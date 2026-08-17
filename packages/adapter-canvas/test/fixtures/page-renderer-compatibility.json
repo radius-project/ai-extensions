@@ -15,7 +15,7 @@
     ],
     "updatePolicy": "This fixture is a reviewed compatibility decision. Do not regenerate it from current renderers and do not edit expected values to make a test pass: change it only with an explicit, reviewed compatibility change that explains why legacy behaviour is intentionally no longer preserved.",
     "intentionalDivergences": [
-      "environment, credentials — the environment creation form became a two-step wizard (choose or create a credential profile, then create the environment), because a credential profile only ever exists in service of an environment. The change is additive to the legacy projection: no legacy id, marker, navigation target, state value, pane visibility or /api path was removed. The recorded contentIds, the newly disabled env-step1-next step gate, and the page script digest were re-recorded for the environment and credentials cases to accept the added wizard elements."
+      "environment, credentials — the environment creation form became a two-step wizard (choose or create a credential profile, then create the environment), because a credential profile only ever exists in service of an environment. The Credentials sub-tab keeps its own standalone create/edit path, since clicking New Credential Profile expresses intent to manage a credential rather than to create an environment. The change is additive to the legacy projection: no legacy id, marker, navigation target, state value, pane visibility or /api path was removed. The recorded contentIds, the newly disabled env-step1-next step gate, and the page script digest were re-recorded for the environment and credentials cases to accept the added wizard elements."
     ]
   },
   "exports": [
@@ -1535,7 +1535,7 @@
           "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
           "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
           "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21",
-          "page": "b2913dd78a45509ae0b141a39d3c579bbc488f4e7dc4d927df6f072c6e4001a0"
+          "page": "94176039f571473dc9381f505853ac90def4c1cca5900c4a1da8a431029bafc4"
         }
       }
     },
@@ -1829,7 +1829,7 @@
           "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
           "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
           "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21",
-          "page": "ec4a8b53c3bcc1664c33cdf150657fa0b7d0a3fa92d8942a15e03d0423369f3a"
+          "page": "b3fc1d949c59c268e045dd63a7ebb8e46d4f20c6739168c55e17553cb01b119e"
         }
       }
     },

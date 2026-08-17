@@ -48,7 +48,7 @@ function wireCredRowActions(profiles) {
         btn.addEventListener('click', function() { switchSubtab('environments'); showEnvForm({ name: '', profile: this.getAttribute('data-name') }); });
     });
     document.querySelectorAll('.js-cred-edit').forEach(function(a) {
-        a.addEventListener('click', function(e) { e.preventDefault(); showCredEditor(find(this.getAttribute('data-name'))); });
+        a.addEventListener('click', function(e) { e.preventDefault(); showStandaloneCredForm(find(this.getAttribute('data-name'))); });
     });
     document.querySelectorAll('.js-cred-delete').forEach(function(btn) {
         btn.addEventListener('click', function() {
@@ -157,12 +157,11 @@ function showCredSuccessBanner(name) {
     document.getElementById('cred-success-banner-text').innerHTML = 'Successfully created credential profile ' + escapeHtmlClient(name);
     banner.style.display = 'flex';
 }
-// Creating a credential always runs inside the environment wizard: a profile
-// only ever exists in service of an environment, so there is one creation path.
+// Creating a profile from the Credentials sub-tab is credential management, not
+// environment setup: the user asked for a profile, so saving returns them to the
+// listing rather than pushing them into the environment flow.
 document.getElementById('new-cred-btn').addEventListener('click', function() {
-    switchSubtab('environments');
-    showEnvForm({ name: '', advance: false });
-    startCredentialCreation();
+    showStandaloneCredForm();
 });
 document.getElementById('cancel-cred-btn').addEventListener('click', function() {
     if (CRED_FORM_CONTEXT === 'wizard') { endCredentialCreation(); return; }

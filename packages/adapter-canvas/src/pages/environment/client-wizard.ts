@@ -84,9 +84,10 @@ function endCredentialCreation() {
     CRED_FORM_CONTEXT = 'wizard';
 }
 
-// Editing an existing profile from the Credentials sub-tab listing. This is a
-// management action, not environment creation, so it stays on that sub-tab.
-function showCredEditor(profile) {
+// Creating or editing a profile from the Credentials sub-tab. Both are
+// credential management rather than environment creation, so the form stays on
+// that sub-tab and saving returns to its listing.
+function showStandaloneCredForm(profile) {
     CRED_FORM_CONTEXT = 'standalone';
     moveCredFormTo('cred-form');
     // The wizard may have been mid-creation when the user came here; restore

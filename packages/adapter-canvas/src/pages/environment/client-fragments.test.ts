@@ -7,6 +7,18 @@ import { ENVIRONMENT_DISCOVERY_CLIENT_JS } from "./client-discovery.js";
 import { ENVIRONMENT_WIZARD_CLIENT_JS } from "./client-wizard.js";
 import { ENVIRONMENT_CREDENTIAL_CLIENT_JS } from "./client-credentials.js";
 
+// Isolates the click handler bound to one element id so a wiring assertion
+// cannot accidentally match an identical call somewhere else in the fragment.
+function handlerFor(source: string, elementId: string): string {
+  const start = source.indexOf(
+    `document.getElementById('${elementId}').addEventListener('click'`
+  );
+  if (start < 0) throw new Error(`no click handler bound to #${elementId}`);
+  const end = source.indexOf("\n});", start);
+  if (end < 0) throw new Error(`unterminated handler for #${elementId}`);
+  return source.slice(start, end);
+}
+
 const fragments: Array<[string, string, string[]]> = [
   [
     "client-environments",
@@ -54,7 +66,7 @@ const fragments: Array<[string, string, string[]]> = [
       "renderEnvProfileSummary",
       "startCredentialCreation",
       "endCredentialCreation",
-      "showCredEditor"
+      "showStandaloneCredForm"
     ]
   ],
   [
@@ -126,6 +138,39 @@ describe("environment page client fragments", () => {
     expect(ENVIRONMENT_DISCOVERY_CLIENT_JS).not.toContain(
       "formatServesReposLabelClient"
     );
+  });
+
+  // The browser layer that could click these buttons is not delivered yet, so
+  // these guard the wiring contract only: which entry point each creation
+  // affordance is bound to. They cannot prove the resulting behaviour.
+  it("keeps the Credentials sub-tab's create action out of the environment wizard", () => {
+    const handler = handlerFor(
+      ENVIRONMENT_CREDENTIAL_CLIENT_JS,
+      "new-cred-btn"
+    );
+    expect(handler).toContain("showStandaloneCredForm()");
+    expect(handler).not.toContain("startCredentialCreation");
+    expect(handler).not.toContain("showEnvForm");
+    expect(handler).not.toContain("switchSubtab");
+  });
+
+  it("enters the wizard's credential step only from the environment flow", () => {
+    expect(ENVIRONMENT_DISCOVERY_CLIENT_JS).toContain(
+      "startCredentialCreation()"
+    );
+    expect(ENVIRONMENT_CREDENTIAL_CLIENT_JS).not.toContain(
+      "startCredentialCreation("
+    );
+  });
+
+  it("returns a standalone save to the credentials listing, not to step 2", () => {
+    const handler = handlerFor(
+      ENVIRONMENT_CREDENTIAL_CLIENT_JS,
+      "save-cred-btn"
+    );
+    expect(handler).toContain("var wizard = CRED_FORM_CONTEXT === 'wizard'");
+    expect(handler).toContain("showCredLanding(); showCredSuccessBanner(name)");
+    expect(handler).toContain("showEnvWizardStep(2)");
   });
 
   it("addresses only elements the page actually renders", () => {
