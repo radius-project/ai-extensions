@@ -262,10 +262,18 @@ export function createDeployOutcomeService(
         );
         return;
       }
-      entry.state.deployStatus = "failed";
       log("");
       log("❌ Deployment failed. Conclusion: " + conclusion);
+      // Assemble the error BEFORE flipping the status to "failed". The webview's
+      // /api/deploy-status poll fires triggerDeployRepairHandoff the instant it
+      // observes "failed", and describeFailure awaits network reads (run log +
+      // control-plane log) that take seconds. Setting the status first opens a
+      // window where a poll relays a handoff with an empty deployError and marks
+      // it delivered, permanently locking out the real error — the "flaky error
+      // logs" symptom. Publishing the error first closes that window for both
+      // the webview trigger and the deploy-request `.finally()` trigger.
       entry.state.deployError = await describeFailure(request);
+      entry.state.deployStatus = "failed";
     }
   };
 }

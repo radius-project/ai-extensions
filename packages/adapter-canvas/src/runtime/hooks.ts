@@ -359,3 +359,69 @@ export function deployRepairHandoffMessage(
     displayPrompt: deployRepairHandoffDisplayPrompt(repo, branch)
   };
 }
+
+interface DeployFailureNoticeDetails {
+  error?: string;
+  deployRunUrl?: string;
+}
+
+// Prompt sent to the agent when a canvas deploy failed WITHOUT confirming what
+// happened to its workflow run (no run surfaced after dispatch, monitoring timed
+// out, the monitor crashed, or the dispatch itself was rejected). Unlike the
+// repair handoff, this must NOT drive an automatic repair-and-redeploy: a run may
+// still be in flight, so redeploying could start a second run against the same
+// target. The agent's job here is only to relay the failure to the user. Kept
+// self-contained and agent-facing; send it through deployFailureNoticeMessage()
+// so a display prompt travels with it.
+export function deployFailureNoticePrompt(
+  repo: string,
+  branch: string,
+  { error = "", deployRunUrl = "" }: DeployFailureNoticeDetails = {}
+): string {
+  const where = repo ? ` of ${repo}` : "";
+  const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
+  const fenced = fenceDeployDiagnostic(error);
+  const lines = [
+    `The Radius deploy${where}${onPhrase} failed, and its workflow run could not be confirmed. Report this to the user; do not automatically redeploy.`,
+    "",
+    fenced ?
+      `${DEPLOY_DIAGNOSTIC_NOTE}\n\n${fenced}`
+    : "The deploy failed before a workflow run could be confirmed, and no error text was captured."
+  ];
+  if (deployRunUrl) lines.push("", `Workflow run (full logs): ${deployRunUrl}`);
+  lines.push(
+    "",
+    "A workflow run may or may not still be in progress, so do NOT call radius_deploy to retry this on the agent's own initiative: a second run could race the first against the same target. Instead:",
+    deployRunUrl ?
+      `- Tell the user the deploy failed and point them at the run: ${deployRunUrl}. Ask them to check the Actions tab for its real outcome.`
+    : "- Tell the user the deploy failed to start (for example a missing `workflow` token scope, disabled Actions, or an unpushed branch) and ask them to check the repository's Actions tab.",
+    "- Only deploy again if the user explicitly asks, and start a fresh deploy from the canvas or with radius_deploy (no attemptId) once the previous run is known to be over."
+  );
+  return lines
+    .filter((line, i) => line !== "" || lines[i - 1] !== "")
+    .join("\n");
+}
+
+// Timeline stand-in for deployFailureNoticePrompt: names the repo/branch and
+// that the failure is being reported, without the diagnostic dump or guidance.
+export function deployFailureNoticeDisplayPrompt(
+  repo: string,
+  branch: string
+): string {
+  const where = repo ? ` of ${repo}` : "";
+  const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
+  return `Reporting the failed Radius deploy${where}${onPhrase} (its workflow run could not be confirmed).`;
+}
+
+// Pairs the agent-facing notice with its timeline stand-in so the two halves
+// cannot drift apart or be swapped at the call site.
+export function deployFailureNoticeMessage(
+  repo: string,
+  branch: string,
+  details: DeployFailureNoticeDetails = {}
+): HandoffMessage {
+  return {
+    prompt: deployFailureNoticePrompt(repo, branch, details),
+    displayPrompt: deployFailureNoticeDisplayPrompt(repo, branch)
+  };
+}

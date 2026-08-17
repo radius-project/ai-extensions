@@ -219,6 +219,18 @@ export interface HostCallbackDependencies {
         }) => unknown)
       | null
   ): void;
+  setDeployFailureNotice(
+    fn:
+      | ((input: {
+          repo: string;
+          branch: string;
+          error: string;
+          deployRunUrl: string;
+          kind: string;
+          instanceId: string;
+        }) => unknown)
+      | null
+  ): void;
   setOpenSourceHandler(
     fn: (input: {
       path: string;

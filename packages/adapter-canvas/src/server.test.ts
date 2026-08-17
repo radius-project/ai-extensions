@@ -38,6 +38,8 @@ import {
   resolveDeployRepairLoop,
   setDeployRepairHandoff,
   triggerDeployRepairHandoff,
+  setDeployFailureNotice,
+  triggerDeployFailureNotice,
   classifyDeployDispatchFailure,
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
   DEPLOY_RUN_UNCONFIRMED_KIND
@@ -53,7 +55,10 @@ import {
   recordServicePrincipal
 } from "./operations.js";
 import type { CanvasState } from "./shared.js";
-import type { DeployRepairHandoffInput } from "./server.js";
+import type {
+  DeployRepairHandoffInput,
+  DeployFailureNoticeInput
+} from "./server.js";
 
 describe("DEPLOY_RAD_COMMANDS_STEP", () => {
   it("matches the step name in the upstream run-rad-commands action", () => {
@@ -1898,6 +1903,318 @@ describe("triggerDeployRepairHandoff", () => {
         state: "retryable",
         attempts: 2
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("triggerDeployFailureNotice", () => {
+  afterEach(() => {
+    setDeployFailureNotice(null);
+  });
+
+  function unconfirmedEntry(overrides: Partial<CanvasState> = {}) {
+    return {
+      state: {
+        deployStatus: "failed",
+        deployErrorKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+        deployingRepo: "octo/app",
+        deployingBranch: "feat",
+        deployError: "dispatch rejected: missing workflow scope",
+        deployRunUrl: "https://github.com/octo/app/actions",
+        deployAttempt: { id: "attempt-A" },
+        ...overrides
+      } satisfies CanvasState
+    };
+  }
+
+  it("reports a run-unconfirmed failure to the agent with repo, branch, error, run URL, kind, and instance", () => {
+    const calls: DeployFailureNoticeInput[] = [];
+    setDeployFailureNotice((payload) => {
+      calls.push(payload);
+    });
+    expect(triggerDeployFailureNotice(unconfirmedEntry(), "radius-panel")).toBe(
+      true
+    );
+    expect(calls).toEqual([
+      {
+        repo: "octo/app",
+        branch: "feat",
+        error: "dispatch rejected: missing workflow scope",
+        deployRunUrl: "https://github.com/octo/app/actions",
+        kind: DEPLOY_RUN_UNCONFIRMED_KIND,
+        instanceId: "radius-panel"
+      }
+    ]);
+  });
+
+  it("never opens a repair loop, so the panel does not show a repairing note", async () => {
+    setDeployFailureNotice(() => Promise.resolve("message-id"));
+    const entry = unconfirmedEntry();
+    expect(triggerDeployFailureNotice(entry)).toBe(true);
+    await Promise.resolve();
+    expect(entry.state.deployRepairing).toBeUndefined();
+    expect(entry.state.deployHandoffState).toBeUndefined();
+    expect(entry.state.deployNoticeState).toBe("delivered");
+  });
+
+  it("fires once per failure so a re-poll does not report it twice", () => {
+    const calls: DeployFailureNoticeInput[] = [];
+    setDeployFailureNotice((payload) => {
+      calls.push(payload);
+    });
+    const entry = unconfirmedEntry();
+    expect(triggerDeployFailureNotice(entry)).toBe(true);
+    expect(triggerDeployFailureNotice(entry)).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not report a repairable failure, which the repair handoff owns", () => {
+    const calls: DeployFailureNoticeInput[] = [];
+    setDeployFailureNotice((payload) => {
+      calls.push(payload);
+    });
+    // A modeling failure has no run-unconfirmed kind; the repair handoff relays it.
+    expect(
+      triggerDeployFailureNotice(unconfirmedEntry({ deployErrorKind: null }))
+    ).toBe(false);
+    // Branch-not-pushed has its own actionable canvas panel, so no chat report.
+    expect(
+      triggerDeployFailureNotice(
+        unconfirmedEntry({ deployErrorKind: DEPLOY_BRANCH_NOT_PUSHED_KIND })
+      )
+    ).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does not report unless the deploy actually failed", () => {
+    const calls: DeployFailureNoticeInput[] = [];
+    setDeployFailureNotice((payload) => {
+      calls.push(payload);
+    });
+    expect(
+      triggerDeployFailureNotice(unconfirmedEntry({ deployStatus: "in_progress" }))
+    ).toBe(false);
+    expect(triggerDeployFailureNotice(undefined)).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does nothing when no notice callback is registered", () => {
+    setDeployFailureNotice(null);
+    expect(triggerDeployFailureNotice(unconfirmedEntry())).toBe(false);
+  });
+
+  it("falls back through planned then context repo and omits absent details", () => {
+    const calls: DeployFailureNoticeInput[] = [];
+    setDeployFailureNotice((payload) => {
+      calls.push(payload);
+    });
+    // No deployingRepo/branch/error/runUrl: the payload must fall back to the
+    // planned/context repo and empty strings rather than carry undefined.
+    expect(
+      triggerDeployFailureNotice({
+        state: {
+          deployStatus: "failed",
+          deployErrorKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+          plannedRepo: "octo/planned"
+        }
+      })
+    ).toBe(true);
+    expect(calls[0]).toMatchObject({
+      repo: "octo/planned",
+      branch: "",
+      error: "",
+      deployRunUrl: ""
+    });
+
+    calls.length = 0;
+    triggerDeployFailureNotice({
+      state: {
+        deployStatus: "failed",
+        deployErrorKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+        contextRepo: "octo/context"
+      }
+    });
+    expect(calls[0]).toMatchObject({ repo: "octo/context" });
+
+    // No repo anywhere: the payload carries an empty repo, never undefined.
+    calls.length = 0;
+    triggerDeployFailureNotice({
+      state: {
+        deployStatus: "failed",
+        deployErrorKind: DEPLOY_RUN_UNCONFIRMED_KIND
+      }
+    });
+    expect(calls[0]).toMatchObject({ repo: "" });
+  });
+
+  it("never throws when the notice callback itself fails", () => {
+    setDeployFailureNotice(() => {
+      throw new Error("session gone");
+    });
+    expect(() => triggerDeployFailureNotice(unconfirmedEntry())).not.toThrow();
+  });
+
+  it("never throws if recording the notice bookkeeping fails", () => {
+    // A frozen state makes the deployNoticeState assignment throw before the
+    // callback runs; the defensive outer guard must swallow it.
+    setDeployFailureNotice(() => {
+      throw new Error("must not be reached");
+    });
+    const entry = { state: Object.freeze(unconfirmedEntry().state) };
+    expect(triggerDeployFailureNotice(entry)).toBe(false);
+  });
+
+  it("retries delivery on the next status poll when the first send rejects", async () => {
+    const entry = unconfirmedEntry();
+    setDeployFailureNotice(() => Promise.reject(new Error("send failed")));
+    expect(triggerDeployFailureNotice(entry)).toBe(true);
+    await Promise.resolve();
+    expect(entry.state.deployNoticeState).toBe("retryable");
+    expect(entry.state.deployNoticeAttempts).toBe(1);
+
+    const calls: DeployFailureNoticeInput[] = [];
+    setDeployFailureNotice((payload) => {
+      calls.push(payload);
+      return Promise.resolve("message-id");
+    });
+    expect(triggerDeployFailureNotice(entry)).toBe(true);
+    await Promise.resolve();
+    expect(calls).toHaveLength(1);
+    expect(entry.state.deployNoticeState).toBe("delivered");
+  });
+
+  it("gives up after the attempt budget so the report is not retried forever", async () => {
+    const entry = unconfirmedEntry();
+    setDeployFailureNotice(() => Promise.reject(new Error("send failed")));
+    for (let i = 0; i < DEPLOY_HANDOFF_MAX_ATTEMPTS; i++) {
+      triggerDeployFailureNotice(entry);
+      await Promise.resolve();
+    }
+    expect(entry.state.deployNoticeState).toBe("failed");
+    expect(entry.state.deployNoticeAttempts).toBe(DEPLOY_HANDOFF_MAX_ATTEMPTS);
+    // Terminal: no further delivery is attempted.
+    expect(triggerDeployFailureNotice(entry)).toBe(false);
+  });
+
+  it("does not deliver twice while a send is still in flight", () => {
+    const calls: DeployFailureNoticeInput[] = [];
+    setDeployFailureNotice((payload) => {
+      calls.push(payload);
+      return new Promise(() => {});
+    });
+    const entry = unconfirmedEntry();
+    expect(triggerDeployFailureNotice(entry)).toBe(true);
+    expect(triggerDeployFailureNotice(entry)).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(entry.state.deployNoticeState).toBe("pending");
+  });
+
+  // A canvas panel is reused across deploys, so a late delivery must settle
+  // against whatever deploy is current, not the one that opened the notice.
+  it("ignores a delivery that lands after a new deploy replaced the attempt", async () => {
+    let resolveSend: (value: string) => void = () => {};
+    setDeployFailureNotice(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    const entry = unconfirmedEntry();
+    expect(triggerDeployFailureNotice(entry)).toBe(true);
+
+    entry.state.deployStatus = "in_progress";
+    entry.state.deployNoticeState = "idle";
+    entry.state.deployNoticeAttempts = 0;
+    entry.state.deployAttempt = { id: "attempt-B" };
+
+    resolveSend("message-id");
+    await Promise.resolve();
+
+    expect(entry.state.deployNoticeState).toBe("idle");
+    expect(entry.state.deployNoticeAttempts).toBe(0);
+  });
+
+  it("ignores a rejection that lands after a new deploy replaced the attempt", async () => {
+    let rejectSend: (reason: Error) => void = () => {};
+    setDeployFailureNotice(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectSend = reject;
+        })
+    );
+    const entry = unconfirmedEntry();
+    expect(triggerDeployFailureNotice(entry)).toBe(true);
+
+    entry.state.deployStatus = "in_progress";
+    entry.state.deployNoticeState = "idle";
+    entry.state.deployNoticeAttempts = 0;
+    entry.state.deployAttempt = { id: "attempt-B" };
+
+    rejectSend(new Error("send failed"));
+    await Promise.resolve();
+
+    expect(entry.state.deployNoticeState).toBe("idle");
+    expect(entry.state.deployNoticeAttempts).toBe(0);
+  });
+
+  // Falls back to the run-unconfirmed kind if the state somehow lost its kind
+  // between the guard and the payload assembly.
+  it("still settles a notice opened without an attempt id", async () => {
+    setDeployFailureNotice(() => Promise.resolve("message-id"));
+    const entry = unconfirmedEntry({ deployAttempt: undefined });
+    expect(triggerDeployFailureNotice(entry)).toBe(true);
+    await Promise.resolve();
+    expect(entry.state.deployNoticeState).toBe("delivered");
+  });
+
+  it("retries from the server when nothing polls the status route", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: DeployFailureNoticeInput[] = [];
+      setDeployFailureNotice((payload) => {
+        calls.push(payload);
+        return Promise.reject(new Error("send failed"));
+      });
+      const entry = unconfirmedEntry();
+      expect(triggerDeployFailureNotice(entry)).toBe(true);
+      await Promise.resolve();
+      expect(calls).toHaveLength(1);
+
+      // No status poll happens here; the retry has to come from the timer.
+      await vi.advanceTimersByTimeAsync(DEPLOY_HANDOFF_RETRY_DELAY_MS);
+      expect(calls).toHaveLength(2);
+      expect(entry.state.deployNoticeState).toBe("retryable");
+      expect(entry.state.deployNoticeAttempts).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops a scheduled retry when a new deploy starts during the backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: DeployFailureNoticeInput[] = [];
+      setDeployFailureNotice((payload) => {
+        calls.push(payload);
+        return Promise.reject(new Error("send failed"));
+      });
+      const entry = unconfirmedEntry();
+      expect(triggerDeployFailureNotice(entry)).toBe(true);
+      await Promise.resolve();
+      expect(calls).toHaveLength(1);
+
+      // A new deploy during the backoff must revoke the scheduled retry.
+      entry.state.deployNoticeState = "idle";
+      entry.state.deployNoticeAttempts = 0;
+      entry.state.deployAttempt = { id: "attempt-B" };
+
+      await vi.advanceTimersByTimeAsync(DEPLOY_HANDOFF_RETRY_DELAY_MS * 2);
+
+      expect(calls).toHaveLength(1);
+      expect(entry.state.deployNoticeState).toBe("idle");
+      expect(entry.state.deployNoticeAttempts).toBe(0);
     } finally {
       vi.useRealTimers();
     }

@@ -19,7 +19,8 @@ import { RADIUS_SESSION_START_CONTEXT } from "./declarations.js";
 import {
   evaluateAppBicepHook,
   appBicepHandoffMessage,
-  deployRepairHandoffMessage
+  deployRepairHandoffMessage,
+  deployFailureNoticeMessage
 } from "./hooks.js";
 import { errorMessage } from "./util.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
@@ -86,6 +87,14 @@ export function createRadiusExtension(
           attemptId
         })
       )
+  );
+  // The informational sibling of the repair handoff: a deploy whose run could
+  // not be confirmed is relayed to chat as a report, never as a repair loop.
+  deps.hostCallbacks.setDeployFailureNotice(
+    ({ repo, branch, error, deployRunUrl }) =>
+      deps.session
+        .get()
+        .send(deployFailureNoticeMessage(repo, branch, { error, deployRunUrl }))
   );
   // Routes hand us either a bare prompt or an already-paired
   // {prompt, displayPrompt}; forward both shapes untouched so the server owns

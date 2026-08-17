@@ -61,6 +61,7 @@ import {
   getLastWebviewActivityAt,
   setAppBicepHandoff,
   setDeployRepairHandoff,
+  setDeployFailureNotice,
   setSessionPromptHandler,
   setOpenSourceHandler
 } from "./server.js";
@@ -156,6 +157,7 @@ const dependencies: RadiusExtensionDependencies = {
   hostCallbacks: {
     setAppBicepHandoff,
     setDeployRepairHandoff,
+    setDeployFailureNotice,
     setSessionPromptHandler,
     setOpenSourceHandler
   },

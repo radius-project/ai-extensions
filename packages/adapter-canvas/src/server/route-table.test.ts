@@ -92,6 +92,7 @@ const productionHandlers = {
   ...createDeploymentsRoutes({
     readInstanceEntry: () => undefined,
     triggerDeployRepairHandoff: () => false,
+    triggerDeployFailureNotice: () => false,
     deployHandoffStatus: () => ({
       state: "idle",
       attempts: 0,
