@@ -1,6 +1,5 @@
 // @ts-nocheck
-import { readFileSync } from "node:fs";
-// @ts-nocheck
+import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   addLegacyStep,
@@ -14,6 +13,7 @@ import {
   announcementOptions,
   buildStages,
   createOperation,
+  canResumeInput,
   createRegistry,
   enterStage,
   finish,
@@ -22,6 +22,8 @@ import {
   isTerminalState,
   requestStop,
   requireInput,
+  resumeAfterInput,
+  setExecutionActive,
   recordAzureApp,
   recordCommitState,
   recordCommittedWorkflowFile,
@@ -31,7 +33,6 @@ import {
   recordGitHubEnvironment,
   recordServicePrincipal,
   reconcileRestoredOperation,
-  resumeAfterInput,
   sanitizeResumeTarget,
   setCloudContext,
   setStageState,
@@ -52,6 +53,19 @@ function newOp(overrides = {}) {
     environment: "dev",
     ...overrides
   });
+}
+
+function addSafeResumeRequest(op) {
+  op.resumeRequest = {
+    needsAzureCredentials: true,
+    azure: {},
+    environment: {
+      repo: op.repo,
+      environment: op.environment,
+      provider: op.provider
+    }
+  };
+  return op;
 }
 
 describe("stage inventory", () => {
@@ -293,19 +307,28 @@ describe("journey capture", () => {
   });
 
   describe("interactive input transitions", () => {
-    it("keeps an operation running while input is requested, then resumes it", () => {
+    it("marks an operation input-required, then resumes it", () => {
       const op = newOp();
       requireInput(op, {
         code: "app-selection-required",
         message: "Choose an app."
       });
-      expect(op.state).toBe("running");
+      expect(op.state).toBe("input_required");
       expect(op.inputRequired).toMatchObject({
         code: "app-selection-required"
       });
       resumeAfterInput(op);
       expect(op.state).toBe("running");
       expect(op.inputRequired).toBeNull();
+    });
+
+    it("uses the default prompt code as the default checkpoint", () => {
+      const op = newOp();
+      requireInput(op, { message: "Provide input." });
+      expect(op.inputRequired).toMatchObject({
+        code: "input-required",
+        checkpoint: "input-required"
+      });
     });
   });
 
@@ -838,6 +861,7 @@ describe("registry", () => {
     const first = createRegistry({ store });
     const op = newOp();
     requireInput(op, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(op);
     first.put(op);
     await first.persist();
 
@@ -852,6 +876,7 @@ describe("registry", () => {
   it("skips invalid persisted records, reports them, and rewrites a clean envelope", async () => {
     const valid = newOp();
     requireInput(valid, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(valid);
     let envelope = {
       schemaVersion: 1,
       operations: [
@@ -910,6 +935,7 @@ describe("registry", () => {
   it("keeps valid restored records when rewriting a cleaned envelope fails", async () => {
     const valid = newOp();
     requireInput(valid, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(valid);
     const diagnostics = [];
     const store = {
       report(diagnostic) {
@@ -983,6 +1009,7 @@ describe("startup reconciliation", () => {
   it("restores input-required operations without stale filtering", () => {
     const op = newOp();
     requireInput(op, { code: "choose-app", message: "Choose an app." });
+    addSafeResumeRequest(op);
     op.lastActivityAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     reconcileRestoredOperation(op);
     expect(op.recoveryState).toBe("waiting_input");
@@ -1031,10 +1058,147 @@ describe("keepalive predicate", () => {
     expect(setupInFlight()).toBe(false);
   });
 
+  describe("server-owned input lifecycle", () => {
+    it("keeps the repository lock while excluding input waits from execution keepalive", () => {
+      const registry = createRegistry();
+      const op = createOperation({
+        provider: "azure",
+        repo: "contoso/input",
+        environment: "dev"
+      });
+      registry.start(op);
+      setExecutionActive(op, true);
+      expect(registry.anyExecuting()).toBe(true);
+
+      setExecutionActive(op, false);
+      requireInput(op, {
+        code: "app-selection-required",
+        checkpoint: "azure-app-selection",
+        message: "Choose an App Registration."
+      });
+
+      expect(op.state).toBe("input_required");
+      expect(registry.running("contoso/input")).toBe(op);
+      expect(registry.anyExecuting()).toBe(false);
+      expect(
+        registry.start(
+          createOperation({
+            provider: "azure",
+            repo: "contoso/input",
+            environment: "prod"
+          })
+        )
+      ).toMatchObject({
+        ok: false,
+        conflict: { operationId: op.operationId }
+      });
+    });
+
+    it("resumes only the matching idle operation checkpoint", () => {
+      const op = createOperation({
+        provider: "azure",
+        repo: "contoso/input",
+        environment: "dev"
+      });
+      requireInput(op, {
+        code: "service-management-reference-required",
+        checkpoint: "azure-service-management-reference",
+        message: "Enter the Service Management Reference."
+      });
+
+      expect(
+        canResumeInput(op, {
+          code: "service-management-reference-required",
+          checkpoint: "azure-service-management-reference",
+          repo: "contoso/input",
+          environment: "dev",
+          provider: "azure"
+        })
+      ).toBe(true);
+      expect(canResumeInput(op, { code: "app-selection-required" })).toBe(
+        false
+      );
+
+      resumeAfterInput(op);
+      expect(op.state).toBe("running");
+      expect(op.inputRequired).toBeNull();
+      expect(canResumeInput(op)).toBe(false);
+    });
+
+    it("keeps an input wait resumable for an hour", () => {
+      const startedAt = Date.parse("2026-08-12T00:00:00.000Z");
+      const registry = createRegistry({ clock: () => startedAt + 59 * 60_000 });
+      const op = createOperation({
+        provider: "azure",
+        repo: "contoso/abandoned-input",
+        environment: "dev",
+        startedAt: new Date(startedAt).toISOString(),
+        now: () => new Date(startedAt).toISOString()
+      });
+      requireInput(op, {
+        code: "app-selection-required",
+        checkpoint: "azure-app-selection",
+        message: "Choose an App Registration."
+      });
+      op.inputRequired.requestedAt = new Date(startedAt).toISOString();
+      op.lastActivityAt = new Date(startedAt).toISOString();
+
+      registry.start(op);
+      expect(registry.running(op.repo)).toBe(op);
+    });
+
+    it("turns an expired input wait into a durable typed terminal record", () => {
+      const startedAt = Date.parse("2026-08-12T00:00:00.000Z");
+      const registry = createRegistry({ clock: () => startedAt + 61 * 60_000 });
+      const op = createOperation({
+        provider: "azure",
+        repo: "contoso/expired-input",
+        environment: "dev",
+        startedAt: new Date(startedAt).toISOString(),
+        now: () => new Date(startedAt).toISOString()
+      });
+      requireInput(op, {
+        code: "app-selection-required",
+        checkpoint: "azure-app-selection",
+        message: "Choose an App Registration."
+      });
+      op.inputRequired.requestedAt = new Date(startedAt).toISOString();
+      op.lastActivityAt = new Date(startedAt).toISOString();
+
+      registry.start(op);
+      expect(registry.get(op.operationId)).toBe(op);
+      expect(op.state).toBe("failed_partial");
+      expect(op.failure.code).toBe("operation-input-expired");
+      expect(registry.latest(op.repo)).toBe(op);
+    });
+  });
+
   it("holds the process open while a setup is running", () => {
     operations.clear();
     const op = newOp();
     operations.start(op);
+    setExecutionActive(op, true);
+    expect(setupInFlight()).toBe(true);
+    finishSucceeded(op);
+    expect(setupInFlight()).toBe(false);
+    operations.clear();
+  });
+
+  it("holds the process open while dispatched verification is pending", () => {
+    operations.clear();
+    const op = newOp();
+    operations.start(op);
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      sha: null,
+      runId: null,
+      runUrl: null
+    };
+
     expect(setupInFlight()).toBe(true);
     finishSucceeded(op);
     expect(setupInFlight()).toBe(false);
@@ -1259,10 +1423,20 @@ describe("the step-marker convention at the call sites", () => {
   // silently reported as a plain success. That is a quiet failure — the panel
   // shows a green tick for something that warned, failed or never ran — so it
   // is guarded here rather than left to review.
-  const SERVER_SRC = readFileSync(
+  // The marker convention is a property of every call site that narrates an
+  // operation, wherever that site now lives. A route migrating onto the route
+  // table carries its `steps.push` sites into `server/routes/`, so scanning
+  // `server.ts` alone would let the convention quietly stop being enforced one
+  // slice at a time. The corpus is therefore the legacy dispatcher plus every
+  // route module.
+  const SERVER_SRC = [
     new URL("./server.ts", import.meta.url),
-    "utf8"
-  );
+    ...readdirSync(new URL("./server/routes/", import.meta.url))
+      .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))
+      .map((name) => new URL(`./server/routes/${name}`, import.meta.url))
+  ]
+    .map((url) => readFileSync(url, "utf8"))
+    .join("\n");
 
   // Steps whose text is a plain successful observation and so correctly take
   // the default. Anything else added to this list should first be re-read as a
@@ -1278,14 +1452,84 @@ describe("the step-marker convention at the call sites", () => {
     "Verifying the"
   ];
 
-  function stepStrings() {
-    // Capture the whole argument expression, not just its first literal:
-    // several sites concatenate a variable and put the trailing ellipsis on
-    // the final fragment, e.g. 'Creating package "' + name + '"...'.
-    const out = [];
-    const re = /steps\.push\(\s*([\s\S]*?)\);/g;
-    let m;
-    while ((m = re.exec(SERVER_SRC))) out.push(m[1].trim());
+  const FORWARDED_STEP_IDENTIFIERS = new Set(["message"]);
+
+  function firstArgumentEnd(source: string, start: number): number {
+    let parentheses = 1;
+    let brackets = 0;
+    let braces = 0;
+    let quote = "";
+    let lineComment = false;
+    let blockComment = false;
+    for (let i = start; i < source.length; i += 1) {
+      const ch = source[i];
+      const next = source[i + 1];
+      if (lineComment) {
+        if (ch === "\n") lineComment = false;
+        continue;
+      }
+      if (blockComment) {
+        if (ch === "*" && next === "/") {
+          blockComment = false;
+          i += 1;
+        }
+        continue;
+      }
+      if (quote) {
+        if (ch === "\\") {
+          i += 1;
+        } else if (ch === quote) {
+          quote = "";
+        }
+        continue;
+      }
+      if (ch === "/" && next === "/") {
+        lineComment = true;
+        i += 1;
+        continue;
+      }
+      if (ch === "/" && next === "*") {
+        blockComment = true;
+        i += 1;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        quote = ch;
+        continue;
+      }
+      if (ch === "(") parentheses += 1;
+      else if (ch === ")") {
+        parentheses -= 1;
+        if (parentheses === 0) return i;
+      } else if (ch === "[") brackets += 1;
+      else if (ch === "]") brackets -= 1;
+      else if (ch === "{") braces += 1;
+      else if (ch === "}") braces -= 1;
+      else if (
+        ch === "," &&
+        parentheses === 1 &&
+        brackets === 0 &&
+        braces === 0
+      ) {
+        return i;
+      }
+    }
+    throw new Error("Unterminated step narration call in server source.");
+  }
+
+  function stepStrings(source = SERVER_SRC): string[] {
+    // Locate the call, then balance its argument expression while skipping
+    // quoted/template text and comments. A narration literal may legitimately
+    // contain `);`; the old non-greedy regex silently truncated it there.
+    const out: string[] = [];
+    const call = /(?:steps\.push|ports\.pushStep)\(\s*/g;
+    let match;
+    while ((match = call.exec(source))) {
+      const start = call.lastIndex;
+      const end = firstArgumentEnd(source, start);
+      out.push(source.slice(start, end).trim());
+      call.lastIndex = end + 1;
+    }
     return out;
   }
 
@@ -1301,16 +1545,38 @@ describe("the step-marker convention at the call sites", () => {
     expect(stepStrings().length).toBeGreaterThan(40);
   });
 
-  it("marks every step that is not a plain successful observation", () => {
-    const unaccounted = stepStrings().filter((s) => {
+  function unaccountedStepStrings(source = SERVER_SRC) {
+    return stepStrings(source).filter((s) => {
       if (MARKED.test(s)) return false;
       if (RUNNING.test(s)) return false;
+      // These exact identifiers are forwarding sites: ports re-publish a
+      // message that a real call site already composed and marked. Do not exempt
+      // arbitrary identifiers, which could hide text composed outside the
+      // scanned server corpus.
+      if (FORWARDED_STEP_IDENTIFIERS.has(s)) return false;
       const compact = s.replace(/\s+/g, " ");
       return !PLAIN_OBSERVATIONS.some((allowed) =>
         compact.slice(1).startsWith(allowed)
       );
     });
+  }
+
+  it("marks every step that is not a plain successful observation", () => {
+    const unaccounted = unaccountedStepStrings();
     expect(unaccounted).toEqual([]);
+  });
+
+  it("parses narration literals containing a call terminator", () => {
+    expect(
+      stepStrings('steps.push("✅ Literal contains ); safely.");')
+    ).toEqual(['"✅ Literal contains ); safely."']);
+  });
+
+  it("rejects unrecognized forwarding identifiers", () => {
+    expect(
+      unaccountedStepStrings("steps.push(unlistedForwardingValue);")
+    ).toEqual(["unlistedForwardingValue"]);
+    expect(unaccountedStepStrings("steps.push(message);")).toEqual([]);
   });
 
   it("does not report a deliberately-skipped step as done", () => {
@@ -1324,122 +1590,6 @@ describe("the step-marker convention at the call sites", () => {
     for (const s of skipping) {
       expect(addLegacyStep(newOp(), s.slice(1)).state).toBe("skipped");
     }
-  });
-});
-
-describe("environment creation boundaries", () => {
-  const SERVER_SRC = readFileSync(
-    new URL("./server.ts", import.meta.url),
-    "utf8"
-  );
-  const azureStart = SERVER_SRC.indexOf('pathname === "/api/azure-auto-setup"');
-  const azureEnd = SERVER_SRC.indexOf(
-    'pathname === "/api/list-azure-app-registrations"',
-    azureStart + 'pathname === "/api/azure-auto-setup"'.length
-  );
-  const createStart = SERVER_SRC.indexOf(
-    'pathname === "/api/create-environment"'
-  );
-  const createEnd = SERVER_SRC.indexOf(
-    'pathname === "/api/load-graph-stream"',
-    createStart + 'pathname === "/api/create-environment"'.length
-  );
-  const deployStart = SERVER_SRC.indexOf('pathname === "/api/deploy"');
-  const azureRoute = SERVER_SRC.slice(azureStart, azureEnd);
-  const createRoute = SERVER_SRC.slice(createStart, createEnd);
-  const deployRoute = SERVER_SRC.slice(deployStart);
-
-  it("preflights GHCR package scopes before selecting the Azure subscription", () => {
-    const ghcrPreflight = azureRoute.indexOf("preflightGhcrPackageWriteAccess");
-    const azAccountSet = azureRoute.indexOf(
-      "steps.push(`Selecting subscription ${subscriptionId}...`);"
-    );
-    const appCreate = azureRoute.indexOf("buildAppCreateArgs");
-    expect(azureStart).toBeGreaterThan(-1);
-    expect(azureEnd).toBeGreaterThan(azureStart);
-    expect(ghcrPreflight).toBeGreaterThan(-1);
-    expect(azAccountSet).toBeGreaterThan(ghcrPreflight);
-    expect(appCreate).toBeGreaterThan(azAccountSet);
-  });
-
-  it("does not require an application model to create an environment", () => {
-    expect(createStart).toBeGreaterThan(-1);
-    expect(createEnd).toBeGreaterThan(createStart);
-    // Verification planning may probe the committed workflow files, but
-    // environment creation itself must stay independent of deploy-model
-    // resolution.
-    expect(createRoute).not.toContain("appParams(");
-    expect(createRoute).not.toContain("resolveDeployParams(");
-    expect(createRoute).not.toContain("RADIUS_DEPLOY_PARAMS");
-    expect(createRoute).not.toContain("RADIUS_RAD_COMMANDS");
-  });
-
-  it("keeps the later create-environment GHCR preflight before bootstrap", () => {
-    const ghcrPreflight = createRoute.indexOf(
-      "preflightGhcrPackageWriteAccess"
-    );
-    const bootstrap = createRoute.indexOf("bootstrapGHCRStatePackage");
-    expect(ghcrPreflight).toBeGreaterThan(-1);
-    expect(bootstrap).toBeGreaterThan(ghcrPreflight);
-  });
-
-  it("verifies owner assignment and provenance tags before continuing past a new app registration", () => {
-    const createApp = azureRoute.indexOf("buildAppCreateArgs");
-    const ownerAdd = azureRoute.indexOf(
-      "Assigning the signed-in user as an owner of the new App Registration..."
-    );
-    const ownerList = azureRoute.indexOf(
-      "Verifying the signed-in user owns the new App Registration..."
-    );
-    const tagPatch = azureRoute.indexOf(
-      "Applying Radius provenance tags to the new App Registration..."
-    );
-    const tagShow = azureRoute.indexOf("Verifying Radius provenance tags...");
-    const servicePrincipal = azureRoute.indexOf(
-      "const spReady = await ensureServicePrincipal"
-    );
-    expect(createApp).toBeGreaterThan(-1);
-    expect(ownerAdd).toBeGreaterThan(createApp);
-    expect(ownerList).toBeGreaterThan(ownerAdd);
-    expect(tagPatch).toBeGreaterThan(ownerList);
-    expect(tagShow).toBeGreaterThan(tagPatch);
-    expect(servicePrincipal).toBeGreaterThan(tagShow);
-  });
-
-  it("checks whether the GitHub environment already exists before PUT and aborts on ambiguous lookup errors", () => {
-    const lookup = createRoute.indexOf("resolveGitHubEnvironmentCreateState");
-    const put = createRoute.indexOf(
-      '["api", "--method", "PUT", environmentPath]'
-    );
-    expect(lookup).toBeGreaterThan(-1);
-    expect(put).toBeGreaterThan(lookup);
-    expect(createRoute).toContain(
-      'Could not determine whether GitHub environment "'
-    );
-    expect(createRoute).not.toContain('"created" | "reused" | "unknown"');
-  });
-
-  it("records the commit point only after verification dispatch succeeds or PR action-required is established", () => {
-    const commitPoint = createRoute.indexOf("recordCommitState(op, {");
-    const verifyPlan = createRoute.indexOf(
-      "const verifyPlan = await planCredentialVerification"
-    );
-    const actionRequired = createRoute.indexOf(
-      'finish(op, "action_required", {'
-    );
-    const dispatchSuccess = createRoute.indexOf(
-      'steps.push("✅ Verify workflow dispatched.")'
-    );
-    expect(commitPoint).toBeGreaterThan(-1);
-    expect(commitPoint).toBeGreaterThan(verifyPlan);
-    expect(commitPoint).toBeLessThan(actionRequired);
-    expect(commitPoint).toBeGreaterThan(dispatchSuccess);
-  });
-
-  it("provisions model-specific values when deployment begins", () => {
-    expect(deployRoute).toContain("app.bicep");
-    expect(deployRoute).toContain("RADIUS_DEPLOY_PARAMS");
-    expect(deployRoute).toContain("RADIUS_RAD_COMMANDS");
   });
 });
 

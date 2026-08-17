@@ -1,11 +1,10 @@
-// Tests for the server-side HTML page renderers. Focus: the recipe-pack
-// refactor removed all singleton-recipe / on-demand-bicep UI, and app.bicep is
-// now authored solely by the Radius app-bicep skill. These tests assert the
-// changed pages surface the skill/needsAppBicep messaging and no longer emit
-// the removed generated-bicep state, while smoke-rendering every page so the
-// module's branches stay exercised.
+// Tests for the page-renderer compatibility facade. The facade owns no
+// behaviour, so these cover the exported surface, its equivalence with the
+// owning modules, and the cross-page contracts every renderer shares.
 
 import { describe, it, expect } from "vitest";
+import { browserScript } from "./browser/scripts.js";
+import { BROWSER_ENTRIES } from "./browser/build.js";
 import {
   pageShell,
   oidcPage,
@@ -19,6 +18,30 @@ import {
   deployingPage,
   serializeBrowserFunction
 } from "./pages.js";
+import * as facade from "./pages.js";
+import { serializeBrowserFunction as serializeBrowserFunctionModule } from "./pages/browser-function.js";
+import { pageShell as pageShellModule } from "./pages/shell.js";
+import { oidcPage as oidcPageModule } from "./pages/oidc-page.js";
+import {
+  graphHeader as graphHeaderModule,
+  graphHeaderClose as graphHeaderCloseModule
+} from "./pages/graph-header.js";
+import { graphPage as graphPageModule } from "./pages/graph-page.js";
+import { plannedGraphPage as plannedGraphPageModule } from "./pages/planned-graph-page.js";
+import { graphDiffPage as graphDiffPageModule } from "./pages/graph-diff-page.js";
+import { deployedGraphPage as deployedGraphPageModule } from "./pages/deployed-graph-page.js";
+import { environmentPage as environmentPageModule } from "./pages/environment-page.js";
+import { deployingPage as deployingPageModule } from "./pages/deploying-page.js";
+import {
+  HOSTILE_STATE,
+  expectSafeInlineScripts
+} from "../test/support/pages/hostile-state.js";
+import { readFileSync } from "node:fs";
+import {
+  parsePageCompatibilityFixture,
+  projectPage
+} from "../test/support/pages/compatibility-projection.js";
+import type { CanvasState } from "./shared.js";
 
 const REMOVED_TOKENS = [
   "bicepGenerated",
@@ -34,796 +57,6 @@ const sampleResources = [
     connections: []
   }
 ];
-
-describe("pageShell", () => {
-  it("wraps body content in an HTML document with the title", () => {
-    const html = pageShell("My Title", "<p>hello</p>");
-    expect(html).toContain("<!doctype html>");
-    expect(html).toContain("My Title — Radius");
-    expect(html).toContain("<p>hello</p>");
-  });
-
-  it("previews feedback link destinations in native tooltips", () => {
-    const html = pageShell("My Title", "<p>hello</p>");
-    expect(html).toContain(
-      'title="https://github.com/radius-project/ai-extensions/issues/new?template=feedback-or-bug-report.yml"'
-    );
-    expect(html).toContain('title="https://radapp.io"');
-  });
-
-  it("renders larger top-navigation icons without a border or filled background", () => {
-    const html = pageShell("My Title", "<p>hello</p>");
-    const iconStyles = html.match(/\.rad-topnav__icon\s*\{([^}]*)\}/)?.[1];
-    expect(html).toContain("width:28px;height:28px");
-    expect(iconStyles).toContain("background: transparent");
-    expect(iconStyles).not.toContain("border:");
-  });
-
-  it("inherits the Copilot host theme without creating Radius-owned theme state", () => {
-    const html = pageShell("My Title", "<p>hello</p>");
-    expect(html).toContain("color-scheme: var(--color-scheme, inherit)");
-    expect(html).toContain("--rad-bg: var(--background-color-default, Canvas)");
-    expect(html).toContain("--rad-text: var(--text-color-default, CanvasText)");
-    expect(html).toContain(
-      "--rad-bg-subtle: color-mix(in srgb, var(--rad-text) 6%, var(--rad-bg))"
-    );
-    expect(html).toContain("--rad-neutral-bg: var(--rad-bg-subtle)");
-    expect(html).toContain("--rad-node-bg: var(--rad-surface)");
-    expect(html).toContain("--rad-success: var(--text-color-success");
-    expect(html).toContain("--rad-warning: var(--text-color-warning");
-    expect(html).toContain("--rad-danger: var(--text-color-danger");
-    expect(html).not.toContain("localStorage");
-    expect(html).not.toContain("matchMedia");
-    expect(html).not.toContain("prefers-color-scheme");
-    expect(html).not.toContain(
-      "--rad-bg-subtle: var(--background-color-segmented"
-    );
-    expect(html).not.toContain(
-      "--rad-neutral-bg: var(--background-color-segmented"
-    );
-  });
-
-  it("keeps React Flow chrome transparent over the themed graph surface", () => {
-    const html = pageShell("My Title", '<div id="graph-container"></div>');
-    const flowStyles = html.match(
-      /\.react-flow, \.react-flow__renderer, \.react-flow__pane\s*\{([^}]*)\}/
-    )?.[1];
-    expect(flowStyles).toContain("background: transparent");
-  });
-
-  it("excludes radio and checkbox inputs from the 100%-width form-field rule", () => {
-    // The app-registration picker builds each option as a flex row of
-    // [radio][text]. A bare `input` selector in the width:100% rule stretches
-    // the radio to fill the row and shoves the label text far to the right
-    // (see the empty GITHUB-card style regression). The width rule must skip
-    // radios/checkboxes so they keep their intrinsic size.
-    const html = pageShell("My Title", "<p>hello</p>");
-    expect(html).toContain(
-      'input:not([type="radio"]):not([type="checkbox"]), select, .rad-select {'
-    );
-    // The bare selector (which would balloon the radio) must be gone.
-    expect(html).not.toMatch(/\n\s*input, select, \.rad-select \{/);
-  });
-
-  it("constrains graph type labels to the node card width", () => {
-    const html = pageShell("My Title", "<p>hello</p>");
-    const typeStyles = html.match(/\.rad-node__type\s*\{([^}]*)\}/)?.[1];
-    expect(typeStyles).toContain("width: 100%");
-    expect(typeStyles).toContain("overflow: hidden");
-    expect(typeStyles).toContain("white-space: nowrap");
-  });
-});
-
-describe("graphHeader / graphHeaderClose", () => {
-  it("renders the nav header and matching close markup", () => {
-    expect(graphHeader("graph")).toContain("<");
-    expect(graphHeaderClose()).toContain("<");
-  });
-});
-
-describe("graphPage — empty resources (initial) branch", () => {
-  const html = graphPage({ contextRepo: "octo/app", contextBranch: "dev" });
-
-  it("posts to /api/load-graph and keeps retrying while app.bicep is being generated", () => {
-    expect(html).toContain("/api/load-graph");
-    expect(html).toContain("requestGraphLoad()");
-    expect(html).toContain("window.radiusGraphRetryTimer");
-    expect(html).toContain("d.reload");
-    expect(html).toContain("d.stale");
-    expect(html).toContain("scheduleGraphRetry(1000)");
-    expect(html).toContain("d.error");
-  });
-
-  it("ignores stale callbacks and progress updates after the run finishes", () => {
-    expect(html).toContain("var graphRunFinished = false");
-    expect(html).toContain(
-      "window.radiusGraphRunToken !== graphRunToken || graphRunFinished"
-    );
-    expect(html).toContain(
-      "window.radiusGraphRunToken !== graphRunToken || !graphRunFinished"
-    );
-  });
-
-  it("renders a staged progress bar with duration guidance and terminal states", () => {
-    expect(html).toContain('id="progress-stage"');
-    expect(html).toContain('id="progress-percent"');
-    expect(html).toContain('id="progress-bar-fill"');
-    expect(html).toContain('id="progress-eta"');
-    expect(html).toContain("Usually completes in about 5 minutes.");
-    expect(html).toContain(
-      "Still running — complex repositories can take a little longer than 5 minutes."
-    );
-    expect(html).toContain("Application graph generated successfully.");
-    expect(html).toContain("Graph generation failed");
-  });
-
-  it("emits none of the removed generated-bicep tokens", () => {
-    for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
-  });
-});
-
-describe("graphPage — with resources branch", () => {
-  const html = graphPage({
-    graphResources: sampleResources,
-    graphTargetRepo: "octo/app",
-    graphBranch: "main"
-  });
-
-  it("handles needsAppBicep and error from /api/load-graph", () => {
-    expect(html).toContain("d.needsAppBicep");
-    expect(html).toContain("Error: ");
-    expect(html).toContain("Radius app-bicep skill");
-  });
-
-  it("renders the graph via radiusRenderGraph with the serialized resources", () => {
-    expect(html).toContain("radiusRenderGraph");
-    expect(html).toContain("Applications.Core/containers");
-  });
-
-  it("refreshes the modeled graph from app.bicep when the panel reloads", () => {
-    expect(html).toContain("refresh: true");
-    expect(html).toContain(
-      "graphController = graphController.update(d.resources) || graphController"
-    );
-    expect(html).toContain("Unable to refresh the application graph");
-  });
-
-  it("shows automatic app.bicep regeneration as progress rather than an error", () => {
-    expect(html).toContain("d.needsAppBicep");
-    expect(html).toContain("generatingStatus.className = 'status info'");
-    expect(html).toContain("Copilot is rebuilding the application graph");
-  });
-
-  it("emits none of the removed generated-bicep tokens", () => {
-    for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
-  });
-
-  describe("graphPage — successfully loaded empty graph", () => {
-    it("renders an empty graph instead of returning to the generate prompt", () => {
-      const html = graphPage({
-        graphLoaded: true,
-        graphResources: [],
-        graphTargetRepo: "octo/app",
-        graphBranch: "main"
-      });
-      expect(html).toContain("var resources = [];");
-      expect(html).toContain("radiusRenderGraph('graph-container', resources");
-      expect(html).not.toContain(
-        "Select a branch to generate the application graph"
-      );
-    });
-  });
-});
-
-describe("graphPage — localSource provenance flag", () => {
-  it("passes localSource:true when the graph is the local workspace selection", () => {
-    const html = graphPage({
-      graphResources: sampleResources,
-      graphTargetRepo: "octo/app",
-      graphBranch: "feature-x",
-      workspacePath: "/work/tree",
-      workspaceRepo: "octo/app",
-      workspaceBranch: "feature-x"
-    });
-    expect(html).toContain("localSource: true");
-  });
-
-  it("passes localSource:false for a remote/non-workspace selection", () => {
-    const html = graphPage({
-      graphResources: sampleResources,
-      graphTargetRepo: "octo/app",
-      graphBranch: "main"
-    });
-    expect(html).toContain("localSource: false");
-  });
-
-  it("honors the persisted graphFromWorkspace:false even when repo+branch match", () => {
-    const html = graphPage({
-      graphResources: sampleResources,
-      graphTargetRepo: "octo/app",
-      graphBranch: "feature-x",
-      workspacePath: "/work/tree",
-      workspaceRepo: "octo/app",
-      workspaceBranch: "feature-x",
-      graphFromWorkspace: false
-    });
-    expect(html).toContain("localSource: false");
-  });
-
-  it("honors the persisted graphFromWorkspace:true", () => {
-    const html = graphPage({
-      graphResources: sampleResources,
-      graphTargetRepo: "octo/app",
-      graphBranch: "main",
-      graphFromWorkspace: true
-    });
-    expect(html).toContain("localSource: true");
-  });
-});
-
-describe("plannedGraphPage", () => {
-  it("passes localSource:true for the local workspace planned graph", () => {
-    const html = plannedGraphPage({
-      plannedResources: sampleResources,
-      plannedRepo: "octo/app",
-      plannedBranch: "feature-x",
-      workspacePath: "/work/tree",
-      workspaceRepo: "octo/app",
-      workspaceBranch: "feature-x"
-    });
-    expect(html).toContain("localSource: true");
-  });
-
-  it("honors the persisted plannedFromWorkspace:false even when repo+branch match", () => {
-    const html = plannedGraphPage({
-      plannedResources: sampleResources,
-      plannedRepo: "octo/app",
-      plannedBranch: "feature-x",
-      workspacePath: "/work/tree",
-      workspaceRepo: "octo/app",
-      workspaceBranch: "feature-x",
-      plannedFromWorkspace: false
-    });
-    expect(html).toContain("localSource: false");
-  });
-
-  it("renders the empty (plan) branch with no removed tokens", () => {
-    const html = plannedGraphPage({
-      contextRepo: "octo/app",
-      contextBranch: "main"
-    });
-    expect(html).toContain("Plan Deployment");
-    expect(html).toContain(
-      "radiusPopulatePlannedSelectors(CONTEXT_REPO, ENV_PROVIDERS, CONTEXT_BRANCH)"
-    );
-    for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
-  });
-
-  it("renders the with-resources branch with no removed tokens", () => {
-    const html = plannedGraphPage({
-      plannedResources: sampleResources,
-      plannedRepo: "octo/app"
-    });
-    expect(typeof html).toBe("string");
-    expect(html).toContain("plannedMode: true");
-    expect(html).not.toContain("Cloud Resource");
-    for (const token of REMOVED_TOKENS) expect(html).not.toContain(token);
-  });
-});
-
-describe("environmentPage — Credentials/Profiles restructure", () => {
-  it("renders Environments and Credentials subtabs", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain('data-subtab="environments"');
-    expect(html).toContain('data-subtab="credentials"');
-  });
-
-  it("activates the Credentials subtab when state.activeSubtab is 'credentials'", () => {
-    const html = environmentPage({
-      contextRepo: "octo/app",
-      activeSubtab: "credentials"
-    });
-    // The active pane is the one NOT display:none'd.
-    expect(html).toContain('id="pane-credentials"');
-    expect(html).toContain("Create Credential Profile");
-  });
-
-  it("drives environment creation from a saved credential profile, not inline tenant/sub", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain('id="env-profile-select"');
-    expect(html).toContain("/api/credential-profiles");
-    expect(html).toContain("/api/save-credential-profile");
-    // The old inline provider picker was removed from the env-create form.
-    expect(html).not.toContain('id="env-provider-select"');
-  });
-
-  it("progressively discloses a Service Management Reference input and retries with it", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    // The SMR modal + input are present but hidden by default (no field on
-    // first submit).
-    expect(html).toContain('id="env-smr-modal"');
-    expect(html).toContain('id="env-smr-input"');
-    expect(html).toContain("Service Management Reference");
-    expect(html).toContain("Service Tree ID GUID");
-    // The client reacts to the machine-readable code and forwards the value.
-    expect(html).toContain("service-management-reference-required");
-    expect(html).toContain("serviceManagementReference");
-    expect(html).toContain("runAzureAutoSetupInteractive");
-  });
-
-  it("keeps interactive prompt errors separate from cleanup narration", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("err.steps = data.steps");
-    expect(html).toContain("err.cleanup = data.cleanup");
-    expect(html).not.toContain("data.steps.join('; ')");
-  });
-
-  it("renders the app-registration picker + editable name + use-existing action", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    // Editable deploy-identity name prefilled from the repo.
-    expect(html).toContain('id="az-app-name-input"');
-    expect(html).toContain("radius-deploy-octo-app");
-    // Opt-in cross-repo "use existing" advanced action + its endpoint.
-    expect(html).toContain('id="az-use-existing-link"');
-    expect(html).toContain("/api/list-azure-app-registrations");
-    // Duplicate/selection picker modal + its machine-readable trigger code.
-    expect(html).toContain('id="env-appselect-modal"');
-    expect(html).toContain("app-selection-required");
-    expect(html).toContain("showAppPicker");
-    // The "Serves:" label is lazy-loaded per app so the picker renders
-    // immediately instead of blocking on one az FIC-list per owned app.
-    expect(html).toContain("/api/azure-app-serves-repos?appId=");
-    expect(html).toContain("servesSlots");
-    expect(html).toContain("loadServesLabels");
-  });
-
-  it("uses semantic theme tokens throughout environment modal content", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain('id="env-smr-modal"');
-    expect(html).toContain('id="env-appselect-modal"');
-    expect(html).toContain("box-shadow:0 8px 30px var(--rad-shadow)");
-    for (const legacyToken of [
-      "var(--background-color-default,#fff)",
-      "var(--text-color-default,#1f2328)",
-      "var(--text-color-muted,#656d76)",
-      "var(--border-color-muted,#d8dee4)"
-    ]) {
-      expect(html).not.toContain(legacyToken);
-    }
-    expect(html).not.toContain("box-shadow:0 8px 30px rgba(");
-  });
-
-  it("leads the deploy-identity field copy with its purpose (Round 11A / four-step redesign)", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    // Step 3 header + provider-federated app registration copy.
-    expect(html).toContain("3 · Deploy identity");
-    expect(html).toContain("Azure app registration");
-    expect(html).toContain(
-      "The Microsoft Entra app GitHub Actions signs in as"
-    );
-    expect(html).toContain("no stored secrets");
-  });
-
-  it("discloses both role grants (Contributor + AKS Cluster Admin) at consent", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    // Setup grants two roles; both the deploy-identity field help and the
-    // profile-detail line must name the AKS Cluster Admin grant, not just
-    // Contributor, so the privilege is disclosed before the user proceeds.
-    expect(html).toContain("Azure Kubernetes Service RBAC Cluster Admin");
-    expect(html).toContain("the default for AKS Automatic");
-    expect(html).toContain("AKS RBAC Cluster Admin on the cluster");
-  });
-
-  it("wires the New Environment button to open the env form (regression guard)", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    // d97b6d1 accidentally dropped this handler when the use-existing IIFE was
-    // inserted, leaving #new-env-btn dead. Assert the exact wiring so a future
-    // deletion of the primary entry point fails the suite.
-    expect(html).toContain("getElementById('new-env-btn')");
-    expect(html).toMatch(
-      /getElementById\('new-env-btn'\)\.addEventListener\('click',\s*function\(\)\s*\{\s*showEnvForm/
-    );
-  });
-
-  it("makes the shared-identity pin reversible and reset on context change", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    // Hidden pin + note + explicit reversal affordance.
-    expect(html).toContain('id="az-selected-app-id"');
-    expect(html).toContain('id="az-selected-app-note"');
-    expect(html).toContain('id="az-clear-pin-link"');
-    // Central reset helper is defined and called from both the fresh-form and
-    // profile-change paths so a stale pin can't leak into the wrong context.
-    expect(html).toContain("function clearSharedAppPin");
-    expect(html).toMatch(/clearSharedAppPin\(\)/);
-    expect(html).toContain('data-default-name="radius-deploy-octo-app"');
-    expect(html).toContain(
-      "nameEl.value = (picked && picked.displayName) || choice.appId"
-    );
-    expect(html).toContain(
-      "nameEl.value = nameEl.getAttribute('data-default-name') || ''"
-    );
-  });
-
-  it("re-syncs the profile combo when returning to an open env form (stale-profile regression)", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    // Repro: open the env form, use the combo's "+ Create new profile" action
-    // to add a profile on the Credentials subtab, then switch back to
-    // Environments. switchSubtab() must refresh the combo (preserving the
-    // current selection) so the new profile appears without a full canvas
-    // reload — but only while the form is visible, so discovery doesn't fire
-    // on the hidden landing view.
-    expect(html).toMatch(
-      /if\s*\(envForm\s*&&\s*envForm\.style\.display\s*!==\s*'none'\)\s*loadProfilesIntoEnvSelect\(envProfileSelect\.value\)/
-    );
-  });
-
-  it("surfaces the write:packages scope in the account picker and identity warning", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    // Per-account label flags a missing packages scope (sibling of the
-    // existing workflow-scope flag).
-    expect(html).toContain("missing ");
-    expect(html).toContain("hasPackages");
-    expect(html).toContain("actingHasPackages");
-    // The identity warning builds the concrete refresh command including
-    // read:packages + write:packages when the acting account lacks it.
-    expect(html).toContain("read:packages");
-    expect(html).toContain("write:packages");
-    // Default (non-warning) note names both scopes setup needs.
-    expect(html).toContain("<code>write:packages</code>");
-    // `gh auth refresh` has NO --user flag, so the remediation must first
-    // `gh auth switch -u <login>` and then run a bare `gh auth refresh`.
-    // Guard against regressing to `gh auth refresh ... -u <login>`, which
-    // errors with "unknown shorthand flag: 'u'".
-    expect(html).toContain("gh auth switch -h github.com -u ");
-    expect(html).toContain("gh auth refresh -h github.com");
-    expect(html).not.toMatch(/gh auth refresh[^'"`]*-u /);
-    // After running the command out-of-band the UX must be able to detect the
-    // change: a manual Re-check button plus an auto re-check on window refocus,
-    // both hitting the cache-busting fresh=1 identity endpoint (now carrying
-    // ?repo so the server folds in the repo admin preflight).
-    expect(html).toContain('id="env-gh-recheck"');
-    expect(html).toContain(
-      "'/api/github-identity?repo=' + encodeURIComponent(CTX_REPO"
-    );
-    expect(html).toContain("idUrl += '&fresh=1'");
-    expect(html).toContain("visibilitychange");
-    expect(html).toContain(
-      "window.addEventListener('focus', envGhAutoRecheck)"
-    );
-  });
-
-  it("gates credential profiles on GitHub Packages access with explicit remediation", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain('id="cred-ghcr-section"');
-    expect(html).toContain('id="cred-ghcr-command"');
-    expect(html).toContain('id="cred-ghcr-copy"');
-    expect(html).toContain('id="cred-ghcr-retry"');
-    expect(html).toContain("I’ve updated permissions — retry");
-    expect(html).toContain(
-      "' && gh auth refresh -h github.com -s read:packages -s write:packages'"
-    );
-    expect(html).toContain("function loadCredGitHubAccess(fresh)");
-    expect(html).toContain(
-      "'/api/github-identity' + (fresh ? '?fresh=1' : '')"
-    );
-    expect(html).toContain(
-      "document.getElementById('save-cred-btn').disabled = !(credVerified && credPackagesVerified)"
-    );
-    expect(html).toContain("navigator.clipboard.writeText(command)");
-  });
-
-  it("scopes the AKS grant to the cluster's own resource group and surfaces setup warnings on success", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    // The cluster's own RG (from discovery) is sent independently of the
-    // editable deployment RG combo, so the server scopes AKS Cluster Admin to
-    // the cluster's real path even when the deployment RG differs.
-    expect(html).toContain("function findAzureClusterResourceGroup(");
-    expect(html).toContain(
-      "clusterResourceGroup = findAzureClusterResourceGroup(cluster)"
-    );
-    expect(html).toContain("clusterResourceGroup: clusterResourceGroup");
-    expect(html).toContain(
-      "payload.clusterResourceGroup = params.clusterResourceGroup"
-    );
-    // The auto-setup step log (incl. the best-effort AKS warning) is surfaced
-    // on the SUCCESS path, not just swallowed into the error message.
-    expect(html).toContain("function showEnvSetupWarnings(");
-    expect(html).toContain("preflight.then(function(setupResult)");
-    expect(html).toContain("showEnvSetupWarnings(setupSteps)");
-    expect(html).toContain('id="env-warning-banner"');
-  });
-
-  it("links the Azure RG and cluster dropdowns and sorts discovered resources (Nicole regression)", () => {
-    // Regression: the cluster dropdown listed every AKS cluster regardless of
-    // the selected resource group, the two dropdowns were not linked RG->cluster,
-    // and neither list was sorted. Discovery now sorts clusters/RGs/namespaces,
-    // filters the cluster list to the selected RG, and keeps the cluster->RG
-    // back-fill so the two stay linked both ways.
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("function sortByName(");
-    expect(html).toContain("function renderAzureClusters(");
-    expect(html).toContain(
-      "window.__azureClusters = sortByName(data.clusters || [])"
-    );
-    expect(html).toContain(
-      "populateSelect('azure-rg-select', sortByName(data.resourceGroups || [])"
-    );
-    expect(html).toContain(
-      "populateSelect('azure-namespace-select', sortByName("
-    );
-    // Selecting a resource group filters the cluster list to that RG.
-    expect(html).toContain(
-      "if ((all[i].resourceGroup || '') === rg) filtered.push(all[i])"
-    );
-    // Selecting a cluster still back-fills its resource group (bidirectional link).
-    expect(html).toContain("rgSel.value = cluster.resourceGroup;");
-  });
-
-  it("always sends appName on create so explicit-empty is server-detectable", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("params.appName !== undefined");
-  });
-
-  it("requires in-canvas consent before asking Copilot to start Azure login", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain('id="azure-cli-assist-modal"');
-    expect(html).toContain('role="dialog"');
-    expect(html).toContain("data.code === 'az-login-required'");
-    expect(html).toContain(
-      "showAzureCliAssistPrompt('login', data.tenantId || tenantId, data.error)"
-    );
-    expect(html).toContain(
-      "document.getElementById('azure-cli-assist-confirm').addEventListener('click'"
-    );
-    expect(html).not.toContain("confirm('No active Azure session.");
-    expect(html).toContain("/api/azure-cli-assist");
-    expect(html).toContain("fallbackMessage ? ' ' + fallbackMessage : ''");
-  });
-
-  it("requires in-canvas consent before asking Copilot to install Azure CLI", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("data.code === 'az-cli-missing'");
-    expect(html).toContain(
-      "showAzureCliAssistPrompt('install', data.tenantId || tenantId, data.error)"
-    );
-    expect(html).toContain(
-      "Would you like Copilot to attempt to install it and then start Azure login?"
-    );
-    expect(html).toContain("Ask Copilot to install");
-    expect(html).not.toContain("confirm('Azure CLI is not installed.");
-  });
-
-  it("surfaces repo admin access at open: fetches identity with ?repo and renders repoAccess", () => {
-    // Comment #9: the repo admin preflight was submit-only, so a write/maintain
-    // developer only hit the 403 after filling the whole form. The client now
-    // passes its repo to /api/github-identity so the server folds the preflight
-    // in, and renders the returned repoAccess message in the account note — an
-    // early, additive heads-up beside the account it concerns.
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain(
-      "'/api/github-identity?repo=' + encodeURIComponent(CTX_REPO"
-    );
-    expect(html).toContain("if (id.repoAccess)");
-    // A successful account switch must re-run the preflight for the new
-    // account (the switch response carries no repoAccess), so the switch
-    // handler re-loads identity rather than trusting res.d.identity.
-    expect(html).toContain("loadGitHubIdentity(true);");
-  });
-
-  it("single-sources the tested azure-oidc helpers into the client via .toString() (no hand-copied twins)", () => {
-    // Comment #10: formatServesReposLabel / discoverStatusText were duplicated
-    // as untested browser copies. They are now serialized from azure-oidc.ts
-    // into the client bundle, so the shipping client runs the exact tested
-    // code and the call sites reference the real functions.
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain(
-      "var formatServesReposLabel = function formatServesReposLabel("
-    );
-    expect(html).toContain(
-      "var discoverStatusText = function discoverStatusText("
-    );
-    expect(html).toContain("discoverStatusText(data, 'azure')");
-    expect(html).toContain("discoverStatusText(data, 'aws')");
-    expect(html).toContain("formatServesReposLabel(serves)");
-    // The hand-copied twins must be gone.
-    expect(html).not.toContain("formatServesReposLabelClient");
-  });
-
-  it("keeps stable browser helper names when the bundled function name is mangled", () => {
-    function Fi(data: unknown): unknown {
-      return data;
-    }
-    expect(serializeBrowserFunction("discoverStatusText", Fi)).toMatch(
-      /^var discoverStatusText = function Fi\(data\)/
-    );
-    expect(() => serializeBrowserFunction("bad-name", Fi)).toThrow(
-      'Invalid browser function name "bad-name".'
-    );
-  });
-
-  it("emits only syntactically valid client <script> blocks (init-halt guard)", () => {
-    // The client scripts live inside a template literal, so an escaped
-    // apostrophe (\\') un-escapes to a raw ' in the emitted JS and breaks a
-    // single-quoted string, halting page init so the tables never load.
-    // Parse every emitted script with new Function to catch that class of bug
-    // at build time without executing it.
-    const html = environmentPage({ contextRepo: "octo/app" });
-    const scripts = [
-      ...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)
-    ].map((m) => m[1]);
-    expect(scripts.length).toBeGreaterThan(0);
-    for (const src of scripts) {
-      expect(() => new Function(src)).not.toThrow();
-    }
-  });
-
-  it("never references the undeclared CONTEXT_REPO — this page's repo var is CTX_REPO", () => {
-    // Regression: loadGitHubIdentity was pasted with `CONTEXT_REPO`, an
-    // identifier declared in OTHER page scripts (graph/diff pages) but never
-    // in environmentPage — this page declares `var CTX_REPO`. At runtime that
-    // read throws `ReferenceError: CONTEXT_REPO is not defined`, halting
-    // showEnvForm before the GitHub account field loads, so the GITHUB card
-    // renders empty. The compile-only init-halt guard can't catch an
-    // undeclared free variable, so assert the identifier never appears here.
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).not.toContain("CONTEXT_REPO");
-  });
-});
-
-describe("deployingPage — Deployments landing", () => {
-  it("emits only syntactically valid client <script> blocks (init-halt guard)", () => {
-    // The Deployments page carries non-trivial inline client logic (branch
-    // discovery + selected-branch dispatch) inside a template literal, so an
-    // unescaped backtick or stray delimiter silently closes the outer literal
-    // and halts page init. Compile every emitted script to catch that class
-    // of bug (it already caught a stray backtick during development).
-    const html = deployingPage({
-      contextRepo: "octo/app",
-      contextBranch: "feature-x"
-    });
-    const scripts = [
-      ...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)
-    ].map((m) => m[1]);
-    expect(scripts.length).toBeGreaterThan(0);
-    for (const src of scripts) {
-      expect(() => new Function(src)).not.toThrow();
-    }
-  });
-
-  it("renders a Branch selector defaulting to the session branch and dispatches it", () => {
-    const html = deployingPage({
-      contextRepo: "octo/app",
-      contextBranch: "feature-x"
-    });
-    // The Branch selector is visible (not a hidden input) and seeded with the
-    // active session branch, and the dispatch reads the selected branch.
-    expect(html).toContain('id="deploy-branch-select"');
-    expect(html).toContain("feature-x");
-    expect(html).toContain(
-      "var deployBranch = (branchSelect && branchSelect.value) || CTX_BRANCH;"
-    );
-    expect(html).toContain("branch: deployBranch");
-  });
-
-  it("auto-refreshes the deployments table after a deploy starts (synthetic row + quiet in-flight polling)", () => {
-    const html = deployingPage({
-      contextRepo: "octo/app",
-      contextBranch: "feature-x"
-    });
-    // Fix 1: loadDeployments takes a quiet flag and renders a synthetic row for
-    // any optimistic OP_STATUS op that has no server record yet, so a brand-new
-    // deployment appears immediately instead of staying invisible until the run
-    // reaches a terminal state or Refresh is clicked.
-    expect(html).toContain("function loadDeployments(fresh, quiet) {");
-    expect(html).toContain("var synthetic = [];");
-    expect(html).toContain("var rows = synthetic.concat(deps);");
-    // The quiet flag suppresses the "Loading…" placeholder on background refreshes.
-    expect(html).toContain(
-      'if (!quiet) body.innerHTML = \'<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Loading deployments…</td></tr>\';'
-    );
-    // Fix 2: while the run is still in flight, the deploy-status poll quietly
-    // refreshes the list so the real GitHub record replaces the synthetic row.
-    expect(html).toContain("loadDeployments(true, true);");
-    // Synthetic rows are tagged so they can't offer a Delete button for a
-    // deployment record GitHub hasn't created yet (which would falsely report a
-    // successful delete mid-deploy).
-    expect(html).toContain("synthetic: true");
-    expect(html).toContain(
-      "var delDisabled = (status === 'deleting' || dep.synthetic) ? ' disabled' : '';"
-    );
-    // The in-flight list refresh stops once the real record shows up, and the
-    // poll is capped so a stuck run can't fan out fresh=1 fetches forever.
-    expect(html).toContain("if (recordSeen) return;");
-    expect(html).toContain(
-      "if (DEPLOY_RECORDS_PRESENT[opKey(app, env)]) { recordSeen = true; return; }"
-    );
-    expect(html).toContain("if (++wfTicks > 720) {");
-  });
-
-  it("applies the same quiet in-flight polling to the Delete Deployment flow", () => {
-    const html = deployingPage({
-      contextRepo: "octo/app",
-      contextBranch: "feature-x"
-    });
-    // The delete poll keeps the row showing "Deleting…" via a quiet refresh, so
-    // the table no longer flashes a loading placeholder every ~4s during a
-    // delete (matching the deploy flow's in-flight polling).
-    expect(html).toContain(
-      'loadDeployments(true, true); // keep the row showing "Deleting…" (quiet)'
-    );
-    // The initial optimistic "deleting" refresh is also quiet so the existing
-    // row flips in place without a flash.
-    expect(html).toContain(
-      "OP_STATUS[opKey(dep.app, dep.environment)] = 'deleting';"
-    );
-    // A synthetic row is only created for a not-yet-recorded op (deploy's
-    // "pending"), never for "deleting" — a delete acts on an existing record, so
-    // once it's gone there must be no phantom "Deleting…" row.
-    expect(html).toContain(
-      "if (present[k] || OP_STATUS[k] === 'deleting') return;"
-    );
-    // The delete is acknowledged immediately with a banner (mirroring the deploy
-    // flow) so the button click isn't left looking like it did nothing while the
-    // workflow spins up.
-    expect(html).toContain(
-      "'Deleting deployment of application <strong>' + escapeHtmlClient(dep.app)"
-    );
-  });
-});
-
-describe("graphDiffPage — passes repo/branch context so source links + popup work (not just diffMode)", () => {
-  it("passes repoUrl, branch (head), and baseBranch to radiusRenderGraph so buildSourceUrl doesn't short-circuit on missing repoUrl", () => {
-    const html = graphDiffPage({
-      diffResources: sampleResources,
-      diffBase: "main",
-      diffHead: "feature",
-      diffTargetRepo: "octo/app"
-    });
-    expect(html).toContain("radiusRenderGraph('graph-container', resources, {");
-    expect(html).toContain("diffMode: true");
-    expect(html).toContain("repoUrl: DIFF_REPO_URL");
-    expect(html).toContain("branch: 'feature'");
-    expect(html).toContain("baseBranch: 'main'");
-    expect(html).toContain(
-      "var DIFF_REPO_URL = 'https://github.com/' + document.getElementById('diff-repo-select').value.trim();"
-    );
-  });
-});
-
-describe("graphDiffPage — comparison errors", () => {
-  it.each([{ diffResources: [] }, { diffResources: sampleResources }])(
-    "surfaces an automatic comparison failure with existing resources: $diffResources",
-    ({ diffResources }) => {
-      const html = graphDiffPage({
-        diffError: "Unable to compile head graph",
-        diffResources,
-        diffTargetRepo: "octo/app",
-        diffBase: "main",
-        diffHead: "feature"
-      });
-      expect(html).toContain("Unable to compile head graph");
-      expect(html).toContain('class="status error"');
-    }
-  );
-});
-
-describe("deployedGraphPage", () => {
-  it("uses resolved concrete labels with planned topology and solid lines", () => {
-    const html = deployedGraphPage({ contextRepo: "octo/app" });
-    const renderGraph = html.match(
-      /function renderGraph\(resources, showDeployStatus\) \{([\s\S]*?)\n    \}/
-    )?.[1];
-    expect(renderGraph).toContain("deployedMode: !showDeployStatus");
-    expect(renderGraph).toContain("deployMode: !!showDeployStatus");
-  });
-
-  it("renders terminal failed resources with deployment status styling", () => {
-    const html = deployedGraphPage({ contextRepo: "octo/app" });
-    expect(html).toContain("st === 'failed'");
-    expect(html).toContain("renderGraph(liveRes, true)");
-    expect(html).toContain("renderGraph(resources, false)");
-  });
-});
 
 describe("remaining pages smoke-render without removed tokens", () => {
   const cases: Array<readonly [string, () => string, (() => string) | null]> = [
@@ -930,337 +163,542 @@ describe("remaining pages smoke-render without removed tokens", () => {
   });
 });
 
-describe("environmentPage — non-blocking setup progress", () => {
-  it("no longer renders a full-screen blocking overlay for creation", () => {
-    // The blocking modal is the one thing every comparable agent-canvas
-    // product avoids, and it trapped the user for up to eight minutes.
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).not.toContain('id="env-creating-modal"');
-    expect(html).toContain('id="env-progress-panel"');
+// Inline <script> blocks in pages.ts are template-literal strings, so a syntax
+// error in one is invisible to tsc, eslint and prettier — it surfaces only at
+// runtime as a silently dead script (this has caused a real "perpetual
+// Loading…" bug). Parsing every emitted block is the only cheap guard.
+describe("inline scripts", () => {
+  const renderers: Array<[string, () => string]> = [
+    ["graphPage", () => graphPage({})],
+    ["plannedGraphPage", () => plannedGraphPage({})],
+    ["graphDiffPage", () => graphDiffPage({})],
+    ["deployedGraphPage", () => deployedGraphPage({})],
+    ["environmentPage", () => environmentPage({})],
+    ["deployingPage", () => deployingPage({})],
+    ["oidcPage", () => oidcPage({})]
+  ];
+
+  it.each(renderers)(
+    "%s emits only parseable script blocks",
+    (_name, render) => {
+      const blocks = render().match(/<script>([\s\S]*?)<\/script>/g) || [];
+      expect(blocks.length).toBeGreaterThan(0);
+      for (const block of blocks) {
+        const src = block.slice("<script>".length, -"</script>".length);
+        expect(() => new Function(src)).not.toThrow();
+      }
+    }
+  );
+});
+
+// Function declarations hoist within a <script> block but not across blocks, so
+// a page whose body script uses a shared helper injected *after* it dies with a
+// ReferenceError — taking every later statement with it, which surfaces as a
+// permanently stuck "Loading…". Each block parses fine alone, so only an
+// ordering check catches this. The shared behaviour is exactly the code that
+// crosses block boundaries, so it is what this pins.
+//
+// The compiled entries publish their helpers by assignment rather than by
+// declaration, so an entry's block must appear before any block that calls one
+// of its names — the same ordering rule, checked against the names the entry
+// declares it exports.
+describe("shared client helpers are injected before the page body uses them", () => {
+  const entryHelpers = BROWSER_ENTRIES.flatMap((entry) =>
+    entry.globals.map((name) => [entry.name, name] as const)
+  );
+
+  const renderers: Array<[string, () => string]> = [
+    ["graphPage", () => graphPage({})],
+    ["plannedGraphPage", () => plannedGraphPage({})],
+    ["graphDiffPage", () => graphDiffPage({})],
+    ["deployedGraphPage", () => deployedGraphPage({})],
+    ["environmentPage", () => environmentPage({})],
+    ["deployingPage", () => deployingPage({})],
+    ["oidcPage", () => oidcPage({})]
+  ];
+
+  it("finds the shared helpers to check", () => {
+    const names = entryHelpers.map(([, name]) => name);
+    expect(names).toContain("radiusRenderGraph");
   });
 
-  it("renders the panel inline on the environments landing, not as an overlay", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    const panel = html.slice(html.indexOf('id="env-progress-panel"'));
-    expect(panel.slice(0, 200)).not.toContain("position:fixed");
-    const landing = html.indexOf('<div id="env-landing">');
-    expect(html.indexOf('id="env-progress-panel"')).toBeGreaterThan(landing);
-    expect(html.indexOf('id="env-progress-panel"')).toBeLessThan(
-      html.indexOf('id="new-env-btn"')
-    );
-    expect(html).toContain(
-      'role="region" aria-label="Environment setup progress" tabindex="-1"'
-    );
+  it.each(renderers)(
+    "%s calls no compiled entry helper before that entry's block",
+    (_name, render) => {
+      const blocks = (
+        render().match(/<script>([\s\S]*?)<\/script>/g) || []
+      ).map((b) => b.slice("<script>".length, -"</script>".length));
+      const entryBlock = new Map<string, number>();
+      for (const entry of BROWSER_ENTRIES) {
+        const compiled = browserScript(entry.name);
+        entryBlock.set(
+          entry.name,
+          blocks.findIndex((src) => src.includes(compiled))
+        );
+      }
+      const violations: string[] = [];
+      for (const [entryName, helper] of entryHelpers) {
+        const definedIn = entryBlock.get(entryName) ?? -1;
+        if (definedIn === -1) continue;
+        const usedIn = blocks.findIndex(
+          (src, index) =>
+            index !== definedIn && new RegExp(`\\b${helper}\\b`).test(src)
+        );
+        if (usedIn !== -1 && usedIn < definedIn) {
+          violations.push(
+            `${helper} used in block ${usedIn} but published by ${entryName} in block ${definedIn}`
+          );
+        }
+      }
+      expect(violations).toEqual([]);
+    }
+  );
+});
+
+// Deleting a deployment tears down live infrastructure irreversibly. Every
+// surface that offers it must use the same 3-step type-to-confirm dialog — a
+// page shipping a lighter confirmation of its own lowers the bar product-wide.
+describe("delete-deployment confirmation is uniform", () => {
+  const DIALOG_IDS = [
+    "deploy-delete-modal",
+    "deploy-delete-body",
+    "deploy-delete-app",
+    "deploy-delete-env",
+    "deploy-delete-close"
+  ];
+
+  it.each([
+    ["deployedGraphPage", () => deployedGraphPage({})],
+    ["deployingPage", () => deployingPage({})]
+  ])("%s renders the shared dialog", (_name, render) => {
+    const html = render();
+    expect(html).toContain('class="rad-ddlg"');
+    for (const id of DIALOG_IDS) expect(html).toContain(`id="${id}"`);
+    expect(html).toContain("radiusCreateDeleteDeploymentDialog");
   });
 
-  it("focuses and scrolls the progress panel into view when setup starts", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("function focusEnvProgressPanel()");
-    expect(html).toContain("panel.focus({ preventScroll: true })");
-    expect(html).toContain("panel.scrollIntoView({ behavior: reduceMotion");
-    const start = html.indexOf("summary: 'Creating ' + env + '…'");
-    const focus = html.indexOf("focusEnvProgressPanel();", start);
-    const tracking = html.indexOf(
-      "trackEnvProgress(targetRepo, env, provider);",
-      start
-    );
-    expect(start).toBeGreaterThan(-1);
-    expect(focus).toBeGreaterThan(start);
-    expect(tracking).toBeGreaterThan(focus);
+  it("the Deployed graph page no longer ships a one-click confirm", () => {
+    const html = deployedGraphPage({});
+    expect(html).not.toContain("deployed-delete-confirm");
+    expect(html).not.toContain("deployed-delete-cancel");
+    expect(html).not.toContain("Are you sure you want to delete");
   });
 
-  it("offers dismissal only after setup reaches a terminal state", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain('id="env-progress-dismiss"');
-    expect(html).toContain(
-      'aria-label="Dismiss completed environment setup progress"'
-    );
-    expect(html).toContain(
-      "if (dismiss) dismiss.style.display = op.terminalState ? '' : 'none';"
-    );
-    expect(html).toContain(
-      "if (actions) actions.style.display = op.terminalState ? 'flex' : 'none';"
-    );
-    expect(html).toContain(
-      "envProgressDismiss.addEventListener('click', function() {\n    hideEnvProgress();"
-    );
-  });
-
-  it("keeps the journey action beside dismissal when a return target exists", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain(
-      "var canResume = op.terminalState && target && target.page === 'planned' && target.repo;"
-    );
-    expect(html).toContain(
-      "if (resume) resume.style.display = canResume ? '' : 'none';"
-    );
-  });
-
-  it("clears stale terminal banners before showing progress for a new setup", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("function hideEnvTerminalBanners()");
-    expect(html).toContain(
-      "['env-success-banner', 'env-error-banner', 'env-warning-banner', 'env-action-banner']"
-    );
-    const start = html.indexOf("showEnvLanding();");
-    const clear = html.indexOf("hideEnvTerminalBanners();", start);
-    const render = html.indexOf("renderEnvProgress({", start);
-    expect(start).toBeGreaterThan(-1);
-    expect(clear).toBeGreaterThan(start);
-    expect(render).toBeGreaterThan(clear);
-  });
-
-  it("shows stage, current activity and elapsed time instead of a percentage", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain('id="env-progress-stages"');
-    expect(html).toContain('id="env-progress-activity"');
-    expect(html).toContain('id="env-progress-elapsed"');
-    // The step count varies with branching (credentials can be skipped,
-    // verification can never run), so a percentage could only be fiction.
-    expect(html).not.toContain("env-progress__bar");
-  });
-
-  it("announces the activity line and does not rely on colour alone for state", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain(
-      'id="env-progress-activity" class="env-progress__activity" role="status" aria-live="polite"'
-    );
-    expect(html).toContain("ENV_STAGE_GLYPH");
-    expect(html).toContain("prefers-reduced-motion");
-  });
-
-  it("renders one inline failure card that covers cleanup results and retry readiness", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain('id="env-progress-failure"');
-    expect(html).toContain('id="env-progress-cleanup-removed"');
-    expect(html).toContain('id="env-progress-cleanup-retained"');
-    expect(html).toContain('id="env-progress-cleanup-warnings"');
-    expect(html).toContain("function renderEnvFailureCard(op)");
-    expect(html).toContain("Retry starts cleanly:");
-  });
-
-  it("describes commit-point retention, cleanup warnings, and retry readiness in the failure card copy", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    const failureCard = html.slice(
-      html.indexOf("function renderEnvFailureCard(op)")
-    );
-    expect(failureCard).toContain(
-      "Cleanup stopped at the commit point, so reusable artifacts were left in place."
-    );
-    expect(failureCard).toContain("Cleanup finished with warnings.");
-    expect(failureCard).toContain(
-      "Retry starts cleanly: ' + (retry.startsCleanly ? 'Yes' : 'No') + '. '"
-    );
-  });
-
-  it("polls the operation record rather than the request that started it", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("/api/operations?repo=");
-    // Rejoining on load is what makes navigating away safe.
-    expect(html).toContain("resumeEnvProgress(CTX_REPO)");
-  });
-
-  it("falls back to verification status when the process-local operation record disappears", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain(
-      "function trackEnvProgress(repo, environment, provider, onTerminal)"
-    );
-    expect(html).toContain("if (!op) {");
-    expect(html).toContain(
-      "// Verification is tracked separately from the process-local"
-    );
-    expect(html).toContain(
-      "'/api/verify-status?repo=' + encodeURIComponent(repo) + '&environment=' + encodeURIComponent(environment) + '&operationId=' + encodeURIComponent(operationId)"
-    );
-    expect(html).toContain(
-      "if (v.state === 'success') {\n                                hideEnvProgress();"
-    );
-    expect(html).toContain(
-      "else hideEnvProgress();\n                                    })"
-    );
-  });
-
-  it("does not treat a previous verification run as success before the new operation appears", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("var observedOperation = false;");
-    expect(html).toContain(
-      "if (!observedOperation) {\n                        envProgressTimer = setTimeout(tick, 1500);"
-    );
-    expect(html).toContain("observedOperation = true;");
-    const noOperation = html.indexOf("if (!observedOperation)");
-    const verifyFallback = html.indexOf(
-      "fetch('/api/verify-status?repo='",
-      noOperation
-    );
-    expect(noOperation).toBeGreaterThan(-1);
-    expect(verifyFallback).toBeGreaterThan(noOperation);
-  });
-
-  it("does not replace a fresh setup panel with the previous terminal operation", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain(
-      "if (!observedOperation && op && (op.environment !== environment || op.terminalState))"
-    );
-    const staleGuard = html.indexOf(
-      "if (!observedOperation && op && (op.environment !== environment || op.terminalState))"
-    );
-    const observed = html.indexOf("observedOperation = true;", staleGuard);
-    const render = html.indexOf("renderEnvProgress(op);", staleGuard);
-    expect(staleGuard).toBeGreaterThan(-1);
-    expect(observed).toBeGreaterThan(staleGuard);
-    expect(render).toBeGreaterThan(observed);
-  });
-
-  it("polls verification while the live operation is in the verify stage", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    const liveVerify = html.indexOf(
-      "if (op.currentStage === 'verify' && environment)"
-    );
-    const verifyRequest = html.indexOf(
-      "fetch('/api/verify-status?repo='",
-      liveVerify
-    );
-    expect(liveVerify).toBeGreaterThan(-1);
-    expect(verifyRequest).toBeGreaterThan(liveVerify);
-    expect(html.slice(liveVerify, verifyRequest + 500)).toContain(
-      "v.state === 'expired' || v.terminal"
-    );
-  });
-
-  it("bounds reconnect verification without treating transient unknown as terminal", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("var verifyDeadlineMs = 45 * 60 * 1000;");
-    expect(html).toContain(
-      "Date.now() - verifyDispatchedAtMs > verifyDeadlineMs"
-    );
-    expect(html).toContain("v.state === 'expired' || v.terminal");
-    expect(html).not.toContain("v.state === 'unknown' || v.terminal");
-    expect(html).toContain(
-      "if (op.verification && op.verification.dispatchedAt) verifyDispatchedAtMs = Number(op.verification.dispatchedAt);"
-    );
-  });
-
-  it("re-hydrates terminal request failures from the shared operation record", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("function syncEnvFailureOperation(data)");
-    expect(html).toContain("syncEnvFailureOperation(envResult)");
-    expect(html).toContain("syncEnvFailureOperation(err)");
+  it("both pages emit byte-identical dialog markup", () => {
+    const extract = (html: string) => {
+      const start = html.indexOf('<div id="deploy-delete-modal"');
+      expect(start).toBeGreaterThan(-1);
+      return html.slice(
+        start,
+        html.indexOf("</div>", html.indexOf('id="deploy-delete-body"'))
+      );
+    };
+    expect(extract(deployedGraphPage({}))).toBe(extract(deployingPage({})));
   });
 });
 
-describe("environmentPage — pull-request terminal state", () => {
-  it("renders an action-required outcome instead of polling for a verify run that was never dispatched", () => {
-    // The server deliberately skips the verify dispatch on the PR path, so
-    // the old client polled for eight minutes and then reported a correct
-    // outcome as "Timed out waiting for credential verification".
-    //
-    // The branch keys off the server's stated `actionRequired` flag, not off
-    // the presence of a pull-request URL. Once the server learned to dispatch
-    // verification from a PR branch, a URL could accompany a run that was
-    // genuinely verifying — and inferring "do not poll" from it would have
-    // reintroduced #247 from the other direction.
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("if (envResult.actionRequired) {");
-    const prBranch = html.slice(
-      html.indexOf("if (envResult.actionRequired) {")
-    );
-    const untilPoll = prBranch.slice(
-      0,
-      prBranch.indexOf("function pollVerify")
-    );
-    expect(untilPoll).toContain("showEnvActionRequired");
-    expect(untilPoll).toContain("return;");
-  });
+// The facade exists so `./pages.js` importers keep working while ownership
+// lives in ./pages/. These pin the exported surface and prove the facade adds
+// no behaviour of its own.
+// The recipe-pack model removed singleton-recipe and on-demand-bicep UI: app
+// models are authored by the Radius app-bicep skill, never generated by a
+// server route. Every renderer is checked here, so no page can quietly bring
+// one back.
+describe("no page offers removed singleton-recipe or generated-bicep behaviour", () => {
+  const REMOVED_ROUTES = [
+    "/generated-bicep",
+    "/api/generate-bicep",
+    "/api/generate-recipe",
+    "/api/recipes/generate"
+  ];
+  const guarded: Array<[string, () => string]> = [
+    ["oidcPage", () => oidcPage({ contextRepo: "octo/app" })],
+    ["graphPage", () => graphPage({ contextRepo: "octo/app" })],
+    [
+      "graphPage with resources",
+      () =>
+        graphPage({ graphResources: sampleResources, contextRepo: "octo/app" })
+    ],
+    ["plannedGraphPage", () => plannedGraphPage({ contextRepo: "octo/app" })],
+    [
+      "plannedGraphPage with resources",
+      () =>
+        plannedGraphPage({
+          plannedResources: sampleResources,
+          plannedRepo: "octo/app"
+        })
+    ],
+    ["graphDiffPage", () => graphDiffPage({ diffTargetRepo: "octo/app" })],
+    [
+      "graphDiffPage with resources",
+      () => graphDiffPage({ diffResources: sampleResources })
+    ],
+    ["deployedGraphPage", () => deployedGraphPage({ contextRepo: "octo/app" })],
+    ["environmentPage", () => environmentPage({ contextRepo: "octo/app" })],
+    [
+      "environmentPage credentials",
+      () =>
+        environmentPage({
+          contextRepo: "octo/app",
+          activeSubtab: "credentials"
+        })
+    ],
+    [
+      "environmentPage result",
+      () => environmentPage({ deployResult: { message: "ok" } })
+    ],
+    ["deployingPage", () => deployingPage({ contextRepo: "octo/app" })]
+  ];
 
-  it("has a dedicated banner that reads as informational, not as a failure", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain('id="env-action-banner"');
-    expect(html).toContain("is set up, but one step is left for you");
-    expect(html).toContain("Review the pull request");
-  });
-
-  it("only links a pull request URL it recognises", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain(
-      "pullRequestUrl.indexOf('https://github.com/') === 0"
-    );
-  });
-
-  it("can explain manual PR creation when automatic PR creation failed", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    expect(html).toContain("could not open a pull request automatically");
-    expect(html).toContain("terminal.branch");
-    expect(html).toContain("terminal.baseBranch");
-  });
-
-  it("continues both setup POSTs with the same operation id", () => {
-    const html = environmentPage({
-      contextRepo: "octo/app",
-      contextBranch: "feature"
-    });
-    expect(html).toContain(
-      "if (params.operationId) payload.operationId = params.operationId"
-    );
-    expect(html).toContain(
-      "operationId: setupResult && setupResult.operationId"
-    );
-    expect(html).toContain(
-      "operationId: err.operationId || params.operationId"
-    );
-  });
-
-  it("captures and renders a planned-graph resume target", () => {
-    const html = environmentPage({
-      contextRepo: "octo/app",
-      contextBranch: "feature"
-    });
-    expect(html).toContain(
-      "resumeTarget: { page: 'planned', repo: targetRepo, branch: CTX_BRANCH }"
-    );
-    expect(html).toContain('id="env-progress-resume"');
-    expect(html).toContain("target.page === 'planned'");
-    expect(html).toContain("resumeReason: 'View planned graph'");
+  it.each(guarded)("%s emits no removed token or route", (_name, render) => {
+    const html = render();
+    for (const token of [...REMOVED_TOKENS, ...REMOVED_ROUTES]) {
+      expect(html, token).not.toContain(token);
+    }
+    // The app model is authored by the skill, so no page ships a generate action.
+    expect(html).not.toContain("Generate app.bicep");
+    expect(html).not.toContain("singletonRecipe");
   });
 });
 
-describe("operation status chip in the top navigation", () => {
-  const shell = pageShell("Environments", "<div></div>", "environments");
+// Every renderer composes server state into inline scripts, so each one must
+// survive state that tries to close the script element. This is the whole-page
+// counterpart to the encoding helpers' unit tests.
+describe("no page lets state escape its inline scripts", () => {
+  const hostileRenders: Array<[string, () => string]> = [
+    ["oidcPage", () => oidcPage({ oidcAzure: { message: HOSTILE_STATE } })],
+    [
+      "graphPage",
+      () =>
+        graphPage({ contextRepo: HOSTILE_STATE, contextBranch: HOSTILE_STATE })
+    ],
+    [
+      "graphPage with resources",
+      () =>
+        graphPage({
+          graphResources: [
+            { id: HOSTILE_STATE, name: HOSTILE_STATE, connections: [] }
+          ],
+          graphTargetRepo: HOSTILE_STATE
+        })
+    ],
+    [
+      "plannedGraphPage",
+      () =>
+        plannedGraphPage({
+          contextRepo: HOSTILE_STATE,
+          deployProvider: HOSTILE_STATE
+        })
+    ],
+    [
+      "plannedGraphPage with resources",
+      () =>
+        plannedGraphPage({
+          plannedResources: [
+            { id: HOSTILE_STATE, name: HOSTILE_STATE, connections: [] }
+          ],
+          plannedRepo: HOSTILE_STATE,
+          plannedProvider: HOSTILE_STATE
+        })
+    ],
+    [
+      "graphDiffPage",
+      () =>
+        graphDiffPage({
+          diffTargetRepo: HOSTILE_STATE,
+          diffBase: HOSTILE_STATE,
+          diffHead: HOSTILE_STATE,
+          diffError: HOSTILE_STATE,
+          branches: [HOSTILE_STATE],
+          branchShas: { [HOSTILE_STATE]: HOSTILE_STATE }
+        })
+    ],
+    [
+      "graphDiffPage with resources",
+      () =>
+        graphDiffPage({
+          diffResources: [
+            { id: HOSTILE_STATE, name: HOSTILE_STATE, connections: [] }
+          ],
+          branches: [HOSTILE_STATE],
+          branchShas: { [HOSTILE_STATE]: HOSTILE_STATE },
+          diffBase: HOSTILE_STATE,
+          diffHead: HOSTILE_STATE
+        })
+    ],
+    [
+      "deployedGraphPage",
+      () =>
+        deployedGraphPage({
+          contextRepo: HOSTILE_STATE,
+          contextBranch: HOSTILE_STATE,
+          deployProvider: HOSTILE_STATE
+        })
+    ],
+    [
+      "environmentPage",
+      () =>
+        environmentPage({
+          contextRepo: HOSTILE_STATE,
+          contextBranch: HOSTILE_STATE,
+          envName: HOSTILE_STATE
+        })
+    ],
+    [
+      "environmentPage result",
+      () =>
+        environmentPage({
+          deployResult: {
+            message: HOSTILE_STATE,
+            workflow: HOSTILE_STATE,
+            workflowUrl: "javascript:alert(1)"
+          },
+          deployAttempt: { id: HOSTILE_STATE }
+        })
+    ],
+    [
+      "deployingPage",
+      () =>
+        deployingPage({
+          contextRepo: HOSTILE_STATE,
+          contextBranch: HOSTILE_STATE
+        })
+    ],
+    ["pageShell", () => pageShell(HOSTILE_STATE, "<p>trusted</p>")]
+  ];
 
-  it("ships the chip on every page, hidden until it has something to report", () => {
-    // It renders in the shell rather than on the environments page because
-    // the whole point is to reach a user who has navigated away from there.
-    const html = pageShell("Applications", "<div></div>", "applications");
-    expect(html).toContain('id="rad-opchip"');
-    expect(html).toContain('id="rad-opchip-label"');
-    expect(html).toMatch(
-      /<a class="rad-opchip" id="rad-opchip" href="\/\?page=environment" hidden/
+  it.each(hostileRenders)(
+    "%s keeps every script block closed and parseable",
+    (_name, render) => {
+      const html = render();
+      expectSafeInlineScripts(html);
+      expect(html).not.toContain("<script>alert(1)</script>");
+      expect(html).not.toContain('href="javascript:');
+    }
+  );
+});
+
+// Durable Phase 3 compatibility oracle. The expected projections were produced
+// from the pre-extraction renderers at f2282b7 and are never recomputed here:
+// this suite renders the current facade exports and compares the same
+// deterministic projection. See test/fixtures/page-renderer-compatibility.json
+// for provenance and the update policy.
+describe("compiled graph page network contracts", () => {
+  it.each([
+    [
+      "graph-page",
+      [
+        "/api/discover-branches",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/progress",
+        "/api/load-graph"
+      ]
+    ],
+    [
+      "planned-graph-page",
+      [
+        "/api/discover-branches",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/deploy",
+        "/api/progress",
+        "/api/plan-graph"
+      ]
+    ],
+    [
+      "graph-diff-page",
+      ["/api/discover-branches", "/api/list-applications", "/api/diff-branches"]
+    ],
+    [
+      "deployed-graph-page",
+      [
+        "/api/deploy",
+        "/api/list-deployments",
+        "/api/deployed-graph",
+        "/api/deploy-status",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/delete-deployment"
+      ]
+    ]
+  ] as const)(
+    "%s exposes exactly its reviewed API path set",
+    (entry, expected) => {
+      const paths = [
+        ...new Set(
+          [...browserScript(entry).matchAll(/['"`(](\/api\/[a-z0-9-]+)/g)].map(
+            (match) => match[1]
+          )
+        )
+      ];
+      expect(paths).toEqual(expected);
+    }
+  );
+});
+
+describe("legacy page renderer compatibility oracle", () => {
+  const fixture = parsePageCompatibilityFixture(
+    JSON.parse(
+      readFileSync(
+        new URL(
+          "../test/fixtures/page-renderer-compatibility.json",
+          import.meta.url
+        ),
+        "utf8"
+      )
+    )
+  );
+
+  // Mirrors the server's page dispatch, so the oracle exercises the pages the
+  // canvas actually routes to.
+  const renderers: Record<string, (state: CanvasState) => string> = {
+    graph: graphPage,
+    planned: plannedGraphPage,
+    "graph-diff": graphDiffPage,
+    deployed: deployedGraphPage,
+    credentials: environmentPage,
+    environment: environmentPage,
+    deploying: deployingPage
+  };
+
+  it("records the oracle's provenance and review policy", () => {
+    expect(fixture.schemaVersion).toBe(1);
+    expect(fixture.source.commit).toBe(
+      "f2282b7ea77887a834d67dad84c3a966f9c14f30"
     );
-    expect(shell).toContain('id="rad-opchip"');
+    expect(fixture.source.path).toBe("packages/adapter-canvas/src/pages.ts");
+    expect(fixture.source.hostileInputs).toContain("PU-02");
+    expect(fixture.source.updatePolicy).toContain("reviewed");
+    expect(fixture.source.excludedScriptPayloads.join(" ")).toContain("#367");
+    expect(fixture.source.excludedScriptPayloads.join(" ")).toContain("#379");
   });
 
-  it("routes back to environments rather than opening anything on its own", () => {
-    // Auto-focus on completion was rejected: it re-creates the modal's sin
-    // with worse timing. The chip is a link the user chooses to follow.
-    expect(shell).toContain('href="/?page=environment"');
-    expect(shell).not.toContain('rad-opchip" onclick');
+  it("forwards exactly the legacy public export surface", () => {
+    expect(Object.keys(facade).sort()).toEqual([...fixture.exports].sort());
   });
 
-  it("announces itself politely to assistive technology", () => {
-    expect(shell).toMatch(/id="rad-opchip"[^>]*aria-live="polite"/);
-    expect(shell).toContain(
-      'class="rad-opchip__dot" id="rad-opchip-dot" aria-hidden="true"'
+  it("covers every routed page plus the shared shell", () => {
+    expect(
+      [...new Set(fixture.cases.map((entry) => entry.page))].sort()
+    ).toEqual([
+      "credentials",
+      "deployed",
+      "deploying",
+      "environment",
+      "graph",
+      "graph-diff",
+      "pageShell",
+      "planned"
+    ]);
+  });
+
+  it.each(fixture.cases.map((entry) => [entry.id, entry] as const))(
+    "%s still matches the legacy projection",
+    (_id, testCase) => {
+      const html =
+        testCase.page === "pageShell" ?
+          pageShell(
+            testCase.shellTitle ?? "",
+            testCase.shellBody ?? "",
+            testCase.shellActiveNav
+          )
+        : renderers[testCase.page](testCase.state);
+
+      expect(
+        projectPage(html, {
+          markers: testCase.markers,
+          hashedScripts: testCase.hashedScripts,
+          scope: testCase.scope
+        })
+      ).toEqual({
+        ...testCase.expected,
+        // Shell payloads are recorded once for the whole fixture; asserting the
+        // merge keeps every case covering them.
+        scriptDigests: {
+          ...fixture.sharedScriptDigests,
+          ...testCase.expected.scriptDigests
+        }
+      });
+    }
+  );
+});
+
+describe("page renderer facade", () => {
+  const EXPECTED_EXPORTS = [
+    "deployedGraphPage",
+    "deployingPage",
+    "environmentPage",
+    "graphDiffPage",
+    "graphHeader",
+    "graphHeaderClose",
+    "graphPage",
+    "oidcPage",
+    "pageShell",
+    "plannedGraphPage",
+    "serializeBrowserFunction"
+  ];
+
+  it("exports exactly the renderers the server and tools import, and nothing else", () => {
+    expect(Object.keys(facade).sort()).toEqual(EXPECTED_EXPORTS);
+    for (const name of EXPECTED_EXPORTS) {
+      expect(typeof (facade as Record<string, unknown>)[name]).toBe("function");
+    }
+  });
+
+  it("forwards each renderer to the module that owns it", () => {
+    expect(facade.serializeBrowserFunction).toBe(
+      serializeBrowserFunctionModule
     );
+    expect(facade.pageShell).toBe(pageShellModule);
+    expect(facade.oidcPage).toBe(oidcPageModule);
+    expect(facade.graphHeader).toBe(graphHeaderModule);
+    expect(facade.graphHeaderClose).toBe(graphHeaderCloseModule);
+    expect(facade.graphPage).toBe(graphPageModule);
+    expect(facade.plannedGraphPage).toBe(plannedGraphPageModule);
+    expect(facade.graphDiffPage).toBe(graphDiffPageModule);
+    expect(facade.deployedGraphPage).toBe(deployedGraphPageModule);
+    expect(facade.environmentPage).toBe(environmentPageModule);
+    expect(facade.deployingPage).toBe(deployingPageModule);
   });
 
-  it("carries the poller that fills it in", () => {
-    expect(shell).toContain("/api/operations");
-    expect(shell).toContain("radiusOpChipAck");
-  });
-
-  it("stops the pulse for anyone who has asked for less motion", () => {
-    expect(shell).toContain("@media (prefers-reduced-motion: reduce)");
-    expect(shell).toMatch(
-      /prefers-reduced-motion[\s\S]*rad-opchip--running \.rad-opchip__dot \{ animation: none; \}/
+  // Comparing the facade's output against the owning module's output would only
+  // re-invoke the same function binding, so the contract asserted here is the
+  // rendered output itself: every forwarded name still produces its page. The
+  // reviewed pre-extraction markers for all seven pages live in
+  // test/fixtures/runtime-compatibility.json and are asserted against these
+  // same exports by the runtime compatibility suite.
+  it("delivers a working renderer through every forwarded export", () => {
+    expect(pageShell("Deployments", "<p>body</p>", "deployments")).toContain(
+      "<title>Deployments — Radius</title>"
     );
+    expect(graphHeader("planned")).toContain(
+      '<a href="?page=planned" data-page="planned" data-radius-graph-page="planned" class="rad-subtab rad-subtab--active"'
+    );
+    expect(graphHeaderClose()).toBe("</div>");
+    expect(
+      serializeBrowserFunction("radiusEcho", (value: string) => value)
+    ).toMatch(/^var radiusEcho = /);
+    expect(oidcPage({})).toContain('id="panel-azure"');
+    expect(graphPage({ contextRepo: "octo/app" })).toContain('id="graph-app"');
+    expect(plannedGraphPage({ contextRepo: "octo/app" })).toContain(
+      'id="planned-subtitle"'
+    );
+    expect(graphDiffPage({ diffResources: sampleResources })).toContain(
+      'id="graph-diff-subtitle"'
+    );
+    expect(deployedGraphPage({})).toContain('id="deployed-subtitle"');
+    expect(environmentPage({})).toContain('id="pane-environments"');
+    expect(deployingPage({})).toContain('id="deploy-table-body"');
+  });
+
+  it("renders each page's default state identically to its explicit empty state", () => {
+    expect(facade.oidcPage()).toBe(facade.oidcPage({}));
+    expect(facade.graphPage()).toBe(facade.graphPage({}));
+    expect(facade.plannedGraphPage()).toBe(facade.plannedGraphPage({}));
+    expect(facade.graphDiffPage()).toBe(facade.graphDiffPage({}));
+    expect(facade.deployedGraphPage()).toBe(facade.deployedGraphPage({}));
+    expect(facade.environmentPage()).toBe(facade.environmentPage({}));
+    expect(facade.deployingPage()).toBe(facade.deployingPage({}));
   });
 });

@@ -48,12 +48,16 @@ import {
   buildDeployPayload,
   validateDeployPayload,
   validateDeployAttempt,
-  summarizeDeployStatus
+  summarizeDeployStatus,
+  describeDeployStarted
 } from "./deploy-tools.js";
 import { generateAzureOIDC, generateAWSOIDC } from "./infra.js";
 import {
   servers,
   getOrCreateServer,
+  hasActiveEnvironmentTasks,
+  markEnvironmentInstanceShuttingDown,
+  onEnvironmentTasksSettled,
   getLastWebviewActivityAt,
   setAppBicepHandoff,
   setDeployRepairHandoff,
@@ -134,7 +138,8 @@ const dependencies: RadiusExtensionDependencies = {
     buildDeployPayload,
     validateDeployPayload,
     validateDeployAttempt,
-    summarizeDeployStatus
+    summarizeDeployStatus,
+    describeDeployStarted
   },
   sourceRefs: {
     getSourceRefResources,
@@ -162,7 +167,10 @@ const dependencies: RadiusExtensionDependencies = {
     fetch: (...args: Parameters<typeof fetch>) => fetch(...args)
   },
   operations: {
-    setupInFlight
+    setupInFlight,
+    hasActiveEnvironmentTasks,
+    markEnvironmentInstanceShuttingDown,
+    onEnvironmentTasksSettled
   },
   radiusAppBicepSkill,
   renderPrDiffMarkdown,

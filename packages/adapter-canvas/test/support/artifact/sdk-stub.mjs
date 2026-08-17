@@ -1,4 +1,5 @@
 let joinCount = 0;
+let joinedDeclaration;
 
 function json(value) {
   return JSON.parse(JSON.stringify(value));
@@ -17,6 +18,7 @@ export function createCanvas(declaration) {
 
 export async function joinSession(declaration) {
   joinCount++;
+  joinedDeclaration = declaration;
   const generateApp = declaration.tools.find(
     (tool) => tool.name === "radius_generate_app"
   );
@@ -72,4 +74,29 @@ export async function joinSession(declaration) {
     metadata: { snapshot: async () => ({}) },
     close: () => send({ type: "shutdown", closeCount: 1 })
   };
+}
+
+export async function renderArtifactPage() {
+  const canvas = joinedDeclaration?.canvases.find(
+    (candidate) => candidate.id === "radius"
+  );
+  if (!canvas) throw new Error("Radius canvas was not registered.");
+  const context = {
+    extensionId: "radius",
+    canvasId: "radius",
+    instanceId: "artifact-smoke",
+    input: { page: "environment" }
+  };
+  let opened = false;
+  try {
+    const page = await canvas.open(context);
+    opened = true;
+    const response = await fetch(page.url);
+    if (!response.ok) {
+      throw new Error(`Artifact page returned HTTP ${response.status}.`);
+    }
+    return await response.text();
+  } finally {
+    if (opened) await canvas.onClose(context);
+  }
 }

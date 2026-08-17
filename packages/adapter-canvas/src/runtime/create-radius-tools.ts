@@ -216,7 +216,7 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
           if (!response.ok || result.error) {
             return `⚠️ Could not start the deploy: ${result.error || `HTTP ${response.status}`}`;
           }
-          return `Deploy of ${payload.targetRepo}${payload.branch ? ` (branch ${payload.branch})` : ""} to environment "${payload.environment}" started. It deploys ${payload.branch || "that branch"} as it exists on GitHub, so confirm any repair was pushed. Poll the radius_deploy_status tool until it reports success or failed.`;
+          return deps.deployTools.describeDeployStarted(payload, result);
         } catch (err) {
           return `⚠️ Could not start the deploy: ${errorMessage(err)}`;
         }
