@@ -142,11 +142,7 @@ describe("canvas pages over real loopback HTTP", () => {
       resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
       const response = await get(`/?page=${page}`);
 
-      for (const entry of [
-        "graph",
-        "heartbeat",
-        pageEntry
-      ] as const) {
+      for (const entry of ["graph", "heartbeat", pageEntry] as const) {
         expect(
           response.body.split(`\n${browserEntryMarker(entry)}\n`)
         ).toHaveLength(2);
