@@ -4,10 +4,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
   createOperationsControlRoutes,
+  handleContinueOperation,
   handleRetryOperation,
+  handleRollbackOperation,
   handleStopOperation,
   retryRefusalMessage,
+  CONTINUE_OPERATION_ROUTE,
   RETRY_OPERATION_ROUTE,
+  ROLLBACK_OPERATION_ROUTE,
   STOP_OPERATION_ROUTE,
   type OperationsControlDependencies
 } from "./operations-control.js";
@@ -19,11 +23,14 @@ import {
   announceOperationTerminal,
   beginRetryAttempt,
   buildStages,
+  canContinueSetup,
   canRetryCleanup,
   canRetrySetup,
   canRetryVerification,
+  canStartRollback,
   createOperation,
   enterStage,
+  findActiveCommand,
   finish,
   onOperationTerminal,
   recordAzureApp,
@@ -32,11 +39,13 @@ import {
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
   recordServicePrincipal,
+  requestStop,
   requireInput,
   rollbackRetryAttempt,
   setCommandState,
   setStageState,
   snapshotRetryState,
+  stopAtBoundary,
   toClientView,
   STAGE_VERIFY,
   type OperationControlRecord
@@ -146,9 +155,12 @@ function dependencies(
     rollbackRetryAttempt,
     beginRetryAttempt,
     acceptCommand,
+    findActiveCommand,
     setCommandState,
+    canContinueSetup,
     canRetrySetup,
     canRetryVerification,
+    canStartRollback,
     canRetryCleanup,
     applySetupResumePoint,
     setStageState,
@@ -168,6 +180,10 @@ function dependencies(
     },
     scheduleCleanupRetry: (instanceId, _operation, commandId) => {
       journal.scheduled.push({ kind: "cleanup", instanceId, commandId });
+      return true;
+    },
+    scheduleRollback: (instanceId, _operation, commandId) => {
+      journal.scheduled.push({ kind: "rollback", instanceId, commandId });
       return true;
     },
     errorMessage: (error) =>
@@ -237,11 +253,13 @@ function mergeHandoff(repo = "contoso/store"): OperationRecord {
 }
 
 describe("the route registry", () => {
-  it("claims exactly the two declared control routes", () => {
+  it("claims exactly the four declared control routes", () => {
     const registry = createOperationsControlRoutes(dependencies());
     expect(Object.keys(registry).sort()).toEqual(
       [
         routeKey({ method: "POST", path: STOP_OPERATION_ROUTE }),
+        routeKey({ method: "POST", path: CONTINUE_OPERATION_ROUTE }),
+        routeKey({ method: "POST", path: ROLLBACK_OPERATION_ROUTE }),
         routeKey({ method: "POST", path: RETRY_OPERATION_ROUTE })
       ].sort()
     );
@@ -266,6 +284,24 @@ describe("the route registry", () => {
     );
     // The same record is now running, so a setup retry has nothing to continue.
     expect(retry.payload().code).toBe("operation-active");
+
+    const continued = recorder();
+    await registry[`POST ${CONTINUE_OPERATION_ROUTE}`](
+      postContext(
+        `/api/operations/${op.operationId}/continue`,
+        continued.response
+      )
+    );
+    expect(continued.payload().code).toBe("operation-active");
+
+    const rolledBack = recorder();
+    await registry[`POST ${ROLLBACK_OPERATION_ROUTE}`](
+      postContext(
+        `/api/operations/${op.operationId}/rollback`,
+        rolledBack.response
+      )
+    );
+    expect(rolledBack.payload().code).toBe("operation-active");
   });
 });
 
@@ -967,5 +1003,406 @@ describe("retryRefusalMessage", () => {
     expect(retryRefusalMessage("setup", "brand-new-code")).toBe(
       "Radius cannot retry setup for this operation (brand-new-code)."
     );
+  });
+});
+
+// ─── Stop, continue, roll back ───────────────────────────────────────────────
+// A stopped attempt offers two decisions, and the routes below keep them apart:
+// continuing walks the ledger forward, rolling back removes only what the
+// ledger proves this attempt created, and neither can start while the other
+// owns the record.
+
+function stoppedSetup(repo = "contoso/store"): OperationFixture {
+  const op = newOperation(repo);
+  op.resumeRequest = {
+    needsAzureCredentials: true,
+    azure: {},
+    environment: { repo, environment: "dev", provider: "azure" }
+  };
+  recordAzureApp(op, {
+    state: "created",
+    appId: "app-1",
+    displayName: "radius-deploy"
+  });
+  recordServicePrincipal(op, { state: "created", appId: "app-1" });
+  requestStop(op);
+  stopAtBoundary(op, "after_service_principal");
+  return op;
+}
+
+describe("POST /api/operations/{id}/continue", () => {
+  it("continues a stopped setup from the first unfinished step", async () => {
+    const op = stoppedSetup();
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleContinueOperation(
+      postContext(`/api/operations/${op.operationId}/continue`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(202);
+    const payload = out.payload();
+    expect(payload.commandId).toBe(
+      `${op.operationId}:continue_setup:2:continue`
+    );
+    expect(payload.attempt).toBe(2);
+    expect(payload.operation.state).toBe("running");
+    expect(op.resumeFrom).toBe("federated_credentials");
+    expect(deps.journal.scheduled).toEqual([
+      { kind: "setup", instanceId: "panel-a" }
+    ]);
+    // The command is saved before any work is handed to a runner.
+    expect(deps.journal.persistCalls).toBe(1);
+  });
+
+  it("refuses to continue a setup whose ownership the ledger cannot prove", async () => {
+    const op = stoppedSetup();
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleContinueOperation(
+      postContext(`/api/operations/${op.operationId}/continue`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "setup-continue-ownership-ambiguous",
+      detail: "A GitHub environment may exist without proven ownership."
+    });
+    expect(op.state).toBe("cancelled");
+    expect(deps.journal.scheduled).toEqual([]);
+  });
+
+  it("refuses to continue a running operation", async () => {
+    const op = newOperation();
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleContinueOperation(
+      postContext(`/api/operations/${op.operationId}/continue`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload().code).toBe("operation-active");
+    expect(deps.journal.scheduled).toEqual([]);
+  });
+
+  it("resolves a repeated continue to the command already in flight", async () => {
+    const op = stoppedSetup();
+    const deps = dependencies({ get: () => op });
+
+    const first = recorder();
+    await handleContinueOperation(
+      postContext(`/api/operations/${op.operationId}/continue`, first.response),
+      deps
+    );
+    const second = recorder();
+    await handleContinueOperation(
+      postContext(
+        `/api/operations/${op.operationId}/continue`,
+        second.response
+      ),
+      deps
+    );
+
+    expect(second.recording.status).toBe(202);
+    expect(second.payload()).toMatchObject({
+      duplicate: true,
+      commandId: first.payload().commandId
+    });
+    expect(deps.journal.scheduled).toHaveLength(1);
+  });
+
+  it("restores the stopped state when the continuation cannot be saved", async () => {
+    const op = stoppedSetup();
+    const deps = dependencies({
+      get: () => op,
+      persistOperations: () => Promise.reject(new Error("disk full"))
+    });
+    const out = recorder();
+
+    await handleContinueOperation(
+      postContext(`/api/operations/${op.operationId}/continue`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(500);
+    expect(out.payload()).toMatchObject({
+      code: "operation-continue-persist-failed",
+      detail: "disk full"
+    });
+    expect(op.state).toBe("cancelled");
+    expect(op.control.commands).toEqual([]);
+    expect(deps.journal.scheduled).toEqual([]);
+  });
+
+  it("restores the stopped decision when no runner accepts the continuation", async () => {
+    const op = stoppedSetup();
+    const deps = dependencies({
+      get: () => op,
+      scheduleSetupContinuation: () => false
+    });
+    const out = recorder();
+
+    await handleContinueOperation(
+      postContext(`/api/operations/${op.operationId}/continue`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(503);
+    expect(out.payload()).toMatchObject({
+      code: "operation-command-unscheduled"
+    });
+    // Nothing ran, so the customer is put back on the same decision rather than
+    // shown a failure that never happened, and no command is left behind to
+    // absorb their next click.
+    expect(op.state).toBe("cancelled");
+    expect(op.control.attempts.setup).toBe(1);
+    expect(op.control.commands).toEqual([]);
+    expect(
+      out.payload().operation.actions.map((a: { id: string }) => a.id)
+    ).toEqual(["continue-setup", "rollback"]);
+  });
+
+  it("answers 404 for a continue against an unknown operation", async () => {
+    const deps = dependencies({ get: () => null });
+    const out = recorder();
+
+    await handleContinueOperation(
+      postContext("/api/operations/op_missing/continue", out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(404);
+    expect(out.payload().code).toBe("unknown-operation");
+  });
+});
+
+describe("POST /api/operations/{id}/rollback", () => {
+  it("accepts a rollback for a stopped attempt and schedules it once", async () => {
+    const op = stoppedSetup();
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleRollbackOperation(
+      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(202);
+    const payload = out.payload();
+    expect(payload.attempt).toBe(1);
+    // The identity names the exact artifact set, so a repeat of the same
+    // request is the same command and a different set is not.
+    expect(payload.commandId).toMatch(
+      new RegExp(`^${op.operationId}:rollback:1:cleanup#[0-9a-f]{16}$`)
+    );
+    expect(deps.journal.persistCalls).toBe(1);
+    expect(deps.journal.scheduled).toEqual([
+      { kind: "rollback", instanceId: "panel-a", commandId: payload.commandId }
+    ]);
+  });
+
+  it("refuses a rollback once the workflows were committed", async () => {
+    const op = stoppedSetup();
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/radius-deploy.yml",
+      mode: "default_branch",
+      branch: "main"
+    });
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleRollbackOperation(
+      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "rollback-after-commit",
+      error:
+        "The workflows were already committed, so these resources are retained on purpose rather than removed."
+    });
+    expect(deps.journal.scheduled).toEqual([]);
+  });
+
+  it("refuses a rollback when the attempt created nothing it can prove it owns", async () => {
+    const op = newOperation();
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    requestStop(op);
+    stopAtBoundary(op, "after_environment");
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleRollbackOperation(
+      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload().code).toBe("rollback-nothing-owned");
+    expect(deps.journal.scheduled).toEqual([]);
+  });
+
+  it("refuses a rollback while the operation is still running", async () => {
+    const op = newOperation();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleRollbackOperation(
+      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload().code).toBe("operation-active");
+    expect(deps.journal.scheduled).toEqual([]);
+  });
+
+  it("resolves a duplicate rollback to the accepted command instead of deleting twice", async () => {
+    const op = stoppedSetup();
+    const deps = dependencies({ get: () => op });
+
+    const first = recorder();
+    await handleRollbackOperation(
+      postContext(`/api/operations/${op.operationId}/rollback`, first.response),
+      deps
+    );
+    const second = recorder();
+    await handleRollbackOperation(
+      postContext(
+        `/api/operations/${op.operationId}/rollback`,
+        second.response
+      ),
+      deps
+    );
+
+    expect(second.recording.status).toBe(202);
+    expect(second.payload()).toMatchObject({
+      duplicate: true,
+      commandId: first.payload().commandId
+    });
+    expect(deps.journal.scheduled).toHaveLength(1);
+  });
+
+  it("restores the stopped state and reports that no cleanup began when the save fails", async () => {
+    const op = stoppedSetup();
+    const deps = dependencies({
+      get: () => op,
+      persistOperations: () => Promise.reject(new Error("store offline"))
+    });
+    const out = recorder();
+
+    await handleRollbackOperation(
+      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(500);
+    expect(out.payload()).toMatchObject({
+      code: "operation-rollback-persist-failed",
+      error:
+        "Radius could not save the rollback request, so no cleanup began. Try again."
+    });
+    expect(op.state).toBe("cancelled");
+    expect(op.control.attempts.cleanup).toBe(0);
+    expect(deps.journal.scheduled).toEqual([]);
+  });
+
+  it("leaves a terminal, actionable record when no runner accepts the rollback", async () => {
+    const op = stoppedSetup();
+    const deps = dependencies({ get: () => op, scheduleRollback: () => false });
+    const out = recorder();
+
+    await handleRollbackOperation(
+      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(503);
+    expect(op.state).toBe("cancelled");
+    expect(
+      out.payload().operation.actions.map((entry: { id: string }) => entry.id)
+    ).toContain("rollback");
+  });
+
+  it("refuses a rollback while another operation owns the repository", async () => {
+    const op = stoppedSetup();
+    const deps = dependencies({
+      get: () => op,
+      acquireForRetry: () => ({
+        ok: false,
+        conflict: { operationId: "op_live" }
+      })
+    });
+    const out = recorder();
+
+    await handleRollbackOperation(
+      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toEqual({
+      error: "Another setup is already running for contoso/store.",
+      code: "operation-in-progress",
+      operationId: "op_live"
+    });
+    expect(op.state).toBe("cancelled");
+  });
+
+  it("still restores the decision when the follow-up write also fails", async () => {
+    const op = stoppedSetup();
+    let allowFirstWrite = true;
+    const deps = dependencies({
+      get: () => op,
+      scheduleRollback: () => false,
+      persistOperations: () => {
+        if (allowFirstWrite) {
+          allowFirstWrite = false;
+          return Promise.resolve();
+        }
+        return Promise.reject(new Error("store offline"));
+      }
+    });
+    const out = recorder();
+
+    await handleRollbackOperation(
+      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+      deps
+    );
+
+    // The durable write is best effort here: the in-memory record is already
+    // back on the stopped decision, so polling reports the truth either way.
+    expect(out.recording.status).toBe(503);
+    expect(op.state).toBe("cancelled");
+    expect(op.control.attempts.cleanup).toBe(0);
+  });
+
+  it("answers 404 for a rollback against an unknown operation", async () => {
+    const deps = dependencies({ get: () => null });
+    const out = recorder();
+
+    await handleRollbackOperation(
+      postContext("/api/operations/op_missing/rollback", out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(404);
+    expect(out.payload().code).toBe("unknown-operation");
   });
 });

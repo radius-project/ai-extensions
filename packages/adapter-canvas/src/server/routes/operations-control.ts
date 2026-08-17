@@ -6,13 +6,18 @@ import {
 import type { OperationCommandKind } from "../../operations.js";
 import type { OperationRecord } from "./operations-status.js";
 
-// Cooperative controls for an environment operation: stop, and the three
-// retries (setup continuation, verification, cleanup).
+// Cooperative controls for an environment operation: stop, the two forward
+// commands (continue a deliberate stop, retry a failed continuation), rollback
+// of what the attempt created, and the two remaining retries.
 //
-// All four share one shape, and the order is the safety property: read the
+// They all share one shape, and the order is the safety property: read the
 // saved record, decide from the saved record alone, durably record the command
 // before the caller is told it was accepted, and only then schedule work.
 // Nothing here deploys the application — that stays a separate customer action.
+//
+// Stop and rollback are deliberately different commands. Stop means "create
+// nothing more"; rollback means "remove what you created", is confirmed in the
+// browser first, and fails closed on anything the ledger cannot prove.
 //
 // The handlers stay thin. Eligibility lives in `operations.ts`, the merge proof
 // lives in `services/setup-pull-request.ts`, and every seam below is a single
@@ -22,16 +27,25 @@ import type { OperationRecord } from "./operations-status.js";
 // resume and abandon routes in `operations-status.ts`, so a template and the
 // code that destructures it cannot drift apart.
 export const STOP_OPERATION_ROUTE = "/api/operations/:operationId/stop";
+export const CONTINUE_OPERATION_ROUTE = "/api/operations/:operationId/continue";
+export const ROLLBACK_OPERATION_ROUTE = "/api/operations/:operationId/rollback";
 export const RETRY_OPERATION_ROUTE =
   "/api/operations/:operationId/retry/:retryKind";
 
 export type OperationRetryKind = "setup" | "verification" | "cleanup";
+
+// The command a request is asking for, independent of which route carried it.
+// `continue` and `rollback` are first-choice commands after a stop; `retry/*`
+// repeats one that already ran.
+export type OperationCommandName =
+  "setup" | "verification" | "cleanup" | "continue" | "rollback";
 
 export type RetryEligibility = {
   ok: boolean;
   code: string;
   detail?: string;
   resumeFrom?: string;
+  target?: string;
   classification?: string;
   requiresMergedPullRequest?: boolean;
   pullRequestUrl?: string | null;
@@ -82,14 +96,22 @@ export interface OperationsControlDependencies {
     operation: OperationRecord,
     input: { kind: OperationCommandKind; attempt: number; target: string }
   ): AcceptedCommand;
+  // The command Radius is still working on, so a duplicate submission resolves
+  // to it instead of scheduling a second cleanup or continuation.
+  findActiveCommand(
+    operation: OperationRecord,
+    kinds: readonly OperationCommandKind[]
+  ): { commandId: string } | null;
   setCommandState(
     operation: OperationRecord,
     commandId: string,
     state: "accepted" | "running" | "finished",
     outcome?: string | null
   ): unknown;
+  canContinueSetup(operation: OperationRecord): RetryEligibility;
   canRetrySetup(operation: OperationRecord): RetryEligibility;
   canRetryVerification(operation: OperationRecord): RetryEligibility;
+  canStartRollback(operation: OperationRecord): RetryEligibility;
   canRetryCleanup(operation: OperationRecord): RetryEligibility;
   applySetupResumePoint(operation: OperationRecord, resumeFrom: unknown): void;
   setStageState(operation: OperationRecord, stage: string, state: string): void;
@@ -127,6 +149,14 @@ export interface OperationsControlDependencies {
     operation: OperationRecord,
     commandId: string
   ): boolean;
+  // The first rollback removes every proven-owned pre-commit artifact rather
+  // than the unresolved subset a cleanup retry repeats, so it gets its own
+  // runner instead of a flag on the retry one.
+  scheduleRollback(
+    instanceId: string,
+    operation: OperationRecord,
+    commandId: string
+  ): boolean;
   errorMessage(error: unknown): string;
 }
 
@@ -136,16 +166,31 @@ const RETRY_KINDS: readonly OperationRetryKind[] = [
   "cleanup"
 ];
 
-const RETRY_COMMAND_KINDS: Readonly<
-  Record<OperationRetryKind, OperationCommandKind>
+const COMMAND_KINDS: Readonly<
+  Record<OperationCommandName, OperationCommandKind>
 > = {
   setup: "retry_setup",
   verification: "retry_verification",
-  cleanup: "retry_cleanup"
+  cleanup: "retry_cleanup",
+  continue: "continue_setup",
+  rollback: "rollback"
+};
+
+// Which attempt counter a command advances. Rollback shares the cleanup counter
+// with the cleanup retry, so a retry selects the results of the attempt before
+// it rather than a parallel history.
+const ATTEMPT_KINDS: Readonly<
+  Record<OperationCommandName, OperationRetryKind>
+> = {
+  setup: "setup",
+  verification: "verification",
+  cleanup: "cleanup",
+  continue: "setup",
+  rollback: "cleanup"
 };
 
 /**
- * Explain a refused retry in the customer's terms.
+ * Explain a refused command in the customer's terms.
  *
  * Each string maps to one closed refusal code so the page never has to guess at
  * a reason, and an unrecognised code degrades to the honest general statement
@@ -166,6 +211,22 @@ export function retryRefusalMessage(kind: string, code: string): string {
       "Radius no longer holds the environment details needed to continue this setup.",
     "setup-retry-ownership-ambiguous":
       "Radius cannot prove what it created during this attempt, so continuing could duplicate a resource. Review the listed resources first.",
+    "setup-continue-not-available":
+      "This setup is not waiting at a stop that Radius can continue from.",
+    "setup-continue-request-missing":
+      "Radius no longer holds the environment details needed to continue this setup.",
+    "setup-continue-ownership-ambiguous":
+      "Radius cannot prove what it created during this attempt, so continuing could duplicate a resource. Review the listed resources first.",
+    "setup-continue-rolled-back":
+      "Radius rolled back what this attempt created, so there is nothing left to continue from. Start a new environment setup.",
+    "rollback-not-available":
+      "Only a stopped or partially failed setup can be rolled back.",
+    "rollback-after-commit":
+      "The workflows were already committed, so these resources are retained on purpose rather than removed.",
+    "rollback-nothing-owned":
+      "Radius did not create any resources it can prove it owns in this attempt.",
+    "rollback-already-attempted":
+      "Radius already ran a rollback for this attempt. Use the rollback retry for anything still present.",
     "cleanup-retry-not-retryable":
       "The last cleanup attempt did not leave anything Radius can safely retry.",
     "cleanup-retry-after-commit":
@@ -329,20 +390,26 @@ function eligibilityFor(
   return dependencies.canRetryCleanup(operation);
 }
 
-function scheduleRetry(
-  kind: OperationRetryKind,
+function scheduleCommand(
+  name: OperationCommandName,
   context: CanvasRequestContext,
   operation: OperationRecord,
   commandId: string,
   dependencies: OperationsControlDependencies
 ): boolean {
-  if (kind === "cleanup")
+  if (name === "rollback")
+    return dependencies.scheduleRollback(
+      context.instanceId,
+      operation,
+      commandId
+    );
+  if (name === "cleanup")
     return dependencies.scheduleCleanupRetry(
       context.instanceId,
       operation,
       commandId
     );
-  if (kind === "verification")
+  if (name === "verification")
     return dependencies.scheduleVerificationRetry(
       context.instanceId,
       operation,
@@ -351,10 +418,288 @@ function scheduleRetry(
   return dependencies.scheduleSetupContinuation(context.instanceId, operation);
 }
 
+interface CommandExecution {
+  name: OperationCommandName;
+  operationId: string;
+  operation: OperationRecord;
+  eligibility: RetryEligibility;
+  // A retry that no runner accepted is closed with a failure, preserving the
+  // established contract. A first-choice command restores the terminal decision
+  // the customer was looking at instead, because nothing ran at all.
+  schedulerMiss: "close-operation" | "restore-terminal";
+  persistFailureCode: string;
+  persistFailureMessage: string;
+}
+
 /**
- * Reopen a closed operation for one allowed continuation.
+ * Reopen a closed operation for exactly one saved command.
  *
- * The three kinds differ only in what they may resume: a setup continues from
+ * The order is the safety property and does not vary by command: take the
+ * repository lock, snapshot what a failure must restore, record the command
+ * with its derived identity, position the record where the work resumes, make
+ * it durable, and only then hand the work to a runner.
+ */
+async function runOperationCommand(
+  context: CanvasRequestContext,
+  dependencies: OperationsControlDependencies,
+  execution: CommandExecution
+): Promise<void> {
+  const { name, operationId, operation, eligibility } = execution;
+  const lock = dependencies.acquireForRetry(operation);
+  if (!lock.ok) {
+    sendJson(context, 409, {
+      error: `Another setup is already running for ${String(operation.repo ?? "")}.`,
+      code: "operation-in-progress",
+      operationId: lock.conflict.operationId
+    });
+    return;
+  }
+
+  const snapshot = dependencies.snapshotRetryState(operation);
+  const attempt = dependencies.beginRetryAttempt(
+    operation,
+    ATTEMPT_KINDS[name]
+  );
+  const accepted = dependencies.acceptCommand(operation, {
+    kind: COMMAND_KINDS[name],
+    attempt,
+    // Rollback keys on the exact artifact set it will remove, so a repeat of
+    // the same request is the same command and a different set is not.
+    target: eligibility.target ?? name
+  });
+  if (!accepted.ok || !accepted.command) {
+    // The identity is derived from saved facts, so a double click, a lost
+    // response, or a reload all resolve to the command already in flight.
+    dependencies.rollbackRetryAttempt(operation, snapshot);
+    sendJson(context, 202, {
+      operationId,
+      statusUrl: statusUrlFor(operationId),
+      commandId: accepted.command?.commandId || null,
+      duplicate: true
+    });
+    return;
+  }
+  const commandId = accepted.command.commandId;
+  if (name === "verification") {
+    dependencies.setStageState(operation, dependencies.stageVerify, "pending");
+    dependencies.enterStage(operation, dependencies.stageVerify);
+  } else if (name === "setup" || name === "continue") {
+    dependencies.applySetupResumePoint(operation, eligibility.resumeFrom);
+  }
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    dependencies.rollbackRetryAttempt(operation, snapshot);
+    sendJson(context, 500, {
+      error: execution.persistFailureMessage,
+      code: execution.persistFailureCode,
+      operationId,
+      detail: dependencies.errorMessage(error)
+    });
+    return;
+  }
+  dependencies.setCommandState(operation, commandId, "running");
+
+  if (execution.schedulerMiss === "restore-terminal") {
+    // Scheduling first keeps the promise the response makes: the customer is
+    // told work started only once a runner has it. There is no await between
+    // the two, so the record cannot advance before the response is written.
+    const started = scheduleCommand(
+      name,
+      context,
+      operation,
+      commandId,
+      dependencies
+    );
+    if (!started) {
+      // Undoing the reopened attempt removes the command with it, so the record
+      // goes back to exactly the terminal decision the customer is looking at.
+      dependencies.rollbackRetryAttempt(operation, snapshot);
+      sendJson(context, 503, {
+        error: `Radius could not start the ${name === "rollback" ? "rollback" : "setup continuation"}, so no work was started and nothing changed. Try again.`,
+        code: "operation-command-unscheduled",
+        operationId,
+        operation: dependencies.toClientView(operation)
+      });
+      // The durable record has to go back too, best effort: the in-memory
+      // record is already correct, so polling reports the truth either way.
+      try {
+        await dependencies.persistOperations();
+      } catch (error) {
+        dependencies.errorMessage(error);
+      }
+      return;
+    }
+    sendJson(context, 202, {
+      operationId,
+      statusUrl: statusUrlFor(operationId),
+      commandId,
+      attempt,
+      operation: dependencies.toClientView(operation)
+    });
+    return;
+  }
+
+  sendJson(context, 202, {
+    operationId,
+    statusUrl: statusUrlFor(operationId),
+    commandId,
+    attempt,
+    operation: dependencies.toClientView(operation)
+  });
+
+  const scheduled = scheduleCommand(
+    name,
+    context,
+    operation,
+    commandId,
+    dependencies
+  );
+  if (scheduled) return;
+  // No runner accepted the work, so nothing will advance the record this
+  // request just reopened. The 202 is already on the wire and cannot be
+  // recalled, but leaving the operation `running` would hold the repository
+  // lock and keep the panel spinning until the record went stale.
+  dependencies.setCommandState(operation, commandId, "finished", "unscheduled");
+  dependencies.finish(operation, "failed", {
+    failure: {
+      code: "operation-scheduling-failed",
+      stage: operation.currentStage,
+      stepSeq: null,
+      message: `Radius accepted the ${name} retry but could not start any work for it.`,
+      classification: "unknown",
+      evidence: `No server-owned task runner was available for instance ${context.instanceId}.`
+    }
+  });
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    // Best-effort: the in-memory record is already terminal, so polling
+    // reflects the failure even if this durable write does not land.
+    dependencies.errorMessage(error);
+  }
+}
+
+/**
+ * Continue a deliberately stopped setup.
+ *
+ * This is the first forward action after Stop, so it is a command of its own
+ * rather than the setup retry wearing a different label: the customer has not
+ * retried anything yet, and the record should say which decision they made.
+ */
+export async function handleContinueOperation(
+  context: CanvasRequestContext,
+  dependencies: OperationsControlDependencies
+): Promise<void> {
+  const resolved = await resolveOperation(
+    context,
+    CONTINUE_OPERATION_ROUTE,
+    dependencies
+  );
+  if (!resolved) return;
+  const { operationId, operation } = resolved;
+
+  const active = dependencies.findActiveCommand(operation, [
+    "continue_setup",
+    "retry_setup"
+  ]);
+  if (active) {
+    sendJson(context, 202, {
+      operationId,
+      statusUrl: statusUrlFor(operationId),
+      commandId: active.commandId,
+      duplicate: true,
+      operation: dependencies.toClientView(operation)
+    });
+    return;
+  }
+
+  const eligibility = dependencies.canContinueSetup(operation);
+  if (!eligibility.ok) {
+    sendJson(context, 409, {
+      error: retryRefusalMessage("setup", eligibility.code),
+      code: eligibility.code,
+      operationId,
+      ...(eligibility.detail ? { detail: eligibility.detail } : {}),
+      operation: dependencies.toClientView(operation)
+    });
+    return;
+  }
+  await runOperationCommand(context, dependencies, {
+    name: "continue",
+    operationId,
+    operation,
+    eligibility,
+    schedulerMiss: "restore-terminal",
+    persistFailureCode: "operation-continue-persist-failed",
+    persistFailureMessage:
+      "Radius could not save the request to continue setup, so no work was started. Try again."
+  });
+}
+
+/**
+ * Remove the resources this attempt created.
+ *
+ * The browser confirms first, but confirmation is not authorisation: the
+ * deletion set is re-derived from the saved ledger here, so a stale panel
+ * cannot ask Radius to remove a resource it no longer proves it created.
+ */
+export async function handleRollbackOperation(
+  context: CanvasRequestContext,
+  dependencies: OperationsControlDependencies
+): Promise<void> {
+  const resolved = await resolveOperation(
+    context,
+    ROLLBACK_OPERATION_ROUTE,
+    dependencies
+  );
+  if (!resolved) return;
+  const { operationId, operation } = resolved;
+
+  const active = dependencies.findActiveCommand(operation, [
+    "rollback",
+    "retry_cleanup"
+  ]);
+  if (active) {
+    // Cleanup is already running for this record. Answering with the accepted
+    // command is what keeps a double click from deleting through the ledger
+    // twice.
+    sendJson(context, 202, {
+      operationId,
+      statusUrl: statusUrlFor(operationId),
+      commandId: active.commandId,
+      duplicate: true,
+      operation: dependencies.toClientView(operation)
+    });
+    return;
+  }
+
+  const eligibility = dependencies.canStartRollback(operation);
+  if (!eligibility.ok) {
+    sendJson(context, 409, {
+      error: retryRefusalMessage("rollback", eligibility.code),
+      code: eligibility.code,
+      operationId,
+      operation: dependencies.toClientView(operation)
+    });
+    return;
+  }
+  await runOperationCommand(context, dependencies, {
+    name: "rollback",
+    operationId,
+    operation,
+    eligibility,
+    schedulerMiss: "restore-terminal",
+    persistFailureCode: "operation-rollback-persist-failed",
+    persistFailureMessage:
+      "Radius could not save the rollback request, so no cleanup began. Try again."
+  });
+}
+
+/**
+ * Reopen a closed operation for one allowed retry.
+ *
+ * The three kinds differ only in what they may repeat: a setup continues from
  * the first step its artifact ledger does not already prove finished, a
  * verification repeats the exact workflow identity Radius saved, and a cleanup
  * removes only the resources Radius proved it created and could not delete.
@@ -423,94 +768,16 @@ export async function handleRetryOperation(
     }
   }
 
-  const lock = dependencies.acquireForRetry(operation);
-  if (!lock.ok) {
-    sendJson(context, 409, {
-      error: `Another setup is already running for ${String(operation.repo ?? "")}.`,
-      code: "operation-in-progress",
-      operationId: lock.conflict.operationId
-    });
-    return;
-  }
-
-  const snapshot = dependencies.snapshotRetryState(operation);
-  const attempt = dependencies.beginRetryAttempt(operation, kind);
-  const accepted = dependencies.acceptCommand(operation, {
-    kind: RETRY_COMMAND_KINDS[kind],
-    attempt,
-    target: kind
-  });
-  if (!accepted.ok || !accepted.command) {
-    // The identity is derived from saved facts, so a double click, a lost
-    // response, or a reload all resolve to the command already in flight.
-    dependencies.rollbackRetryAttempt(operation, snapshot);
-    sendJson(context, 202, {
-      operationId,
-      statusUrl: statusUrlFor(operationId),
-      commandId: accepted.command?.commandId || null,
-      duplicate: true
-    });
-    return;
-  }
-  const commandId = accepted.command.commandId;
-  if (kind === "verification") {
-    dependencies.setStageState(operation, dependencies.stageVerify, "pending");
-    dependencies.enterStage(operation, dependencies.stageVerify);
-  } else if (kind === "setup") {
-    dependencies.applySetupResumePoint(operation, eligibility.resumeFrom);
-  }
-  try {
-    await dependencies.persistOperations();
-  } catch (error) {
-    dependencies.rollbackRetryAttempt(operation, snapshot);
-    sendJson(context, 500, {
-      error:
-        "Radius could not save the retry request, so no work was started. Try again.",
-      code: "operation-retry-persist-failed",
-      operationId,
-      detail: dependencies.errorMessage(error)
-    });
-    return;
-  }
-  dependencies.setCommandState(operation, commandId, "running");
-  sendJson(context, 202, {
+  await runOperationCommand(context, dependencies, {
+    name: kind,
     operationId,
-    statusUrl: statusUrlFor(operationId),
-    commandId,
-    attempt,
-    operation: dependencies.toClientView(operation)
-  });
-
-  const scheduled = scheduleRetry(
-    kind,
-    context,
     operation,
-    commandId,
-    dependencies
-  );
-  if (scheduled) return;
-  // No runner accepted the work, so nothing will advance the record this
-  // request just reopened. The 202 is already on the wire and cannot be
-  // recalled, but leaving the operation `running` would hold the repository
-  // lock and keep the panel spinning until the record went stale.
-  dependencies.setCommandState(operation, commandId, "finished", "unscheduled");
-  dependencies.finish(operation, "failed", {
-    failure: {
-      code: "operation-scheduling-failed",
-      stage: operation.currentStage,
-      stepSeq: null,
-      message: `Radius accepted the ${kind} retry but could not start any work for it.`,
-      classification: "unknown",
-      evidence: `No server-owned task runner was available for instance ${context.instanceId}.`
-    }
+    eligibility,
+    schedulerMiss: "close-operation",
+    persistFailureCode: "operation-retry-persist-failed",
+    persistFailureMessage:
+      "Radius could not save the retry request, so no work was started. Try again."
   });
-  try {
-    await dependencies.persistOperations();
-  } catch (error) {
-    // Best-effort: the in-memory record is already terminal, so polling
-    // reflects the failure even if this durable write does not land.
-    dependencies.errorMessage(error);
-  }
 }
 
 export function createOperationsControlRoutes(
@@ -519,6 +786,10 @@ export function createOperationsControlRoutes(
   return {
     [`POST ${STOP_OPERATION_ROUTE}`]: (context) =>
       handleStopOperation(context, dependencies),
+    [`POST ${CONTINUE_OPERATION_ROUTE}`]: (context) =>
+      handleContinueOperation(context, dependencies),
+    [`POST ${ROLLBACK_OPERATION_ROUTE}`]: (context) =>
+      handleRollbackOperation(context, dependencies),
     [`POST ${RETRY_OPERATION_ROUTE}`]: (context) =>
       handleRetryOperation(context, dependencies)
   };

@@ -212,8 +212,20 @@ ${confirmDialogMarkup()}
 .env-progress__commands { display:flex; flex-direction:column; gap:6px; margin-top:12px; }
 .env-progress__command-buttons { display:flex; gap:8px; flex-wrap:wrap; }
 .env-progress__command-note { font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; }
+.env-progress__command-guidance { margin:0; padding-left:18px; font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; }
 .env-progress__command-status { font-size:12px; color:var(--rad-text); line-height:1.5; }
 .env-progress__command-error { font-size:12px; color:var(--rad-danger); line-height:1.5; }
+/* The stopped and rollback states get their own heading line: a stop is neither
+   a success nor a failure, and a rollback that left something behind is not a
+   failed setup. */
+.env-progress__headline-note { font-size:12px; color:var(--rad-text-tertiary); margin-top:4px; line-height:1.5; }
+.env-progress--cleaning .env-progress__spinner { background:conic-gradient(var(--rad-danger) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); }
+/* Rollback confirmation dialog. Destructive cloud deletions are confirmed
+   against the server's own preview before anything is sent. */
+.env-rollback__panel { background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:520px; width:92%; max-height:80vh; overflow:auto; display:flex; flex-direction:column; gap:10px; }
+.env-rollback__title { font-size:15px; font-weight:600; line-height:1.4; color:var(--rad-text); }
+.env-rollback__intro { font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; }
+.env-rollback__buttons { display:flex; justify-content:flex-end; gap:8px; margin-top:6px; }
 /* Credentials success banner (green outline, Figma "Successfully created credential profile"). */
 .rad-cred-banner { display:flex; align-items:center; gap:8px; padding:12px 14px; margin:0 0 16px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); }
 .rad-cred-banner__check { flex:0 0 auto; color:var(--rad-primary); font-weight:700; }
