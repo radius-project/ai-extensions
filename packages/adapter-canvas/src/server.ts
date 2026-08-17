@@ -879,6 +879,7 @@ const environmentsRoutes = createEnvironmentsRoutes({
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,
   addLegacyStep: (operation, text) => addLegacyStep(operation, text),
+  isTerminalState,
   finish,
   finishSucceeded,
   persistBestEffort,

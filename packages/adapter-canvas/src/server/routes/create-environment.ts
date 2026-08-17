@@ -564,7 +564,7 @@ export async function handleCreateEnvironment(
       }
 
       if (dispatchResult.code === 0) {
-        steps.push("✅ Verify workflow dispatched.");
+        steps.push("✅ Credentials verification dispatched.");
         await dependencies.sleep(5000);
         const runsResult = await runGh([
           "run",
@@ -590,7 +590,6 @@ export async function handleCreateEnvironment(
             steps.push("Verify run: " + verifyRunUrl);
           }
         } catch {}
-        steps.push("✅ Credentials verification dispatched.");
       } else {
         const detail =
           (dispatchResult.stderr || dispatchResult.stdout || "").trim() ||

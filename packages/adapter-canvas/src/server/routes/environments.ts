@@ -565,7 +565,7 @@ export async function handleVerifyStatus(
       if (
         verifyOp &&
         verifyOp.currentStage === dependencies.stageVerify &&
-        verifyOp.state === "running"
+        !dependencies.isTerminalState(verifyOp.state)
       ) {
         dependencies.addLegacyStep(
           verifyOp,

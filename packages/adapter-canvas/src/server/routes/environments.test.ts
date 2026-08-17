@@ -24,7 +24,8 @@ import type { CanvasServerEntry } from "../types.js";
 import { getOrCreateServer, persistBestEffort } from "../../server.js";
 import {
   addLegacyStep as recordLegacyStep,
-  finishSucceeded as finishSetupSucceeded
+  finishSucceeded as finishSetupSucceeded,
+  isTerminalState as isSetupTerminalState
 } from "../../operations.js";
 import { createTestRouteTable } from "../../../test/support/server/route-table.js";
 
@@ -124,6 +125,7 @@ function deps(
     extractGitHubActionsStepLog: unset("extractGitHubActionsStepLog") as never,
     explainOidcEnterpriseClaim: unset("explainOidcEnterpriseClaim") as never,
     addLegacyStep: unset("addLegacyStep") as never,
+    isTerminalState: unset("isTerminalState") as never,
     finish: unset("finish") as never,
     finishSucceeded: unset("finishSucceeded") as never,
     persistBestEffort: unset("persistBestEffort") as never,
@@ -856,6 +858,7 @@ describe("environments — verify-status", () => {
       hasCompleteVerificationIdentity: () => true,
       getRunDetail: () => Promise.resolve(detail({})),
       addLegacyStep,
+      isTerminalState: isSetupTerminalState,
       finishSucceeded,
       persistBestEffort,
       persistOperations: () => Promise.resolve(),
@@ -882,6 +885,48 @@ describe("environments — verify-status", () => {
       runUrl: "https://github.com/o/r/actions/runs/9"
     });
     expect(JSON.parse(second.recording.body)).toEqual({
+      state: "success",
+      runId: 9,
+      runUrl: "https://github.com/o/r/actions/runs/9"
+    });
+  });
+
+  it("finishes a non-terminal verification operation that is not running", async () => {
+    const op = {
+      repo: "o/r",
+      environment: "dev",
+      state: "input_required",
+      currentStage: "verify",
+      verification: { dispatchedAt: 1, runId: 9 }
+    };
+    const finishSucceeded = vi.fn((operation: { state: string }) => {
+      operation.state = "succeeded";
+    });
+    const persistBestEffort = vi.fn(() => Promise.resolve(true));
+    const { recording, ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&operationId=op1"
+    );
+
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => op,
+        hasCompleteVerificationIdentity: () => true,
+        getRunDetail: () => Promise.resolve(detail({})),
+        addLegacyStep: vi.fn(),
+        isTerminalState: isSetupTerminalState,
+        finishSucceeded,
+        persistBestEffort,
+        persistOperations: () => Promise.resolve(),
+        reportOperationDiagnostic: () => {}
+      })
+    );
+
+    expect(finishSucceeded).toHaveBeenCalledOnce();
+    expect(persistBestEffort).toHaveBeenCalledOnce();
+    expect(JSON.parse(recording.body)).toEqual({
       state: "success",
       runId: 9,
       runUrl: "https://github.com/o/r/actions/runs/9"
@@ -1083,6 +1128,7 @@ describe("environments — real loopback", () => {
           steps: []
         }),
       addLegacyStep: recordLegacyStep,
+      isTerminalState: isSetupTerminalState,
       finishSucceeded: finishSetupSucceeded,
       persistBestEffort,
       persistOperations,

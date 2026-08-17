@@ -269,6 +269,7 @@ const productionHandlers = {
     extractGitHubActionsStepLog: () => "",
     explainOidcEnterpriseClaim: () => "",
     addLegacyStep: () => null,
+    isTerminalState: () => false,
     finish: () => null,
     finishSucceeded: () => null,
     persistBestEffort: () => Promise.resolve(true),

@@ -574,6 +574,11 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     const payload = (await response.json()) as { steps: string[] };
 
     expect(payload.steps).toContain("✅ Credentials verification dispatched.");
+    expect(
+      payload.steps.filter(
+        (step) => step === "✅ Credentials verification dispatched."
+      )
+    ).toHaveLength(1);
     expect(payload.steps).not.toEqual(
       expect.arrayContaining([
         expect.stringContaining(

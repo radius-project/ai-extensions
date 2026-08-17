@@ -133,6 +133,7 @@ export interface EnvironmentsDependencies {
   ): string;
   explainOidcEnterpriseClaim(logText?: string | null): string;
   addLegacyStep(operation: unknown, text: string): unknown;
+  isTerminalState(state: unknown): boolean;
   finish(operation: unknown, state: unknown, options?: unknown): unknown;
   finishSucceeded(operation: unknown, terminal?: unknown): unknown;
   persistBestEffort(input: {
