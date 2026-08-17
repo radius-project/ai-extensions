@@ -366,15 +366,30 @@ function errorDetail(error: unknown): string {
   return String(error).replace(/^[A-Za-z]*Error:\s*/, "");
 }
 
+function unavailableStorage(action: string, key: string): Error {
+  return new Error(
+    `Radius browser storage is unavailable; cannot ${action} "${key}".`
+  );
+}
+
 function createStoragePort(scope: unknown): StoragePort {
   const storage = readMember(scope, "sessionStorage");
   const getItem = readMember(storage, "getItem");
   const setItem = readMember(storage, "setItem");
-  const available = isCallable(getItem) && isCallable(setItem);
+  if (!isCallable(getItem) || !isCallable(setItem)) {
+    return {
+      available: false,
+      get(key) {
+        throw unavailableStorage("read", key);
+      },
+      set(key) {
+        throw unavailableStorage("write", key);
+      }
+    };
+  }
   return {
-    available,
+    available: true,
     get(key) {
-      if (!isCallable(getItem)) return null;
       try {
         const value: unknown = getItem.call(storage, key);
         if (value === null || typeof value === "string") return value;
@@ -387,10 +402,8 @@ function createStoragePort(scope: unknown): StoragePort {
       }
     },
     set(key, value) {
-      if (!isCallable(setItem)) return false;
       try {
         setItem.call(storage, key, value);
-        return true;
       } catch (error) {
         throw new Error(
           `Radius browser storage could not write "${key}": ${errorDetail(error)}`,

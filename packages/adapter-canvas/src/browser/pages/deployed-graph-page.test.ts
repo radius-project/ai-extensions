@@ -388,6 +388,28 @@ describe("initializeDeployedGraphPage", () => {
     );
   });
 
+  it("does not navigate when a deploy completes after page teardown", async () => {
+    const { browser, action, appSelect, envSelect } = fixture();
+    const deployment = createDeferred<HttpResponse>();
+    browser.net.handle("/api/deploy", () => deployment.promise);
+    const teardown = initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+    action.dataset.mode = "deploy";
+    action.disabled = false;
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    await flushPromises();
+
+    teardown();
+    deployment.resolve(jsonResponse({ ok: true }));
+    await flushPromises();
+
+    expect(
+      browser.nav.assigned.some((url) => url.includes("page=deploying"))
+    ).toBe(false);
+  });
+
   it("does not bind selector listeners or a delete action when elements are absent", async () => {
     const { browser } = fixture({
       withAppSelect: false,
@@ -809,37 +831,202 @@ describe("initializeDeployedGraphPage", () => {
     ).toBe(true);
   });
 
-  it("reopens the deploy feed for a later deployment from its own cursor", async () => {
+  it("resets the deploy feed only when a later deployment changes attempt", async () => {
     const { browser, logOutput } = fixture();
+    let bufferReads = 0;
     browser.net.handle(
       "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
       () => jsonResponse({ resources: [{ id: "app/web" }], mode: "live" })
     );
     browser.net.handle("/api/deploy-status", () =>
-      jsonResponse({ status: "complete", logTotal: 1 })
+      jsonResponse({
+        status: "complete",
+        logTotal: 1,
+        attempt: { id: "attempt-one" }
+      })
     );
-    browser.net.handle("/api/deploy-status?since=0", () =>
-      jsonResponse({ logsNew: ["first run"], logTotal: 1, status: "complete" })
-    );
+    browser.net.handle("/api/deploy-status?since=0", () => {
+      bufferReads++;
+      return bufferReads === 1 ?
+          jsonResponse({
+            logsNew: ["first run"],
+            logTotal: 1,
+            status: "complete",
+            attempt: { id: "attempt-one" }
+          })
+        : jsonResponse({
+            logsNew: ["second run"],
+            logTotal: 1,
+            status: "in_progress",
+            attempt: { id: "attempt-two" }
+          });
+    });
+    let resumedReads = 0;
+    browser.net.handle("/api/deploy-status?since=1", () => {
+      resumedReads++;
+      return jsonResponse({
+        logsNew: [],
+        logTotal: 1,
+        status: "in_progress",
+        attempt: { id: "attempt-two" }
+      });
+    });
     initializeDeployedGraphPage(browser.context, globals());
     await flushPromises();
 
     expect(logOutput.textContent).toContain("first run");
     expect(browser.clock.intervals).toBe(0);
 
-    // A second deployment starts. The feed must resume rather than stay closed
-    // because an earlier run already opened it.
-    browser.net.handle("/api/deploy-status?since=1", () =>
-      jsonResponse({
-        logsNew: ["second run"],
-        logTotal: 2,
-        status: "in_progress"
-      })
-    );
+    // A new attempt resets deployLogs and deployLogBase on the server. Reusing
+    // the first attempt's cursor would permanently skip the new buffer's start.
     browser.clock.tick(DEPLOYED_GRAPH_POLL_MS);
     await flushPromises();
 
+    expect(bufferReads).toBe(2);
+    expect(resumedReads).toBe(1);
     expect(logOutput.textContent).toContain("second run");
+    expect(browser.clock.intervals).toBe(1);
+  });
+
+  it("resumes the same attempt when a late live graph reopens its feed", async () => {
+    const { browser, logOutput } = fixture();
+    const graph = createDeferred<HttpResponse>();
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => graph.promise
+    );
+    browser.net.handle("/api/deploy-status", () =>
+      jsonResponse({
+        status: "complete",
+        logTotal: 1,
+        attempt: { id: "attempt-one" }
+      })
+    );
+    let bufferReads = 0;
+    browser.net.handle("/api/deploy-status?since=0", () => {
+      bufferReads++;
+      return jsonResponse({
+        logsNew: ["first run"],
+        logTotal: 1,
+        status: "complete",
+        attempt: { id: "attempt-one" }
+      });
+    });
+    let resumeReads = 0;
+    browser.net.handle("/api/deploy-status?since=1", () => {
+      resumeReads++;
+      return jsonResponse({
+        logsNew: [],
+        logTotal: 1,
+        status: "complete",
+        attempt: { id: "attempt-one" }
+      });
+    });
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(logOutput.textContent).toBe("first run\n");
+
+    graph.resolve(
+      jsonResponse({ resources: [{ id: "app/web" }], mode: "live" })
+    );
+    await flushPromises();
+
+    expect(bufferReads).toBe(1);
+    expect(resumeReads).toBe(1);
+    expect(logOutput.textContent).toBe("first run\n");
+  });
+
+  it("restarts an active feed when the startup probe finds a newer attempt", async () => {
+    const { browser, logOutput } = fixture();
+    const probe = createDeferred<HttpResponse>();
+    browser.net.handle("/api/deploy-status", () => probe.promise);
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => jsonResponse({ resources: [{ id: "app/web" }], mode: "live" })
+    );
+    let bufferReads = 0;
+    browser.net.handle("/api/deploy-status?since=0", () => {
+      bufferReads++;
+      return bufferReads === 1 ?
+          jsonResponse({
+            logsNew: ["first run"],
+            logTotal: 1,
+            status: "in_progress",
+            attempt: { id: "attempt-one" }
+          })
+        : jsonResponse({
+            logsNew: ["second run"],
+            logTotal: 1,
+            status: "in_progress",
+            attempt: { id: "attempt-two" }
+          });
+    });
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(logOutput.textContent).toContain("first run");
+
+    probe.resolve(
+      jsonResponse({
+        status: "in_progress",
+        logTotal: 1,
+        attempt: { id: "attempt-two" }
+      })
+    );
+    await flushPromises();
+
+    expect(bufferReads).toBe(2);
+    expect(logOutput.textContent).toContain("second run");
+    expect(browser.clock.intervals).toBe(1);
+  });
+
+  it("ignores an unidentified feed response after the startup probe establishes its attempt", async () => {
+    const { browser, logOutput } = fixture();
+    const probe = createDeferred<HttpResponse>();
+    const unidentifiedBuffer = createDeferred<HttpResponse>();
+    browser.net.handle("/api/deploy-status", () => probe.promise);
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => jsonResponse({ resources: [{ id: "app/web" }], mode: "live" })
+    );
+    let bufferReads = 0;
+    browser.net.handle("/api/deploy-status?since=0", () => {
+      bufferReads++;
+      return bufferReads === 1 ?
+          unidentifiedBuffer.promise
+        : jsonResponse({
+            logsNew: ["current run"],
+            logTotal: 1,
+            status: "in_progress",
+            attempt: { id: "attempt-two" }
+          });
+    });
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(bufferReads).toBe(1);
+
+    probe.resolve(
+      jsonResponse({
+        status: "in_progress",
+        logTotal: 1,
+        attempt: { id: "attempt-two" }
+      })
+    );
+    await flushPromises();
+
+    expect(bufferReads).toBe(2);
+    expect(logOutput.textContent).toBe("current run\n");
+
+    unidentifiedBuffer.resolve(
+      jsonResponse({
+        logsNew: ["stale run"],
+        logTotal: 1,
+        status: "in_progress",
+        attempt: { id: "attempt-one" }
+      })
+    );
+    await flushPromises();
+
+    expect(logOutput.textContent).toBe("current run\n");
     expect(browser.clock.intervals).toBe(1);
   });
 
@@ -943,6 +1130,46 @@ describe("initializeDeployedGraphPage", () => {
     buffer.resolve(
       jsonResponse({ logsNew: ["one"], logTotal: 1, status: "in_progress" })
     );
+    await flushPromises();
+
+    expect(browser.clock.intervals).toBe(1);
+  });
+
+  it("keeps incremental log polling single-flight", async () => {
+    const { browser } = fixture();
+    const poll = createDeferred<HttpResponse>();
+    browser.net.handle("/api/deploy-status", () =>
+      jsonResponse({ status: "in_progress", logTotal: 1 })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () =>
+      jsonResponse({ logsNew: ["one"], logTotal: 1, status: "in_progress" })
+    );
+    browser.net.handle("/api/deploy-status?since=1", () => poll.promise);
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    browser.clock.tick(DEPLOYED_LOG_POLL_MS * 3);
+    await flushPromises();
+
+    expect(
+      browser.net.calls.filter(
+        (call) => call.url === "/api/deploy-status?since=1"
+      )
+    ).toHaveLength(1);
+    poll.resolve(
+      jsonResponse({ logsNew: ["two"], logTotal: 2, status: "complete" })
+    );
+    await flushPromises();
+  });
+
+  it("keeps polling when a log response is malformed", async () => {
+    const { browser } = fixture();
+    browser.net.handle("/api/deploy-status", () =>
+      jsonResponse({ status: "in_progress", logTotal: 1 })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () => jsonResponse(null));
+
+    initializeDeployedGraphPage(browser.context, globals());
     await flushPromises();
 
     expect(browser.clock.intervals).toBe(1);
@@ -1522,6 +1749,24 @@ describe("initializeDeployedGraphPage", () => {
     expect(action.disabled).toBe(false);
   });
 
+  it("fails deployment actions closed when the environment listing reports an error", async () => {
+    const { browser, envSelect, action } = fixture({ envListing: "error" });
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app",
+      () => jsonResponse({ resources: [], mode: "greyed" })
+    );
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(envSelect.innerHTML).toContain("Could not load");
+    expect(action.dataset.mode).toBe("deploy");
+    expect(action.disabled).toBe(true);
+    expect(action.getAttribute("title")).toContain(
+      "Environments could not be loaded"
+    );
+    expect(browser.logger.errors).toHaveLength(1);
+  });
+
   it("cancels an in-flight state poll once the selection is no longer pending", async () => {
     const { browser, appSelect } = fixture({
       deployments: [
@@ -1616,7 +1861,7 @@ describe("initializeDeployedGraphPage", () => {
     );
   });
 
-  it("stops a log poll left in flight at teardown without logging or throwing", async () => {
+  it("ignores a log rejection after teardown without logging or throwing", async () => {
     const { browser } = fixture();
     browser.net.handle(
       "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
@@ -1628,9 +1873,7 @@ describe("initializeDeployedGraphPage", () => {
     await flushPromises();
 
     teardown();
-    poll.resolve(
-      jsonResponse({ logsNew: ["late"], logTotal: 1, status: "in_progress" })
-    );
+    poll.reject(new Error("late failure"));
     await flushPromises();
 
     expect(browser.logger.errors).toHaveLength(0);

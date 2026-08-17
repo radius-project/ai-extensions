@@ -18,9 +18,9 @@ import {
   parseApplicationListing,
   parseEnvironmentListing
 } from "../repositories.js";
-import type { BrowserTeardown } from "../lifecycle.js";
+import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
-import type { AbortHandle, BrowserContext, TimerHandle } from "../ports.js";
+import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
 
@@ -142,12 +142,16 @@ export function initializeDeployedGraphPage(
   const adaptive = createDeployedState();
   const deployments = new Map<string, string>();
   let hasEnvironments = false;
+  let environmentsUnavailable = false;
   let deploymentStatesStale = false;
   let statePolls = 0;
-  let stateTimer: TimerHandle | null = null;
-  let graphTimer: TimerHandle | null = null;
-  let logTimer: TimerHandle | null = null;
+  let stateTimer: ScopeTimer | null = null;
+  let graphTimer: ScopeTimer | null = null;
+  let logTimer: ScopeTimer | null = null;
   let logStreamStarted = false;
+  let logRequestInFlight = false;
+  let logGeneration = 0;
+  let logAttemptId: string | null | undefined;
   let graphAbort: AbortHandle | null = null;
   let graphGeneration = 0;
   let logTotal = 0;
@@ -199,7 +203,8 @@ export function initializeDeployedGraphPage(
       hasEnvironments,
       exists,
       deploymentStatus,
-      deploymentStatesStale
+      deploymentStatesStale,
+      environmentsUnavailable
     );
     if (label) {
       label.textContent =
@@ -389,6 +394,8 @@ export function initializeDeployedGraphPage(
     if (logTimer !== null) entry.cancel(logTimer);
     logTimer = null;
     logStreamStarted = false;
+    logRequestInFlight = false;
+    logGeneration++;
   };
 
   const appendLogLines = (lines: readonly string[]): void => {
@@ -397,37 +404,76 @@ export function initializeDeployedGraphPage(
     context.dom.scrollToEnd(logOutput);
   };
 
-  const fetchLogs = (): Promise<void> =>
+  const readDeployAttemptId = (payload: unknown): string | null =>
+    readString(isRecord(payload) ? payload.attempt : null, "id") || null;
+
+  const trackLogAttempt = (attemptId: string | null): boolean => {
+    if (logAttemptId === undefined) {
+      logAttemptId = attemptId;
+      logTotal = 0;
+      return false;
+    }
+    if (logAttemptId === attemptId) return false;
+    logAttemptId = attemptId;
+    logTotal = 0;
+    return true;
+  };
+
+  const fetchLogs = (since: number, generation: number): Promise<void> =>
     context.net
-      .fetch(`/api/deploy-status?since=${logTotal}`)
+      .fetch(`/api/deploy-status?since=${since}`)
       .then((response) => response.json())
       .then((payload) => {
-        if (!entry.active) return;
+        if (!entry.active || generation !== logGeneration) return;
+        if (trackLogAttempt(readDeployAttemptId(payload)) && since !== 0) {
+          return fetchLogs(0, generation);
+        }
         const lines = readStringArray(payload, "logsNew");
         appendLogLines(lines);
-        logTotal = readNumber(payload, "logTotal") ?? logTotal + lines.length;
+        logTotal = Math.max(
+          logTotal,
+          readNumber(payload, "logTotal") ?? since + lines.length
+        );
         if (isTerminalDeployStatus(readString(payload, "status"))) {
           stopLogStream();
         }
       })
       .catch((error: unknown) => {
+        if (!entry.active || generation !== logGeneration) return;
         context.logger.error("Radius deployment log request failed.", error);
       });
 
   const pollLogs = (): void => {
-    void fetchLogs();
+    if (!logStreamStarted || logRequestInFlight) return;
+    const generation = logGeneration;
+    logRequestInFlight = true;
+    void fetchLogs(logTotal, generation).finally(() => {
+      if (generation === logGeneration) logRequestInFlight = false;
+    });
   };
 
   // Pull the retained buffer once, then stream incrementally. The interval is
   // armed only after that first response resolves, because two requests sharing
-  // the same cursor would each append the whole buffer. `stopLogStream` clears
-  // the latch, so a later deployment can reopen the feed from its own cursor.
-  const startLogStream = (): void => {
+  // the same cursor would each append the whole buffer. The attempt identity
+  // decides when that cursor resets; reopening the same feed resumes it.
+  const startLogStream = (attemptId?: string | null): void => {
+    const identifiesActiveStream =
+      attemptId !== undefined && logAttemptId === undefined && logStreamStarted;
+    const attemptChanged =
+      attemptId === undefined ? false : trackLogAttempt(attemptId);
+    if (logStreamStarted && (identifiesActiveStream || attemptChanged)) {
+      stopLogStream();
+    }
     if (logStreamStarted) return;
     logStreamStarted = true;
+    const generation = ++logGeneration;
+    logRequestInFlight = true;
     if (logSection) logSection.style.display = "block";
-    void fetchLogs().then(() => {
-      if (!entry.active || !logStreamStarted) return;
+    void fetchLogs(logTotal, generation).finally(() => {
+      if (!entry.active || !logStreamStarted || generation !== logGeneration) {
+        return;
+      }
+      logRequestInFlight = false;
       logTimer = entry.every(DEPLOYED_LOG_POLL_MS, pollLogs);
     });
   };
@@ -447,7 +493,7 @@ export function initializeDeployedGraphPage(
           isTerminalDeployStatus(deployStatus) ||
           (readNumber(payload, "logTotal") ?? 0) > 0
         ) {
-          startLogStream();
+          startLogStream(readDeployAttemptId(payload));
         }
       })
       .catch((error: unknown) => {
@@ -483,17 +529,33 @@ export function initializeDeployedGraphPage(
         }
       });
 
+  const markEnvironmentsUnavailable = (error: unknown): void => {
+    hasEnvironments = false;
+    environmentsUnavailable = true;
+    context.logger.error("Radius environments could not load.", error);
+    if (envSelect) {
+      context.dom.setOptions(envSelect, [
+        { value: "", label: "Could not load" }
+      ]);
+    }
+  };
+
   const loadEnvironments = (): Promise<void> =>
     context.net
       .fetch(`/api/list-environments?repo=${encodeURIComponent(page.repo)}`)
       .then((response) => response.json())
       .then((payload) => {
-        if (!envSelect) return;
         const listing = parseEnvironmentListing(payload);
+        if (listing.error !== "") {
+          markEnvironmentsUnavailable(listing.error);
+          return;
+        }
+        environmentsUnavailable = false;
         hasEnvironments = listing.environments.length > 0;
         for (const environment of listing.environments) {
           providers[environment.name] = environment.provider;
         }
+        if (!envSelect) return;
         context.dom.setOptions(
           envSelect,
           hasEnvironments ?
@@ -505,13 +567,7 @@ export function initializeDeployedGraphPage(
         );
       })
       .catch((error: unknown) => {
-        hasEnvironments = false;
-        context.logger.error("Radius environments could not load.", error);
-        if (envSelect) {
-          context.dom.setOptions(envSelect, [
-            { value: "", label: "Could not load" }
-          ]);
-        }
+        markEnvironmentsUnavailable(error);
       });
 
   const runDelete = (application: string, environment: string): void => {
@@ -594,7 +650,8 @@ export function initializeDeployedGraphPage(
           page.repo,
           page.branch,
           providers,
-          page.provider
+          page.provider,
+          () => entry.active
         );
       } else if (dialog && selectedApplication() && selectedEnvironment()) {
         dialog.open(selectedApplication(), selectedEnvironment());

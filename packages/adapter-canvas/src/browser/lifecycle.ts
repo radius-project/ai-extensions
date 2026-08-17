@@ -26,13 +26,21 @@ export function createBindingRegistry(): BindingRegistry {
   };
 }
 
+// A scope-owned timer identity. Cancellation is keyed on this object rather
+// than on the host's numeric handle, because browsers allocate timeout and
+// interval handles from one pool and reuse them once a timer has fired.
+export interface ScopeTimer {
+  readonly kind: "interval" | "timeout";
+  readonly handle: TimerHandle;
+}
+
 export interface EntryScope {
   readonly key: string;
   readonly active: boolean;
   on(target: DomEventTarget, type: string, listener: DomEventListener): void;
-  every(intervalMs: number, handler: () => void): TimerHandle;
-  after(timeoutMs: number, handler: () => void): TimerHandle;
-  cancel(handle: TimerHandle): void;
+  every(intervalMs: number, handler: () => void): ScopeTimer;
+  after(timeoutMs: number, handler: () => void): ScopeTimer;
+  cancel(timer: ScopeTimer): void;
   onTeardown(cleanup: BrowserTeardown): void;
   teardown(): void;
 }
@@ -53,8 +61,7 @@ function createScope(
   release: BrowserTeardown
 ): EntryScope {
   const listeners: ListenerRegistration[] = [];
-  const intervals = new Set<TimerHandle>();
-  const timeouts = new Set<TimerHandle>();
+  const timers = new Set<ScopeTimer>();
   const cleanups: BrowserTeardown[] = [];
   let active = true;
 
@@ -64,6 +71,14 @@ function createScope(
         `Cannot ${action} after browser entry "${key}" teardown.`
       );
     }
+  }
+
+  function clearTimer(timer: ScopeTimer): void {
+    if (timer.kind === "interval") {
+      clock.clearInterval(timer.handle);
+      return;
+    }
+    clock.clearTimeout(timer.handle);
   }
 
   const scope: EntryScope = {
@@ -78,26 +93,26 @@ function createScope(
     },
     every(intervalMs, handler) {
       requireActive("start an interval");
-      const handle = clock.setInterval(handler, intervalMs);
-      intervals.add(handle);
-      return handle;
+      const timer: ScopeTimer = {
+        kind: "interval",
+        handle: clock.setInterval(handler, intervalMs)
+      };
+      timers.add(timer);
+      return timer;
     },
     after(timeoutMs, handler) {
       requireActive("start a timeout");
-      let handle = -1;
-      handle = clock.setTimeout(() => {
-        timeouts.delete(handle);
+      const timer = { kind: "timeout" as const, handle: -1 };
+      timer.handle = clock.setTimeout(() => {
+        timers.delete(timer);
         if (active) handler();
       }, timeoutMs);
-      timeouts.add(handle);
-      return handle;
+      timers.add(timer);
+      return timer;
     },
-    cancel(handle) {
-      if (timeouts.delete(handle)) {
-        clock.clearTimeout(handle);
-      } else if (intervals.delete(handle)) {
-        clock.clearInterval(handle);
-      }
+    cancel(timer) {
+      if (!timers.delete(timer)) return;
+      clearTimer(timer);
     },
     onTeardown(cleanup) {
       requireActive("register cleanup");
@@ -123,14 +138,10 @@ function createScope(
           )
         );
       }
-      for (const handle of intervals) {
-        attempt(() => clock.clearInterval(handle));
+      for (const timer of timers) {
+        attempt(() => clearTimer(timer));
       }
-      intervals.clear();
-      for (const handle of timeouts) {
-        attempt(() => clock.clearTimeout(handle));
-      }
-      timeouts.clear();
+      timers.clear();
       for (const cleanup of cleanups.splice(0).reverse()) {
         attempt(cleanup);
       }

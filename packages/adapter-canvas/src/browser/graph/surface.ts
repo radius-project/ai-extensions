@@ -164,9 +164,10 @@ export function createGraphSurface(
     container.appendChild(retry);
   }
 
-  function teardown(containerId: string): void {
+  function teardown(containerId: string, owner?: ActiveRender): void {
     const current = active.get(containerId);
     if (!current) return;
+    if (owner !== undefined && current !== owner) return;
     active.delete(containerId);
     if (current.mounted) current.mounted.unmount();
     if (current.panel) current.panel.destroy();
@@ -218,10 +219,12 @@ export function createGraphSurface(
   function emptyController(
     containerId: string,
     container: DomElement,
-    options: GraphOptions
+    options: GraphOptions,
+    record: ActiveRender
   ): GraphController {
     const controller: GraphController = {
       update(next) {
+        if (active.get(containerId) !== record) return controller;
         if (!next) return controller;
         if (next.length === 0) {
           container.innerHTML = "";
@@ -230,7 +233,7 @@ export function createGraphSurface(
         return render(containerId, next, options) ?? controller;
       },
       destroy() {
-        teardown(containerId);
+        teardown(containerId, record);
       }
     };
     return controller;
@@ -255,8 +258,10 @@ export function createGraphSurface(
 
     const settings = resolveGraphSettings(options);
     if (!resources || resources.length === 0) {
+      const record: ActiveRender = { mounted: null, panel: null, host: null };
+      active.set(containerId, record);
       container.innerHTML = "";
-      return emptyController(containerId, container, options);
+      return emptyController(containerId, container, options, record);
     }
 
     container.innerHTML = "";
@@ -316,6 +321,7 @@ export function createGraphSurface(
 
     const controller: GraphController = {
       update(next) {
+        if (active.get(containerId) !== record) return controller;
         if (!next) return controller;
         if (next.length === 0) {
           controller.destroy();
@@ -329,7 +335,7 @@ export function createGraphSurface(
         return controller;
       },
       destroy() {
-        teardown(containerId);
+        teardown(containerId, record);
       }
     };
     return controller;

@@ -19,13 +19,13 @@ import {
   readStringArray
 } from "../json.js";
 import type { ElementSpec } from "../dom.js";
+import type { ScopeTimer } from "../lifecycle.js";
 import type {
   AbortHandle,
   BrowserContext,
   DomElement,
   HttpRequestInit,
-  HttpResponse,
-  TimerHandle
+  HttpResponse
 } from "../ports.js";
 
 export const ENVIRONMENT_OPERATIONS_ENTRY_KEY = "environment-operations";
@@ -528,8 +528,8 @@ export function initializeEnvironmentOperations(
   const { repo, deps } = options;
 
   let verifyActivity = "";
-  let progressTimer: TimerHandle | null = null;
-  let elapsedTimer: TimerHandle | null = null;
+  let progressTimer: ScopeTimer | null = null;
+  let elapsedTimer: ScopeTimer | null = null;
   let activeAbort: AbortHandle | null = null;
   // Bumped at the start of every resumeProgress()/trackProgress() call. Async
   // work captures the value at its start and checks it before touching the

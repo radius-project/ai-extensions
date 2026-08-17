@@ -1,4 +1,7 @@
 {
+  "notes": {
+    "newlyExtracted": "Migration floors for scopes still being extracted, not coverage targets. New and changed production code targets 100% (see .github/skills/radius-code-quality/SKILL.md); these thresholds only keep an in-flight extraction from landing below the documented 80% line / 80% function / 70% branch gate. Ratchet each scope up to its measured value once its extraction is complete: `browser` is complete as of Phase 4C and is pinned at its measured 100% statements, branches, functions, and lines, so it is a real gate rather than a floor."
+  },
   "aggregate": {
     "statements": 46.64,
     "branches": 46.3,

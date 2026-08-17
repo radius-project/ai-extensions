@@ -72,9 +72,53 @@ describe("browser entry scope", () => {
     const timeout = scope.after(20, () => undefined);
     scope.cancel(interval);
     scope.cancel(timeout);
-    scope.cancel(999);
+    scope.cancel(interval);
+    scope.cancel({ kind: "timeout", handle: timeout.handle });
     expect(browser.clock.pending).toBe(0);
     scope.teardown();
+  });
+
+  it("cancels only the timer that owns a recycled handle", () => {
+    const browser = createFakeBrowser();
+    const cleared: string[] = [];
+    let timeoutHandler: (() => void) | undefined;
+    // Browsers allocate timeouts and intervals from one pool, so a handle freed
+    // by a fired timeout can be reissued to a later interval.
+    const recyclingClock: ClockPort = {
+      setTimeout(handler) {
+        timeoutHandler = handler;
+        return 1;
+      },
+      clearTimeout(handle) {
+        cleared.push(`timeout:${handle}`);
+      },
+      setInterval() {
+        return 1;
+      },
+      clearInterval(handle) {
+        cleared.push(`interval:${handle}`);
+      },
+      now() {
+        return 0;
+      }
+    };
+    const context: BrowserContext = {
+      ...browser.context,
+      clock: recyclingClock
+    };
+    const scope = beginEntry(context, "entry");
+    if (scope === null) throw new Error("expected entry scope");
+
+    const timeout = scope.after(10, () => undefined);
+    timeoutHandler?.();
+    const interval = scope.every(10, () => undefined);
+    expect(interval.handle).toBe(timeout.handle);
+
+    scope.cancel(timeout);
+
+    expect(cleared).toEqual([]);
+    scope.teardown();
+    expect(cleared).toEqual(["interval:1"]);
   });
 
   it("does not run a timeout callback after teardown", () => {

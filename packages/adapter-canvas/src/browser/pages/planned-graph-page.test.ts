@@ -459,6 +459,27 @@ describe("initializePlannedGraphPage", () => {
     expect(browser.logger.errors).toHaveLength(0);
   });
 
+  it("does not navigate when a deploy completes after page teardown", async () => {
+    const { browser, button } = fixture();
+    const deployment = createDeferred<HttpResponse>();
+    browser.net.handle("/api/deploy", () => deployment.promise);
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    button.disabled = false;
+    button.dispatch("click");
+    await flushPromises();
+
+    teardown();
+    deployment.resolve(jsonResponse({ ok: true }));
+    await flushPromises();
+
+    expect(
+      browser.nav.assigned.some((url) => url.includes("page=deploying"))
+    ).toBe(false);
+  });
+
   it("reloads once the plan is ready", async () => {
     const { browser } = fixture();
     browser.net.handle("/api/plan-graph", () => jsonResponse({ reload: true }));

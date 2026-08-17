@@ -4,6 +4,7 @@ import {
   HEARTBEAT_MISS_THRESHOLD,
   HEARTBEAT_OVERLAY_ID,
   HEARTBEAT_PING_PATH,
+  HEARTBEAT_RELOAD_RETRY_MS,
   HEARTBEAT_REQUEST_TIMEOUT_MS,
   initializeHeartbeat
 } from "./heartbeat.js";
@@ -120,7 +121,7 @@ describe("heartbeat watchdog", () => {
     expect(browser.overlay.style.display).toBe("flex");
   });
 
-  it("reloads the current page exactly once after an observed outage", async () => {
+  it("reloads the current page exactly once within the recovery retry window", async () => {
     const browser = setup();
     let healthy = false;
     browser.net.handle(HEARTBEAT_PING_PATH, () =>
@@ -135,6 +136,33 @@ describe("heartbeat watchdog", () => {
 
     expect(browser.nav.reloads).toBe(1);
     expect(browser.nav.href).toBe("http://localhost/?page=graph");
+    expect(HEARTBEAT_RELOAD_RETRY_MS).toBeGreaterThan(
+      2 * HEARTBEAT_INTERVAL_MS
+    );
+  });
+
+  it("retries recovery when a host accepts a reload without navigating", async () => {
+    const browser = setup();
+    let healthy = false;
+    browser.net.handle(HEARTBEAT_PING_PATH, () =>
+      healthy ? jsonResponse({}) : Promise.reject(new Error("offline"))
+    );
+    initializeHeartbeat(browser.context, {
+      missThreshold: 1,
+      reloadRetryMs: 2 * HEARTBEAT_INTERVAL_MS
+    });
+    await beat(browser.clock);
+    expect(browser.overlay.style.display).toBe("flex");
+
+    healthy = true;
+    await beat(browser.clock);
+    expect(browser.nav.reloads).toBe(1);
+
+    await beat(browser.clock);
+    expect(browser.nav.reloads).toBe(1);
+
+    await beat(browser.clock);
+    expect(browser.nav.reloads).toBe(2);
   });
 
   it("never reloads a page that remained healthy", async () => {
@@ -220,7 +248,6 @@ describe("heartbeat watchdog", () => {
 
   it("aborts and ignores an in-flight response after teardown", async () => {
     const browser = setup();
-    browser.net.supportsAbort = false;
     const pending = createDeferred<HttpResponse>();
     let call = 0;
     browser.net.handle(HEARTBEAT_PING_PATH, () => {
@@ -238,8 +265,8 @@ describe("heartbeat watchdog", () => {
     browser.clock.tick(HEARTBEAT_INTERVAL_MS);
     await flushPromises();
     teardown();
-    expect(browser.net.aborted).toBe(0);
-    pending.resolve(jsonResponse({}));
+    expect(browser.net.aborted).toBe(1);
+    pending.reject(new Error("aborted"));
     await flushPromises();
 
     expect(browser.nav.reloads).toBe(0);
@@ -247,20 +274,55 @@ describe("heartbeat watchdog", () => {
     expect(browser.clock.pending).toBe(0);
   });
 
-  it("ignores an in-flight rejection after teardown", async () => {
+  it("ignores an in-flight rejection after teardown without AbortController", async () => {
     const browser = setup();
+    browser.net.supportsAbort = false;
     const pending = createDeferred<HttpResponse>();
     browser.net.handle(HEARTBEAT_PING_PATH, () => pending.promise);
     const teardown = initializeHeartbeat(browser.context);
     browser.clock.tick(HEARTBEAT_INTERVAL_MS);
     await flushPromises();
     teardown();
+    expect(browser.net.aborted).toBe(0);
 
     pending.reject(new Error("late failure"));
     await flushPromises();
 
     expect(browser.overlay.style.display).toBe("none");
     expect(browser.logger.errors).toEqual([]);
+  });
+
+  it("ignores an in-flight healthy response after teardown", async () => {
+    const browser = setup();
+    const pending = createDeferred<HttpResponse>();
+    let call = 0;
+    // Abort support is off so the held request is never cancelled: the point
+    // is a *fulfilled* late response, which is the one path that reaches the
+    // recovery reload. With the scope torn down, the response must be dropped
+    // rather than reloading a document this entry no longer owns.
+    browser.net.supportsAbort = false;
+    browser.net.handle(HEARTBEAT_PING_PATH, () => {
+      call += 1;
+      return call === 1 ?
+          Promise.reject(new Error("offline"))
+        : pending.promise;
+    });
+    const teardown = initializeHeartbeat(browser.context, {
+      missThreshold: 1
+    });
+    await beat(browser.clock);
+    expect(browser.overlay.style.display).toBe("flex");
+
+    browser.clock.tick(HEARTBEAT_INTERVAL_MS);
+    await flushPromises();
+    teardown();
+
+    pending.resolve(jsonResponse({}));
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(0);
+    expect(browser.logger.errors).toEqual([]);
+    expect(browser.clock.pending).toBe(0);
   });
 
   it("reports a reload failure and retries recovery on the next healthy beat", async () => {

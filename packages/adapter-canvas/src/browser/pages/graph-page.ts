@@ -9,11 +9,11 @@ import {
   populateApplications,
   populateBranches
 } from "../repositories.js";
-import type { BrowserTeardown } from "../lifecycle.js";
+import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphOptions } from "../graph/build.js";
 import type { GraphResource } from "../graph/model.js";
 import type { GraphController } from "../graph/surface.js";
-import type { AbortHandle, BrowserContext, TimerHandle } from "../ports.js";
+import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";
 
 const ENTRY_KEY = "graph-page";
@@ -73,8 +73,8 @@ export function initializeGraphPage(
   if (!entry) return NOOP_TEARDOWN;
   let generation = 0;
   let requestActive = false;
-  let retry: TimerHandle | null = null;
-  let progress: TimerHandle | null = null;
+  let retry: ScopeTimer | null = null;
+  let progress: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
 

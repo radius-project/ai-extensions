@@ -3,6 +3,20 @@ import { isRecord, readString } from "./json.js";
 import type { BrowserTeardown } from "./lifecycle.js";
 import type { BrowserContext, DomElement } from "./ports.js";
 
+// ─── Operation status chip ───────────────────────────────────────────────────
+// The ambient tier of the notification model. Environment creation takes
+// minutes, and the panel that narrates it lives on one page — so a user who
+// goes to look at the app graph while it runs would otherwise have no way of
+// knowing it finished. That is the failure the non-blocking panel would
+// introduce: we would have traded trapping the user for losing them.
+//
+// This chip is deliberately the quietest thing that closes that gap. It never
+// takes focus, never navigates on its own, and never moves the page. It appears
+// in the corner of the nav bar, says what is happening in three or four words,
+// and links back to the environments page. Auto-focusing the panel on
+// completion was considered and rejected: it re-creates the modal's sin with
+// worse timing, yanking the user out of whatever they moved on to.
+
 export const OPERATION_CHIP_ENTRY_KEY = "operation-chip";
 export const OPERATION_CHIP_ID = "rad-opchip";
 export const OPERATION_CHIP_LABEL_ID = "rad-opchip-label";
@@ -96,6 +110,10 @@ export function initializeOperationChip(
     chip.hidden = true;
   };
 
+  // A terminal chip is dismissed once, per operation, for the life of the
+  // canvas session. Records are retained server-side for an hour so a returning
+  // user can still find out what happened; without this the chip would nag for
+  // that whole hour.
   const acknowledge = (operationId: string | undefined): void => {
     if (!operationId) return;
     try {
@@ -122,6 +140,8 @@ export function initializeOperationChip(
   };
 
   const render = (status: OperationStatus | null): void => {
+    // The inline panel is the better surface whenever it is on screen, and two
+    // widgets narrating the same operation is noise, not redundancy.
     if (panelIsOnScreen(context.dom.byId(OPERATION_PANEL_ID))) return hide();
     if (!status) return hide();
     const text = operationChipLabel(status);
@@ -130,6 +150,8 @@ export function initializeOperationChip(
     if (terminal && acknowledged(status.operationId)) return hide();
     chip.className = `rad-opchip ${operationChipTone(status.state)}`;
     if (label) label.textContent = text;
+    // The full sentence goes in the tooltip and the accessible name, so the
+    // three-word chip is never the only thing on offer.
     chip.setAttribute("title", status.summary || text);
     chip.setAttribute("aria-label", status.summary || text);
     chip.hidden = false;
@@ -150,6 +172,9 @@ export function initializeOperationChip(
           applied = token;
           render(parseOperationStatus(payload));
         },
+        // A dropped poll means the server is idle or restarting, which the
+        // heartbeat already handles. Leaving the chip as it was is more honest
+        // than inventing a failure state for it.
         () => {}
       )
       .then(() => {

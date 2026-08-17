@@ -606,9 +606,8 @@ class FakeStorage implements StoragePort {
     return this.values.get(key) ?? null;
   }
 
-  set(key: string, value: string): boolean {
+  set(key: string, value: string): void {
     this.values.set(key, value);
-    return true;
   }
 }
 

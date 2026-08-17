@@ -43,6 +43,8 @@ import {
   jsonResponse
 } from "../../test/support/browser/fakes.js";
 import type { FakeBrowser } from "../../test/support/browser/fakes.js";
+import type { ScopeTimer } from "./lifecycle.js";
+import type { HttpResponse } from "./ports.js";
 
 function selects(browser: FakeBrowser, ids: string[]) {
   const created: Record<string, ReturnType<typeof createFakeSelect>> = {};
@@ -1256,6 +1258,36 @@ describe("planned deployment dispatch", () => {
       "Could not start the deployment."
     );
   });
+
+  it.each(["success", "failure"])(
+    "ignores a stale deploy %s after its page is torn down",
+    async (outcome) => {
+      const { browser, button } = deployPage();
+      const deployment = createDeferred<HttpResponse>();
+      browser.net.handle(DEPLOY_PATH, () => deployment.promise);
+      let current = true;
+      const pending = deployPlannedApp(
+        browser.context,
+        button,
+        "octo/app",
+        {},
+        "azure",
+        () => current
+      );
+
+      current = false;
+      if (outcome === "success") {
+        deployment.resolve(jsonResponse({ ok: true }));
+      } else {
+        deployment.reject(new Error("offline"));
+      }
+      await pending;
+
+      expect(browser.nav.assigned).toHaveLength(0);
+      expect(button.disabled).toBe(true);
+      expect(button.textContent).toBe("Starting deployment…");
+    }
+  );
 });
 
 describe("deployed pane state", () => {
@@ -1290,6 +1322,27 @@ describe("deployed pane state", () => {
     expect(button.disabled).toBe(false);
     expect(button.textContent).toBe("Create Environment");
     expect(hint.textContent).toContain("must first create an environment");
+  });
+
+  it("fails deployment actions closed when environments are unavailable", () => {
+    const { browser, button, hint } = deployedPage();
+
+    const mode = applyDeployedEnvState(
+      browser.context,
+      createDeployedState(),
+      false,
+      false,
+      "",
+      false,
+      true
+    );
+
+    expect(mode).toBe("deploy");
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "Environments could not be loaded"
+    );
+    expect(hint.textContent).toContain("temporarily unavailable");
   });
 
   it("offers a deploy when an environment exists but nothing is deployed", () => {
@@ -1589,6 +1642,20 @@ describe("modeled pane state", () => {
     expect(browser.net.calls).toHaveLength(1);
   });
 
+  it("fails the pane closed when the listing reports an error", async () => {
+    const { browser, button, hint } = modeledPage();
+    browser.net.handle(`${ENVIRONMENTS_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({ environments: [], error: "credentials expired" })
+    );
+
+    await loadModeledEnvState(browser.context, "octo/app");
+
+    expect(button.dataset.mode).toBe("unavailable");
+    expect(button.disabled).toBe(true);
+    expect(hint.textContent).toContain("temporarily unavailable");
+    expect(browser.logger.errors).toHaveLength(1);
+  });
+
   it.each(["success", "failure"])(
     "ignores a stale modeled environment %s",
     async (outcome) => {
@@ -1801,8 +1868,11 @@ describe("diff branch selectors", () => {
     const lifecycle = {
       active: true,
       after: (timeoutMs: number, handler: () => void) =>
-        browser.clock.setTimeout(handler, timeoutMs),
-      cancel: (handle: number) => browser.clock.clearTimeout(handle)
+        ({
+          kind: "timeout",
+          handle: browser.clock.setTimeout(handler, timeoutMs)
+        }) satisfies ScopeTimer,
+      cancel: (timer: ScopeTimer) => browser.clock.clearTimeout(timer.handle)
     };
     const pending = populateDiffBranches(browser.context, "octo/app", {
       lifecycle
@@ -1829,8 +1899,11 @@ describe("diff branch selectors", () => {
     const lifecycle = {
       active: true,
       after: (timeoutMs: number, handler: () => void) =>
-        browser.clock.setTimeout(handler, timeoutMs),
-      cancel: (handle: number) => browser.clock.clearTimeout(handle)
+        ({
+          kind: "timeout",
+          handle: browser.clock.setTimeout(handler, timeoutMs)
+        }) satisfies ScopeTimer,
+      cancel: (timer: ScopeTimer) => browser.clock.clearTimeout(timer.handle)
     };
     const pending = populateDiffBranches(browser.context, "octo/app", {
       lifecycle

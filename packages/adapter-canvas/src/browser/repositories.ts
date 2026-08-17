@@ -13,6 +13,7 @@
 
 import { escapeBrowserHtml, hasClassToken } from "./html.js";
 import { isRecord, readArray, readString } from "./json.js";
+import type { EntryScope } from "./lifecycle.js";
 import type {
   BrowserContext,
   DomInputElement,
@@ -677,7 +678,8 @@ function resolveProvider(
 
 function dispatchDeploy(
   context: BrowserContext,
-  request: DeployDispatch
+  request: DeployDispatch,
+  isCurrent: () => boolean
 ): Promise<void> {
   const button = request.button;
   button.disabled = true;
@@ -701,6 +703,7 @@ function dispatchDeploy(
         .then((payload) => ({ ok: response.ok, payload }))
     )
     .then((result) => {
+      if (!isCurrent()) return;
       if (!result.ok) {
         restoreDeployButton(
           button,
@@ -714,6 +717,7 @@ function dispatchDeploy(
       );
     })
     .catch(() => {
+      if (!isCurrent()) return;
       restoreDeployButton(button, "Could not start the deployment.");
     });
 }
@@ -731,7 +735,8 @@ export function deployPlannedApp(
   button: DomInputElement | null,
   repo: string,
   environmentProviders: EnvironmentProviders,
-  fallbackProvider: string
+  fallbackProvider: string,
+  isCurrent: () => boolean = () => true
 ): Promise<void> {
   if (!button || button.disabled) return Promise.resolve();
   const dom = context.dom;
@@ -739,18 +744,22 @@ export function deployPlannedApp(
   const environment = selectValue(dom.selectById("planned-env"));
   const application = selectValue(dom.selectById("planned-app"));
   if (!repo || !environment || !branch) return Promise.resolve();
-  return dispatchDeploy(context, {
-    button,
-    repo,
-    branch,
-    environment,
-    application,
-    provider: resolveProvider(
-      environmentProviders,
+  return dispatchDeploy(
+    context,
+    {
+      button,
+      repo,
+      branch,
       environment,
-      fallbackProvider
-    )
-  });
+      application,
+      provider: resolveProvider(
+        environmentProviders,
+        environment,
+        fallbackProvider
+      )
+    },
+    isCurrent
+  );
 }
 
 export interface DeployedEnvState {
@@ -774,7 +783,8 @@ export function applyDeployedEnvState(
   hasEnv: boolean,
   hasDeployment: boolean,
   deploymentStatus: string,
-  statesUnavailable: boolean
+  statesUnavailable: boolean,
+  environmentsUnavailable = false
 ): DeployedMode {
   state.hasEnv = hasEnv;
   state.hasDeployment = hasDeployment;
@@ -786,7 +796,8 @@ export function applyDeployedEnvState(
   const pending = deploymentStatus === "pending";
   const deleting = deploymentStatus === "deleting";
   const mode: DeployedMode =
-    !hasEnv ? "create-env"
+    environmentsUnavailable ? "deploy"
+    : !hasEnv ? "create-env"
     : hasDeployment ? "delete"
     : "deploy";
 
@@ -802,8 +813,16 @@ export function applyDeployedEnvState(
     } else if (mode === "deploy") {
       button.textContent = "Deploy Application";
       button.className = "rad-btn rad-btn--primary";
-      button.disabled = !(application && environment) || statesUnavailable;
-      if (statesUnavailable) {
+      button.disabled =
+        !(application && environment) ||
+        statesUnavailable ||
+        environmentsUnavailable;
+      if (environmentsUnavailable) {
+        button.setAttribute(
+          "title",
+          "Environments could not be loaded. Try again before deploying."
+        );
+      } else if (statesUnavailable) {
         button.setAttribute(
           "title",
           "The current deployment state could not be loaded. Retrying…"
@@ -842,7 +861,10 @@ export function applyDeployedEnvState(
   if (hint) {
     const appLabel = `<strong>${escapeBrowserHtml(application || "this application")}</strong>`;
     const envLabel = `<strong>${escapeBrowserHtml(environment || "the selected environment")}</strong>`;
-    if (mode === "create-env") {
+    if (environmentsUnavailable) {
+      hint.textContent =
+        " Environments could not be loaded, so deployment actions are temporarily unavailable.";
+    } else if (mode === "create-env") {
       hint.textContent =
         " To deploy this application, you must first create an environment.";
     } else if (mode === "deploy") {
@@ -867,7 +889,8 @@ export function deployDeployedApp(
   repo: string,
   branch: string,
   environmentProviders: EnvironmentProviders,
-  fallbackProvider: string
+  fallbackProvider: string,
+  isCurrent: () => boolean = () => true
 ): Promise<void> {
   if (!button || button.disabled) return Promise.resolve();
   const dom = context.dom;
@@ -875,18 +898,22 @@ export function deployDeployedApp(
   const application = selectValue(dom.selectById("deployed-app-select"));
   const deployBranch = branch.trim();
   if (!repo || !environment || !deployBranch) return Promise.resolve();
-  return dispatchDeploy(context, {
-    button,
-    repo,
-    branch: deployBranch,
-    environment,
-    application,
-    provider: resolveProvider(
-      environmentProviders,
+  return dispatchDeploy(
+    context,
+    {
+      button,
+      repo,
+      branch: deployBranch,
       environment,
-      fallbackProvider
-    )
-  });
+      application,
+      provider: resolveProvider(
+        environmentProviders,
+        environment,
+        fallbackProvider
+      )
+    },
+    isCurrent
+  );
 }
 
 export function applyModeledEnvState(
@@ -910,6 +937,27 @@ export function applyModeledEnvState(
       hasEnv ?
         ' To see how this application would be deployed to one of your existing environments, click "Plan Deployment".'
       : " To plan the deployment of this application, you must first create an environment.";
+  }
+}
+
+function applyModeledEnvUnavailable(
+  context: BrowserContext,
+  error: unknown
+): void {
+  context.logger.error("Radius environments could not be loaded.", error);
+  const button = context.dom.inputById("deploy-app-btn");
+  if (button) {
+    button.dataset.mode = "unavailable";
+    button.disabled = true;
+    button.setAttribute(
+      "title",
+      "Environments could not be loaded. Try again before planning a deployment."
+    );
+  }
+  const hint = context.dom.byId("modeled-subtitle-hint");
+  if (hint) {
+    hint.textContent =
+      " Environments could not be loaded, so deployment planning is temporarily unavailable.";
   }
 }
 
@@ -940,28 +988,16 @@ export function loadModeledEnvState(
   )
     .then((payload) => {
       if (!isCurrent()) return;
-      applyModeledEnvState(
-        context,
-        parseEnvironmentListing(payload).environments.length > 0
-      );
+      const listing = parseEnvironmentListing(payload);
+      if (listing.error !== "") {
+        applyModeledEnvUnavailable(context, listing.error);
+        return;
+      }
+      applyModeledEnvState(context, listing.environments.length > 0);
     })
     .catch((error: unknown) => {
       if (!isCurrent()) return;
-      context.logger.error("Radius environments could not be loaded.", error);
-      const button = context.dom.inputById("deploy-app-btn");
-      if (button) {
-        button.dataset.mode = "unavailable";
-        button.disabled = true;
-        button.setAttribute(
-          "title",
-          "Environments could not be loaded. Try again before planning a deployment."
-        );
-      }
-      const hint = context.dom.byId("modeled-subtitle-hint");
-      if (hint) {
-        hint.textContent =
-          " Environments could not be loaded, so deployment planning is temporarily unavailable.";
-      }
+      applyModeledEnvUnavailable(context, error);
     });
 }
 
@@ -969,11 +1005,7 @@ export interface DiffBranchLoadOptions {
   preferBase?: string;
   preferHead?: string;
   autoCompare?: boolean;
-  lifecycle?: {
-    readonly active: boolean;
-    after(timeoutMs: number, handler: () => void): number;
-    cancel(handle: number): void;
-  };
+  lifecycle?: Pick<EntryScope, "active" | "after" | "cancel">;
 }
 
 // Populate the Base/Head selectors on the Graph Diff pane, then hand off to the
@@ -1003,10 +1035,15 @@ export function populateDiffBranches(
   }
   if (status && !preserveError) status.textContent = "Loading branches…";
 
-  const timeout =
-    options.lifecycle ?
-      options.lifecycle.after(DIFF_BRANCH_TIMEOUT_MS, onTimeout)
-    : context.clock.setTimeout(onTimeout, DIFF_BRANCH_TIMEOUT_MS);
+  let cancelTimeout: () => void;
+  if (options.lifecycle) {
+    const lifecycle = options.lifecycle;
+    const timeout = lifecycle.after(DIFF_BRANCH_TIMEOUT_MS, onTimeout);
+    cancelTimeout = () => lifecycle.cancel(timeout);
+  } else {
+    const timeout = context.clock.setTimeout(onTimeout, DIFF_BRANCH_TIMEOUT_MS);
+    cancelTimeout = () => context.clock.clearTimeout(timeout);
+  }
 
   function onTimeout(): void {
     if (!isCurrent()) return;
@@ -1023,11 +1060,6 @@ export function populateDiffBranches(
       if (headSelect) dom.setOptions(headSelect, timeoutOption);
     }
   }
-
-  const cancelTimeout = (): void => {
-    if (options.lifecycle) options.lifecycle.cancel(timeout);
-    else context.clock.clearTimeout(timeout);
-  };
 
   return branchListingFor(context, repo)
     .then((listing) => {
