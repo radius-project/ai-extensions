@@ -285,7 +285,8 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   }
   .rad-conn__badge svg { width: 15px; height: 15px; display: block; }
   /* Ordinal chip marking each side as a step in one sequence rather than an
-     either-or choice. Nested under the numbered section that contains it. */
+     either-or choice. Worded rather than numbered, so it does not compete with
+     the wizard's own step numbering. */
   .rad-conn__ord {
     display: inline-flex; align-items: center; justify-content: center;
     min-width: 20px; padding: 1px 5px; border-radius: 999px;

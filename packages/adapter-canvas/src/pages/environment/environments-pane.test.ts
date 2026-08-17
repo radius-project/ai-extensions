@@ -174,11 +174,11 @@ describe("environmentsPaneMarkup", () => {
     expect(stepTwo).toContain('id="deploy-btn"');
   });
 
-  it("numbers the two connection sides as one sequence under section 2", () => {
+  it("orders the two connection sides as one sequence", () => {
     const html = environmentsPaneMarkup(baseOptions);
     const conn = html.slice(html.indexOf('class="rad-conn"'));
-    const github = conn.indexOf('<span class="rad-conn__ord">2a</span>');
-    const cloud = conn.indexOf('<span class="rad-conn__ord">2b</span>');
+    const github = conn.indexOf('<span class="rad-conn__ord">First</span>');
+    const cloud = conn.indexOf('<span class="rad-conn__ord">Then</span>');
     expect(github).toBeGreaterThan(-1);
     expect(cloud).toBeGreaterThan(github);
     expect(conn.slice(github, cloud)).toContain("GitHub");
@@ -188,7 +188,7 @@ describe("environmentsPaneMarkup", () => {
   it("says both connection sides are required rather than alternatives", () => {
     const html = environmentsPaneMarkup(baseOptions);
     expect(html).toContain(
-      "Both sides are required: confirm the GitHub account in 2a, then the cloud credentials it deploys with in 2b."
+      "Both sides are required: confirm the GitHub account first, then the cloud credentials it deploys with."
     );
   });
 });
