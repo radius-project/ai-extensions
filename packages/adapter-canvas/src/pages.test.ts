@@ -491,6 +491,7 @@ describe("no page lets state escape its inline scripts", () => {
 // deterministic projection. See test/fixtures/page-renderer-compatibility.json
 // for provenance and the update policy.
 describe("legacy page renderer compatibility oracle", () => {
+  const migratedBrowserPayloads = new Set(["heartbeat"]);
   const fixture = parsePageCompatibilityFixture(
     JSON.parse(
       readFileSync(
@@ -561,7 +562,11 @@ describe("legacy page renderer compatibility oracle", () => {
       expect(
         projectPage(html, {
           markers: testCase.markers,
-          hashedScripts: testCase.hashedScripts,
+          // Phase 4 replaces each migrated source-string digest with executable
+          // behavior, deterministic compiler, and renderer-marker checks.
+          hashedScripts: testCase.hashedScripts.filter(
+            (name) => !migratedBrowserPayloads.has(name)
+          ),
           scope: testCase.scope
         })
       ).toEqual({

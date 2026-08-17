@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { browserEntryMarker } from "../browser/scripts.js";
 import { pageShell } from "./shell.js";
 
 describe("pageShell", () => {
@@ -257,6 +258,15 @@ describe("pageShell document structure", () => {
       html.indexOf('id="radius-reconnect-overlay"')
     );
     expect(html).toContain("Reconnecting to Radius…");
+  });
+
+  it("injects the compiled heartbeat inline exactly once", () => {
+    const marker = browserEntryMarker("heartbeat");
+    expect(html.split(marker).length - 1).toBe(1);
+    expect(html).not.toMatch(/<script[^>]+src=/);
+    expect(html.indexOf(marker)).toBeGreaterThan(
+      html.indexOf('id="radius-reconnect-overlay"')
+    );
   });
 
   it("renders the feedback widget with both destinations on every page", () => {
