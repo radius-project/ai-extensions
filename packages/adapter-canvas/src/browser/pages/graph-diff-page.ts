@@ -4,13 +4,12 @@ import { githubRepositoryUrl } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { readArray, readBoolean, readString } from "../json.js";
 import { populateApplications, populateDiffBranches } from "../repositories.js";
-import type { BrowserTeardown } from "../lifecycle.js";
+import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
 import type {
   AbortHandle,
   BrowserContext,
-  DomSelectElement,
-  TimerHandle
+  DomSelectElement
 } from "../ports.js";
 import { readPageState } from "./state.js";
 
@@ -64,7 +63,7 @@ export function initializeGraphDiffPage(
   const headSelect = context.dom.selectById("head-branch");
   const repoInput = context.dom.inputById("diff-repo-select");
   let generation = 0;
-  let pending: TimerHandle | null = null;
+  let pending: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
 

@@ -4,6 +4,19 @@
 // Operation-chip and delete-dialog behavior remains legacy source until 4C.
 
 export const CLIENT_OPCHIP_JS = `
+// ─── Operation status chip ───────────────────────────────────────────────────
+// The ambient tier of the notification model. Environment creation takes
+// minutes, and the panel that narrates it lives on one page — so a user who
+// goes to look at the app graph while it runs has, until now, had no way of
+// knowing it finished. That is the failure the non-blocking panel would
+// otherwise introduce: we would have traded trapping the user for losing them.
+//
+// This chip is deliberately the quietest thing that closes that gap. It never
+// takes focus, never navigates on its own, and never moves the page. It appears
+// in the corner of the nav bar, says what is happening in three or four words,
+// and links back to the environments page. Auto-focusing the panel on
+// completion was considered and rejected: it re-creates the modal's sin with
+// worse timing, yanking the user out of whatever they moved on to.
 (function() {
   var chip = document.getElementById('rad-opchip');
   if (!chip) return;
@@ -11,6 +24,10 @@ export const CLIENT_OPCHIP_JS = `
   var ACK_KEY = 'radiusOpChipAck';
   var POLL_MS = 5000;
 
+  // A terminal chip is dismissed once, per operation, for the life of the
+  // canvas session. Records are retained server-side for an hour so a returning
+  // user can still find out what happened; without this the chip would nag for
+  // that whole hour.
   function ack(id) {
     if (!id) return;
     try { window.sessionStorage.setItem(ACK_KEY, id); } catch (e) {}
@@ -45,6 +62,8 @@ export const CLIENT_OPCHIP_JS = `
   function hide() { chip.hidden = true; }
 
   function render(op) {
+    // The inline panel is the better surface whenever it is on screen, and two
+    // widgets narrating the same operation is noise, not redundancy.
     var panel = document.getElementById('env-progress-panel');
     if (panel && panel.style.display !== 'none' && panel.offsetParent !== null) { hide(); return; }
     if (!op || !op.state) { hide(); return; }
@@ -54,6 +73,8 @@ export const CLIENT_OPCHIP_JS = `
     if (terminal && acked(op.operationId)) { hide(); return; }
     chip.className = 'rad-opchip ' + toneClass(op.state);
     if (labelEl) labelEl.textContent = text;
+    // The full sentence goes in the tooltip and the accessible name, so the
+    // three-word chip is never the only thing on offer.
     chip.setAttribute('title', op.summary || text);
     chip.setAttribute('aria-label', op.summary || text);
     chip.hidden = false;
@@ -67,6 +88,9 @@ export const CLIENT_OPCHIP_JS = `
     fetch('/api/operations', { cache: 'no-store' })
       .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(d) { render(d && d.operation); })
+      // A dropped poll means the server is idle or restarting, which the
+      // heartbeat already handles. Leaving the chip as it was is more honest
+      // than inventing a failure state for it.
       .catch(function() {});
   }
   poll();
@@ -80,6 +104,8 @@ export const CLIENT_OPCHIP_JS = `
 export const CLIENT_DELETE_DIALOG_JS = `
 function radiusCreateDeleteDeploymentDialog(options) {
   var opts = options || {};
+  // Self-contained escaping: this dialog is injected as its own <script> block,
+  // so it must not depend on another block having already defined a helper.
   var esc = function(value) {
     return String(value)
       .replace(/&/g, '&amp;')
@@ -111,6 +137,8 @@ function radiusCreateDeleteDeploymentDialog(options) {
     if (typeof opts.onConfirm === 'function') opts.onConfirm(target.app, target.environment);
   }
 
+  // Steps escalate the confirmation:
+  //   1) intent, 2) acknowledge the irreversible effects, 3) type "app/env".
   function renderStep() {
     if (!pending) return;
     var app = pending.app, env = pending.environment;

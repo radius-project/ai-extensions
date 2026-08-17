@@ -399,6 +399,34 @@ describe("controller", () => {
     expect(harness.vendor!.reactDom.roots[0].unmounts).toBe(1);
   });
 
+  it("prevents a stale populated controller from changing its replacement", () => {
+    const harness = setup();
+    const first = harness.surface.render("graph-container", RESOURCES);
+    const replacement = harness.surface.render("graph-container", RESOURCES);
+
+    expect(first?.update([{ id: "app/stale", name: "stale" }])).toBe(first);
+    first?.destroy();
+
+    expect(harness.vendor!.dagre?.graphs).toHaveLength(2);
+    expect(harness.vendor!.reactDom.roots[1].unmounts).toBe(0);
+    replacement?.destroy();
+    expect(harness.vendor!.reactDom.roots[1].unmounts).toBe(1);
+  });
+
+  it("prevents a stale empty controller from destroying a populated graph", () => {
+    const harness = setup();
+    const empty = harness.surface.render("graph-container", []);
+    const populated = empty?.update(RESOURCES);
+
+    expect(empty?.update([{ id: "app/stale", name: "stale" }])).toBe(empty);
+    empty?.destroy();
+
+    expect(harness.vendor!.dagre?.graphs).toHaveLength(1);
+    expect(harness.vendor!.reactDom.roots[0].unmounts).toBe(0);
+    populated?.destroy();
+    expect(harness.vendor!.reactDom.roots[0].unmounts).toBe(1);
+  });
+
   it("destroys every active container through the page-level cleanup", () => {
     const harness = setup();
     const second = createFakeElement("graph-secondary");

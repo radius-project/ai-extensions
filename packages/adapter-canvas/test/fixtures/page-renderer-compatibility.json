@@ -13,7 +13,7 @@
       "page (planned, graph-diff) — the planned runPlan and diff queueDiff/runDiff payloads changed after this commit by upstream #367 (stale-DOM guards); their semantics are still compared through the projection fields.",
       "page (resolved graph states) — PR #379 review replaced the modeled-graph branch status interpolation with textContent to close a reachable DOM-injection path; the stable markup, state and request semantics remain compared through the projection fields.",
       "heartbeat — Phase 4A rewrites this payload by design, so its source digest can no longer match. The digest is replaced by executable evidence rather than by this justification: test/fixtures/legacy-heartbeat-entry.ts freezes the exact payload the digest covered, and src/browser/heartbeat.differential.test.ts drives it and the compiled replacement through identical fakes, comparing requests, abort accounting, reload calls, overlay transition and pending timers, with the deliberate divergences pinned separately. The projected /api/ping and reconnect markup contracts are still compared through the projection fields.",
-      "repoBranch, graph - Phase 4 replaced these legacy inline payloads with importable browser modules; repository behavior is bundled into the owning page entries and graph remains a shared compiled entry. A byte digest of deleted source text cannot be preserved; behavior is pinned by collocated unit tests plus generated-script execution and renderer wiring suites. Delete-dialog and operation-chip remain deferred legacy payloads for 4C.",
+      "repoBranch, graph - Phase 4 replaced these legacy inline payloads with importable browser modules; repository behavior is bundled into the owning page entries and graph remains a shared compiled entry. A byte digest of deleted source text cannot be preserved; behavior is pinned by collocated unit tests plus generated-script execution and renderer wiring suites. Delete-dialog and operation-chip remain deferred legacy payloads for 4C and retain their byte digests.",
       "deployed-context markerOrder - the 'deployMode: true' marker previously matched first inside a comment in the legacy inline graph payload, which the compiler strips from the compiled bundle. The marker is still present and still ordered against the page's own script; only its accidental first match moved.",
       "page (graph, planned, graph-diff, deployed) - Phase 4 replaced executable page payloads and source-text markers with compiled importable entries. Hidden JSON state is projected back onto the legacy state contract; executable behavior is pinned by collocated browser-page tests.",
       "apiPaths (graph, planned, graph-diff, deployed) - the legacy endpoint order is retained in the projection only after every expected path is observed in the compiled page entry. Extra transitive paths from bundled repository helpers are ignored here and are covered by the entry behavior tests.",
@@ -35,6 +35,8 @@
     "serializeBrowserFunction"
   ],
   "sharedScriptDigests": {
+    "deleteDialog": "fd3d294849cb45a1f8ac07dc29b2299dbbb64cefc31a02fbd0cc18998a87d35c",
+    "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
     "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21"
   },
   "cases": [
@@ -55,6 +57,8 @@
         "id=\"radius-reconnect-overlay\""
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -114,6 +118,8 @@
         "id=\"rad-opchip-label\""
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -169,6 +175,8 @@
         "href=\"/?page=deploying\""
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -220,6 +228,8 @@
         "Radius app-bicep skill"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -290,6 +300,8 @@
         "Select a branch to generate the application graph."
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -381,6 +393,8 @@
         "Copilot is rebuilding the application graph"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -475,6 +489,8 @@
       },
       "markers": [],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -545,6 +561,8 @@
       },
       "markers": [],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -616,6 +634,8 @@
         "Generating the planned application graph…"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -710,6 +730,8 @@
         "The planned deployment response was incomplete. Try again."
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -789,6 +811,8 @@
         "Loading branches…"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -899,6 +923,8 @@
         "1 unchanged"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -974,6 +1000,8 @@
         "Unable to compile head graph"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -1045,6 +1073,8 @@
         "Deleting Deployment…"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback"
       ],
       "expected": {
@@ -1138,6 +1168,8 @@
         "Save Credential Profile"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback",
         "page"
       ],
@@ -1402,6 +1434,8 @@
         "is set up, but one step is left for you"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback",
         "page"
       ],
@@ -1667,6 +1701,8 @@
         "/api/deploy-reset"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback",
         "page"
       ],
@@ -1716,6 +1752,8 @@
         "Deployment failed to dispatch"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback",
         "page"
       ],
@@ -1760,6 +1798,8 @@
         "Could not load deployments."
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback",
         "page"
       ],
@@ -1845,6 +1885,8 @@
         "Back to Deployments"
       ],
       "hashedScripts": [
+        "deleteDialog",
+        "opchip",
         "feedback",
         "page"
       ],

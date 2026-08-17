@@ -10,9 +10,9 @@ import {
   deployPlannedApp,
   populatePlannedSelectors
 } from "../repositories.js";
-import type { BrowserTeardown } from "../lifecycle.js";
+import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
-import type { AbortHandle, BrowserContext, TimerHandle } from "../ports.js";
+import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
 
@@ -81,7 +81,7 @@ export function initializePlannedGraphPage(
   const branch = context.dom.selectById("planned-branch");
   const environment = context.dom.selectById("planned-env");
   const button = context.dom.inputById("plan-btn");
-  let progress: TimerHandle | null = null;
+  let progress: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
 
@@ -249,7 +249,8 @@ export function initializePlannedGraphPage(
         button,
         page.repo,
         providers,
-        page.provider
+        page.provider,
+        () => entry.active
       );
     });
   }

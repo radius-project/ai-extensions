@@ -21,7 +21,7 @@ import {
   srcLineFromRef,
   srcPathFromRef
 } from "./model.js";
-import { filterGraphVisualizationResources } from "@radius-project/core";
+import { filterGraphVisualizationResources } from "@radius-project/core/graph";
 import { parseGraphResources } from "./model.js";
 import type { GraphResource, ResourceOutput } from "./model.js";
 
