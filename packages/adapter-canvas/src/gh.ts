@@ -366,22 +366,49 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
   // De-duplicated switchable account list. An account is switchable when it
   // exists in the keyring (gh auth switch operates on keyring accounts).
   const keyringLogins = new Set(s.keyringAccts.map((a) => a.login));
-  // Every scope must be read keyring-first. gh auth switch/refresh mutate the
-  // keyring credential, and GHCR pushes authenticate with the credential
-  // getGhPackageCredentials resolves (the keyring token pinned to the login
-  // when a keyring entry exists, else the injected token). When a host-injected
-  // GH_TOKEN shadows a keyring credential of the same login but was minted with
-  // fewer scopes, reading the token account first (it appears first in the
-  // deduped list below) would misreport the scope — and, worse, no gh command
-  // can add a scope to that env token, so the warning could never clear.
   const keyringScopesByLogin = new Map(
     s.keyringAccts.map((a) => [a.login, a.scopes])
   );
   const tokenScopesByLogin = new Map(
     s.withTokenAccts.map((a) => [a.login, a.scopes])
   );
-  const scopesFor = (login: string): string[] =>
+  // GHCR pushes authenticate with the credential getGhPackageCredentials
+  // resolves: the keyring token pinned to the login when a keyring entry exists,
+  // else the injected token. Packages auth is independent of the workflow token
+  // strategy, so the write:packages scope is always resolved keyring-first.
+  const packagesScopesFor = (login: string): string[] =>
     keyringScopesByLogin.get(login) || tokenScopesByLogin.get(login) || [];
+  // The workflow scope must be read from the credential that will ACTUALLY act
+  // as a login — the one decideGhTokenStrategy selects — not blanket
+  // keyring-first. gh keeps the injected token when it already carries workflow
+  // (so the token's scopes are in effect) and falls back to the keyring
+  // credential only when the token lacks workflow. Reading keyring-first
+  // unconditionally misreports in both directions: it clears the warning when a
+  // keyring credential has MORE scopes than a shadowing same-login token (issue
+  // #213), but would wrongly report workflow missing in the mirror case where
+  // the injected token has workflow and its same-login keyring credential does
+  // not — telling the user to run a refresh for a scope the acting credential
+  // already has.
+  //   - Acting login: use the credential the resolved strategy selected
+  //     (strat.useKeyring ? keyring : token) — exactly what gh will run as.
+  //   - Any other switchable account is a keyring login; switching to it sets a
+  //     preference other than the token login, which forces the keyring
+  //     credential (decideGhTokenStrategy), so its keyring scopes apply.
+  const workflowScopesFor = (login: string): string[] => {
+    if (login === actingLogin) {
+      const chosen =
+        strat.useKeyring ?
+          keyringScopesByLogin.get(login)
+        : tokenScopesByLogin.get(login);
+      return (
+        chosen ||
+        keyringScopesByLogin.get(login) ||
+        tokenScopesByLogin.get(login) ||
+        []
+      );
+    }
+    return keyringScopesByLogin.get(login) || tokenScopesByLogin.get(login) || [];
+  };
   const seen = new Set<string>();
   const accounts: GitHubIdentityAccount[] = [];
   for (const a of [...s.withTokenAccts, ...s.keyringAccts]) {
@@ -389,8 +416,8 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
     seen.add(a.login);
     accounts.push({
       login: a.login,
-      hasWorkflow: scopesFor(a.login).includes("workflow"),
-      hasPackages: scopesFor(a.login).includes("write:packages"),
+      hasWorkflow: workflowScopesFor(a.login).includes("workflow"),
+      hasPackages: packagesScopesFor(a.login).includes("write:packages"),
       switchable: keyringLogins.has(a.login),
       acting: a.login === actingLogin
     });

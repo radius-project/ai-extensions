@@ -64,7 +64,19 @@ const STATUS = {
   keyringPubWithWorkflow: `github.com
   ✓ Logged in to github.com account pubuser (keyring)
     - Active account: true
-    - Token scopes: 'gist', 'read:org', 'repo', 'workflow', 'write:packages'`
+    - Token scopes: 'gist', 'read:org', 'repo', 'workflow', 'write:packages'`,
+  // Mirror of the above: the injected GH_TOKEN for `pubuser` HAS workflow, but
+  // its same-login keyring credential does NOT. The strategy keeps the token
+  // (token-has-workflow), so the acting credential already has the scope —
+  // scope reporting must not read the keyring credential and warn.
+  tokenPubWithWorkflow: `github.com
+  ✓ Logged in to github.com account pubuser (GITHUB_TOKEN)
+    - Active account: true
+    - Token scopes: 'gist', 'repo', 'workflow'`,
+  keyringPubNoWorkflow: `github.com
+  ✓ Logged in to github.com account pubuser (keyring)
+    - Active account: true
+    - Token scopes: 'gist', 'repo'`
 };
 
 function setPlatform(platform: NodeJS.Platform): void {
@@ -726,6 +738,28 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
     });
     const id = await getGitHubIdentity();
     expect(id.actingLogin).toBe("pubuser");
+    expect(id.actingHasWorkflow).toBe(true);
+    const pub = id.accounts.find((a) => a.login === "pubuser");
+    expect(pub).toBeDefined();
+    if (!pub) throw new Error("pubuser account missing");
+    expect(pub.hasWorkflow).toBe(true);
+  });
+
+  it("reports workflow from the injected token when it has the scope but its same-login keyring credential does not", async () => {
+    // Mirror of #213: the injected token HAS workflow, its same-login keyring
+    // credential does NOT. decideGhTokenStrategy keeps the token
+    // (token-has-workflow), so gh acts as the token and setup would succeed.
+    // Reporting must follow the acting credential (the token) — a blanket
+    // keyring-first read would wrongly warn that workflow is missing and tell
+    // the user to run a refresh the acting credential does not need.
+    const { getGitHubIdentity } = await loadGh("linux", {
+      token: "tok",
+      withToken: STATUS.tokenPubWithWorkflow,
+      keyring: STATUS.keyringPubNoWorkflow
+    });
+    const id = await getGitHubIdentity();
+    expect(id.actingLogin).toBe("pubuser");
+    expect(id.reason).toBe("token-has-workflow");
     expect(id.actingHasWorkflow).toBe(true);
     const pub = id.accounts.find((a) => a.login === "pubuser");
     expect(pub).toBeDefined();
