@@ -914,7 +914,28 @@ export function initializeEnvironmentOperations(
       op === null ||
       (op.terminalState !== "failed" && op.terminalState !== "failed_partial")
     ) {
+      // Clear the card as well as hiding it. A continuation reuses the same
+      // panel, and a stale failure that reappears the next time the card is
+      // shown would describe an attempt the customer already moved past.
       card.style.display = "none";
+      messageEl.textContent = "";
+      cleanupEl.textContent = "";
+      retryEl.textContent = "";
+      setFailureList(
+        [],
+        dom.byId(PROGRESS_IDS.cleanupRemovedList),
+        dom.byId(PROGRESS_IDS.cleanupRemovedBlock)
+      );
+      setFailureList(
+        [],
+        dom.byId(PROGRESS_IDS.cleanupRetainedList),
+        dom.byId(PROGRESS_IDS.cleanupRetainedBlock)
+      );
+      setFailureList(
+        [],
+        dom.byId(PROGRESS_IDS.cleanupWarningsList),
+        dom.byId(PROGRESS_IDS.cleanupWarningsBlock)
+      );
       return;
     }
 
