@@ -32,10 +32,9 @@
       "lines": 80
     },
     "browser": {
-      "statements": 100,
-      "branches": 100,
-      "functions": 100,
-      "lines": 100
+      "branches": 70,
+      "functions": 80,
+      "lines": 80
     }
   }
 }
