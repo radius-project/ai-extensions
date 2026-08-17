@@ -125,15 +125,42 @@ function sortByName(items) {
         return an < bn ? -1 : an > bn ? 1 : 0;
     });
 }
+// Selects a value only when the dropdown actually offers it, so a preference
+// that discovery did not return leaves the placeholder in place.
+function selectOptionValue(selectId, value) {
+    var sel = document.getElementById(selectId);
+    if (!sel) return false;
+    for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === value) { sel.value = value; return true; }
+    }
+    return false;
+}
+// A list with exactly one real choice has nothing to ask, so it selects itself.
+// Two or more stay on the placeholder, because picking one for the user there
+// would be a guess they might not notice.
+function selectSoleOption(selectId, items) {
+    if (!items || items.length !== 1) return;
+    selectOptionValue(selectId, items[0].id || items[0]);
+}
+// Discovery is one request per provider: a second one cannot learn anything the
+// first will not, and racing them can land an older result last. The provider's
+// Refresh button is disabled for the life of its request and re-enabled when
+// that request settles, including when it fails.
+var DISCOVERY_IN_FLIGHT = {};
+function discoveryInFlight(provider) {
+    return DISCOVERY_IN_FLIGHT[provider] === true;
+}
+function setDiscoveryBusy(provider, busy) {
+    DISCOVERY_IN_FLIGHT[provider] = busy;
+    var btn = document.getElementById(provider === 'aws' ? 'aws-refresh-btn' : 'azure-refresh-btn');
+    if (btn) btn.disabled = busy;
+}
 // Populate the AKS cluster dropdown from a (possibly RG-filtered) list, keeping
 // the current selection when it is still present in the new list.
 function renderAzureClusters(list, keepValue) {
     populateSelect('azure-cluster-select', list, 'Select AKS cluster…');
-    if (!keepValue) return;
-    var sel = document.getElementById('azure-cluster-select');
-    for (var i = 0; i < sel.options.length; i++) {
-        if (sel.options[i].value === keepValue) { sel.value = keepValue; break; }
-    }
+    if (keepValue) { selectOptionValue('azure-cluster-select', keepValue); return; }
+    selectSoleOption('azure-cluster-select', list);
 }
 function setupAzureInfraFilter() {
     var clusterSel = document.getElementById('azure-cluster-select');
@@ -177,12 +204,14 @@ function setupAzureInfraFilter() {
     });
 }
 function discoverResources(provider, subId, tenantId) {
+    if (discoveryInFlight(provider)) return;
     var payload = { provider: provider };
     if (subId) payload.subscriptionId = subId;
     if (tenantId) payload.tenantId = tenantId;
     var statusId = provider === 'azure' ? 'azure-discover-status' : 'aws-discover-status';
     var statusEl = document.getElementById(statusId);
     if (statusEl) statusEl.textContent = 'Discovering resources…';
+    setDiscoveryBusy(provider, true);
     fetch('/api/discover', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) })
         .then(function(r) { return r.json(); })
         .then(function(data) {
@@ -192,16 +221,24 @@ function discoverResources(provider, subId, tenantId) {
                 renderAzureClusters(window.__azureClusters, '');
                 populateSelect('azure-rg-select', sortByName(data.resourceGroups || []), 'Select resource group…');
                 populateSelect('azure-namespace-select', sortByName(data.namespaces || ['default','kube-system','radius-system']), 'Select namespace…');
+                selectOptionValue('azure-namespace-select', 'default');
                 setupAzureInfraFilter();
             } else {
                 if (statusEl) statusEl.textContent = discoverStatusText(data, 'aws');
-                populateSelect('aws-cluster-select', sortByName(data.clusters || []), 'Select EKS cluster…');
+                var awsClusters = sortByName(data.clusters || []);
+                populateSelect('aws-cluster-select', awsClusters, 'Select EKS cluster…');
+                selectSoleOption('aws-cluster-select', awsClusters);
                 populateSelect('aws-namespace-select', sortByName(data.namespaces || ['default','kube-system','radius-system']), 'Select namespace…');
+                selectOptionValue('aws-namespace-select', 'default');
                 populateSelect('aws-vpc-select', [{id:'', name:'None (optional)'}].concat(data.vpcs || []), 'Select VPC…');
                 populateSelect('aws-subnets-select', [{id:'', name:'None (optional)'}].concat(data.subnets || []), 'Select subnets…');
             }
+            setDiscoveryBusy(provider, false);
         })
-        .catch(function(e) { if (statusEl) statusEl.textContent = 'Discovery error: ' + e.message; });
+        .catch(function(e) {
+            if (statusEl) statusEl.textContent = 'Discovery error: ' + e.message;
+            setDiscoveryBusy(provider, false);
+        });
 }
 function getComboValue(selectId, customId) {
     var sel = document.getElementById(selectId);

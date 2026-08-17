@@ -312,7 +312,9 @@ function onEnvProfileSelected() {
     document.getElementById('panel-aws').style.display = prov === 'aws' ? '' : 'none';
     deployBtn.disabled = false;
     var rb = document.getElementById(prov === 'aws' ? 'aws-refresh-btn' : 'azure-refresh-btn');
-    if (rb) rb.disabled = false;
+    // Selecting a profile makes Refresh meaningful, but discovery owns the
+    // button while a request is in flight.
+    if (rb) rb.disabled = discoveryInFlight(prov);
     discoverResources(prov, selectedProfile.subscriptionId, selectedProfile.tenantId);
 }
 ['azure-refresh-btn','aws-refresh-btn'].forEach(function(id){
