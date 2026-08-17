@@ -140,6 +140,12 @@ function fixture(options: FixtureOptions = {}) {
     `/api/deployed-graph?repo=${encodeURIComponent(repo)}&application=app&environment=dev`,
     () => jsonResponse({ resources: [], mode: "greyed" })
   );
+  // A pristine session for the startup deploy-feed probe: no run has produced
+  // logs, so the log stream stays closed. Tests that exercise the feed override
+  // this with their own `net.handle` call.
+  browser.net.handle("/api/deploy-status", () =>
+    jsonResponse({ status: "pending", logTotal: 0 })
+  );
 
   return {
     browser,
@@ -801,6 +807,240 @@ describe("initializeDeployedGraphPage", () => {
         (entry) => entry.message === "Radius deployment log request failed."
       )
     ).toBe(true);
+  });
+
+  it("reopens the deploy feed for a later deployment from its own cursor", async () => {
+    const { browser, logOutput } = fixture();
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => jsonResponse({ resources: [{ id: "app/web" }], mode: "live" })
+    );
+    browser.net.handle("/api/deploy-status", () =>
+      jsonResponse({ status: "complete", logTotal: 1 })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () =>
+      jsonResponse({ logsNew: ["first run"], logTotal: 1, status: "complete" })
+    );
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(logOutput.textContent).toContain("first run");
+    expect(browser.clock.intervals).toBe(0);
+
+    // A second deployment starts. The feed must resume rather than stay closed
+    // because an earlier run already opened it.
+    browser.net.handle("/api/deploy-status?since=1", () =>
+      jsonResponse({
+        logsNew: ["second run"],
+        logTotal: 2,
+        status: "in_progress"
+      })
+    );
+    browser.clock.tick(DEPLOYED_GRAPH_POLL_MS);
+    await flushPromises();
+
+    expect(logOutput.textContent).toContain("second run");
+    expect(browser.clock.intervals).toBe(1);
+  });
+
+  it("keeps streaming after a failing incremental log poll", async () => {
+    const { browser, logOutput } = fixture();
+    browser.net.handle("/api/deploy-status", () =>
+      jsonResponse({ status: "in_progress", logTotal: 1 })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () =>
+      jsonResponse({ logsNew: ["one"], logTotal: 1, status: "in_progress" })
+    );
+    browser.net.handle("/api/deploy-status?since=1", () =>
+      Promise.reject(new Error("poll failed"))
+    );
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(DEPLOYED_LOG_POLL_MS);
+    await flushPromises();
+
+    expect(
+      browser.logger.errors.some(
+        (entry) => entry.message === "Radius deployment log request failed."
+      )
+    ).toBe(true);
+    // A single failed poll must not silently end an in-progress deployment feed.
+    expect(browser.clock.intervals).toBe(1);
+
+    browser.net.handle("/api/deploy-status?since=1", () =>
+      jsonResponse({ logsNew: ["two"], logTotal: 2, status: "complete" })
+    );
+    browser.clock.tick(DEPLOYED_LOG_POLL_MS);
+    await flushPromises();
+
+    expect(logOutput.textContent).toContain("two");
+    expect(browser.clock.intervals).toBe(0);
+  });
+
+  it("opens the deploy feed for a finished deployment whose graph is not live", async () => {
+    const { browser, logSection, logOutput } = fixture();
+    browser.net.handle("/api/deploy-status", () =>
+      jsonResponse({ status: "failed", logTotal: 2 })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () =>
+      jsonResponse({
+        logsNew: ["boom", "stack"],
+        logTotal: 2,
+        status: "failed"
+      })
+    );
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    // The default graph for this fixture is "greyed", not "live": a failed run
+    // explains itself in this log, so it must not be hidden behind live mode.
+    expect(logSection.style.display).toBe("block");
+    expect(logOutput.textContent).toContain("boom");
+    expect(logOutput.textContent).toContain("stack");
+    // A finished run has nothing left to stream.
+    expect(browser.clock.intervals).toBe(0);
+  });
+
+  it("opens the deploy feed when the session retained logs and streams from the shown cursor", async () => {
+    const { browser, logOutput } = fixture();
+    browser.net.handle("/api/deploy-status", () =>
+      jsonResponse({ status: "pending", logTotal: 1 })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () =>
+      jsonResponse({ logsNew: ["queued"], status: "pending" })
+    );
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(logOutput.textContent).toContain("queued");
+    expect(browser.clock.intervals).toBe(1);
+
+    // That first response carried no logTotal, so the cursor falls back to the
+    // number of lines already shown rather than replaying them.
+    browser.net.handle("/api/deploy-status?since=1", () =>
+      jsonResponse({ logsNew: [], logTotal: 1, status: "complete" })
+    );
+    browser.clock.tick(DEPLOYED_LOG_POLL_MS);
+    await flushPromises();
+
+    expect(browser.clock.intervals).toBe(0);
+  });
+
+  it("arms the log poll only after the first buffer response resolves", async () => {
+    const { browser } = fixture();
+    const buffer = createDeferred<HttpResponse>();
+    browser.net.handle("/api/deploy-status", () =>
+      jsonResponse({ status: "in_progress", logTotal: 1 })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () => buffer.promise);
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    // Arming the interval up front would let a second request share the same
+    // cursor and append the whole buffer twice.
+    expect(browser.clock.intervals).toBe(0);
+
+    buffer.resolve(
+      jsonResponse({ logsNew: ["one"], logTotal: 1, status: "in_progress" })
+    );
+    await flushPromises();
+
+    expect(browser.clock.intervals).toBe(1);
+  });
+
+  it("leaves the deploy feed closed for a session that never deployed", async () => {
+    const { browser, logSection } = fixture();
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(logSection.style.display).not.toBe("block");
+    expect(browser.clock.intervals).toBe(0);
+  });
+
+  it("leaves the deploy feed closed when the status payload omits a log total", async () => {
+    const { browser, logSection } = fixture();
+    browser.net.handle("/api/deploy-status", () =>
+      jsonResponse({ status: "pending" })
+    );
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(logSection.style.display).not.toBe("block");
+    expect(browser.clock.intervals).toBe(0);
+  });
+
+  it("ignores an incremental log poll that resolves after teardown", async () => {
+    const { browser, logOutput } = fixture();
+    const poll = createDeferred<HttpResponse>();
+    browser.net.handle("/api/deploy-status", () =>
+      jsonResponse({ status: "in_progress", logTotal: 1 })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () =>
+      jsonResponse({ logsNew: ["one"], logTotal: 1, status: "in_progress" })
+    );
+    browser.net.handle("/api/deploy-status?since=1", () => poll.promise);
+    const teardown = initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(DEPLOYED_LOG_POLL_MS);
+    await flushPromises();
+    teardown();
+
+    poll.resolve(
+      jsonResponse({ logsNew: ["late"], logTotal: 2, status: "in_progress" })
+    );
+    await flushPromises();
+
+    expect(logOutput.textContent ?? "").not.toContain("late");
+  });
+
+  it("logs a failing startup deploy-status probe without breaking the page", async () => {
+    const { browser, logSection } = fixture();
+    browser.net.handle("/api/deploy-status", () =>
+      Promise.reject(new Error("status down"))
+    );
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(
+      browser.logger.errors.some(
+        (entry) => entry.message === "Radius deployment status could not load."
+      )
+    ).toBe(true);
+    expect(logSection.style.display).not.toBe("block");
+  });
+
+  it("ignores a startup deploy-status probe that resolves after teardown", async () => {
+    const { browser, logSection } = fixture();
+    const probe = createDeferred<HttpResponse>();
+    browser.net.handle("/api/deploy-status", () => probe.promise);
+    const teardown = initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+    teardown();
+
+    probe.resolve(jsonResponse({ status: "failed", logTotal: 3 }));
+    await flushPromises();
+
+    expect(logSection.style.display).not.toBe("block");
+  });
+
+  it("ignores a log buffer that arrives after teardown", async () => {
+    const { browser, logOutput } = fixture();
+    const buffer = createDeferred<HttpResponse>();
+    browser.net.handle("/api/deploy-status", () =>
+      jsonResponse({ status: "in_progress", logTotal: 1 })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () => buffer.promise);
+    const teardown = initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+    teardown();
+
+    buffer.resolve(
+      jsonResponse({ logsNew: ["late"], logTotal: 1, status: "in_progress" })
+    );
+    await flushPromises();
+
+    expect(logOutput.textContent ?? "").not.toContain("late");
+    expect(browser.clock.intervals).toBe(0);
   });
 
   it("selects the application named by the query string", async () => {

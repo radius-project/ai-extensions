@@ -541,10 +541,82 @@ describe("initializePlannedGraphPage", () => {
     browser.clock.tick(PLAN_DEBOUNCE_MS);
     await flushPromises();
 
+    // Requests are serialized, so the replacement is still queued: it is only
+    // released once the superseded request settles.
+    expect(calls).toBe(1);
+
     first.reject(new Error("stale plan failure"));
+    await flushPromises();
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+    expect(browser.nav.reloads).toBe(1);
+    expect(browser.logger.errors).toHaveLength(0);
+  });
+
+  it("holds the deploy action closed while a plan is in flight and reopens it once the plan settles", async () => {
+    const { browser, button } = fixture();
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle("/api/plan-graph", () => pending.promise);
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("deploy");
+    expect(button.disabled).toBe(true);
+
+    pending.resolve(jsonResponse({ reload: true }));
     await flushPromises();
 
     expect(browser.nav.reloads).toBe(1);
+    expect(button.disabled).toBe(false);
+  });
+
+  it("closes the deploy action again as soon as a selection queues a new plan", async () => {
+    const { browser, button, branch } = fixture();
+    browser.net.handle("/api/plan-graph", () => jsonResponse({ reload: true }));
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(button.disabled).toBe(false);
+
+    branch.value = "another";
+    branch.dispatch("change");
+
+    // Closed on the selection itself, before the debounce even elapses: the
+    // previewed plan no longer matches what the button would deploy.
+    expect(button.disabled).toBe(true);
+  });
+
+  it("abandons a queued plan when the page is torn down before it drains", async () => {
+    const { browser, branch } = fixture();
+    let calls = 0;
+    const first = createDeferred<HttpResponse>();
+    browser.net.handle("/api/plan-graph", () => {
+      calls += 1;
+      return calls === 1 ? first.promise : jsonResponse({ reload: true });
+    });
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    teardown();
+
+    first.resolve(jsonResponse({ reload: true }));
+    await flushPromises();
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    // The queued request belonged to a page the user has already left.
+    expect(calls).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
     expect(browser.logger.errors).toHaveLength(0);
   });
 
