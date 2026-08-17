@@ -1233,6 +1233,46 @@ describe("failure card rendering", () => {
     );
   });
 
+  it("clears a previous failure card when the operation is running again", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    controller?.renderProgress(
+      record({
+        terminalState: "failed_partial",
+        failure: { message: "Setup failed." },
+        cleanup: {
+          state: "succeeded_with_warnings",
+          retry: { startsCleanly: false, guidance: "Review first." },
+          removed: [{ target: "rg-dev" }],
+          retained: [{ target: "kv-dev" }],
+          warnings: ["A cleanup warning."]
+        }
+      })
+    );
+    expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("");
+
+    controller?.renderProgress(
+      record({ state: "running", terminalState: null, cleanup: null })
+    );
+
+    expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.failureMessage].textContent).toBe("");
+    expect(browser.els[PROGRESS_IDS.cleanupStatus].textContent).toBe("");
+    expect(browser.els[PROGRESS_IDS.retry].textContent).toBe("");
+    expect(
+      browser.els[PROGRESS_IDS.cleanupWarningsList].children
+    ).toHaveLength(0);
+    expect(browser.els[PROGRESS_IDS.cleanupRemovedList].children).toHaveLength(
+      0
+    );
+    expect(browser.els[PROGRESS_IDS.cleanupRetainedList].children).toHaveLength(
+      0
+    );
+  });
+
   it("hides the failure card outside the two failed terminal states", () => {
     const browser = setup();
     const controller = initializeEnvironmentOperations(browser.context, {
