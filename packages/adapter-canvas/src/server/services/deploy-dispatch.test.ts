@@ -1275,13 +1275,14 @@ describe("deploy dispatch rad commands and secrets", () => {
     expect(logs).toContain('✅ RADIUS_DEPLOY_PARAMS is set on "production".');
   });
 
-  it("retries the secret write with the injected token stripped", async () => {
-    const { input } = request();
+  it("does not rewrite the secret as the machine-wide account when the first write is refused", async () => {
+    // Writing a repository secret as whichever account is merely active is a
+    // silent identity change for a credential-bearing write, so the refusal is
+    // surfaced with account guidance instead of retried.
+    const { input, state } = request();
     const gh = recordingGh([
       OK,
-      { code: 1, stderr: "missing scope", stdout: "" },
-      OK,
-      { code: 0, stdout: "RADIUS_DEPLOY_PARAMS", stderr: "" }
+      { code: 1, stderr: "HTTP 403: Resource not accessible", stdout: "" }
     ]);
     const service = createDeployDispatchService(
       dependencies({
@@ -1296,10 +1297,14 @@ describe("deploy dispatch rad commands and secrets", () => {
       })
     );
 
-    expect(await service.prepareAndDispatch(input)).toMatchObject({
-      dispatched: true
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
     });
-    expect(gh.calls[2].env).toEqual({ PATH: "/usr/bin" });
+    expect(gh.calls.map((call) => call.args[0])).toEqual(["api", "secret"]);
+    expect(state.deployError).toContain("HTTP 403: Resource not accessible");
+    expect(state.deployError).toContain(
+      "pick the GitHub account to act as in the Create Environment dialog"
+    );
   });
 
   it("refuses to start a run whose secret write failed", async () => {
@@ -1554,7 +1559,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
   it("keeps the first failure when the stripped-token retry also fails", async () => {
     const { input, state } = request();
     const gh = recordingGh([
-      { code: 1, stderr: "first failure", stdout: "" },
+      { code: 1, stderr: "first failure: missing workflow scope", stdout: "" },
       { code: 1, stderr: "second failure", stdout: "" }
     ]);
     const service = createDeployDispatchService(
@@ -1565,12 +1570,59 @@ describe("deploy dispatch workflow publication and dispatch", () => {
       dispatched: false
     });
     expect(state.deployError).toContain("first failure");
+    expect(state.deployError).not.toContain("second failure");
   });
 
   it("does not retry when no token is injected", async () => {
     const { input } = request();
-    const gh = recordingGh([{ code: 1, stderr: "boom", stdout: "" }]);
+    const gh = recordingGh([
+      { code: 1, stderr: "missing workflow scope", stdout: "" }
+    ]);
     const service = createDeployDispatchService(dependencies({ ...gh }));
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(gh.calls).toHaveLength(1);
+  });
+
+  it("does not retry a dispatch failure the keyring credential cannot fix", async () => {
+    // Re-running as the machine-wide active account cannot fix a disabled
+    // Actions setting, and would deploy as an identity the user did not choose.
+    const { input, state } = request();
+    const gh = recordingGh([
+      {
+        code: 1,
+        stderr: "HTTP 403: Actions are disabled for this repository",
+        stdout: ""
+      }
+    ]);
+    const service = createDeployDispatchService(
+      dependencies({ ...gh, readProcessEnv: () => ({ GH_TOKEN: "t" }) })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(gh.calls).toHaveLength(1);
+    expect(state.deployError).toContain("Actions are disabled");
+  });
+
+  it("does not re-dispatch a run whose first attempt timed out", async () => {
+    // GitHub may already have accepted the timed-out dispatch, so a retry could
+    // start a second deploy run.
+    const { input } = request();
+    const gh = recordingGh([
+      {
+        code: 1,
+        stderr: "missing workflow scope",
+        stdout: "",
+        timedOut: true
+      }
+    ]);
+    const service = createDeployDispatchService(
+      dependencies({ ...gh, readProcessEnv: () => ({ GH_TOKEN: "t" }) })
+    );
 
     expect(await service.prepareAndDispatch(input)).toEqual({
       dispatched: false

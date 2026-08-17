@@ -7,6 +7,7 @@ import {
 import type { CanvasState, DeployErrorKind } from "../../shared.js";
 import { buildEnvironmentSuffix } from "@radius-project/core/platforms";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
+import { shouldRetryWithKeyringCredential } from "./workflow-credential-fallback.js";
 
 // Second runtime stage of a background deploy: everything between "we have a
 // graph" and "a workflow run exists". Branch reachability, the rad commands and
@@ -25,10 +26,13 @@ export interface DeployDispatchInstanceEntry {
 // `code` is `string | number` because that is what the legacy runner produced: a
 // spawn failure surfaces a string errno like "ENOENT", and every comparison
 // against it is a `=== 0` / `!== 0` check that treats a string as failure.
+// `timedOut` is set when the runner's timeout killed the child, so the
+// command's outcome is unknown and no credential fallback may re-run it.
 export interface DeployCommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
 }
 
 export interface DeployCommandOptions {
@@ -227,15 +231,24 @@ export function createDeployDispatchService(
     );
   }
 
-  // The injected OAuth token often lacks the `workflow` scope (and the scope to
-  // write environment secrets), so a failure is retried once with it stripped
-  // and gh falls back to the keyring credential. Only an improvement is kept.
+  // The injected OAuth token often lacks the `workflow` scope, so a failure that
+  // names that missing scope is retried once with the token stripped and gh
+  // falls back to the keyring credential. Every other failure keeps its own
+  // error: retrying it would run the command as whichever account is active
+  // machine-wide, which is not the account the rest of the deploy acts as. A
+  // timed-out command is never retried — GitHub may already have accepted it.
+  // Only an improvement is kept.
   const withStrippedToken = async (
     first: DeployCommandResult,
     retry: (env: NodeJS.ProcessEnv) => Promise<DeployCommandResult>
   ): Promise<DeployCommandResult> => {
     const env = dependencies.readProcessEnv();
-    if (!(env.GH_TOKEN || env.GITHUB_TOKEN)) return first;
+    const retryAllowed = shouldRetryWithKeyringCredential({
+      stderr: first.stderr,
+      timedOut: first.timedOut,
+      hasInjectedToken: !!(env.GH_TOKEN || env.GITHUB_TOKEN)
+    });
+    if (!retryAllowed) return first;
     const fallbackEnv = { ...env };
     delete fallbackEnv.GH_TOKEN;
     delete fallbackEnv.GITHUB_TOKEN;
@@ -290,13 +303,19 @@ export function createDeployDispatchService(
       repo
     ];
     const payload = JSON.stringify(secretParams);
-    let setRes = await dependencies.runGhWithStdin(setArgs, payload);
+    // No credential fallback here. Writing a repository secret as whichever
+    // account happens to be active machine-wide is a silent identity change for
+    // a credential-bearing write, and the failures a secret write actually
+    // produces ("Resource not accessible…", 403, 404) never identify a missing
+    // `workflow` scope, so a retry could not be justified by the diagnostic
+    // either. The real error is surfaced with the account guidance instead.
+    const setRes = await dependencies.runGhWithStdin(setArgs, payload);
     if (setRes.code !== 0) {
-      setRes = await withStrippedToken(setRes, (env) =>
-        dependencies.runGhWithStdin(setArgs, payload, { env })
-      );
-    }
-    if (setRes.code !== 0) {
+      const env = dependencies.readProcessEnv();
+      const accountHint =
+        env.GH_TOKEN || env.GITHUB_TOKEN ?
+          " The Copilot session token may not be allowed to write this repository's environment secrets; pick the GitHub account to act as in the Create Environment dialog, then retry."
+        : "";
       const failure =
         'Could not provision RADIUS_DEPLOY_PARAMS on environment "' +
         environment +
@@ -304,7 +323,8 @@ export function createDeployDispatchService(
         ((setRes.stderr || "").trim() || "unknown error") +
         ". The deploy would fail for a missing required parameter (" +
         names +
-        "), so it was not started.";
+        "), so it was not started." +
+        accountHint;
       log("❌ " + failure);
       return failure;
     }

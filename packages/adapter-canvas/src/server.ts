@@ -66,7 +66,11 @@ import {
   selectedCreatePullRequest,
   selectedFetchFileFromRepo
 } from "./gh.js";
-import type { CliOptions, SelectedGhExecutor } from "./gh.js";
+import type {
+  CliOptions,
+  GitHubIdentityAccount,
+  SelectedGhExecutor
+} from "./gh.js";
 import {
   buildAppDeleteArgs,
   isAzResourceNotFound,
@@ -254,6 +258,7 @@ import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
+import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
@@ -269,6 +274,9 @@ interface CommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
+  // Set when the runner's timeout killed the child. The command's outcome is
+  // then unknown, so no credential fallback may re-run it.
+  timedOut?: boolean;
 }
 
 export async function persistMutationCheckpoint({
@@ -733,11 +741,7 @@ const deploymentsRoutes = createDeploymentsRoutes({
       const opts: CliOptions = { timeout };
       if (extraEnv) opts.env = extraEnv;
       cliExec("gh", args, opts, (err, stdout, stderr) => {
-        resolve({
-          code: err ? err.code || 1 : 0,
-          stdout: (stdout || "").trim(),
-          stderr: stderr || ""
-        });
+        resolve(toGhCommandResult(err, stdout, stderr, { trimStdout: true }));
       });
     }),
   readProcessEnv: () => process.env,
@@ -2428,11 +2432,7 @@ function runGhForDeploy(
       args,
       { timeout: 30000, ...(options.env ? { env: options.env } : {}) },
       (err, stdout, stderr) => {
-        resolve({
-          code: err ? err.code || 1 : 0,
-          stdout: stdout || "",
-          stderr: stderr || ""
-        });
+        resolve(toGhCommandResult(err, stdout, stderr));
       }
     );
   });
@@ -2451,11 +2451,7 @@ function runGhWithStdinForDeploy(
       args,
       { timeout: 30000, ...(options.env ? { env: options.env } : {}) },
       (err, stdout, stderr) => {
-        resolve({
-          code: err ? err.code || 1 : 0,
-          stdout: stdout || "",
-          stderr: stderr || ""
-        });
+        resolve(toGhCommandResult(err, stdout, stderr));
       }
     );
     if (stdin !== undefined) child.stdin?.end(stdin);
@@ -3387,9 +3383,11 @@ type GhcrPackagePreflightResult =
     };
 
 // Resolve the exact GitHub Packages credential GHCR writes will use, then check
-// that very account for write:packages. The package credential is authoritative:
-// on multi-account machines it can differ from a merely-active gh login, and the
-// packages scope is read keyring-first to match getGhPackageCredentials.
+// that very account for write:packages. The package credential is
+// authoritative: on multi-account machines it can differ from a merely-active
+// gh login, and the credential's own `source` decides both which scopes are
+// read and which remediation is possible — a `gh auth refresh` cannot change an
+// injected session token.
 export async function preflightGhcrPackageWriteAccess(
   loadCredentials: GhcrPackageCredentialLoader = getGhPackageCredentials,
   loadIdentity: GhcrPackageIdentityLoader = getGitHubIdentity,
@@ -3464,10 +3462,18 @@ export async function preflightGhcrPackageWriteAccess(
         "Could not determine which GitHub account the GHCR package credentials belong to. Re-authenticate to GitHub Packages and retry."
     };
   }
+  // The identity reports the scopes of the credential it resolved. Trust it
+  // only when that is the same credential this preflight holds; otherwise fall
+  // back to the account list.
   const ghPkgAccount =
     (ghPkgIdentity.accounts || []).find((a) => a.login === ghPkgLogin) || null;
   const ghPkgHasPackages =
-    ghPkgAccount ? ghPkgAccount.hasPackages
+    (
+      ghPkgIdentity.packagesLogin === ghPkgLogin &&
+      ghPkgIdentity.packagesCredentialSource === packageCredentials.source
+    ) ?
+      ghPkgIdentity.packagesHasWrite
+    : ghPkgAccount ? ghPkgAccount.hasPackages
     : ghPkgIdentity.actingLogin === ghPkgLogin ? ghPkgIdentity.actingHasPackages
     : false;
   if (!ghPkgHasPackages) {
@@ -3475,7 +3481,11 @@ export async function preflightGhcrPackageWriteAccess(
       ok: false,
       status: 403,
       code: "ghcr-scope-required",
-      error: `The account @${ghPkgLogin} needs the write:packages permission to proceed. In the terminal, run: gh auth switch --hostname github.com --user ${ghPkgLogin}. Then run: gh auth refresh --hostname github.com --scopes read:packages,write:packages. This will make @${ghPkgLogin} the active GitHub CLI account if it is not already active.`
+      error: explainMissingPackagesScope(
+        ghPkgLogin,
+        packageCredentials.source,
+        ghPkgIdentity.accounts || []
+      )
     };
   }
 
@@ -3485,6 +3495,32 @@ export async function preflightGhcrPackageWriteAccess(
     identity: ghPkgIdentity,
     login: ghPkgLogin
   };
+}
+
+// Build the remediation for a packages credential that lacks write:packages.
+// The advice depends on WHICH credential was resolved: a stored keyring login
+// can be refreshed in place, while the host-injected session token overrides
+// stored logins and can only be replaced by selecting another stored account —
+// and that is worth suggesting only when such an account actually exists.
+export function explainMissingPackagesScope(
+  login: string,
+  source: GhcrPackageCredentials["source"],
+  accounts: readonly GitHubIdentityAccount[]
+): string {
+  const missing = `The GitHub account @${login} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR.`;
+  if (source === "injected-token") {
+    const alternative =
+      accounts.find(
+        (a) => a.switchable && a.hasPackages && a.login !== login
+      ) || null;
+    return (
+      `${missing} That credential is the Copilot session token, which overrides stored gh logins, so "gh auth refresh" cannot add the scope to it. ` +
+      (alternative ?
+        `Select the stored account @${alternative.login} in the Create Environment dialog, then retry.`
+      : `Run "gh auth login -h github.com -s read:packages -s write:packages" to sign in a stored account that can publish packages, then retry.`)
+    );
+  }
+  return `${missing} Run "gh auth switch -h github.com -u ${login} && gh auth refresh -h github.com -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`;
 }
 
 // How many of an environment's newest deployment records to resolve

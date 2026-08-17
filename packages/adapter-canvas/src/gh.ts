@@ -46,6 +46,9 @@ export interface GitHubIdentityAccount {
   acting: boolean;
 }
 
+export type GhPackageCredentialSource =
+  "keyring" | "injected-token" | "unavailable";
+
 export interface GitHubIdentity {
   actingLogin: string;
   displayLogin: string;
@@ -54,11 +57,24 @@ export interface GitHubIdentity {
   actingHasPackages: boolean;
   packagesLogin: string;
   packagesHasWrite: boolean;
-  packagesCredentialSource: "keyring" | "injected-token" | "unavailable";
+  // The credential GHCR pushes will ACTUALLY use, resolved by the same code
+  // path as getGhPackageCredentials (including its keyring-lookup failure
+  // fallback) rather than predicted from the account list.
+  packagesCredentialSource: GhPackageCredentialSource;
   reason: string;
   accounts: GitHubIdentityAccount[];
   repoAccess?: string;
 }
+
+export interface GhPackageCredentials {
+  token: string;
+  username: string;
+  source: Exclude<GhPackageCredentialSource, "unavailable">;
+}
+
+type GhPackageCredentialResolution =
+  | { ok: true; credentials: GhPackageCredentials }
+  | { ok: false; error: string };
 
 type CliCallback = (
   error: ExecFileException | null,
@@ -97,7 +113,7 @@ export interface SelectedGhExecutor {
     options?: CommandOptions
   ): Promise<SelectedGhCommandResult>;
   verifyIdentity(): Promise<void>;
-  packageCredentials(): { username: string; token: string };
+  packageCredentials(): GhPackageCredentials;
   redact(value: string): string;
   errorMessage(error: unknown): string;
 }
@@ -195,6 +211,14 @@ let _ghSnapshot: GhSnapshot | null = null;
 let _ghSnapshotPromise: Promise<GhSnapshot> | null = null;
 let _ghStrategy: GhTokenStrategy | null = null;
 
+// Single-flight resolution of the credential GHCR/GitHub Packages calls use.
+// Memoized alongside the snapshot (and cleared by the same reset) so the
+// identity endpoints can report the credential that will ACTUALLY be used —
+// including the injected-token fallback taken when the keyring lookup fails —
+// without spawning a second `gh auth token` per read.
+let _ghPackageCredentialPromise: Promise<GhPackageCredentialResolution> | null =
+  null;
+
 // Parse `gh auth status` text into structured accounts. Pure so it can be unit
 // tested against real gh output across versions. Each account block looks like:
 //   ✓ Logged in to github.com account <login> (<source>)
@@ -278,6 +302,20 @@ function ghAuthStatusText(env: NodeJS.ProcessEnv): Promise<string> {
   });
 }
 
+// The `gh auth status` source strings that identify the host-injected
+// environment token. gh prints the exact environment variable name it read the
+// credential from, so the match is exact: a `/TOKEN/i` substring test also
+// matched `oauth_token`, which is how gh reports a STORED credential kept in
+// hosts.yml rather than the OS keyring. Treating that stored login as the
+// injected token made setup resolve the wrong identity (and the wrong package
+// credential) on every machine with secure storage disabled.
+const INJECTED_TOKEN_SOURCES = ["GH_TOKEN", "GITHUB_TOKEN"] as const;
+
+export function isInjectedTokenSource(source: string): boolean {
+  const value = (source || "").trim();
+  return INJECTED_TOKEN_SOURCES.some((name) => name === value);
+}
+
 // Snapshot the accounts gh sees with the injected token present vs stripped.
 // Single-flight and memoized: the FIRST caller starts one probe; every caller
 // (including ones that arrive while it is still in flight) awaits that same
@@ -299,7 +337,7 @@ function ensureGhSnapshot(): Promise<GhSnapshot> {
     const keyringAccts = parseGhAuthStatus(keyringText);
     const tokenAcct =
       hasToken ?
-        withTokenAccts.find((a) => /TOKEN/i.test(a.source)) || null
+        withTokenAccts.find((a) => isInjectedTokenSource(a.source)) || null
       : null;
     const keyringActive =
       keyringAccts.find((a) => a.active) || keyringAccts[0] || null;
@@ -358,6 +396,7 @@ export function resetGhIdentityCache(): void {
   _ghSnapshot = null;
   _ghSnapshotPromise = null;
   _ghStrategy = null;
+  _ghPackageCredentialPromise = null;
 }
 
 // Build the child environment for a `gh` invocation. Strips the injected
@@ -378,6 +417,81 @@ function ghChildEnv(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
+// Which login gh will actually act as, given the snapshot and the resolved
+// strategy. Shared by the identity report and the package-credential resolver so
+// the two can never disagree about who setup runs as.
+function resolveActingLogin(
+  snapshot: GhSnapshot,
+  strategy: GhTokenStrategy
+): string {
+  if (strategy.useKeyring) {
+    return snapshot.keyringActive ? snapshot.keyringActive.login : "";
+  }
+  if (snapshot.tokenAcct) return snapshot.tokenAcct.login;
+  return snapshot.keyringActive ? snapshot.keyringActive.login : "";
+}
+
+// Resolve (single-flight, memoized) the credential GHCR / GitHub Packages
+// operations will use, together with WHICH credential it turned out to be.
+//
+// Preference order:
+//   1. When the acting login has a keyring entry, use its token pinned via
+//      `--user` (a full `gh auth login` credential, which carries the
+//      read:packages/write:packages scopes GHCR needs).
+//   2. Otherwise — including when that keyring lookup yields nothing — fall back
+//      to the injected GH_TOKEN/GITHUB_TOKEN for that same identity. It may lack
+//      package scopes, in which case GHCR returns a scope error the caller
+//      surfaces with refresh guidance.
+// The resolved `source` is what the dialog and the GHCR preflight report, so a
+// failed keyring lookup is never presented as a keyring credential.
+function ensurePackageCredential(): Promise<GhPackageCredentialResolution> {
+  if (_ghPackageCredentialPromise) return _ghPackageCredentialPromise;
+  _ghPackageCredentialPromise = (async () => {
+    const snapshot = await ensureGhSnapshot();
+    const strategy = await ensureGhStrategy();
+    const login = resolveActingLogin(snapshot, strategy);
+    if (!login) {
+      return {
+        ok: false,
+        error:
+          "No GitHub account is available for package setup. Sign in with: gh auth login"
+      };
+    }
+    const hasKeyringEntry = snapshot.keyringAccts.some(
+      (a) => a.login === login
+    );
+    if (hasKeyringEntry) {
+      const token = await ghKeyringTokenForUser(login);
+      if (token) {
+        return {
+          ok: true,
+          credentials: { token, username: login, source: "keyring" }
+        };
+      }
+    }
+    const injected = (
+      process.env.GH_TOKEN ||
+      process.env.GITHUB_TOKEN ||
+      ""
+    ).trim();
+    if (injected) {
+      return {
+        ok: true,
+        credentials: {
+          token: injected,
+          username: login,
+          source: "injected-token"
+        }
+      };
+    }
+    return {
+      ok: false,
+      error: `Could not obtain a GitHub token for @${login}. Sign in with: gh auth login`
+    };
+  })();
+  return _ghPackageCredentialPromise;
+}
+
 // Resolve the effective GitHub identity for setup, plus the switchable account
 // list. `actingLogin` is who gh mutates as (after the strategy decision);
 // `displayLogin` is who the injected token represents (what the host UI shows).
@@ -389,23 +503,31 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
     s.hasToken && s.tokenAcct ? s.tokenAcct.login
     : s.keyringActive ? s.keyringActive.login
     : "";
-  const actingLogin =
-    strat.useKeyring ?
-      s.keyringActive ?
-        s.keyringActive.login
-      : ""
-    : s.tokenAcct ? s.tokenAcct.login
-    : s.keyringActive ? s.keyringActive.login
-    : "";
+  const actingLogin = resolveActingLogin(s, strat);
   // De-duplicated switchable account list. An account is switchable when it
   // exists in the keyring (gh auth switch operates on keyring accounts).
   const keyringLogins = new Set(s.keyringAccts.map((a) => a.login));
+  // GHCR pushes authenticate with the credential ensurePackageCredential
+  // resolves: the keyring token pinned to the login when a keyring entry
+  // exists, else the injected token. So the *packages* scope must be read
+  // keyring-first — reading the token account first (as the gh CLI strategy
+  // does) would misreport for a login whose keyring credential differs from its
+  // injected one.
   const keyringScopesByLogin = new Map(
     s.keyringAccts.map((a) => [a.login, a.scopes])
   );
   const tokenScopesByLogin = new Map(
     s.withTokenAccts.map((a) => [a.login, a.scopes])
   );
+  // The injected token's scopes for a login. One login can be signed in twice
+  // — once as the host-injected session token and once as a stored credential
+  // — and gh prints both blocks under the same host, so `tokenScopesByLogin`
+  // keeps only the last. The parsed token account is the authoritative reading
+  // of the injected credential, so it wins whenever it names this login.
+  const injectedScopesFor = (login: string): string[] | undefined =>
+    s.tokenAcct && s.tokenAcct.login === login ?
+      s.tokenAcct.scopes
+    : tokenScopesByLogin.get(login);
   // Prefer the keyring scopes for a login, else the injected token's. Keys off
   // Map.has, not the value's truthiness: parseGhAuthStatus yields scopes: [] for
   // an account whose "Token scopes:" line is absent/unparsed, and an empty array
@@ -414,11 +536,9 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
   const preferKeyring = (login: string): string[] =>
     keyringScopesByLogin.has(login) ?
       keyringScopesByLogin.get(login)!
-    : (tokenScopesByLogin.get(login) ?? []);
-  // GHCR pushes authenticate with the credential getGhPackageCredentials
-  // resolves: the keyring token pinned to the login when a keyring entry exists,
-  // else the injected token. Packages auth is independent of the workflow token
-  // strategy, so the write:packages scope is always resolved keyring-first.
+    : (injectedScopesFor(login) ?? []);
+  // Packages auth is independent of the workflow token strategy, so the
+  // write:packages scope is always resolved keyring-first.
   const packagesScopesFor = (login: string): string[] => preferKeyring(login);
   // The workflow scope must be read from the credential that will ACTUALLY act
   // as a login — the one decideGhTokenStrategy selects — not blanket
@@ -441,12 +561,37 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
   //     credential (decideGhTokenStrategy), so its keyring scopes apply.
   const workflowScopesFor = (login: string): string[] => {
     if (login === actingLogin) {
-      const selected =
-        strat.useKeyring ? keyringScopesByLogin : tokenScopesByLogin;
-      if (selected.has(login)) return selected.get(login)!;
+      if (strat.useKeyring) {
+        if (keyringScopesByLogin.has(login)) {
+          return keyringScopesByLogin.get(login)!;
+        }
+      } else {
+        const injected = injectedScopesFor(login);
+        if (injected !== undefined) return injected;
+      }
     }
     return preferKeyring(login);
   };
+  // Resolve the credential that will really publish, so the page can name it
+  // and give guidance that applies to it. An injected session token overrides
+  // stored gh logins, and telling a customer to run `gh auth refresh` for a
+  // credential gh cannot change is a dead end.
+  const packagesResolution = await ensurePackageCredential();
+  const packagesLogin =
+    packagesResolution.ok ?
+      packagesResolution.credentials.username
+    : actingLogin;
+  const packagesCredentialSource: GhPackageCredentialSource =
+    packagesResolution.ok ?
+      packagesResolution.credentials.source
+    : "unavailable";
+  const resolvedPackagesScopes =
+    (packagesCredentialSource === "keyring" ?
+      keyringScopesByLogin.get(packagesLogin)
+    : packagesCredentialSource === "injected-token" ?
+      injectedScopesFor(packagesLogin)
+    : undefined) || [];
+  const packagesHasWrite = resolvedPackagesScopes.includes("write:packages");
   const seen = new Set<string>();
   const accounts: GitHubIdentityAccount[] = [];
   for (const a of [...s.withTokenAccts, ...s.keyringAccts]) {
@@ -455,25 +600,30 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
     accounts.push({
       login: a.login,
       hasWorkflow: workflowScopesFor(a.login).includes("workflow"),
-      hasPackages: packagesScopesFor(a.login).includes("write:packages"),
+      // The account the packages credential resolved for reports the scopes of
+      // that exact credential; every other account keeps the keyring-first
+      // prediction of what selecting it would use.
+      hasPackages:
+        (
+          a.login === packagesLogin &&
+          packagesCredentialSource !== "unavailable"
+        ) ?
+          packagesHasWrite
+        : packagesScopesFor(a.login).includes("write:packages"),
       switchable: keyringLogins.has(a.login),
       acting: a.login === actingLogin
     });
   }
   const actingAcct = accounts.find((a) => a.login === actingLogin) || null;
-  const packagesAccount = actingAcct;
   return {
     actingLogin,
     displayLogin,
     mismatch: !!(actingLogin && displayLogin && actingLogin !== displayLogin),
     actingHasWorkflow: !!(actingAcct && actingAcct.hasWorkflow),
     actingHasPackages: !!(actingAcct && actingAcct.hasPackages),
-    packagesLogin: actingLogin,
-    packagesHasWrite: !!(packagesAccount && packagesAccount.hasPackages),
-    packagesCredentialSource:
-      packagesAccount?.switchable ? "keyring"
-      : s.hasToken ? "injected-token"
-      : "unavailable",
+    packagesLogin,
+    packagesHasWrite,
+    packagesCredentialSource,
     reason: strat.reason,
     accounts
   };
@@ -713,7 +863,14 @@ export async function createSelectedGhExecutor(
     run,
     runOrThrow,
     verifyIdentity,
-    packageCredentials: () => ({ username: login, token }),
+    // The executor pins one credential, so it also names which one it is: a
+    // `gh auth refresh` can repair a keyring login but never an injected
+    // session token, and the GHCR preflight's guidance turns on that.
+    packageCredentials: () => ({
+      username: login,
+      token,
+      source: credentialSource === "keyring" ? "keyring" : "injected-token"
+    }),
     redact,
     errorMessage: (error) => selectedErrorMessage(error, redact)
   };
@@ -907,36 +1064,14 @@ export function switchGhKeyringAccount(
 // login that GHCR rejects ("As an Enterprise Managed User, you cannot access
 // this content") even though the rest of setup runs as the intended account.
 //
-// Preference order:
-//   1. When the acting login has a keyring entry, use its token pinned via
-//      `--user` (a full `gh auth login` credential, which carries the
-//      read:packages/write:packages scopes GHCR needs).
-//   2. Otherwise fall back to the injected GH_TOKEN/GITHUB_TOKEN for that same
-//      identity. It may lack package scopes, in which case GHCR returns a scope
-//      error the caller surfaces with refresh guidance.
-// Throws when no credential can be resolved. `username` is always the acting
-// login so the Basic-auth pair matches the token.
-export async function getGhPackageCredentials(): Promise<{
-  token: string;
-  username: string;
-}> {
-  const id = await getGitHubIdentity();
-  const login = id.actingLogin;
-  if (!login) {
-    throw new Error(
-      "No GitHub account is available for package setup. Authenticate with GitHub CLI, then re-check. Note: gh auth login changes the machine-wide active account for github.com."
-    );
-  }
-  const acct = (id.accounts || []).find((a) => a.login === login) || null;
-  if (acct && acct.switchable) {
-    const token = await ghKeyringTokenForUser(login);
-    if (token) return { token, username: login };
-  }
-  const injected = getInjectedGhToken();
-  if (injected) return { token: injected, username: login };
-  throw new Error(
-    `Could not obtain a GitHub token for @${login}. Authenticate that account with GitHub CLI, then re-check. Note: gh auth login changes the machine-wide active account for github.com.`
-  );
+// See ensurePackageCredential for the resolution order. Throws when no
+// credential can be resolved. `username` is always the acting login so the
+// Basic-auth pair matches the token, and `source` names the credential that was
+// actually resolved so callers can give guidance that applies to it.
+export async function getGhPackageCredentials(): Promise<GhPackageCredentials> {
+  const resolution = await ensurePackageCredential();
+  if (!resolution.ok) throw new Error(resolution.error);
+  return resolution.credentials;
 }
 
 // Returns true when cmd refers to the gh CLI regardless of whether the caller

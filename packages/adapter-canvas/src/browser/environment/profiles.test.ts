@@ -547,7 +547,7 @@ describe("githubIdentityNote", () => {
     );
   });
 
-  it("does not offer a gh command for a session token gh cannot repair", () => {
+  it("does not offer a gh switch for a session token gh cannot repair", () => {
     const note = githubIdentityNote({
       ...base,
       actingHasPackages: true,
@@ -557,8 +557,65 @@ describe("githubIdentityNote", () => {
     });
     expect(note.tone).toBe("warning");
     expect(note.showRecheck).toBe(true);
-    expect(note.specs[0].text).toContain("The Copilot session token for @alice");
+    expect(note.specs[0].text).toContain(
+      "The Copilot session token for @alice"
+    );
+    expect(note.specs[0].text).toContain(
+      "No stored GitHub CLI account can publish packages either"
+    );
     expect(note.specs[0].text).not.toContain("gh auth switch -h github.com");
+  });
+
+  it("names a stored account that can publish instead of the session token", () => {
+    const note = githubIdentityNote({
+      ...base,
+      actingHasPackages: true,
+      packagesLogin: "alice",
+      packagesHasWrite: false,
+      packagesCredentialSource: "injected-token",
+      accounts: [
+        {
+          login: "alice",
+          hasWorkflow: true,
+          hasPackages: true,
+          switchable: true
+        },
+        {
+          login: "locked",
+          hasWorkflow: true,
+          hasPackages: true,
+          switchable: false
+        },
+        {
+          login: "publisher",
+          hasWorkflow: true,
+          hasPackages: true,
+          switchable: true
+        }
+      ]
+    });
+    expect(note.specs[0].text).toContain(
+      "Select the stored account @publisher"
+    );
+  });
+
+  it("keeps the workflow guidance alongside the packages warning", () => {
+    const note = githubIdentityNote({
+      ...base,
+      actingHasWorkflow: false,
+      actingHasPackages: true,
+      packagesLogin: "alice",
+      packagesHasWrite: false,
+      packagesCredentialSource: "injected-token"
+    });
+    // The workflow scope lives on a different credential, so its fix must not
+    // disappear with the packages warning.
+    expect(note.specs[0].text).toContain(
+      "the credential for @alice is missing the workflow scope"
+    );
+    expect(note.specs[0].text).toContain(
+      "gh auth refresh -h github.com -s workflow"
+    );
   });
 
   it("names the acting login when an injected token reports no publisher", () => {
@@ -567,7 +624,9 @@ describe("githubIdentityNote", () => {
       packagesHasWrite: false,
       packagesCredentialSource: "injected-token"
     });
-    expect(note.specs[0].text).toContain("The Copilot session token for @alice");
+    expect(note.specs[0].text).toContain(
+      "The Copilot session token for @alice"
+    );
   });
 
   it("trusts the reported publisher over the acting account's own scope", () => {

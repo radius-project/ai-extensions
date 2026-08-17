@@ -7,11 +7,14 @@ import type { IncomingMessage } from "node:http";
 
 // The gh/az command shape every runner in this slice resolves to. `code` is
 // `string | number` because the legacy route compared it against both `0` and
-// `"0"` depending on which helper produced it.
+// `"0"` depending on which helper produced it. `timedOut` is set when the
+// runner's own timeout killed the child, so the command's outcome is unknown
+// and no credential fallback may re-run it.
 export interface CreateEnvironmentCommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
 }
 
 // Options forwarded to the CLI runner. Only `timeout` and `env` are ever set by
@@ -34,7 +37,15 @@ export interface CreateEnvironmentCliExec {
     args: string[],
     options: CreateEnvironmentCliOptions,
     callback: (
-      error: (Error & { code?: string | number | null }) | null,
+      // `killed`/`signal` are how execFile reports a child it terminated when
+      // the timeout elapsed; the runner turns them into `timedOut`.
+      error:
+        | (Error & {
+            code?: string | number | null;
+            killed?: boolean;
+            signal?: NodeJS.Signals | null;
+          })
+        | null,
       stdout: string,
       stderr: string
     ) => void

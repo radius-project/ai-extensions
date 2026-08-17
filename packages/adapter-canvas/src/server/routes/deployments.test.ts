@@ -1658,7 +1658,10 @@ describe("deployments routes (SU-06)", () => {
             return Promise.resolve({
               code: 1,
               stdout: "",
-              stderr: calls === 1 ? "first failure" : "second failure"
+              stderr:
+                calls === 1 ?
+                  "first failure: missing workflow scope"
+                : "second failure"
             });
           }
         })
@@ -1666,6 +1669,56 @@ describe("deployments routes (SU-06)", () => {
 
       expect(calls).toBe(2);
       expect(JSON.parse(recording.body).error).toContain("first failure");
+      expect(JSON.parse(recording.body).error).not.toContain("second failure");
+    });
+
+    it("does not re-dispatch a delete whose first attempt timed out", async () => {
+      // A timed-out dispatch may already have been accepted, so a retry could
+      // start a second delete run.
+      const { recording, context: ctx } = deleteContext();
+      let calls = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({ GH_TOKEN: "t" }),
+          runGh: () => {
+            calls += 1;
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: "missing workflow scope",
+              timedOut: true
+            });
+          }
+        })
+      );
+
+      expect(calls).toBe(1);
+      expect(recording.status).toBe(400);
+    });
+
+    it("does not re-dispatch a failure the keyring credential cannot fix", async () => {
+      const { recording, context: ctx } = deleteContext();
+      const stderrs: string[] = [];
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({ GH_TOKEN: "t" }),
+          runGh: () => {
+            stderrs.push("call");
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: "HTTP 403: Actions are disabled for this repository"
+            });
+          }
+        })
+      );
+
+      expect(stderrs).toHaveLength(1);
+      expect(JSON.parse(recording.body).error).toContain(
+        "Actions are disabled for this repository"
+      );
     });
 
     it("retries a not-found race only when the workflow was just created", async () => {

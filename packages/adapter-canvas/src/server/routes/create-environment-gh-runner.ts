@@ -1,3 +1,4 @@
+import { toGhCommandResult } from "../services/gh-command-result.js";
 import type {
   CreateEnvironmentCliExec,
   CreateEnvironmentCliOptions,
@@ -42,15 +43,10 @@ export interface WorkflowScopeGhRunner {
   ): Promise<CreateEnvironmentCommandResult>;
 }
 
-// Pure predicate, exported so both this module and the workflow committer can
-// distinguish a missing token scope (which a pull request cannot fix) from a
-// protected-branch refusal (which it can).
-export function needsWorkflowScope(stderr?: string): boolean {
-  return (
-    /workflow.{0,20}scope/i.test(stderr || "") ||
-    /without .?workflow.? scope/i.test(stderr || "")
-  );
-}
+// Pure predicate, re-exported so the workflow committer and publisher keep
+// importing it from this slice while the canonical implementation lives with
+// the fallback decision it belongs to.
+export { needsWorkflowScope } from "../services/workflow-credential-fallback.js";
 
 export function createWorkflowScopeGhRunner(
   ports: WorkflowScopeGhRunnerPorts,
@@ -75,11 +71,7 @@ export function createWorkflowScopeGhRunner(
         args,
         { timeout: 30000, ...(extraOpts || {}) },
         (err, stdout, stderr) => {
-          resolve({
-            code: err ? err.code || 1 : 0,
-            stdout: stdout || "",
-            stderr: stderr || ""
-          });
+          resolve(toGhCommandResult(err, stdout, stderr));
         }
       );
       if (stdin !== undefined) child.stdin?.end(stdin);

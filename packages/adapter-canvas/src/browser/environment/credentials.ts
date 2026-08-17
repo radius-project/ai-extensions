@@ -57,10 +57,17 @@ export type VerifiedCredentials =
       readonly region: string;
     };
 
+export interface GitHubPackagesAccount {
+  readonly login: string;
+  readonly hasPackages: boolean;
+  readonly switchable: boolean;
+}
+
 export interface GitHubPackagesIdentity {
   error: string;
   actingLogin: string;
   actingHasPackages: boolean;
+  accounts: readonly GitHubPackagesAccount[];
   // The credential that will actually publish the package, which is not always
   // the acting login: a Copilot session token overrides stored `gh` logins.
   packagesLogin: string;
@@ -155,13 +162,24 @@ export function credentialRowsMarkup(
 export function parseGitHubPackagesIdentity(
   payload: unknown
 ): GitHubPackagesIdentity {
-  const packagesHasWrite = isRecord(payload) ? payload["packagesHasWrite"] : (
-    undefined
-  );
+  const packagesHasWrite =
+    isRecord(payload) ? payload["packagesHasWrite"] : undefined;
+  const accounts: GitHubPackagesAccount[] = [];
+  for (const entry of readArray(payload, "accounts")) {
+    if (!isRecord(entry)) continue;
+    const login = readString(entry, "login");
+    if (login === "") continue;
+    accounts.push({
+      login,
+      hasPackages: readBoolean(entry, "hasPackages"),
+      switchable: readBoolean(entry, "switchable")
+    });
+  }
   return {
     error: readString(payload, "error"),
     actingLogin: readString(payload, "actingLogin"),
     actingHasPackages: readBoolean(payload, "actingHasPackages"),
+    accounts,
     packagesLogin: readString(payload, "packagesLogin"),
     packagesHasWrite:
       typeof packagesHasWrite === "boolean" ? packagesHasWrite : undefined,
@@ -180,9 +198,7 @@ export function packagesCredentialCanWrite(
   identity: GitHubPackagesIdentity
 ): boolean {
   if (identity.packagesHasWrite === true) return true;
-  return (
-    identity.packagesCredentialSource === "" && identity.actingHasPackages
-  );
+  return identity.packagesCredentialSource === "" && identity.actingHasPackages;
 }
 
 function packagesCredentialLogin(identity: GitHubPackagesIdentity): string {
@@ -206,13 +222,16 @@ export function renderGitHubAccessView(
   }
   const login = packagesCredentialLogin(identity);
   if (packagesCredentialCanWrite(identity)) {
+    const source =
+      identity.packagesCredentialSource === "injected-token" ?
+        "the Copilot session token"
+      : "the stored GitHub CLI credential";
     return {
       packagesVerified: true,
       statusText: "",
-      statusHtml:
-        `✓ GitHub Packages access verified for <strong>@${escapeBrowserHtml(
-          login
-        )}</strong> using the stored GitHub CLI credential.`,
+      statusHtml: `✓ GitHub Packages access verified for <strong>@${escapeBrowserHtml(
+        login
+      )}</strong> using ${source}.`,
       statusColor: "var(--rad-primary)",
       commandVisible: false,
       command: "",
@@ -220,8 +239,15 @@ export function renderGitHubAccessView(
     };
   }
   if (identity.packagesCredentialSource === "injected-token") {
-    // An injected session token cannot be repaired with `gh`, so offering the
-    // switch/refresh command would send the customer down a dead end.
+    // An injected session token cannot be repaired with `gh auth switch` or
+    // `gh auth refresh`, so the picker is only worth naming when a stored,
+    // switchable account already holds write:packages. Otherwise the only real
+    // fix is signing one in with those scopes.
+    const alternative =
+      identity.accounts.find(
+        (account) =>
+          account.switchable && account.hasPackages && account.login !== login
+      ) ?? null;
     return {
       packagesVerified: false,
       statusText: "",
@@ -230,12 +256,18 @@ export function renderGitHubAccessView(
           login
         )}</strong> cannot publish packages. This token overrides stored ` +
         "<code>gh</code> logins, so <code>gh auth switch</code> and " +
-        "<code>gh auth refresh</code> do not change it. Select a stored " +
-        "account in Create Environment, or restart the session with a token " +
-        "that has <code>write:packages</code>.",
+        "<code>gh auth refresh</code> do not change it. " +
+        (alternative ?
+          `Select the stored account <strong>@${escapeBrowserHtml(
+            alternative.login
+          )}</strong> in Create Environment, or restart the session with a token that has <code>write:packages</code>.`
+        : "No stored GitHub CLI account can publish packages either — run the command below to sign one in, then retry, or restart the session with a token that has <code>write:packages</code>."),
       statusColor: "var(--rad-warning)",
-      commandVisible: false,
-      command: "",
+      commandVisible: alternative === null,
+      command:
+        alternative === null ?
+          "gh auth login -h github.com -s read:packages -s write:packages"
+        : "",
       retryVisible: true
     };
   }
@@ -492,6 +524,7 @@ export function initializeCredentialsPane(
           error: "GitHub identity check failed",
           actingLogin: "",
           actingHasPackages: false,
+          accounts: [],
           packagesLogin: "",
           packagesHasWrite: undefined,
           packagesCredentialSource: ""
