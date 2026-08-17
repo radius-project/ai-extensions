@@ -174,21 +174,18 @@ describe("environmentsPaneMarkup", () => {
     expect(stepTwo).toContain('id="deploy-btn"');
   });
 
-  it("orders the two connection sides as one sequence", () => {
+  it("presents the two connection sides as one trust, not a choice", () => {
     const html = environmentsPaneMarkup(baseOptions);
     const conn = html.slice(html.indexOf('class="rad-conn"'));
-    const github = conn.indexOf('<span class="rad-conn__ord">First</span>');
-    const cloud = conn.indexOf('<span class="rad-conn__ord">Then</span>');
+    const github = conn.indexOf("GitHub");
+    const cloud = conn.indexOf("Cloud credentials");
     expect(github).toBeGreaterThan(-1);
     expect(cloud).toBeGreaterThan(github);
-    expect(conn.slice(github, cloud)).toContain("GitHub");
-    expect(conn.slice(cloud)).toContain("Cloud credentials");
-  });
-
-  it("says both connection sides are required rather than alternatives", () => {
-    const html = environmentsPaneMarkup(baseOptions);
+    // The cloud side only echoes the profile chosen in step 1, so it carries no
+    // ordinal of its own.
+    expect(conn).not.toContain("rad-conn__ord");
     expect(html).toContain(
-      "Both sides are required: confirm the GitHub account first, then the cloud credentials it deploys with."
+      "These are the two ends of that trust, not a choice between them: the cloud credentials are the profile you selected, shown here to confirm."
     );
   });
 });
