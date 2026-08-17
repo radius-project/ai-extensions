@@ -372,12 +372,20 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
   const tokenScopesByLogin = new Map(
     s.withTokenAccts.map((a) => [a.login, a.scopes])
   );
+  // Prefer the keyring scopes for a login, else the injected token's. Keys off
+  // Map.has, not the value's truthiness: parseGhAuthStatus yields scopes: [] for
+  // an account whose "Token scopes:" line is absent/unparsed, and an empty array
+  // is truthy — a `get(login) || …` chain would treat that as "resolved" and
+  // never consult the other credential. has() makes presence explicit instead.
+  const preferKeyring = (login: string): string[] =>
+    keyringScopesByLogin.has(login) ?
+      keyringScopesByLogin.get(login)!
+    : (tokenScopesByLogin.get(login) ?? []);
   // GHCR pushes authenticate with the credential getGhPackageCredentials
   // resolves: the keyring token pinned to the login when a keyring entry exists,
   // else the injected token. Packages auth is independent of the workflow token
   // strategy, so the write:packages scope is always resolved keyring-first.
-  const packagesScopesFor = (login: string): string[] =>
-    keyringScopesByLogin.get(login) || tokenScopesByLogin.get(login) || [];
+  const packagesScopesFor = (login: string): string[] => preferKeyring(login);
   // The workflow scope must be read from the credential that will ACTUALLY act
   // as a login — the one decideGhTokenStrategy selects — not blanket
   // keyring-first. gh keeps the injected token when it already carries workflow
@@ -389,27 +397,21 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
   // the injected token has workflow and its same-login keyring credential does
   // not — telling the user to run a refresh for a scope the acting credential
   // already has.
-  //   - Acting login: use the credential the resolved strategy selected
-  //     (strat.useKeyring ? keyring : token) — exactly what gh will run as.
+  //   - Acting login: read exactly the credential the resolved strategy selected
+  //     (strat.useKeyring ? keyring : token) — what gh will run as. Do NOT cross
+  //     to the other credential when the selected one is present; its scopes are
+  //     what runs, even if empty. Only fall back if the selected credential has
+  //     no entry for the login at all (unusual).
   //   - Any other switchable account is a keyring login; switching to it sets a
   //     preference other than the token login, which forces the keyring
   //     credential (decideGhTokenStrategy), so its keyring scopes apply.
   const workflowScopesFor = (login: string): string[] => {
     if (login === actingLogin) {
-      const chosen =
-        strat.useKeyring ?
-          keyringScopesByLogin.get(login)
-        : tokenScopesByLogin.get(login);
-      return (
-        chosen ||
-        keyringScopesByLogin.get(login) ||
-        tokenScopesByLogin.get(login) ||
-        []
-      );
+      const selected =
+        strat.useKeyring ? keyringScopesByLogin : tokenScopesByLogin;
+      if (selected.has(login)) return selected.get(login)!;
     }
-    return (
-      keyringScopesByLogin.get(login) || tokenScopesByLogin.get(login) || []
-    );
+    return preferKeyring(login);
   };
   const seen = new Set<string>();
   const accounts: GitHubIdentityAccount[] = [];

@@ -738,6 +738,11 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
     });
     const id = await getGitHubIdentity();
     expect(id.actingLogin).toBe("pubuser");
+    // Pin the configuration under test: pubuser is the active keyring account,
+    // so the strategy falls back to it (reporting and the acting credential
+    // agree here). Guards against the fixture drifting into a case where they
+    // diverge without the test noticing.
+    expect(id.reason).toBe("token-missing-workflow");
     expect(id.actingHasWorkflow).toBe(true);
     const pub = id.accounts.find((a) => a.login === "pubuser");
     expect(pub).toBeDefined();
