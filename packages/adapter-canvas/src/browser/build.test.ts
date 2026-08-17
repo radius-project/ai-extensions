@@ -67,19 +67,28 @@ const HEARTBEAT_SPEC: BrowserEntrySpec = {
 };
 
 describe("browser entry specifications", () => {
-  it("registers only the implemented heartbeat entry", () => {
-    expect(BROWSER_ENTRY_NAMES).toEqual(["heartbeat"]);
+  it("registers every implemented repository and graph entry exactly once", () => {
+    expect(BROWSER_ENTRY_NAMES).toEqual([
+      "graph",
+      "heartbeat",
+      "graph-page",
+      "planned-graph-page",
+      "graph-diff-page",
+      "deployed-graph-page"
+    ]);
     expect(SHARED_ENTRY_GLOBALS).toEqual([PAGE_REGISTRY_GLOBAL]);
-    expect(BROWSER_ENTRIES).toEqual([
-      {
-        name: "heartbeat",
-        file: "./entries/heartbeat.ts",
-        initializer: "installHeartbeatEntry",
-        globals: []
-      }
+    expect(BROWSER_ENTRIES.map((entry) => entry.initializer)).toEqual([
+      "installGraphEntry",
+      "installHeartbeatEntry",
+      "installGraphPageEntry",
+      "installPlannedGraphPageEntry",
+      "installGraphDiffPageEntry",
+      "installDeployedGraphPageEntry"
     ]);
     expect(new Set(BROWSER_ENTRY_NAMES).size).toBe(BROWSER_ENTRY_NAMES.length);
-    expect(browserEntrySpec("heartbeat")).toBe(BROWSER_ENTRIES[0]);
+    expect(browserEntrySpec("heartbeat")).toBe(
+      BROWSER_ENTRIES.find((entry) => entry.name === "heartbeat")
+    );
     expect(() => browserEntrySpec("missing")).toThrow(
       'Unknown browser entry "missing".'
     );
@@ -185,20 +194,22 @@ describe("inline browser safety", () => {
 });
 
 describe("in-memory browser compiler", () => {
-  it("compiles deterministic, parseable, self-contained heartbeat bytes", () => {
+  it("compiles deterministic, parseable, self-contained entry bytes", () => {
     const first = compileAllBrowserEntries();
     const second = compileAllBrowserEntries();
-    const heartbeat = compileBrowserEntry("heartbeat");
 
-    expect(Object.keys(first)).toEqual(["heartbeat"]);
+    expect(Object.keys(first)).toEqual(BROWSER_ENTRY_NAMES);
     expect(second).toEqual(first);
-    expect(heartbeat).toBe(first.heartbeat);
-    expect(heartbeat.length).toBeGreaterThan(0);
-    expect(() => new Function(heartbeat)).not.toThrow();
-    expect(() => assertInlineSafe("heartbeat", heartbeat)).not.toThrow();
-    expect(() => assertSelfContained("heartbeat", heartbeat)).not.toThrow();
-    expect(heartbeat).not.toContain(".mjs");
-    expect(heartbeat).not.toMatch(/<script[^>]+src=/);
+    for (const name of BROWSER_ENTRY_NAMES) {
+      const code = compileBrowserEntry(name);
+      expect(code).toBe(first[name]);
+      expect(code.length).toBeGreaterThan(0);
+      expect(() => new Function(code)).not.toThrow();
+      expect(() => assertInlineSafe(name, code)).not.toThrow();
+      expect(() => assertSelfContained(name, code)).not.toThrow();
+      expect(code).not.toContain(".mjs");
+      expect(code).not.toMatch(/<script[^>]+src=/);
+    }
   });
 
   it("emits identical bytes from repository and package working directories", () => {
@@ -265,18 +276,29 @@ describe("in-memory browser compiler", () => {
     expect(() => compileBrowserEntrySpec(spec)).toThrow(error);
   });
 
-  it("publishes only the real entry's intended shared globals when executed", () => {
+  it.each(BROWSER_ENTRIES)(
+    "publishes only $name's intended globals when executed",
+    (entry) => {
+      const browser = createFakeBrowserScope();
+      const before = new Set(Object.keys(browser.scope));
+
+      new Function("globalThis", compileBrowserEntry(entry.name))(
+        browser.scope
+      );
+
+      const published = Object.keys(browser.scope)
+        .filter((name) => !before.has(name))
+        .sort();
+      expect(published).toEqual(
+        [...entry.globals, ...SHARED_ENTRY_GLOBALS].sort()
+      );
+      resolvePageRegistry(browser.scope).teardownAll();
+    }
+  );
+
+  it("starts the heartbeat when its compiled entry executes", () => {
     const browser = createFakeBrowserScope();
-    const before = new Set(Object.keys(browser.scope));
-
     new Function("globalThis", compileBrowserEntry("heartbeat"))(browser.scope);
-
-    const published = Object.keys(browser.scope)
-      .filter((name) => !before.has(name))
-      .sort();
-    expect(published).toEqual(
-      [...BROWSER_ENTRIES[0].globals, ...SHARED_ENTRY_GLOBALS].sort()
-    );
     expect(browser.clock.intervals).toBe(1);
     resolvePageRegistry(browser.scope).teardownAll();
   });
@@ -292,11 +314,14 @@ describe("in-memory browser compiler", () => {
     expect(compiler.compile("heartbeat")).toBe("(() => {})();");
     expect(compiler.compile("heartbeat")).toBe("(() => {})();");
     expect(calls).toHaveLength(1);
-    expect(compiler.compileAll()).toEqual({ heartbeat: "(() => {})();" });
-    expect(compiler.compileAll()).toEqual({ heartbeat: "(() => {})();" });
-    expect(calls).toHaveLength(3);
+    const allEntries = Object.fromEntries(
+      BROWSER_ENTRY_NAMES.map((name) => [name, "(() => {})();"])
+    );
+    expect(compiler.compileAll()).toEqual(allEntries);
+    expect(compiler.compileAll()).toEqual(allEntries);
+    expect(calls).toHaveLength(1 + BROWSER_ENTRY_NAMES.length * 2);
     expect(compiler.compile("heartbeat")).toBe("(() => {})();");
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(1 + BROWSER_ENTRY_NAMES.length * 2);
   });
 
   it("passes an explicit browser-only build contract to esbuild", () => {

@@ -329,7 +329,7 @@ describe("P0-C built Radius extension artifact", () => {
     expect(bundle).not.toMatch(/from\s*["']\.[^"']*pages[^"']*["']/);
   });
 
-  it("embeds the compiled heartbeat and ships no browser compiler or runtime asset", () => {
+  it("embeds compiled browser entries and ships no compiler or runtime asset", () => {
     assertCurrentArtifact();
     const bundle = readFileSync(ARTIFACT, "utf8");
     const sourceMap = JSON.parse(readFileSync(SOURCE_MAP, "utf8")) as {
@@ -342,7 +342,14 @@ describe("P0-C built Radius extension artifact", () => {
       source.includes("packages/adapter-canvas/src/browser/")
     );
 
-    expect(BROWSER_ENTRY_NAMES).toEqual(["heartbeat"]);
+    expect(BROWSER_ENTRY_NAMES).toEqual([
+      "graph",
+      "heartbeat",
+      "graph-page",
+      "planned-graph-page",
+      "graph-diff-page",
+      "deployed-graph-page"
+    ]);
     expect(browserSources).toHaveLength(2);
     expect(browserSources).toEqual(
       expect.arrayContaining([
@@ -383,6 +390,13 @@ describe("P0-C built Radius extension artifact", () => {
     )}\n</script>`;
     expect(smoke.renderedPage.split(marker)).toHaveLength(2);
     expect(smoke.renderedPage).toContain(expectedTag);
+    for (const name of ["graph"] as const) {
+      const entryMarker = browserEntryMarker(name);
+      expect(smoke.renderedPage.split(`\n${entryMarker}\n`)).toHaveLength(2);
+      expect(smoke.renderedPage).toContain(
+        `<script>\n${entryMarker}\n${compileBrowserEntry(name)}\n</script>`
+      );
+    }
     expect(smoke.renderedPage).not.toMatch(/<script[^>]+src=/);
   });
 });

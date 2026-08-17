@@ -11,9 +11,12 @@ import type { BindingRegistry, BrowserContext } from "./ports.js";
 
 export interface PageRegistry {
   readonly bindings: BindingRegistry;
-  register(teardown: BrowserTeardown): void;
+  register(teardown: BrowserTeardown, lifetime: BrowserLifetime): void;
+  teardownPage(): void;
   teardownAll(): void;
 }
+
+export type BrowserLifetime = "page" | "document";
 
 function errorDetail(error: unknown): string {
   return String(error).replace(/^[A-Za-z]*Error:\s*/, "");
@@ -21,26 +24,42 @@ function errorDetail(error: unknown): string {
 
 function createPageRegistry(): PageRegistry {
   const bindings = createBindingRegistry();
-  const teardowns: BrowserTeardown[] = [];
+  const teardowns: Array<{
+    teardown: BrowserTeardown;
+    lifetime: BrowserLifetime;
+  }> = [];
+
+  function teardownWhere(
+    shouldRun: (lifetime: BrowserLifetime) => boolean
+  ): void {
+    const failures: unknown[] = [];
+    for (let index = teardowns.length - 1; index >= 0; index--) {
+      const registered = teardowns[index];
+      if (!shouldRun(registered.lifetime)) continue;
+      teardowns.splice(index, 1);
+      try {
+        registered.teardown();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(
+        `Radius page teardown failed: ${failures.map(errorDetail).join("; ")}`
+      );
+    }
+  }
+
   return {
     bindings,
-    register(teardown) {
-      teardowns.push(teardown);
+    register(teardown, lifetime) {
+      teardowns.push({ teardown, lifetime });
+    },
+    teardownPage() {
+      teardownWhere((lifetime) => lifetime === "page");
     },
     teardownAll() {
-      const failures: unknown[] = [];
-      for (const teardown of teardowns.splice(0).reverse()) {
-        try {
-          teardown();
-        } catch (error) {
-          failures.push(error);
-        }
-      }
-      if (failures.length > 0) {
-        throw new Error(
-          `Radius page teardown failed: ${failures.map(errorDetail).join("; ")}`
-        );
-      }
+      teardownWhere(() => true);
     }
   };
 }
@@ -59,6 +78,7 @@ function isPageRegistry(value: unknown): value is PageRegistry {
     isRecord(value) &&
     isBindingRegistry(value.bindings) &&
     isCallable(value.register) &&
+    isCallable(value.teardownPage) &&
     isCallable(value.teardownAll)
   );
 }
@@ -95,11 +115,12 @@ export function resolvePageContext(scope: unknown): BrowserContext {
 
 export function runBrowserEntry(
   scope: unknown,
-  install: BrowserInstaller
+  install: BrowserInstaller,
+  lifetime: BrowserLifetime = "page"
 ): BrowserTeardown {
   const registry = resolvePageRegistry(scope);
   const context = resolveBrowserContext(scope, registry.bindings);
   const teardown = install(context, scope);
-  if (teardown !== NOOP_TEARDOWN) registry.register(teardown);
+  if (teardown !== NOOP_TEARDOWN) registry.register(teardown, lifetime);
   return teardown;
 }

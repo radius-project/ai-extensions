@@ -5,7 +5,13 @@ import { fileURLToPath } from "node:url";
 
 const BROWSER_SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 
-export type BrowserEntryName = "heartbeat";
+export type BrowserEntryName =
+  | "graph"
+  | "heartbeat"
+  | "graph-page"
+  | "planned-graph-page"
+  | "graph-diff-page"
+  | "deployed-graph-page";
 
 export interface BrowserEntrySpec<Name extends string = string> {
   readonly name: Name;
@@ -18,9 +24,43 @@ export const SHARED_ENTRY_GLOBALS: readonly string[] = ["radiusPageRegistry"];
 
 export const BROWSER_ENTRIES: readonly BrowserEntrySpec<BrowserEntryName>[] = [
   {
+    name: "graph",
+    file: "./entries/graph.ts",
+    initializer: "installGraphEntry",
+    globals: [
+      "radiusRenderGraph",
+      "radiusSetGraphLoading",
+      "radiusSetGraphError"
+    ]
+  },
+  {
     name: "heartbeat",
     file: "./entries/heartbeat.ts",
     initializer: "installHeartbeatEntry",
+    globals: []
+  },
+  {
+    name: "graph-page",
+    file: "./entries/graph-page.ts",
+    initializer: "installGraphPageEntry",
+    globals: []
+  },
+  {
+    name: "planned-graph-page",
+    file: "./entries/planned-graph-page.ts",
+    initializer: "installPlannedGraphPageEntry",
+    globals: []
+  },
+  {
+    name: "graph-diff-page",
+    file: "./entries/graph-diff-page.ts",
+    initializer: "installGraphDiffPageEntry",
+    globals: []
+  },
+  {
+    name: "deployed-graph-page",
+    file: "./entries/deployed-graph-page.ts",
+    initializer: "installDeployedGraphPageEntry",
     globals: []
   }
 ];
