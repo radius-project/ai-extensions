@@ -1000,6 +1000,21 @@ export function initializeDeployingPage(
     let failedPolls = 0;
     let wfTicks = 0;
     let recordSeen = false;
+    // The deploy-status slot is per-canvas, not per-run: it keeps the previous
+    // attempt's terminal result until `POST /api/deploy` reaches
+    // `beginDeployAttempt`, which resets the status and mints a fresh attempt
+    // id. That reset is synchronous and lands strictly before the 200 is
+    // written, so any status read after the dispatch is accepted describes
+    // this attempt or a later one — never an earlier one.
+    //
+    // Before that point it describes the previous one, and the dispatch is not
+    // instant: it awaits a repair-loop check, a GitHub deployment lookup and a
+    // reservation, which routinely outlasts the 2.5s first tick. Redeploying
+    // to an environment whose last attempt failed therefore read that stale
+    // `failed` and flipped the optimistic Pending row straight to Failed for a
+    // run that was still starting — and `sameAttempt` cannot catch it, because
+    // repo and environment are exactly what a redeploy repeats.
+    let dispatchAccepted = false;
     const wfPoll = entry.every(DEPLOY_WORKFLOW_POLL_MS, () => {
       wfTicks++;
       if (wfTicks > DEPLOY_WORKFLOW_POLL_LIMIT) {
@@ -1009,6 +1024,7 @@ export function initializeDeployingPage(
         void loadDeployments(true);
         return;
       }
+      if (!dispatchAccepted) return;
       void context.net
         .fetch(DEPLOY_STATUS_PATH)
         .then((response) => response.json())
@@ -1106,7 +1122,10 @@ export function initializeDeployingPage(
       )
       .then((result) => {
         if (!entry.active) return;
-        if (result.ok) return;
+        if (result.ok) {
+          dispatchAccepted = true;
+          return;
+        }
         entry.cancel(wfPoll);
         entry.cancel(autoHide);
         overrides.delete(key);

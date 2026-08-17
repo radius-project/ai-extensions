@@ -1905,6 +1905,116 @@ describe("deploy flow", () => {
   });
 });
 
+describe("deploy-status run correlation", () => {
+  // The regression these pin: `/api/deploy-status` is a per-canvas slot, not a
+  // per-run one. Until `POST /api/deploy` reaches `beginDeployAttempt` it still
+  // holds the *previous* attempt's terminal result, and that dispatch first
+  // awaits a repair-loop check, a GitHub deployment lookup and a reservation —
+  // routinely longer than the 2.5s first tick. Redeploying to an environment
+  // whose last attempt failed therefore read that stale "failed" and flipped
+  // the optimistic Pending row straight to Failed while the new run was still
+  // starting. `sameAttempt` cannot catch it: repo and environment are exactly
+  // what a redeploy repeats.
+  it("ignores the previous attempt's failure until the dispatch is accepted", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+
+    const dispatch = createDeferred<HttpResponse>();
+    page.browser.net.handle(DEPLOY_PATH, () => dispatch.promise);
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        error: "the previous run failed",
+        attempt: { targetRepo: page.repo, environment: "dev" },
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    expect(page.tableBody.innerHTML).toContain("Pending");
+
+    for (let tick = 0; tick < 4; tick++) {
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+    }
+
+    // Not merely ignored once read — the stale slot must not be read at all.
+    expect(
+      page.browser.net.calls.some((call) => call.url === DEPLOY_STATUS_PATH)
+    ).toBe(false);
+    expect(page.tableBody.innerHTML).toContain("Pending");
+    expect(page.tableBody.innerHTML).not.toContain("Failed");
+    expect(page.progressTitle.innerHTML).not.toContain("failed");
+    expect(page.progressFailActions.style.display).not.toBe("block");
+
+    dispatch.resolve(jsonResponse({ ok: true }));
+    await flushPromises();
+  });
+
+  it("honors the failure once the dispatch has been accepted", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+
+    const dispatch = createDeferred<HttpResponse>();
+    page.browser.net.handle(DEPLOY_PATH, () => dispatch.promise);
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        error: "boom",
+        attempt: { targetRepo: page.repo, environment: "dev" },
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.progressTitle.innerHTML).not.toContain("failed");
+
+    // Accepting the dispatch means the server has already reset the slot, so
+    // anything it reports from here describes this run.
+    dispatch.resolve(jsonResponse({ ok: true }));
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(page.progressTitle.innerHTML).toContain("failed");
+    expect(page.progressFailActions.style.display).toBe("block");
+  });
+
+  it("stops polling the status slot when the dispatch is refused", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+
+    page.browser.net.handle(DEPLOY_PATH, () =>
+      jsonResponse({ error: "already deploying" }, false, 409)
+    );
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        error: "the previous run failed",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(
+      page.browser.net.calls.some((call) => call.url === DEPLOY_STATUS_PATH)
+    ).toBe(false);
+    expect(page.progressTitle.innerHTML).not.toContain("failed");
+    expect(page.browser.clock.pending).toBe(0);
+  });
+});
+
 describe("optimistic deployment rows", () => {
   // The regression this pins: a `fresh=1` listing bypasses the cache and can
   // take tens of seconds. When the click path blanked the table to the loading
