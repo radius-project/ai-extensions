@@ -71,7 +71,8 @@ export function topNav(active: string): string {
 }
 
 // Underlined sub-tabs (e.g. Modeled / Planned / Deployed / Diff).
-// `items` = [{ id, label }], `active` = id, `onNav` = optional JS nav fn name.
+// `items` = [{ id, label }], `active` = id. The graph navigation entry handles
+// clicks through data-radius-graph-page, so this helper emits no inline script.
 export interface SubTab {
   id: string;
   label: string;
@@ -82,18 +83,14 @@ export interface SelectOption {
   label: string;
 }
 
-export function subTabs(
-  items: readonly SubTab[],
-  active: string,
-  onNav = "radiusNavTo"
-): string {
+export function subTabs(items: readonly SubTab[], active: string): string {
   const links = items
     .map((it) => {
       const cls =
         it.id === active ? "rad-subtab rad-subtab--active" : "rad-subtab";
       return `<a href="?page=${it.id}" data-page="${
         it.id
-      }" class="${cls}" onclick="${onNav}(event, '${it.id}')">${escapeHtml(
+      }" data-radius-graph-page="${it.id}" class="${cls}">${escapeHtml(
         it.label
       )}</a>`;
     })

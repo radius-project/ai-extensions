@@ -11,6 +11,8 @@ import {
   FakeDocument,
   FakeElement,
   FakeEventTarget,
+  createFakeInput,
+  createFakeSelect,
   jsonResponse
 } from "../../test/support/browser/fakes.js";
 
@@ -57,6 +59,9 @@ function createScope(
 describe("browser value guards", () => {
   it("accepts only the browser shapes required by the ports", () => {
     expect(isDomElement(new FakeElement("element"))).toBe(true);
+    const emptyText = new FakeElement("empty-text");
+    emptyText.textContent = null;
+    expect(isDomElement(emptyText)).toBe(true);
     expect(isDomElement({})).toBe(false);
     expect(isDomDocument(new FakeDocument())).toBe(true);
     expect(isDomDocument(new FakeElement("element"))).toBe(false);
@@ -86,6 +91,60 @@ describe("DOM and focus ports", () => {
     expect(() => createDomPort(document).createElement("div")).toThrow(
       "Radius browser context cannot create a <div> element."
     );
+  });
+
+  it("reads typed inputs and selects, writes safe options, and dispatches events", () => {
+    const document = new FakeDocument();
+    const input = createFakeInput("input", "value");
+    const select = createFakeSelect("select");
+    const plain = new FakeElement("plain");
+    document.add(input);
+    document.add(select);
+    document.add(plain);
+    class Event {
+      constructor(readonly type: string) {}
+    }
+    const dom = createDomPort(document, Event);
+    let changes = 0;
+    select.addEventListener("change", () => changes++);
+
+    expect(dom.inputById("input")).toBe(input);
+    expect(dom.inputById("plain")).toBeNull();
+    expect(dom.selectById("select")).toBe(select);
+    expect(dom.selectById("input")).toBeNull();
+    dom.setOptions(select, [
+      { value: "<first>", label: "<First>" },
+      { value: "second", label: "Second", selected: true }
+    ]);
+    expect(select.value).toBe("second");
+    expect(select.selectedIndex).toBe(1);
+    expect(select.innerHTML).toContain("&lt;First&gt;");
+    expect(dom.createOption({ value: "x", label: "X" }).value).toBe("x");
+    dom.dispatch(select, "change");
+    expect(changes).toBe(1);
+
+    dom.setOptions(select, []);
+    expect(select.value).toBe("");
+    expect(select.selectedIndex).toBe(-1);
+    expect(dom.all(null, "*")).toEqual([]);
+    document.querySelectorAll = () => [plain, {}];
+    expect(dom.all(document, "*")).toEqual([plain]);
+    expect(() => createDomPort(document).dispatch(select, "change")).toThrow(
+      'Radius browser context cannot dispatch the "change" event.'
+    );
+    plain.scrollHeight = 120;
+    expect(dom.scrollToEnd(plain)).toBe(true);
+    expect(plain.scrollTop).toBe(120);
+    Object.assign(plain, { scrollHeight: Number.NaN });
+    expect(dom.scrollToEnd(plain)).toBe(false);
+  });
+
+  it("rejects a malformed option element", () => {
+    const document = new FakeDocument();
+    document.createElement = () => new FakeElement("not-option");
+    expect(() =>
+      createDomPort(document).createOption({ value: "x", label: "X" })
+    ).toThrow("Radius browser context cannot create an option.");
   });
 
   it("reports and restores focus through a typed element", () => {
@@ -221,6 +280,42 @@ describe("resolveBrowserContext", () => {
     expect(() => withoutHistory.nav.replaceState("/x")).toThrow(
       "Radius browser context is missing history.replaceState."
     );
+  });
+
+  it("parses navigation documents and rejects each malformed parser shape", () => {
+    const parsed = new FakeDocument();
+    const context = resolveBrowserContext(
+      createScope({
+        DOMParser: class {
+          parseFromString(html: string, type: string) {
+            expect(html).toBe("<html></html>");
+            expect(type).toBe("text/html");
+            return parsed;
+          }
+        }
+      })
+    );
+    expect(context.nav.parseDocument("<html></html>")).toBe(parsed);
+
+    expect(() =>
+      resolveBrowserContext(createScope()).nav.parseDocument("<html/>")
+    ).toThrow("Radius browser context is missing DOMParser.");
+    expect(() =>
+      resolveBrowserContext(
+        createScope({ DOMParser: class {} })
+      ).nav.parseDocument("<html/>")
+    ).toThrow("Radius browser context is missing DOMParser.");
+    expect(() =>
+      resolveBrowserContext(
+        createScope({
+          DOMParser: class {
+            parseFromString() {
+              return {};
+            }
+          }
+        })
+      ).nav.parseDocument("<html/>")
+    ).toThrow("Radius browser context could not parse a document.");
   });
 
   it("uses the supplied timers and rejects invalid timer or clock values", () => {

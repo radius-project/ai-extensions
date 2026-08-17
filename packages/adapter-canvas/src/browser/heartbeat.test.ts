@@ -220,6 +220,7 @@ describe("heartbeat watchdog", () => {
 
   it("aborts and ignores an in-flight response after teardown", async () => {
     const browser = setup();
+    browser.net.supportsAbort = false;
     const pending = createDeferred<HttpResponse>();
     let call = 0;
     browser.net.handle(HEARTBEAT_PING_PATH, () => {
@@ -237,7 +238,7 @@ describe("heartbeat watchdog", () => {
     browser.clock.tick(HEARTBEAT_INTERVAL_MS);
     await flushPromises();
     teardown();
-    expect(browser.net.aborted).toBeGreaterThan(0);
+    expect(browser.net.aborted).toBe(0);
     pending.resolve(jsonResponse({}));
     await flushPromises();
 

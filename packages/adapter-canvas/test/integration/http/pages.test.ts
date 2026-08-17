@@ -23,6 +23,7 @@ import {
 } from "../../../src/pages.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { CanvasState } from "../../../src/shared.js";
+import { browserEntryMarker } from "../../../src/browser/scripts.js";
 import {
   HOSTILE_STATE,
   expectSafeInlineScripts
@@ -85,7 +86,7 @@ describe("canvas pages over real loopback HTTP", () => {
     // rendering it rather than falling back to the environment page.
     expect(response.body).toBe(graphPage(entry.state));
     expect(response.body).toContain(
-      '<a href="?page=graph" data-page="graph" class="rad-subtab rad-subtab--active"'
+      '<a href="?page=graph" data-page="graph" data-radius-graph-page="graph" class="rad-subtab rad-subtab--active"'
     );
   });
 
@@ -127,6 +128,29 @@ describe("canvas pages over real loopback HTTP", () => {
       expect(response.status).toBe(200);
       expect(response.body).toContain(marker);
       expect(response.body).toBe(render());
+    }
+  );
+
+  it.each([
+    ["graph", "graph-page"],
+    ["planned", "planned-graph-page"],
+    ["graph-diff", "graph-diff-page"],
+    ["deployed", "deployed-graph-page"]
+  ] as const)(
+    "serves ?page=%s with one page entry and one copy of each shared entry",
+    async (page, pageEntry) => {
+      resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
+      const response = await get(`/?page=${page}`);
+
+      for (const entry of [
+        "graph",
+        "heartbeat",
+        pageEntry
+      ] as const) {
+        expect(
+          response.body.split(`\n${browserEntryMarker(entry)}\n`)
+        ).toHaveLength(2);
+      }
     }
   );
 
