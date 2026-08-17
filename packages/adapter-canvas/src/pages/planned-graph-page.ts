@@ -51,7 +51,7 @@ ${graphHeader("planned")}
       <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Loading…</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Plan Deployment</button>
 </div>
 <div id="plan-status" class="status info">Generating the planned application graph…</div>
 <div id="graph-container-wrapper"></div>
@@ -95,7 +95,7 @@ ${graphHeader("planned")}
       <option value="">Loading environments...</option>
     </select>
   </div>
-  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Loading…</button>
+  <button id="plan-btn" class="rad-btn rad-btn--primary" style="margin-top:0;" disabled>Plan Deployment</button>
 </div>
 <div id="plan-status" class="status error" style="display:none;"></div>
 <div id="graph-container"></div>
