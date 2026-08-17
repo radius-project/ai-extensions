@@ -8,7 +8,7 @@
 
 ## Overview
 
-Radius Canvas is the visual part of the Radius Copilot extension. It opens a panel where a developer can inspect an application graph, compare branches, configure cloud credentials, create a Radius environment, and deploy or delete an application. The host talks to the extension through the Copilot SDK; the extension starts a private HTTP server on `127.0.0.1`; that server renders one of seven pages; and browser code on the page calls 37 local API routes to read or change state.
+Radius Canvas is the visual part of the Radius Copilot extension. It opens a panel where a developer can inspect an application graph, compare branches, configure cloud credentials, create a Radius environment, and deploy or delete an application. The host talks to the extension through the Copilot SDK; the extension starts a private HTTP server on `127.0.0.1`; that server renders one of seven pages; and browser code on the page calls 40 local API routes to read or change state.
 
 The extension is built as one generated, loadable file at `plugins/radius/dist/extension.mjs`. The test architecture must preserve that packaging contract and the existing server-rendered interface.
 
@@ -209,6 +209,20 @@ The build continues to use Node 24, pnpm 11.19.0, and esbuild. The Copilot SDK r
 - Completion, cancellation, close, and shutdown may race, but cleanup runs once and every caller observes the same terminal outcome.
 
 Cancellation is a cross-cutting contract, not a separate rollout phase. Phase 5 owns runtime, server, adapter, subprocess, and HTTP cancellation checks. Phase 6 owns browser abort, teardown, navigation, and stale-result checks. Phase 7 repeats bounded race, timeout, and cleanup cases that add resilience beyond the required pull-request gates. Phase 8 confirms close, reopen, and reconnect behavior in a supported host.
+
+## GitHub CLI authentication
+
+The adapter treats `gh` as the credential broker and does not read an operating-system keychain or `hosts.yml` directly. Production can receive a host-injected `GH_TOKEN` or `GITHUB_TOKEN`, use accounts stored by `gh auth login`, or have both available. Tests cover the identity, scope, and precedence rules rather than merely proving that one authenticated command succeeds.
+
+- `GH_TOKEN` and `GITHUB_TOKEN` are tested independently, including their documented precedence when both are present.
+- An injected token with the required scopes remains the acting identity. A token missing `workflow` may fall back to a stored `gh` account with that scope; without a better account, the later permission failure remains visible.
+- With no injected token, the active stored account is used. Explicit account selection overrides the automatic choice, including multi-account and enterprise-managed-user cases.
+- Package authentication requests the acting login's stored token with `gh auth token --user` before falling back to the injected token. Missing `read:packages` or `write:packages` scopes produce actionable failure rather than an identity switch or success-shaped fallback.
+- Missing, expired, revoked, malformed, or unrecognized credentials; `gh auth status`, token, or switch failure; command timeout; and absent scopes are distinct test outcomes.
+- GitHub.com behavior is tested separately from unsupported GitHub Enterprise Server package paths. Clearing `GH_HOST` for GitHub.com package operations must not silently redirect another host.
+- Tokens are passed only through controlled environment or standard input, never command arguments, logs, snapshots, reports, or failure messages.
+
+Pull-request tests use a fake `gh` executable, controlled status/token output, placeholder tokens, and an isolated `GH_CONFIG_DIR`; they never inspect or change a developer's real credential store. Phase 5 owns the token-selection, account, scope, command-environment, redaction, and failure matrix. Phase 6 verifies the identity and account-selection UI without exposing tokens. Phase 7 runs the fake-credential matrix across supported operating systems. Phase 8 alone may exercise a real `gh` secure credential store, using disposable test accounts and mandatory cleanup.
 
 ## Security
 
