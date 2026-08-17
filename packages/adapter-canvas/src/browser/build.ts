@@ -219,6 +219,35 @@ export function assertSelfContained(name: string, code: string): void {
   }
 }
 
+// Reject Node-only globals. esbuild's browser platform does not shim these, so
+// a stray one is emitted verbatim and throws a page error on first evaluation —
+// which takes the whole entry, and therefore the page's behavior, down with it.
+// The usual way one arrives is transitively: a browser module imports a barrel
+// that also re-exports server code reading `process.env` at module scope.
+//
+// Only property access is a hazard. A bare `typeof process !== "undefined"`
+// feature-detect is legitimate and stays allowed, so the patterns require the
+// member access and ignore matches that are themselves properties
+// (`options.process`) or longer identifiers (`processResults`, `globalThis`).
+export function assertBrowserSafe(name: string, code: string): void {
+  const hazards = [
+    [/(?<![.\w$])process\s*\./, "process"],
+    [/(?<![.\w$])Buffer\s*\./, "Buffer"],
+    [/(?<![.\w$])global\s*\./, "global"],
+    [/(?<![.\w$])__dirname\b/, "__dirname"],
+    [/(?<![.\w$])__filename\b/, "__filename"]
+  ] as const;
+  const found = hazards
+    .filter(([pattern]) => pattern.test(code))
+    .map(([, description]) => description);
+  if (found.length > 0) {
+    throw new Error(
+      `Browser entry "${name}" reaches Node-only globals: ${found.join(", ")}. ` +
+        `Import from a browser-safe subpath instead of a package barrel that re-exports server code.`
+    );
+  }
+}
+
 function entryPath(spec: BrowserEntrySpec): string {
   return fileURLToPath(new URL(spec.file, import.meta.url));
 }
@@ -292,6 +321,7 @@ export function compileBrowserEntrySpec(
   assertInlineSafe(spec.name, code);
   assertParseable(spec.name, code);
   assertSelfContained(spec.name, code);
+  assertBrowserSafe(spec.name, code);
   if (output.metafile === undefined) {
     throw new Error(
       `Browser entry "${spec.name}" produced no build metadata; cannot prove self-containment.`

@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  assertBrowserSafe,
   assertInlineSafe,
   assertParseable,
   assertSelfContained,
@@ -203,6 +204,43 @@ describe("inline browser safety", () => {
       assertSelfContained("valid", "(() => { const value = 1; })();")
     ).not.toThrow();
   });
+
+  it("names every Node-only global a bundle must not reach", () => {
+    expect(() =>
+      assertBrowserSafe("env", "var ref = process.env.RADIUS_DELETE_REF;")
+    ).toThrow(
+      /Browser entry "env" reaches Node-only globals: process\. Import from a browser-safe subpath/
+    );
+    expect(() =>
+      assertBrowserSafe("buffered", "var raw = Buffer.from(value);")
+    ).toThrow(/reaches Node-only globals: Buffer\./);
+    expect(() =>
+      assertBrowserSafe("scoped", "var target = global.setTimeout;")
+    ).toThrow(/reaches Node-only globals: global\./);
+    expect(() =>
+      assertBrowserSafe("pathed", "var here = __dirname + __filename;")
+    ).toThrow(/reaches Node-only globals: __dirname, __filename\./);
+    expect(() =>
+      assertBrowserSafe("several", "process.cwd(); Buffer.alloc(1);")
+    ).toThrow(/reaches Node-only globals: process, Buffer\./);
+  });
+
+  // The guard must not fire on ordinary browser code that merely reads like a
+  // Node global, or the next contributor learns to work around it.
+  it("allows feature detects, own properties, and similarly named identifiers", () => {
+    expect(() =>
+      assertBrowserSafe(
+        "clean",
+        [
+          'if (typeof process !== "undefined") return;',
+          "var state = options.process.id;",
+          "var done = processResults(items);",
+          "globalThis.radiusPageRegistry = registry;",
+          "var label = deployment.Buffer;"
+        ].join("\n")
+      )
+    ).not.toThrow();
+  });
 });
 
 describe("in-memory browser compiler", () => {
@@ -219,6 +257,7 @@ describe("in-memory browser compiler", () => {
       expect(() => new Function(code)).not.toThrow();
       expect(() => assertInlineSafe(name, code)).not.toThrow();
       expect(() => assertSelfContained(name, code)).not.toThrow();
+      expect(() => assertBrowserSafe(name, code)).not.toThrow();
       expect(code).not.toContain(".mjs");
       expect(code).not.toMatch(/<script[^>]+src=/);
     }
@@ -283,6 +322,16 @@ describe("in-memory browser compiler", () => {
         globals: []
       },
       /contains a require call|retained runtime module loads/
+    ],
+    [
+      "Node global reached through a package barrel",
+      {
+        name: "node-global",
+        file: "../../test/fixtures/browser/entry-node-global.ts",
+        initializer: "installNodeGlobal",
+        globals: []
+      },
+      /reaches Node-only globals: process\b/
     ]
   ])("rejects a compiled entry with a residual %s", (_label, spec, error) => {
     expect(() => compileBrowserEntrySpec(spec)).toThrow(error);

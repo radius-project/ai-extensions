@@ -21,7 +21,13 @@ import {
   srcLineFromRef,
   srcPathFromRef
 } from "./model.js";
-import { filterGraphVisualizationResources } from "@radius-project/core";
+// Imported from the `graph` subpath rather than the package root: the root
+// barrel also re-exports the workflow modules, and `workflows/delete.ts` reads
+// `process.env` at module scope. Bundling that into a browser entry ships a
+// `process is not defined` page error, so browser code only ever reaches core
+// through a subpath that is free of Node globals (enforced by
+// `assertBrowserSafe` in ../build.ts).
+import { filterGraphVisualizationResources } from "@radius-project/core/graph";
 import { parseGraphResources } from "./model.js";
 import type { GraphResource, ResourceOutput } from "./model.js";
 
