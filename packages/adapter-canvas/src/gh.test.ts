@@ -53,7 +53,18 @@ const STATUS = {
     - Token scopes: 'repo', 'read:org', 'workflow', 'read:packages', 'write:packages'
   ✓ Logged in to github.com account emuuser (keyring)
     - Active account: true
-    - Token scopes: 'repo', 'read:org', 'workflow', 'read:packages', 'write:packages'`
+    - Token scopes: 'repo', 'read:org', 'workflow', 'read:packages', 'write:packages'`,
+  // An injected GH_TOKEN for `pubuser` minted WITHOUT workflow, shadowing a
+  // keyring credential for the SAME login that DOES have workflow. gh switch/
+  // refresh mutate the keyring credential; the env token can't be changed.
+  tokenPubNoWorkflow: `github.com
+  ✓ Logged in to github.com account pubuser (GITHUB_TOKEN)
+    - Active account: true
+    - Token scopes: 'gist', 'repo', 'user'`,
+  keyringPubWithWorkflow: `github.com
+  ✓ Logged in to github.com account pubuser (keyring)
+    - Active account: true
+    - Token scopes: 'gist', 'read:org', 'repo', 'workflow', 'write:packages'`
 };
 
 function setPlatform(platform: NodeJS.Platform): void {
@@ -700,6 +711,26 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
     expect(pub).toBeDefined();
     if (!pub) throw new Error("pubuser account missing");
     expect(pub.hasPackages).toBe(true);
+  });
+
+  it("reads the workflow scope keyring-first when an injected token shadows a same-login keyring credential", async () => {
+    // pubuser's INJECTED token was minted without workflow, but its KEYRING
+    // credential has it. gh auth switch/refresh mutate the keyring credential,
+    // so the identity must report workflow from the keyring entry — reading the
+    // shadowing env token (which no gh command can change) would leave the
+    // Create Environment warning permanently stuck. Regression test for #213.
+    const { getGitHubIdentity } = await loadGh("linux", {
+      token: "tok",
+      withToken: STATUS.tokenPubNoWorkflow,
+      keyring: STATUS.keyringPubWithWorkflow
+    });
+    const id = await getGitHubIdentity();
+    expect(id.actingLogin).toBe("pubuser");
+    expect(id.actingHasWorkflow).toBe(true);
+    const pub = id.accounts.find((a) => a.login === "pubuser");
+    expect(pub).toBeDefined();
+    if (!pub) throw new Error("pubuser account missing");
+    expect(pub.hasWorkflow).toBe(true);
   });
 
   it("flags a mismatch when setup falls back to a different keyring account", async () => {

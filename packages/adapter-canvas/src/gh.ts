@@ -366,19 +366,21 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
   // De-duplicated switchable account list. An account is switchable when it
   // exists in the keyring (gh auth switch operates on keyring accounts).
   const keyringLogins = new Set(s.keyringAccts.map((a) => a.login));
-  // GHCR pushes authenticate with the credential getGhPackageCredentials
-  // resolves: the keyring token pinned to the login when a keyring entry
-  // exists, else the injected token. So the *packages* scope must be read
-  // keyring-first — reading the token account first (as hasWorkflow does)
-  // would misreport for a login whose keyring credential differs from its
-  // injected one.
+  // Every scope must be read keyring-first. gh auth switch/refresh mutate the
+  // keyring credential, and GHCR pushes authenticate with the credential
+  // getGhPackageCredentials resolves (the keyring token pinned to the login
+  // when a keyring entry exists, else the injected token). When a host-injected
+  // GH_TOKEN shadows a keyring credential of the same login but was minted with
+  // fewer scopes, reading the token account first (it appears first in the
+  // deduped list below) would misreport the scope — and, worse, no gh command
+  // can add a scope to that env token, so the warning could never clear.
   const keyringScopesByLogin = new Map(
     s.keyringAccts.map((a) => [a.login, a.scopes])
   );
   const tokenScopesByLogin = new Map(
     s.withTokenAccts.map((a) => [a.login, a.scopes])
   );
-  const packageScopesFor = (login: string): string[] =>
+  const scopesFor = (login: string): string[] =>
     keyringScopesByLogin.get(login) || tokenScopesByLogin.get(login) || [];
   const seen = new Set<string>();
   const accounts: GitHubIdentityAccount[] = [];
@@ -387,8 +389,8 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
     seen.add(a.login);
     accounts.push({
       login: a.login,
-      hasWorkflow: a.scopes.includes("workflow"),
-      hasPackages: packageScopesFor(a.login).includes("write:packages"),
+      hasWorkflow: scopesFor(a.login).includes("workflow"),
+      hasPackages: scopesFor(a.login).includes("write:packages"),
       switchable: keyringLogins.has(a.login),
       acting: a.login === actingLogin
     });
