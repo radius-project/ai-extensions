@@ -2,6 +2,7 @@ import { buildSync } from "esbuild";
 import type { BuildOptions, BuildResult } from "esbuild";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { PageRegistryGlobal } from "./globals.js";
 
 const BROWSER_SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -14,7 +15,14 @@ export interface BrowserEntrySpec<Name extends string = string> {
   readonly globals: readonly string[];
 }
 
-export const SHARED_ENTRY_GLOBALS: readonly string[] = ["radiusPageRegistry"];
+// `build.mjs` imports this module directly with bare Node type stripping, which
+// does not resolve a `.js` specifier to its `.ts` source, so the compiler must
+// keep its runtime graph free of relative imports. The type-only import above
+// is erased, so it costs nothing at runtime while still making `globals.ts` the
+// single definition of the shared global's name.
+export const SHARED_ENTRY_GLOBALS: readonly string[] = [
+  "radiusPageRegistry" satisfies PageRegistryGlobal
+];
 
 export const BROWSER_ENTRIES: readonly BrowserEntrySpec<BrowserEntryName>[] = [
   {
@@ -237,19 +245,22 @@ export function createBrowserCompiler(
   build: BrowserBuild = runEsbuild
 ): BrowserCompiler {
   const cache = new Map<BrowserEntryName, string>();
+
+  function compile(name: string): string {
+    const spec = browserEntrySpec(name);
+    const cached = cache.get(spec.name);
+    if (cached !== undefined) return cached;
+    const code = compileBrowserEntrySpec(spec, build);
+    cache.set(spec.name, code);
+    return code;
+  }
+
   return {
-    compile(name) {
-      const spec = browserEntrySpec(name);
-      const cached = cache.get(spec.name);
-      if (cached !== undefined) return cached;
-      const code = compileBrowserEntrySpec(spec, build);
-      cache.set(spec.name, code);
-      return code;
-    },
+    compile,
     compileAll() {
       const bundles: Record<string, string> = {};
       for (const spec of BROWSER_ENTRIES) {
-        bundles[spec.name] = compileBrowserEntrySpec(spec, build);
+        bundles[spec.name] = compile(spec.name);
       }
       return bundles;
     }

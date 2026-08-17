@@ -87,10 +87,14 @@ export interface ClockPort {
   now(): number;
 }
 
+// Storage is optional in a webview, so `available` is the single precondition
+// for both accessors: when it is false every call throws, and when it is true a
+// call throws only if the underlying storage rejects it. Neither accessor
+// reports failure through its return value.
 export interface StoragePort {
   readonly available: boolean;
   get(key: string): string | null;
-  set(key: string, value: string): boolean;
+  set(key: string, value: string): void;
 }
 
 export interface FocusPort {

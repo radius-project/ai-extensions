@@ -270,8 +270,20 @@ describe("resolveBrowserContext", () => {
       createScope({ sessionStorage: undefined })
     ).storage;
     expect(unavailable.available).toBe(false);
-    expect(unavailable.get("key")).toBeNull();
-    expect(unavailable.set("key", "value")).toBe(false);
+    expect(() => unavailable.get("key")).toThrow(
+      'Radius browser storage is unavailable; cannot read "key".'
+    );
+    expect(() => unavailable.set("key", "value")).toThrow(
+      'Radius browser storage is unavailable; cannot write "key".'
+    );
+
+    const readOnly = resolveBrowserContext(
+      createScope({ sessionStorage: { getItem: () => null } })
+    ).storage;
+    expect(readOnly.available).toBe(false);
+    expect(() => readOnly.get("key")).toThrow(
+      'Radius browser storage is unavailable; cannot read "key".'
+    );
 
     const values = new Map<string, unknown>();
     const storage = resolveBrowserContext(
@@ -283,7 +295,8 @@ describe("resolveBrowserContext", () => {
       })
     ).storage;
     expect(storage.available).toBe(true);
-    expect(storage.set("key", "value")).toBe(true);
+    expect(storage.get("key")).toBeNull();
+    expect(storage.set("key", "value")).toBeUndefined();
     expect(storage.get("key")).toBe("value");
     values.set("key", 4);
     expect(() => storage.get("key")).toThrow(
@@ -302,6 +315,7 @@ describe("resolveBrowserContext", () => {
         }
       })
     ).storage;
+    expect(refusing.available).toBe(true);
     expect(() => refusing.get("key")).toThrow("read denied");
     expect(() => refusing.set("key", "value")).toThrow("write denied");
 

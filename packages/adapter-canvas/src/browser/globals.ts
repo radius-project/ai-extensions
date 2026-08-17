@@ -2,6 +2,8 @@ import { isRecord } from "./json.js";
 
 export const PAGE_REGISTRY_GLOBAL = "radiusPageRegistry";
 
+export type PageRegistryGlobal = typeof PAGE_REGISTRY_GLOBAL;
+
 export function publishBrowserGlobals(
   scope: unknown,
   values: Readonly<Record<string, unknown>>,

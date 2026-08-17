@@ -8,11 +8,13 @@ export const HEARTBEAT_OVERLAY_ID = "radius-reconnect-overlay";
 export const HEARTBEAT_INTERVAL_MS = 5000;
 export const HEARTBEAT_REQUEST_TIMEOUT_MS = 4000;
 export const HEARTBEAT_MISS_THRESHOLD = 2;
+export const HEARTBEAT_RELOAD_RETRY_MS = 15000;
 
 export interface HeartbeatOptions {
   intervalMs?: number;
   requestTimeoutMs?: number;
   missThreshold?: number;
+  reloadRetryMs?: number;
 }
 
 export function initializeHeartbeat(
@@ -27,12 +29,13 @@ export function initializeHeartbeat(
   const requestTimeoutMs =
     options.requestTimeoutMs ?? HEARTBEAT_REQUEST_TIMEOUT_MS;
   const missThreshold = options.missThreshold ?? HEARTBEAT_MISS_THRESHOLD;
+  const reloadRetryMs = options.reloadRetryMs ?? HEARTBEAT_RELOAD_RETRY_MS;
   const overlay = context.dom.byId(HEARTBEAT_OVERLAY_ID);
 
   let down = false;
   let misses = 0;
   let inFlight = false;
-  let reloading = false;
+  let reloadRequestedAt: number | null = null;
   let activeAbort: AbortHandle | null = null;
 
   function recordMiss(): void {
@@ -41,6 +44,17 @@ export function initializeHeartbeat(
       down = true;
       if (overlay !== null) overlay.style.display = "flex";
     }
+  }
+
+  // A reload the host accepts without navigating leaves this page alive, so the
+  // request is throttled rather than latched: an unnoticed non-navigation is
+  // retried once the retry window elapses instead of wedging the overlay open
+  // for the life of the page.
+  function reloadDue(): boolean {
+    return (
+      reloadRequestedAt === null ||
+      context.clock.now() - reloadRequestedAt >= reloadRetryMs
+    );
   }
 
   function ping(): Promise<void> {
@@ -69,12 +83,12 @@ export function initializeHeartbeat(
             recordMiss();
             return;
           }
-          if (down && !reloading) {
-            reloading = true;
+          if (down && reloadDue()) {
+            reloadRequestedAt = context.clock.now();
             try {
               context.nav.reload();
             } catch (error) {
-              reloading = false;
+              reloadRequestedAt = null;
               throw error;
             }
             return;

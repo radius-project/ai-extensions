@@ -4,6 +4,7 @@ import {
   HEARTBEAT_MISS_THRESHOLD,
   HEARTBEAT_OVERLAY_ID,
   HEARTBEAT_PING_PATH,
+  HEARTBEAT_RELOAD_RETRY_MS,
   HEARTBEAT_REQUEST_TIMEOUT_MS,
   initializeHeartbeat
 } from "./heartbeat.js";
@@ -120,7 +121,7 @@ describe("heartbeat watchdog", () => {
     expect(browser.overlay.style.display).toBe("flex");
   });
 
-  it("reloads the current page exactly once after an observed outage", async () => {
+  it("reloads the current page exactly once within the recovery retry window", async () => {
     const browser = setup();
     let healthy = false;
     browser.net.handle(HEARTBEAT_PING_PATH, () =>
@@ -135,6 +136,33 @@ describe("heartbeat watchdog", () => {
 
     expect(browser.nav.reloads).toBe(1);
     expect(browser.nav.href).toBe("http://localhost/?page=graph");
+    expect(HEARTBEAT_RELOAD_RETRY_MS).toBeGreaterThan(
+      2 * HEARTBEAT_INTERVAL_MS
+    );
+  });
+
+  it("retries recovery when a host accepts a reload without navigating", async () => {
+    const browser = setup();
+    let healthy = false;
+    browser.net.handle(HEARTBEAT_PING_PATH, () =>
+      healthy ? jsonResponse({}) : Promise.reject(new Error("offline"))
+    );
+    initializeHeartbeat(browser.context, {
+      missThreshold: 1,
+      reloadRetryMs: 2 * HEARTBEAT_INTERVAL_MS
+    });
+    await beat(browser.clock);
+    expect(browser.overlay.style.display).toBe("flex");
+
+    healthy = true;
+    await beat(browser.clock);
+    expect(browser.nav.reloads).toBe(1);
+
+    await beat(browser.clock);
+    expect(browser.nav.reloads).toBe(1);
+
+    await beat(browser.clock);
+    expect(browser.nav.reloads).toBe(2);
   });
 
   it("never reloads a page that remained healthy", async () => {

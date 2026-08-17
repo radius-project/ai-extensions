@@ -338,14 +338,17 @@ describe("heartbeat deliberate divergences from the legacy payload", () => {
     expect(migrated.timeouts).toBe(1);
   });
 
-  it("reloads once instead of on every healthy beat after an outage", async () => {
+  // The legacy payload reloaded on every healthy beat once an outage was
+  // observed. The migrated entry throttles that to one reload per retry window,
+  // which still recovers when a host accepts a reload without navigating.
+  it("throttles the recovery reloads the legacy payload issued on every beat", async () => {
     const { legacy, migrated } = await compare(
       ["reject", "reject", "ok", "ok"],
-      [beat, beat, beat, beat]
+      [beat, beat, beat, beat, beat, beat]
     );
 
-    expect(legacy.reloads).toBe(2);
-    expect(migrated.reloads).toBe(1);
+    expect(legacy.reloads).toBe(4);
+    expect(migrated.reloads).toBe(2);
   });
 
   // The legacy payload routed a throwing reload into its own miss handler, so a

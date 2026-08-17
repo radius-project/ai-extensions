@@ -201,6 +201,9 @@ describe("in-memory browser compiler", () => {
     expect(heartbeat).not.toMatch(/<script[^>]+src=/);
   });
 
+  // Also proves the compiler stays loadable by bare Node type stripping: it
+  // runs `build.ts` in a subprocess with no bundler, so a runtime relative
+  // import — which Node will not resolve from `.js` to `.ts` — fails here.
   it("emits identical bytes from repository and package working directories", () => {
     const script = `const compiler = await import(${JSON.stringify(
       BUILD_MODULE_URL
@@ -281,7 +284,7 @@ describe("in-memory browser compiler", () => {
     resolvePageRegistry(browser.scope).teardownAll();
   });
 
-  it("memoizes named compiles while compileAll always rebuilds fresh bytes", () => {
+  it("memoizes compiled entries across compile and compileAll", () => {
     const calls: string[] = [];
     const build: BrowserBuild = (options) => {
       calls.push(options.stdin?.sourcefile ?? "");
@@ -294,9 +297,12 @@ describe("in-memory browser compiler", () => {
     expect(calls).toHaveLength(1);
     expect(compiler.compileAll()).toEqual({ heartbeat: "(() => {})();" });
     expect(compiler.compileAll()).toEqual({ heartbeat: "(() => {})();" });
-    expect(calls).toHaveLength(3);
-    expect(compiler.compile("heartbeat")).toBe("(() => {})();");
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(1);
+
+    const seeded = createBrowserCompiler(build);
+    expect(seeded.compileAll()).toEqual({ heartbeat: "(() => {})();" });
+    expect(seeded.compile("heartbeat")).toBe("(() => {})();");
+    expect(calls).toHaveLength(2);
   });
 
   it("passes an explicit browser-only build contract to esbuild", () => {
