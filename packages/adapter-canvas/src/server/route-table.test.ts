@@ -92,16 +92,15 @@ const productionHandlers = {
     announceOperationTerminal: () => false,
     snapshotRetryState: () => null,
     rollbackRetryAttempt: () => {},
-    beginRetryAttempt: () => 1,
-    acceptCommand: () => ({
-      ok: true,
-      duplicate: false,
-      command: { commandId: "cmd" }
-    }),
+    beginRetryAttempt: () => 0,
+    acceptCommand: () => ({ ok: false, duplicate: true, command: null }),
+    findActiveCommand: () => null,
     setCommandState: () => null,
-    canRetrySetup: () => ({ ok: false, code: "" }),
-    canRetryVerification: () => ({ ok: false, code: "" }),
-    canRetryCleanup: () => ({ ok: false, code: "" }),
+    canContinueSetup: () => ({ ok: false, code: "operation-active" }),
+    canRetrySetup: () => ({ ok: false, code: "operation-active" }),
+    canRetryVerification: () => ({ ok: false, code: "operation-active" }),
+    canStartRollback: () => ({ ok: false, code: "operation-active" }),
+    canRetryCleanup: () => ({ ok: false, code: "operation-active" }),
     applySetupResumePoint: () => {},
     setStageState: () => {},
     enterStage: () => {},
@@ -111,6 +110,7 @@ const productionHandlers = {
     scheduleSetupContinuation: () => true,
     scheduleVerificationRetry: () => true,
     scheduleCleanupRetry: () => true,
+    scheduleRollback: () => true,
     errorMessage: (error) => String(error)
   }),
   ...createRepositoriesRoutes({

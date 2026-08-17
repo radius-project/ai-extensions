@@ -84,6 +84,9 @@ function optimisticOperation(
       manualActionRequired: []
     },
     actions: [],
+    guidance: [],
+    headline: null,
+    activeCommandKind: "",
     nextTransition: null,
     journey: null,
     verification: null,

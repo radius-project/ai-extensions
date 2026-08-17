@@ -51,6 +51,7 @@ import {
   createOperation,
   finish,
   recordAzureApp,
+  recordCleanupState,
   recordCommittedWorkflowFile,
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
@@ -496,6 +497,112 @@ describe("cleanupAzureSetupArtifacts", () => {
       { artifactType: "service_principal", outcome: "deleted" },
       { artifactType: "azure_app", outcome: "deleted" }
     ]);
+  });
+
+  it("saves each deletion result before it starts the next one", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    recordCreatedRoleAssignment(op, {
+      role: "Contributor",
+      scope: "/subscriptions/sub",
+      principalObjectId: "sp-1"
+    });
+
+    // An interrupted rollback must still report exactly what it removed, so the
+    // ledger is asked what it holds at the moment each delete returns.
+    const observed: Array<{ outcomes: string[]; state: string }> = [];
+    await cleanupAzureSetupArtifacts(op, {
+      runAz: async () => ({ code: 0, stdout: "", stderr: "" }),
+      onResultRecorded: () => {
+        observed.push({
+          state: op.setupArtifacts.cleanup.state,
+          outcomes: op.setupArtifacts.cleanup.results.map(
+            (entry: any) => `${entry.artifactType}:${entry.outcome}`
+          )
+        });
+      }
+    });
+
+    expect(observed).toEqual([
+      {
+        state: "running",
+        outcomes: ["role_assignment:deleted"]
+      },
+      {
+        state: "running",
+        outcomes: ["role_assignment:deleted", "service_principal:deleted"]
+      },
+      {
+        state: "running",
+        outcomes: [
+          "role_assignment:deleted",
+          "service_principal:deleted",
+          "azure_app:deleted"
+        ]
+      }
+    ]);
+    expect(op.setupArtifacts.cleanup.state).toBe("succeeded");
+  });
+
+  it("keeps a result an earlier pass recorded for the same attempt", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+
+    // The rollback runner deletes the GitHub environment before the Azure pass
+    // and records the outcome against the same attempt. Losing that row would
+    // report a clean rollback while the environment was still present.
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev"
+    });
+    await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 1,
+      runDeleteEnvironment: async () => {
+        throw new Error("GitHub returned 502.");
+      }
+    });
+    recordCleanupState(op, {
+      state: "running",
+      results: [
+        {
+          attempt: 1,
+          artifactType: "github_environment",
+          target: "octo/app:dev",
+          identity: "octo/app:dev",
+          outcome: "warning",
+          detail: "GitHub returned 502."
+        }
+      ]
+    });
+
+    const seen: string[][] = [];
+    await cleanupAzureSetupArtifacts(op, {
+      runAz: async () => ({ code: 0, stdout: "", stderr: "" }),
+      onResultRecorded: () => {
+        seen.push(
+          op.setupArtifacts.cleanup.results.map(
+            (entry: any) => `${entry.artifactType}:${entry.outcome}`
+          )
+        );
+      }
+    });
+
+    expect(seen).toEqual([["github_environment:warning", "azure_app:deleted"]]);
+    expect(
+      op.setupArtifacts.cleanup.results.map(
+        (entry: any) => `${entry.artifactType}:${entry.outcome}`
+      )
+    ).toEqual(["github_environment:warning", "azure_app:deleted"]);
+    // The unresolved environment is still what a rollback retry would target.
+    expect(
+      unresolvedCleanupTargets(op).map((entry: any) => entry.artifactType)
+    ).toEqual(["github_environment"]);
   });
 
   it("retries only the named unresolved targets on a cleanup retry", async () => {

@@ -62,13 +62,14 @@ export function environmentsPaneMarkup(
       <div class="env-progress__spinner" aria-hidden="true"></div>
       <div class="env-progress__headtext">
         <div id="env-progress-title" class="env-progress__title"></div>
+        <div id="env-progress-headline-note" class="env-progress__headline-note" style="display:none;"></div>
         <div id="env-progress-activity" class="env-progress__activity" role="status" aria-live="polite"></div>
       </div>
       <div id="env-progress-elapsed" class="env-progress__elapsed" aria-label="Elapsed time"></div>
     </div>
     <ol id="env-progress-stages" class="env-progress__stages"></ol>
     <div id="env-progress-failure" class="env-progress__failure" style="display:none;" role="alert">
-      <div class="env-progress__failure-title">Setup didn’t finish</div>
+      <div id="env-progress-failure-title" class="env-progress__failure-title">Setup didn’t finish</div>
       <div id="env-progress-failure-message" class="env-progress__failure-copy"></div>
       <div id="env-progress-cleanup-status" class="env-progress__failure-copy"></div>
       <div id="env-progress-retry" class="env-progress__failure-copy"></div>
@@ -112,10 +113,16 @@ export function environmentsPaneMarkup(
       </div>
     </div>
     <!-- Server-projected commands. The page renders whatever the operation
-         record says is allowed; it never re-derives eligibility itself. -->
+         record says is allowed; it never re-derives eligibility itself. The
+         forward action comes first and the destructive one second, and neither
+         is a default: the customer chooses whether to finish the environment or
+         abandon it. -->
     <div id="env-progress-commands" class="env-progress__commands" role="group" aria-label="Environment setup controls" style="display:none;">
       <div id="env-progress-command-buttons" class="env-progress__command-buttons"></div>
       <div id="env-progress-command-note" class="env-progress__command-note"></div>
+      <!-- Why a path the customer might expect is missing. Silence reads as a
+           bug, so every refusal that a customer can reach gets a sentence. -->
+      <ul id="env-progress-command-guidance" class="env-progress__command-guidance" style="display:none;"></ul>
       <div id="env-progress-command-status" class="env-progress__command-status" role="status" aria-live="polite"></div>
       <div id="env-progress-command-error" class="env-progress__command-error" role="alert"></div>
     </div>
@@ -126,6 +133,32 @@ export function environmentsPaneMarkup(
     <div id="env-progress-actions" class="env-progress__actions" style="display:none;">
       <a id="env-progress-resume" class="rad-btn rad-btn--secondary" href="#">View planned graph</a>
       <button type="button" id="env-progress-dismiss" class="rad-btn rad-btn--secondary" aria-label="Dismiss completed environment setup progress">Dismiss</button>
+    </div>
+  </div>
+  <!-- Rollback confirmation. Removing cloud resources cannot be undone, so the
+       destructive command is confirmed against a server-projected preview that
+       names exactly what goes and exactly what stays. The lists are filled from
+       the operation record; nothing here is reconstructed in the browser. -->
+  <div id="env-rollback-modal" role="dialog" aria-modal="true" aria-labelledby="env-rollback-title" aria-describedby="env-rollback-intro" style="display:none; position:fixed; inset:0; z-index:1004; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
+    <div class="env-rollback__panel">
+      <div id="env-rollback-title" class="env-rollback__title" tabindex="-1">Roll back resources created by this setup?</div>
+      <div id="env-rollback-intro" class="env-rollback__intro">Radius removes only the resources it proved it created before the workflows were committed. This cannot be undone.</div>
+      <div id="env-rollback-remove-block" class="env-progress__failure-block" style="display:none;">
+        <div class="env-progress__failure-label">Radius will remove</div>
+        <ul id="env-rollback-remove" class="env-progress__failure-list"></ul>
+      </div>
+      <div id="env-rollback-keep-block" class="env-progress__failure-block" style="display:none;">
+        <div class="env-progress__failure-label">Radius will keep</div>
+        <ul id="env-rollback-keep" class="env-progress__failure-list"></ul>
+      </div>
+      <div id="env-rollback-manual-block" class="env-progress__failure-block" style="display:none;">
+        <div class="env-progress__failure-label">Needs an action from you</div>
+        <ul id="env-rollback-manual" class="env-progress__failure-list"></ul>
+      </div>
+      <div class="env-rollback__buttons">
+        <button type="button" id="env-rollback-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Keep resources</button>
+        <button type="button" id="env-rollback-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Roll back resources</button>
+      </div>
     </div>
   </div>
   <button id="new-env-btn" class="rad-btn rad-btn--primary" style="margin:0 0 16px;">New Environment</button>

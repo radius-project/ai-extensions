@@ -24,7 +24,7 @@
 //      `warning` is allowlisted; raw stderr only ever lands in
 //      `failure.evidence`, fenced, and never in a label.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   disabledOperationStore,
   PERSISTED_OPERATIONS_VERSION,
@@ -143,11 +143,18 @@ export type SetupArtifactLedger = {
 // an extension restart resolves to the same saved decision instead of starting a
 // second mutation. Nothing here holds a secret, a token, or raw command output.
 
+// `continue_setup` and `rollback` are the two first-choice commands a stopped
+// operation offers. They are separate kinds rather than a reused retry so the
+// saved record says which decision the customer actually made: "continue what I
+// stopped" and "repeat the continuation that failed" are different sentences,
+// and so are "remove what this attempt created" and "try that removal again".
 export type OperationCommandKind =
   | "stop"
   | "resume_input"
+  | "continue_setup"
   | "retry_setup"
   | "retry_verification"
+  | "rollback"
   | "retry_cleanup";
 
 export type OperationCommandState = "accepted" | "running" | "finished";
@@ -219,10 +226,15 @@ function positiveInt(value: any, fallback: number): number {
 const COMMAND_KINDS = Object.freeze([
   "stop",
   "resume_input",
+  "continue_setup",
   "retry_setup",
   "retry_verification",
+  "rollback",
   "retry_cleanup"
 ]);
+
+const FORWARD_COMMAND_KINDS = Object.freeze(["continue_setup", "retry_setup"]);
+const CLEANUP_COMMAND_KINDS = Object.freeze(["rollback", "retry_cleanup"]);
 const COMMAND_STATES = Object.freeze(["accepted", "running", "finished"]);
 const ATTEMPT_KINDS = Object.freeze(["setup", "verification", "cleanup"]);
 
@@ -1379,7 +1391,11 @@ function projectPartialState(
       });
   });
 
-  const reusableOnRetry = commitPointReached || canRetrySetup(op).ok;
+  // "Reusable" means a forward continuation would reuse it, whichever label
+  // that continuation carries: a deliberate stop is continued and a failed
+  // continuation is retried, and both walk the same ledger.
+  const reusableOnRetry =
+    commitPointReached || canRetrySetup(op).ok || canContinueSetup(op).ok;
   const created: any[] = [];
   const retainedGroup: any[] = [];
   for (const entry of surviving) {
@@ -1639,27 +1655,264 @@ export function applySetupResumePoint(
   return { ...plan, stage: target || plan.stage };
 }
 
-export function canRetrySetup(op: any): any {
+/**
+ * The forward command a terminal record is actually offering.
+ *
+ * "Continue" and "Retry" describe different customer situations, so the label
+ * is decided from the saved record rather than from the word `retry` in the
+ * route: a deliberate stop is continued, and only a continuation that started
+ * and then failed is retried. A failed rollback leaves the forward path on its
+ * first attempt, so it stays a continuation.
+ */
+export function setupForwardIntent(op: any): "continue" | "retry" | null {
+  if (!op || !isTerminalState(op.state)) return null;
+  if (op.state === "cancelled") return "continue";
+  if (op.state !== "failed_partial" && op.state !== "failed") return null;
+  const command = latestCommand(op);
+  // The customer's most recent command owns the failure in front of them. After
+  // a rollback attempt the forward path has still never been tried.
+  if (command && CLEANUP_COMMAND_KINDS.includes(command.kind))
+    return "continue";
+  if (op.state === "failed") return null;
+  return "retry";
+}
+
+/**
+ * Whether a stopped or partially failed setup may move forward at all.
+ *
+ * Shared by `canContinueSetup` and `canRetrySetup` so the two labels cannot
+ * disagree about safety — only about which sentence the customer is reading.
+ */
+function setupForwardEligibility(
+  op: any,
+  {
+    intent,
+    prefix,
+    notAvailableCode
+  }: {
+    intent: "continue" | "retry";
+    prefix: "setup-continue" | "setup-retry";
+    notAvailableCode: string;
+  }
+): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
-  if (op.state !== "failed_partial" && op.state !== "cancelled")
-    return { ok: false, code: "setup-retry-not-retryable" };
+  if (setupForwardIntent(op) !== intent)
+    return { ok: false, code: notAvailableCode };
   const request = op.resumeRequest || op.request;
   if (!request || !request.environment)
-    return { ok: false, code: "setup-retry-request-missing" };
+    return { ok: false, code: `${prefix}-request-missing` };
   const ledger = getSetupArtifactLedger(op);
   const ambiguous = ambiguousSetupOwnership(ledger);
   if (ambiguous)
     return {
       ok: false,
-      code: "setup-retry-ownership-ambiguous",
+      code: `${prefix}-ownership-ambiguous`,
       detail: ambiguous
     };
+  // A completed rollback removed everything this attempt created on purpose.
+  // Offering to walk forward from an emptied ledger would quietly rebuild the
+  // resources the customer just asked Radius to remove.
+  if (intent === "continue" && rollbackRemovedEverything(op))
+    return { ok: false, code: "setup-continue-rolled-back" };
   return {
     ok: true,
-    code: "setup-retry-allowed",
+    code: `${prefix}-allowed`,
     resumeFrom: nextIncompleteSetupStep(op)
+  };
+}
+
+/** The first forward action after a deliberate stop or a failed rollback. */
+export function canContinueSetup(op: any): any {
+  return setupForwardEligibility(op, {
+    intent: "continue",
+    prefix: "setup-continue",
+    notAvailableCode: "setup-continue-not-available"
+  });
+}
+
+/** The forward action after a continuation attempt failed, or setup was cut off. */
+export function canRetrySetup(op: any): any {
+  return setupForwardEligibility(op, {
+    intent: "retry",
+    prefix: "setup-retry",
+    // The pre-split refusal code, kept so the existing route message and the
+    // panel copy that quotes it do not have to change meaning.
+    notAvailableCode: "setup-retry-not-retryable"
+  });
+}
+
+// ─── Rollback eligibility ────────────────────────────────────────────────────
+// Stop and rollback are two decisions, not one. Stop ends the attempt; rollback
+// is the separate, confirmed request to remove what the attempt created. The
+// selection below is the whole safety boundary: only resources the ledger
+// proves this attempt created, only before the workflow commit point, never a
+// reused resource and never one identified by display name alone.
+
+/** The order deletions must run in so nothing is removed before its dependents. */
+const ROLLBACK_ARTIFACT_ORDER: readonly SetupCleanupArtifactType[] =
+  Object.freeze([
+    "github_environment",
+    "role_assignment",
+    "federated_credential",
+    "service_principal",
+    "azure_app"
+  ]);
+
+export type RollbackTarget = {
+  artifactType: SetupCleanupArtifactType;
+  target: string;
+  identity: string | null;
+  key: string;
+};
+
+function rollbackTarget(
+  artifactType: SetupCleanupArtifactType,
+  artifact: any,
+  target: string
+): RollbackTarget {
+  const identity = cleanupArtifactIdentity(artifactType, artifact);
+  return {
+    artifactType,
+    target,
+    identity: identity || null,
+    key: cleanupTargetKey({ artifactType, identity, target })
+  };
+}
+
+/**
+ * Every proven-owned pre-commit artifact the ledger still claims, in the order
+ * a rollback must delete them.
+ *
+ * `created_candidate` is deliberately absent: GitHub's idempotent PUT cannot
+ * prove this request created that environment, so it stays a manual action.
+ */
+export function provenOwnedCleanupTargets(op: any): RollbackTarget[] {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger || hasReachedSetupCommitPoint(op)) return [];
+  const targets: RollbackTarget[] = [];
+  if (ledger.githubEnvironment.state === "created") {
+    targets.push(
+      rollbackTarget(
+        "github_environment",
+        ledger.githubEnvironment,
+        formatGitHubEnvironmentLabel(ledger.githubEnvironment)
+      )
+    );
+  }
+  for (const entry of [...ledger.roleAssignments].reverse()) {
+    targets.push(
+      rollbackTarget(
+        "role_assignment",
+        entry,
+        `${String(entry.role || "")} @ ${String(entry.scope || "")}`
+      )
+    );
+  }
+  for (const entry of [...ledger.federatedCredentials].reverse()) {
+    targets.push(
+      rollbackTarget(
+        "federated_credential",
+        entry,
+        `${String(entry.name || "")} @ ${String(entry.subject || "")}`
+      )
+    );
+  }
+  if (ledger.servicePrincipal.state === "created") {
+    targets.push(
+      rollbackTarget(
+        "service_principal",
+        ledger.servicePrincipal,
+        formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
+      )
+    );
+  }
+  if (ledger.azureApp.state === "created") {
+    targets.push(
+      rollbackTarget(
+        "azure_app",
+        ledger.azureApp,
+        formatAzureAppLabel(ledger.azureApp)
+      )
+    );
+  }
+  return targets.sort(
+    (a, b) =>
+      ROLLBACK_ARTIFACT_ORDER.indexOf(a.artifactType) -
+      ROLLBACK_ARTIFACT_ORDER.indexOf(b.artifactType)
+  );
+}
+
+/**
+ * Whether a *completed* cleanup attempt has already run against this operation.
+ *
+ * A cleanup left in `running` on a terminal record was interrupted — the
+ * process went away mid-rollback — and nothing owns it: the cleanup retry only
+ * accepts a finished attempt that ended with warnings. Counting it as attempted
+ * would leave the customer with created resources and no path to remove them,
+ * so it is reported as not attempted and the first rollback is offered again.
+ * That is safe because the deletion set is re-derived from the ledger, and
+ * anything the interrupted attempt proved gone is no longer in it.
+ */
+function hasAttemptedCleanup(op: any): boolean {
+  const cleanup = getSetupArtifactLedger(op)?.cleanup || {};
+  if (cleanup.state === "running") return false;
+  return (
+    Number(cleanup.attempts || 0) > 0 ||
+    (Array.isArray(cleanup.results) && cleanup.results.length > 0) ||
+    cleanup.state === "succeeded" ||
+    cleanup.state === "succeeded_with_warnings"
+  );
+}
+
+function rollbackRemovedEverything(op: any): boolean {
+  return hasAttemptedCleanup(op) && provenOwnedCleanupTargets(op).length === 0;
+}
+
+/**
+ * A stable identity for the exact set of artifacts one rollback will remove.
+ *
+ * Derived from saved artifact keys alone, so a duplicate click, a lost
+ * response, a reload, and an extension restart all rebuild the same command id
+ * instead of scheduling a second cleanup.
+ */
+export function rollbackArtifactIdentity(targets: RollbackTarget[]): string {
+  const keys = targets.map((entry) => entry.key).sort();
+  if (keys.length === 0) return "cleanup";
+  const digest = createHash("sha256")
+    .update(keys.join("\u0000"))
+    .digest("hex")
+    .slice(0, 16);
+  return `cleanup#${digest}`;
+}
+
+export function canStartRollback(op: any): any {
+  if (!op) return { ok: false, code: "unknown-operation" };
+  if (!isTerminalState(op.state))
+    return { ok: false, code: "operation-active" };
+  // A rollback answers a stopped or partially failed attempt. A succeeded or
+  // action_required record describes resources the customer is relying on.
+  if (
+    op.state !== "cancelled" &&
+    op.state !== "failed_partial" &&
+    op.state !== "failed"
+  )
+    return { ok: false, code: "rollback-not-available" };
+  if (hasReachedSetupCommitPoint(op))
+    return { ok: false, code: "rollback-after-commit" };
+  if (hasAttemptedCleanup(op))
+    return { ok: false, code: "rollback-already-attempted" };
+  // A record with no ledger proves nothing, so it selects nothing and refuses
+  // here rather than needing a guard of its own.
+  const targets = provenOwnedCleanupTargets(op);
+  if (targets.length === 0)
+    return { ok: false, code: "rollback-nothing-owned" };
+  return {
+    ok: true,
+    code: "rollback-allowed",
+    targets,
+    target: rollbackArtifactIdentity(targets)
   };
 }
 
@@ -1743,17 +1996,251 @@ const VERIFICATION_RETRY_DESCRIPTIONS: Record<string, string> = {
     "GitHub refused the request that starts the verification workflow, so nothing ran. Radius asks GitHub to start the same workflow again."
 };
 
+const SETUP_STEP_LABELS: Record<string, string> = {
+  azure_app: "Create the App Registration",
+  service_principal: "Create the Service Principal",
+  federated_credentials: "Add the federated credentials",
+  role_assignments: "Grant the Azure role assignments",
+  github_environment: "Configure the GitHub environment",
+  workflow_commit: "Commit the deploy workflows",
+  verification: "Verify the credentials"
+};
+
+/** The customer-facing name of a resume point. */
+export function setupStepLabel(step: any): string {
+  return SETUP_STEP_LABELS[String(step || "")] || "the next setup step";
+}
+
+/**
+ * What a continuation would reuse, and where it would start.
+ *
+ * Built here rather than in the browser so the sentence beside **Continue
+ * setup** comes from the same ledger the continuation will actually walk.
+ */
+function projectContinuationPreview(op: any, resumeFrom: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  const reuses: Array<{ kind: string; target: string }> = [];
+  if (ledger) {
+    const present = (state: any) => state === "created" || state === "reused";
+    if (present(ledger.azureApp.state))
+      reuses.push({
+        kind: "azure_app",
+        target: formatAzureAppLabel(ledger.azureApp)
+      });
+    if (present(ledger.servicePrincipal.state))
+      reuses.push({
+        kind: "service_principal",
+        target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
+      });
+    ledger.federatedCredentials.forEach((entry: any) => {
+      reuses.push({
+        kind: "federated_credential",
+        target: `${String(entry.name || "")} @ ${String(entry.subject || "")}`
+      });
+    });
+    ledger.roleAssignments.forEach((entry: any) => {
+      reuses.push({
+        kind: "role_assignment",
+        target: `${String(entry.role || "")} @ ${String(entry.scope || "")}`
+      });
+    });
+    if (present(ledger.githubEnvironment.state))
+      reuses.push({
+        kind: "github_environment",
+        target: formatGitHubEnvironmentLabel(ledger.githubEnvironment)
+      });
+  }
+  return {
+    resumeFrom: String(resumeFrom || ""),
+    resumeLabel: setupStepLabel(resumeFrom),
+    reuses
+  };
+}
+
+/**
+ * What a rollback will remove, keep, and leave for the customer.
+ *
+ * The confirmation dialog renders this projection verbatim. Rebuilding it in
+ * the browser from the inventory groups would let the dialog promise a deletion
+ * the server would then refuse to perform.
+ */
+function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
+  const summary = projectCleanupSummary(op) || {};
+  const removes = targets.map((entry) => ({
+    kind: entry.artifactType,
+    target: entry.target
+  }));
+  const removeKeys = new Set(
+    removes.map((entry) => `${entry.kind}#${entry.target}`)
+  );
+  const keeps = [
+    ...(summary.reused || []).map((entry: any) => ({
+      kind: entry.kind,
+      target: entry.target,
+      reason: "reused"
+    })),
+    ...(summary.retainedArtifacts || [])
+      .filter((entry: any) => !removeKeys.has(`${entry.kind}#${entry.target}`))
+      .map((entry: any) => ({
+        kind: entry.kind,
+        target: entry.target,
+        reason: "retained"
+      }))
+  ];
+  return {
+    removes,
+    keeps,
+    manualActionRequired: (summary.manualActionRequired || []).map(
+      (entry: any) => ({
+        kind: entry.kind,
+        target: entry.target,
+        action: entry.action
+      })
+    )
+  };
+}
+
+/**
+ * Why a path the customer might expect is not on offer.
+ *
+ * Silence reads as a bug. Every refusal that a customer can reasonably reach
+ * gets one sentence naming the constraint that produced it.
+ */
+const ROLLBACK_UNAVAILABLE_MESSAGES: Record<string, string> = {
+  "rollback-nothing-owned":
+    "Radius did not create any resources in this attempt, so there is nothing to roll back.",
+  "rollback-after-commit":
+    "Setup committed workflow files, so Radius retained the environment resources instead of removing them.",
+  "rollback-already-attempted":
+    "Radius already ran a rollback for this attempt. Anything still listed needs the retry above or a manual removal."
+};
+
+const CONTINUE_UNAVAILABLE_MESSAGES: Record<string, string> = {
+  "setup-continue-request-missing":
+    "Radius no longer holds the environment details needed to continue this setup.",
+  "setup-continue-ownership-ambiguous":
+    "Radius cannot prove ownership of a remaining resource, so continuing could duplicate it. Remove it manually if needed.",
+  "setup-continue-rolled-back":
+    "Radius rolled back what this attempt created. Start a new environment setup when you are ready."
+};
+
+export function projectActionGuidance(op: any): any[] {
+  if (!op || !isTerminalState(op.state)) return [];
+  const notes: Array<{ code: string; message: string }> = [];
+  const rollback = canStartRollback(op);
+  const forward = canContinueSetup(op).ok || canRetrySetup(op).ok;
+  if (!rollback.ok && ROLLBACK_UNAVAILABLE_MESSAGES[rollback.code]) {
+    notes.push({
+      code: rollback.code,
+      message: ROLLBACK_UNAVAILABLE_MESSAGES[rollback.code]
+    });
+  }
+  if (!forward) {
+    const continuation = canContinueSetup(op);
+    if (CONTINUE_UNAVAILABLE_MESSAGES[continuation.code]) {
+      notes.push({
+        code: continuation.code,
+        message: CONTINUE_UNAVAILABLE_MESSAGES[continuation.code]
+      });
+    }
+  }
+  return notes;
+}
+
+/**
+ * The heading and supporting sentence for a state that needs its own screen.
+ *
+ * A stopped setup is neither a success nor a failure, and a rollback that left
+ * something behind is not a failed setup. Each gets the heading that describes
+ * what actually happened, projected here so the panel never has to infer it.
+ */
+export function projectOperationHeadline(op: any): any {
+  if (!op) return null;
+  const activeCleanup = activeCommandKind(op);
+  if (!isTerminalState(op.state)) {
+    if (activeCleanup === "rollback" || activeCleanup === "retry_cleanup") {
+      return {
+        code: "rolling-back",
+        title: "Rolling back created resources…",
+        message:
+          "Radius is removing the resources it proved it created during this attempt."
+      };
+    }
+    if (activeCleanup === "continue_setup") {
+      return {
+        code: "continuing",
+        title: "Continuing setup…",
+        message: `Radius resumed from ${setupStepLabel(op.resumeFrom)} and is reusing the resources it already recorded.`
+      };
+    }
+    if (activeCleanup === "retry_setup") {
+      return {
+        code: "retrying-setup",
+        title: "Retrying setup…",
+        message: `Radius restarted from ${setupStepLabel(op.resumeFrom)} and is reusing the resources it already recorded.`
+      };
+    }
+    return null;
+  }
+  const lastCommand = latestCommand(op);
+  const cleanupCommand =
+    lastCommand && CLEANUP_COMMAND_KINDS.includes(lastCommand.kind);
+  if (op.state === "cancelled") {
+    if (cleanupCommand) {
+      return {
+        code: "rollback-complete",
+        title: "Rollback complete",
+        message:
+          "Radius removed the resources it created during this attempt. Anything it reused was left alone."
+      };
+    }
+    return {
+      code: "stopped",
+      title: "Environment setup stopped",
+      message:
+        "Radius stopped before the next setup step. Review what exists, then roll it back or continue setup."
+    };
+  }
+  if (op.state === "failed_partial" && cleanupCommand) {
+    return {
+      code: "rollback-incomplete",
+      title: "Rollback finished with items still present",
+      message:
+        "Radius removed what it could. The resources below are still present and need another attempt or a manual removal."
+    };
+  }
+  if (
+    (op.state === "failed_partial" || op.state === "failed") &&
+    lastCommand &&
+    FORWARD_COMMAND_KINDS.includes(lastCommand.kind)
+  ) {
+    return {
+      code: "continue-failed",
+      title: "Setup could not continue",
+      message: `Radius stopped at ${setupStepLabel(op.resumeFrom)}. Review what exists, then retry setup or roll back what this attempt created.`
+    };
+  }
+  return null;
+}
+
 export function projectOperationActions(op: any): any[] {
   if (!op) return [];
   const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
   const control = op.control || createOperationControl();
   if (!isTerminalState(op.state)) {
+    // A confirmed rollback is one cooperative server-owned command: cleanup has
+    // no pause control, so offering Stop mid-deletion would promise a boundary
+    // that does not exist.
+    const active = activeCommandKind(op);
+    if (active === "rollback" || active === "retry_cleanup") return [];
     const waitingForInput = op.state === INPUT_REQUIRED_STATE;
     return [
       {
         id: "stop",
         kind: "stop",
         label: "Stop setup",
+        tone: "neutral",
+        requiresConfirmation: false,
         description:
           waitingForInput ?
             "Radius is waiting for your answer, so it stops immediately."
@@ -1771,6 +2258,8 @@ export function projectOperationActions(op: any): any[] {
       id: "retry-verification",
       kind: "retry_verification",
       label: "Retry verification",
+      tone: "primary",
+      requiresConfirmation: false,
       description: VERIFICATION_RETRY_DESCRIPTIONS[verification.classification],
       method: "POST",
       path: `${base}/retry/verification`,
@@ -1780,18 +2269,63 @@ export function projectOperationActions(op: any): any[] {
       pullRequestUrl: verification.pullRequestUrl
     });
   }
+  // Forward first, destructive second, and neither is a default: the customer
+  // decides whether to finish creating the environment or abandon it.
+  const continuation = canContinueSetup(op);
+  if (continuation.ok) {
+    actions.push({
+      id: "continue-setup",
+      kind: "continue_setup",
+      label: "Continue setup",
+      tone: "primary",
+      requiresConfirmation: false,
+      description: `Radius continues from ${setupStepLabel(
+        continuation.resumeFrom
+      )} and reuses the resources it already recorded.`,
+      method: "POST",
+      path: `${base}/continue`,
+      pending: false,
+      resumeFrom: continuation.resumeFrom,
+      preview: projectContinuationPreview(op, continuation.resumeFrom)
+    });
+  }
   const setup = canRetrySetup(op);
   if (setup.ok) {
     actions.push({
       id: "retry-setup",
       kind: "retry_setup",
       label: "Retry setup",
-      description:
-        "Radius reuses the resources it already recorded and continues from the first unfinished step.",
+      tone: "primary",
+      requiresConfirmation: false,
+      description: `The last attempt stopped at ${setupStepLabel(
+        op.resumeFrom || setup.resumeFrom
+      )}. Radius reuses the resources it already recorded and starts again from ${setupStepLabel(
+        setup.resumeFrom
+      )}.`,
       method: "POST",
       path: `${base}/retry/setup`,
       pending: false,
-      resumeFrom: setup.resumeFrom
+      resumeFrom: setup.resumeFrom,
+      preview: projectContinuationPreview(op, setup.resumeFrom)
+    });
+  }
+  const rollback = canStartRollback(op);
+  if (rollback.ok) {
+    actions.push({
+      id: "rollback",
+      kind: "rollback",
+      label: "Roll back created resources",
+      tone: "danger",
+      requiresConfirmation: true,
+      confirmTitle: "Roll back resources created by this setup?",
+      confirmLabel: "Roll back resources",
+      cancelLabel: "Keep resources",
+      description:
+        "Radius removes only the resources it proved it created before the workflows were committed. This cannot be undone.",
+      method: "POST",
+      path: `${base}/rollback`,
+      pending: false,
+      preview: projectRollbackPreview(op, rollback.targets)
     });
   }
   const cleanup = canRetryCleanup(op);
@@ -1799,12 +2333,26 @@ export function projectOperationActions(op: any): any[] {
     actions.push({
       id: "retry-cleanup",
       kind: "retry_cleanup",
-      label: "Retry cleanup",
+      label: "Retry rollback",
+      tone: "danger",
+      requiresConfirmation: true,
+      confirmTitle: "Retry the rollback for the resources still present?",
+      confirmLabel: "Retry rollback",
+      cancelLabel: "Keep resources",
       description:
         "Radius removes only the resources it proved it created and could not delete on the last attempt.",
       method: "POST",
       path: `${base}/retry/cleanup`,
-      pending: false
+      pending: false,
+      preview: {
+        removes: cleanup.targets.map((entry: any) => ({
+          kind: entry.artifactType,
+          target: entry.target
+        })),
+        keeps: projectRollbackPreview(op, []).keeps,
+        manualActionRequired: projectRollbackPreview(op, [])
+          .manualActionRequired
+      }
     });
   }
   return actions;
@@ -1818,6 +2366,21 @@ export function projectOperationActions(op: any): any[] {
  */
 export function projectNextTransition(op: any): any {
   if (!op || isTerminalState(op.state)) return null;
+  const active = activeCommandKind(op);
+  // Cleanup owns the record while it runs, and it is the one activity with no
+  // action of its own — so it has to name itself or the panel would be silent.
+  if (active === "rollback") {
+    return {
+      code: "rolling-back",
+      message: "Rolling back created resources…"
+    };
+  }
+  if (active === "retry_cleanup") {
+    return {
+      code: "retrying-rollback",
+      message: "Retrying the rollback for the resources still present…"
+    };
+  }
   if (isStopPending(op)) {
     return {
       code: "stopping",
@@ -1828,6 +2391,18 @@ export function projectNextTransition(op: any): any {
     return {
       code: "awaiting-input",
       message: "Radius is waiting for your answer before it continues."
+    };
+  }
+  if (active === "continue_setup") {
+    return {
+      code: "continuing-setup",
+      message: `Continuing setup from ${setupStepLabel(op.resumeFrom)}…`
+    };
+  }
+  if (active === "retry_setup") {
+    return {
+      code: "retrying-setup",
+      message: `Retrying setup from ${setupStepLabel(op.resumeFrom)}…`
     };
   }
   if (op.currentStage === STAGE_VERIFY && op.verification?.dispatchedAt) {
@@ -1932,6 +2507,18 @@ export function finish(
         hasTrackedSetupArtifacts(ledger) ? "pending"
         : "not_needed"
       : "not_needed";
+  }
+  // A terminal record has nothing in flight. The runner that owns a command
+  // usually closes it with its own outcome first; a forward continuation ends
+  // through the setup executor instead, so the outcome closes it here. Leaving
+  // one marked running would let a later duplicate check mistake a finished
+  // attempt for work in progress and silently swallow the customer's click.
+  const control = getOperationControl(op);
+  for (const command of control?.commands ?? []) {
+    if (command.state !== "accepted" && command.state !== "running") continue;
+    command.state = "finished";
+    command.completedAt = nowIso();
+    if (command.outcome == null) command.outcome = state;
   }
   if (announce) announceTerminal(op);
   return op;
@@ -2107,6 +2694,33 @@ export function latestCommand(op: any): any {
   const commands = op?.control?.commands;
   if (!Array.isArray(commands) || commands.length === 0) return null;
   return commands[commands.length - 1];
+}
+
+/**
+ * The command Radius is still working on, if any.
+ *
+ * A duplicate submission resolves to this record rather than starting a second
+ * one, and the panel reads it to name the activity that owns the operation. A
+ * terminal record is working on nothing by definition: a command persisted as
+ * `running` by a process that then went away must never absorb the customer's
+ * next click.
+ */
+export function findActiveCommand(op: any, kinds?: readonly string[]): any {
+  const commands = op?.control?.commands;
+  if (!Array.isArray(commands) || isTerminalState(op?.state)) return null;
+  for (let index = commands.length - 1; index >= 0; index--) {
+    const command = commands[index];
+    if (command.state !== "accepted" && command.state !== "running") continue;
+    if (kinds && !kinds.includes(command.kind)) continue;
+    return command;
+  }
+  return null;
+}
+
+/** The kind of the command currently owning a running operation. */
+export function activeCommandKind(op: any): string | null {
+  const command = findActiveCommand(op);
+  return command ? String(command.kind) : null;
 }
 
 /**
@@ -2299,6 +2913,9 @@ export function summarize(op: any): string {
   const env = op.environment || "environment";
   switch (op.state) {
     case RUNNING_STATE: {
+      const active = activeCommandKind(op);
+      if (active === "rollback" || active === "retry_cleanup")
+        return `Rolling back the resources created for ${env}…`;
       if (isStopPending(op))
         return `Stopping ${env} setup after the current step…`;
       const stage = op.stages.find((s) => s.id === op.currentStage);
@@ -2328,8 +2945,12 @@ export function summarize(op: any): string {
       return `Creating environment "${env}" failed.`;
     case "failed_partial":
       return `Creating environment "${env}" failed partway through — some resources exist.`;
-    case "cancelled":
+    case "cancelled": {
+      const command = latestCommand(op);
+      if (command && CLEANUP_COMMAND_KINDS.includes(command.kind))
+        return `Rolled back the resources created for "${env}".`;
       return `Creating environment "${env}" was stopped.`;
+    }
     default:
       return "";
   }
@@ -2948,6 +3569,9 @@ export function toClientView(op: any): any {
       recordedAt: entry.recordedAt
     })),
     actions: projectOperationActions(op),
+    guidance: projectActionGuidance(op),
+    headline: projectOperationHeadline(op),
+    activeCommandKind: activeCommandKind(op),
     nextTransition: projectNextTransition(op),
     failure:
       op.failure ?

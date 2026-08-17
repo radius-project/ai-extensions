@@ -13,23 +13,29 @@ import {
   announceOperationTerminal,
   beginRetryAttempt,
   buildStages,
+  canContinueSetup,
   canRetryCleanup,
   canRetrySetup,
   canRetryVerification,
+  canStartRollback,
   createOperation,
   enterStage,
+  findActiveCommand,
   finish,
   isTerminalState,
   recordAzureApp,
   recordCleanupState,
   recordCommitState,
   recordCommittedWorkflowFile,
+  recordGitHubEnvironment,
   recordServicePrincipal,
+  requestStop,
   requireInput,
   rollbackRetryAttempt,
   setCommandState,
   setStageState,
   snapshotRetryState,
+  stopAtBoundary,
   toClientView,
   INPUT_REQUIRED_STATE,
   STAGE_VERIFY
@@ -93,9 +99,12 @@ function start(): Harness {
       rollbackRetryAttempt,
       beginRetryAttempt,
       acceptCommand,
+      findActiveCommand,
       setCommandState,
+      canContinueSetup,
       canRetrySetup,
       canRetryVerification,
+      canStartRollback,
       canRetryCleanup,
       applySetupResumePoint,
       setStageState,
@@ -116,6 +125,11 @@ function start(): Harness {
       scheduleCleanupRetry: (instanceId, _operation, commandId) => {
         if (!schedulerAccepts.value) return false;
         scheduled.push({ kind: "cleanup", instanceId, commandId });
+        return true;
+      },
+      scheduleRollback: (instanceId, _operation, commandId) => {
+        if (!schedulerAccepts.value) return false;
+        scheduled.push({ kind: "rollback", instanceId, commandId });
         return true;
       },
       errorMessage: (error) =>
@@ -267,6 +281,39 @@ function mergeHandoff(harness: Harness): OperationRecord {
       pullRequestUrl: "https://github.com/contoso/store/pull/7"
     }
   });
+  return op;
+}
+
+// A setup the customer deliberately stopped, with resources this attempt
+// created and can prove it owns.
+function stoppedSetup(harness: Harness): OperationRecord {
+  const op = seed(harness);
+  op.resumeRequest = {
+    needsAzureCredentials: true,
+    azure: {},
+    environment: {
+      repo: "contoso/store",
+      environment: "dev",
+      provider: "azure"
+    }
+  };
+  recordAzureApp(op, {
+    state: "created",
+    appId: "app-1",
+    displayName: "radius-deploy"
+  });
+  recordServicePrincipal(op, {
+    state: "created",
+    appId: "app-1",
+    objectId: "sp-1"
+  });
+  recordGitHubEnvironment(op, {
+    state: "created",
+    repo: "contoso/store",
+    name: "dev"
+  });
+  requestStop(op);
+  stopAtBoundary(op, "after_environment");
   return op;
 }
 
@@ -601,5 +648,287 @@ describe("operation controls real-loopback HIT", () => {
     // operation and no runner was asked to pick it up.
     expect(harness.persistCalls).toEqual([]);
     expect(harness.scheduled).toEqual([]);
+  });
+});
+
+// The stop → decide → act journey over the real socket. Stopping is one
+// request, and what happens next is the customer's choice between two more:
+// continue the setup, or roll back what the attempt created.
+describe("stop, then continue or roll back, over the socket", () => {
+  it("stops a running operation and then continues it from the saved resume point", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness);
+    op.resumeRequest = {
+      needsAzureCredentials: true,
+      azure: {},
+      environment: {
+        repo: "contoso/store",
+        environment: "dev",
+        provider: "azure"
+      }
+    };
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, { state: "created", appId: "app-1" });
+
+    // 1. Stop, and let the executor honor it at its next safe boundary.
+    const stopped = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/stop`
+    );
+    expect(stopped.status).toBe(202);
+    stopAtBoundary(op, "after_service_principal");
+
+    // 2. The stopped record projects both paths, forward first.
+    const polled = await fetch(
+      `${entry.baseUrl}/api/operations/${op.operationId}`
+    );
+    const view = (await polled.json()) as {
+      operation: {
+        terminalState: string;
+        headline: { title: string };
+        actions: Array<{ id: string; label: string; path: string }>;
+      };
+    };
+    expect(view.operation.terminalState).toBe("cancelled");
+    expect(view.operation.headline.title).toBe("Environment setup stopped");
+    expect(view.operation.actions.map((entry) => entry.label)).toEqual([
+      "Continue setup",
+      "Roll back created resources"
+    ]);
+
+    // 3. Continuing reuses the same operation id and the retained ledger.
+    const continuePath = view.operation.actions[0].path;
+    const continued = await post(entry.baseUrl, continuePath);
+    expect(continued.status).toBe(202);
+    const body = (await continued.json()) as {
+      operationId: string;
+      commandId: string;
+      operation: { state: string };
+    };
+    expect(body.operationId).toBe(op.operationId);
+    expect(body.commandId).toBe(`${op.operationId}:continue_setup:2:continue`);
+    expect(body.operation.state).toBe("running");
+    expect(harness.scheduled).toEqual([
+      { kind: "setup", instanceId: "panel-a" }
+    ]);
+  });
+
+  it("stops a running operation and then rolls it back through the same record", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-b");
+    const op = stoppedSetup(harness);
+
+    const polled = await fetch(
+      `${entry.baseUrl}/api/operations/${op.operationId}`
+    );
+    const view = (await polled.json()) as {
+      operation: {
+        actions: Array<{
+          id: string;
+          path: string;
+          tone: string;
+          requiresConfirmation: boolean;
+          preview: { removes: Array<{ kind: string }> };
+        }>;
+      };
+    };
+    const rollback = view.operation.actions.find(
+      (entry) => entry.id === "rollback"
+    )!;
+    expect(rollback.tone).toBe("danger");
+    expect(rollback.requiresConfirmation).toBe(true);
+    // The preview the dialog renders is the server's own, in deletion order.
+    expect(rollback.preview.removes.map((entry) => entry.kind)).toEqual([
+      "github_environment",
+      "service_principal",
+      "azure_app"
+    ]);
+
+    const response = await post(entry.baseUrl, rollback.path);
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as {
+      operationId: string;
+      commandId: string;
+      statusUrl: string;
+    };
+    expect(body.operationId).toBe(op.operationId);
+    expect(harness.scheduled).toEqual([
+      { kind: "rollback", instanceId: "panel-b", commandId: body.commandId }
+    ]);
+
+    // While cleanup owns the record, no forward retry and no stop are offered.
+    const during = await fetch(`${entry.baseUrl}${body.statusUrl}`);
+    const duringBody = (await during.json()) as {
+      operation: {
+        actions: unknown[];
+        nextTransition: { code: string; message: string };
+      };
+    };
+    expect(duringBody.operation.actions).toEqual([]);
+    expect(duringBody.operation.nextTransition).toEqual({
+      code: "rolling-back",
+      message: "Rolling back created resources…"
+    });
+  });
+
+  it("accepts a second continue after the customer stops the continuation", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = stoppedSetup(harness);
+
+    const first = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/continue`
+    );
+    expect(first.status).toBe(202);
+    expect((await first.json()) as { duplicate?: boolean }).not.toMatchObject({
+      duplicate: true
+    });
+
+    // The customer stops the continuation, then decides to continue again. The
+    // saved command from the first attempt must not swallow the second click.
+    stopAtBoundary(op, "after_service_principal");
+    const second = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/continue`
+    );
+
+    expect(second.status).toBe(202);
+    const body = (await second.json()) as {
+      duplicate?: boolean;
+      commandId: string;
+      attempt: number;
+    };
+    expect(body.duplicate).toBeUndefined();
+    expect(body.attempt).toBe(3);
+    expect(body.commandId).toBe(`${op.operationId}:continue_setup:3:continue`);
+    expect(harness.scheduled).toHaveLength(2);
+  });
+
+  it("schedules one rollback for a repeated request", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = stoppedSetup(harness);
+
+    const first = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/rollback`
+    );
+    const second = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/rollback`
+    );
+
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    const firstBody = (await first.json()) as { commandId: string };
+    expect(await second.json()).toMatchObject({
+      duplicate: true,
+      commandId: firstBody.commandId
+    });
+    expect(harness.scheduled).toHaveLength(1);
+  });
+
+  it("restores the stopped record when the rollback cannot be saved", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = stoppedSetup(harness);
+    harness.persistError.value = new Error("store offline");
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/rollback`
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({
+      code: "operation-rollback-persist-failed"
+    });
+    harness.persistError.value = null;
+
+    const polled = await fetch(
+      `${entry.baseUrl}/api/operations/${op.operationId}`
+    );
+    const view = (await polled.json()) as {
+      operation: {
+        terminalState: string;
+        actions: Array<{ id: string }>;
+      };
+    };
+    expect(view.operation.terminalState).toBe("cancelled");
+    expect(view.operation.actions.map((entry) => entry.id)).toEqual([
+      "continue-setup",
+      "rollback"
+    ]);
+    expect(harness.scheduled).toEqual([]);
+  });
+
+  it("fails closed on a post-commit, an empty-ledger, and an ambiguous-only record", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const committed = stoppedSetup(harness);
+    recordCommittedWorkflowFile(committed, {
+      path: ".github/workflows/radius-deploy.yml",
+      mode: "default_branch",
+      branch: "main"
+    });
+    const empty = seed(harness, "contoso/empty");
+    finish(empty, "cancelled", { terminal: { reason: "stopped-at-boundary" } });
+    const ambiguous = seed(harness, "contoso/ambiguous");
+    recordGitHubEnvironment(ambiguous, {
+      state: "created_candidate",
+      repo: "contoso/ambiguous",
+      name: "dev"
+    });
+    finish(ambiguous, "cancelled", {
+      terminal: { reason: "stopped-at-boundary" }
+    });
+
+    for (const [operation, code] of [
+      [committed, "rollback-after-commit"],
+      [empty, "rollback-nothing-owned"],
+      [ambiguous, "rollback-nothing-owned"]
+    ] as const) {
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${operation.operationId}/rollback`
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ code });
+    }
+    expect(harness.scheduled).toEqual([]);
+  });
+
+  it("reports that nothing started when no runner accepts the rollback", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = stoppedSetup(harness);
+    harness.schedulerAccepts.value = false;
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/rollback`
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      code: "operation-command-unscheduled"
+    });
+
+    // The customer is put back on the decision they were looking at, with the
+    // repository lock released rather than held by a record that never ran.
+    const polled = await fetch(
+      `${entry.baseUrl}/api/operations/${op.operationId}`
+    );
+    const view = (await polled.json()) as {
+      operation: { terminalState: string; actions: Array<{ id: string }> };
+    };
+    expect(view.operation.terminalState).toBe("cancelled");
+    expect(view.operation.actions.map((entry) => entry.id)).toEqual([
+      "continue-setup",
+      "rollback"
+    ]);
   });
 });

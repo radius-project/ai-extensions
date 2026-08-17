@@ -266,3 +266,66 @@ describe("environmentsPaneMarkup", () => {
     );
   });
 });
+
+describe("environmentsPaneMarkup — stop, continue and rollback", () => {
+  const html = environmentsPaneMarkup(baseOptions);
+
+  it("gives the stopped and rollback states their own heading line", () => {
+    expect(html).toContain(
+      '<div id="env-progress-headline-note" class="env-progress__headline-note" style="display:none;"></div>'
+    );
+    expect(html).toContain('id="env-progress-failure-title"');
+  });
+
+  it("renders a guidance list for a path Radius cannot offer", () => {
+    expect(html).toContain(
+      '<ul id="env-progress-command-guidance" class="env-progress__command-guidance" style="display:none;"></ul>'
+    );
+  });
+
+  it("declares the rollback confirmation as an accessible modal dialog", () => {
+    expect(html).toContain(
+      '<div id="env-rollback-modal" role="dialog" aria-modal="true" aria-labelledby="env-rollback-title" aria-describedby="env-rollback-intro"'
+    );
+    expect(html).toContain(
+      '<div id="env-rollback-title" class="env-rollback__title" tabindex="-1">Roll back resources created by this setup?</div>'
+    );
+    // Hidden until the customer asks for it, so nothing destructive is one
+    // stray click away.
+    const dialog = html.slice(html.indexOf('id="env-rollback-modal"'));
+    expect(dialog.slice(0, 260)).toContain("display:none;");
+  });
+
+  it("names the destructive confirmation and the safe way out", () => {
+    expect(html).toContain(
+      '<button type="button" id="env-rollback-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Keep resources</button>'
+    );
+    expect(html).toContain(
+      '<button type="button" id="env-rollback-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Roll back resources</button>'
+    );
+    // Cancel comes first in the DOM, so the destructive control is never the
+    // first thing a keyboard user lands on after the title.
+    expect(html.indexOf('id="env-rollback-cancel"')).toBeLessThan(
+      html.indexOf('id="env-rollback-confirm"')
+    );
+  });
+
+  it("carries a named block for each preview group the server projects", () => {
+    for (const id of [
+      "env-rollback-remove",
+      "env-rollback-keep",
+      "env-rollback-manual"
+    ]) {
+      expect(html).toContain(`id="${id}"`);
+      expect(html).toContain(`id="${id}-block"`);
+    }
+    expect(html).toContain("Radius will remove");
+    expect(html).toContain("Radius will keep");
+  });
+
+  it("places the inventory above the actions so the effect is read first", () => {
+    expect(html.indexOf('id="env-progress-state"')).toBeLessThan(
+      html.indexOf('id="env-progress-commands"')
+    );
+  });
+});

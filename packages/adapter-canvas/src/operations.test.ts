@@ -27,6 +27,7 @@ import {
   recordAzureApp,
   recordCommitState,
   recordCommittedWorkflowFile,
+  recordCleanupDeletion,
   recordCleanupState,
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
@@ -47,25 +48,33 @@ import {
   beginRetryAttempt,
   buildCommandId,
   buildIdempotencyKey,
+  canContinueSetup,
   canRetryCleanup,
   canRetrySetup,
   canRetryVerification,
+  canStartRollback,
   classifyVerificationRetry,
   createOperationControl,
   discardCommand,
+  findActiveCommand,
   findCommand,
   getOperationControl,
   isStopPending,
   latestCommand,
   nextIncompleteSetupStep,
+  projectActionGuidance,
   projectCleanupSummary,
   projectNextTransition,
   projectOperationActions,
+  projectOperationHeadline,
+  provenOwnedCleanupTargets,
   readOperationControl,
   recordAttemptOutcome,
   reconcileOperationLifecycle,
   rollbackRetryAttempt,
   setCommandState,
+  rollbackArtifactIdentity,
+  setupForwardIntent,
   snapshotRetryState,
   stopAtBoundary,
   unresolvedCleanupTargets,
@@ -2780,5 +2789,635 @@ describe("control record guard rails", () => {
       requested: true,
       boundary: "after-app-registration"
     });
+  });
+});
+
+// ─── Stop, continue and rollback ─────────────────────────────────────────────
+// Stopping an attempt and removing what it created are two decisions, and the
+// projection below is the whole contract the panel renders: which forward
+// action is on offer, whether a rollback is safe, exactly what it would remove,
+// and why a missing path is missing.
+
+function stoppedWithCreatedResources(overrides = {}) {
+  const op = addSafeResumeRequest(newOp(overrides));
+  recordAzureApp(op, {
+    state: "created",
+    appId: "app-1",
+    displayName: "radius-deploy"
+  });
+  recordServicePrincipal(op, {
+    state: "created",
+    appId: "app-1",
+    objectId: "sp-1"
+  });
+  recordCreatedFederatedCredential(op, {
+    name: "radius-main",
+    subject: "repo:contoso/store:ref:refs/heads/main"
+  });
+  recordCreatedRoleAssignment(op, {
+    role: "Contributor",
+    scope: "/subscriptions/s1",
+    principalObjectId: "sp-1"
+  });
+  recordGitHubEnvironment(op, {
+    state: "created",
+    repo: "contoso/store",
+    name: "dev"
+  });
+  requestStop(op);
+  stopAtBoundary(op, "after_environment");
+  return op;
+}
+
+describe("stopped operations offer continuing and rolling back", () => {
+  it("projects Continue setup before Roll back created resources", () => {
+    const op = stoppedWithCreatedResources();
+    const actions = projectOperationActions(op);
+    expect(actions.map((entry) => [entry.id, entry.label])).toEqual([
+      ["continue-setup", "Continue setup"],
+      ["rollback", "Roll back created resources"]
+    ]);
+    expect(actions[0]).toMatchObject({
+      kind: "continue_setup",
+      tone: "primary",
+      requiresConfirmation: false,
+      method: "POST",
+      path: `/api/operations/${op.operationId}/continue`,
+      resumeFrom: "workflow_commit"
+    });
+    expect(actions[1]).toMatchObject({
+      kind: "rollback",
+      tone: "danger",
+      requiresConfirmation: true,
+      method: "POST",
+      path: `/api/operations/${op.operationId}/rollback`,
+      confirmTitle: "Roll back resources created by this setup?",
+      confirmLabel: "Roll back resources",
+      cancelLabel: "Keep resources"
+    });
+  });
+
+  it("names the resume point and the resources a continuation reuses", () => {
+    const op = stoppedWithCreatedResources();
+    const [continueAction] = projectOperationActions(op);
+    expect(continueAction.description).toBe(
+      "Radius continues from Commit the deploy workflows and reuses the resources it already recorded."
+    );
+    expect(continueAction.preview.resumeLabel).toBe(
+      "Commit the deploy workflows"
+    );
+    expect(continueAction.preview.reuses.map((entry) => entry.kind)).toEqual([
+      "azure_app",
+      "service_principal",
+      "federated_credential",
+      "role_assignment",
+      "github_environment"
+    ]);
+  });
+
+  it("calls the first forward action Continue and only a failed continuation Retry", () => {
+    const stopped = stoppedWithCreatedResources();
+    expect(setupForwardIntent(stopped)).toBe("continue");
+    expect(canContinueSetup(stopped)).toMatchObject({ ok: true });
+    expect(canRetrySetup(stopped)).toMatchObject({
+      ok: false,
+      code: "setup-retry-not-retryable"
+    });
+
+    // The customer continued, and that continuation is what failed.
+    beginRetryAttempt(stopped, "setup");
+    acceptCommand(stopped, {
+      kind: "continue_setup",
+      attempt: 2,
+      target: "continue"
+    });
+    finish(stopped, "failed_partial", {
+      failure: { code: "azure-cli-failed", message: "az returned 1" }
+    });
+    expect(setupForwardIntent(stopped)).toBe("retry");
+    expect(canContinueSetup(stopped)).toMatchObject({
+      ok: false,
+      code: "setup-continue-not-available"
+    });
+    const actions = projectOperationActions(stopped);
+    expect(actions.map((entry) => entry.label)).toEqual([
+      "Retry setup",
+      "Roll back created resources"
+    ]);
+    expect(projectOperationHeadline(stopped)).toMatchObject({
+      code: "continue-failed",
+      title: "Setup could not continue"
+    });
+  });
+
+  it("keeps the forward action on Continue after a rollback attempt failed", () => {
+    const op = stoppedWithCreatedResources();
+    beginRetryAttempt(op, "cleanup");
+    acceptCommand(op, { kind: "rollback", attempt: 1, target: "cleanup#abc" });
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius-deploy (app-1)",
+          identity: "app-1",
+          outcome: "warning",
+          detail: "Azure CLI returned 429."
+        }
+      ]
+    });
+    finish(op, "failed_partial", {
+      failure: { code: "setup-cleanup-incomplete" }
+    });
+
+    expect(setupForwardIntent(op)).toBe("continue");
+    const actions = projectOperationActions(op);
+    expect(actions.map((entry) => entry.label)).toEqual([
+      "Continue setup",
+      "Retry rollback"
+    ]);
+    expect(actions[1]).toMatchObject({
+      kind: "retry_cleanup",
+      tone: "danger",
+      requiresConfirmation: true,
+      path: `/api/operations/${op.operationId}/retry/cleanup`
+    });
+    expect(actions[1].preview.removes.map((entry) => entry.target)).toEqual([
+      "radius-deploy (app-1)"
+    ]);
+    expect(projectOperationHeadline(op)).toMatchObject({
+      code: "rollback-incomplete",
+      title: "Rollback finished with items still present"
+    });
+  });
+
+  it("gives the stopped state its own heading rather than a failure", () => {
+    const op = stoppedWithCreatedResources();
+    expect(projectOperationHeadline(op)).toEqual({
+      code: "stopped",
+      title: "Environment setup stopped",
+      message:
+        "Radius stopped before the next setup step. Review what exists, then roll it back or continue setup."
+    });
+    expect(toClientView(op).headline.title).toBe("Environment setup stopped");
+  });
+});
+
+describe("rollback eligibility", () => {
+  it("selects every proven-owned pre-commit artifact in reverse dependency order", () => {
+    const op = stoppedWithCreatedResources();
+    expect(
+      provenOwnedCleanupTargets(op).map((entry) => entry.artifactType)
+    ).toEqual([
+      "github_environment",
+      "role_assignment",
+      "federated_credential",
+      "service_principal",
+      "azure_app"
+    ]);
+    expect(canStartRollback(op)).toMatchObject({
+      ok: true,
+      code: "rollback-allowed"
+    });
+  });
+
+  it("never puts a reused or unprovable resource in the deletion set", () => {
+    const op = addSafeResumeRequest(newOp());
+    recordAzureApp(op, { state: "reused", appId: "app-existing" });
+    recordServicePrincipal(op, { state: "reused", appId: "app-existing" });
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    requestStop(op);
+    stopAtBoundary(op, "after_environment");
+
+    expect(provenOwnedCleanupTargets(op)).toEqual([]);
+    expect(canStartRollback(op)).toMatchObject({
+      ok: false,
+      code: "rollback-nothing-owned"
+    });
+    expect(projectActionGuidance(op)).toContainEqual({
+      code: "rollback-nothing-owned",
+      message:
+        "Radius did not create any resources in this attempt, so there is nothing to roll back."
+    });
+    // The unprovable environment stays a manual action rather than a target.
+    expect(
+      projectCleanupSummary(op).manualActionRequired.map((e) => e.target)
+    ).toEqual(["contoso/store:dev"]);
+  });
+
+  it("refuses rollback once setup crossed the workflow commit point", () => {
+    const op = stoppedWithCreatedResources();
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/radius-deploy.yml",
+      mode: "default_branch",
+      branch: "main"
+    });
+    expect(provenOwnedCleanupTargets(op)).toEqual([]);
+    expect(canStartRollback(op)).toMatchObject({
+      ok: false,
+      code: "rollback-after-commit"
+    });
+    expect(projectOperationActions(op).map((entry) => entry.id)).not.toContain(
+      "rollback"
+    );
+    expect(projectActionGuidance(op)).toContainEqual({
+      code: "rollback-after-commit",
+      message:
+        "Setup committed workflow files, so Radius retained the environment resources instead of removing them."
+    });
+  });
+
+  it("refuses rollback for a running operation, a success, and a missing record", () => {
+    expect(canStartRollback(null)).toMatchObject({
+      code: "unknown-operation"
+    });
+    expect(canStartRollback(newOp())).toMatchObject({
+      code: "operation-active"
+    });
+    const succeeded = addSafeResumeRequest(newOp());
+    recordAzureApp(succeeded, { state: "created", appId: "app-1" });
+    finishSucceeded(succeeded);
+    expect(canStartRollback(succeeded)).toMatchObject({
+      code: "rollback-not-available"
+    });
+  });
+
+  it("offers the rollback retry, not a second first rollback, once cleanup ran", () => {
+    const op = stoppedWithCreatedResources();
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius-deploy (app-1)",
+          identity: "app-1",
+          outcome: "warning",
+          detail: "Azure CLI returned 429."
+        }
+      ]
+    });
+    expect(canStartRollback(op)).toMatchObject({
+      ok: false,
+      code: "rollback-already-attempted"
+    });
+    expect(canRetryCleanup(op)).toMatchObject({ ok: true });
+  });
+
+  it("stops offering to continue once a rollback removed everything", () => {
+    const op = stoppedWithCreatedResources();
+    recordCleanupState(op, { state: "succeeded", attempts: 1, results: [] });
+    for (const artifactType of [
+      "github_environment",
+      "role_assignment",
+      "federated_credential",
+      "service_principal",
+      "azure_app"
+    ]) {
+      recordCleanupDeletion(op, { artifactType });
+    }
+    expect(provenOwnedCleanupTargets(op)).toEqual([]);
+    expect(canContinueSetup(op)).toMatchObject({
+      ok: false,
+      code: "setup-continue-rolled-back"
+    });
+    expect(projectOperationActions(op)).toEqual([]);
+    expect(projectActionGuidance(op)).toContainEqual({
+      code: "setup-continue-rolled-back",
+      message:
+        "Radius rolled back what this attempt created. Start a new environment setup when you are ready."
+    });
+  });
+
+  it("builds a rollback identity that survives a reload and a restart", () => {
+    const op = stoppedWithCreatedResources();
+    const identity = rollbackArtifactIdentity(provenOwnedCleanupTargets(op));
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(op))
+    );
+    expect(rollbackArtifactIdentity(provenOwnedCleanupTargets(restored))).toBe(
+      identity
+    );
+    expect(identity).toMatch(/^cleanup#[0-9a-f]{16}$/);
+    // A different artifact set is a different command, so an accepted rollback
+    // for one set can never absorb a request for another.
+    const other = stoppedWithCreatedResources({ environment: "prod" });
+    recordCleanupDeletion(other, { artifactType: "azure_app" });
+    expect(rollbackArtifactIdentity(provenOwnedCleanupTargets(other))).not.toBe(
+      identity
+    );
+    expect(rollbackArtifactIdentity([])).toBe("cleanup");
+  });
+
+  it("previews exactly what rollback removes, keeps, and leaves to the customer", () => {
+    const op = stoppedWithCreatedResources();
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    recordAzureApp(op, { state: "reused", appId: "app-1" });
+    const rollback = projectOperationActions(op).find(
+      (entry) => entry.id === "rollback"
+    );
+    expect(rollback.preview.removes.map((entry) => entry.kind)).toEqual([
+      "role_assignment",
+      "federated_credential",
+      "service_principal"
+    ]);
+    expect(rollback.preview.keeps).toContainEqual({
+      kind: "azure_app",
+      target: "radius-deploy (app-1)",
+      reason: "reused"
+    });
+    expect(
+      rollback.preview.manualActionRequired.map((entry) => entry.target)
+    ).toEqual(["contoso/store:dev"]);
+  });
+});
+
+describe("a running rollback owns the operation", () => {
+  function rollbackRunning() {
+    const op = stoppedWithCreatedResources();
+    beginRetryAttempt(op, "cleanup");
+    const accepted = acceptCommand(op, {
+      kind: "rollback",
+      attempt: 1,
+      target: "cleanup#abc"
+    });
+    setCommandState(op, accepted.command.commandId, "running");
+    return op;
+  }
+
+  it("offers no setup retry and no stop while cleanup is deleting", () => {
+    const op = rollbackRunning();
+    expect(findActiveCommand(op, ["rollback"])).toMatchObject({
+      kind: "rollback",
+      state: "running"
+    });
+    expect(projectOperationActions(op)).toEqual([]);
+    expect(projectNextTransition(op)).toEqual({
+      code: "rolling-back",
+      message: "Rolling back created resources…"
+    });
+    expect(summarize(op)).toBe("Rolling back the resources created for dev…");
+    expect(projectOperationHeadline(op)).toMatchObject({
+      code: "rolling-back",
+      title: "Rolling back created resources…"
+    });
+  });
+
+  it("keeps the original cancelled outcome in history while cleanup runs", () => {
+    const op = rollbackRunning();
+    expect(
+      op.control.outcomes.map((entry) => [entry.kind, entry.state, entry.code])
+    ).toEqual([
+      ["setup", "cancelled", "operation-stopped"],
+      ["cleanup", "cancelled", "stopped-at-boundary"]
+    ]);
+  });
+
+  it("names a running continuation without hiding its resume point", () => {
+    const op = stoppedWithCreatedResources();
+    beginRetryAttempt(op, "setup");
+    const accepted = acceptCommand(op, {
+      kind: "continue_setup",
+      attempt: 2,
+      target: "continue"
+    });
+    setCommandState(op, accepted.command.commandId, "running");
+    op.resumeFrom = "workflow_commit";
+    expect(projectNextTransition(op)).toEqual({
+      code: "continuing-setup",
+      message: "Continuing setup from Commit the deploy workflows…"
+    });
+    expect(projectOperationHeadline(op)).toMatchObject({
+      code: "continuing",
+      title: "Continuing setup…"
+    });
+    // Stop still means something while setup is moving forward.
+    expect(projectOperationActions(op).map((entry) => entry.id)).toEqual([
+      "stop"
+    ]);
+  });
+
+  it("reports a completed rollback as a rollback, not as a bare stop", () => {
+    const op = rollbackRunning();
+    for (const artifactType of [
+      "github_environment",
+      "role_assignment",
+      "federated_credential",
+      "service_principal",
+      "azure_app"
+    ]) {
+      recordCleanupDeletion(op, { artifactType });
+    }
+    recordCleanupState(op, { state: "succeeded", attempts: 1, results: [] });
+    finish(op, "cancelled", { terminal: { reason: "rollback-complete" } });
+    expect(projectOperationHeadline(op)).toMatchObject({
+      code: "rollback-complete",
+      title: "Rollback complete"
+    });
+    expect(summarize(op)).toBe('Rolled back the resources created for "dev".');
+  });
+});
+
+describe("command and projection guards", () => {
+  it("names no forward intent for a record that is not terminal", () => {
+    expect(setupForwardIntent(null)).toBe(null);
+    expect(setupForwardIntent(newOp())).toBe(null);
+    // A plain success has resources the customer relies on, so neither forward
+    // action applies to it.
+    const succeeded = addSafeResumeRequest(newOp());
+    finishSucceeded(succeeded);
+    expect(setupForwardIntent(succeeded)).toBe(null);
+  });
+
+  it("has no headline for a missing record or an ordinary running one", () => {
+    expect(projectOperationHeadline(null)).toBe(null);
+    expect(projectOperationHeadline(newOp())).toBe(null);
+  });
+
+  it("finds only the active command of the kinds a route may absorb", () => {
+    const op = stoppedWithCreatedResources();
+    beginRetryAttempt(op, "setup");
+    const forward = acceptCommand(op, {
+      kind: "continue_setup",
+      attempt: 2,
+      target: "continue"
+    });
+
+    // A continuation in flight is not a cleanup a rollback request may join.
+    expect(findActiveCommand(op, ["rollback", "retry_cleanup"])).toBe(null);
+    expect(findActiveCommand(op, ["continue_setup", "retry_setup"])).toBe(
+      forward.command
+    );
+    expect(findActiveCommand(op)).toBe(forward.command);
+
+    setCommandState(op, forward.command.commandId, "finished");
+    expect(findActiveCommand(op, ["continue_setup"])).toBe(null);
+    expect(findActiveCommand({})).toBe(null);
+  });
+});
+
+describe("a partially written ledger still describes itself truthfully", () => {
+  it("never renders undefined into a rollback preview or a deletion target", () => {
+    // A record restored from an older write can hold an entry whose secondary
+    // field was never saved. The preview is customer-facing, so it must degrade
+    // to an empty label rather than the word "undefined".
+    const op = addSafeResumeRequest(newOp());
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation({
+        ...toPersistedOperation(op),
+        setupArtifacts: {
+          ...toPersistedOperation(op).setupArtifacts,
+          azureApp: {
+            state: "created",
+            appId: "app-1",
+            displayName: null,
+            serviceManagementReference: null
+          },
+          federatedCredentials: [{ name: "radius-main" }],
+          roleAssignments: [{ role: "Contributor", principalObjectId: null }]
+        }
+      })
+    );
+    restored.resumeRequest = op.resumeRequest;
+    finish(restored, "cancelled", {
+      terminal: { reason: "stopped-at-boundary" }
+    });
+
+    const targets = provenOwnedCleanupTargets(restored);
+    expect(targets.map((entry) => entry.target)).toEqual([
+      "Contributor @ ",
+      "radius-main @ ",
+      "app-1"
+    ]);
+    expect(targets.every((entry) => entry.identity)).toBe(true);
+    const actions = projectOperationActions(restored);
+    const rollback = actions.find((entry) => entry.id === "rollback");
+    // An interrupted record resumes under the retry label; either forward
+    // action carries the same reuse preview.
+    const forward = actions.find((entry) =>
+      ["continue-setup", "retry-setup"].includes(entry.id)
+    );
+    for (const label of [
+      ...rollback.preview.removes.map((entry) => entry.target),
+      ...forward.preview.reuses.map((entry) => entry.target)
+    ]) {
+      expect(label).not.toContain("undefined");
+      expect(label).not.toContain("null");
+    }
+  });
+});
+
+describe("a closed operation never looks like work in progress", () => {
+  it("closes any command still open when the operation reaches a terminal state", () => {
+    const op = stoppedWithCreatedResources();
+    beginRetryAttempt(op, "setup");
+    const accepted = acceptCommand(op, {
+      kind: "continue_setup",
+      attempt: 2,
+      target: "continue"
+    });
+    setCommandState(op, accepted.command.commandId, "running");
+
+    finish(op, "failed_partial", { failure: { code: "azure-cli-failed" } });
+
+    expect(latestCommand(op)).toMatchObject({
+      kind: "continue_setup",
+      state: "finished",
+      outcome: "failed_partial"
+    });
+    // The runner's own verdict is never overwritten by the terminal state.
+    beginRetryAttempt(op, "cleanup");
+    const cleanup = acceptCommand(op, {
+      kind: "rollback",
+      attempt: 1,
+      target: "cleanup#abc"
+    });
+    setCommandState(op, cleanup.command.commandId, "finished", "rolled-back");
+    finish(op, "cancelled", { terminal: { reason: "rollback-complete" } });
+    expect(latestCommand(op).outcome).toBe("rolled-back");
+  });
+
+  it("does not let a stale saved command swallow the next continue", () => {
+    // Stop, continue, stop again: the record that comes back from disk carries
+    // the earlier continuation, and the customer's second Continue must still
+    // be work Radius accepts rather than a silent duplicate.
+    const op = stoppedWithCreatedResources();
+    beginRetryAttempt(op, "setup");
+    const accepted = acceptCommand(op, {
+      kind: "continue_setup",
+      attempt: 2,
+      target: "continue"
+    });
+    setCommandState(op, accepted.command.commandId, "running");
+    // A crash mid-continuation: the command is saved as running, the record is
+    // latched terminal on restore without the runner ever closing it.
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(op))
+    );
+    restored.resumeRequest = op.resumeRequest;
+
+    expect(latestCommand(restored).state).toBe("running");
+    expect(isTerminalState(restored.state)).toBe(true);
+    expect(findActiveCommand(restored, ["continue_setup", "retry_setup"])).toBe(
+      null
+    );
+    expect(
+      projectOperationActions(restored).map((entry) => entry.id)
+    ).toContain("retry-setup");
+  });
+});
+
+describe("an interrupted rollback still offers a way out", () => {
+  it("treats a cleanup left running on a closed record as unfinished, not done", () => {
+    const op = stoppedWithCreatedResources();
+    // The rollback removed the environment, then the process went away before
+    // the attempt could be closed.
+    recordCleanupDeletion(op, { artifactType: "github_environment" });
+    recordCleanupState(op, {
+      state: "running",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "github_environment",
+          target: "contoso/store:dev",
+          identity: "contoso/store:dev",
+          outcome: "deleted",
+          detail: null
+        }
+      ]
+    });
+
+    // Neither the cleanup retry (which only repeats a finished attempt that
+    // warned) nor a completed-attempt check owns this record, so the first
+    // rollback is offered again for what is genuinely left.
+    expect(canRetryCleanup(op)).toMatchObject({
+      ok: false,
+      code: "cleanup-retry-not-retryable"
+    });
+    const rollback = canStartRollback(op);
+    expect(rollback).toMatchObject({ ok: true });
+    expect(rollback.targets.map((entry) => entry.artifactType)).toEqual([
+      "role_assignment",
+      "federated_credential",
+      "service_principal",
+      "azure_app"
+    ]);
+    // What the interrupted attempt proved gone is not offered for deletion
+    // again, and the customer still sees it as removed.
+    expect(
+      projectCleanupSummary(op).cleaned.map((entry) => entry.target)
+    ).toEqual(["contoso/store:dev"]);
   });
 });

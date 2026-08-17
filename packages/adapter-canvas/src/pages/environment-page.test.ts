@@ -219,3 +219,37 @@ describe("environmentPage deployment result", () => {
     expectSafeInlineScripts(html);
   });
 });
+
+describe("environmentPage — stop, continue and rollback styling", () => {
+  const html = () => environmentPage({ contextRepo: "octo/app" });
+
+  it("styles the rollback dialog and its destructive control from theme tokens", () => {
+    const markup = html();
+    expect(markup).toContain(
+      ".env-rollback__panel { background:var(--rad-surface)"
+    );
+    expect(markup).toContain(".env-rollback__title {");
+    expect(markup).toContain(".env-rollback__buttons {");
+    expect(markup).toContain('class="rad-btn rad-btn--danger"');
+    for (const literal of ["#fff;", "rgba(0,0,0"]) {
+      const panelStyles = markup.slice(
+        markup.indexOf(".env-rollback__panel"),
+        markup.indexOf(".env-rollback__buttons")
+      );
+      expect(panelStyles).not.toContain(literal);
+    }
+  });
+
+  it("distinguishes a running rollback from a running setup without colour alone", () => {
+    const markup = html();
+    expect(markup).toContain(".env-progress--cleaning .env-progress__spinner");
+    expect(markup).toContain(".env-progress__headline-note {");
+    expect(markup).toContain(".env-progress__command-guidance {");
+  });
+
+  it("keeps the whole rollback confirmation inside one parseable script page", () => {
+    expectSafeInlineScripts(
+      environmentPage({ contextRepo: HOSTILE_STATE, envName: HOSTILE_STATE })
+    );
+  });
+});

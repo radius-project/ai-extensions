@@ -212,13 +212,31 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "none",
     "operations-status"
   ),
-  // Cooperative controls in the same family: a durable stop request, and the
-  // three retries. Both carry the operation id mid-path, so they are template
-  // routes like the two above, and both stay method-disjoint from the family's
-  // `GET /api/operations/` prefix read.
+  // Cooperative controls in the same family: a durable stop request, the two
+  // first-choice commands after a stop, and the three retries. All carry the
+  // operation id mid-path, so they are template routes like the two above, and
+  // all stay method-disjoint from the family's `GET /api/operations/` prefix
+  // read.
   declare(
     "POST",
     "/api/operations/:operationId/stop",
+    "template",
+    "json",
+    "operations-status"
+  ),
+  // Continue and rollback are separate typed routes rather than a mode on the
+  // retry route: they have opposite intent, opposite eligibility, and only one
+  // of them may ever run for a given saved record.
+  declare(
+    "POST",
+    "/api/operations/:operationId/continue",
+    "template",
+    "json",
+    "operations-status"
+  ),
+  declare(
+    "POST",
+    "/api/operations/:operationId/rollback",
     "template",
     "json",
     "operations-status"

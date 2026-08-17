@@ -45,6 +45,7 @@ export const DEPLOY_BUTTON_IDLE_LABEL = "Create Environment";
 export const PROGRESS_IDS = {
   panel: "env-progress-panel",
   title: "env-progress-title",
+  headlineNote: "env-progress-headline-note",
   activity: "env-progress-activity",
   elapsed: "env-progress-elapsed",
   stages: "env-progress-stages",
@@ -54,6 +55,7 @@ export const PROGRESS_IDS = {
   resume: "env-progress-resume",
   dismiss: "env-progress-dismiss",
   failureCard: "env-progress-failure",
+  failureTitle: "env-progress-failure-title",
   failureMessage: "env-progress-failure-message",
   cleanupStatus: "env-progress-cleanup-status",
   retry: "env-progress-retry",
@@ -77,8 +79,23 @@ export const PROGRESS_IDS = {
   commands: "env-progress-commands",
   commandButtons: "env-progress-command-buttons",
   commandNote: "env-progress-command-note",
+  commandGuidance: "env-progress-command-guidance",
   commandStatus: "env-progress-command-status",
   commandError: "env-progress-command-error"
+} as const;
+
+export const ROLLBACK_IDS = {
+  modal: "env-rollback-modal",
+  title: "env-rollback-title",
+  intro: "env-rollback-intro",
+  removeList: "env-rollback-remove",
+  removeBlock: "env-rollback-remove-block",
+  keepList: "env-rollback-keep",
+  keepBlock: "env-rollback-keep-block",
+  manualList: "env-rollback-manual",
+  manualBlock: "env-rollback-manual-block",
+  cancel: "env-rollback-cancel",
+  confirm: "env-rollback-confirm"
 } as const;
 
 // Partial-state groups stay separate rather than merging into one list: a
@@ -107,12 +124,39 @@ const PARTIAL_STATE_GROUPS = [
   }
 ] as const;
 
+const COMMAND_TONE_CLASS: Readonly<Record<string, string>> = {
+  primary: "rad-btn rad-btn--primary",
+  danger: "rad-btn rad-btn--danger",
+  neutral: "rad-btn rad-btn--secondary"
+};
 const COMMAND_BUTTON_CLASS = "rad-btn rad-btn--secondary";
 const COMMAND_REFUSED_MESSAGE = "Radius could not accept that request.";
 const COMMAND_UNREACHABLE_MESSAGE =
   "Radius could not reach the setup service. Try again.";
 const STOPPING_MESSAGE = "Stopping after the current step…";
 const COMMAND_ACCEPTED_MESSAGE = "Radius accepted the request…";
+const ROLLBACK_UNAVAILABLE_MESSAGE =
+  "Radius could not open the rollback confirmation.";
+const DEFAULT_FAILURE_TITLE = "Setup didn’t finish";
+const DEFAULT_ROLLBACK_TITLE = "Roll back resources created by this setup?";
+const DEFAULT_ROLLBACK_CONFIRM = "Roll back resources";
+const DEFAULT_ROLLBACK_CANCEL = "Keep resources";
+const CANCELLED_ACTIVITY_MESSAGE = "Environment setup cancelled.";
+const CLEANING_COMMAND_KINDS: ReadonlySet<string> = new Set([
+  "rollback",
+  "retry_cleanup"
+]);
+
+// A command's own sentence. Stop, rollback, and the two forward continuations
+// are different promises, so none of them borrows another's wording.
+const COMMAND_STATUS_TEXT: Readonly<Record<string, string>> = {
+  stop: STOPPING_MESSAGE,
+  rollback: "Rollback started. Removing the resources Radius created…",
+  retry_cleanup:
+    "Rollback retry started. Removing the resources still present…",
+  continue_setup: "Continuing setup…",
+  retry_setup: "Retrying setup…"
+};
 
 const STAGE_GLYPH: Readonly<Record<string, string>> = {
   pending: "○",
@@ -193,6 +237,41 @@ export interface OperationAction {
   readonly description: string;
   readonly path: string;
   readonly pending: boolean;
+  readonly tone: string;
+  readonly requiresConfirmation: boolean;
+  readonly confirmTitle: string;
+  readonly confirmLabel: string;
+  readonly cancelLabel: string;
+  readonly preview: OperationActionPreview | null;
+}
+
+/** A resource named in a destructive command's server-built preview. */
+export interface OperationPreviewEntry {
+  readonly kind: string;
+  readonly target: string;
+  readonly action: string;
+}
+
+export interface OperationActionPreview {
+  readonly removes: readonly OperationPreviewEntry[];
+  readonly keeps: readonly OperationPreviewEntry[];
+  readonly manualActionRequired: readonly OperationPreviewEntry[];
+}
+
+/** Why a path the customer might expect is not on offer. */
+export interface OperationGuidanceNote {
+  readonly code: string;
+  readonly message: string;
+}
+
+/**
+ * The heading and supporting sentence for a state that needs its own screen —
+ * a stop, a rollback in progress, or a rollback that left something behind.
+ */
+export interface OperationHeadline {
+  readonly code: string;
+  readonly title: string;
+  readonly message: string;
 }
 
 /** The automatic move a non-terminal record is waiting on. */
@@ -255,6 +334,9 @@ export interface OperationRecord {
   readonly failure: OperationFailure | null;
   readonly cleanup: OperationCleanup;
   readonly actions: readonly OperationAction[];
+  readonly guidance: readonly OperationGuidanceNote[];
+  readonly headline: OperationHeadline | null;
+  readonly activeCommandKind: string;
   readonly nextTransition: OperationNextTransition | null;
   readonly journey: OperationJourney | null;
   readonly verification: { readonly dispatchedAt: number | null } | null;
@@ -400,6 +482,31 @@ function parseCleanup(value: unknown): OperationCleanup {
   };
 }
 
+function parsePreviewEntries(value: unknown): OperationPreviewEntry[] {
+  if (!Array.isArray(value)) return [];
+  const entries: OperationPreviewEntry[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const target = readString(entry, "target");
+    if (target === "") continue;
+    entries.push({
+      kind: readString(entry, "kind"),
+      target,
+      action: readString(entry, "action")
+    });
+  }
+  return entries;
+}
+
+function parsePreview(value: unknown): OperationActionPreview | null {
+  if (!isRecord(value)) return null;
+  return {
+    removes: parsePreviewEntries(value["removes"]),
+    keeps: parsePreviewEntries(value["keeps"]),
+    manualActionRequired: parsePreviewEntries(value["manualActionRequired"])
+  };
+}
+
 function parseActions(value: unknown): OperationAction[] {
   if (!Array.isArray(value)) return [];
   const actions: OperationAction[] = [];
@@ -415,10 +522,37 @@ function parseActions(value: unknown): OperationAction[] {
       label: readString(entry, "label"),
       description: readString(entry, "description"),
       path,
-      pending: readBoolean(entry, "pending")
+      pending: readBoolean(entry, "pending"),
+      tone: readString(entry, "tone"),
+      requiresConfirmation: readBoolean(entry, "requiresConfirmation"),
+      confirmTitle: readString(entry, "confirmTitle"),
+      confirmLabel: readString(entry, "confirmLabel"),
+      cancelLabel: readString(entry, "cancelLabel"),
+      preview: parsePreview(entry["preview"])
     });
   }
   return actions;
+}
+
+function parseGuidance(value: unknown): OperationGuidanceNote[] {
+  if (!Array.isArray(value)) return [];
+  const notes: OperationGuidanceNote[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const message = readString(entry, "message");
+    if (message === "") continue;
+    notes.push({ code: readString(entry, "code"), message });
+  }
+  return notes;
+}
+
+function parseHeadline(value: unknown): OperationHeadline | null {
+  if (!isRecord(value)) return null;
+  return {
+    code: readString(value, "code"),
+    title: readString(value, "title"),
+    message: readString(value, "message")
+  };
 }
 
 function parseNextTransition(value: unknown): OperationNextTransition | null {
@@ -509,6 +643,9 @@ function parseOperationRecord(
     failure: parseFailure(raw["failure"]),
     cleanup: parseCleanup(raw["cleanup"]),
     actions: parseActions(raw["actions"]),
+    guidance: parseGuidance(raw["guidance"]),
+    headline: parseHeadline(raw["headline"]),
+    activeCommandKind: readString(raw, "activeCommandKind"),
     nextTransition: parseNextTransition(raw["nextTransition"]),
     journey: parseJourney(raw["journey"]),
     verification: parseVerification(raw["verification"]),
@@ -618,6 +755,10 @@ function stepSpec(step: OperationStageOrStep): ElementSpec {
     className: `env-progress__step env-progress__step--${step.state}`,
     text: `${glyph} ${step.label}`
   };
+}
+
+function commandStatusText(action: OperationAction): string {
+  return COMMAND_STATUS_TEXT[action.kind] ?? COMMAND_ACCEPTED_MESSAGE;
 }
 
 function operationsByRepoUrl(repo: string): string {
@@ -774,6 +915,12 @@ export function initializeEnvironmentOperations(
       op.failure && op.failure.message !== "" ?
         op.failure.message
       : "The setup request failed.";
+    // The card names the outcome the customer actually reached. A rollback
+    // that left resources behind is not a setup that failed to finish.
+    const titleEl = dom.byId(PROGRESS_IDS.failureTitle);
+    if (titleEl) {
+      titleEl.textContent = op.headline?.title || DEFAULT_FAILURE_TITLE;
+    }
     cleanupEl.textContent = cleanupStatus;
     retryEl.textContent =
       cleanup.retry.guidance !== "" ?
@@ -884,6 +1031,166 @@ export function initializeEnvironmentOperations(
     if (el) el.textContent = message;
   }
 
+  // ---------------- Rollback confirmation ----------------
+  //
+  // Removing cloud resources cannot be undone, so the destructive command is
+  // confirmed first against the server's own preview. The dialog never rebuilds
+  // that list: it renders exactly what the operation record projected, and the
+  // server re-derives the deletion set again before it acts.
+
+  let rollbackPending: {
+    readonly action: OperationAction;
+    readonly op: OperationRecord;
+  } | null = null;
+  let rollbackReturnFocus: DomElement | null = null;
+  let rollbackKeydownBound = false;
+
+  function setRollbackList(
+    items: readonly string[],
+    listId: string,
+    blockId: string
+  ): void {
+    setStateList(items, listId, blockId);
+  }
+
+  function rollbackFocusable(dialog: DomElement): readonly DomElement[] {
+    return dom.all(dialog, "button:not([disabled])");
+  }
+
+  // Focus stays inside the dialog while it is open. A Tab that escapes to the
+  // page behind a modal leaves a keyboard user operating controls they cannot
+  // see, which is the specific failure the trap exists to prevent.
+  const rollbackKeydown: DomEventListener = (event) => {
+    const dialog = dom.byId(ROLLBACK_IDS.modal);
+    if (!dialog) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeRollbackDialog();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = rollbackFocusable(dialog);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = context.focus.active();
+    if (event.shiftKey === true && (active === first || active === null)) {
+      event.preventDefault();
+      last.focus();
+      return;
+    }
+    if (event.shiftKey !== true && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  function bindRollbackKeydown(): void {
+    if (rollbackKeydownBound) return;
+    dom.document.addEventListener("keydown", rollbackKeydown);
+    rollbackKeydownBound = true;
+  }
+
+  function unbindRollbackKeydown(): void {
+    if (!rollbackKeydownBound) return;
+    dom.document.removeEventListener("keydown", rollbackKeydown);
+    rollbackKeydownBound = false;
+  }
+
+  scope.onTeardown(unbindRollbackKeydown);
+
+  function previewLabel(entry: OperationPreviewEntry): string {
+    return entry.target;
+  }
+
+  function manualPreviewLabel(entry: OperationPreviewEntry): string {
+    const label = previewLabel(entry);
+    return entry.action === "" ? label : `${label} — ${entry.action}`;
+  }
+
+  function openRollbackDialog(
+    action: OperationAction,
+    op: OperationRecord,
+    trigger: DomElement
+  ): void {
+    const dialog = dom.byId(ROLLBACK_IDS.modal);
+    if (!dialog) {
+      // No dialog markup means no confirmation, and an unconfirmed destructive
+      // command is worse than no command at all.
+      setCommandError(ROLLBACK_UNAVAILABLE_MESSAGE);
+      return;
+    }
+    rollbackPending = { action, op };
+    rollbackReturnFocus = trigger;
+    const preview = action.preview;
+    const titleEl = dom.byId(ROLLBACK_IDS.title);
+    if (titleEl) {
+      titleEl.textContent = action.confirmTitle || DEFAULT_ROLLBACK_TITLE;
+    }
+    const introEl = dom.byId(ROLLBACK_IDS.intro);
+    if (introEl) introEl.textContent = action.description;
+    setRollbackList(
+      (preview?.removes ?? []).map(previewLabel),
+      ROLLBACK_IDS.removeList,
+      ROLLBACK_IDS.removeBlock
+    );
+    setRollbackList(
+      (preview?.keeps ?? []).map(previewLabel),
+      ROLLBACK_IDS.keepList,
+      ROLLBACK_IDS.keepBlock
+    );
+    setRollbackList(
+      (preview?.manualActionRequired ?? []).map(manualPreviewLabel),
+      ROLLBACK_IDS.manualList,
+      ROLLBACK_IDS.manualBlock
+    );
+    const confirm = dom.inputById(ROLLBACK_IDS.confirm);
+    if (confirm) {
+      confirm.disabled = false;
+      confirm.textContent = action.confirmLabel || DEFAULT_ROLLBACK_CONFIRM;
+    }
+    const cancel = dom.byId(ROLLBACK_IDS.cancel);
+    if (cancel) {
+      cancel.textContent = action.cancelLabel || DEFAULT_ROLLBACK_CANCEL;
+    }
+    dialog.style.display = "flex";
+    bindRollbackKeydown();
+    titleEl?.focus();
+  }
+
+  function dismissRollbackDialog(): void {
+    const dialog = dom.byId(ROLLBACK_IDS.modal);
+    if (dialog) dialog.style.display = "none";
+    unbindRollbackKeydown();
+    rollbackPending = null;
+  }
+
+  function closeRollbackDialog(): void {
+    dismissRollbackDialog();
+    const trigger = rollbackReturnFocus;
+    rollbackReturnFocus = null;
+    // Focus returns to the control that opened the dialog, so cancelling puts
+    // a keyboard user back exactly where they were.
+    context.focus.focus(trigger);
+  }
+
+  function confirmRollback(): void {
+    const pending = rollbackPending;
+    if (!pending) return;
+    // Disabled before the request goes out: a second confirmation would be a
+    // second delete request against the same ledger.
+    const confirm = dom.inputById(ROLLBACK_IDS.confirm);
+    if (confirm) confirm.disabled = true;
+    dismissRollbackDialog();
+    rollbackReturnFocus = null;
+    sendCommand(pending.action, pending.op);
+  }
+
+  const rollbackCancel = dom.byId(ROLLBACK_IDS.cancel);
+  if (rollbackCancel) scope.on(rollbackCancel, "click", closeRollbackDialog);
+  const rollbackConfirm = dom.byId(ROLLBACK_IDS.confirm);
+  if (rollbackConfirm) scope.on(rollbackConfirm, "click", confirmRollback);
+
   function pollOperation(operationId: string): void {
     void fetchTracked(operationUrl(operationId), { cache: "no-store" })
       .then((response) => (response.ok ? response.json() : null))
@@ -896,13 +1203,28 @@ export function initializeEnvironmentOperations(
       });
   }
 
-  function submitCommand(action: OperationAction, op: OperationRecord): void {
+  /**
+   * Route a pressed control. A destructive command is confirmed against the
+   * server's own preview first; everything else goes straight out.
+   */
+  function submitCommand(
+    action: OperationAction,
+    op: OperationRecord,
+    trigger: DomElement
+  ): void {
+    if (commandInFlight) return;
+    if (action.requiresConfirmation) {
+      openRollbackDialog(action, op, trigger);
+      return;
+    }
+    sendCommand(action, op);
+  }
+
+  function sendCommand(action: OperationAction, op: OperationRecord): void {
     if (commandInFlight) return;
     setCommandError("");
     setCommandBusy(true);
-    setCommandStatus(
-      action.kind === "stop" ? STOPPING_MESSAGE : COMMAND_ACCEPTED_MESSAGE
-    );
+    setCommandStatus(commandStatusText(action));
     void fetchTracked(action.path, {
       method: "POST",
       headers: {
@@ -951,6 +1273,28 @@ export function initializeEnvironmentOperations(
       });
   }
 
+  /**
+   * Why a path the customer might expect is missing. Silence reads as a bug,
+   * so every refusal a customer can reach gets a sentence.
+   */
+  function renderCommandGuidance(op: OperationRecord | null): boolean {
+    const list = dom.byId(PROGRESS_IDS.commandGuidance);
+    if (!list) return false;
+    const notes = op?.guidance ?? [];
+    if (notes.length === 0) {
+      setChildren(dom, list, []);
+      list.style.display = "none";
+      return false;
+    }
+    setChildren(
+      dom,
+      list,
+      notes.map((note) => ({ tag: "li", text: note.message }))
+    );
+    list.style.display = "";
+    return true;
+  }
+
   function renderCommands(op: OperationRecord | null): void {
     const container = dom.byId(PROGRESS_IDS.commands);
     const buttons = dom.byId(PROGRESS_IDS.commandButtons);
@@ -964,9 +1308,15 @@ export function initializeEnvironmentOperations(
     }
     releaseCommandButtons();
     buttons.replaceChildren();
+    const hasGuidance = renderCommandGuidance(op);
     if (op === null || actions.length === 0) {
-      container.style.display = "none";
-      note.textContent = op?.nextTransition?.message ?? "";
+      // A record with no actions still has something to say: cleanup running
+      // under its own command, or a state whose next move is automatic.
+      const transitionMessage = op?.nextTransition?.message ?? "";
+      if (op?.nextTransition) note.textContent = transitionMessage;
+      else if (!hasGuidance) note.textContent = "";
+      container.style.display =
+        hasGuidance || op?.nextTransition ? "" : "none";
       return;
     }
     const record = op;
@@ -974,10 +1324,14 @@ export function initializeEnvironmentOperations(
       const element = dom.createElement("button") as DomInputElement;
       element.setAttribute("type", "button");
       element.id = `env-progress-command-${action.id}`;
-      element.className = COMMAND_BUTTON_CLASS;
+      element.className =
+        COMMAND_TONE_CLASS[action.tone] ?? COMMAND_BUTTON_CLASS;
       element.textContent = action.label === "" ? "Continue" : action.label;
       element.disabled = commandInFlight || action.pending;
-      const listener = (): void => submitCommand(action, record);
+      if (action.requiresConfirmation) {
+        element.setAttribute("aria-haspopup", "dialog");
+      }
+      const listener = (): void => submitCommand(action, record, element);
       element.addEventListener("click", listener);
       commandButtons.push({ element, listener });
       buttons.appendChild(element);
@@ -994,12 +1348,29 @@ export function initializeEnvironmentOperations(
     container.style.display = "";
   }
 
+  /**
+   * The heading line. A stop, a running rollback, and a rollback that left
+   * something behind each need their own words; a plain setup keeps its
+   * summary.
+   */
+  function renderHeadline(op: OperationRecord | null): void {
+    const headline = op?.headline ?? null;
+    const titleEl = dom.byId(PROGRESS_IDS.title);
+    if (titleEl) titleEl.textContent = headline?.title || op?.summary || "";
+    const noteEl = dom.byId(PROGRESS_IDS.headlineNote);
+    if (!noteEl) return;
+    const message = headline?.message ?? "";
+    noteEl.textContent = message;
+    noteEl.style.display = message === "" ? "none" : "";
+  }
+
   function renderProgress(op: OperationRecord | null): void {
     if (op === null) {
       panel.style.display = "none";
       renderFailureCard(null);
       renderPartialState(null);
       renderCommands(null);
+      renderHeadline(null);
       return;
     }
     panel.style.display = "";
@@ -1011,9 +1382,14 @@ export function initializeEnvironmentOperations(
       op.terminalState === "failed" || op.terminalState === "failed_partial";
     panel.classList.toggle("env-progress--done", done);
     panel.classList.toggle("env-progress--failed", failed);
+    // A rollback in progress is not a setup in progress, and the spinner has
+    // to say so without relying on colour alone.
+    panel.classList.toggle(
+      "env-progress--cleaning",
+      CLEANING_COMMAND_KINDS.has(op.activeCommandKind)
+    );
 
-    const titleEl = dom.byId(PROGRESS_IDS.title);
-    if (titleEl) titleEl.textContent = op.summary;
+    renderHeadline(op);
 
     // The current step doubles as the activity line. When the record has
     // nothing to say we clear it rather than substitute filler.
@@ -1140,10 +1516,31 @@ export function initializeEnvironmentOperations(
       deps.showSuccessBanner(op.provider, op.environment);
       deps.showSetupWarnings(warnings);
     } else if (op.terminalState === "cancelled") {
-      panel.classList.remove("env-progress--done", "env-progress--failed");
+      panel.classList.remove(
+        "env-progress--done",
+        "env-progress--failed",
+        "env-progress--cleaning"
+      );
       const cancelledActivity = dom.byId(PROGRESS_IDS.activity);
-      if (cancelledActivity)
-        cancelledActivity.textContent = "Environment setup cancelled.";
+      // Stopped and rolled-back are different outcomes, and the server names
+      // which one this is. Only fall back when it does not.
+      if (cancelledActivity) {
+        cancelledActivity.textContent =
+          op.headline?.message || CANCELLED_ACTIVITY_MESSAGE;
+      }
+      deps.showSetupWarnings(warnings);
+    } else if (
+      op.terminalState === "failed_partial" &&
+      op.headline !== null &&
+      op.headline.code === "rollback-incomplete"
+    ) {
+      // A rollback that left something behind is not a failed setup, so it
+      // does not get the failure banner that would tell the customer their
+      // environment creation broke.
+      panel.classList.remove("env-progress--done", "env-progress--cleaning");
+      panel.classList.add("env-progress--failed");
+      const partialActivity = dom.byId(PROGRESS_IDS.activity);
+      if (partialActivity) partialActivity.textContent = op.headline.message;
       deps.showSetupWarnings(warnings);
     } else {
       const message = `Environment setup failed: ${op.failure && op.failure.message !== "" ? op.failure.message : "unknown error"}`;

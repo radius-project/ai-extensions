@@ -555,6 +555,31 @@ What ships:
 
 Idempotent re-run is _recovery_, not _control_, and it is not a substitute for one. Much of the operation is already idempotent — it detects and reuses an existing App Registration and skips existing federated credentials — which is what makes the panel's retry button viable.
 
+#### Stopping is not rolling back
+
+Stopping and undoing are two decisions, and collapsing them into one control is what made **Stop setup** confusing: it ends the attempt, and the terminal screen then emphasised **Retry setup** while the customer was looking for a way to remove what had just been created.
+
+They are now separate steps with separate words:
+
+| Term                            | Meaning                                                                                                  |
+|---------------------------------|----------------------------------------------------------------------------------------------------------|
+| **Stop setup**                  | Stop creating or changing more resources after the current safe boundary.                                |
+| **Continue setup**              | Resume a stopped operation from the first unfinished safe step, reusing the retained ledger.             |
+| **Retry setup**                 | Repeat a continuation attempt that started and then failed. Never the first forward action after a stop. |
+| **Roll back created resources** | Remove the resources this operation proved it created before the workflow commit point.                  |
+| **Retry rollback**              | Repeat cleanup for the proven-owned resources a previous rollback could not delete.                      |
+
+A stopped record therefore projects both paths, forward first, and neither is a default:
+
+1. **Continue setup** — `POST /api/operations/{operationId}/continue`, tone `primary`, no confirmation, carrying the resume step and the resources a continuation will reuse.
+2. **Roll back created resources** — `POST /api/operations/{operationId}/rollback`, tone `danger`, `requiresConfirmation: true`, carrying the server's own preview of what it will remove, what it will keep, and what still needs the customer.
+
+When only one path is safe, the panel says why the other is not: Radius created nothing it can prove it owns, the workflows were already committed, or ownership of a remaining resource cannot be proven. When neither is safe, the manual action stands alone and the repository lock is released.
+
+The first rollback selects **every** present proven-owned pre-commit artifact and deletes in reverse dependency order — GitHub environment, Azure role assignments, federated credentials, Service Principal, App Registration — recording each result before the next deletion starts. **Retry rollback** selects only the unresolved warning targets from the latest attempt and preserves the earlier results in the summary. Reused resources, committed workflow files, `created_candidate` resources, and anything identified only by name are never deletion targets. A confirmed rollback is one cooperative server-owned command: cleanup has no pause control, so the panel offers no **Stop setup** while it runs.
+
+Rollback removes environment setup artifacts. It never deploys an application, and deployment stays a separate action the customer starts.
+
 ### API design
 
 #### `POST /api/operations` — start an operation
@@ -596,9 +621,17 @@ Returns the latest non-stale operation for a repository. This route is implement
 
 Records the stop request durably before answering, so a canvas reload cannot lose it. The server checks the request between cloud or GitHub commands, finishes the command already running, records what it changed, and then records `cancelled`. An operation parked on a prompt has nothing in flight and cancels immediately: `200` with the closed record. Anything else answers `202` and reports the stop as pending until the executor reaches its next safe boundary. A finished operation answers `409 operation-already-terminal`. This route is implemented.
 
+#### `POST /api/operations/{operationId}/continue` — continue a stopped setup
+
+The first forward action after a deliberate stop. It continues from the first step the artifact ledger does not already prove finished, reusing the retained resources, and is refused when the saved environment input is gone (`409 setup-continue-request-missing`), when ownership of a recorded artifact cannot be proven (`409 setup-continue-ownership-ambiguous`), when the record is not waiting at a stop Radius can continue from (`409 setup-continue-not-available`), or when a completed rollback already removed what the attempt created (`409 setup-continue-rolled-back`). A repeated request resolves to the continuation already in flight. This route is implemented.
+
+#### `POST /api/operations/{operationId}/rollback` — remove what this attempt created
+
+Removes every present, proven-owned, pre-commit artifact after the customer confirms in the browser. Answers `202` once the command is saved and the repository lock is held, `404` for an unknown operation, and `409` when the operation is still running (`operation-active`), crossed the workflow commit point (`rollback-after-commit`), has no proven-owned resources (`rollback-nothing-owned`), already ran a cleanup attempt (`rollback-already-attempted`), or another operation owns the repository (`operation-in-progress`). A duplicate request returns the accepted command instead of deleting twice. A persistence failure restores the terminal stopped state and reports that no cleanup began; a scheduling failure restores the same decision with `503 operation-command-unscheduled` rather than leaving the record running. The command identity is derived from the operation id, the command kind, the cleanup attempt, and a digest of the exact artifact set, so a reload or an extension restart rebuilds the same command. Confirmation is not authorisation: the deletion set is re-derived from the saved ledger server-side. This route is implemented.
+
 #### `POST /api/operations/{operationId}/retry/{setup|verification|cleanup}` — retry
 
-Reopens a closed operation for one allowed continuation, decided from the saved record alone. A **setup** retry continues from the first step the artifact ledger does not already prove finished, and is refused when ownership of a recorded artifact cannot be proven. A **verification** retry repeats the exact workflow identity Radius saved; when the record is waiting on a setup pull request it is refused with `409 verification-retry-pull-request-open` until that pull request has merged. A **cleanup** retry deletes only the resources Radius proved it created and could not remove on the previous attempt. Each accepted retry records a derived command id first, so a double click, a lost response, or a reload all resolve to the same command. These routes are implemented.
+Reopens a closed operation for one allowed continuation, decided from the saved record alone. A **setup** retry repeats a continuation that started and then failed, or resumes an interrupted setup, from the first step the artifact ledger does not already prove finished, and is refused when ownership of a recorded artifact cannot be proven. A **verification** retry repeats the exact workflow identity Radius saved; when the record is waiting on a setup pull request it is refused with `409 verification-retry-pull-request-open` until that pull request has merged. A **cleanup** retry — projected to the customer as **Retry rollback** — deletes only the resources Radius proved it created and could not remove on the previous attempt. Each accepted retry records a derived command id first, so a double click, a lost response, or a reload all resolve to the same command. These routes are implemented.
 
 #### `GET /api/verify-status` — keyed by operation
 
