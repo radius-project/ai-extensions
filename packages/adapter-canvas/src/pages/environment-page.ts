@@ -4,15 +4,15 @@
 
 import { escapeHtml, type CanvasState } from "../shared.js";
 import { radiusMark } from "../ui.js";
+import { browserScriptTag } from "../browser/scripts.js";
+import {
+  DEPLOY_RESULT_STATE_ID,
+  ENVIRONMENT_PAGE_STATE_ID
+} from "./browser-state-ids.js";
 import { pageShell } from "./shell.js";
-import { inlineJson, inlineJsString, safeExternalHref } from "./encoding.js";
+import { inlineJson, safeExternalHref } from "./encoding.js";
 import { environmentsPaneMarkup } from "./environment/environments-pane.js";
 import { credentialsPaneMarkup } from "./environment/credentials-pane.js";
-import { ENVIRONMENT_TABLE_CLIENT_JS } from "./environment/client-environments.js";
-import { ENVIRONMENT_OPERATION_CLIENT_JS } from "./environment/client-operations.js";
-import { ENVIRONMENT_PROFILE_CLIENT_JS } from "./environment/client-profiles.js";
-import { ENVIRONMENT_DISCOVERY_CLIENT_JS } from "./environment/client-discovery.js";
-import { ENVIRONMENT_CREDENTIAL_CLIENT_JS } from "./environment/client-credentials.js";
 
 export function environmentPage(state: CanvasState = {}): string {
   const envName = state?.envName || "dev";
@@ -52,17 +52,11 @@ ${
   : ""
 }
 <button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--rad-neutral-bg); color:var(--rad-neutral-text); border:1px solid var(--rad-neutral-border); border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
-<script>
-document.getElementById('back-btn').addEventListener('click', function() {
-    fetch('/api/deploy-reset', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({attemptId: ${inlineJson(
-          state?.deployAttempt?.id || ""
-        )}})
-    }).then(function() { window.location.reload(); });
-});
-<\/script>`
+<div id="deploy-reset-status" class="status error" role="alert" style="display:none; margin-top:12px;"></div>
+<div hidden id="${DEPLOY_RESULT_STATE_ID}">${escapeHtml(
+        inlineJson({ attemptId: state?.deployAttempt?.id || "" })
+      )}</div>
+${browserScriptTag("deploy-result-page")}`
     );
   }
 
@@ -274,15 +268,9 @@ ${credentialsPaneMarkup(activeSubtab)}
 .rad-combo__action:hover { background:var(--rad-bg-subtle); }
 </style>
 
-<script>
-var CTX_REPO = '${inlineJsString(ctxRepo)}';
-var CTX_BRANCH = '${inlineJsString(ctxBranch)}';
-
-${ENVIRONMENT_TABLE_CLIENT_JS}
-${ENVIRONMENT_OPERATION_CLIENT_JS}
-${ENVIRONMENT_PROFILE_CLIENT_JS}
-${ENVIRONMENT_DISCOVERY_CLIENT_JS}
-${ENVIRONMENT_CREDENTIAL_CLIENT_JS}
-<\/script>`
+<div hidden id="${ENVIRONMENT_PAGE_STATE_ID}">${escapeHtml(
+      inlineJson({ repo: ctxRepo, branch: ctxBranch, activeSubtab })
+    )}</div>
+${browserScriptTag("environment-page")}`
   );
 }

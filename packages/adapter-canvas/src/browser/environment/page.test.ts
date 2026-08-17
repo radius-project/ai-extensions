@@ -1,0 +1,926 @@
+import { describe, expect, it } from "vitest";
+import {
+  CREDENTIALS_ENTRY_KEY,
+  CREDENTIAL_PROFILES_PATH,
+  GITHUB_IDENTITY_PATH
+} from "./credentials.js";
+import { DISCOVER_ENDPOINT, DISCOVERY_PANEL_ENTRY_KEY } from "./discovery.js";
+import {
+  ENVIRONMENTS_ENTRY_KEY,
+  ENVIRONMENT_LIST_PATH
+} from "./environments.js";
+import {
+  ENVIRONMENT_OPERATIONS_ENTRY_KEY,
+  OPERATIONS_PATH,
+  PROGRESS_IDS
+} from "./operations.js";
+import { PROFILES_PANEL_ENTRY_KEY } from "./profiles.js";
+import {
+  CREATE_ENVIRONMENT_OPERATION_PATH,
+  ENVIRONMENT_PAGE_ENTRY_KEY,
+  ENVIRONMENT_PAGE_STATE_ID,
+  initializeEnvironmentPage
+} from "./page.js";
+import {
+  createFakeBrowser,
+  createFakeElement,
+  createFakeInput,
+  createFakeSelect,
+  flushPromises,
+  jsonResponse,
+  textResponse
+} from "../../../test/support/browser/fakes.js";
+import type {
+  FakeBrowser,
+  FakeElement
+} from "../../../test/support/browser/fakes.js";
+import type { BrowserTeardown } from "../lifecycle.js";
+import type {
+  DomInputElement,
+  HttpResponse,
+  HttpRequestInit
+} from "../ports.js";
+
+interface PageFixture {
+  readonly browser: FakeBrowser;
+  readonly elements: Record<string, FakeElement>;
+  readonly repo: string;
+  readonly branch: string;
+}
+
+const REQUIRED_INPUTS = [
+  "env-name-input",
+  "env-profile-select",
+  "cred-name-input",
+  "az-tenant-id",
+  "az-sub-id",
+  "aws-account-id",
+  "aws-region",
+  "aws-role-arn",
+  "save-cred-btn",
+  "btn-verify-azure",
+  "btn-verify-aws",
+  "cred-ghcr-retry",
+  "env-smr-input",
+  "env-smr-retry",
+  "env-smr-cancel",
+  "env-appselect-confirm",
+  "env-appselect-cancel",
+  "env-gh-recheck",
+  "azure-refresh-btn",
+  "aws-refresh-btn",
+  "deploy-btn",
+  "target-repo",
+  "deploy-branch-select",
+  "az-client-id",
+  "az-app-name-input",
+  "az-selected-app-id"
+] as const;
+
+const REQUIRED_SELECTS = [
+  "cred-provider-select",
+  "azure-cluster-select",
+  "azure-rg-select",
+  "azure-namespace-select",
+  "aws-cluster-select",
+  "aws-namespace-select",
+  "aws-vpc-select",
+  "aws-subnets-select"
+] as const;
+
+const REQUIRED_ELEMENTS = [
+  "pane-environments",
+  "pane-credentials",
+  "env-landing",
+  "env-form",
+  "env-table-body",
+  "env-error-banner",
+  "env-error-banner-text",
+  "cred-landing",
+  "cred-form",
+  "cred-panel-azure",
+  "cred-panel-aws",
+  "cred-table-body",
+  "new-cred-btn",
+  "cancel-cred-btn",
+  "cred-success-banner",
+  "cred-success-banner-text",
+  "cred-success-banner-close",
+  "cred-verify-status",
+  "cred-verify-hint",
+  "cred-ghcr-status",
+  "cred-ghcr-command-row",
+  "cred-ghcr-command",
+  "cred-ghcr-copy",
+  "env-verify-modal",
+  "env-verify-title",
+  "azure-cli-assist-modal",
+  "azure-cli-assist-title",
+  "azure-cli-assist-message",
+  "azure-cli-assist-confirm",
+  "azure-cli-assist-cancel",
+  "env-profile-button",
+  "env-profile-menu",
+  "env-profile-value",
+  "env-profile-options",
+  PROGRESS_IDS.panel,
+  "deploy-status",
+  "new-env-btn",
+  "cancel-env-btn",
+  "env-create-profile-link"
+] as const;
+
+function fixture(
+  state: {
+    repo?: string;
+    branch?: string;
+    activeSubtab?: string;
+    search?: string;
+  } = {}
+): PageFixture {
+  const browser = createFakeBrowser();
+  const repo = state.repo ?? "octo/app";
+  const branch = state.branch ?? "feature/x";
+  const elements: Record<string, FakeElement> = {};
+  const add = (element: FakeElement): void => {
+    elements[element.id] = element;
+    browser.document.add(element);
+  };
+  const stateElement = createFakeElement(ENVIRONMENT_PAGE_STATE_ID);
+  stateElement.textContent = JSON.stringify({
+    repo,
+    branch,
+    activeSubtab: state.activeSubtab ?? "environments"
+  });
+  add(stateElement);
+  for (const id of REQUIRED_ELEMENTS) add(createFakeElement(id));
+  for (const id of REQUIRED_INPUTS) add(createFakeInput(id));
+  for (const id of REQUIRED_SELECTS) add(createFakeSelect(id));
+  const setValue = (id: string, value: string): void => {
+    const element = browser.context.dom.inputById(id);
+    if (!element) throw new Error(`Missing fixture input "${id}".`);
+    element.value = value;
+  };
+  setValue("target-repo", repo);
+  setValue("deploy-branch-select", branch);
+  setValue("cred-provider-select", "azure");
+  elements["env-profile-menu"].style.display = "none";
+  browser.nav.search = state.search ?? "?page=environment";
+  browser.nav.href = `http://localhost/${browser.nav.search}`;
+  browser.net.handle(
+    `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(repo)}`,
+    () => jsonResponse({ environments: [] })
+  );
+  browser.net.handle(
+    `${OPERATIONS_PATH}?repo=${encodeURIComponent(repo)}`,
+    () => jsonResponse({ operation: null })
+  );
+  browser.net.handle(
+    `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(repo)}`,
+    () => jsonResponse({ profiles: [] })
+  );
+  browser.net.handle(
+    `${GITHUB_IDENTITY_PATH}?repo=${encodeURIComponent(repo)}`,
+    () => jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
+  );
+  return { browser, elements, repo, branch };
+}
+
+function pageInput(page: PageFixture, id: string): DomInputElement {
+  const element = page.browser.context.dom.inputById(id);
+  if (!element) throw new Error(`Missing fixture input "${id}".`);
+  return element;
+}
+
+function profile(provider: "azure" | "aws") {
+  return provider === "azure" ?
+      {
+        name: "azure-prod",
+        provider,
+        tenantId: "tenant-1",
+        subscriptionId: "sub-1",
+        subscriptionName: "Production",
+        user: "octocat"
+      }
+    : {
+        name: "aws-prod",
+        provider,
+        accountId: "123456789012",
+        region: "us-east-1",
+        roleArn: "arn:aws:iam::123456789012:role/radius"
+      };
+}
+
+async function openWithProfile(
+  page: PageFixture,
+  provider: "azure" | "aws"
+): Promise<BrowserTeardown> {
+  page.browser.nav.search = `?page=environment&new=1&profile=${provider}-prod`;
+  page.browser.net.handle(
+    `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
+    () => jsonResponse({ profiles: [profile(provider)] })
+  );
+  page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+    jsonResponse(
+      provider === "azure" ?
+        {
+          clusters: [
+            { id: "aks-1", name: "aks-1", resourceGroup: "cluster-rg" }
+          ],
+          resourceGroups: [{ id: "app-rg", name: "app-rg" }],
+          namespaces: ["default"]
+        }
+      : {
+          clusters: [{ id: "eks-1", name: "eks-1" }],
+          namespaces: ["default"],
+          vpcs: [{ id: "vpc-1", name: "vpc-1" }],
+          subnets: [{ id: "subnet-1", name: "subnet-1" }]
+        }
+    )
+  );
+  const teardown = initializeEnvironmentPage(page.browser.context);
+  await flushPromises();
+  await flushPromises();
+  return teardown;
+}
+
+describe("initializeEnvironmentPage", () => {
+  it("does nothing outside the environment page", () => {
+    const browser = createFakeBrowser();
+    const teardown = initializeEnvironmentPage(browser.context);
+    expect(() => teardown()).not.toThrow();
+    expect(browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(false);
+  });
+
+  it.each([
+    DISCOVERY_PANEL_ENTRY_KEY,
+    PROFILES_PANEL_ENTRY_KEY,
+    ENVIRONMENTS_ENTRY_KEY,
+    CREDENTIALS_ENTRY_KEY,
+    ENVIRONMENT_OPERATIONS_ENTRY_KEY
+  ])("rolls back partial construction when %s is already owned", (childKey) => {
+    const page = fixture();
+    page.browser.bindings.claim(childKey);
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+
+    expect(teardown).toBeTypeOf("function");
+    expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(false);
+    expect(page.browser.bindings.has(childKey)).toBe(true);
+    page.browser.bindings.release(childKey);
+  });
+
+  it("initializes once, loads the environment landing, and tears down cleanly", async () => {
+    const page = fixture();
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    const duplicate = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    expect(
+      page.browser.net.calls.some((call) =>
+        call.url.startsWith(ENVIRONMENT_LIST_PATH)
+      )
+    ).toBe(true);
+    expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(true);
+    duplicate();
+    teardown();
+    expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(false);
+    expect(page.browser.clock.pending).toBe(0);
+  });
+
+  it("loads credential profiles instead of the environment table on the credentials subtab", async () => {
+    const page = fixture({ activeSubtab: "credentials" });
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    expect(
+      page.browser.net.calls.some((call) =>
+        call.url.startsWith(CREDENTIAL_PROFILES_PATH)
+      )
+    ).toBe(true);
+    expect(
+      page.browser.net.calls.some((call) =>
+        call.url.startsWith(ENVIRONMENT_LIST_PATH)
+      )
+    ).toBe(false);
+  });
+
+  it("routes a credential row's Create Env action back through the environment controller", async () => {
+    const page = fixture({ activeSubtab: "credentials" });
+    const createEnvironment = createFakeElement("credential-create-env");
+    createEnvironment.setAttribute("data-name", "azure-prod");
+    page.browser.document.addSelectorAll(".js-cred-createenv", [
+      createEnvironment
+    ]);
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => jsonResponse({ profiles: [profile("azure")] })
+    );
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    createEnvironment.dispatch("click");
+    await flushPromises();
+
+    expect(page.elements["pane-environments"].style.display).toBe("");
+    expect(page.elements["pane-credentials"].style.display).toBe("none");
+    expect(page.elements["env-form"].style.display).toBe("");
+  });
+
+  it("opens and cancels the environment form and routes create-profile to credentials", async () => {
+    const page = fixture();
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    page.elements["new-env-btn"].dispatch("click");
+    expect(page.elements["env-form"].style.display).toBe("");
+    expect(page.elements["env-landing"].style.display).toBe("none");
+    page.elements["cancel-env-btn"].dispatch("click");
+    expect(page.elements["env-form"].style.display).toBe("none");
+    page.elements["env-create-profile-link"].dispatch("click");
+    expect(page.elements["pane-credentials"].style.display).toBe("");
+    expect(page.elements["cred-form"].style.display).toBe("");
+  });
+
+  it("reads deep-link values without a leading question mark", async () => {
+    const page = fixture({
+      search: "page=environment&new=1&name=prod&profile=azure-prod"
+    });
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => jsonResponse({ profiles: [profile("azure")] })
+    );
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      jsonResponse({
+        clusters: [],
+        resourceGroups: [],
+        namespaces: []
+      })
+    );
+
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    expect(page.elements["env-form"].style.display).toBe("");
+    expect(pageInput(page, "env-name-input").value).toBe("prod");
+  });
+
+  it("treats a bare deep-link key as an empty value", () => {
+    const page = fixture({ search: "?page=environment&new" });
+    page.elements["env-form"].style.display = "none";
+
+    initializeEnvironmentPage(page.browser.context);
+
+    expect(page.elements["env-form"].style.display).not.toBe("");
+  });
+
+  it("requires a selected credential profile before creating", () => {
+    const page = fixture({ search: "?page=environment&new=1" });
+    initializeEnvironmentPage(page.browser.context);
+    pageInput(page, "env-name-input").value = "dev";
+    page.elements["deploy-btn"].dispatch("click");
+
+    expect(page.elements["deploy-status"].textContent).toBe(
+      "Please select a credential profile."
+    );
+  });
+
+  it("requires an environment name before creating", async () => {
+    const page = fixture();
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "";
+    page.elements["deploy-btn"].dispatch("click");
+
+    expect(page.elements["deploy-status"].textContent).toBe(
+      "Please enter an environment name."
+    );
+  });
+
+  it("fails closed when repository identity changes", async () => {
+    const page = fixture();
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "target-repo").value = "attacker/other";
+    page.elements["deploy-btn"].dispatch("click");
+
+    expect(page.elements["deploy-status"].textContent).toContain(
+      "repository context changed"
+    );
+    expect(
+      page.browser.net.calls.filter(
+        (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
+      )
+    ).toHaveLength(0);
+  });
+
+  it.each([
+    [
+      "resource group",
+      "azure-rg-select",
+      "",
+      "Please specify a resource group."
+    ],
+    ["cluster", "azure-cluster-select", "", "Please specify an AKS cluster."]
+  ])("validates the Azure %s", async (_label, id, value, expected) => {
+    const page = fixture();
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    pageInput(page, id).value = value;
+    page.elements["deploy-btn"].dispatch("click");
+    expect(page.elements["deploy-status"].textContent).toBe(expected);
+  });
+
+  it("validates the AWS cluster", async () => {
+    const page = fixture();
+    await openWithProfile(page, "aws");
+    pageInput(page, "env-name-input").value = "prod";
+    pageInput(page, "aws-cluster-select").value = "";
+
+    page.elements["deploy-btn"].dispatch("click");
+
+    expect(page.elements["deploy-status"].textContent).toBe(
+      "Please specify an EKS cluster."
+    );
+  });
+
+  it.each([
+    [
+      "Azure",
+      {
+        name: "azure-broken",
+        provider: "azure",
+        tenantId: "",
+        subscriptionId: ""
+      },
+      "The selected profile needs both a tenant ID and subscription ID."
+    ],
+    [
+      "AWS",
+      {
+        name: "aws-broken",
+        provider: "aws",
+        accountId: "",
+        region: ""
+      },
+      "The selected profile needs both an account ID and region."
+    ]
+  ])(
+    "fails closed for incomplete %s profile identity",
+    async (_name, brokenProfile, expected) => {
+      const page = fixture();
+      page.browser.nav.search = `?page=environment&new=1&profile=${brokenProfile.name}`;
+      page.browser.net.handle(
+        `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
+        () => jsonResponse({ profiles: [brokenProfile] })
+      );
+      page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+        jsonResponse({
+          clusters: [
+            {
+              id: brokenProfile.provider === "aws" ? "eks-1" : "aks-1",
+              name: "cluster",
+              resourceGroup: "cluster-rg"
+            }
+          ],
+          resourceGroups: [{ id: "app-rg", name: "app-rg" }],
+          namespaces: ["default"]
+        })
+      );
+      initializeEnvironmentPage(page.browser.context);
+      await flushPromises();
+      await flushPromises();
+      pageInput(page, "env-name-input").value = "dev";
+      pageInput(
+        page,
+        brokenProfile.provider === "aws" ?
+          "aws-cluster-select"
+        : "azure-cluster-select"
+      ).value = brokenProfile.provider === "aws" ? "eks-1" : "aks-1";
+      pageInput(page, "azure-rg-select").value = "app-rg";
+
+      page.elements["deploy-btn"].dispatch("click");
+
+      expect(page.elements["deploy-status"].textContent).toContain(expected);
+      expect(
+        page.browser.net.calls.filter(
+          (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
+        )
+      ).toHaveLength(0);
+    }
+  );
+
+  it("dispatches an Azure environment operation with preserved branch identity", async () => {
+    const page = fixture();
+    let createInit: HttpRequestInit | undefined;
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    pageInput(page, "azure-namespace-select").value = "default";
+    pageInput(page, "az-app-name-input").value = "radius-deploy-octo-app";
+    pageInput(page, "deploy-branch-select").value = "";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, (init) => {
+      createInit = init;
+      return jsonResponse({ operationId: "op-1" }, true, 202);
+    });
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(JSON.parse(String(createInit?.body))).toMatchObject({
+      repo: "octo/app",
+      environment: "dev",
+      provider: "azure",
+      cluster: "aks-1",
+      namespace: "default",
+      profileName: "azure-prod",
+      branch: "feature/x",
+      resourceGroup: "app-rg",
+      clusterResourceGroup: "cluster-rg",
+      appName: "radius-deploy-octo-app",
+      resumeTarget: {
+        page: "planned",
+        repo: "octo/app",
+        branch: "feature/x"
+      }
+    });
+    expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("");
+  });
+
+  it("clears the create latch when the tracked operation becomes terminal", async () => {
+    const page = fixture();
+    let createRequests = 0;
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, () => {
+      createRequests += 1;
+      return jsonResponse({ operationId: `op-${createRequests}` }, true, 202);
+    });
+    let operationPolls = 0;
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        operationPolls += 1;
+        return jsonResponse({
+          operation: {
+            operationId: `op-${createRequests}`,
+            environment: "dev",
+            provider: "azure",
+            state: operationPolls === 1 ? "running" : "succeeded",
+            terminalState: operationPolls === 1 ? null : "succeeded",
+            summary: operationPolls === 1 ? "creating" : "ready"
+          }
+        });
+      }
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(1500);
+    await flushPromises();
+    expect(page.elements["deploy-btn"].textContent).toBe("Create Environment");
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(createRequests).toBe(2);
+  });
+
+  it("dispatches AWS-specific infrastructure without Azure fields", async () => {
+    const page = fixture();
+    let createInit: HttpRequestInit | undefined;
+    await openWithProfile(page, "aws");
+    page.browser.net.supportsAbort = false;
+    pageInput(page, "env-name-input").value = "prod";
+    pageInput(page, "aws-cluster-select").value = "eks-1";
+    pageInput(page, "aws-namespace-select").value = "default";
+    pageInput(page, "aws-vpc-select").value = "vpc-1";
+    pageInput(page, "aws-subnets-select").value = "subnet-1";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, (init) => {
+      createInit = init;
+      return jsonResponse({ operationId: "op-aws" }, true, 202);
+    });
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    const body = JSON.parse(String(createInit?.body));
+    expect(body).toMatchObject({
+      provider: "aws",
+      cluster: "eks-1",
+      accountId: "123456789012",
+      region: "us-east-1",
+      roleArn: "arn:aws:iam::123456789012:role/radius",
+      vpcId: "vpc-1",
+      subnetIds: "subnet-1"
+    });
+    expect(body).not.toHaveProperty("resourceGroup");
+    expect(createInit?.signal).toBeUndefined();
+  });
+
+  it("dispatches an AWS profile with no optional role ARN", async () => {
+    const page = fixture();
+    let createInit: HttpRequestInit | undefined;
+    page.browser.nav.search = "?page=environment&new=1&profile=aws-basic";
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          profiles: [
+            {
+              name: "aws-basic",
+              provider: "aws",
+              accountId: "123456789012",
+              region: "us-east-1"
+            }
+          ]
+        })
+    );
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      jsonResponse({
+        clusters: [{ id: "eks-1", name: "eks-1" }],
+        namespaces: ["default"],
+        vpcs: [],
+        subnets: []
+      })
+    );
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    await flushPromises();
+    pageInput(page, "env-name-input").value = "prod";
+    pageInput(page, "aws-cluster-select").value = "eks-1";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, (init) => {
+      createInit = init;
+      return jsonResponse({ operationId: "op-aws" }, true, 202);
+    });
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(JSON.parse(String(createInit?.body))).toMatchObject({
+      provider: "aws",
+      roleArn: ""
+    });
+  });
+
+  it("dispatches only one create while a request is pending", async () => {
+    const page = fixture();
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    let requests = 0;
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, () => {
+      requests += 1;
+      return new Promise<HttpResponse>(() => {});
+    });
+
+    page.elements["deploy-btn"].dispatch("click");
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(requests).toBe(1);
+  });
+
+  it.each([
+    [
+      "HTTP failure",
+      () => jsonResponse({ error: "setup denied" }, false, 403),
+      "setup denied"
+    ],
+    [
+      "HTTP failure without a message",
+      () => jsonResponse({}, false, 500),
+      "Could not start environment setup."
+    ],
+    [
+      "missing operation identity",
+      () => jsonResponse({}, true, 202),
+      "Radius did not return an environment operation."
+    ],
+    [
+      "malformed response",
+      () => textResponse("not json", false, 500),
+      "Radius returned an invalid environment response."
+    ],
+    [
+      "network failure",
+      () => Promise.reject({ secret: "do-not-render" }),
+      "Could not start environment setup. Please try again."
+    ]
+  ])(
+    "reports %s explicitly and restores the action",
+    async (_label, result, expected) => {
+      const page = fixture();
+      await openWithProfile(page, "azure");
+      pageInput(page, "env-name-input").value = "dev";
+      pageInput(page, "azure-rg-select").value = "app-rg";
+      pageInput(page, "azure-cluster-select").value = "aks-1";
+      page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, result);
+
+      page.elements["deploy-btn"].dispatch("click");
+      await flushPromises();
+
+      expect(page.elements["env-error-banner-text"].textContent).toBe(expected);
+      expect(pageInput(page, "deploy-btn").disabled).toBe(false);
+      expect(page.elements["deploy-btn"].textContent).toBe(
+        "Create Environment"
+      );
+      expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("none");
+    }
+  );
+
+  it("renders a recorded failure returned with the rejected create request", async () => {
+    const page = fixture();
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, () =>
+      jsonResponse(
+        {
+          error: "setup failed",
+          operationId: "op-failed"
+        },
+        false,
+        500
+      )
+    );
+    page.browser.net.handle("/api/operations/op-failed", () =>
+      jsonResponse({
+        operation: {
+          operationId: "op-failed",
+          environment: "dev",
+          provider: "azure",
+          state: "failed",
+          terminalState: "failed",
+          summary: "setup failed"
+        }
+      })
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(page.elements["deploy-btn"].textContent).toBe("Create Environment");
+    expect(pageInput(page, "deploy-btn").disabled).toBe(false);
+    expect(page.elements[PROGRESS_IDS.panel].style.display).not.toBe("none");
+  });
+
+  it("supersedes a resumed poll before rendering a recorded create failure", async () => {
+    const page = fixture();
+    let resumedPolls = 0;
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        resumedPolls += 1;
+        return jsonResponse({
+          operation: {
+            operationId: "old-op",
+            environment: "old",
+            provider: "azure",
+            state: "running",
+            terminalState: null,
+            summary: "old operation"
+          }
+        });
+      }
+    );
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, () =>
+      jsonResponse(
+        { error: "new setup failed", operationId: "new-op" },
+        false,
+        500
+      )
+    );
+    page.browser.net.handle("/api/operations/new-op", () =>
+      jsonResponse({
+        operation: {
+          operationId: "new-op",
+          environment: "dev",
+          provider: "azure",
+          state: "failed",
+          terminalState: "failed",
+          summary: "new setup failed"
+        }
+      })
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+    await flushPromises();
+    const pollsAfterFailure = resumedPolls;
+    expect(page.elements[PROGRESS_IDS.panel].className).toContain(
+      "env-progress--failed"
+    );
+
+    page.browser.clock.tick(5000);
+    await flushPromises();
+
+    expect(resumedPolls).toBe(pollsAfterFailure);
+    expect(page.elements[PROGRESS_IDS.panel].className).toContain(
+      "env-progress--failed"
+    );
+  });
+
+  it("aborts an in-flight create and ignores its response on teardown", async () => {
+    const page = fixture();
+    let resolveCreate: (() => void) | undefined;
+    const teardown = await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    page.browser.net.handle(
+      CREATE_ENVIRONMENT_OPERATION_PATH,
+      () =>
+        new Promise<HttpResponse>((resolve) => {
+          resolveCreate = () =>
+            resolve(jsonResponse({ operationId: "late" }, true, 202));
+        })
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+    teardown();
+    resolveCreate?.();
+    await flushPromises();
+
+    expect(page.browser.net.aborted).toBeGreaterThan(0);
+    expect(page.elements["deploy-btn"].textContent).toBe(
+      "Creating environment…"
+    );
+  });
+
+  it("ignores a late create success when abort is unavailable", async () => {
+    const page = fixture();
+    let resolveCreate: (() => void) | undefined;
+    const teardown = await openWithProfile(page, "azure");
+    page.browser.net.supportsAbort = false;
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    page.browser.net.handle(
+      CREATE_ENVIRONMENT_OPERATION_PATH,
+      () =>
+        new Promise<HttpResponse>((resolve) => {
+          resolveCreate = () =>
+            resolve(jsonResponse({ operationId: "late" }, true, 202));
+        })
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+    teardown();
+    resolveCreate?.();
+    await flushPromises();
+
+    expect(page.elements["deploy-btn"].textContent).toBe(
+      "Creating environment…"
+    );
+  });
+
+  it("does not fetch or render a late create failure after teardown", async () => {
+    const page = fixture();
+    let resolveCreate: (() => void) | undefined;
+    const teardown = await openWithProfile(page, "azure");
+    page.browser.net.supportsAbort = false;
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    page.browser.net.handle(
+      CREATE_ENVIRONMENT_OPERATION_PATH,
+      () =>
+        new Promise<HttpResponse>((resolve) => {
+          resolveCreate = () =>
+            resolve(
+              jsonResponse(
+                { error: "late failure", operationId: "late-op" },
+                false,
+                500
+              )
+            );
+        })
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+    teardown();
+    resolveCreate?.();
+    await flushPromises();
+
+    expect(
+      page.browser.net.calls.some(
+        (call) => call.url === "/api/operations/late-op"
+      )
+    ).toBe(false);
+  });
+});

@@ -109,7 +109,10 @@ const PAGE_STATE_IDS = [
   "radius-graph-page-state",
   "radius-planned-graph-state",
   "radius-graph-diff-state",
-  "radius-deployed-graph-state"
+  "radius-deployed-graph-state",
+  "radius-deploy-result-state",
+  "radius-environment-state",
+  "radius-deploying-state"
 ] as const;
 
 // Inline payloads are named by a stable anchor rather than by position, so the
@@ -267,6 +270,18 @@ function projectHiddenInitialState(
         GRAPH_BRANCH: JSON.stringify(stateString(state, "graphBranch")),
         FALLBACK_PROVIDER: JSON.stringify(stateString(state, "provider"))
       };
+    case "radius-deploy-result-state":
+      return { attemptId: JSON.stringify(stateString(state, "attemptId")) };
+    case "radius-environment-state":
+      return {
+        CTX_REPO: singleQuoted(repo),
+        CTX_BRANCH: singleQuoted(branch)
+      };
+    case "radius-deploying-state":
+      return {
+        CTX_REPO: JSON.stringify(repo),
+        CTX_BRANCH: JSON.stringify(branch)
+      };
     default:
       return null;
   }
@@ -304,6 +319,36 @@ function expectedHiddenApiPaths(
         "/api/list-environments",
         "/api/list-deployments",
         "/api/delete-deployment"
+      ];
+    case "radius-deploy-result-state":
+      return ["/api/deploy-reset"];
+    case "radius-environment-state":
+      return [
+        "/api/list-environments",
+        "/api/delete-environment",
+        "/api/operations",
+        "/api/verify-status",
+        "/api/credential-profiles",
+        "/api/github-identity",
+        "/api/github-account",
+        "/api/list-azure-app-registrations",
+        "/api/discover",
+        "/api/azure-app-serves-repos",
+        "/api/delete-credential-profile",
+        "/api/azure-cli-assist",
+        "/api/verify-azure-login",
+        "/api/verify-aws-login",
+        "/api/save-credential-profile"
+      ];
+    case "radius-deploying-state":
+      return [
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/discover-branches",
+        "/api/list-deployments",
+        "/api/delete-deployment",
+        "/api/deploy-status",
+        "/api/deploy"
       ];
     default:
       return null;

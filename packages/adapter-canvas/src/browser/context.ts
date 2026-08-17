@@ -6,6 +6,7 @@ import type {
   BrowserContext,
   ClipboardPort,
   ClockPort,
+  DialogPort,
   DomDocument,
   DomElement,
   DomEventTarget,
@@ -461,6 +462,22 @@ function createClipboardPort(scope: unknown): ClipboardPort {
   };
 }
 
+function createDialogPort(scope: unknown): DialogPort {
+  const confirm = readMember(scope, "confirm");
+  const alert = readMember(scope, "alert");
+  if (!isCallable(confirm) || !isCallable(alert)) {
+    throw new Error("Radius browser context is missing confirm or alert.");
+  }
+  return {
+    confirm(message) {
+      return confirm.call(scope, message) === true;
+    },
+    notify(message) {
+      alert.call(scope, message);
+    }
+  };
+}
+
 function createLoggerPort(scope: unknown): LoggerPort {
   const runtimeConsole = readMember(scope, "console");
   const report = readMember(runtimeConsole, "error");
@@ -496,6 +513,7 @@ export function resolveBrowserContext(
     focus: createFocusPort(document),
     external: createExternalOpenPort(scope, document),
     clipboard: createClipboardPort(scope),
+    dialogs: createDialogPort(scope),
     logger: createLoggerPort(scope),
     bindings
   };

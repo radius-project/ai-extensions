@@ -195,6 +195,11 @@ export interface ClipboardPort {
   write(text: string): Promise<boolean>;
 }
 
+export interface DialogPort {
+  confirm(message: string): boolean;
+  notify(message: string): void;
+}
+
 export interface LoggerPort {
   error(message: string, detail: unknown): void;
 }
@@ -215,6 +220,7 @@ export interface BrowserContext {
   readonly focus: FocusPort;
   readonly external: ExternalOpenPort;
   readonly clipboard: ClipboardPort;
+  readonly dialogs: DialogPort;
   readonly logger: LoggerPort;
   readonly bindings: BindingRegistry;
 }

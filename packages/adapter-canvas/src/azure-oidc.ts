@@ -581,7 +581,7 @@ export function parseServedReposFromSubjects(
  * Short human label summarizing the repos an App Registration already serves,
  * for the identity-picker rows. Pure and self-contained so it can be serialized
  * into the browser bundle via .toString() (see
- * pages/environment/client-discovery.ts) — the client runs this
+ * browser/environment/discovery.ts) — the client runs this
  * exact function rather than a hand-copied twin.
  *
  * @param {string[]} list
@@ -670,7 +670,7 @@ export function selectMissingFederatedCredentials(
  * e.g. an ARM token not yet silently acquirable on Corpnet — surfaces as
  * "Discovery failed: <stderr>" rather than a misleading "Found 0 …". Pure and
  * self-contained so it is serialized into the browser bundle via .toString()
- * (see pages/environment/client-discovery.ts `discoverResources`) — the client
+ * (see browser/environment/discovery.ts `discoverResources`) — the client
  * runs this exact function.
  *
  * @param {{clusters?:unknown[], resourceGroups?:unknown[], vpcs?:unknown[], subnets?:unknown[], error?:string, errors?:Record<string,string>}} data

@@ -70,7 +70,13 @@ describe("browser entry specifications", () => {
   it("registers every implemented repository and graph entry exactly once", () => {
     expect(BROWSER_ENTRY_NAMES).toEqual([
       "graph",
+      "delete-dialog",
       "heartbeat",
+      "operation-chip",
+      "oidc-page",
+      "deploy-result-page",
+      "environment-page",
+      "deploying-page",
       "graph-page",
       "planned-graph-page",
       "graph-diff-page",
@@ -79,7 +85,13 @@ describe("browser entry specifications", () => {
     expect(SHARED_ENTRY_GLOBALS).toEqual([PAGE_REGISTRY_GLOBAL]);
     expect(BROWSER_ENTRIES.map((entry) => entry.initializer)).toEqual([
       "installGraphEntry",
+      "installDeleteDialogEntry",
       "installHeartbeatEntry",
+      "installOperationChipEntry",
+      "installOidcPageEntry",
+      "installDeployResultPageEntry",
+      "installEnvironmentPageEntry",
+      "installDeployingPageEntry",
       "installGraphPageEntry",
       "installPlannedGraphPageEntry",
       "installGraphDiffPageEntry",

@@ -7,7 +7,13 @@ const BROWSER_SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 
 export type BrowserEntryName =
   | "graph"
+  | "delete-dialog"
   | "heartbeat"
+  | "operation-chip"
+  | "oidc-page"
+  | "deploy-result-page"
+  | "environment-page"
+  | "deploying-page"
   | "graph-page"
   | "planned-graph-page"
   | "graph-diff-page"
@@ -34,9 +40,45 @@ export const BROWSER_ENTRIES: readonly BrowserEntrySpec<BrowserEntryName>[] = [
     ]
   },
   {
+    name: "delete-dialog",
+    file: "./entries/delete-dialog.ts",
+    initializer: "installDeleteDialogEntry",
+    globals: ["radiusCreateDeleteDeploymentDialog"]
+  },
+  {
     name: "heartbeat",
     file: "./entries/heartbeat.ts",
     initializer: "installHeartbeatEntry",
+    globals: []
+  },
+  {
+    name: "operation-chip",
+    file: "./entries/operation-chip.ts",
+    initializer: "installOperationChipEntry",
+    globals: []
+  },
+  {
+    name: "oidc-page",
+    file: "./entries/oidc-page.ts",
+    initializer: "installOidcPageEntry",
+    globals: []
+  },
+  {
+    name: "deploy-result-page",
+    file: "./entries/deploy-result-page.ts",
+    initializer: "installDeployResultPageEntry",
+    globals: []
+  },
+  {
+    name: "environment-page",
+    file: "./entries/environment-page.ts",
+    initializer: "installEnvironmentPageEntry",
+    globals: []
+  },
+  {
+    name: "deploying-page",
+    file: "./entries/deploying-page.ts",
+    initializer: "installDeployingPageEntry",
     globals: []
   },
   {

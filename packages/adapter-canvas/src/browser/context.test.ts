@@ -50,6 +50,8 @@ function createScope(
     navigator: {
       clipboard: { writeText: () => Promise.resolve() }
     },
+    confirm: () => false,
+    alert: () => undefined,
     console: { error: () => undefined },
     open: () => null,
     ...overrides
@@ -184,6 +186,14 @@ describe("resolveBrowserContext", () => {
     [
       createScope({ console: undefined }),
       "Radius browser context is missing console.error."
+    ],
+    [
+      createScope({ confirm: undefined }),
+      "Radius browser context is missing confirm or alert."
+    ],
+    [
+      createScope({ alert: undefined }),
+      "Radius browser context is missing confirm or alert."
     ]
   ])("names a missing browser capability", (scope, message) => {
     expect(() => resolveBrowserContext(scope)).toThrow(message);
@@ -194,6 +204,32 @@ describe("resolveBrowserContext", () => {
       window: undefined
     });
     expect(resolveBrowserContext(scope).page).toBe(scope);
+  });
+
+  it("fails closed on confirmation and reports notifications through browser dialogs", () => {
+    const confirmations: string[] = [];
+    const notifications: string[] = [];
+    const context = resolveBrowserContext(
+      createScope({
+        confirm: (message: string) => {
+          confirmations.push(message);
+          return "yes";
+        },
+        alert: (message: string) => {
+          notifications.push(message);
+        }
+      })
+    );
+
+    expect(context.dialogs.confirm("Delete?")).toBe(false);
+    context.dialogs.notify("Could not delete.");
+    expect(confirmations).toEqual(["Delete?"]);
+    expect(notifications).toEqual(["Could not delete."]);
+
+    const approved = resolveBrowserContext(
+      createScope({ confirm: () => true })
+    );
+    expect(approved.dialogs.confirm("Delete?")).toBe(true);
   });
 
   it("validates fetch responses and creates an optional abort handle", async () => {
