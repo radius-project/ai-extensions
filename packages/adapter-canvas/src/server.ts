@@ -169,14 +169,12 @@ import {
   createDeployStatusReader,
   settleDeployStatuses
 } from "./deploy-artifacts.js";
-import {
-  graphPage,
-  plannedGraphPage,
-  graphDiffPage,
-  deployedGraphPage,
-  environmentPage,
-  deployingPage
-} from "./pages.js";
+import { graphPage } from "./pages/graph-page.js";
+import { plannedGraphPage } from "./pages/planned-graph-page.js";
+import { graphDiffPage } from "./pages/graph-diff-page.js";
+import { deployedGraphPage } from "./pages/deployed-graph-page.js";
+import { environmentPage } from "./pages/environment-page.js";
+import { deployingPage } from "./pages/deploying-page.js";
 import { createCanvasServer } from "./server/create-canvas-server.js";
 import { createRequestHandler as createScaffoldRequestHandler } from "./server/create-request-handler.js";
 import {
@@ -563,7 +561,7 @@ const deploymentsRoutes = createDeploymentsRoutes({
   }
 });
 
-// Composition root for the migrated `azure-discovery` routes. Four seams: the
+// Composition root for the `azure-discovery` routes. Four seams:
 // `az` runner (which carries the agent-session-stripped `cliExec` environment
 // the Azure setup routes run under), the general trimmed-stdout CLI runner the
 // discovery enumeration branches on, and the two pure `azure-oidc` helpers,
@@ -1067,7 +1065,7 @@ const canvasServer = createCanvasServer(
   })
 );
 
-// Compatibility facade shared with the SDK runtime during the route migration.
+// Shared instance registry used by the runtime and request handler.
 export const servers = canvasServer.instances;
 
 let environmentOperationTestRunner:
