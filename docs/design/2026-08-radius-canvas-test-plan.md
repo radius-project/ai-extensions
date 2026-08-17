@@ -136,11 +136,8 @@ The full plan is complete when every requirement in the appendices has a passing
 
 ## Open decisions
 
-1. Should Windows and macOS checks block affected pull requests or remain scheduled warnings?
-2. How long should coverage reports and failure files be retained?
-3. Which controlled runner will own real-host checks and credential rotation?
-4. Should production continue loading pinned vendor assets from unpkg, or should a later change package them?
-5. What request-size limit and common local API error format, if any, should be approved as a separate behavior change?
+1. Should production continue loading pinned vendor assets from unpkg, or should a later change package them?
+2. What request-size limit and common local API error format, if any, should be approved as a separate behavior change?
 
 ## Appendices
 
