@@ -2671,8 +2671,6 @@ function buildRoleAssignmentDeleteArgs({
     "delete",
     "--assignee-object-id",
     objectId,
-    "--assignee-principal-type",
-    "ServicePrincipal",
     "--role",
     role,
     "--scope",
