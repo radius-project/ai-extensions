@@ -197,6 +197,19 @@ The build continues to use Node 24, pnpm 11.19.0, and esbuild. The Copilot SDK r
 - Harnesses close servers, streams, subprocesses, browser contexts, and workspaces on success and failure.
 - Artifact and host harnesses report infrastructure failure separately from product failure.
 
+## Cancellation and abandoned work
+
+- Every long-running workflow declares who owns it and what closing the page, canvas instance, session, or process means: cancel the work or leave a durable operation running.
+- Browser teardown cancels timers, polling, and browser requests and ignores late callbacks. It does not claim that server or external work stopped.
+- Instance-scoped work receives a cancellation request when its instance closes or the extension shuts down. Work may continue after close only when it has a persisted operation identity, can be resumed safely, and is shown as continuing rather than cancelled.
+- GitHub, cloud, command-line, and filesystem adapters receive a cancellation signal when they support one. When an external call cannot be interrupted, its late result is fenced off and cannot start another mutation or overwrite newer state.
+- Multi-step mutations check for cancellation before each irreversible step and after each awaited external call. If earlier work cannot be undone, the operation records the partial result and reports cancellation separately from success or failure.
+- Command cancellation targets the specific child process tree, waits for exit within a bounded deadline, and never uses a name-wide process kill.
+- Instance generation, operation identity, and graph context tokens prevent work from a closed, reopened, or superseded context from committing late results.
+- Completion, cancellation, close, and shutdown may race, but cleanup runs once and every caller observes the same terminal outcome.
+
+Cancellation is a cross-cutting contract, not a separate rollout phase. Phase 5 owns runtime, server, adapter, subprocess, and HTTP cancellation checks. Phase 6 owns browser abort, teardown, navigation, and stale-result checks. Phase 7 repeats bounded race, timeout, and cleanup cases that add resilience beyond the required pull-request gates. Phase 8 confirms close, reopen, and reconnect behavior in a supported host.
+
 ## Security
 
 - Pull-request tests use no personal credentials, inherited tokens, live cloud resources, mutable repositories, or live publication.

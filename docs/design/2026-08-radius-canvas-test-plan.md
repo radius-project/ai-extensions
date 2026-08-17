@@ -36,24 +36,28 @@ Phase 4 is complete and meets BU-01–BU-14 in #395.
 - Show external failures as failures. If identity or state cannot be confirmed, deployment and deletion must stop.
 - For the session repository, graph and plan views use the current worktree branch, not an assumed `main`.
 - Close servers, streams, processes, timers, browser sessions, and temporary workspaces after success or failure.
+- Every long-running workflow states whether close cancels it or leaves a durable, resumable operation running. Late work from a closed or superseded context must not mutate newer state.
 - For local API changes, test cross-site mutation attempts, malformed bodies, approved request-size boundaries, path traversal, workspace confinement, and destructive actions that must stop safely.
 - Preserve the seven page values, retained action and tool contracts, current 40 routes, branch behavior, and the single packaged extension unless a separate approved change says otherwise.
 
 ## Required checks
 
-| Check                      | Required when                                                                 | What it protects                                                       |
-|----------------------------|-------------------------------------------------------------------------------|------------------------------------------------------------------------|
-| Focused module tests       | Every behavior change                                                         | Rules, validation, state changes, escaping, and error handling         |
-| Extension setup tests      | Canvas setup, actions, tools, lifecycle, callbacks, or branch handling change | Registration, open, reopen, close, reconnect, and cleanup              |
-| Local API tests            | A page route, API route, cache, stream, or destructive action changes         | Requests, responses, errors, state, cleanup, and safe failure          |
-| Packaged-extension test    | Runtime, page, browser, dependency, build, or packaging changes               | Missing code, duplicate setup, broken startup, and broken shutdown     |
-| Chromium behavior tests    | Browser behavior changes after Phase 6 begins                                 | Real events, focus, forms, polling, navigation, and browser rendering  |
-| End-to-end workflow tests  | A supported workflow crosses the browser and server                           | Regressions that smaller tests cannot see                              |
-| Accessibility and keyboard | An interactive page or material page state changes after Phase 6 begins       | Unusable controls, poor focus order, missing announcements, and WCAG   |
-| Screenshot review          | A selected stable visual state changes after Phase 7 begins                   | Layout, clipping, theme, graph, and status presentation                |
-| Real-host check            | Before release after Phase 8 qualification                                    | Installation, discovery, panel lifecycle, focus, reopen, and reconnect |
+| Check                      | Required when                                                                    | What it protects                                                       |
+|----------------------------|----------------------------------------------------------------------------------|------------------------------------------------------------------------|
+| Focused module tests       | Every behavior change                                                            | Rules, validation, state changes, escaping, and error handling         |
+| Extension setup tests      | Canvas setup, actions, tools, lifecycle, callbacks, or branch handling change    | Registration, open, reopen, close, reconnect, and cleanup              |
+| Local API tests            | A page route, API route, cache, stream, or destructive action changes            | Requests, responses, errors, state, cleanup, and safe failure          |
+| Cancellation tests         | Async work, external calls, subprocesses, navigation, close, or shutdown changes | Leaked work, late mutation, false cancellation, and duplicate cleanup  |
+| Packaged-extension test    | Runtime, page, browser, dependency, build, or packaging changes                  | Missing code, duplicate setup, broken startup, and broken shutdown     |
+| Chromium behavior tests    | Browser behavior changes after Phase 6 begins                                    | Real events, focus, forms, polling, navigation, and browser rendering  |
+| End-to-end workflow tests  | A supported workflow crosses the browser and server                              | Regressions that smaller tests cannot see                              |
+| Accessibility and keyboard | An interactive page or material page state changes after Phase 6 begins          | Unusable controls, poor focus order, missing announcements, and WCAG   |
+| Screenshot review          | A selected stable visual state changes after Phase 7 begins                      | Layout, clipping, theme, graph, and status presentation                |
+| Real-host check            | Before release after Phase 8 qualification                                       | Installation, discovery, panel lifecycle, focus, reopen, and reconnect |
 
 Tests that do not open a browser do not retry. Browser and host checks may retry once to collect useful failure information, but the original failure remains visible and a retry-only pass is recorded as flaky. Setting a check aside requires a linked issue, owner, narrow scope, and clear end condition. Safety checks cannot be skipped or set aside.
+
+Cancellation is not a separate implementation phase. Add each test at the lowest boundary that owns the work, and add any missing production behavior in the same pull request. Phase 5 covers runtime, server, adapter, subprocess, and HTTP cancellation. Phase 6 covers browser abort, teardown, navigation, and stale results. Phase 7 adds bounded repeated races, timeouts, and cleanup checks. Phase 8 confirms close, reopen, and reconnect behavior in a supported host.
 
 ## Standard local check
 
@@ -97,25 +101,25 @@ Completion evidence: BU-01–BU-14 pass; all 12 entries build safely and appear 
 
 ### Phase 5: permanent extension and server test gates
 
-Combine the extension setup, local API, and packaged-extension checks already introduced by earlier phases. Fill any missing lifecycle, route, cleanup, branch, resume, and package cases. Make the complete checks required for pull requests and publishing.
+Combine the extension setup, local API, and packaged-extension checks already introduced by earlier phases. Fill any missing lifecycle, route, cleanup, branch, resume, package, and cancellation cases. Cover close or shutdown during startup, external calls, mutations, and subprocess execution; prove that late results cannot change newer state. Make the complete checks required for pull requests and publishing.
 
 Complete when all three suites run without live GitHub or cloud access, produce short logs with no secrets, and block regressions in CI.
 
 ### Phase 6: real browser behavior
 
-Run the interface in Chromium with controlled data. Cover the workflows in Appendix B, including graph details and links, credentials, safe environment and deployment actions, branch selection, recovery, progress, resume, keyboard use, and accessibility.
+Run the interface in Chromium with controlled data. Cover the workflows in Appendix B, including graph details and links, credentials, safe environment and deployment actions, branch selection, recovery, progress, resume, keyboard use, and accessibility. Prove that navigation and teardown abort browser-owned work, ignore late callbacks, and do not falsely report durable server work as cancelled.
 
 Complete when these checks are repeatable without a public content network, personal login, or mutable repository, and useful traces are saved when they fail.
 
 ### Phase 7: screenshots and reliability
 
-Add the selected screenshots in Appendix D and scheduled checks for empty or partial data, expired caches, repeated polling, timeouts, multiple instances, cleanup, and Windows/macOS paths. Screenshot changes require a clear product reason and human review.
+Add the selected screenshots in Appendix D and scheduled checks for empty or partial data, expired caches, repeated polling, cancellation races, timeouts, multiple instances, cleanup, and Windows/macOS paths. Screenshot changes require a clear product reason and human review.
 
 Complete when screenshots are stable, changed paths pass their reliability checks, and retry-only passes are recorded.
 
 ### Phase 8: supported-host qualification
 
-Use a controlled Copilot host, non-personal authentication, and a disposable workspace to run HOST-01–HOST-07. The harness must distinguish a test-system failure from a product failure and prove cleanup.
+Use a controlled Copilot host, non-personal authentication, and a disposable workspace to run HOST-01–HOST-07. Confirm that closing, reopening, and reconnecting follow the documented cancel-or-continue policy. The harness must distinguish a test-system failure from a product failure and prove cleanup.
 
 Complete when every host case passes before release. Skipped, simulated, or cleanup-incomplete runs do not count.
 
@@ -240,6 +244,19 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | LC-15 | External errors are surfaced; no success-shaped fallback is returned                                                         |
 | LC-16 | Deploy repair handoff preserves attempt identity across tool calls                                                           |
 | LC-17 | Setup state survives navigation and supports safe polling, acknowledgement, and resume without exposing raw failure evidence |
+
+#### Cancellation and abandoned work
+
+| ID    | Requirement                                                                                                                                          |
+|-------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| CN-01 | Every long-running workflow declares whether page, instance, session, and process close cancel it or leave a durable operation running               |
+| CN-02 | Browser teardown aborts browser requests, timers, and polling; late callbacks cannot update the closed or superseded page                            |
+| CN-03 | Durable work may outlive a canvas only when its operation identity and state are persisted, resumable, and shown as continuing                       |
+| CN-04 | Cancellable GitHub, cloud, command-line, and filesystem calls receive a cancellation signal; uncancellable late results are fenced off               |
+| CN-05 | Multi-step mutations check cancellation before irreversible steps and after external waits, then record any partial result without reporting success |
+| CN-06 | Cancelling command-line work terminates only its child process tree and waits for bounded cleanup                                                    |
+| CN-07 | Instance generation, operation identity, and graph context tokens prevent closed or superseded work from committing late results                     |
+| CN-08 | Completion, cancellation, close, and shutdown races produce one terminal outcome and exactly-once cleanup                                            |
 
 #### Critical journeys
 
@@ -389,6 +406,7 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | QR-12 | Loopback mistaken for host coverage                      | Separate real-host suite/reporting       |
 | QR-13 | Unknown consumer of removed declaration                  | Phase 0 audit/history                    |
 | QR-14 | Setup becomes stale/non-resumable or leaks raw errors    | LC-17, RF-08, J-11                       |
+| QR-15 | Closed or superseded work leaks or mutates newer state   | CN-01–CN-08 across Phases 5–8            |
 
 ### Appendix F: priority suite identifiers
 
