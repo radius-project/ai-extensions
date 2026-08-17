@@ -14,19 +14,19 @@ Start with the status table. Use the phase sections for the work still to come. 
 
 ## Current status
 
-| Phase | Status                       | Outcome                                                                                      | Evidence                                                                                                                                                                                                                                                           |
-|-------|------------------------------|----------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 0     | Complete                     | Recorded the original behavior and removed four obsolete action/tool pairs                   | [#318](https://github.com/radius-project/ai-extensions/pull/318)                                                                                                                                                                                                   |
-| 1     | Complete                     | Made extension setup and lifecycle behavior testable without a live Copilot session          | [#288](https://github.com/radius-project/ai-extensions/pull/288), [#318](https://github.com/radius-project/ai-extensions/pull/318)                                                                                                                                 |
-| 2     | Complete and merged          | Gave all 40 local API routes one owner and removed the old fallback path                     | [#339](https://github.com/radius-project/ai-extensions/pull/339) through [#382](https://github.com/radius-project/ai-extensions/pull/382)                                                                                                                          |
-| 3     | Complete and merged          | Split page rendering into smaller modules while preserving the seven page outputs            | [#379](https://github.com/radius-project/ai-extensions/pull/379)                                                                                                                                                                                                   |
-| 4     | Final pull request in review | Moved browser behavior into testable TypeScript and removed the duplicate JavaScript sources | Foundation [#393](https://github.com/radius-project/ai-extensions/pull/393) and graph [#394](https://github.com/radius-project/ai-extensions/pull/394) are merged; final browser behavior [#395](https://github.com/radius-project/ai-extensions/pull/395) is open |
-| 5     | Not started                  | Combine extension, local API, and packaged-extension checks into permanent CI gates          | —                                                                                                                                                                                                                                                                  |
-| 6     | Not started                  | Test the interface in real Chromium, including keyboard and accessibility behavior           | —                                                                                                                                                                                                                                                                  |
-| 7     | Not started                  | Add reviewed screenshots and scheduled reliability checks                                    | —                                                                                                                                                                                                                                                                  |
-| 8     | Not started                  | Test installation and panel lifecycle in a supported Copilot host before release             | —                                                                                                                                                                                                                                                                  |
+| Phase | Status      | Outcome                                                                                      | Evidence                                                                                                                                                                                                                                                         |
+|-------|-------------|----------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 0     | Complete    | Recorded the original behavior and removed four obsolete action/tool pairs                   | [#318](https://github.com/radius-project/ai-extensions/pull/318)                                                                                                                                                                                                 |
+| 1     | Complete    | Made extension setup and lifecycle behavior testable without a live Copilot session          | [#288](https://github.com/radius-project/ai-extensions/pull/288), [#318](https://github.com/radius-project/ai-extensions/pull/318)                                                                                                                               |
+| 2     | Complete    | Gave all 40 local API routes one owner and removed the old fallback path                     | [#339](https://github.com/radius-project/ai-extensions/pull/339) through [#382](https://github.com/radius-project/ai-extensions/pull/382) are merged                                                                                                             |
+| 3     | Complete    | Split page rendering into smaller modules while preserving the seven page outputs            | [#379](https://github.com/radius-project/ai-extensions/pull/379) is merged                                                                                                                                                                                       |
+| 4     | Complete    | Moved browser behavior into testable TypeScript and removed the duplicate JavaScript sources | Foundation [#393](https://github.com/radius-project/ai-extensions/pull/393) and graph [#394](https://github.com/radius-project/ai-extensions/pull/394) are merged; final browser behavior is in [#395](https://github.com/radius-project/ai-extensions/pull/395) |
+| 5     | Not started | Combine extension, local API, and packaged-extension checks into permanent CI gates          | —                                                                                                                                                                                                                                                                |
+| 6     | Not started | Test the interface in real Chromium, including keyboard and accessibility behavior           | —                                                                                                                                                                                                                                                                |
+| 7     | Not started | Add reviewed screenshots and scheduled reliability checks                                    | —                                                                                                                                                                                                                                                                |
+| 8     | Not started | Test installation and panel lifecycle in a supported Copilot host before release             | —                                                                                                                                                                                                                                                                |
 
-Phase 4 meets BU-01–BU-14 in #395. The pull request's checks pass, but its branch must be brought up to date with `main` before merge.
+Phase 4 is complete and meets BU-01–BU-14 in #395.
 
 ## Rules for every change
 
@@ -73,7 +73,7 @@ pnpm run test:integration:artifact
 
 CI is authoritative for checks that require a controlled operating system or host.
 
-## Completed and in-review phases
+## Completed phases
 
 ### Phases 0–2: record behavior, then separate runtime and server work
 
@@ -87,7 +87,7 @@ Phase 3 split the shared page shell from graph, credential, environment, and dep
 
 Completion evidence: PU-01–PU-13 pass, all seven pages are served through the real local server, and #379 is merged.
 
-### Phase 4: browser behavior in review
+### Phase 4: browser behavior
 
 Phase 4 moved graph, credential, environment, deployment, navigation, heartbeat, status, and polling behavior into importable TypeScript. Production builds those same modules into inline page scripts.
 
