@@ -392,6 +392,28 @@ describe("deploy outcome on failure", () => {
     expect(state.deployError).toContain("Error: quota exceeded");
   });
 
+  it("still settles as failed with a degraded message when describeFailure throws", async () => {
+    // describeFailure's run-log read is unguarded. If it throws, settle() must
+    // not reject: a rejection would leave the panel non-terminal AND reach the
+    // monitor's `.catch`, which reclassifies a concluded "failure" run as
+    // run-unconfirmed — routing it to the informational notice instead of the
+    // repair path. The run must still land as "failed" with a degraded message.
+    const { request, state } = outcomeRequest({ conclusion: "failure" });
+    const service = createDeployOutcomeService(
+      dependencies({
+        fetchRunLog: () => Promise.reject(new Error("network down"))
+      })
+    );
+
+    await expect(service.settle(request)).resolves.toBeUndefined();
+
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployError).toBe(
+      "Deployment failed (failure). The failure details could not be read; " +
+        "see the full run: https://github.com/acme/widgets/actions/runs/42."
+    );
+  });
+
   it("reports a conclusion-less failure without inventing one", async () => {
     const { request, state } = outcomeRequest({ conclusion: null, steps: [] });
     const service = createDeployOutcomeService(dependencies());

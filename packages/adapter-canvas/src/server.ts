@@ -331,7 +331,6 @@ export interface DeployFailureNoticeInput {
   branch: string;
   error: string;
   deployRunUrl: string;
-  kind: string;
   instanceId: string;
 }
 
@@ -1847,6 +1846,14 @@ export function beginDeployAttempt(
   // it on every redeploy would let an undeliverable handoff retry forever.
   state.deployHandoffAttempts =
     input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
+  // The informational failure notice has no repair loop to inherit a budget
+  // from, so every new deploy attempt resets it unconditionally. Without this
+  // reset a canvas panel — whose CanvasState is reused across deploys — would
+  // keep a "delivered" (or exhausted "failed") notice for its whole life, and
+  // every later run-unconfirmed failure would bail at the trigger's guard and
+  // never reach chat.
+  state.deployNoticeState = "idle";
+  state.deployNoticeAttempts = 0;
   // Same lifetime as the delivery budget, and counted the way
   // resolveDeployRepairLoop projected it, so the number the agent is told
   // matches the one the next call is checked against. A deploy that opens a
@@ -2039,7 +2046,6 @@ export function triggerDeployFailureNotice(
           branch,
           error,
           deployRunUrl,
-          kind: DEPLOY_RUN_UNCONFIRMED_KIND,
           instanceId
         })
       ).then(delivered, failed);

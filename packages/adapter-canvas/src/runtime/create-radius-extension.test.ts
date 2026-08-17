@@ -267,7 +267,6 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       branch: "main",
       error: "dispatch rejected: missing workflow scope",
       deployRunUrl: "https://github.com/acme/widgets/actions/runs/1",
-      kind: "run-unconfirmed",
       instanceId: "radius-panel"
     });
     expect(session.send).toHaveBeenCalledOnce();

@@ -1682,6 +1682,36 @@ describe("triggerDeployRepairHandoff", () => {
     expect(entry.state.deployRepairAttempts).toBe(0);
   });
 
+  it("resets the failure-notice state so a reused panel can relay a later failure", () => {
+    // A canvas panel's CanvasState is reused across deploys. The notice has no
+    // repair loop to inherit a budget from, so every new attempt — repair loop
+    // or not — must clear a prior "delivered"/"failed" notice. Otherwise
+    // triggerDeployFailureNotice would bail at its guard and a later
+    // run-unconfirmed failure on the same panel would never reach chat.
+    const entry = failedEntry();
+    const input = {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep"
+    };
+    entry.state.deployNoticeState = "delivered";
+    entry.state.deployNoticeAttempts = 3;
+    beginDeployAttempt(entry.state, { ...input, repairLoop: false });
+    expect(entry.state.deployNoticeState).toBe("idle");
+    expect(entry.state.deployNoticeAttempts).toBe(0);
+    entry.state.deployNoticeState = "failed";
+    entry.state.deployNoticeAttempts = 3;
+    beginDeployAttempt(entry.state, {
+      ...input,
+      repairLoop: true,
+      attemptId: "attempt-A"
+    });
+    expect(entry.state.deployNoticeState).toBe("idle");
+    expect(entry.state.deployNoticeAttempts).toBe(0);
+  });
+
   describe("resolveDeployRepairLoop", () => {
     it("treats a deploy with no attempt as an ordinary deploy", () => {
       expect(
@@ -1929,7 +1959,7 @@ describe("triggerDeployFailureNotice", () => {
     };
   }
 
-  it("reports a run-unconfirmed failure to the agent with repo, branch, error, run URL, kind, and instance", () => {
+  it("reports a run-unconfirmed failure to the agent with repo, branch, error, run URL, and instance", () => {
     const calls: DeployFailureNoticeInput[] = [];
     setDeployFailureNotice((payload) => {
       calls.push(payload);
@@ -1943,7 +1973,6 @@ describe("triggerDeployFailureNotice", () => {
         branch: "feat",
         error: "dispatch rejected: missing workflow scope",
         deployRunUrl: "https://github.com/octo/app/actions",
-        kind: DEPLOY_RUN_UNCONFIRMED_KIND,
         instanceId: "radius-panel"
       }
     ]);
@@ -1968,6 +1997,33 @@ describe("triggerDeployFailureNotice", () => {
     expect(triggerDeployFailureNotice(entry)).toBe(true);
     expect(triggerDeployFailureNotice(entry)).toBe(false);
     expect(calls).toHaveLength(1);
+  });
+
+  it("relays a second failure on a reused panel after a new deploy begins", async () => {
+    // The panel is reused across deploys. Once the first notice is delivered,
+    // its guard would silence every later failure — beginDeployAttempt clears
+    // the notice state, so a second run-unconfirmed failure still reaches chat.
+    const calls: DeployFailureNoticeInput[] = [];
+    setDeployFailureNotice((payload) => {
+      calls.push(payload);
+      return Promise.resolve("message-id");
+    });
+    const entry = unconfirmedEntry();
+    expect(triggerDeployFailureNotice(entry)).toBe(true);
+    await Promise.resolve();
+    expect(entry.state.deployNoticeState).toBe("delivered");
+    beginDeployAttempt(entry.state, {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep",
+      repairLoop: false
+    });
+    entry.state.deployStatus = "failed";
+    entry.state.deployErrorKind = DEPLOY_RUN_UNCONFIRMED_KIND;
+    expect(triggerDeployFailureNotice(entry)).toBe(true);
+    expect(calls).toHaveLength(2);
   });
 
   it("does not report a repairable failure, which the repair handoff owns", () => {

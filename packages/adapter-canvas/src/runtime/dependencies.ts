@@ -226,7 +226,6 @@ export interface HostCallbackDependencies {
           branch: string;
           error: string;
           deployRunUrl: string;
-          kind: string;
           instanceId: string;
         }) => unknown)
       | null
