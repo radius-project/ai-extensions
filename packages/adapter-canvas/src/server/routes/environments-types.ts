@@ -132,6 +132,7 @@ export interface EnvironmentsDependencies {
     stepName: string
   ): string;
   explainOidcEnterpriseClaim(logText?: string | null): string;
+  explainNoSubscriptions(logText?: string | null): string;
   addLegacyStep(operation: unknown, text: string): unknown;
   isTerminalState(state: unknown): boolean;
   finish(operation: unknown, state: unknown, options?: unknown): unknown;

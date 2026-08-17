@@ -4,6 +4,7 @@ import type {
   CreateEnvironmentOperation,
   WorkflowCommitOutcome
 } from "./create-environment-types.js";
+import { cloudCredentialsComplete } from "../../deploy.js";
 
 // Seam 5 of the `POST /api/create-environment` slice: steps 2, 3, 4 and 4b —
 // writing the provider's configuration onto the GitHub environment, then
@@ -35,6 +36,15 @@ export interface ProviderConfigurationPorts {
   pushStep(message: string): void;
 }
 
+// Whether the identifying cloud credentials the verify-credentials workflow
+// needs to authenticate were actually configured. When they're absent the use
+// case skips dispatching verify (issue #219) and surfaces `missingCredNote`
+// instead; `missingCredNote` is "" when the credentials are complete.
+export interface ProviderCredentialStatus {
+  credentialsComplete: boolean;
+  missingCredNote: string;
+}
+
 // Step 2. Values from the request win; anything absent falls back to the
 // shared credential record. `||` rather than `??` throughout, so an empty
 // string is treated as absent exactly as it was inline.
@@ -42,7 +52,7 @@ export async function applyProviderConfiguration(
   provider: string,
   data: CreateEnvironmentRequestData,
   ports: ProviderConfigurationPorts
-): Promise<void> {
+): Promise<ProviderCredentialStatus> {
   ports.pushStep("Setting environment variables and secrets...");
   const azureCreds = ports.azureCredential();
   const awsCreds = ports.awsCredential();
@@ -73,12 +83,23 @@ export async function applyProviderConfiguration(
       data.namespace
     ].filter(Boolean).length;
     ports.pushStep(`Set ${setCount} environment value(s) for Azure.`);
-    if (!clientId || !tenantId || !subscriptionId) {
+    if (
+      !cloudCredentialsComplete("azure", {
+        clientId,
+        tenantId,
+        subscriptionId
+      })
+    ) {
       ports.pushStep(
         "⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually."
       );
+      return {
+        credentialsComplete: false,
+        missingCredNote:
+          "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
+      };
     }
-    return;
+    return { credentialsComplete: true, missingCredNote: "" };
   }
 
   const roleArn = data.roleArn || "";
@@ -94,6 +115,17 @@ export async function applyProviderConfiguration(
   await ports.setEnvironmentVariable("RADIUS_VPC_ID", data.vpcId);
   await ports.setEnvironmentVariable("RADIUS_SUBNET_IDS", data.subnetIds);
   await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
+  if (!cloudCredentialsComplete("aws", { roleArn })) {
+    ports.pushStep(
+      "⚠️ Missing AWS role ARN. Enter it or use auto-setup before verifying credentials."
+    );
+    return {
+      credentialsComplete: false,
+      missingCredNote:
+        "The AWS IAM role ARN is not configured for this environment. Enter it (or use auto-setup), then verify credentials from the Environments list."
+    };
+  }
+  return { credentialsComplete: true, missingCredNote: "" };
 }
 
 // The message a failed workflow commit is reported with. Pure, so the hint
