@@ -337,6 +337,9 @@ describe("parseGithubIdentity", () => {
       repoAccess: "",
       actingHasWorkflow: true,
       actingHasPackages: true,
+      packagesLogin: "publisher",
+      packagesHasWrite: true,
+      packagesCredentialSource: "keyring",
       accounts: [
         {
           login: "alice",
@@ -357,6 +360,18 @@ describe("parseGithubIdentity", () => {
         switchable: true
       }
     ]);
+    expect(identity.packagesLogin).toBe("publisher");
+    expect(identity.packagesHasWrite).toBe(true);
+    expect(identity.packagesCredentialSource).toBe("keyring");
+  });
+
+  it("keeps a malformed packagesHasWrite distinct from a reported false", () => {
+    expect(
+      parseGithubIdentity({ packagesHasWrite: "true" }).packagesHasWrite
+    ).toBeUndefined();
+    expect(
+      parseGithubIdentity({ packagesHasWrite: false }).packagesHasWrite
+    ).toBe(false);
   });
 
   it("defaults every field for a malformed payload", () => {
@@ -369,6 +384,9 @@ describe("parseGithubIdentity", () => {
       repoAccess: "",
       actingHasWorkflow: false,
       actingHasPackages: false,
+      packagesLogin: "",
+      packagesHasWrite: undefined,
+      packagesCredentialSource: "",
       accounts: []
     });
   });
@@ -465,6 +483,9 @@ describe("githubIdentityNote", () => {
     repoAccess: "",
     actingHasWorkflow: true,
     actingHasPackages: true,
+    packagesLogin: "",
+    packagesHasWrite: undefined,
+    packagesCredentialSource: "",
     accounts: []
   };
 
@@ -521,6 +542,47 @@ describe("githubIdentityNote", () => {
     expect(note.specs[0].text).toContain(
       "-s workflow -s read:packages -s write:packages"
     );
+    expect(note.specs[0].text).toContain(
+      "The stored GitHub CLI credential for @alice"
+    );
+  });
+
+  it("does not offer a gh command for a session token gh cannot repair", () => {
+    const note = githubIdentityNote({
+      ...base,
+      actingHasPackages: true,
+      packagesLogin: "alice",
+      packagesHasWrite: false,
+      packagesCredentialSource: "injected-token"
+    });
+    expect(note.tone).toBe("warning");
+    expect(note.showRecheck).toBe(true);
+    expect(note.specs[0].text).toContain("The Copilot session token for @alice");
+    expect(note.specs[0].text).not.toContain("gh auth switch -h github.com");
+  });
+
+  it("names the acting login when an injected token reports no publisher", () => {
+    const note = githubIdentityNote({
+      ...base,
+      packagesHasWrite: false,
+      packagesCredentialSource: "injected-token"
+    });
+    expect(note.specs[0].text).toContain("The Copilot session token for @alice");
+  });
+
+  it("trusts the reported publisher over the acting account's own scope", () => {
+    const note = githubIdentityNote({
+      ...base,
+      actingHasPackages: false,
+      packagesHasWrite: true,
+      packagesCredentialSource: "keyring"
+    });
+    expect(note.specs[0].text).toContain("Acts as");
+  });
+
+  it("still uses the acting scope for a record that names no credential source", () => {
+    const note = githubIdentityNote({ ...base, actingHasPackages: false });
+    expect(note.specs[0].text).toContain("missing the write:packages");
   });
 
   it("reports a single missing scope without the plural", () => {

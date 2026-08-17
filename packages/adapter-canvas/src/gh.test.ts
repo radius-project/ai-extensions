@@ -974,6 +974,8 @@ describe.sequential("getGitHubIdentity", () => {
     });
     const id = await getGitHubIdentity();
     expect(id.actingHasPackages).toBe(false);
+    expect(id.packagesHasWrite).toBe(false);
+    expect(id.packagesCredentialSource).toBe("injected-token");
     expect(id.accounts.every((a) => a.hasPackages === false)).toBe(true);
   });
 
@@ -990,6 +992,9 @@ describe.sequential("getGitHubIdentity", () => {
     const id = await getGitHubIdentity();
     expect(id.actingLogin).toBe("pubuser");
     expect(id.actingHasPackages).toBe(true);
+    expect(id.packagesLogin).toBe("pubuser");
+    expect(id.packagesHasWrite).toBe(true);
+    expect(id.packagesCredentialSource).toBe("keyring");
     const pub = id.accounts.find((a) => a.login === "pubuser");
     expect(pub).toBeDefined();
     if (!pub) throw new Error("pubuser account missing");

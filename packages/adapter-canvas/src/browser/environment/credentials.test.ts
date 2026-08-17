@@ -239,36 +239,103 @@ describe("credential profile parsing and markup", () => {
   });
 });
 
+const LEGACY_IDENTITY = {
+  packagesLogin: "",
+  packagesHasWrite: undefined,
+  packagesCredentialSource: ""
+} as const;
+
 describe("GitHub Packages identity parsing and rendering", () => {
   it("parses identity fields and defaults malformed booleans", () => {
     expect(
       parseGitHubPackagesIdentity({
         actingLogin: "octocat",
-        actingHasPackages: true
-      })
-    ).toEqual({ error: "", actingLogin: "octocat", actingHasPackages: true });
-    expect(
-      parseGitHubPackagesIdentity({
-        actingLogin: "octocat",
-        actingHasPackages: "true"
+        actingHasPackages: true,
+        packagesLogin: "publisher",
+        packagesHasWrite: true,
+        packagesCredentialSource: "keyring"
       })
     ).toEqual({
       error: "",
       actingLogin: "octocat",
-      actingHasPackages: false
+      actingHasPackages: true,
+      packagesLogin: "publisher",
+      packagesHasWrite: true,
+      packagesCredentialSource: "keyring"
+    });
+    expect(
+      parseGitHubPackagesIdentity({
+        actingLogin: "octocat",
+        actingHasPackages: "true",
+        packagesHasWrite: "true"
+      })
+    ).toEqual({
+      error: "",
+      actingLogin: "octocat",
+      actingHasPackages: false,
+      ...LEGACY_IDENTITY
     });
     expect(parseGitHubPackagesIdentity(null)).toEqual({
       error: "",
       actingLogin: "",
-      actingHasPackages: false
+      actingHasPackages: false,
+      ...LEGACY_IDENTITY
     });
+  });
+
+  it("names the publishing credential rather than the acting account", () => {
+    const view = renderGitHubAccessView({
+      error: "",
+      actingLogin: "octocat",
+      actingHasPackages: false,
+      packagesLogin: "publisher",
+      packagesHasWrite: true,
+      packagesCredentialSource: "keyring"
+    });
+    expect(view.packagesVerified).toBe(true);
+    expect(view.statusHtml).toContain("@publisher");
+    expect(view.statusHtml).toContain("using the stored GitHub CLI credential");
+  });
+
+  it("offers no gh command for a session token that gh cannot repair", () => {
+    const view = renderGitHubAccessView({
+      error: "",
+      actingLogin: "octocat",
+      actingHasPackages: true,
+      packagesLogin: "octocat",
+      packagesHasWrite: false,
+      packagesCredentialSource: "injected-token"
+    });
+    expect(view.packagesVerified).toBe(false);
+    expect(view.statusHtml).toContain("The Copilot session token for");
+    // A switch/refresh command here would be a dead end.
+    expect(view.commandVisible).toBe(false);
+    expect(view.command).toBe("");
+    expect(view.retryVisible).toBe(true);
+  });
+
+  it("does not let the acting account's scope stand in for a known publisher", () => {
+    const view = renderGitHubAccessView({
+      error: "",
+      actingLogin: "octocat",
+      actingHasPackages: true,
+      packagesLogin: "publisher",
+      packagesHasWrite: false,
+      packagesCredentialSource: "keyring"
+    });
+    expect(view.packagesVerified).toBe(false);
+    expect(view.statusHtml).toContain("The stored GitHub CLI credential for");
+    expect(view.command).toBe(
+      "gh auth switch -h github.com -u publisher && gh auth refresh -h github.com -s read:packages -s write:packages"
+    );
   });
 
   it("renders the unauthenticated fallback when login is missing or errored", () => {
     const view = renderGitHubAccessView({
       error: "",
       actingLogin: "",
-      actingHasPackages: false
+      actingHasPackages: false,
+      ...LEGACY_IDENTITY
     });
     expect(view.packagesVerified).toBe(false);
     expect(view.statusHtml).toBeNull();
@@ -279,7 +346,8 @@ describe("GitHub Packages identity parsing and rendering", () => {
     const errored = renderGitHubAccessView({
       error: "boom",
       actingLogin: "octocat",
-      actingHasPackages: true
+      actingHasPackages: true,
+      ...LEGACY_IDENTITY
     });
     expect(errored.packagesVerified).toBe(false);
     expect(errored.statusHtml).toBeNull();
@@ -289,7 +357,8 @@ describe("GitHub Packages identity parsing and rendering", () => {
     const view = renderGitHubAccessView({
       error: "",
       actingLogin: "<b>octocat</b>",
-      actingHasPackages: true
+      actingHasPackages: true,
+      ...LEGACY_IDENTITY
     });
     expect(view.packagesVerified).toBe(true);
     expect(view.statusHtml).toContain("&lt;b&gt;octocat&lt;/b&gt;");
@@ -301,7 +370,8 @@ describe("GitHub Packages identity parsing and rendering", () => {
     const view = renderGitHubAccessView({
       error: "",
       actingLogin: "octocat",
-      actingHasPackages: false
+      actingHasPackages: false,
+      ...LEGACY_IDENTITY
     });
     expect(view.packagesVerified).toBe(false);
     expect(view.commandVisible).toBe(true);

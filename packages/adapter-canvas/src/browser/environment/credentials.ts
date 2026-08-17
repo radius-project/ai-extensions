@@ -61,6 +61,11 @@ export interface GitHubPackagesIdentity {
   error: string;
   actingLogin: string;
   actingHasPackages: boolean;
+  // The credential that will actually publish the package, which is not always
+  // the acting login: a Copilot session token overrides stored `gh` logins.
+  packagesLogin: string;
+  packagesHasWrite: boolean | undefined;
+  packagesCredentialSource: string;
 }
 
 export interface GitHubAccessView {
@@ -150,11 +155,38 @@ export function credentialRowsMarkup(
 export function parseGitHubPackagesIdentity(
   payload: unknown
 ): GitHubPackagesIdentity {
+  const packagesHasWrite = isRecord(payload) ? payload["packagesHasWrite"] : (
+    undefined
+  );
   return {
     error: readString(payload, "error"),
     actingLogin: readString(payload, "actingLogin"),
-    actingHasPackages: readBoolean(payload, "actingHasPackages")
+    actingHasPackages: readBoolean(payload, "actingHasPackages"),
+    packagesLogin: readString(payload, "packagesLogin"),
+    packagesHasWrite:
+      typeof packagesHasWrite === "boolean" ? packagesHasWrite : undefined,
+    packagesCredentialSource: readString(payload, "packagesCredentialSource")
   };
+}
+
+/**
+ * Whether the credential that will publish the package can write packages.
+ *
+ * The server reports the publishing credential explicitly when it knows it. A
+ * record from before that field existed carries no source, and only then does
+ * the acting account's scope stand in for it.
+ */
+export function packagesCredentialCanWrite(
+  identity: GitHubPackagesIdentity
+): boolean {
+  if (identity.packagesHasWrite === true) return true;
+  return (
+    identity.packagesCredentialSource === "" && identity.actingHasPackages
+  );
+}
+
+function packagesCredentialLogin(identity: GitHubPackagesIdentity): string {
+  return identity.packagesLogin || identity.actingLogin;
 }
 
 export function renderGitHubAccessView(
@@ -172,26 +204,48 @@ export function renderGitHubAccessView(
       retryVisible: false
     };
   }
-  if (identity.actingHasPackages) {
+  const login = packagesCredentialLogin(identity);
+  if (packagesCredentialCanWrite(identity)) {
     return {
       packagesVerified: true,
       statusText: "",
-      statusHtml: `✓ GitHub Packages access verified for <strong>@${escapeBrowserHtml(
-        identity.actingLogin
-      )}</strong>.`,
+      statusHtml:
+        `✓ GitHub Packages access verified for <strong>@${escapeBrowserHtml(
+          login
+        )}</strong> using the stored GitHub CLI credential.`,
       statusColor: "var(--rad-primary)",
       commandVisible: false,
       command: "",
       retryVisible: false
     };
   }
-  const command = `gh auth switch -h github.com -u ${identity.actingLogin} && gh auth refresh -h github.com -s read:packages -s write:packages`;
+  if (identity.packagesCredentialSource === "injected-token") {
+    // An injected session token cannot be repaired with `gh`, so offering the
+    // switch/refresh command would send the customer down a dead end.
+    return {
+      packagesVerified: false,
+      statusText: "",
+      statusHtml:
+        `The Copilot session token for <strong>@${escapeBrowserHtml(
+          login
+        )}</strong> cannot publish packages. This token overrides stored ` +
+        "<code>gh</code> logins, so <code>gh auth switch</code> and " +
+        "<code>gh auth refresh</code> do not change it. Select a stored " +
+        "account in Create Environment, or restart the session with a token " +
+        "that has <code>write:packages</code>.",
+      statusColor: "var(--rad-warning)",
+      commandVisible: false,
+      command: "",
+      retryVisible: true
+    };
+  }
+  const command = `gh auth switch -h github.com -u ${login} && gh auth refresh -h github.com -s read:packages -s write:packages`;
   return {
     packagesVerified: false,
     statusText: "",
     statusHtml:
-      `The active account <strong>@${escapeBrowserHtml(
-        identity.actingLogin
+      `The stored GitHub CLI credential for <strong>@${escapeBrowserHtml(
+        login
       )}</strong> cannot publish packages. Run the command below, complete the GitHub authorization, then retry. ` +
       "<strong>Note:</strong> <code>gh auth switch</code> changes the active account machine-wide until you switch back.",
     statusColor: "var(--rad-warning)",
@@ -437,7 +491,10 @@ export function initializeCredentialsPane(
         (): GitHubPackagesIdentity => ({
           error: "GitHub identity check failed",
           actingLogin: "",
-          actingHasPackages: false
+          actingHasPackages: false,
+          packagesLogin: "",
+          packagesHasWrite: undefined,
+          packagesCredentialSource: ""
         })
       )
       .then((identity) => {
