@@ -225,6 +225,49 @@ describe("inline browser safety", () => {
     ).toThrow(/reaches Node-only globals: process, Buffer\./);
   });
 
+  // The dotted form is what esbuild emits today, but the gate is named for the
+  // globals rather than for one access syntax, so the other ways of reaching
+  // the same binding have to be rejected too.
+  it("rejects bracketed, aliased, destructured, and globalThis-qualified access", () => {
+    expect(() =>
+      assertBrowserSafe("bracketed", 'var ref = process["env"].RADIUS_REF;')
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("aliased", "var proc = process; proc.exit(0);")
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("destructured", "const { env } = process;")
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("qualified", "var ref = globalThis.process.env.REF;")
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("windowed", "var raw = window.Buffer.from(value);")
+    ).toThrow(/reaches Node-only globals: Buffer\./);
+    expect(() => assertBrowserSafe("selfed", "var g = self.global;")).toThrow(
+      /reaches Node-only globals: global\./
+    );
+  });
+
+  it("rejects the Node-only immediate timers", () => {
+    expect(() =>
+      assertBrowserSafe("immediate", "setImmediate(() => refresh());")
+    ).toThrow(/reaches Node-only globals: setImmediate\./);
+    expect(() =>
+      assertBrowserSafe("cleared", "clearImmediate(handle);")
+    ).toThrow(/reaches Node-only globals: clearImmediate\./);
+  });
+
+  // A global reached more than one way is still one thing to go fix.
+  it("names each global once however many ways the bundle reaches it", () => {
+    expect(() =>
+      assertBrowserSafe(
+        "repeated",
+        'var p = process; p.env.A; process["env"].B; globalThis.process.C;'
+      )
+    ).toThrow(/reaches Node-only globals: process\. Import from/);
+  });
+
   // The guard must not fire on ordinary browser code that merely reads like a
   // Node global, or the next contributor learns to work around it.
   it("allows feature detects, own properties, and similarly named identifiers", () => {
@@ -236,7 +279,10 @@ describe("inline browser safety", () => {
           "var state = options.process.id;",
           "var done = processResults(items);",
           "globalThis.radiusPageRegistry = registry;",
-          "var label = deployment.Buffer;"
+          "var label = deployment.Buffer;",
+          "var later = setImmediateRetry(fn);",
+          "var own = scope.setImmediate;",
+          "var mapped = items.map((entry) => entry.global);"
         ].join("\n")
       )
     ).not.toThrow();

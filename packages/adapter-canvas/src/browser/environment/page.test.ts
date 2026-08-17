@@ -288,6 +288,27 @@ describe("initializeEnvironmentPage", () => {
     expect(page.browser.clock.pending).toBe(0);
   });
 
+  it("survives a malformed escape in the query string and stays rebindable", async () => {
+    // A hand-edited or truncated URL can carry `%` with nothing after it.
+    // decodeURIComponent throws URIError on that, and this read happens after
+    // the entry key is claimed and before the teardown is returned, so an
+    // unguarded decode would escape the entry IIFE with the claim held and
+    // leave the page permanently dead.
+    const page = fixture({ search: "?page=environment&new=1&name=%" });
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    expect(teardown).toBeTypeOf("function");
+    expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(true);
+    teardown();
+    expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(false);
+
+    const rebound = initializeEnvironmentPage(page.browser.context);
+    expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(true);
+    rebound();
+  });
+
   it("loads credential profiles instead of the environment table on the credentials subtab", async () => {
     const page = fixture({ activeSubtab: "credentials" });
     initializeEnvironmentPage(page.browser.context);

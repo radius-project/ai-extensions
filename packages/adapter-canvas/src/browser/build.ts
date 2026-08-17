@@ -233,21 +233,63 @@ export function assertSelfContained(name: string, code: string): void {
 // The usual way one arrives is transitively: a browser module imports a barrel
 // that also re-exports server code reading `process.env` at module scope.
 //
-// Only property access is a hazard. A bare `typeof process !== "undefined"`
-// feature-detect is legitimate and stays allowed, so the patterns require the
-// member access and ignore matches that are themselves properties
-// (`options.process`) or longer identifiers (`processResults`, `globalThis`).
+// This is a textual gate over esbuild's output, not a parse of it, so it is a
+// safety net rather than a proof: sufficiently indirect access (a computed
+// member name, a value threaded through an unrelated identifier) still gets
+// through. It is sized for the shape the bundler actually emits, which with
+// `minify: false` preserves the original identifiers and access syntax.
+//
+// A bare `typeof process !== "undefined"` feature-detect is legitimate and
+// stays allowed, so the namespace globals are flagged only where they are
+// really *used*: member access by dot or bracket, aliasing or destructuring off
+// the binding, or access qualified through the global object. The lookbehind
+// keeps unrelated properties (`options.process`) and longer identifiers
+// (`processResults`, `globalThis`) from matching.
+const NODE_NAMESPACE_GLOBALS = ["process", "Buffer", "global"] as const;
+
+// No browser meaning at all, so any mention is a hazard.
+const NODE_BARE_GLOBALS = [
+  "__dirname",
+  "__filename",
+  "setImmediate",
+  "clearImmediate"
+] as const;
+
+const GLOBAL_OBJECTS = "globalThis|window|self|global";
+
+function nodeGlobalHazards(): readonly (readonly [RegExp, string])[] {
+  const hazards: (readonly [RegExp, string])[] = [];
+  for (const name of NODE_NAMESPACE_GLOBALS) {
+    hazards.push(
+      // `process.env`, `process["env"]`
+      [new RegExp(String.raw`(?<![.\w$])${name}\s*[.[]`), name],
+      // `const { env } = process`, `const p = process`
+      [new RegExp(String.raw`=\s*${name}\b`), name],
+      // `globalThis.process.env`
+      [
+        new RegExp(
+          String.raw`(?<![.\w$])(?:${GLOBAL_OBJECTS})\s*\.\s*${name}\b`
+        ),
+        name
+      ]
+    );
+  }
+  for (const name of NODE_BARE_GLOBALS) {
+    hazards.push([new RegExp(String.raw`(?<![.\w$])${name}\b`), name]);
+  }
+  return hazards;
+}
+
+const NODE_GLOBAL_HAZARDS = nodeGlobalHazards();
+
 export function assertBrowserSafe(name: string, code: string): void {
-  const hazards = [
-    [/(?<![.\w$])process\s*\./, "process"],
-    [/(?<![.\w$])Buffer\s*\./, "Buffer"],
-    [/(?<![.\w$])global\s*\./, "global"],
-    [/(?<![.\w$])__dirname\b/, "__dirname"],
-    [/(?<![.\w$])__filename\b/, "__filename"]
-  ] as const;
-  const found = hazards
-    .filter(([pattern]) => pattern.test(code))
-    .map(([, description]) => description);
+  const found = [
+    ...new Set(
+      NODE_GLOBAL_HAZARDS.filter(([pattern]) => pattern.test(code)).map(
+        ([, description]) => description
+      )
+    )
+  ];
   if (found.length > 0) {
     throw new Error(
       `Browser entry "${name}" reaches Node-only globals: ${found.join(", ")}. ` +

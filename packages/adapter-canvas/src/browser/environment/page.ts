@@ -1,4 +1,5 @@
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
+import { queryValue } from "../query.js";
 import { readString } from "../json.js";
 import { readPageState } from "../pages/state.js";
 import { ENVIRONMENT_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
@@ -43,19 +44,6 @@ function parsePageState(context: BrowserContext): EnvironmentPageState {
         "environments"
       )
   };
-}
-
-function queryValue(search: string, name: string): string {
-  const query = search.startsWith("?") ? search.slice(1) : search;
-  for (const pair of query.split("&")) {
-    const separator = pair.indexOf("=");
-    const key = separator < 0 ? pair : pair.slice(0, separator);
-    if (decodeURIComponent(key) !== name) continue;
-    return decodeURIComponent(
-      (separator < 0 ? "" : pair.slice(separator + 1)).replace(/\+/g, " ")
-    );
-  }
-  return "";
 }
 
 function input(context: BrowserContext, id: string): DomInputElement | null {
