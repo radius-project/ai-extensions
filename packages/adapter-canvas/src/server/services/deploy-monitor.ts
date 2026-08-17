@@ -131,6 +131,14 @@ const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_MS = 30000;
 const PENDING_FALLBACK_MS = 25000;
 
+function advancePendingNodes(resources: CanvasGraphResource[]): void {
+  for (const resource of resources) {
+    if ((resource.deployStatus ?? "pending") === "pending")
+      resource.deployStatus = "in_progress";
+    if (resource.outputResources) advancePendingNodes(resource.outputResources);
+  }
+}
+
 export function createDeployMonitorService(
   dependencies: DeployMonitorDependencies
 ): DeployMonitorService {
@@ -139,17 +147,22 @@ export function createDeployMonitorService(
     dependencies,
     REQUIRED_DEPENDENCIES
   );
-  // Neither of the two value seams below is function-typed, so the shared assert
-  // cannot reach them. `unconfirmedRunKind` is the load-bearing one: it marks a
-  // run whose real outcome is unknown, and an absent marking would let an
-  // attempt-bound repair redeploy race an in-flight run instead of refusing.
-  for (const name of [
-    "plannedGraph",
-    "dispatch",
-    "outcome",
-    "deployRadCommandsStep",
-    "unconfirmedRunKind"
-  ] as const) {
+  const missingServices = [
+    ["plannedGraph.recover", dependencies.plannedGraph?.recover],
+    ["dispatch.prepareAndDispatch", dependencies.dispatch?.prepareAndDispatch],
+    ["outcome.settle", dependencies.outcome?.settle]
+  ].flatMap(([name, method]) => (typeof method === "function" ? [] : [name]));
+  if (missingServices.length > 0) {
+    throw new Error(
+      "createDeployMonitorService is missing required dependencies: " +
+        missingServices.join(", ")
+    );
+  }
+  // Neither value seam is function-typed, so the shared assert cannot reach
+  // them. `unconfirmedRunKind` is the load-bearing one: it marks a run whose
+  // real outcome is unknown, and an absent marking would let an attempt-bound
+  // repair redeploy race an in-flight run instead of refusing.
+  for (const name of ["deployRadCommandsStep", "unconfirmedRunKind"] as const) {
     if (!dependencies[name]) {
       throw new Error(
         `createDeployMonitorService is missing required dependencies: ${name}`
@@ -268,6 +281,8 @@ export function createDeployMonitorService(
       let beatStepStartedAt = 0;
       let lastBeatAt = 0;
       let deployStarted = false;
+      let artifactProgressObserved = false;
+      let pendingFallbackApplied = false;
 
       // Deploy status and the deployed graph are published as a workflow
       // artifact. This reader is scoped to the run being tracked, so it reports
@@ -303,6 +318,8 @@ export function createDeployMonitorService(
           );
           return;
         }
+        if (statusMap.size > 0 || messageMap.size > 0)
+          artifactProgressObserved = true;
         dependencies.applyDeployMessages(resources, messageMap);
         const changes = dependencies.applyDeployStatusToResources(
           resources,
@@ -408,16 +425,15 @@ export function createDeployMonitorService(
           // so that when the producer starts uploading during the deploy, this
           // lights up unchanged.
           await pollDeployStatus();
-          // Fallback: if nothing has advanced past pending ~25s into the
-          // deploy, mark all pending nodes in_progress so the graph is not
-          // stuck gray for the whole run.
+          // Run this only when the producer has published no progress. This
+          // cannot use setStatus because advanced output nodes must be kept.
           if (
-            dependencies.now() - deployStepStartedAt > PENDING_FALLBACK_MS &&
-            !resources.some(
-              (r) => r.deployStatus && r.deployStatus !== "pending"
-            )
+            !artifactProgressObserved &&
+            !pendingFallbackApplied &&
+            dependencies.now() - deployStepStartedAt > PENDING_FALLBACK_MS
           ) {
-            resources.forEach((r) => setStatus(r, "in_progress"));
+            pendingFallbackApplied = true;
+            advancePendingNodes(resources);
           }
         }
 

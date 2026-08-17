@@ -5,7 +5,7 @@ import { createRequestHandler } from "../../../src/server/create-request-handler
 import {
   createGraphsPlanningStreamRoutes,
   type LoadGraphStreamBicepSelection
-} from "../../../src/server/routes/graphs-planning-reads.js";
+} from "../../../src/server/routes/graphs-planning.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
@@ -118,9 +118,9 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       }),
     createState: () => ({}),
@@ -248,12 +248,12 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
       { id: "res-a", name: "api", type: "Radius.Compute/containers" }
     ]);
 
-    // GET-only: a POST to the same path still falls through to the fallback.
+    // GET-only: a POST to the same path reaches unmatched routing.
     const posted = await fetch(
       `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp`,
       { method: "POST" }
     );
-    expect(posted.status).toBe(418);
+    expect(posted.status).toBe(404);
   });
 
   it("flushes progress frames on the socket while the build is still in flight", async () => {

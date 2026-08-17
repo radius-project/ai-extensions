@@ -3,10 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createLivenessSourceRoutes } from "../../../src/server/routes/liveness-source.js";
-import {
-  createTestRouteTable,
-  fetchResidualRoute
-} from "../../support/server/route-table.js";
+import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
 import type { OpenSourceRequest } from "../../../src/server/routes/liveness-source.js";
@@ -56,9 +53,9 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
-        legacyFallback: (_request, response) => {
-          response.writeHead(418);
-          response.end("legacy");
+        handleUnmatchedRequest: (_request, response) => {
+          response.writeHead(404);
+          response.end("unmatched");
         }
       });
     },
@@ -148,11 +145,6 @@ describe("liveness-source real-loopback HIT (RF-01)", () => {
     expect(await failed.text()).toBe(
       '{"ok":false,"error":"editor canvas unavailable"}'
     );
-
-    // A method-matching route selected from the live residual inventory still
-    // reaches the fallback and will fail loudly when that route migrates.
-    const residual = await fetchResidualRoute(entry.baseUrl);
-    expect(residual.status).toBe(418);
   });
 
   it("keeps liveness responses scoped to the instance that served them", async () => {

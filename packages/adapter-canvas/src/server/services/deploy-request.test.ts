@@ -127,6 +127,15 @@ function body(overrides: Record<string, unknown> = {}): string {
   });
 }
 
+function parseError(body: string): string {
+  try {
+    JSON.parse(body);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error("expected JSON.parse to fail");
+}
+
 function entryWith(state: CanvasState = {}) {
   return { state };
 }
@@ -182,37 +191,30 @@ describe("deploy request service construction", () => {
 });
 
 describe("deploy request admission", () => {
-  it("answers 400 with the parse error for a malformed body", async () => {
-    const service = createDeployRequestService(
-      dependencies({
-        readInstanceEntry: () => {
-          throw new Error("the entry must not be read before the body parses");
-        }
-      })
-    );
+  it.each([
+    ["a malformed body", "not json"],
+    ["an empty body", ""]
+  ])(
+    "answers 400 with the raw JSON.parse error for %s",
+    async (_name, body) => {
+      const service = createDeployRequestService(
+        dependencies({
+          readInstanceEntry: () => {
+            throw new Error(
+              "the entry must not be read before the body parses"
+            );
+          }
+        })
+      );
 
-    const result = await service.deploy({ instanceId: "a", body: "not json" });
+      const result = await service.deploy({ instanceId: "a", body });
 
-    expect(result.status).toBe(400);
-    expect(String((result.body as { error: string }).error)).toMatch(
-      /^Invalid JSON body:/
-    );
-  });
-
-  it("answers 400 with a specific error for an empty body", async () => {
-    const service = createDeployRequestService(
-      dependencies({
-        readInstanceEntry: () => {
-          throw new Error("the entry must not be read before the body parses");
-        }
-      })
-    );
-
-    expect(await service.deploy({ instanceId: "a", body: " \r\n " })).toEqual({
-      status: 400,
-      body: { error: "Invalid JSON body: Empty request body." }
-    });
-  });
+      expect(result).toEqual({
+        status: 400,
+        body: { error: parseError(body) }
+      });
+    }
+  );
 
   it("answers 400 when the instance entry is gone", async () => {
     const service = createDeployRequestService(

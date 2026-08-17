@@ -145,6 +145,21 @@ describe("deploy dispatch construction", () => {
       "createDeployDispatchService is missing required dependencies: deployWorkflowFiles"
     );
   });
+
+  it("refuses to construct without the branch-not-pushed error kind", () => {
+    const missing: Partial<DeployDispatchDependencies> = dependencies();
+    delete missing.branchNotPushedKind;
+    expect(() =>
+      createDeployDispatchService(missing as DeployDispatchDependencies)
+    ).toThrow(
+      "createDeployDispatchService is missing required dependencies: branchNotPushedKind"
+    );
+    const empty = dependencies();
+    Object.defineProperty(empty, "branchNotPushedKind", { value: "" });
+    expect(() => createDeployDispatchService(empty)).toThrow(
+      "createDeployDispatchService is missing required dependencies: branchNotPushedKind"
+    );
+  });
 });
 
 describe("deploy dispatch environment and branch preflight", () => {
