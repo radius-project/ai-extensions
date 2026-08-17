@@ -27,10 +27,6 @@ export interface CredentialProfile {
 
 export interface CredentialProfileInput {
   name?: string;
-  // The name the profile is stored under when an edit is renaming it. Absent
-  // when creating. Without it a rename would be indistinguishable from creating
-  // a second profile.
-  originalName?: string;
   provider?: string;
   user?: string;
   tenantId?: string;
@@ -271,9 +267,7 @@ export function listCredentialProfiles(repo: string): CredentialProfile[] {
   return Array.isArray(list) ? list.filter(isRecord) : [];
 }
 
-// Upsert a profile for a repo, then persist. An edit identifies its target with
-// `originalName`, so renaming updates that profile in place instead of leaving
-// the original behind next to a new one. Creating matches by name as before.
+// Upsert a profile by name (case-insensitive) for a repo, then persist.
 export function saveCredentialProfile(
   repo: string,
   profile: CredentialProfileInput | null | undefined
@@ -283,12 +277,6 @@ export function saveCredentialProfile(
   // persisted as an empty-string profile name.
   const name = String(profile.name || "").trim();
   if (!name) return null;
-  // An edit addresses its existing entry by originalName; a create has none and
-  // addresses itself by name, which keeps the original upsert behaviour.
-  const originalName = String(profile.originalName || "").trim();
-  const target = originalName || name;
-  const renaming =
-    !!originalName && originalName.toLowerCase() !== name.toLowerCase();
   const root = profilesRoot();
   const list = listCredentialProfiles(repo);
   root[repo] = list;
@@ -307,20 +295,8 @@ export function saveCredentialProfile(
     updatedAt: new Date().toISOString()
   };
   const idx = list.findIndex(
-    (p) => String(p.name).toLowerCase() === target.toLowerCase()
+    (p) => String(p.name).toLowerCase() === name.toLowerCase()
   );
-  // Renaming onto a name another profile already holds would silently discard
-  // one of the two, so refuse instead of guessing which the user meant.
-  if (renaming) {
-    const clash = list.findIndex(
-      (p, i) => i !== idx && String(p.name).toLowerCase() === name.toLowerCase()
-    );
-    if (clash >= 0) {
-      throw new Error(
-        `A credential profile named "${list[clash].name}" already exists.`
-      );
-    }
-  }
   if (idx >= 0) list[idx] = { ...list[idx], ...entry };
   else list.push(entry);
   saveCredentials();

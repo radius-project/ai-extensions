@@ -8,8 +8,6 @@ var credProviderSelect = document.getElementById('cred-provider-select');
 var credVerified = null;
 var credPackagesVerified = false;
 var credGhChecking = false;
-// Name the open form's profile is stored under, '' while creating.
-var CRED_EDITING_NAME = '';
 
 function loadCredTable() {
     var body = document.getElementById('cred-table-body');
@@ -32,7 +30,6 @@ function loadCredTable() {
                     '<td class="rad-table__provider">' + escapeHtmlClient(providerLabel(p.provider)) + '</td>' +
                     '<td>' + statusCell(p.status || 'verified') + '</td>' +
                     '<td class="rad-table__actions">' +
-                        '<a class="rad-link js-cred-edit" href="#" data-name="' + escapeHtmlClient(p.name) + '">edit</a>' +
                         '<button class="rad-btn rad-btn--neutral js-cred-createenv" data-name="' + escapeHtmlClient(p.name) + '" style="margin:0;">Create Env</button>' +
                         '<button class="rad-btn rad-btn--danger-outline js-cred-delete" data-name="' + escapeHtmlClient(p.name) + '" style="margin:0;">Delete Profile</button>' +
                     '</td>' +
@@ -45,17 +42,15 @@ function loadCredTable() {
         });
 }
 function wireCredRowActions(profiles) {
-    function find(name) { for (var i = 0; i < profiles.length; i++) { if (profiles[i].name === name) return profiles[i]; } return null; }
     document.querySelectorAll('.js-cred-createenv').forEach(function(btn) {
         btn.addEventListener('click', function() { switchSubtab('environments'); showEnvForm({ name: '', profile: this.getAttribute('data-name') }); });
-    });
-    document.querySelectorAll('.js-cred-edit').forEach(function(a) {
-        a.addEventListener('click', function(e) { e.preventDefault(); showStandaloneCredForm(find(this.getAttribute('data-name'))); });
     });
     document.querySelectorAll('.js-cred-delete').forEach(function(btn) {
         btn.addEventListener('click', function() {
             var name = this.getAttribute('data-name') || '';
-            if (!name || !confirm('Delete credential profile "' + name + '"?')) return;
+            // Environments already created from a profile hold their own copy of
+            // its values, so deleting one never affects an existing environment.
+            if (!name || !confirm('Delete credential profile "' + name + '"?\\n\\nEnvironments already created from it keep working — they have their own copy of these values. You will not be able to create new environments from this profile.')) return;
             this.disabled = true; this.textContent = 'Deleting…';
             fetch('/api/delete-credential-profile', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ repo: CTX_REPO, name: name }) })
                 .then(function(r) { return r.json(); }).then(function() { loadCredTable(); })
@@ -125,23 +120,24 @@ function loadCredGitHubAccess(fresh) {
             if (retry) { retry.disabled = false; retry.textContent = 'I’ve updated permissions — retry'; }
         });
 }
-function showCredForm(profile) {
+// Profiles are created, never edited: every field here must be re-verified
+// against the cloud account before it can be saved, so an edit was already
+// equivalent to creating a profile. Removing it also removes renaming, which
+// was the only way a profile's name could drift from the one recorded on the
+// environments created from it.
+function showCredForm() {
     document.getElementById('cred-success-banner').style.display = 'none';
-    var editing = profile && profile.name;
-    // Remember which stored profile this form is editing, so renaming updates
-    // that profile rather than creating a second one under the new name.
-    CRED_EDITING_NAME = editing ? profile.name : '';
-    document.getElementById('cred-form-title').textContent = editing ? 'Edit Credential Profile' : 'Create Credential Profile';
+    document.getElementById('cred-form-title').textContent = 'Create Credential Profile';
     document.getElementById('save-cred-btn').textContent = credSaveLabel();
     document.getElementById('cancel-cred-btn').textContent = CRED_FORM_CONTEXT === 'wizard' ? 'Cancel' : '← Back to credentials';
-    document.getElementById('cred-name-input').value = editing ? profile.name : '';
-    credProviderSelect.value = editing ? (profile.provider || 'azure') : 'azure';
-    applyCredProvider(credProviderSelect.value);
-    document.getElementById('az-tenant-id').value = editing ? (profile.tenantId || '') : '';
-    document.getElementById('az-sub-id').value = editing ? (profile.subscriptionId || '') : '';
-    var acc = document.getElementById('aws-account-id'); if (acc) acc.value = editing ? (profile.accountId || '') : '';
-    var reg = document.getElementById('aws-region'); if (reg) reg.value = editing ? (profile.region || '') : '';
-    var role = document.getElementById('aws-role-arn'); if (role) role.value = editing ? (profile.roleArn || '') : '';
+    document.getElementById('cred-name-input').value = '';
+    credProviderSelect.value = 'azure';
+    applyCredProvider('azure');
+    document.getElementById('az-tenant-id').value = '';
+    document.getElementById('az-sub-id').value = '';
+    var acc = document.getElementById('aws-account-id'); if (acc) acc.value = '';
+    var reg = document.getElementById('aws-region'); if (reg) reg.value = '';
+    var role = document.getElementById('aws-role-arn'); if (role) role.value = '';
     resetCredVerify();
     credPackagesVerified = false;
     updateCredSaveState();
@@ -153,14 +149,13 @@ function credSaveLabel() {
     return CRED_FORM_CONTEXT === 'wizard' ? 'Save & Continue' : 'Save Credential Profile';
 }
 function showCredLanding() {
-    CRED_EDITING_NAME = '';
     credForm.style.display = 'none';
     credLanding.style.display = '';
     loadCredTable();
 }
-function showCredSuccessBanner(name, edited) {
+function showCredSuccessBanner(name) {
     var banner = document.getElementById('cred-success-banner');
-    document.getElementById('cred-success-banner-text').innerHTML = 'Successfully ' + (edited ? 'updated' : 'created') + ' credential profile ' + escapeHtmlClient(name);
+    document.getElementById('cred-success-banner-text').innerHTML = 'Successfully created credential profile ' + escapeHtmlClient(name);
     banner.style.display = 'flex';
 }
 // Creating a profile from the Credentials sub-tab is credential management, not
@@ -332,11 +327,9 @@ document.getElementById('save-cred-btn').addEventListener('click', function() {
     if (!credVerified) { alert('Please verify your credentials first.'); return; }
     var provider = credProviderSelect.value;
     var profile = { repo: CTX_REPO, name: name, provider: provider, user: credVerified.user || '' };
-    if (CRED_EDITING_NAME) profile.originalName = CRED_EDITING_NAME;
     if (provider === 'azure') { profile.tenantId = credVerified.tenantId || ''; profile.subscriptionId = credVerified.subscriptionId || ''; profile.subscriptionName = credVerified.subscriptionName || ''; }
     else { profile.accountId = credVerified.accountId || ''; profile.region = credVerified.region || ''; profile.roleArn = document.getElementById('aws-role-arn').value.trim(); }
     var wizard = CRED_FORM_CONTEXT === 'wizard';
-    var edited = !!CRED_EDITING_NAME;
     btn.disabled = true; btn.textContent = 'Saving…';
     fetch('/api/save-credential-profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profile) })
         .then(function(r) { return r.json(); }).then(function(d) {
@@ -353,7 +346,7 @@ document.getElementById('save-cred-btn').addEventListener('click', function() {
                 });
                 return;
             }
-            showCredLanding(); showCredSuccessBanner(name, edited);
+            showCredLanding(); showCredSuccessBanner(name);
         }).catch(function(err) {
             btn.disabled = false; btn.textContent = credSaveLabel();
             alert('Could not save profile: ' + err.message);

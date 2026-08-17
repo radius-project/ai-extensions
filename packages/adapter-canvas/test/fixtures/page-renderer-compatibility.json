@@ -15,7 +15,7 @@
     ],
     "updatePolicy": "This fixture is a reviewed compatibility decision. Do not regenerate it from current renderers and do not edit expected values to make a test pass: change it only with an explicit, reviewed compatibility change that explains why legacy behaviour is intentionally no longer preserved.",
     "intentionalDivergences": [
-      "environment, credentials — the environment creation form became a two-step wizard (choose or create a credential profile, then create the environment), because a credential profile only ever exists in service of an environment. The Credentials sub-tab keeps its own standalone create/edit path, since clicking New Credential Profile expresses intent to manage a credential rather than to create an environment. The change is additive to the legacy projection: no legacy id, marker, navigation target, state value, pane visibility or /api path was removed. The recorded contentIds, the newly disabled env-step1-next step gate, and the page script digest were re-recorded for the environment and credentials cases to accept the added wizard elements."
+      "environment, credentials — the environment creation form became a two-step wizard (choose or create a credential profile, then create the environment), because a credential profile only ever exists in service of an environment. The Credentials sub-tab keeps its own standalone create path, since clicking New Credential Profile expresses intent to manage a credential rather than to create an environment. Profiles are create-and-delete only: environments snapshot a profile's values into their own GitHub environment variables at creation, so editing one could never update an existing environment, and renaming was the only way a profile's name could drift from the one recorded on the environments created from it. The change is additive to the legacy projection: no legacy id, marker, navigation target, state value, pane visibility or /api path was removed. The recorded contentIds, the newly disabled env-step1-next step gate, and the page script digest were re-recorded for the environment and credentials cases to accept the added wizard elements."
     ]
   },
   "exports": [
@@ -1535,7 +1535,7 @@
           "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
           "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
           "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21",
-          "page": "c9ab46430c3c24c5b2c3617d4fd2e756cde33ab3dac9a1cfb9b26a2659aaad52"
+          "page": "f2706f9aa183d9825647fc09c2194d282cac56953fd01ac57253f5426c8a2768"
         }
       }
     },
@@ -1829,7 +1829,7 @@
           "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
           "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
           "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21",
-          "page": "a68d6c2b1bb6e280cb00f1a125f0f6c6402cf19cd00d2fe3aea15c8547f45b14"
+          "page": "c15aa545dfe8ff415732720910951b1b94f7466ab4be549574e3eebd32f62444"
         }
       }
     },

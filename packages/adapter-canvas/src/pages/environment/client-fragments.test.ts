@@ -169,23 +169,31 @@ describe("environment page client fragments", () => {
       "save-cred-btn"
     );
     expect(handler).toContain("var wizard = CRED_FORM_CONTEXT === 'wizard'");
-    expect(handler).toContain(
-      "showCredLanding(); showCredSuccessBanner(name, edited)"
-    );
+    expect(handler).toContain("showCredLanding(); showCredSuccessBanner(name)");
     expect(handler).toContain("showEnvWizardStep(2)");
   });
 
-  it("sends the edited profile's original name so a rename updates in place", () => {
-    const handler = handlerFor(
-      ENVIRONMENT_CREDENTIAL_CLIENT_JS,
-      "save-cred-btn"
+  it("offers no way to edit a stored profile", () => {
+    // Profiles are create-and-delete only: an edit would have to re-verify
+    // every field anyway, and renaming was the only way a profile's name could
+    // drift from the one recorded on environments created from it.
+    for (const [name, source] of fragments) {
+      expect(source.includes("js-cred-edit"), name).toBe(false);
+      expect(source.includes("originalName"), name).toBe(false);
+      expect(source.includes("Edit Credential Profile"), name).toBe(false);
+    }
+  });
+
+  it("deletes a profile without consulting environments first", () => {
+    // Deletion is inert for existing environments — they hold their own copy of
+    // the values — so it must not become conditional on remote GitHub state.
+    const wiring = ENVIRONMENT_CREDENTIAL_CLIENT_JS.slice(
+      ENVIRONMENT_CREDENTIAL_CLIENT_JS.indexOf("'.js-cred-delete'"),
+      ENVIRONMENT_CREDENTIAL_CLIENT_JS.indexOf("function applyCredProvider")
     );
-    expect(handler).toContain(
-      "if (CRED_EDITING_NAME) profile.originalName = CRED_EDITING_NAME;"
-    );
-    expect(ENVIRONMENT_CREDENTIAL_CLIENT_JS).toContain(
-      "CRED_EDITING_NAME = editing ? profile.name : '';"
-    );
+    expect(wiring).toContain("/api/delete-credential-profile");
+    expect(wiring).toContain("confirm(");
+    expect(wiring).not.toContain("/api/environments");
   });
 
   it("addresses only elements the page actually renders", () => {

@@ -60,7 +60,7 @@ function renderEnvProfileSummary(profile) {
 
 // --- Credential form hosting ---------------------------------------------
 // Creating a profile inside the wizard: swap the step 1 card for the form.
-function startCredentialCreation(profile) {
+function startCredentialCreation() {
     CRED_FORM_CONTEXT = 'wizard';
     showEnvWizardStep(1);
     moveCredFormTo('env-cred-form-host');
@@ -69,7 +69,7 @@ function startCredentialCreation(profile) {
     var host = document.getElementById('env-cred-form-host');
     if (host) host.style.display = '';
     if (credForm) credForm.style.display = 'none';
-    showCredForm(profile);
+    showCredForm();
 }
 
 // Leave the in-wizard credential form and return the node to its home so the
@@ -84,10 +84,10 @@ function endCredentialCreation() {
     CRED_FORM_CONTEXT = 'wizard';
 }
 
-// Creating or editing a profile from the Credentials sub-tab. Both are
-// credential management rather than environment creation, so the form stays on
-// that sub-tab and saving returns to its listing.
-function showStandaloneCredForm(profile) {
+// Creating a profile from the Credentials sub-tab. That is credential
+// management rather than environment creation, so the form stays on that
+// sub-tab and saving returns to its listing.
+function showStandaloneCredForm() {
     CRED_FORM_CONTEXT = 'standalone';
     moveCredFormTo('cred-form');
     // The wizard may have been mid-creation when the user came here; restore
@@ -98,7 +98,7 @@ function showStandaloneCredForm(profile) {
     if (stepCard) stepCard.style.display = '';
     if (credLanding) credLanding.style.display = 'none';
     if (credForm) credForm.style.display = '';
-    showCredForm(profile);
+    showCredForm();
 }
 
 var envStep1Next = document.getElementById('env-step1-next');
