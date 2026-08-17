@@ -8,6 +8,8 @@ var credProviderSelect = document.getElementById('cred-provider-select');
 var credVerified = null;
 var credPackagesVerified = false;
 var credGhChecking = false;
+// Name the open form's profile is stored under, '' while creating.
+var CRED_EDITING_NAME = '';
 
 function loadCredTable() {
     var body = document.getElementById('cred-table-body');
@@ -126,6 +128,9 @@ function loadCredGitHubAccess(fresh) {
 function showCredForm(profile) {
     document.getElementById('cred-success-banner').style.display = 'none';
     var editing = profile && profile.name;
+    // Remember which stored profile this form is editing, so renaming updates
+    // that profile rather than creating a second one under the new name.
+    CRED_EDITING_NAME = editing ? profile.name : '';
     document.getElementById('cred-form-title').textContent = editing ? 'Edit Credential Profile' : 'Create Credential Profile';
     document.getElementById('save-cred-btn').textContent = credSaveLabel();
     document.getElementById('cancel-cred-btn').textContent = CRED_FORM_CONTEXT === 'wizard' ? 'Cancel' : '← Back to credentials';
@@ -148,13 +153,14 @@ function credSaveLabel() {
     return CRED_FORM_CONTEXT === 'wizard' ? 'Save & Continue' : 'Save Credential Profile';
 }
 function showCredLanding() {
+    CRED_EDITING_NAME = '';
     credForm.style.display = 'none';
     credLanding.style.display = '';
     loadCredTable();
 }
-function showCredSuccessBanner(name) {
+function showCredSuccessBanner(name, edited) {
     var banner = document.getElementById('cred-success-banner');
-    document.getElementById('cred-success-banner-text').innerHTML = 'Successfully created credential profile ' + escapeHtmlClient(name);
+    document.getElementById('cred-success-banner-text').innerHTML = 'Successfully ' + (edited ? 'updated' : 'created') + ' credential profile ' + escapeHtmlClient(name);
     banner.style.display = 'flex';
 }
 // Creating a profile from the Credentials sub-tab is credential management, not
@@ -326,9 +332,11 @@ document.getElementById('save-cred-btn').addEventListener('click', function() {
     if (!credVerified) { alert('Please verify your credentials first.'); return; }
     var provider = credProviderSelect.value;
     var profile = { repo: CTX_REPO, name: name, provider: provider, user: credVerified.user || '' };
+    if (CRED_EDITING_NAME) profile.originalName = CRED_EDITING_NAME;
     if (provider === 'azure') { profile.tenantId = credVerified.tenantId || ''; profile.subscriptionId = credVerified.subscriptionId || ''; profile.subscriptionName = credVerified.subscriptionName || ''; }
     else { profile.accountId = credVerified.accountId || ''; profile.region = credVerified.region || ''; profile.roleArn = document.getElementById('aws-role-arn').value.trim(); }
     var wizard = CRED_FORM_CONTEXT === 'wizard';
+    var edited = !!CRED_EDITING_NAME;
     btn.disabled = true; btn.textContent = 'Saving…';
     fetch('/api/save-credential-profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profile) })
         .then(function(r) { return r.json(); }).then(function(d) {
@@ -345,7 +353,7 @@ document.getElementById('save-cred-btn').addEventListener('click', function() {
                 });
                 return;
             }
-            showCredLanding(); showCredSuccessBanner(name);
+            showCredLanding(); showCredSuccessBanner(name, edited);
         }).catch(function(err) {
             btn.disabled = false; btn.textContent = credSaveLabel();
             alert('Could not save profile: ' + err.message);

@@ -6,7 +6,10 @@ import { createIdentityProfilesRoutes } from "../../../src/server/routes/identit
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { GitHubIdentity } from "../../../src/gh.js";
-import type { CredentialProfile } from "../../../src/shared.js";
+import type {
+  CredentialProfile,
+  CredentialProfileInput
+} from "../../../src/shared.js";
 
 let container: CanvasServerContainer | undefined;
 
@@ -23,6 +26,8 @@ interface Harness {
   preflight: string | Error;
   validSlugs: string[];
   identityThrows?: Error;
+  saveThrows?: Error;
+  savedInputs: CredentialProfileInput[];
 }
 
 function identityFor(login: string): GitHubIdentity {
@@ -45,7 +50,8 @@ function start(): Harness {
     login: "initial-login",
     switchResult: { ok: true },
     preflight: "",
-    validSlugs: []
+    validSlugs: [],
+    savedInputs: []
   };
 
   const routes = createTestRouteTable(
@@ -56,6 +62,8 @@ function start(): Harness {
       },
       saveCredentialProfile: (repo, profile) => {
         harness.calls.push(`save(${repo})`);
+        harness.savedInputs.push(profile);
+        if (harness.saveThrows) throw harness.saveThrows;
         const saved: CredentialProfile = {
           name: String(profile.name || "").trim(),
           status: "verified"
@@ -174,6 +182,47 @@ describe("identity-profiles real-loopback HIT (RF-02)", () => {
     );
     expect(removed.status).toBe(200);
     expect(await removed.text()).toBe('{"success":true,"removed":true}');
+  });
+
+  it("carries the edited profile's original name through to the store", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const saved = await post(
+      entry.baseUrl,
+      "/api/save-credential-profile",
+      '{"repo":"octo/app","originalName":"prod","name":"production","provider":"azure"}'
+    );
+    expect(saved.status).toBe(200);
+    // Without originalName reaching the store a rename cannot be told apart
+    // from creating a second profile.
+    expect(harness.savedInputs).toEqual([
+      {
+        repo: "octo/app",
+        originalName: "prod",
+        name: "production",
+        provider: "azure"
+      }
+    ]);
+  });
+
+  it("surfaces a rejected rename as a 400 instead of a success payload", async () => {
+    const harness = start();
+    harness.saveThrows = new Error(
+      'A credential profile named "staging" already exists.'
+    );
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/save-credential-profile",
+      '{"repo":"octo/app","originalName":"prod","name":"staging"}'
+    );
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.json()).toEqual({
+      error: 'A credential profile named "staging" already exists.'
+    });
   });
 
   it("answers a missing repo with an empty list and no store call", async () => {

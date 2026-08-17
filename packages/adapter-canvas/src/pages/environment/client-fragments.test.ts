@@ -169,8 +169,23 @@ describe("environment page client fragments", () => {
       "save-cred-btn"
     );
     expect(handler).toContain("var wizard = CRED_FORM_CONTEXT === 'wizard'");
-    expect(handler).toContain("showCredLanding(); showCredSuccessBanner(name)");
+    expect(handler).toContain(
+      "showCredLanding(); showCredSuccessBanner(name, edited)"
+    );
     expect(handler).toContain("showEnvWizardStep(2)");
+  });
+
+  it("sends the edited profile's original name so a rename updates in place", () => {
+    const handler = handlerFor(
+      ENVIRONMENT_CREDENTIAL_CLIENT_JS,
+      "save-cred-btn"
+    );
+    expect(handler).toContain(
+      "if (CRED_EDITING_NAME) profile.originalName = CRED_EDITING_NAME;"
+    );
+    expect(ENVIRONMENT_CREDENTIAL_CLIENT_JS).toContain(
+      "CRED_EDITING_NAME = editing ? profile.name : '';"
+    );
   });
 
   it("addresses only elements the page actually renders", () => {
