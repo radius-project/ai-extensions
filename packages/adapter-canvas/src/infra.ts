@@ -22,6 +22,7 @@ import {
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
 } from "@radius-project/core";
+import type { DeployWorkflowOptions } from "@radius-project/core";
 import {
   cliExec,
   fetchFileFromRepoResult,
@@ -422,7 +423,8 @@ ${indent}    echo "✅ GHCR accepted a non-mutating upload-session probe."`;
  */
 export async function generateDeployWorkflow(
   env: string,
-  appFile: string
+  appFile: string,
+  options: DeployWorkflowOptions = {}
 ): Promise<Record<string, string>> {
   // Only the dispatcher + the Azure provider workflow are fetched and committed;
   // the AWS provider workflow is intentionally never fetched or committed. The
@@ -438,7 +440,12 @@ export async function generateDeployWorkflow(
   // the AWS template; the generated AWS output is dropped below and never
   // committed.
   templates[DEPLOY_AWS_FILE] = templates[DEPLOY_AZURE_FILE];
-  const generated = coreGenerateDeployWorkflow(env, appFile, templates);
+  const generated = coreGenerateDeployWorkflow(
+    env,
+    appFile,
+    templates,
+    options
+  );
   delete generated[DEPLOY_AWS_FILE];
   // Creating an environment should ONLY run the verify-credentials workflow.
   // The upstream dispatcher auto-triggers the deploy via a `workflow_run`
