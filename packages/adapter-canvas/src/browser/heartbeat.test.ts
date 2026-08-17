@@ -265,8 +265,8 @@ describe("heartbeat watchdog", () => {
     browser.clock.tick(HEARTBEAT_INTERVAL_MS);
     await flushPromises();
     teardown();
-    expect(browser.net.aborted).toBeGreaterThan(0);
-    pending.resolve(jsonResponse({}));
+    expect(browser.net.aborted).toBe(1);
+    pending.reject(new Error("aborted"));
     await flushPromises();
 
     expect(browser.nav.reloads).toBe(0);
@@ -274,14 +274,16 @@ describe("heartbeat watchdog", () => {
     expect(browser.clock.pending).toBe(0);
   });
 
-  it("ignores an in-flight rejection after teardown", async () => {
+  it("ignores an in-flight rejection after teardown without AbortController", async () => {
     const browser = setup();
+    browser.net.supportsAbort = false;
     const pending = createDeferred<HttpResponse>();
     browser.net.handle(HEARTBEAT_PING_PATH, () => pending.promise);
     const teardown = initializeHeartbeat(browser.context);
     browser.clock.tick(HEARTBEAT_INTERVAL_MS);
     await flushPromises();
     teardown();
+    expect(browser.net.aborted).toBe(0);
 
     pending.reject(new Error("late failure"));
     await flushPromises();

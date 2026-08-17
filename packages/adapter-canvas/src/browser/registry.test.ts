@@ -36,10 +36,10 @@ describe("page-scoped browser registry", () => {
     const order: string[] = [];
     registry.register(() => {
       order.push("first");
-    });
+    }, "page");
     registry.register(() => {
       order.push("second");
-    });
+    }, "page");
 
     registry.teardownAll();
     registry.teardownAll();
@@ -53,14 +53,14 @@ describe("page-scoped browser registry", () => {
     const order: string[] = [];
     registry.register(() => {
       order.push("first");
-    });
+    }, "page");
     registry.register(() => {
       order.push("second");
       throw new Error("entry failed");
-    });
+    }, "page");
     registry.register(() => {
       order.push("third");
-    });
+    }, "page");
 
     expect(() => registry.teardownAll()).toThrow(
       "Radius page teardown failed: entry failed"
@@ -74,7 +74,7 @@ describe("page-scoped browser registry", () => {
     const registry = resolvePageRegistry(scope);
     registry.register(() => {
       throw "string failure";
-    });
+    }, "document");
     expect(() => registry.teardownAll()).toThrow(
       "Radius page teardown failed: string failure"
     );
@@ -92,5 +92,19 @@ describe("page-scoped browser registry", () => {
     resolvePageRegistry(scope).teardownAll();
 
     expect(tornDown).toBe(1);
+  });
+
+  it("tears down outgoing page behavior without stopping document behavior", () => {
+    const { scope } = createFakeBrowserScope();
+    const registry = resolvePageRegistry(scope);
+    const order: string[] = [];
+    registry.register(() => order.push("document"), "document");
+    registry.register(() => order.push("page"), "page");
+
+    registry.teardownPage();
+    expect(order).toEqual(["page"]);
+
+    registry.teardownAll();
+    expect(order).toEqual(["page", "document"]);
   });
 });

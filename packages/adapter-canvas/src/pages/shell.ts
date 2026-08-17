@@ -4,12 +4,7 @@
 // operation chip), and the feedback widget that every page renders inside.
 
 import { getInlineVendorScripts, getInlineVendorStyles } from "../vendor.js";
-import {
-  CLIENT_REPO_BRANCH_JS,
-  CLIENT_GRAPH_JS,
-  CLIENT_OPCHIP_JS,
-  CLIENT_DELETE_DIALOG_JS
-} from "../client.js";
+import { CLIENT_DELETE_DIALOG_JS, CLIENT_OPCHIP_JS } from "../client.js";
 import { browserScriptTag } from "../browser/scripts.js";
 import { escapeHtml } from "../shared.js";
 import { topNav, feedbackWidget } from "../ui.js";
@@ -45,13 +40,8 @@ ${SHELL_STYLE_CSS}
 </head>
 <body>
 ${topNav(active)}
-<script>
-${CLIENT_REPO_BRANCH_JS}
-</script>
 ${getInlineVendorScripts()}
-<script>
-${CLIENT_GRAPH_JS}
-</script>
+${browserScriptTag("graph")}
 <script>
 ${CLIENT_DELETE_DIALOG_JS}
 </script>
