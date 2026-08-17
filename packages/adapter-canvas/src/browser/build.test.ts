@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  assertBrowserSafe,
   assertInlineSafe,
   assertParseable,
   assertSelfContained,
@@ -70,7 +71,13 @@ describe("browser entry specifications", () => {
   it("registers every implemented repository and graph entry exactly once", () => {
     expect(BROWSER_ENTRY_NAMES).toEqual([
       "graph",
+      "delete-dialog",
       "heartbeat",
+      "operation-chip",
+      "oidc-page",
+      "deploy-result-page",
+      "environment-page",
+      "deploying-page",
       "graph-page",
       "planned-graph-page",
       "graph-diff-page",
@@ -79,7 +86,13 @@ describe("browser entry specifications", () => {
     expect(SHARED_ENTRY_GLOBALS).toEqual([PAGE_REGISTRY_GLOBAL]);
     expect(BROWSER_ENTRIES.map((entry) => entry.initializer)).toEqual([
       "installGraphEntry",
+      "installDeleteDialogEntry",
       "installHeartbeatEntry",
+      "installOperationChipEntry",
+      "installOidcPageEntry",
+      "installDeployResultPageEntry",
+      "installEnvironmentPageEntry",
+      "installDeployingPageEntry",
       "installGraphPageEntry",
       "installPlannedGraphPageEntry",
       "installGraphDiffPageEntry",
@@ -191,6 +204,89 @@ describe("inline browser safety", () => {
       assertSelfContained("valid", "(() => { const value = 1; })();")
     ).not.toThrow();
   });
+
+  it("names every Node-only global a bundle must not reach", () => {
+    expect(() =>
+      assertBrowserSafe("env", "var ref = process.env.RADIUS_DELETE_REF;")
+    ).toThrow(
+      /Browser entry "env" reaches Node-only globals: process\. Import from a browser-safe subpath/
+    );
+    expect(() =>
+      assertBrowserSafe("buffered", "var raw = Buffer.from(value);")
+    ).toThrow(/reaches Node-only globals: Buffer\./);
+    expect(() =>
+      assertBrowserSafe("scoped", "var target = global.setTimeout;")
+    ).toThrow(/reaches Node-only globals: global\./);
+    expect(() =>
+      assertBrowserSafe("pathed", "var here = __dirname + __filename;")
+    ).toThrow(/reaches Node-only globals: __dirname, __filename\./);
+    expect(() =>
+      assertBrowserSafe("several", "process.cwd(); Buffer.alloc(1);")
+    ).toThrow(/reaches Node-only globals: process, Buffer\./);
+  });
+
+  // The dotted form is what esbuild emits today, but the gate is named for the
+  // globals rather than for one access syntax, so the other ways of reaching
+  // the same binding have to be rejected too.
+  it("rejects bracketed, aliased, destructured, and globalThis-qualified access", () => {
+    expect(() =>
+      assertBrowserSafe("bracketed", 'var ref = process["env"].RADIUS_REF;')
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("aliased", "var proc = process; proc.exit(0);")
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("destructured", "const { env } = process;")
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("qualified", "var ref = globalThis.process.env.REF;")
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("windowed", "var raw = window.Buffer.from(value);")
+    ).toThrow(/reaches Node-only globals: Buffer\./);
+    expect(() => assertBrowserSafe("selfed", "var g = self.global;")).toThrow(
+      /reaches Node-only globals: global\./
+    );
+  });
+
+  it("rejects the Node-only immediate timers", () => {
+    expect(() =>
+      assertBrowserSafe("immediate", "setImmediate(() => refresh());")
+    ).toThrow(/reaches Node-only globals: setImmediate\./);
+    expect(() =>
+      assertBrowserSafe("cleared", "clearImmediate(handle);")
+    ).toThrow(/reaches Node-only globals: clearImmediate\./);
+  });
+
+  // A global reached more than one way is still one thing to go fix.
+  it("names each global once however many ways the bundle reaches it", () => {
+    expect(() =>
+      assertBrowserSafe(
+        "repeated",
+        'var p = process; p.env.A; process["env"].B; globalThis.process.C;'
+      )
+    ).toThrow(/reaches Node-only globals: process\. Import from/);
+  });
+
+  // The guard must not fire on ordinary browser code that merely reads like a
+  // Node global, or the next contributor learns to work around it.
+  it("allows feature detects, own properties, and similarly named identifiers", () => {
+    expect(() =>
+      assertBrowserSafe(
+        "clean",
+        [
+          'if (typeof process !== "undefined") return;',
+          "var state = options.process.id;",
+          "var done = processResults(items);",
+          "globalThis.radiusPageRegistry = registry;",
+          "var label = deployment.Buffer;",
+          "var later = setImmediateRetry(fn);",
+          "var own = scope.setImmediate;",
+          "var mapped = items.map((entry) => entry.global);"
+        ].join("\n")
+      )
+    ).not.toThrow();
+  });
 });
 
 describe("in-memory browser compiler", () => {
@@ -207,6 +303,7 @@ describe("in-memory browser compiler", () => {
       expect(() => new Function(code)).not.toThrow();
       expect(() => assertInlineSafe(name, code)).not.toThrow();
       expect(() => assertSelfContained(name, code)).not.toThrow();
+      expect(() => assertBrowserSafe(name, code)).not.toThrow();
       expect(code).not.toContain(".mjs");
       expect(code).not.toMatch(/<script[^>]+src=/);
     }
@@ -274,6 +371,16 @@ describe("in-memory browser compiler", () => {
         globals: []
       },
       /contains a require call|retained runtime module loads/
+    ],
+    [
+      "Node global reached through a package barrel",
+      {
+        name: "node-global",
+        file: "../../test/fixtures/browser/entry-node-global.ts",
+        initializer: "installNodeGlobal",
+        globals: []
+      },
+      /reaches Node-only globals: process\b/
     ]
   ])("rejects a compiled entry with a residual %s", (_label, spec, error) => {
     expect(() => compileBrowserEntrySpec(spec)).toThrow(error);

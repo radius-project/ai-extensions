@@ -109,7 +109,10 @@ const PAGE_STATE_IDS = [
   "radius-graph-page-state",
   "radius-planned-graph-state",
   "radius-graph-diff-state",
-  "radius-deployed-graph-state"
+  "radius-deployed-graph-state",
+  "radius-deploy-result-state",
+  "radius-environment-state",
+  "radius-deploying-state"
 ] as const;
 
 // Inline payloads are named by a stable anchor rather than by position, so the
@@ -267,6 +270,18 @@ function projectHiddenInitialState(
         GRAPH_BRANCH: JSON.stringify(stateString(state, "graphBranch")),
         FALLBACK_PROVIDER: JSON.stringify(stateString(state, "provider"))
       };
+    case "radius-deploy-result-state":
+      return { attemptId: JSON.stringify(stateString(state, "attemptId")) };
+    case "radius-environment-state":
+      return {
+        CTX_REPO: singleQuoted(repo),
+        CTX_BRANCH: singleQuoted(branch)
+      };
+    case "radius-deploying-state":
+      return {
+        CTX_REPO: JSON.stringify(repo),
+        CTX_BRANCH: JSON.stringify(branch)
+      };
     default:
       return null;
   }
@@ -305,11 +320,55 @@ function expectedHiddenApiPaths(
         "/api/list-deployments",
         "/api/delete-deployment"
       ];
+    case "radius-deploy-result-state":
+      return ["/api/deploy-reset"];
+    case "radius-environment-state":
+      return [
+        "/api/list-environments",
+        "/api/delete-environment",
+        "/api/operations",
+        "/api/verify-status",
+        "/api/credential-profiles",
+        "/api/github-identity",
+        "/api/github-account",
+        "/api/list-azure-app-registrations",
+        "/api/discover",
+        "/api/azure-app-serves-repos",
+        "/api/delete-credential-profile",
+        "/api/azure-cli-assist",
+        "/api/verify-azure-login",
+        "/api/verify-aws-login",
+        "/api/save-credential-profile"
+      ];
+    case "radius-deploying-state":
+      return [
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/discover-branches",
+        "/api/list-deployments",
+        "/api/delete-deployment",
+        "/api/deploy-status",
+        "/api/deploy"
+      ];
     default:
       return null;
   }
 }
 
+// Projects the API surface a page's compiled entry reaches.
+//
+// For a page with a known legacy contract this returns that contract, not the
+// raw observation, and throws if any part of it went missing. Bundling pulls
+// transitive paths out of shared helpers into a page that never called them
+// itself, so projecting the observation here would record wiring rather than
+// behavior and churn this fixture on every unrelated import change.
+//
+// That is safe only because nothing is lost: the exact ordered observed set of
+// every compiled entry is asserted directly, per entry, by "compiled page entry
+// API contracts" and "compiled graph page network contracts" in pages.test.ts.
+// A page that gains or loses an endpoint fails there. Entries with no legacy
+// contract — the shared shell payloads — are projected as observed, so their
+// surface is pinned here instead.
 function projectVerifiedApiPaths(
   scoped: string,
   pageState: { id: string; value: Record<string, unknown> } | null

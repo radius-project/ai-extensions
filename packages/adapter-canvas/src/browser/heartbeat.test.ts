@@ -292,6 +292,39 @@ describe("heartbeat watchdog", () => {
     expect(browser.logger.errors).toEqual([]);
   });
 
+  it("ignores an in-flight healthy response after teardown", async () => {
+    const browser = setup();
+    const pending = createDeferred<HttpResponse>();
+    let call = 0;
+    // Abort support is off so the held request is never cancelled: the point
+    // is a *fulfilled* late response, which is the one path that reaches the
+    // recovery reload. With the scope torn down, the response must be dropped
+    // rather than reloading a document this entry no longer owns.
+    browser.net.supportsAbort = false;
+    browser.net.handle(HEARTBEAT_PING_PATH, () => {
+      call += 1;
+      return call === 1 ?
+          Promise.reject(new Error("offline"))
+        : pending.promise;
+    });
+    const teardown = initializeHeartbeat(browser.context, {
+      missThreshold: 1
+    });
+    await beat(browser.clock);
+    expect(browser.overlay.style.display).toBe("flex");
+
+    browser.clock.tick(HEARTBEAT_INTERVAL_MS);
+    await flushPromises();
+    teardown();
+
+    pending.resolve(jsonResponse({}));
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(0);
+    expect(browser.logger.errors).toEqual([]);
+    expect(browser.clock.pending).toBe(0);
+  });
+
   it("reports a reload failure and retries recovery on the next healthy beat", async () => {
     const browser = setup();
     let healthy = false;

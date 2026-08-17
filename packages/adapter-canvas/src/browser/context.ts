@@ -6,6 +6,7 @@ import type {
   BrowserContext,
   ClipboardPort,
   ClockPort,
+  DialogPort,
   DomDocument,
   DomElement,
   DomEventTarget,
@@ -474,6 +475,37 @@ function createClipboardPort(scope: unknown): ClipboardPort {
   };
 }
 
+// Native dialogs are resolved per call rather than when the context is built.
+// Only the credentials and deployments pages ever open one, so resolving
+// eagerly made every page — including the graph pages — fail to start over a
+// capability they never use.
+//
+// A host that sandboxes the canvas without `allow-modals` suppresses these.
+// `confirm` then fails closed, because a destructive action must never proceed
+// on consent that was never obtained, and `notify` falls back to the logger so
+// a message the user was meant to see cannot vanish silently. Real modal
+// support is a Phase 6 concern; this only keeps the failure honest.
+function createDialogPort(scope: unknown, logger: LoggerPort): DialogPort {
+  return {
+    confirm(message) {
+      const confirm = readMember(scope, "confirm");
+      if (!isCallable(confirm)) {
+        logger.error("Radius could not confirm an action.", message);
+        return false;
+      }
+      return confirm.call(scope, message) === true;
+    },
+    notify(message) {
+      const alert = readMember(scope, "alert");
+      if (!isCallable(alert)) {
+        logger.error("Radius could not display a notification.", message);
+        return;
+      }
+      alert.call(scope, message);
+    }
+  };
+}
+
 function createLoggerPort(scope: unknown): LoggerPort {
   const runtimeConsole = readMember(scope, "console");
   const report = readMember(runtimeConsole, "error");
@@ -499,6 +531,7 @@ export function resolveBrowserContext(
   if (!isDomEventTarget(page)) {
     throw new Error("Radius browser context is missing window.");
   }
+  const logger = createLoggerPort(scope);
   return {
     dom: createDomPort(document, readMember(scope, "Event")),
     page,
@@ -509,7 +542,8 @@ export function resolveBrowserContext(
     focus: createFocusPort(document),
     external: createExternalOpenPort(scope, document),
     clipboard: createClipboardPort(scope),
-    logger: createLoggerPort(scope),
+    dialogs: createDialogPort(scope, logger),
+    logger,
     bindings
   };
 }

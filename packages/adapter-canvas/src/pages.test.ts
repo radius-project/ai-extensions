@@ -58,6 +58,16 @@ const sampleResources = [
   }
 ];
 
+function compiledApiPaths(
+  entry:
+    "oidc-page" | "deploy-result-page" | "deploying-page" | "environment-page"
+): string[] {
+  const observed = [
+    ...browserScript(entry).matchAll(/['"`(](\/api\/[a-z0-9-]+)/g)
+  ].map((match) => match[1]);
+  return [...new Set(observed)];
+}
+
 describe("remaining pages smoke-render without removed tokens", () => {
   const cases: Array<readonly [string, () => string, (() => string) | null]> = [
     ["oidcPage", () => oidcPage({ provider: "azure" }), () => oidcPage({})],
@@ -187,6 +197,50 @@ describe("inline scripts", () => {
         const src = block.slice("<script>".length, -"</script>".length);
         expect(() => new Function(src)).not.toThrow();
       }
+    }
+  );
+});
+
+describe("compiled page entry API contracts", () => {
+  it.each([
+    ["oidc-page", ["/api/oidc"]],
+    ["deploy-result-page", ["/api/deploy-reset"]],
+    [
+      "deploying-page",
+      [
+        "/api/discover-branches",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/deploy",
+        "/api/list-deployments",
+        "/api/delete-deployment",
+        "/api/deploy-status"
+      ]
+    ],
+    [
+      "environment-page",
+      [
+        "/api/list-environments",
+        "/api/delete-environment",
+        "/api/credential-profiles",
+        "/api/delete-credential-profile",
+        "/api/save-credential-profile",
+        "/api/github-identity",
+        "/api/azure-cli-assist",
+        "/api/verify-azure-login",
+        "/api/verify-aws-login",
+        "/api/discover",
+        "/api/list-azure-app-registrations",
+        "/api/azure-app-serves-repos",
+        "/api/operations",
+        "/api/verify-status",
+        "/api/github-account"
+      ]
+    ]
+  ] as const)(
+    "%s exposes its exact ordered API path set",
+    (entry, expected) => {
+      expect(compiledApiPaths(entry)).toEqual(expected);
     }
   );
 });

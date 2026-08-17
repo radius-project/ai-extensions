@@ -4,6 +4,7 @@ import type {
   BrowserContext,
   ClipboardPort,
   ClockPort,
+  DialogPort,
   DomClassList,
   DomDocument,
   DomElement,
@@ -306,6 +307,8 @@ export function createFakeSelect(id = ""): FakeSelectElement {
   return new FakeSelectElement(id);
 }
 
+const VALUE_TAGS = new Set(["input", "button", "textarea"]);
+
 export class FakeDocument extends FakeEventTarget implements DomDocument {
   visibilityState = "visible";
   activeElement: unknown = null;
@@ -334,9 +337,12 @@ export class FakeDocument extends FakeEventTarget implements DomDocument {
 
   createElement(tagName: string): unknown {
     const element =
-      tagName === "option" ?
-        new FakeOptionElement()
+      tagName === "option" ? new FakeOptionElement()
+      : tagName === "select" ? new FakeSelectElement()
       : new FakeElement("", tagName);
+    if (VALUE_TAGS.has(tagName)) {
+      Object.assign(element, { value: "", disabled: false, checked: false });
+    }
     this.created.push(element);
     return element;
   }
@@ -352,6 +358,30 @@ export class FakeDocument extends FakeEventTarget implements DomDocument {
 
 export function createFakeDocument(): FakeDocument {
   return new FakeDocument();
+}
+
+export function fakeTree(element: FakeElement): FakeElement[] {
+  return [element, ...element.children.flatMap(fakeTree)];
+}
+
+export function fakeText(element: FakeElement): string {
+  return (element.textContent ?? "") + element.children.map(fakeText).join("");
+}
+
+export function fakeById(root: FakeElement, id: string): FakeElement {
+  const found = fakeTree(root).find((element) => element.id === id);
+  if (found === undefined) {
+    throw new Error(`No rendered element with id "${id}".`);
+  }
+  return found;
+}
+
+export function fakeInputById(root: FakeElement, id: string): FakeInputElement {
+  const found = fakeById(root, id);
+  if (!("value" in found) || !("disabled" in found)) {
+    throw new Error(`Rendered element "${id}" is not an input.`);
+  }
+  return found as FakeInputElement;
 }
 
 interface ClockTask {
@@ -619,6 +649,21 @@ class FakeClipboard implements ClipboardPort {
   }
 }
 
+export class FakeDialogs implements DialogPort {
+  readonly confirmations: string[] = [];
+  readonly notifications: string[] = [];
+  nextConfirmation = false;
+
+  confirm(message: string): boolean {
+    this.confirmations.push(message);
+    return this.nextConfirmation;
+  }
+
+  notify(message: string): void {
+    this.notifications.push(message);
+  }
+}
+
 export class FakeLogger implements LoggerPort {
   readonly errors: Array<{ message: string; detail: unknown }> = [];
 
@@ -637,6 +682,7 @@ export function createFakeBrowser() {
   const focus = new FakeFocus(document);
   const external = new FakeExternal();
   const clipboard = new FakeClipboard();
+  const dialogs = new FakeDialogs();
   const logger = new FakeLogger();
   class FakeBrowserEvent {
     constructor(readonly type: string) {}
@@ -652,6 +698,7 @@ export function createFakeBrowser() {
     focus,
     external,
     clipboard,
+    dialogs,
     logger,
     bindings: createBindingRegistry()
   };
@@ -666,6 +713,7 @@ export function createFakeBrowser() {
     focus,
     external,
     clipboard,
+    dialogs,
     logger,
     bindings: context.bindings
   };
@@ -716,6 +764,8 @@ export function createFakeBrowserScope() {
     navigator: {
       clipboard: { writeText: (text: string) => browser.clipboard.write(text) }
     },
+    confirm: (message: string) => browser.dialogs.confirm(message),
+    alert: (message: string) => browser.dialogs.notify(message),
     console: {
       error: (message: string, detail: unknown) =>
         browser.logger.error(message, detail)
