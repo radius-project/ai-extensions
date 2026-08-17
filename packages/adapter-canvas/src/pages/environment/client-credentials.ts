@@ -62,8 +62,8 @@ function wireCredRowActions(profiles) {
                     message: 'This deletes the credential profile "' + name + '". You will not be able to create new environments from it.'
                         + (checked ? '' : '\\n\\nCould not check which environments use this profile.'),
                     usageLabel: usage.length === 1
-                        ? 'This environment was created from this profile and keeps working — it has its own copy of these values:'
-                        : 'These environments were created from this profile and keep working — they have their own copy of these values:',
+                        ? 'This environment was created from this credential profile and will keep working as the environment has stored its own copy of the credential values:'
+                        : 'These environments were created from this credential profile and will keep working as each environment has stored its own copy of the credential values:',
                     usage: usage,
                     confirmLabel: 'Delete profile',
                     onConfirm: function() { deleteCredentialProfile(name, delBtn); }
