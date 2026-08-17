@@ -3,14 +3,19 @@
 // driven through the same routes the panel polls. The panel's whole design rests
 // on the record outliving the request that created it, so this exercises the
 // HTTP boundary rather than the module in isolation.
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { getOrCreateServer } from "./server.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  getOrCreateServer,
+  onEnvironmentTasksSettled,
+  setEnvironmentOperationTestRunner
+} from "./server.js";
 import {
   addLegacyStep,
   buildStages,
   createOperation,
   enterStage,
   finish,
+  requireInput,
   operations,
   recordAzureApp,
   recordCommitState,
@@ -32,12 +37,315 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  setEnvironmentOperationTestRunner(null);
   operations.clear();
   try {
     entry?.server?.close();
   } catch {
     /* best-effort */
   }
+});
+
+async function postJson(path, body) {
+  const res = await fetch(baseUrl + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+describe("POST /api/operations server-owned execution", () => {
+  it("notifies a settlement listener registered after tasks have already settled", async () => {
+    const listener = vi.fn();
+    const stop = onEnvironmentTasksSettled("operations-routes-test", listener);
+    await Promise.resolve();
+    expect(listener).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("isolates a throwing settlement listener from later listeners", async () => {
+    const throwing = vi.fn(() => {
+      throw new Error("listener failed");
+    });
+    const following = vi.fn();
+    const stopThrowing = onEnvironmentTasksSettled(
+      "operations-routes-test",
+      throwing
+    );
+    const stopFollowing = onEnvironmentTasksSettled(
+      "operations-routes-test",
+      following
+    );
+    await Promise.resolve();
+    expect(throwing).toHaveBeenCalledTimes(1);
+    expect(following).toHaveBeenCalledTimes(1);
+    stopThrowing();
+    stopFollowing();
+  });
+
+  it("returns 202 before the scheduled task completes and finishes without polling", async () => {
+    operations.clear();
+    let release;
+    const blocked = new Promise((resolve) => {
+      release = resolve;
+    });
+    const runner = vi.fn(async (operationId) => {
+      await blocked;
+      finish(operations.get(operationId), "succeeded");
+      await operations.persist();
+    });
+    setEnvironmentOperationTestRunner(runner);
+
+    const started = await postJson("/api/operations", {
+      repo: "contoso/detached",
+      environment: "dev",
+      provider: "azure",
+      clientId: "11111111-1111-1111-1111-111111111111",
+      tenantId: "22222222-2222-2222-2222-222222222222",
+      subscriptionId: "33333333-3333-3333-3333-333333333333",
+      resourceGroup: "rg-dev",
+      cluster: "aks-dev"
+    });
+
+    expect(started.status).toBe(202);
+    expect(started.body.operationId).toMatch(/^op_/);
+    expect(started.body.statusUrl).toContain(started.body.operationId);
+    expect(operations.get(started.body.operationId)?.state).toBe("running");
+
+    release();
+    await vi.waitFor(() => {
+      expect(operations.get(started.body.operationId)?.state).toBe("succeeded");
+    });
+  });
+
+  it("returns the active operation id on a conflicting start", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const first = await postJson("/api/operations", {
+      repo: "contoso/conflict",
+      environment: "dev",
+      provider: "azure",
+      clientId: "11111111-1111-1111-1111-111111111111",
+      tenantId: "22222222-2222-2222-2222-222222222222",
+      subscriptionId: "33333333-3333-3333-3333-333333333333",
+      resourceGroup: "rg-dev",
+      cluster: "aks-dev"
+    });
+    const second = await postJson("/api/operations", {
+      repo: "contoso/conflict",
+      environment: "prod",
+      provider: "azure",
+      clientId: "11111111-1111-1111-1111-111111111111",
+      tenantId: "22222222-2222-2222-2222-222222222222",
+      subscriptionId: "33333333-3333-3333-3333-333333333333",
+      resourceGroup: "rg-dev",
+      cluster: "aks-dev"
+    });
+    expect(first.status).toBe(202);
+    expect(second).toMatchObject({
+      status: 409,
+      body: {
+        code: "operation-in-progress",
+        operationId: first.body.operationId
+      }
+    });
+  });
+
+  it("normalizes the environment name before persisting the operation", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const started = await postJson("/api/operations", {
+      repo: "contoso/normalized",
+      environment: "  dev  ",
+      provider: "azure",
+      clientId: "11111111-1111-1111-1111-111111111111",
+      tenantId: "22222222-2222-2222-2222-222222222222",
+      subscriptionId: "33333333-3333-3333-3333-333333333333",
+      resourceGroup: "rg-dev",
+      cluster: "aks-dev"
+    });
+
+    expect(started.status).toBe(202);
+    expect(operations.get(started.body.operationId)?.environment).toBe("dev");
+  });
+
+  it.each(["/api/azure-auto-setup", "/api/create-environment"])(
+    "rejects direct calls to the internal mutation route %s",
+    async (path) => {
+      const response = await postJson(path, {});
+      expect(response).toMatchObject({
+        status: 403,
+        body: { code: "server-owned-operation-required" }
+      });
+    }
+  );
+
+  it("resumes only the prompt currently owned by the operation", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const op = seed("contoso/resume");
+    op.request = { azure: {}, environment: {}, needsAzureCredentials: true };
+    requireInput(op, {
+      code: "service-management-reference-required",
+      checkpoint: "azure-service-management-reference",
+      message: "Enter the Service Management Reference."
+    });
+
+    const wrong = await postJson(
+      `/api/operations/${encodeURIComponent(op.operationId)}/resume/app-selection-required`,
+      {
+        checkpoint: "azure-service-management-reference",
+        repo: op.repo,
+        environment: op.environment,
+        provider: op.provider,
+        appId: "app-1"
+      }
+    );
+    expect(wrong.status).toBe(409);
+
+    const missingContext = await postJson(
+      `/api/operations/${encodeURIComponent(op.operationId)}/resume/service-management-reference-required`,
+      {
+        checkpoint: "azure-service-management-reference",
+        serviceManagementReference: "11111111-1111-1111-1111-111111111111"
+      }
+    );
+    expect(missingContext.status).toBe(409);
+
+    const resumed = await postJson(
+      `/api/operations/${encodeURIComponent(op.operationId)}/resume/service-management-reference-required`,
+      {
+        checkpoint: "azure-service-management-reference",
+        repo: op.repo,
+        environment: op.environment,
+        provider: op.provider,
+        serviceManagementReference: "11111111-1111-1111-1111-111111111111"
+      }
+    );
+    expect(resumed.status).toBe(202);
+    expect(op.state).toBe("running");
+    expect(op.request.azure.serviceManagementReference).toBe(
+      "11111111-1111-1111-1111-111111111111"
+    );
+  });
+
+  it("preserves the resume refusal ladder over the real loopback server", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+
+    const unknown = await postJson(
+      "/api/operations/op-missing/resume/app-selection-required",
+      {}
+    );
+    expect(unknown).toMatchObject({
+      status: 404,
+      body: { code: "unknown-operation" }
+    });
+
+    const expired = seed("contoso/expired");
+    finish(expired, "failed_partial", {
+      failure: {
+        code: "operation-input-expired",
+        message: "The requested input expired."
+      }
+    });
+    const expiredResponse = await postJson(
+      `/api/operations/${expired.operationId}/resume/app-selection-required`,
+      {}
+    );
+    expect(expiredResponse).toMatchObject({
+      status: 410,
+      body: {
+        code: "operation-input-expired",
+        operation: { operationId: expired.operationId }
+      }
+    });
+
+    const malformed = seed("contoso/malformed");
+    malformed.request = {
+      azure: {},
+      environment: {},
+      needsAzureCredentials: true
+    };
+    requireInput(malformed, {
+      code: "app-selection-required",
+      checkpoint: "azure-app-selection",
+      message: "Choose an app."
+    });
+    const malformedResponse = await fetch(
+      `${baseUrl}/api/operations/${malformed.operationId}/resume/app-selection-required`,
+      { method: "POST", body: "{not json" }
+    );
+    expect(malformedResponse.status).toBe(409);
+    expect(await malformedResponse.json()).toMatchObject({
+      code: "operation-resume-mismatch"
+    });
+
+    const unsupported = seed("contoso/unsupported");
+    unsupported.request = {
+      azure: {},
+      environment: {},
+      needsAzureCredentials: true
+    };
+    requireInput(unsupported, {
+      code: "future-prompt",
+      checkpoint: "future-checkpoint",
+      message: "Supply future input."
+    });
+    const unsupportedResponse = await postJson(
+      `/api/operations/${unsupported.operationId}/resume/future-prompt`,
+      {
+        checkpoint: "future-checkpoint",
+        repo: unsupported.repo,
+        environment: unsupported.environment,
+        provider: unsupported.provider
+      }
+    );
+    expect(unsupportedResponse).toMatchObject({
+      status: 400,
+      body: { code: "unsupported-resume" }
+    });
+  });
+
+  it("abandons an input wait and releases the repository lock", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const op = seed("contoso/abandon");
+    requireInput(op, {
+      code: "app-selection-required",
+      checkpoint: "azure-app-selection",
+      message: "Choose an app."
+    });
+
+    const abandoned = await postJson(
+      `/api/operations/${encodeURIComponent(op.operationId)}/abandon`,
+      {}
+    );
+    expect(abandoned.status).toBe(200);
+    expect(op.state).toBe("cancelled");
+    expect(operations.running(op.repo)).toBeNull();
+  });
+
+  it("refuses abandon for an unknown or non-waiting operation", async () => {
+    operations.clear();
+    setEnvironmentOperationTestRunner(async () => {});
+    const unknown = await postJson("/api/operations/op-missing/abandon", {});
+    expect(unknown).toMatchObject({
+      status: 404,
+      body: { code: "unknown-operation" }
+    });
+
+    const running = seed("contoso/not-waiting");
+    const refused = await postJson(
+      `/api/operations/${running.operationId}/abandon`,
+      {}
+    );
+    expect(refused).toMatchObject({
+      status: 409,
+      body: { code: "operation-abandon-mismatch" }
+    });
+  });
 });
 
 async function getJson(path) {

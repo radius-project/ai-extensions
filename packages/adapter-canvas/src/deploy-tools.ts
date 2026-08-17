@@ -32,6 +32,10 @@ export interface DeployPayload extends CanvasDeployParams {
   branch: string;
   appFile: string;
   agentInitiated: true;
+  // Empty unless this call is bound to a repair loop. The route — not the
+  // client — decides what it means: it validates the ID against the attempt it
+  // currently holds and derives repair-loop ownership from that.
+  attemptId: string;
 }
 
 export interface DeployStatusInput {
@@ -144,8 +148,38 @@ export function buildDeployPayload(
     branch: args.branch || snapshot.branch || last.branch || "",
     appFile:
       args.appFile || snapshot.appFile || last.appFile || ".radius/app.bicep",
-    agentInitiated: true
+    agentInitiated: true,
+    // Forward the attempt this call belongs to so the route can re-check it
+    // atomically and keep the redeploy inside the same repair loop. An
+    // unbound call carries no attempt: it is an ordinary deploy that must stay
+    // eligible to hand its failure off.
+    attemptId: args.attemptId || ""
   };
+}
+
+// Describe a started deploy back to the agent. A redeploy inside a repair loop
+// also reports where it sits in that loop: the cap is stated once in the
+// handoff prompt, which is easy to lose track of several repairs later, so it
+// is repeated on every attempt alongside the server-side enforcement.
+export function describeDeployStarted(
+  payload: { targetRepo?: string; branch?: string; environment?: string } = {},
+  result: { repairAttempt?: unknown; repairAttemptCap?: unknown } = {}
+): string {
+  const attempt = Number(result.repairAttempt) || 0;
+  const cap = Number(result.repairAttemptCap) || 0;
+  let budget = "";
+  if (attempt > 0 && cap > 0) {
+    budget =
+      ` This is automatic repair attempt ${attempt} of ${cap}.` +
+      (attempt >= cap ?
+        " It is the last one: if it fails, report the failure to the user instead of redeploying again."
+      : "");
+  }
+  return (
+    `Deploy of ${payload.targetRepo}${payload.branch ? ` (branch ${payload.branch})` : ""} to environment "${payload.environment}" started.` +
+    ` It deploys ${payload.branch || "that branch"} as it exists on GitHub, so confirm any repair was pushed.` +
+    ` Poll the radius_deploy_status tool until it reports success or failed.${budget}`
+  );
 }
 
 // Reject a payload that would deploy something unintended rather than guessing.

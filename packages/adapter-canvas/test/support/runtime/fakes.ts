@@ -15,7 +15,8 @@ import {
   buildDeployPayload,
   validateDeployPayload,
   validateDeployAttempt,
-  summarizeDeployStatus
+  summarizeDeployStatus,
+  describeDeployStarted
 } from "../../../src/deploy-tools.js";
 import {
   getSourceRefResources,
@@ -35,7 +36,10 @@ import type {
   RadiusExtensionDependencies,
   WorkspaceContext
 } from "../../../src/runtime/dependencies.js";
-import type { CanvasServerEntry } from "../../../src/server.js";
+import type {
+  CanvasServerEntry,
+  SessionPromptMessage
+} from "../../../src/server.js";
 import type { CanvasGraphResource } from "../../../src/shared.js";
 
 export interface FakeServer {
@@ -138,7 +142,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       instanceId: string;
       state?: { workspacePath?: string };
     }) => Promise<unknown>;
-    sessionPromptHandler?: (prompt: string) => Promise<unknown>;
+    sessionPromptHandler?: (
+      prompt: string | SessionPromptMessage
+    ) => Promise<unknown>;
   } = {};
 
   const deps: RadiusExtensionDependencies = {
@@ -223,7 +229,8 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       buildDeployPayload,
       validateDeployPayload,
       validateDeployAttempt,
-      summarizeDeployStatus
+      summarizeDeployStatus,
+      describeDeployStarted
     },
     sourceRefs: {
       getSourceRefResources,
@@ -274,7 +281,12 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       )
     },
     operations: {
-      setupInFlight: vi.fn(() => false)
+      setupInFlight: vi.fn(() => false),
+      hasActiveEnvironmentTasks: vi.fn((_instanceId: string) => false),
+      markEnvironmentInstanceShuttingDown: vi.fn(),
+      onEnvironmentTasksSettled: vi.fn(
+        (_instanceId: string, _listener: () => void) => () => {}
+      )
     },
     radiusAppBicepSkill: vi.fn(
       (repoPath?: string) => `SKILL.md content for ${repoPath || "."}`

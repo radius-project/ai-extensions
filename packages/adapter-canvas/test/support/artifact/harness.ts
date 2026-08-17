@@ -41,17 +41,20 @@ export interface ArtifactRegistrationSnapshot {
 }
 
 interface ChildMessage {
-  type: "registered" | "ready" | "shutdown" | "blocked";
+  type:
+    "registered" | "ready" | "shutdown" | "blocked" | "page" | "render-error";
   snapshot?: ArtifactRegistrationSnapshot;
   closeCount?: number;
   kind?: string;
   detail?: string;
+  html?: string;
 }
 
 export interface ArtifactSmokeResult {
   registration: ArtifactRegistrationSnapshot;
   closeCount: number;
   stderr: string;
+  renderedPage: string;
 }
 
 function waitForExit(child: ChildProcess): Promise<number | null> {
@@ -114,6 +117,7 @@ export async function runArtifactSmoke(
   let registration: ArtifactRegistrationSnapshot | undefined;
   let ready = false;
   let closeCount = 0;
+  let renderedPage: string | undefined;
   let failure: Error | undefined;
   child.stderr?.on("data", (chunk: Buffer) => {
     if (stderr.length < 16_384) stderr += chunk.toString();
@@ -125,6 +129,12 @@ export async function runArtifactSmoke(
     else if (raw.type === "blocked") {
       failure = new Error(
         `Artifact attempted ${raw.kind}: ${raw.detail ?? "unknown target"}`
+      );
+    } else if (raw.type === "page") {
+      renderedPage = raw.html;
+    } else if (raw.type === "render-error") {
+      failure = new Error(
+        `Artifact page render failed: ${raw.detail ?? "unknown error"}`
       );
     }
   });
@@ -139,6 +149,23 @@ export async function runArtifactSmoke(
     if (!registration || !ready) {
       throw new Error(
         `Artifact did not register within ${timeoutMs}ms. stderr: ${stderr.slice(-2000)}`
+      );
+    }
+
+    child.send({ type: "render-page" });
+    const renderDeadline = Date.now() + timeoutMs;
+    while (
+      !failure &&
+      renderedPage === undefined &&
+      Date.now() < renderDeadline
+    ) {
+      if (child.exitCode !== null) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    if (failure) throw failure;
+    if (renderedPage === undefined) {
+      throw new Error(
+        `Artifact did not render a page within ${timeoutMs}ms. stderr: ${stderr.slice(-2000)}`
       );
     }
 
@@ -167,7 +194,7 @@ export async function runArtifactSmoke(
         `Artifact subprocess exited with ${exitCode}. stderr: ${stderr.slice(-2000)}`
       );
     }
-    return { registration, closeCount, stderr };
+    return { registration, closeCount, stderr, renderedPage };
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGKILL");

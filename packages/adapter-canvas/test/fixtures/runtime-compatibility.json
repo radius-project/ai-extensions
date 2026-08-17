@@ -109,6 +109,11 @@
     },
     {
       "method": "POST",
+      "path": "/api/operations",
+      "match": "exact"
+    },
+    {
+      "method": "POST",
       "path": "/api/azure-auto-setup",
       "match": "exact"
     },
@@ -221,6 +226,16 @@
       "method": "POST",
       "path": "/api/discover",
       "match": "exact"
+    },
+    {
+      "method": "POST",
+      "path": "/api/operations/:operationId/resume/:code",
+      "match": "template"
+    },
+    {
+      "method": "POST",
+      "path": "/api/operations/:operationId/abandon",
+      "match": "template"
     }
   ],
   "htmlMarkers": {
@@ -229,7 +244,7 @@
     "planned": ["Plan Deployment", "/api/plan-graph"],
     "graph-diff": ["id=\"graph-container\"", "/api/diff-branches"],
     "deployed": ["id=\"graph-container\"", "/api/deployed-graph"],
-    "environment": ["id=\"pane-credentials\"", "/api/create-environment"],
+    "environment": ["id=\"pane-credentials\"", "/api/operations"],
     "deploying": ["id=\"deploy-branch-select\"", "/api/deploy"]
   },
   "branchBehavior": {
