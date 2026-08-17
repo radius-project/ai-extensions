@@ -56,19 +56,19 @@ This decision is approved as the direction of work. The companion [test plan](./
 
 The approved architecture describes a target, not the current contents of `main`.
 
-| Phase | Current state                                                                                                           | Evidence                                                                                                                           |
-|-------|-------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| 0     | Complete: recorded compatibility and coverage, then removed four legacy action/tool pairs                               | [#318](https://github.com/radius-project/ai-extensions/pull/318)                                                                   |
-| 1     | Complete: extracted runtime factories and added unit, runtime-integration, and artifact checks                          | [#288](https://github.com/radius-project/ai-extensions/pull/288), [#318](https://github.com/radius-project/ai-extensions/pull/318) |
-| 2     | In review, not merged: #339 adds server scaffolding; all 37 routes remain on the explicitly inventoried legacy fallback | [#339](https://github.com/radius-project/ai-extensions/pull/339)                                                                   |
-| 3     | Not started: extract the shared page shell and page renderers                                                           | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                 |
-| 4     | Not started: extract importable browser modules and generate their inline bundles                                       | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                 |
-| 5     | Not started: consolidate the complete Node integration and built-extension suites                                       | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                 |
-| 6     | Not started: add required Chromium behavior, journey, accessibility, and keyboard gates                                 | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                 |
-| 7     | Not started: add reviewed visual baselines and extended resilience coverage                                             | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                 |
-| 8     | Not started: qualify the controlled real-host suite and require it before release                                       | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                 |
+| Phase | Current state                                                                                       | Evidence                                                                                                                                                                                                 |
+|-------|-----------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 0     | Complete: recorded compatibility and coverage, then removed four legacy action/tool pairs           | [#318](https://github.com/radius-project/ai-extensions/pull/318)                                                                                                                                         |
+| 1     | Complete: extracted runtime factories and added unit, runtime-integration, and artifact checks      | [#288](https://github.com/radius-project/ai-extensions/pull/288), [#318](https://github.com/radius-project/ai-extensions/pull/318)                                                                       |
+| 2     | Complete: assigned all 40 local API routes to named owners and removed the legacy fallback          | [#339](https://github.com/radius-project/ai-extensions/pull/339) through [#382](https://github.com/radius-project/ai-extensions/pull/382)                                                                |
+| 3     | Complete: extracted the shared page shell and page renderers while preserving all seven page values | [#379](https://github.com/radius-project/ai-extensions/pull/379)                                                                                                                                         |
+| 4     | Complete: extracted browser behavior into tested TypeScript and removed duplicate behavior sources  | [#393](https://github.com/radius-project/ai-extensions/pull/393), [#394](https://github.com/radius-project/ai-extensions/pull/394), and [#395](https://github.com/radius-project/ai-extensions/pull/395) |
+| 5     | Not started: consolidate the complete Node integration and built-extension suites                   | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                                                                                       |
+| 6     | Not started: add required Chromium behavior, journey, accessibility, and keyboard gates             | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                                                                                       |
+| 7     | Not started: add reviewed visual baselines and extended resilience coverage                         | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                                                                                       |
+| 8     | Not started: qualify the controlled real-host suite and require it before release                   | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                                                                                       |
 
-The current accepted runtime surface is two actions, `get_graph_resources` and `update_source_refs`, and six tools: `radius_generate_app`, `radius_generate_pr_diff_markdown`, `radius_publish_custom_type_extension`, `radius_publish_recipe`, `radius_deploy`, and `radius_deploy_status`. The route compatibility inventory remains 37 routes. No Phase 2 route migration should be inferred from the scaffolding in #339.
+The current accepted runtime surface is two actions, `get_graph_resources` and `update_source_refs`, and six tools: `radius_generate_app`, `radius_generate_pr_diff_markdown`, `radius_publish_custom_type_extension`, `radius_publish_recipe`, `radius_deploy`, and `radius_deploy_status`. The authoritative Phase 2 inventory contains 40 local API routes with no legacy fallback.
 
 ## Objectives
 
@@ -113,21 +113,21 @@ Phase 1 implemented this boundary. Tests can now build the real runtime with a f
 
 ### Server boundary
 
-`src/server/` will contain an instance-scoped server container, request parsing and dispatch, one route table, eight API ownership families, page routing, and services for multi-stage workflows. State and caches must have an explicit scope. External behavior is supplied through narrow typed interfaces; missing behavior fails during construction rather than returning a success-shaped default.
+`src/server/` contains an instance-scoped server container, request parsing and dispatch, one route table, eight API ownership families, page routing, and services for multi-stage workflows. State and caches have an explicit scope. External behavior is supplied through narrow typed interfaces; missing behavior fails during construction rather than returning a success-shaped default.
 
 A route adapter should parse input, call a service, and serialize the result. Azure setup, environment, deployment, graph-build, operation, cache, and workflow state machines belong behind narrow services rather than inside route files. API families assign ownership but do not require one large file per family.
 
-Phase 2 is deliberately incremental. While old and new paths coexist, every pull request records the exact residual fallback inventory, runs the same request through both paths where practical, and starts the real loopback server for focused HTTP checks. The fallback is deleted only when its inventory reaches zero.
+Phase 2 landed incrementally. While old and new paths coexisted, each pull request recorded the exact residual fallback inventory, ran the same request through both paths where practical, and started the real loopback server for focused HTTP checks. The final slice removed the fallback after its inventory reached zero.
 
 ### Page boundary
 
-`src/pages/` will split the shared document shell from graph, credential/environment, and deployment renderers. Renderers accept typed state and retain URLs, stable IDs, escaping, serialized initial state, theme tokens, operation progress, and resume behavior.
+`src/pages/` splits the shared document shell from graph, credential/environment, and deployment renderers. Renderers accept typed state and retain URLs, stable IDs, escaping, serialized initial state, theme tokens, operation progress, and resume behavior.
 
-Renderer compatibility compares meaningful markup and state, not entire-page snapshots. Phase 3 does not rewrite browser behavior.
+Renderer compatibility compares meaningful markup and state, not entire-page snapshots. Phase 3 preserved browser behavior for the separate Phase 4 extraction.
 
 ### Browser boundary
 
-`src/browser/` will hold importable TypeScript for graph interaction, forms, navigation, heartbeat, polling, focus, timers, and status updates. Each entry has an explicit initializer and receives controlled browser services such as fetch, navigation, timers, and external link opening.
+`src/browser/` holds importable TypeScript for graph interaction, forms, navigation, heartbeat, polling, focus, timers, and status updates. Each entry has an explicit initializer and receives controlled browser services such as fetch, navigation, timers, and external link opening.
 
 The same TypeScript is used in tests and production. A build helper compiles each browser entry in memory into a self-contained inline script. Generated JavaScript is not committed, the extension's own browser modules are not fetched at runtime, and the packaged extension remains one file. The separate decision about whether to keep fetching pinned vendor libraries from unpkg remains open.
 
@@ -263,4 +263,4 @@ Each pull request is independently green and includes tests, controlled data, ha
 
 An early Phase 2 checkpoint produced green tests but route files of roughly 1,400–1,900 lines and a handler dependency object with about 60 members. The review rejected that shape. API families remain ownership labels, while multi-stage Azure, environment, deployment, and graph workflows move into smaller services that receive only the operations they use. Any production server file above 750 lines triggers an explicit decomposition review and requires a recorded exception.
 
-The review also established that Phase 2 must land as several green slices, with one route table, an exact residual fallback inventory, side-by-side contract tests during migration, focused real-loopback tests, and no incidental HTTP hardening. The current scaffolding proposal in #339 follows that model but does not migrate any of the 37 routes.
+The review also established that Phase 2 had to land as several green slices, with one route table, an exact residual fallback inventory, side-by-side contract tests during migration, focused real-loopback tests, and no incidental HTTP hardening. The completed sequence from #339 through #382 followed that model and ended with 40 owned routes and no fallback.
