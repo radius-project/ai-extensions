@@ -751,6 +751,24 @@ function stepSpec(step: OperationStageOrStep): ElementSpec {
   };
 }
 
+/**
+ * Name a resource in the customer's terms rather than the ledger's. The kind
+ * is a closed server vocabulary; anything unrecognised degrades to the honest
+ * generic noun instead of leaking an internal identifier, and the target is
+ * always kept so the entry stays identifiable.
+ */
+export function previewResourceLabel(entry: OperationPreviewEntry): string {
+  const labels: Readonly<Record<string, string>> = {
+    azure_app: "App Registration",
+    service_principal: "Service Principal",
+    federated_credential: "Federated credential",
+    role_assignment: "Role assignment",
+    github_environment: "GitHub environment",
+    workflow_file: "Workflow file"
+  };
+  return `${labels[entry.kind] ?? "Resource"}: ${entry.target}`;
+}
+
 function commandStatusText(action: OperationAction): string {
   return COMMAND_STATUS_TEXT[action.kind] ?? COMMAND_ACCEPTED_MESSAGE;
 }
@@ -1093,12 +1111,8 @@ export function initializeEnvironmentOperations(
 
   scope.onTeardown(unbindRollbackKeydown);
 
-  function previewLabel(entry: OperationPreviewEntry): string {
-    return entry.target;
-  }
-
   function manualPreviewLabel(entry: OperationPreviewEntry): string {
-    const label = previewLabel(entry);
+    const label = previewResourceLabel(entry);
     return entry.action === "" ? label : `${label} — ${entry.action}`;
   }
 
@@ -1124,12 +1138,12 @@ export function initializeEnvironmentOperations(
     const introEl = dom.byId(ROLLBACK_IDS.intro);
     if (introEl) introEl.textContent = action.description;
     setRollbackList(
-      (preview?.removes ?? []).map(previewLabel),
+      (preview?.removes ?? []).map(previewResourceLabel),
       ROLLBACK_IDS.removeList,
       ROLLBACK_IDS.removeBlock
     );
     setRollbackList(
-      (preview?.keeps ?? []).map(previewLabel),
+      (preview?.keeps ?? []).map(previewResourceLabel),
       ROLLBACK_IDS.keepList,
       ROLLBACK_IDS.keepBlock
     );

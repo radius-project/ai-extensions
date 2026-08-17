@@ -10,6 +10,7 @@ import {
   ROLLBACK_IDS,
   VERIFY_STATUS_PATH,
   initializeEnvironmentOperations,
+  previewResourceLabel,
   parseOperationResponse,
   parseVerifyStatus
 } from "./operations.js";
@@ -1913,6 +1914,27 @@ describe("operation commands", () => {
   });
 });
 
+describe("previewResourceLabel", () => {
+  it.each([
+    ["azure_app", "App Registration: radius-dev"],
+    ["service_principal", "Service Principal: radius-dev"],
+    ["federated_credential", "Federated credential: radius-dev"],
+    ["role_assignment", "Role assignment: radius-dev"],
+    ["github_environment", "GitHub environment: radius-dev"],
+    ["workflow_file", "Workflow file: radius-dev"]
+  ])("names a %s in the customer's terms", (kind, expected) => {
+    expect(
+      previewResourceLabel({ kind, target: "radius-dev", action: "" })
+    ).toBe(expected);
+  });
+
+  it("degrades an unfamiliar kind to a generic noun rather than leaking it", () => {
+    expect(
+      previewResourceLabel({ kind: "aks_cluster", target: "dev", action: "" })
+    ).toBe("Resource: dev");
+  });
+});
+
 describe("rollback confirmation", () => {
   const rollbackAction = {
     id: "rollback",
@@ -1957,21 +1979,22 @@ describe("rollback confirmation", () => {
     expect(browser.els[ROLLBACK_IDS.intro].textContent).toBe(
       "This cannot be undone."
     );
+    // Each entry is named in the customer's terms, not the ledger's.
     expect(
       browser.els[ROLLBACK_IDS.removeList].children.map(
         (child) => child.textContent
       )
-    ).toEqual(["radius-dev"]);
+    ).toEqual(["App Registration: radius-dev"]);
     expect(
       browser.els[ROLLBACK_IDS.keepList].children.map(
         (child) => child.textContent
       )
-    ).toEqual(["existing-sp"]);
+    ).toEqual(["Service Principal: existing-sp"]);
     expect(
       browser.els[ROLLBACK_IDS.manualList].children.map(
         (child) => child.textContent
       )
-    ).toEqual(["Contributor — Remove it"]);
+    ).toEqual(["Role assignment: Contributor — Remove it"]);
     expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe(
       "Roll back resources"
     );
@@ -2249,7 +2272,7 @@ describe("rollback confirmation", () => {
       browser.els[ROLLBACK_IDS.manualList].children.map(
         (child) => child.textContent
       )
-    ).toEqual(["Contributor"]);
+    ).toEqual(["Role assignment: Contributor"]);
   });
 
   it("keeps one key trap when the dialog is reopened without closing", () => {
