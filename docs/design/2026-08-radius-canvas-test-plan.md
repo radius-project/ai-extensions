@@ -6,77 +6,58 @@
 - **Tracking issue**: [#334](https://github.com/radius-project/ai-extensions/issues/334)
 - **Design PR**: [#282](https://github.com/radius-project/ai-extensions/pull/282)
 
-## How to use this plan
+## Purpose
 
-Start with the phase table to find what exists and what the next pull request must deliver. Use the test-layer table to choose the cheapest test that can represent a regression. Read the relevant phase for acceptance and checked-in evidence. Use the appendices for requirement IDs and the exact action, tool, route, page, lifecycle, journey, visual, and host inventories.
+The [test architecture](./2026-08-radius-canvas-test-architecture.md) explains the system, the problems this work addresses, and the chosen design. This plan tracks delivery, required checks, and the exact requirements. It does not repeat the architecture discussion.
 
-The companion [test architecture](./2026-08-radius-canvas-test-architecture.md) explains what Radius Canvas does, why the original structure resisted testing, and why the approved design extracts runtime, server, page, and browser boundaries without rewriting the interface.
+Start with the status table. Use the phase sections for the work still to come. Use the appendices when a pull request needs an exact action, tool, route, page, workflow, screenshot, or host case.
 
-### Phase and status
+## Current status
 
-| Phase | Current status                                                     | Purpose                                                              | Acceptance summary                                                                                                                            | Pull requests                                                                                                                                                                                                                                                                                                        |
-|-------|--------------------------------------------------------------------|----------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 0     | Complete                                                           | Record compatibility and coverage; remove obsolete action/tool pairs | Two actions, six tools, seven pages, the original 37-route baseline, branch behavior, markup, and artifact shape are recorded                 | [#318](https://github.com/radius-project/ai-extensions/pull/318)                                                                                                                                                                                                                                                     |
-| 1     | Complete                                                           | Extract the runtime from import-time session startup                 | RU-01–RU-21, focused runtime integration, artifact smoke, existing tests, typecheck, and build pass                                           | [#288](https://github.com/radius-project/ai-extensions/pull/288), [#318](https://github.com/radius-project/ai-extensions/pull/318)                                                                                                                                                                                   |
-| 2     | Implementation and closeout complete in stacked review; not merged | Extract the server, route ownership, and heavy workflows             | SU-01–SU-18; 40 declarations match 40 concrete handlers; zero residual fallback; gates are green except the documented Windows chmod baseline | Scaffolding [#339](https://github.com/radius-project/ai-extensions/pull/339) and route slices through Azure auto-setup are merged; deploy [#378](https://github.com/radius-project/ai-extensions/pull/378) and final closeout [#382](https://github.com/radius-project/ai-extensions/pull/382) remain open and green |
-| 3     | Complete and merged                                                | Split the page shell and renderers                                   | PU-01–PU-13; durable 20-case pre-extraction oracle; renderer, loopback, integration, artifact, typecheck, and build gates pass                | [#379](https://github.com/radius-project/ai-extensions/pull/379)                                                                                                                                                                                                                                                     |
-| 4     | Implementation complete and green in stacked review; not merged    | Make browser behavior importable and compile it inline               | BU-01–BU-14; 12 compiled entries; zero placeholders or duplicate legacy behavior sources; cumulative browser coverage is 100% in all metrics  | Foundation [#393](https://github.com/radius-project/ai-extensions/pull/393), graph [#394](https://github.com/radius-project/ai-extensions/pull/394), and forms/final removal [#395](https://github.com/radius-project/ai-extensions/pull/395)                                                                        |
-| 5     | Not started                                                        | Consolidate Node boundary suites                                     | Runtime integration, HTTP integration, and built-extension smoke pass without live services and become required PR/publish gates              | —                                                                                                                                                                                                                                                                                                                    |
-| 6     | Not started                                                        | Add required Chromium gates                                          | Browser component, browser functional, journeys, accessibility, and keyboard checks pass deterministically                                    | —                                                                                                                                                                                                                                                                                                                    |
-| 7     | Not started                                                        | Add visual and extended regression gates                             | Reviewed screenshots and non-duplicative resilience/platform checks are stable                                                                | —                                                                                                                                                                                                                                                                                                                    |
-| 8     | Not started                                                        | Qualify a real Copilot host                                          | Harness self-test and HOST-01–HOST-07 pass; unavailable or emulated results do not qualify a release                                          | —                                                                                                                                                                                                                                                                                                                    |
+| Phase | Status                       | Outcome                                                                                      | Evidence                                                                                                                                                                                                                                                           |
+|-------|------------------------------|----------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 0     | Complete                     | Recorded the original behavior and removed four obsolete action/tool pairs                   | [#318](https://github.com/radius-project/ai-extensions/pull/318)                                                                                                                                                                                                   |
+| 1     | Complete                     | Made extension setup and lifecycle behavior testable without a live Copilot session          | [#288](https://github.com/radius-project/ai-extensions/pull/288), [#318](https://github.com/radius-project/ai-extensions/pull/318)                                                                                                                                 |
+| 2     | Complete and merged          | Gave all 40 local API routes one owner and removed the old fallback path                     | [#339](https://github.com/radius-project/ai-extensions/pull/339) through [#382](https://github.com/radius-project/ai-extensions/pull/382)                                                                                                                          |
+| 3     | Complete and merged          | Split page rendering into smaller modules while preserving the seven page outputs            | [#379](https://github.com/radius-project/ai-extensions/pull/379)                                                                                                                                                                                                   |
+| 4     | Final pull request in review | Moved browser behavior into testable TypeScript and removed the duplicate JavaScript sources | Foundation [#393](https://github.com/radius-project/ai-extensions/pull/393) and graph [#394](https://github.com/radius-project/ai-extensions/pull/394) are merged; final browser behavior [#395](https://github.com/radius-project/ai-extensions/pull/395) is open |
+| 5     | Not started                  | Combine extension, local API, and packaged-extension checks into permanent CI gates          | —                                                                                                                                                                                                                                                                  |
+| 6     | Not started                  | Test the interface in real Chromium, including keyboard and accessibility behavior           | —                                                                                                                                                                                                                                                                  |
+| 7     | Not started                  | Add reviewed screenshots and scheduled reliability checks                                    | —                                                                                                                                                                                                                                                                  |
+| 8     | Not started                  | Test installation and panel lifecycle in a supported Copilot host before release             | —                                                                                                                                                                                                                                                                  |
 
-### Test priorities and enforcement
+Phase 4 meets BU-01–BU-14 in #395. The pull request's checks pass, but its branch must be brought up to date with `main` before merge.
 
-Test priority is independent of implementation phase: **P0** means Required PR gates, **P1** means Required browser gates, **P2** means Extended regression gates, and **P3** means Release qualification. Priority controls delivery order and where a test blocks; it does not make a lower-priority test optional when that test is the only faithful check of a boundary. A test is non-negotiable when a pull request changes the behavior it owns. Higher-level tests complement unit tests and never excuse missing focused unit coverage.
+## Rules for every change
 
-| Test layer            | Priority | Enforcement                                                                                                                    | Main regression caught                                                                        |
-|-----------------------|----------|--------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------|
-| Unit                  | P0       | Every affected pull request; no retries                                                                                        | Logic, validation, state, escaping, serialization, and error propagation                      |
-| Runtime integration   | P0       | Runtime, declaration, lifecycle, hook, action, tool, or branch-context changes; complete gate from Phase 5                     | Registration, open/reopen/close, callbacks, keepalive, and session routing                    |
-| HTTP integration      | P0       | Server, route, cache, stream, or destructive-operation changes; complete gate from Phase 5                                     | Real methods, paths, status, headers, bodies, streaming, cleanup, and fail-closed results     |
-| Built-extension smoke | P0       | Runtime, export, build, dependency, page, browser, skill, or packaging changes; complete gate and publish blocker from Phase 5 | Missing bundled code, bundled SDK, duplicate registration, broken startup, or broken shutdown |
-| Browser component     | P1       | Affected browser unit from Phase 6; one diagnostic retry with the original failure retained                                    | Real DOM events, focus, storage, and rendering behavior                                       |
-| Browser functional    | P1       | Affected page or cross-module browser behavior from Phase 6; one diagnostic retry with flake tracking                          | Forms, DOM state, polling, and browser HTTP interactions                                      |
-| Critical journey      | P1       | Affected supported journey from Phase 6; one traced diagnostic retry with flake tracking                                       | Regressions crossing renderers, browser code, local HTTP, navigation, and server state        |
-| Accessibility         | P1       | Every affected material page state from Phase 6; one diagnostic retry                                                          | WCAG 2.2 A/AA semantic violations                                                             |
-| Keyboard              | P1       | Every affected interactive page state from Phase 6; one diagnostic retry                                                       | Keyboard traps, bad tab order, focus loss, and missing announcements                          |
-| Visual                | P2       | Selected and affected stable states from Phase 7; one diagnostic retry and human-reviewed baseline changes                     | Layout, clipping, theme, graph, and status-presentation drift                                 |
-| Real-host             | P3       | Weekly/manual after qualification and non-negotiable before release; at most one diagnostic retry                              | Installation, discovery, panel, iframe, focus, close, reopen, and reconnect                   |
+- Add focused tests with the production change. Manual checks do not replace automated tests.
+- Use the simplest test that can reproduce the failure, then add a wider test only when the failure crosses a real boundary.
+- Keep tests local and repeatable. Do not use personal credentials, live cloud resources, mutable repositories, or public network assets.
+- Show external failures as failures. If identity or state cannot be confirmed, deployment and deletion must stop.
+- For the session repository, graph and plan views use the current worktree branch, not an assumed `main`.
+- Close servers, streams, processes, timers, browser sessions, and temporary workspaces after success or failure.
+- For local API changes, test cross-site mutation attempts, malformed bodies, approved request-size boundaries, path traversal, workspace confinement, and destructive actions that must stop safely.
+- Preserve the seven page values, retained action and tool contracts, current 40 routes, branch behavior, and the single packaged extension unless a separate approved change says otherwise.
 
-Platform-matrix and resilience runs are execution policies over these test layers rather than additional test types. Platform-specific unit, runtime-integration, and HTTP-integration tests are P0 when a pull request changes path, process, managed-binary, or source-link behavior and P2 scheduled protection otherwise. P2 resilience runs choose the cheapest faithful layer for partial responses, expiry, repeated polling, cleanup, and timeouts; their scheduled priority does not permit a known failure to remain unowned.
+## Required checks
 
-## Scope and target map
+| Check                      | Required when                                                                 | What it protects                                                       |
+|----------------------------|-------------------------------------------------------------------------------|------------------------------------------------------------------------|
+| Focused module tests       | Every behavior change                                                         | Rules, validation, state changes, escaping, and error handling         |
+| Extension setup tests      | Canvas setup, actions, tools, lifecycle, callbacks, or branch handling change | Registration, open, reopen, close, reconnect, and cleanup              |
+| Local API tests            | A page route, API route, cache, stream, or destructive action changes         | Requests, responses, errors, state, cleanup, and safe failure          |
+| Packaged-extension test    | Runtime, page, browser, dependency, build, or packaging changes               | Missing code, duplicate setup, broken startup, and broken shutdown     |
+| Chromium behavior tests    | Browser behavior changes after Phase 6 begins                                 | Real events, focus, forms, polling, navigation, and browser rendering  |
+| End-to-end workflow tests  | A supported workflow crosses the browser and server                           | Regressions that smaller tests cannot see                              |
+| Accessibility and keyboard | An interactive page or material page state changes after Phase 6 begins       | Unusable controls, poor focus order, missing announcements, and WCAG   |
+| Screenshot review          | A selected stable visual state changes after Phase 7 begins                   | Layout, clipping, theme, graph, and status presentation                |
+| Real-host check            | Before release after Phase 8 qualification                                    | Installation, discovery, panel lifecycle, focus, reopen, and reconnect |
 
-Only four concentrated boundaries move. Existing testable helpers stay in place and are supplied to the new code as controlled dependencies.
+Tests that do not open a browser do not retry. Browser and host checks may retry once to collect useful failure information, but the original failure remains visible and a retry-only pass is recorded as flaky. Setting a check aside requires a linked issue, owner, narrow scope, and clear end condition. Safety checks cannot be skipped or set aside.
 
-| Current area                                                                       | Target                                                                      | Responsibility                                                                                                                    |
-|------------------------------------------------------------------------------------|-----------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
-| [`extension.ts`](../../packages/adapter-canvas/src/extension.ts)                   | `src/runtime/`; thin `extension.ts` entry                                   | Canvas, actions, tools, hooks, lifecycle, and the single production `joinSession()` call                                          |
-| [`server.ts`](../../packages/adapter-canvas/src/server.ts)                         | `src/server/` container, request handler, route table, routes, and services | Per-instance state, HTTP translation, route ownership, and multi-stage workflows                                                  |
-| [`pages.ts`](../../packages/adapter-canvas/src/pages.ts)                           | `src/pages/` shell, graph, environment, and deployment renderers            | HTML, theme, navigation, stable IDs, escaping, and serialized initial state                                                       |
-| [`client.ts`](../../packages/adapter-canvas/src/client.ts) and inline page scripts | `src/browser/` entries, graph, forms, and shared helpers                    | Browser events, forms, graph behavior, navigation, polling, focus, and status                                                     |
-| Existing helpers                                                                   | Stay in `src/`                                                              | `operations.ts`, `verification-plan.ts`, `bicep.ts`, `deploy.ts`, `gh.ts`, `ghcr.ts`, `workspace.ts`, `source-refs.ts`, and peers |
-| Production build                                                                   | `build.mjs` plus the Phase 4 browser-bundle helper                          | One `plugins/radius/dist/extension.mjs` with inline browser code and external Copilot SDK imports                                 |
+## Standard local check
 
-Unit tests remain beside production modules as `*.test.ts`. All non-unit tests live under `packages/adapter-canvas/test/`: `integration/runtime`, `integration/http`, `integration/artifact`, `component`, `functional`, `e2e/journeys`, `accessibility`, `keyboard`, `visual`, `host`, plus shared `fixtures` and `setup`.
-
-### Short glossary
-
-- **Controlled fake**: a test implementation of an external operation that returns only declared results and throws on unexpected calls.
-- **Compatibility record**: checked-in expected metadata, schemas, routes, markup markers, or artifact imports used to detect drift.
-- **Forwarding module**: a temporary old import path that delegates to extracted code and contains no independent behavior.
-- **Self-contained inline script**: browser TypeScript compiled into text that runs immediately when inserted into a page; legacy documents call this an IIFE.
-- **Server-sent events (SSE)**: a streamed HTTP response made of named event frames.
-- **Side-by-side contract test**: the same request and controlled dependencies run through old and new implementations during migration.
-
-## Operational plan
-
-### Pull-request rule
-
-Every phase pull request is independently green and checks in the production change, focused unit tests, controlled data, harness updates, and the command or CI job that runs the new boundary check. A manual validation note is not an exit gate. A focused test becomes part of the permanent suite when that suite is consolidated; it is not rewritten or silently dropped.
-
-For repository source changes, the baseline local PR check is:
+Run the affected focused tests while working. Before completing a source change, run:
 
 ```console
 pnpm install --frozen-lockfile
@@ -86,189 +67,80 @@ pnpm run format:check
 pnpm run coverage
 pnpm run build
 pnpm run test:integration:runtime
+pnpm run test:integration:http
 pnpm run test:integration:artifact
 ```
 
-Run every additional affected suite introduced by the active phase. Phase 2 adds the checked-in HTTP integration command with its scaffolding; Phase 6 adds the Chromium commands. CI remains authoritative when a controlled host or operating-system matrix cannot run locally.
+CI is authoritative for checks that require a controlled operating system or host.
 
-### Checked-in evidence by phase
+## Completed and in-review phases
 
-| Phase | Evidence added with the production change                                                                                                                                                                                                                            |
-|-------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 0     | Compatibility records for canvas metadata, actions, tools, route methods/paths, selected markup, branch behavior, and artifact imports; coverage reports and summary validation                                                                                      |
-| 1     | Focused real-runtime checks with a fake SDK session; operation-aware keepalive; production artifact registration proving one session-join path                                                                                                                       |
-| 2     | Exact 40-route ownership proof with 40 declarations, 40 concrete handlers, and zero residual fallback; side-by-side route contracts; focused real-loopback cases for validation, failures, streams, caches, state, and fail-closed operations; facade/artifact smoke |
-| 3     | Durable 20-case pre-extraction semantic oracle; old-versus-extracted renderer contracts; stable markup, state, escaping, IDs, and markers; each page served through real loopback HTTP; artifact smoke                                                               |
-| 4     | Generated-script execution and renderer wiring; deterministic inline output, intended globals, no external runtime asset, and artifact smoke                                                                                                                         |
-| 5     | Complete runtime, HTTP, and artifact suites in a dedicated Node integration job                                                                                                                                                                                      |
-| 6     | Real-Chromium component, functional, journey, accessibility, and keyboard suites with controlled browser/server data and failure traces                                                                                                                              |
-| 7     | Reviewed visual baselines, update procedure, resilience cases, platform cases, and retry-only flake reporting                                                                                                                                                        |
-| 8     | Host harness self-test, HOST-01–HOST-07, isolated workspace, non-personal authentication, logs, and verified cleanup                                                                                                                                                 |
+### Phases 0–2: record behavior, then separate runtime and server work
 
-### Phase 0: compatibility and coverage
+Phase 0 recorded the supported actions, tools, pages, routes, branch behavior, selected markup, package shape, and coverage baseline. Phase 1 made extension setup and lifecycle behavior testable without connecting to a real Copilot session. Phase 2 moved all 40 API routes to named owners, tested requests through a real local server, and removed the old fallback path.
 
-Phase 0 records the contracts before extraction, measures aggregate and per-package V8 coverage, exposes coverage deltas in CI, removes the four approved legacy action/tool pairs, and updates references to removed tools.
+Completion evidence: the matching requirements in the appendices pass; all 40 route declarations match 40 working handlers; no fallback route remains; and the packaged extension still loads.
 
-Acceptance: the exact Phase 0 surface is recorded; current tests and build pass; coverage reports are deterministic; the Build job remains green. Phase 0 is complete through #318.
+### Phase 3: page rendering
 
-### Phase 1: runtime
+Phase 3 split the shared page shell from graph, credential, environment, and deployment pages. A fixed 20-case record compares meaningful markup, state, escaping, IDs, and messages with the earlier implementation.
 
-Phase 1 moves declaration and lifecycle behavior into factories that can be built without joining a real session. `extension.ts` constructs production dependencies, calls `joinSession()` once, and wires process lifecycle. Server, page, and browser code remain at their existing paths.
+Completion evidence: PU-01–PU-13 pass, all seven pages are served through the real local server, and #379 is merged.
 
-Acceptance: RU-01–RU-21 pass; existing lifecycle, hook, action, tool, and operation-in-flight assertions are retained; focused runtime integration and artifact registration pass; the full existing suite, typecheck, and production build pass. Phase 1 is complete through #288 and #318.
+### Phase 4: browser behavior in review
 
-### Phase 2: server
+Phase 4 moved graph, credential, environment, deployment, navigation, heartbeat, status, and polling behavior into importable TypeScript. Production builds those same modules into inline page scripts.
 
-Phase 2 replaces the global loopback host with instance-scoped state, explicit dependencies, one route table, route ownership modules, and smaller services for multi-stage work. It is delivered in ordered green slices:
+Completion evidence: BU-01–BU-14 pass; all 12 entries build safely and appear once; no extra browser file is requested while the page runs; the former `client.ts` and page-specific JavaScript strings are removed; browser coverage is 100% in all four measures; and extension, local API, page, build, and packaged-extension checks pass. Phases 0–4 do not claim real browser layout, focus, iframe, React Flow, accessibility, or keyboard coverage.
 
-1. Add production dependency construction, narrow server-lifecycle dependencies, instance state, the server container, and request/response primitives. Keep `server.ts` as the production forwarding module and route all unmigrated requests through an internal fallback.
-2. Add one route table containing method, path or prefix matching, body policy, owner, migration state, and handler. Its test compares the table with the Phase 0 compatibility record and exact fallback inventory.
-3. Migrate liveness/source, operation status, repositories, identity/credentials, then graphs/planning. Each slice adds direct handler tests, side-by-side contracts, focused real-loopback tests, and a green workspace gate.
-4. Migrate Azure discovery, environments, and deployments as thin HTTP adapters backed by services. Azure setup, environment create/list/status/delete, deployment dispatch/status/reset/delete, graph building, cache behavior, and workflows receive explicit state and only the external operations they use.
-5. Remove each route from fallback after its new owner passes. Delete fallback only when the inventory is empty, then prove forwarding-module and built-artifact compatibility.
-6. Consider request-size limits and centralized HTTP errors only after parity. If approved, ship them separately with explicit before-and-after HTTP contracts.
+## Remaining phases
 
-Phase 2 scaffolding in [#339](https://github.com/radius-project/ai-extensions/pull/339) delivered steps 1 and 2 and is merged. The route-family slices through Azure auto-setup are also merged. Deploy remains in open [#378](https://github.com/radius-project/ai-extensions/pull/378), with final closeout implemented in open stacked [#382](https://github.com/radius-project/ai-extensions/pull/382). The closeout's authoritative proof has 40 route declarations, 40 concrete handlers, and zero residual fallback. Its gates are green except for the documented untouched Windows `operation-store.test.ts` chmod expectation. Phase 2 is not complete on `main` until #378 and #382 land and the merged tree passes the acceptance gate.
+### Phase 5: permanent extension and server test gates
 
-Phase 2 semantic gates:
+Combine the extension setup, local API, and packaged-extension checks already introduced by earlier phases. Fill any missing lifecycle, route, cleanup, branch, resume, and package cases. Make the complete checks required for pull requests and publishing.
 
-- Preserve every current method, status, header, payload, stream frame, body behavior, cache scope, and fallthrough result during structural slices.
-- Do not introduce an incidental request limit, `413`, global JSON `500`, success fallback, stream truncation, or response shape.
-- If a server-sent event handler fails after headers, send that route's terminal error or completion frame and close exactly once.
-- Preserve whether environment/deployment caches, workflow synchronization throttles, operation access, callbacks, and activity state are process-wide, container-wide, or per instance; two-instance tests distinguish scopes.
-- Keep route ownership and dispatch in one table. Fail on duplicates, unowned routes, declarations without handlers, and any fallback route missing from the residual inventory.
-- Keep route adapters limited to HTTP input/output. Multi-stage Azure, environment, deployment, graph-build, operation, cache, and workflow logic belongs in narrow services.
-- Trigger an explicit decomposition review for any production server file above 750 lines; an exception must be recorded rather than assumed.
+Complete when all three suites run without live GitHub or cloud access, produce short logs with no secrets, and block regressions in CI.
 
-Acceptance: SU-01–SU-18 pass across success, validation, error, cache, operation, stream, and destructive branches; every route has exactly one owner; fallback is empty and deleted; external production adapters and global server maps are not imported by routes/services; existing canvas, core, and shared suites, typecheck, build, focused HTTP checks, and closing artifact checks pass after each slice.
+### Phase 6: real browser behavior
 
-### Phase 3: pages
+Run the interface in Chromium with controlled data. Cover the workflows in Appendix B, including graph details and links, credentials, safe environment and deployment actions, branch selection, recovery, progress, resume, keyboard use, and accessibility.
 
-Split the document shell from graph pages (`graph`, `planned`, `graph-diff`, `deployed`), environment pages (`credentials`, `environment`), and the deployment page (`deploying`). Keep browser scripts unchanged until Phase 4.
+Complete when these checks are repeatable without a public content network, personal login, or mutable repository, and useful traces are saved when they fail.
 
-Tests compare meaningful fragments and serialized state rather than relying on broad full-page snapshots. Any intentional accessibility semantic change is identified separately from structural compatibility.
+### Phase 7: screenshots and reliability
 
-Acceptance: PU-01–PU-13 pass; existing page state branches are retained; operation progress and resume remain equivalent; every renderer is served through focused real-loopback checks; the forwarding module and built artifact remain complete; full tests, typecheck, and build pass.
+Add the selected screenshots in Appendix D and scheduled checks for empty or partial data, expired caches, repeated polling, timeouts, multiple instances, cleanup, and Windows/macOS paths. Screenshot changes require a clear product reason and human review.
 
-Implementation is complete and merged through [#379](https://github.com/radius-project/ai-extensions/pull/379). It includes PU-01–PU-13 and a durable 20-case semantic oracle generated from the exact pre-extraction source.
+Complete when screenshots are stable, changed paths pass their reliability checks, and retry-only passes are recorded.
 
-### Phase 4: browser
+### Phase 8: supported-host qualification
 
-Add the in-memory browser build helper, shared fetch/navigation/timer/focus/polling helpers, form and graph modules, then entries for repository/branch, heartbeat, operation status, graph, credentials, environment, and deploying. The importable TypeScript becomes the only behavior source; production renderers inject its compiled inline scripts.
+Use a controlled Copilot host, non-personal authentication, and a disposable workspace to run HOST-01–HOST-07. The harness must distinguish a test-system failure from a product failure and prove cleanup.
 
-Phase 4 unit tests do not claim browser layout, real focus, React Flow, iframe, or accessibility coverage. Those begin in Phase 6.
+Complete when every host case passes before release. Skipped, simulated, or cleanup-incomplete runs do not count.
 
-Acceptance: BU-01–BU-14 pass; `client.ts` is removed or contains forwarding only; page templates contain no independent executable behavior; generated scripts are deterministic and inline-safe; production creates no new browser asset request; full tests, typecheck, build, and artifact checks pass.
+## Test data and safety
 
-Implementation is complete and green in the reviewable three-PR stack: browser foundation [#393](https://github.com/radius-project/ai-extensions/pull/393) at `c22c25c1bac96ed2a5ff585bb2cd99da8bc78ae5`, graph behavior [#394](https://github.com/radius-project/ai-extensions/pull/394) at `ed1a531228181c083553110a503d5d26e56b46a9`, and credentials, environments, deploying, shared operations, final renderer wiring, and legacy removal [#395](https://github.com/radius-project/ai-extensions/pull/395) at `1f4216178a9c94bf14bd05cb062fdc0824538156`. BU-01–BU-14 pass; all 12 browser entries compile deterministically and inject exactly once; `client.ts` and the legacy environment and deploying executable string sources are removed; placeholder and duplicate legacy behavior counts are zero; runtime integration, HTTP integration, built-extension smoke, typecheck, lint, formatting, build, version, and diff checks pass; and cumulative browser coverage is 100% statements, branches, functions, and lines. The canonical Windows coverage run retains only the pre-existing operation-store chmod assertion, while the exact supplemental run passes all configured thresholds. This phase does not claim browser layout, real focus, React Flow, iframe, accessibility, keyboard, or Chromium coverage; those begin in Phase 6.
+- Test data is small, readable, fixed, and uses obvious placeholder identities and secrets.
+- Unexpected calls fail the test instead of returning a default success.
+- Tests bind local servers to `127.0.0.1` on operating-system-assigned ports.
+- Logs and saved failure files remove credentials and inherited environment values.
+- Browser tests provide vendor code locally instead of downloading it from unpkg.
+- Coverage for a package may not fall below its checked-in baseline. New modules target at least 80% line coverage, 80% function coverage, and 70% branch coverage. Named safety and error cases remain required regardless of the percentage.
 
-### Phase 5: Node boundaries
+## Completion
 
-Consolidate the focused checks from Phases 1–4 and fill remaining cases:
+A phase starts only after the previous phase is green and its records are available. Keep each pull request reviewable and limited to its phase.
 
-- **Runtime integration**: declaration/schema serialization; open, action, reopen, close, rehydrate, and provider-failure routing; keepalive; worktree branch; explicit graph-diff branches; same-instance source-reference reload.
-- **HTTP integration**: destructive fail-closed behavior; operation lookup and safe resumability; deployment state/retry; worktree versus remote graph; plan outcomes; path confinement; credential errors; server-sent event, progress, heartbeat, cross-site mutation, malformed body, and cleanup contracts.
-- **Built-extension smoke**: exactly one session registration; expected canvas, actions, tools, hooks, pages, and browser entries; external SDK imports; no source-only/test path or missing dynamic asset; clean startup and shutdown.
-
-Acceptance: all three suites pass without live GitHub or cloud access, produce bounded secret-free logs, and become required pull-request and publish gates.
-
-### Phase 6: Chromium behavior
-
-Browser component and functional tests cover graph source links, details, diff status, single event binding, credentials, environment safety, setup progress and resume, deployment states and retry, repository/branch selection, heartbeat recovery, and unresolved planning states.
-
-Critical journeys cover J-01 and J-03–J-11 with the real renderers and loopback server. J-02 remains represented through its missing-application handoff path and may be combined with J-01 fixtures.
-
-Accessibility checks use WCAG 2.2 A/AA axe tags on every primary page and material loading, empty, error, and success state used by the journeys, with zero violations for configured rules. Keyboard checks cover logical tab order, visible unclipped focus, pointer-free controls, popup/dialog focus and Escape behavior, disabled semantics, associated and announced validation errors, status announcements, meaningful graph names, and diff state that is not conveyed by color alone.
-
-Acceptance: required browser gates pass deterministically without a public CDN, personal authentication, or mutable repository; traces and screenshots are retained on failure.
-
-### Phase 7: visual and extended regression
-
-Visual checks use Playwright Chromium on `ubuntu-latest`, a canonical 900 × 900 viewport, a 600 × 900 narrow behavioral viewport where needed, fixed locale/timezone/motion/fonts/assets/theme, and the VI-01–VI-07 states in Appendix D. Dynamic timestamps, ports, run IDs, and animation are fixed or narrowly masked. Broad masks and loose thresholds are prohibited. A baseline update needs an intended UI reason and human review of the diff.
-
-Extended regression covers empty repositories and selection states, malformed graph/vendor data, cache expiry, repeated polling, partial GitHub/CLI responses, timeouts, multiple instances and cleanup, Windows/macOS paths and source references, and Chromium link behavior. It must add unique coverage rather than repeat required gates.
-
-Acceptance: baselines are deterministic and reviewed; affected-path extended gates pass; scheduled failures are tracked; retry-only passes are recorded as flakes.
-
-### Phase 8: real-host qualification
-
-Prerequisites are a supported automatable Copilot desktop or CLI host, stable extension installation/discovery, non-personal test authentication, supported chat/tool/panel automation, an isolated disposable workspace with cleanup, and host/runtime/provider/renderer/loopback logs. A harness self-test distinguishes infrastructure failure from product failure and proves cleanup restores a known state.
-
-Acceptance: HOST-01–HOST-07 pass on the controlled runner without personal credentials. Unavailable, skipped, emulated, cleanup-incomplete, or contract-only results do not qualify a release.
-
-## Test data and controlled dependencies
-
-Fixtures are deterministic, minimal, readable, and immutable by default. Tests require no personal login or internet access. Each test owns its server, workspace, mutable state, and clock where applicable; paths are synthetic and assertions are platform-neutral.
-
-| Fixture set                            | Contents                                                                                                                                  |
-|----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
-| `repo-session`                         | `octo/app`, worktree branch `feature/test`, workspace `.radius/app.bicep`                                                                 |
-| `repo-remote`                          | Another repository with committed `main` and feature models                                                                               |
-| `graph-small`                          | Container, gateway, datastore, secret, connections, and source references                                                                 |
-| `graph-diff`                           | Added, removed, modified, and unchanged nodes plus added/removed edges                                                                    |
-| `planned-resolved`                     | Built-in resource types with registered recipe-pack outputs                                                                               |
-| `planned-unresolved-recipe`            | Existing type with no registered recipe pack                                                                                              |
-| `planned-unsupported`                  | Service not provisionable on Azure, with an explicit error                                                                                |
-| `credentials-azure`, `credentials-aws` | Verified/unverified profiles with placeholder identifiers                                                                                 |
-| `deploy-states`                        | Queued, in progress, success, failure, cancelled, timed out, and deleting                                                                 |
-| `operation-states`                     | Running, succeeded, warnings, action required, failed, partial, cancelled, acknowledged, and resumable records with redacted client views |
-| `external-errors`                      | GitHub 401/403/404/500, missing command, timeout, malformed JSON, Radius command failure, and replication lag                             |
-
-Controlled fakes cover GitHub contents, refs, branches, workflows, environments, deployments, packages, and identity; GHCR state bootstrap; `rad`, `az`, `aws`, `git`, and `gh`; workspace/filesystem identity; credential persistence; clocks; and polling. Tests assert both results and external calls. Any unspecified call throws.
-
-## CI, retries, artifacts, and coverage
-
-CI uses Node 24 and pnpm 11.19.0. The existing Build job on `ubuntu-latest` installs with the frozen lockfile, runs typecheck, lint, format check, unit coverage, and build, then uploads `plugins/radius/dist/`. Chromium installs only Playwright Chromium. Cache keys include the lockfile and Playwright version. HTTP workers use OS-assigned ports. Sharding is added only after measured need.
-
-| Gate                         | Trigger                                                                    | Blocking point                                                           | Retry                                         |
-|------------------------------|----------------------------------------------------------------------------|--------------------------------------------------------------------------|-----------------------------------------------|
-| Unit and coverage            | Every push and pull request                                                | Required now                                                             | None                                          |
-| Runtime integration          | Every pull request and `main` push                                         | Focused when introduced; complete gate in Phase 5                        | None                                          |
-| HTTP integration             | Every pull request and `main` push                                         | Focused when introduced; complete gate in Phase 5                        | None                                          |
-| Built-extension smoke        | Every pull request, `main` push, and publish                               | Focused when introduced; complete gate in Phase 5; always blocks publish | None                                          |
-| Browser component/functional | Every pull request                                                         | Required in Phase 6                                                      | One diagnostic retry; flake tracked           |
-| Critical journey             | Every pull request                                                         | Required in Phase 6                                                      | One traced diagnostic retry                   |
-| Accessibility/keyboard       | Every pull request                                                         | Required in Phase 6                                                      | One diagnostic retry                          |
-| Visual                       | Every pull request                                                         | Required for selected and affected states in Phase 7                     | One diagnostic retry; human-reviewed baseline |
-| Windows/macOS Node matrix    | Nightly and affected path/process/managed-binary/source-link pull requests | Required when path-filtered; advisory nightly                            | None                                          |
-| Extended resilience          | Nightly and on demand                                                      | Advisory; failure is tracked                                             | One diagnostic retry                          |
-| Real-host                    | Weekly, manual, and before release                                         | Release qualification only                                               | At most one diagnostic retry                  |
-
-Default test timeouts are 5 seconds for unit, 10 seconds for browser component/functional, 15 seconds for runtime/HTTP integration, 30 seconds for built-extension and each journey/accessibility/keyboard/visual case, and harness-defined bounded values for real-host. Tests use condition-based waits and controlled clocks. Fixed sleeps are allowed only when testing timer behavior.
-
-A retry-only pass is a flake. Quarantine requires a linked issue, named owner, narrow isolation, and expiry/remediation condition. Safety, branch, path-confinement, external-error, or destructive-operation tests cannot be quarantined.
-
-Upload `coverage/coverage-summary.json` and `coverage/lcov.info` on every run with bounded retention. On failure only, upload Playwright HTML, the first-retry trace, screenshots, visual expected/actual/diff images, machine-readable results, and relevant redacted extension/server logs.
-
-The accepted aggregate and per-package V8 baseline lives in version-controlled configuration and may not decrease without explicit design-review justification. New runtime, route, renderer, and browser modules target at least 80% line, 80% function, and 70% branch coverage. Generated scripts, vendored libraries, and fixtures are excluded. Named scenarios remain required regardless of percentages.
-
-## Security and compatibility
-
-- Pull-request tests use no personal credentials, inherited tokens, live cloud resources, mutable repositories, or live package publication.
-- Servers bind only to `127.0.0.1`; tests use OS-assigned ports.
-- HTTP checks explicitly cover cross-site mutation protection, malformed bodies, approved request-size boundaries, traversal, workspace confinement, and destructive fail-closed behavior.
-- RU-09 and RU-10 require path confinement for both publish tools.
-- Controlled data uses obvious placeholder secrets. Logs and artifacts redact credential-bearing requests, responses, and inherited environment values.
-- Tests inject vendor content rather than using unpkg.
-- Every harness closes servers, streams, subprocesses, browser contexts, workspaces, and installed extensions after success or failure.
-- Windows and macOS remain supported development environments and receive path/process/managed-binary/source-link Node coverage.
-- Except for the four Phase 0 removals recorded in Appendix A, later phases preserve canvas values, retained schemas, 37 route contracts, selected markup, branch behavior, and the single artifact.
-
-## Entry and completion criteria
-
-Entry for a phase: the previous phase is green; its compatibility and coverage records are available; the active pull request contains one reviewable seam and no preparatory work for a later phase.
-
-Overall completion: every CA, TL, RF, PG, LC, J, RU, SU, PU, and BU requirement has a passing owner or approved deferral; required PR and publish gates pass; visual baselines are reviewed; real-host qualification passes; no live credential or external mutation is needed; and the build remains one loadable `plugins/radius/dist/extension.mjs`.
+The full plan is complete when every requirement in the appendices has a passing test or an approved deferral, all required pull-request and publish checks pass, screenshots are reviewed, real-host qualification passes, no live credential or external mutation is needed, and the build still produces one loadable `plugins/radius/dist/extension.mjs`.
 
 ## Open decisions
 
-1. Should identity and credential routes share one file or use separate handler/service modules under the same ownership family?
-2. Should the Windows/macOS matrix block affected pull requests or remain advisory and nightly?
-3. How long should coverage and failure artifacts be retained?
-4. Should scheduled resilience failures create an issue automatically or only report?
-5. Which controlled runner owns real-host qualification and credential rotation?
-6. Should compatibility records for removed action/tool declarations remain permanently as history?
-7. What maximum request-body size and centralized HTTP error shape, if any, should be approved after route parity?
+1. Should Windows and macOS checks block affected pull requests or remain scheduled warnings?
+2. How long should coverage reports and failure files be retained?
+3. Which controlled runner will own real-host checks and credential rotation?
+4. Should production continue loading pinned vendor assets from unpkg, or should a later change package them?
+5. What request-size limit and common local API error format, if any, should be approved as a separate behavior change?
 
 ## Appendices
 
