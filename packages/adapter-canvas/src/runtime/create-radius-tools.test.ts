@@ -309,6 +309,35 @@ describe("RU-11: radius_deploy", () => {
     expect(result).toContain("started");
   });
 
+  it("passes the repair-loop position from the route through to the agent", async () => {
+    // The budget is only useful if it reaches the agent on every redeploy, so
+    // the tool has to surface what the route reports rather than drop it.
+    const { tools, deps } = setup();
+    deps.servers.set("radius-panel", {
+      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
+      baseUrl: "http://127.0.0.1:9999",
+      url: "http://127.0.0.1:9999/?page=deployed",
+      page: "deployed",
+      state: {
+        deployAttempt: {
+          id: "attempt-A",
+          targetRepo: "acme/widgets",
+          environment: "production",
+          branch: "main",
+          provider: "azure",
+          appFile: ".radius/app.bicep"
+        }
+      }
+    });
+    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ ok: true, repairAttempt: 3, repairAttemptCap: 5 })
+    );
+    const result = await findTool(tools, "radius_deploy").handler({
+      attemptId: "attempt-A"
+    });
+    expect(result).toContain("automatic repair attempt 3 of 5");
+  });
+
   it("repeats the last deploy from this session when called with no arguments", async () => {
     const { tools, deps } = setup();
     deps.servers.set("radius-panel", {

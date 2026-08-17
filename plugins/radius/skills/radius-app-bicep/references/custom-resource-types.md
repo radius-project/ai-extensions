@@ -22,7 +22,7 @@ Otherwise, do not generate a type. Report the gap to the user.
 
 - Custom types ALWAYS use the `Radius.Resources` namespace. Do not invent other namespaces and do not extend the predefined `Radius.*` namespaces.
 - The type name is a lowerCamelCase plural noun for the resource, for example `Radius.Resources/azureServiceBusNamespaces`.
-- Define only the properties the application actually reads or writes, plus the Radius base properties (`environment`, `application`) and the read-only outputs the application consumes (host, endpoint, port, connection string, managed-secret name). Do NOT invent properties the application does not use.
+- Define only the properties the application actually reads or writes, plus the base properties this manifest always declares (`environment`, `application`, `codeReference`) and the read-only outputs the application consumes (host, endpoint, port, connection string, managed-secret name). Do NOT invent properties the application does not use.
 
 ## Generation flow
 
@@ -47,6 +47,9 @@ types:
             application:
               type: string
               description: "(Optional) The Radius Application ID."
+            codeReference:
+              type: string
+              description: "(Optional) Repo-relative source path for graph deep-linking; metadata only, ignored by the recipe."
             # Developer inputs the application sets:
             <inputProperty>:
               type: string            # or integer / boolean
@@ -69,6 +72,7 @@ types:
 
 Rules:
 - Base properties `environment` (required) and `application` (optional) are always present.
+- `codeReference` (optional, `type: string`) is always declared too. A generated custom type compiles to a **closed** object built from this manifest, so do not rely on it picking up the base properties that built-in types get from Radius's base resource schema: unless the schema declares `codeReference`, authoring it on a custom-type resource fails with `BCP037`. Declare the property explicitly; do NOT use `additionalProperties: true`, which would disable validation for every stray property. Never list `codeReference` in `required`.
 - Developer inputs are plain typed properties; use `enum: [...]` for a fixed value set.
 - Mark every sensitive input or sensitive output `x-radius-sensitive: true`.
 - Read-only outputs set `readOnly: true` and are populated by the recipe; do not list them in `required`.
@@ -77,6 +81,8 @@ Rules:
 ### 2. Publish the extension locally: call `radius_publish_custom_type_extension`
 
 Compile the manifest into a local Bicep extension co-located with `app.bicep` by calling the `radius_publish_custom_type_extension` tool (never invoke `rad` directly). By default it reads `.radius/custom-types.yaml` and writes `.radius/custom-types.tgz`; pass `manifestPath` / `targetPath` only if you used different names.
+
+Re-run this tool after ANY edit to `custom-types.yaml` — the compiled `custom-types.tgz` is what `app.bicep` validates against, so a schema change (for example adding `codeReference` to a type that predates that rule) has no effect until the extension is republished.
 
 `--target` is a local file path here (not an OCI reference), so the extension ships alongside `app.bicep` and needs no registry. The tool runs the extension-managed `rad` binary internally.
 
@@ -195,6 +201,7 @@ Use the custom type as `Radius.Resources/<typeNamePlural>@2025-08-01-preview` an
 ## Validation
 
 - `app.bicep` compiles with both the `radius` extension and the local custom-types extension.
+- Every generated type declares an optional `codeReference` string, and `custom-types.tgz` was republished from the manifest that declares it.
 - `custom-types.yaml`, `custom-types.tgz`, and `custom-recipe-pack.bicep` exist in `.radius/`, plus `<type>-recipe.bicep` when one was authored.
 - The recipe pack `source` resolves: a pinned MCR AVM path (4a), or a GHCR path that was actually published (4b).
 - The recipe pack `parameters` cover the module's required inputs (via `{{context}}`), and `outputs` map every `readOnly` property of the type (sensitive ones under `secrets`).

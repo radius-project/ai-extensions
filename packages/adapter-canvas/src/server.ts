@@ -1,6 +1,6 @@
 // Canvas adapter — HTTP server host for the webview.
 //
-// Owns the local loopback server that backs each canvas instance: the ~21-route
+// Owns the local loopback server that backs each canvas instance: the 40-route
 // request handler (parse request -> call an @radius-project/core use-case or adapter
 // helper -> serialize), the page router, and the idempotent server lifecycle
 // (stable per-instance port, reuse on re-open). The only product logic here is
@@ -8,24 +8,21 @@
 // adapter modules (pages/deploy/infra/gh). No SDK surface — that stays in
 // extension.ts.
 
-import { createServer } from "node:http";
-import type {
-  IncomingMessage,
-  Server as HttpServer,
-  ServerResponse
-} from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { rmSync } from "node:fs";
+import { rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   computeGraphDiff,
+  deployStatusKeys,
   fetchBicepFromRepo,
   fetchRecipePack,
+  projectDeployedGraph,
   resolveRecipeOutputs,
-  filterGraphVisualizationResources,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
-  stateRegistryForEnvironment,
-  buildEnvironmentSuffix
+  stateRegistryForEnvironment
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import { ensureVendorScripts } from "./vendor.js";
@@ -36,10 +33,14 @@ import {
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
-  getPreferredGitHubLogin,
   setPreferredGitHubLogin
 } from "./shared.js";
-import type { CanvasGraphResource, CanvasState, GraphView } from "./shared.js";
+import type {
+  CanvasGraphResource,
+  CanvasState,
+  DeployErrorKind,
+  GraphView
+} from "./shared.js";
 import {
   fetchFileFromRepo,
   github,
@@ -54,44 +55,18 @@ import {
   getGitHubIdentity,
   switchGhAccount,
   getGhPackageCredentials,
-  resetGhIdentityCache,
-  primeGhIdentity,
-  setPreferredGhLogin
+  resetGhIdentityCache
 } from "./gh.js";
 import type { CliOptions } from "./gh.js";
-import type { ResolveOidcSubjectResult } from "./azure-oidc.js";
 import {
-  resolveOidcSubject,
-  findLegacyMutableCredentialName,
-  buildAppCreateArgs,
   buildAppDeleteArgs,
-  buildAppOwnerAddArgs,
-  buildAppOwnerListArgs,
-  buildAppTagPatchArgs,
-  buildAppTagShowArgs,
-  buildRadiusAppProvenanceTags,
-  isServiceManagementReferenceError,
-  isAppOwnerAlreadyAssignedError,
-  selectMissingFederatedCredentials,
-  decideExistingClientId,
   isAzResourceNotFound,
-  decideRadiusAppOwnership,
-  decideAppSelection,
-  missingRequiredAppTags,
-  parseAppTags,
-  parseDirectoryObjectIds,
   parseServedReposFromSubjects,
-  validateAppRegistrationName,
   isUuid,
   isValidRepoSlug,
   isAksClusterName,
   isResourceGroupName,
   GITHUB_API_VERSION
-} from "./azure-oidc.js";
-import type {
-  GitHubJsonResponse,
-  GitHubJsonRunner,
-  RadiusAppProvenanceInput
 } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage } from "./ghcr.js";
 import {
@@ -112,7 +87,10 @@ import {
   toSafeRepoRelPath,
   workspaceGraphJsonPath
 } from "./workspace.js";
-import { DEFAULT_CANVAS_PAGE } from "./runtime/hooks.js";
+import {
+  DEFAULT_CANVAS_PAGE,
+  DEPLOY_REPAIR_ATTEMPT_CAP
+} from "./runtime/hooks.js";
 import {
   buildVerifyWorkflowDispatchArgs,
   planCredentialVerification
@@ -170,33 +148,27 @@ import {
   generatePortalUrl,
   syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE,
-  DEPLOY_AZURE_FILE,
-  DELETE_APP_DISPATCHER_FILE,
-  DELETE_AZURE_FILE
+  DEPLOY_AZURE_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
   findWorkflowRun,
   getRunDetail,
   fetchRunLog,
-  fetchLiveDeployLog,
-  fetchLiveActivityLog,
-  fetchLiveControlPlaneLog,
-  fetchDeployState,
-  createDeployStatusReader,
-  appNameForGraphTag,
-  normalizeDeployedGraph,
-  rewireDeployedGraphChain,
-  reduceActivityLog,
-  applyActivityToResources,
   extractErrorLines,
   extractGitHubActionsStepLog,
   extractRadDeployError,
   explainOidcEnterpriseClaim,
-  explainRepoAccessForEnvSetup,
-  parseResourceProgress,
-  parseRadDeployLog
+  explainRepoAccessForEnvSetup
 } from "./deploy.js";
+import {
+  applyDeployMessages,
+  applyDeployStatusToResources,
+  buildDeployMessageMap,
+  buildDeployStatusMap,
+  createDeployStatusReader,
+  settleDeployStatuses
+} from "./deploy-artifacts.js";
 import {
   graphPage,
   plannedGraphPage,
@@ -205,24 +177,45 @@ import {
   environmentPage,
   deployingPage
 } from "./pages.js";
+import { createCanvasServer } from "./server/create-canvas-server.js";
+import { createRequestHandler as createScaffoldRequestHandler } from "./server/create-request-handler.js";
+import {
+  syncRequestedPage,
+  type CanvasRequestContext
+} from "./server/request-context.js";
+import { createProductionCanvasServerDependencies } from "./server/dependencies.js";
+import { createServerRouteTable } from "./server/route-table.js";
+import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
+import { createDeploymentsRoutes } from "./server/routes/deployments.js";
+import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
+import { createRepositoriesRoutes } from "./server/routes/repositories.js";
+import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
+import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
+import { composeAzureAutoSetupDependencies } from "./server/azure-auto-setup-dependencies.js";
+import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
+import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
+import {
+  createGraphsPlanningRoutes,
+  createGraphsPlanningStreamRoutes
+} from "./server/routes/graphs-planning.js";
+import { createGraphsPlanningWritesRoutes } from "./server/routes/graphs-planning-writes.js";
+import { createGraphPlanningWorkflows } from "./server/routes/graph-workflows.js";
+import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
+import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
+import { createEnvironmentsRoutes } from "./server/routes/environments.js";
+import { createDeployRequestService } from "./server/services/deploy-request.js";
+import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
+import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
+import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
+import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
+import type { CanvasServerEntry } from "./server/types.js";
 
-export interface CanvasServerEntry {
-  server: HttpServer;
-  baseUrl: string;
-  url: string;
-  page: string;
-  state: CanvasState;
-}
+export type { CanvasServerEntry } from "./server/types.js";
 
 interface CommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
-}
-
-interface PullRequestState {
-  branch: string;
-  base: string;
 }
 
 export async function persistMutationCheckpoint({
@@ -276,56 +269,8 @@ export async function persistBestEffort({
   }
 }
 
-interface EnvironmentListResult {
-  error?: string;
-  stdout?: string;
-}
-
-interface VerifyRun {
-  status: string;
-  conclusion: string;
-}
-
-interface DiscoveryItem {
-  id: string;
-  name: string;
-  resourceGroup?: string;
-}
-
-interface DiscoveryResult {
-  clusters: DiscoveryItem[];
-  resourceGroups: DiscoveryItem[];
-  namespaces: string[];
-  vpcs: DiscoveryItem[];
-  subnets: DiscoveryItem[];
-  errors?: Record<string, string>;
-}
-
-interface BranchInfo {
-  name: string;
-  sha: string;
-}
-
-interface BranchResult {
-  branches?: BranchInfo[];
-  workspaceBranch?: string;
-  error?: string;
-}
-
 interface ChildProcessInput {
   stdin: { end(): unknown } | null;
-}
-
-function discoveryItems(value: unknown): DiscoveryItem[] {
-  if (!Array.isArray(value)) return [];
-  return value.map((item) => {
-    const fields = record(item);
-    return {
-      id: optionalString(fields.id),
-      name: optionalString(fields.name),
-      resourceGroup: optionalString(fields.resourceGroup)
-    };
-  });
 }
 
 export function endChildInput(child: ChildProcessInput): void {
@@ -426,11 +371,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function errorCode(error: unknown, fallback: string): string {
-  const value = record(error).code;
-  return typeof value === "string" && value ? value : fallback;
-}
-
 function record(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return {};
@@ -492,21 +432,642 @@ interface DeployStatusRecord {
   state?: string;
 }
 
-interface RoleAssignmentInput {
-  objectId: string;
-  role: string;
-  scope: string;
-  subscriptionId: string;
+// Composition root for the migrated `liveness-source` family. The handlers
+// receive only the three seams they use; the open handler is read through a
+// getter so the SDK entry can still register it after construction.
+const livenessSourceRoutes = createLivenessSourceRoutes({
+  getOpenSourceHandler: () => openSourceHandler,
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  toSafeRepoRelPath
+});
+
+function scheduleEnvironmentOperationForInstance(
+  instanceId: string,
+  operation: { operationId: string }
+): boolean {
+  const coordinator = instanceRequestCoordinators.get(instanceId);
+  if (!coordinator) {
+    console.error(
+      `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operation.operationId}.`
+    );
+    return false;
+  }
+  coordinator.scheduleEnvironmentOperation(operation);
+  return true;
 }
 
-interface FederatedCredential {
-  name: string;
-  subject: string;
-}
+// Composition root for the migrated `operations-status` family. Reads, creates,
+// and resumable actions each receive only the registry, mutation, persistence,
+// projection, and per-instance scheduling seams they invoke.
+const operationsStatusRoutes = createOperationsStatusRoutes(
+  {
+    latest: (repo) => operations.latest(repo),
+    latestAny: () => operations.latestAny(),
+    get: (operationId) => operations.get(operationId),
+    toClientView
+  },
+  {
+    isValidRepoSlug,
+    isResourceGroupName,
+    isAksClusterName,
+    isUuid,
+    buildStages,
+    createOperation,
+    startOperation: (op) => operations.start(op),
+    persistOperations: () => operations.persist(),
+    finish,
+    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+    errorMessage
+  },
+  {
+    getOperation: (operationId) => operations.get(operationId),
+    canResumeInput,
+    resumeAfterInput,
+    requireInput,
+    finish,
+    isTerminalState,
+    persistOperations: () => operations.persist(),
+    toClientView,
+    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+    errorMessage,
+    inputRequiredState: INPUT_REQUIRED_STATE
+  }
+);
 
-// Per-instance canvas servers: instanceId -> { server, url, page, state }.
-// Shared with the SDK entry (extension.ts) for open/close + shutdown.
-export const servers = new Map<string, CanvasServerEntry>();
+// Composition root for the migrated `repositories` family. Three seams: the
+// subprocess runner, a reader for the live instance state the branch cache is
+// written to, and the workspace-repo predicate, which stays defined here and is
+// injected rather than copied.
+const repositoriesRoutes = createRepositoriesRoutes({
+  cliExec: (command, args, options, callback) => {
+    cliExec(command, args, options, callback);
+  },
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  repoMatchesWorkspace
+});
+
+// Composition root for the migrated `deployments` family: the read routes, the
+// destructive POST /api/delete-deployment, and POST /api/deploy, whose
+// multi-stage runtime behavior lives in the deploy services composed below.
+//
+// The listing cache, its TTL and the deploy service are read through getters
+// because all three are declared further down the module and would otherwise be
+// in the temporal dead zone when this object is built at import time.
+const deploymentsRoutes = createDeploymentsRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  triggerDeployRepairHandoff,
+  deployHandoffStatus,
+  resolveRepoAppName,
+  resolveEnvDeployment,
+  ghOrThrow: (args) => ghOrThrow(args),
+  resetDeploymentViewState: (state, attemptId) => {
+    resetDeploymentViewState(state, attemptId);
+  },
+  get deployListCache() {
+    return deployListCache;
+  },
+  get deployListTtlMs() {
+    return DEPLOY_LIST_TTL_MS;
+  },
+  activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+  reserveDeploymentMutation: (state, reservation) =>
+    reserveDeploymentMutation(state, reservation),
+  releaseDeploymentMutation,
+  deploymentStatusBlocksMutation,
+  localDeploymentBlocksMutation: (state) =>
+    localDeploymentBlocksMutation(state),
+  ensureWorkflowsCurrent: (repo, environment, provider, only) =>
+    ensureWorkflowsCurrent(repo, environment, provider, only),
+  findWorkflowRun,
+  runGh: (args, timeout = 20000, extraEnv) =>
+    new Promise((resolve) => {
+      const opts: CliOptions = { timeout };
+      if (extraEnv) opts.env = extraEnv;
+      cliExec("gh", args, opts, (err, stdout, stderr) => {
+        resolve({
+          code: err ? err.code || 1 : 0,
+          stdout: (stdout || "").trim(),
+          stderr: stderr || ""
+        });
+      });
+    }),
+  readProcessEnv: () => process.env,
+  setTimer: (callback, ms) => setTimeout(callback, ms),
+  // Declared as a getter for the same temporal-dead-zone reason as the cache
+  // above: the deploy services are composed further down, after the workflow
+  // file names and the instance container they narrow over exist.
+  get deployRequest() {
+    return deployRequestService;
+  }
+});
+
+// Composition root for the migrated `azure-discovery` routes. Four seams: the
+// `az` runner (which carries the agent-session-stripped `cliExec` environment
+// the Azure setup routes run under), the general trimmed-stdout CLI runner the
+// discovery enumeration branches on, and the two pure `azure-oidc` helpers,
+// injected rather than imported by the handler module.
+const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
+  runAz: (command, args) => runCliCommand(command, args),
+  runCli: (command, args, options) => runCommand(command, args, options),
+  isUuid,
+  parseServedReposFromSubjects: (subjects) =>
+    parseServedReposFromSubjects(subjects as Iterable<unknown>)
+});
+
+const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
+  composeAzureAutoSetupDependencies({
+    isServerOwnedRequest: (instanceId, request) =>
+      instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
+      false,
+    lifecycle: {
+      get: (operationId) => operations.get(operationId),
+      isStale: (operation) => isStale(operation),
+      create: (input) => createOperation(input),
+      buildStages: () => buildStages(),
+      start: (operation) => operations.start(operation),
+      persist: () => operations.persist(),
+      report: (diagnostic) => operations.report?.(diagnostic),
+      finish: (operation, state, options) => {
+        finish(operation, state, options);
+      }
+    },
+    progress: {
+      enterStage: (operation, stage) => {
+        enterStage(operation, stage);
+      },
+      setStageState: (operation, stage, state) => {
+        setStageState(operation, stage, state);
+      },
+      hasWarnings: (operation) => hasWarnings(operation),
+      addLegacyStep: (operation, text) => {
+        addLegacyStep(operation, text);
+      },
+      setContext: (operation, patch) => {
+        setContext(operation, patch);
+      },
+      setCloudContext: (operation, provider, patch) => {
+        setCloudContext(operation, provider, patch);
+      },
+      requireInput: (operation, input) => {
+        requireInput(operation, input);
+      },
+      resumeAfterInput: (operation) => {
+        resumeAfterInput(operation);
+      }
+    },
+    artifacts: {
+      recordAzureApp: (operation, patch) => {
+        recordAzureApp(operation, patch);
+      },
+      recordServicePrincipal: (operation, patch) => {
+        recordServicePrincipal(operation, patch);
+      },
+      recordCreatedFederatedCredential: (operation, entry) => {
+        recordCreatedFederatedCredential(operation, entry);
+      },
+      recordCreatedRoleAssignment: (operation, entry) => {
+        recordCreatedRoleAssignment(operation, entry);
+      }
+    },
+    external: {
+      getGitHubIdentity,
+      preflightRepoAdmin: (repo) => preflightRepoAdmin(repo),
+      preflightGhcrPackageWriteAccess: () => preflightGhcrPackageWriteAccess(),
+      runGitHubJson: async (apiPath) => {
+        const result = await ghApiJson(apiPath, {
+          headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
+        });
+        return {
+          ok: result.ok,
+          status: result.status,
+          json:
+            (
+              result.json !== null &&
+              typeof result.json === "object" &&
+              !Array.isArray(result.json)
+            ) ?
+              record(result.json)
+            : null,
+          stderr: result.stderr
+        };
+      },
+      runAz: (args) => runCliCommand("az", args)
+    },
+    tempFile: {
+      createPath: () =>
+        join(
+          tmpdir(),
+          `radius-fed-cred-${randomBytes(12).toString("hex")}.json`
+        ),
+      write: (path, contents) => {
+        writeFileSync(path, contents, { mode: 0o600 });
+      },
+      remove: (path) => {
+        try {
+          unlinkSync(path);
+        } catch {}
+      }
+    },
+    ensureServicePrincipal,
+    finalizeSetupFailure,
+    persistMutationCheckpoint,
+    sleep: (milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
+  })
+);
+
+// Composition root for the credential-profile and GitHub-identity half of the
+// `identity-credentials` family. Ten narrow function seams: the three profile
+// store operations, the four gh identity operations, the advisory repo
+// preflight, the repo-slug guard, and the error formatter. `preflightRepoAdmin`
+// and `errorMessage` stay defined here and are injected rather than moved, so
+// the route module spawns nothing and touches no disk.
+const identityProfilesRoutes = createIdentityProfilesRoutes({
+  listCredentialProfiles,
+  saveCredentialProfile,
+  deleteCredentialProfile,
+  getGitHubIdentity,
+  resetGhIdentityCache,
+  switchGhAccount,
+  setPreferredGitHubLogin,
+  preflightRepoAdmin,
+  isValidRepoSlug,
+  errorMessage
+});
+
+// Composition root for the auth/verify half of the `identity-credentials`
+// family. Fourteen narrow function seams: the two OIDC generators and the Azure
+// credential validator from `infra.ts`, the CLI runner from `gh.ts`, the shared
+// credential writer and its save, an instance-state reader, and the GUID,
+// Azure-message, prompt-builder and error helpers that stay defined here. The
+// session-prompt hook is bound here too so the route module never reads the
+// mutable module-level handler.
+const identityAuthRoutes = createIdentityAuthRoutes({
+  validateAzureCredentials,
+  generateAzureOIDC,
+  generateAWSOIDC,
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  setSharedAzureCredentials: (credentials) => {
+    sharedCredentials.azure = credentials;
+  },
+  saveCredentials,
+  azureCredentialIdValidationError,
+  azureLoginRequiredResponse,
+  isCliCommandMissing,
+  isUuid,
+  buildAzureCliAssistMessage: azureCliAssistMessage,
+  runSessionPrompt: (prompt) =>
+    invokeSessionPrompt(sessionPromptHandler, prompt),
+  runCommand: (command, args, options) => runCommand(command, args, options),
+  errorMessage
+});
+
+// Composition root for the read-only half of the `graphs-planning` family. Ten
+// narrow function seams: the instance-state reader, the cached deploy-status
+// reader factory, the two artifact map builders, the status-key and projection
+// helpers from `@radius-project/core`, the canvas resource normalizer, the
+// message applier, and the record/error/workspace-repo helpers that stay defined
+// here. The reader factory is injected already-cached so the route module owns
+// no cache of its own.
+const graphsPlanningRoutes = createGraphsPlanningRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  createDeployStatusReader: (options) => cachedDeployStatusReader(options),
+  buildDeployStatusMap,
+  buildDeployMessageMap,
+  deployStatusKeys,
+  projectDeployedGraph: (modeled, statusByKey) =>
+    projectDeployedGraph(modeled as any[], statusByKey),
+  canvasGraphResources,
+  applyDeployMessages,
+  record,
+  errorMessage,
+  repoMatchesWorkspace
+});
+
+const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  defaultBranchForState,
+  prepareSourceRef: (entry, context) =>
+    prepareSourceRefResources(entry, "graph", context),
+  commitSourceRef: (entry, resources, context, expectedToken) =>
+    setSourceRefResources(entry, "graph", resources, context, expectedToken),
+  triggerAppBicepHandoff: (entry, repo, branch) =>
+    triggerAppBicepHandoff(entry, repo, branch, "graph"),
+  fetchBicepSelection: (entry, repo, branch) =>
+    fetchBicepSelection(entry, repo, branch),
+  workspaceGraphJsonPath: (state, bicepRepoPath) =>
+    workspaceGraphJsonPath(state, bicepRepoPath),
+  radArtifactsDirForSelection: (options) =>
+    radArtifactsDirForSelection({ ...options, github }),
+  buildGraphViaRad: (content, bicepPath, options) =>
+    buildGraphViaRad(content, bicepPath, options),
+  canvasGraphResources,
+  errorMessage
+});
+
+// Composition root for the write half of the `graphs-planning` family. The
+// complete dependency object is assembled here and nowhere else; the workflow
+// service receives narrow function seams and the shared modeling pipeline
+// receives its own eight, so neither module holds a GitHub client, spawns
+// `rad`, or touches disk directly.
+//
+// `github` is bound into `resolveRadArtifactsDir`, `fetchRecipePack` and
+// `resolveRecipeOutputs` here rather than injected, which is what keeps the
+// route modules free of it. The pure helpers (`defaultBranchForState`,
+// `computeGraphDiff`, `record`, …) are injected rather than imported by the
+// workflows, matching how the sibling families inject `repoMatchesWorkspace`.
+const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  pipeline: createGraphPipeline<CanvasServerEntry>({
+    fetchBicepSelection: (entry, repo, branch) =>
+      fetchBicepSelection(entry, repo, branch),
+    resolveRadArtifactsDir: (request) =>
+      radArtifactsDirForSelection({ ...request, github }),
+    buildGraphViaRad: (content, definitionFile, options) =>
+      buildGraphViaRad(content, definitionFile, options),
+    canvasGraphResources,
+    workspaceGraphJsonPath,
+    graphDefinitionHash,
+    radArtifactsFingerprint,
+    removeDirectory: (dir) => {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }),
+  triggerAppBicepHandoff,
+  prepareSourceRefResources: (entry, view, sourceRefInput) =>
+    prepareSourceRefResources(entry, view, sourceRefInput),
+  setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
+    setSourceRefResources(entry, view, resources, sourceRefInput, token),
+  isCurrentSourceRefToken,
+  defaultBranchForState,
+  canReuseModeledGraph,
+  addGraphProgress,
+  beginPlannedGraphRequest,
+  isCurrentPlannedGraphRequest,
+  fetchRecipePack: (provider) => fetchRecipePack(github, provider),
+  resolveRecipeOutputs: (resources, recipes, provider) =>
+    resolveRecipeOutputs(github, resources, recipes, provider),
+  computeGraphDiff: (baseResources, headResources) =>
+    computeGraphDiff(baseResources, headResources),
+  record,
+  optionalString,
+  errorMessage
+});
+
+// The route layer sees exactly one seam: the workflow service above. Parsing
+// and serialization are all it owns.
+const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
+  workflows: graphPlanningWorkflows
+});
+
+// The listing TTL and verify-workflow filename are declared here, before the
+// environments composition root reads them eagerly. Their canonical uses stay
+// below with the rest of the cache and verify constants; hoisting only the
+// declaration keeps the module-init read out of the temporal dead zone.
+const ENV_LIST_TTL_MS = 15000;
+const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
+
+// Composition root for the migrated `environments` family. Its remaining
+// route, `POST /api/create-environment`, is large enough to own a separate
+// composition root below. Every seam is a narrow named function: the two subprocess
+// runners (`cliExec`, `runCommand`), the repo-file fetch and bicep param parse
+// for `app-params`, the app-name and active-deployment resolvers plus the
+// error logger for `delete-environment`, three narrow accessors over the
+// module-level `envListCache` (so this module owns no cache), the workflow-sync
+// kickoff and clock for `list-environments`, and the operation-registry,
+// run-inspection, and finisher helpers for `verify-status`. `repoMatchesWorkspace`,
+// `errorMessage`, `VERIFY_WORKFLOW_FILE`, and `STAGE_VERIFY` stay defined here
+// and are injected rather than moved, so the route module spawns nothing and
+// reads no module-level mutable state.
+const environmentsRoutes = createEnvironmentsRoutes({
+  errorMessage,
+  repoMatchesWorkspace,
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  runCommand: (command, args, options) => runCommand(command, args, options),
+  fetchFileFromRepo: (repo, path, branch) =>
+    fetchFileFromRepo(repo, path, branch),
+  appParams,
+  resolveRepoAppName: (repo, branch) => resolveRepoAppName(repo, branch),
+  resolveEnvDeployment: (repo, environment, appName) =>
+    resolveEnvDeployment(repo, environment, appName),
+  logError: (message) => console.error(message),
+  cliExec: (command, args, options, callback) => {
+    cliExec(command, args, options, callback);
+  },
+  envListCacheGet: (repo) => envListCache.get(repo),
+  envListCacheSet: (repo, entry) => {
+    envListCache.set(repo, entry);
+  },
+  envListCacheDelete: (repo) => {
+    envListCache.delete(repo);
+  },
+  envListTtlMs: ENV_LIST_TTL_MS,
+  kickoffWorkflowSync: (repo, managedEnvironments, workingBranch) =>
+    kickoffWorkflowSync(repo, managedEnvironments, workingBranch),
+  now: () => Date.now(),
+  getOperation: (operationId) => operations.get(operationId),
+  hasCompleteVerificationIdentity,
+  findWorkflowRun: (repo, workflowFile, sinceMs, knownId) =>
+    findWorkflowRun(repo, workflowFile, sinceMs, knownId),
+  getRunDetail: (repo, runId) => getRunDetail(repo, runId),
+  fetchRunLog: (repo, runId) => fetchRunLog(repo, runId),
+  extractErrorLines: (logText, max) => extractErrorLines(logText, max),
+  extractGitHubActionsStepLog,
+  explainOidcEnterpriseClaim,
+  finish,
+  finishSucceeded,
+  persistBestEffort,
+  persistOperations: () => operations.persist(),
+  reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
+  verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
+  stageVerify: STAGE_VERIFY
+});
+
+// Composition root for `POST /api/create-environment`. The route's four seams
+// live in `create-environment*.ts`; everything they touch is injected here, so
+// the module spawns no process directly, imports no `node:fs`, and reads no
+// module-level mutable state. `isServerOwnedRequest` is deliberately a
+// per-request function rather than a value: the token is a per-instance
+// `randomUUID()` held by that instance's request coordinator, and this route is
+// reachable only through the internal loopback POST that carries it.
+const createEnvironmentRoutes = createCreateEnvironmentRoutes({
+  isServerOwnedRequest: (instanceId, request) =>
+    instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
+    false,
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  cliExec: (command, args, options, callback) =>
+    cliExec(command, args, options, callback),
+  readProcessEnv: () => process.env,
+  isValidRepoSlug,
+  getOperation: (operationId) => operations.get(operationId),
+  isStale: (operation) => isStale(operation),
+  createOperation,
+  buildStages,
+  startOperation: (operation) => operations.start(operation),
+  persistOperations: () => operations.persist(),
+  reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
+  finishFailed: (operation, failure) => {
+    finish(operation, "failed", { failure });
+  },
+  enterStage: (operation, stage) => {
+    enterStage(operation, stage);
+  },
+  errorMessage,
+  stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
+  stageConfigureEnvironment: STAGE_CONFIGURE_ENVIRONMENT,
+  addLegacyStep: (operation, text) => {
+    addLegacyStep(operation, text);
+  },
+  finalizeSetupFailure: (operation, input) =>
+    finalizeSetupFailure(operation, input as never),
+  persistMutationCheckpoint,
+  persistBestEffort,
+  runAzCommand: (args) => runCliCommand("az", args),
+  preflightRepoAdmin: (repo) => preflightRepoAdmin(repo),
+  preflightGhcrPackageWriteAccess: () => preflightGhcrPackageWriteAccess(),
+  bootstrapGHCRStatePackage: (input) =>
+    bootstrapGHCRStatePackage({
+      targetRepository: input.targetRepository,
+      registry: input.registry,
+      credentials: input.credentials as GhcrPackageCredentials
+    }),
+  stateRegistryForEnvironment,
+  getDefaultBranch: (repo) => getDefaultBranch(repo),
+  getBranchHeadSha: (repo, branch) => getBranchHeadSha(repo, branch),
+  createBranchRef: (repo, branch, sha) => createBranchRef(repo, branch, sha),
+  tempFile: {
+    write: (contents) => {
+      const path = join(
+        tmpdir(),
+        "radius-wf-commit-" +
+          Date.now() +
+          "-" +
+          Math.random().toString(36).slice(2) +
+          ".json"
+      );
+      writeFileSync(path, contents);
+      return path;
+    },
+    remove: (path) => {
+      try {
+        unlinkSync(path);
+      } catch {}
+    }
+  },
+  resolveGitHubEnvironmentCreateState,
+  recordGitHubEnvironment: (operation, patch) => {
+    recordGitHubEnvironment(operation, patch);
+  },
+  envListCacheDelete: (repo) => {
+    envListCache.delete(repo);
+  },
+  ociStateBackend: OCI_STATE_BACKEND,
+  defaultStateArchive: DEFAULT_STATE_ARCHIVE,
+  azureCredential: () => cloudCredential(sharedCredentials.azure),
+  awsCredential: () => cloudCredential(sharedCredentials.aws),
+  optionalString,
+  generateVerifyWorkflow: (environment, provider) =>
+    generateVerifyWorkflow(environment, provider),
+  generateDeployWorkflow: (environment, appFile) =>
+    generateDeployWorkflow(environment, appFile),
+  generateDeleteWorkflow: (environment) => generateDeleteWorkflow(environment),
+  recordCommittedWorkflowFile: (operation, entry) => {
+    recordCommittedWorkflowFile(operation, entry);
+  },
+  deleteLegacyDeployWorkflow: (repo) => deleteLegacyDeployWorkflow(repo),
+  createPullRequestApi: (repo, head, base, title, body) =>
+    createPullRequestApi(repo, head, base, title, body),
+  planCredentialVerification,
+  fetchFileFromRepo: (repo, path, branch) =>
+    fetchFileFromRepo(repo, path, branch),
+  buildVerifyWorkflowDispatchArgs,
+  verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
+  stageVerify: STAGE_VERIFY,
+  recordCleanupState: (operation, patch) => {
+    recordCleanupState(operation, patch);
+  },
+  recordCommitState: (operation, patch) => {
+    recordCommitState(operation, patch);
+  },
+  setStageState: (operation, stage, state) => {
+    setStageState(operation, stage, state);
+  },
+  finish: (operation, state, options) => {
+    finish(operation, state, options);
+  },
+  sleep: (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  now: () => Date.now()
+});
+
+// Built once at module initialization so table validation runs a single time
+// and a missing typed handler fails early rather than per instance.
+const serverRoutes = createServerRouteTable({
+  ...livenessSourceRoutes,
+  ...operationsStatusRoutes,
+  ...repositoriesRoutes,
+  ...deploymentsRoutes,
+  ...azureDiscoveryRoutes,
+  ...azureAutoSetupRoutes,
+  ...identityProfilesRoutes,
+  ...identityAuthRoutes,
+  ...graphsPlanningRoutes,
+  ...graphsPlanningStreamRoutes,
+  ...graphsPlanningWritesRoutes,
+  ...environmentsRoutes,
+  ...createEnvironmentRoutes
+});
+
+// Per-instance coordinators own the server token, background operation runner,
+// recovered verification monitors, and page/unmatched request handling. They are
+// released by the stopped hook when the instance stops.
+const instanceRequestCoordinators = new Map<
+  string,
+  ReturnType<typeof createInstanceRequestCoordinator>
+>();
+
+const canvasServer = createCanvasServer(
+  createProductionCanvasServerDependencies({
+    createRequestHandler: ({ instanceId, instances, markActivity }) => {
+      const coordinator = createInstanceRequestCoordinator(
+        instanceId,
+        () => instances.get(instanceId)?.baseUrl || ""
+      );
+      instanceRequestCoordinators.set(instanceId, coordinator);
+      return createScaffoldRequestHandler({
+        instanceId,
+        instances,
+        routes: serverRoutes,
+        handleUnmatchedRequest: coordinator.handleUnmatchedRequest,
+        // Server-owned internal calls must not refresh the webview activity
+        // clock, or the idle-respawn timer never fires.
+        markActivity: (request) => {
+          if (!coordinator.isServerOwned(request)) markActivity();
+        },
+        preRoute: preRouteCanvasRequest
+      });
+    },
+    onStarted: (instanceId) => {
+      shuttingDownInstances.delete(instanceId);
+      instanceRequestCoordinators
+        .get(instanceId)
+        ?.startRecoveredVerificationTasks();
+    },
+    onStopped: (instanceId) => {
+      instanceRequestCoordinators.delete(instanceId);
+    },
+    defaultPage: DEFAULT_CANVAS_PAGE,
+    preferredPort: preferredPortForInstance
+  })
+);
+
+// Compatibility facade shared with the SDK runtime during the route migration.
+export const servers = canvasServer.instances;
+
 let environmentOperationTestRunner:
   ((operationId: string) => Promise<void>) | null = null;
 
@@ -608,90 +1169,218 @@ export function addGraphProgress(
   return true;
 }
 
-// deployStatusReaderFromState - build a GHCR-first deployed-graph/status reader
-// from a canvas instance's state. The graph registry/tag are derived the same
-// way the deploy workflow producer derives them (from the environment's GHCR
-// state registry + the environment/app names), so the reader pulls the exact
-// artifact the deploy published. Falls back to the radius-deploy-status branch
-// when the environment/app/registry can't be resolved or the artifact is
-// absent.
+// deployStatusReaderFromState - build a deployed-graph/status reader for a
+// canvas instance's state.
 //
-// The app name is required to build the producer's "<environment>-<app>-latest"
-// tag. It's populated during the deploy flow, but on a fresh session (or when
-// the Deployed tab is opened without first deploying) it's derived here from the
-// repo's app.bicep — the SAME first-`name:`-literal extraction the producer uses
-// — and cached back into state so GHCR retrieval works across reloads.
+// Deploy status and the deployed application graph are published by the deploy
+// workflow as a workflow artifact (see ./deploy-artifacts.ts). Scope the read to
+// the run being monitored when there is one, so an in-flight deploy reports its
+// own status rather than the previous run's; otherwise read the newest matching
+// artifact repo-wide, which is what a fresh canvas session with no run in flight
+// needs.
+//
+// The application name only breaks ties between artifacts in the same
+// environment; it is never a lookup key and never a hard filter. That is why the
+// ordinary `resolveRepoAppName` is good enough here even though it falls back to
+// the repository's short name: a wrong guess cannot hide a real artifact.
 async function deployStatusReaderFromState(
   state: CanvasState,
   repo: string,
-  branch: string
+  branch: string,
+  runId?: number | string | null
 ) {
   const environment = state?.deployEnvName || state?.envName || "";
-  let app = state?.deployAppName || "";
-  if (!app && repo && environment) {
-    app = await resolveGraphAppName(
+  let application = state?.deployAppName || "";
+  if (!application && repo) {
+    application = await resolveRepoAppName(
       repo,
       branch || state?.deployingBranch || state?.graphBranch || ""
     );
-    if (app && state) state.deployAppName = app;
+    if (application && state) state.deployAppName = application;
   }
-  let stateRegistry = "";
-  if (repo && environment) {
-    try {
-      stateRegistry = stateRegistryForEnvironment(repo, environment);
-    } catch {
-      stateRegistry = "";
-    }
-  }
-  return createDeployStatusReader({ repo, environment, app, stateRegistry });
+  return cachedDeployStatusReader({
+    repo,
+    environment,
+    application,
+    runId: runId ?? state?.deployRunId ?? null
+  });
 }
 
-// resolveGraphAppName - extract the Radius app name for the GHCR graph tag using
-// the producer's exact rule (the first `name: '...'` literal in app.bicep). This
-// differs from resolveRepoAppName, which prefers the applications resource name
-// and falls back to the repo basename; the tag must match the producer's grep
-// byte-for-byte, so an unresolved name yields "" (reader stays on the branch).
-async function resolveGraphAppName(
-  repo: string,
-  branch: string
-): Promise<string> {
-  const ref = branch || "main";
-  for (const p of [".radius/app.bicep", "app.bicep"]) {
-    let raw: string;
-    try {
-      raw = await ghOrThrow([
-        "api",
-        `/repos/${repo}/contents/${p}?ref=${ref}`,
-        "--jq",
-        ".content"
-      ]);
-    } catch {
-      raw = "";
-    }
-    if (!raw) continue;
-    let decoded: string;
-    try {
-      decoded = Buffer.from(raw, "base64").toString("utf8");
-    } catch {
-      decoded = "";
-    }
-    const name = appNameForGraphTag(decoded);
-    if (name) return name;
+// createDeployStatusReader keeps its TTL cache, single-flight de-dup and
+// monotonic `sequence` guard in the reader instance, so building a fresh reader
+// per request makes all three inert and lets the deploy monitor and an
+// /api/deployed-graph poll download the same artifact concurrently. Cache
+// readers by their identity so callers reading the same deployment share one.
+const deployStatusReaders = new Map<
+  string,
+  ReturnType<typeof createDeployStatusReader>
+>();
+const MAX_DEPLOY_STATUS_READERS = 32;
+
+function cachedDeployStatusReader(
+  options: Parameters<typeof createDeployStatusReader>[0]
+): ReturnType<typeof createDeployStatusReader> {
+  const key = [
+    options.repo,
+    options.environment || "",
+    options.application || "",
+    options.runId ?? ""
+  ].join("\n");
+  const existing = deployStatusReaders.get(key);
+  if (existing) {
+    // Refresh LRU position so the cap evicts genuinely idle readers, not the
+    // one a live deploy is actively polling.
+    deployStatusReaders.delete(key);
+    deployStatusReaders.set(key, existing);
+    return existing;
   }
-  return "";
+  const reader = createDeployStatusReader(options);
+  deployStatusReaders.set(key, reader);
+  // Bounded: each run mints a new key (runId is part of it), so a long session
+  // cycling through deploys/environments must not grow the map without limit.
+  while (deployStatusReaders.size > MAX_DEPLOY_STATUS_READERS) {
+    const oldest = deployStatusReaders.keys().next().value;
+    if (oldest === undefined) break;
+    deployStatusReaders.delete(oldest);
+  }
+  return reader;
 }
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
 // and deploy pages snappy. Invalidated on environment creation.
-const ENV_LIST_TTL_MS = 15000;
 const envListCache = new Map<string, CachedPayload>();
 
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
 // across re-opens and the workflow poll. Invalidated when a deploy or delete is
-// dispatched (see /api/deploy and /api/delete-deployment).
+// dispatched: the deployments route family is handed this same map and evicts
+// from there, while the deploy dispatch service evicts through the
+// `invalidateDeployListCache` seam bound below.
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map<string, CachedPayload>();
+
+// A deploy request resolves branch and GitHub state asynchronously before
+// beginDeployAttempt marks the canvas state in progress. Reserve that window so
+// two near-simultaneous requests cannot both pass the conflict check and start.
+// Deploy reservations live through the background monitor; delete reservations
+// live through the short GitHub record-publication window. Failures release
+// immediately.
+export interface DeploymentDispatchReservation {
+  repo: string;
+  environment: string;
+  kind: "deploy" | "delete";
+  expiresAt: number;
+  attemptId?: string;
+}
+
+export const DEPLOYMENT_MUTATION_LEASE_MS = 30 * 60 * 1000;
+
+type DeploymentDispatchReservationInput = Omit<
+  DeploymentDispatchReservation,
+  "expiresAt"
+>;
+
+export function activeDeploymentMutation(
+  state: CanvasState,
+  now = Date.now()
+): DeploymentDispatchReservation | undefined {
+  const current = state.deploymentMutation;
+  if (current && current.expiresAt <= now) {
+    delete state.deploymentMutation;
+    return undefined;
+  }
+  return current;
+}
+
+export function reserveDeploymentMutation(
+  state: CanvasState,
+  reservation: DeploymentDispatchReservationInput,
+  now = Date.now()
+): DeploymentDispatchReservation | null {
+  if (activeDeploymentMutation(state, now)) return null;
+  const owner = {
+    ...reservation,
+    expiresAt: now + DEPLOYMENT_MUTATION_LEASE_MS
+  };
+  state.deploymentMutation = owner;
+  return owner;
+}
+
+export function releaseDeploymentMutation(
+  state: CanvasState,
+  reservation: DeploymentDispatchReservation
+): void {
+  if (state.deploymentMutation === reservation) delete state.deploymentMutation;
+}
+
+export function deploymentStatusBlocksMutation(status: unknown): boolean {
+  return (
+    status === "pending" || status === "in_progress" || status === "deleting"
+  );
+}
+
+export function localDeploymentBlocksMutation(
+  state: CanvasState,
+  now = Date.now()
+): boolean {
+  if (state.deployStatus !== "in_progress") return false;
+  return (
+    typeof state.deployStartedAt !== "number" ||
+    state.deployStartedAt + DEPLOYMENT_MUTATION_LEASE_MS > now
+  );
+}
+
+export function resolveDeploymentEnvironment(
+  state: CanvasState,
+  requestedEnvironment: unknown
+): string {
+  return (
+    (typeof requestedEnvironment === "string" && requestedEnvironment) ||
+    (typeof state.envName === "string" && state.envName) ||
+    ""
+  );
+}
+
+export function beginPlannedGraphRequest(state: CanvasState): number {
+  const generation =
+    typeof state.plannedRequestGeneration === "number" ?
+      state.plannedRequestGeneration + 1
+    : 1;
+  state.plannedRequestGeneration = generation;
+  state.plannedResources = null;
+  return generation;
+}
+
+export function isCurrentPlannedGraphRequest(
+  state: CanvasState,
+  generation: number
+): boolean {
+  return state.plannedRequestGeneration === generation;
+}
+
+export function resetDeploymentViewState(
+  state: CanvasState,
+  attemptId: unknown,
+  now = Date.now()
+): void {
+  const requestedAttemptId =
+    typeof attemptId === "string" ? attemptId : undefined;
+  if (
+    state.deployAttempt?.id &&
+    requestedAttemptId !== state.deployAttempt.id
+  ) {
+    return;
+  }
+  delete state.deployResult;
+  const mutation = activeDeploymentMutation(state, now);
+  if (
+    mutation?.attemptId &&
+    mutation.attemptId === requestedAttemptId &&
+    state.deployAttempt?.id === requestedAttemptId
+  ) {
+    releaseDeploymentMutation(state, mutation);
+  }
+}
 
 // Throttle for the background workflow drift-sync kicked off from the
 // environments listing: repo -> last-attempt epoch ms. Keeps the sync from
@@ -740,7 +1429,8 @@ function kickoffWorkflowSync(
 
 // Bare filename of the shared verify-credentials workflow (matches
 // infra.ts's VERIFY_WORKFLOW_PATH). Used to target a pre-dispatch sync.
-const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
+// Declared alongside the other verify constants; see the composition-root copy
+// above for the eagerly-read value.
 
 // Awaited, best-effort pre-dispatch workflow sync. Before the extension runs a
 // committed workflow (deploy / delete / verify), ensure that workflow's files
@@ -945,7 +1635,7 @@ export function azureCliAssistMessage(
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given
 // instance. Fire-and-forget so it never blocks the HTTP response.
 function triggerAppBicepHandoff(
-  entry: CanvasServerEntry | undefined,
+  entry: { state: CanvasState } | undefined,
   repo: string,
   branches: string | string[],
   page: string
@@ -995,28 +1685,114 @@ export interface DeployAttemptInput {
   attemptId?: string;
 }
 
+// Marks a deploy that failed before anything could have started running: the
+// branch it names is not on the remote, so GitHub refused the dispatch. The
+// fix is a git push, not a model repair.
+export const DEPLOY_BRANCH_NOT_PUSHED_KIND: DeployErrorKind =
+  "branch-not-pushed";
+
+// Marks a deploy that failed without proving that no workflow is running: the
+// dispatch outcome was never confirmed, or monitoring stopped before the run
+// reported one. Distinct from a confirmed failure — a workflow GitHub refused
+// to start, or one that ran and reported its own failure — which is the only
+// kind a repair redeploy may act on, because it is the only kind that cannot
+// leave a run in flight for a redeploy to race.
+export const DEPLOY_RUN_UNCONFIRMED_KIND: DeployErrorKind = "run-unconfirmed";
+
+// Split a failed `gh workflow run` by whether it proves no run was created.
+// GitHub naming the branch as unresolvable is proof: it rejected the request.
+// Anything else is not — the request can be accepted and the answer lost (the
+// CLI timing out, for one), and the token-scope retry can dispatch twice — so
+// it has to be treated as a run that may exist.
+export function classifyDeployDispatchFailure(stderr: string): DeployErrorKind {
+  if (
+    /no ref found|could not resolve|no commit found for the ref/i.test(
+      stderr || ""
+    )
+  )
+    return DEPLOY_BRANCH_NOT_PUSHED_KIND;
+  return DEPLOY_RUN_UNCONFIRMED_KIND;
+}
+
 // Decide, server-side, whether an incoming deploy continues an existing repair
-// loop. The tool validates the attempt before it POSTs, but another deploy can
-// start in between, so re-check here against the attempt this panel currently
-// holds: a stale repair must not overwrite the newer deploy or mark it as
-// already owned (which would suppress its own failure handoff). An unbound
-// request is an ordinary deploy and always proceeds.
+// loop, and whether that loop still has budget. The tool validates the attempt
+// before it POSTs, but another deploy can start in between, so re-check here
+// against the attempt this panel currently holds: a stale repair must not
+// overwrite the newer deploy or mark it as already owned (which would suppress
+// its own failure handoff). An unbound request is an ordinary deploy and always
+// proceeds.
 export function resolveDeployRepairLoop(
   state: CanvasState,
   requestedAttemptId: unknown
-): { repairLoop: boolean; attemptId: string; error?: string } {
+): {
+  repairLoop: boolean;
+  attemptId: string;
+  repairAttempt: number;
+  error?: string;
+} {
   const requested =
     typeof requestedAttemptId === "string" ? requestedAttemptId : "";
-  if (!requested) return { repairLoop: false, attemptId: "" };
+  if (!requested) return { repairLoop: false, attemptId: "", repairAttempt: 0 };
   const current = state?.deployAttempt?.id || "";
   if (current !== requested) {
     return {
       repairLoop: false,
       attemptId: "",
+      repairAttempt: 0,
       error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
     };
   }
-  return { repairLoop: true, attemptId: requested };
+  // A repair redeploy only makes sense against a deploy that actually failed.
+  // The attempt stays current after it settles, and the agent was told to keep
+  // passing its id, so without this an attempt-bound call could land on a
+  // deploy that is still running (starting a second workflow run and a second
+  // monitor over the same state) or on one that already succeeded (spending
+  // repair budget on a finished loop, and — because a loop redeploy is marked
+  // agent-owned — silently suppressing the handoff if it fails).
+  const deployStatus = state?.deployStatus || "";
+  if (deployStatus !== "failed") {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error:
+        deployStatus === "in_progress" ?
+          `Deploy attempt "${requested}" is still running, so nothing was deployed. Poll the radius_deploy_status tool until it reports success or failed before redeploying.`
+        : `Deploy attempt "${requested}" is not in a failed state, so there is nothing to repair and nothing was deployed. Its repair loop is over. To deploy again, call radius_deploy without an attemptId to start a new deploy.`
+    };
+  }
+  // "failed" covers two different things, and only one is safe to redeploy.
+  // A confirmed failure — GitHub refused the dispatch, or the run finished and
+  // reported failure — leaves nothing in flight. The rest do not: the dispatch
+  // may have been accepted without us learning of it, or monitoring may have
+  // stopped before the run reported, in which case a redeploy would race a
+  // second run against the same target — exactly what the in_progress check
+  // above prevents, arriving by a different route. Deciding this from stored
+  // state keeps the resolver synchronous; re-querying the run would put an
+  // await in front of beginDeployAttempt, which must not happen.
+  if ((state?.deployErrorKind || "") === DEPLOY_RUN_UNCONFIRMED_KIND) {
+    const runUrl = state?.deployRunUrl || "";
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error: `Deploy attempt "${requested}" never confirmed what happened to its workflow, so a run may still be in flight and nothing was deployed. Redeploying now could start a second run against the same target.${runUrl ? ` Check the run at ${runUrl}` : " Check the repository's Actions tab"} and tell the user what it shows. To deploy again afterwards, call radius_deploy without an attemptId — this attempt cannot be repaired, because its outcome will never be confirmed.`
+    };
+  }
+  // The cap the handoff prompt states is also enforced here, because prompt
+  // text alone is an instruction the agent can lose track of across a long
+  // repair loop. Refusing before anything is dispatched keeps a runaway loop
+  // from burning CI runs.
+  const repairAttempt = (state.deployRepairAttempts || 0) + 1;
+  if (repairAttempt > DEPLOY_REPAIR_ATTEMPT_CAP) {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error: `This repair loop has already used its ${DEPLOY_REPAIR_ATTEMPT_CAP} automatic repair attempts, so nothing was deployed. Stop retrying: report the remaining failure and what you tried to the user, and let them decide whether to deploy again from the canvas.`
+    };
+  }
+  return { repairLoop: true, attemptId: requested, repairAttempt };
 }
 
 // Open a new deploy attempt on a reused canvas state. Deliberately
@@ -1046,6 +1822,12 @@ export function beginDeployAttempt(
   // it on every redeploy would let an undeliverable handoff retry forever.
   state.deployHandoffAttempts =
     input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
+  // Same lifetime as the delivery budget, and counted the way
+  // resolveDeployRepairLoop projected it, so the number the agent is told
+  // matches the one the next call is checked against. A deploy that opens a
+  // new attempt starts a fresh loop with a full budget.
+  state.deployRepairAttempts =
+    input.repairLoop ? (state.deployRepairAttempts || 0) + 1 : 0;
   state.deployingBranch = input.branch;
   // Immutable identity for this attempt. A canvas panel is reused across
   // deploys, so the repair loop binds to this snapshot instead of the panel:
@@ -1076,7 +1858,14 @@ export function triggerDeployRepairHandoff(
     if (typeof deployRepairHandoff !== "function") return false;
     const state = entry?.state;
     if (!state || state.deployStatus !== "failed") return false;
-    if (state.deployErrorKind === "branch-not-pushed") return false;
+    if (
+      state.deployErrorKind === DEPLOY_BRANCH_NOT_PUSHED_KIND ||
+      // An attempt whose run may still be in flight can never be repaired: the
+      // resolver refuses its redeploy. Opening a loop only to refuse its first
+      // call would spend a cycle and tell the agent two different things.
+      state.deployErrorKind === DEPLOY_RUN_UNCONFIRMED_KIND
+    )
+      return false;
     if (state.deployRepairing) return false;
     if (
       state.deployHandoffState === "pending" ||
@@ -1171,6 +1960,186 @@ const LEGACY_DEPLOY_WORKFLOW_FILE = "radius-deploy.yml";
 // are not real application deployments and are filtered out.
 const DEPLOY_WORKFLOW_FILE = "run-rad-commands.yml";
 const DELETE_WORKFLOW_FILE = "delete-application.yml";
+
+// Name of the step inside the run-rad-commands composite action that executes
+// the `rad` commands (and therefore `rad deploy`). The deploy monitor keys its
+// in-flight handling — start time, per-resource status polling, the "still
+// running" heartbeat — on finding a step with this exact name, so a mismatch
+// silently disables all of it. It is exported so a test can pin it.
+//
+// Do not guess at this value: it must match
+// radius-project/radius .github/extension/actions/run-rad-commands/action.yml.
+export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
+
+// ── POST /api/deploy composition root ────────────────────────────────────────
+// One complete dependency object per deploy service, each narrowed to the seams
+// that service actually uses. Every factory validates its own list at
+// construction, so a missing seam fails while this module initialises rather
+// than mid-deploy. Placed here because the workflow file names, the listing
+// cache and the instance container above are all `const` and would otherwise be
+// in the temporal dead zone at the family's composition site.
+
+// The deploy's own gh runner: 30s timeout, resolves (never rejects) on a
+// non-zero exit so the dispatch path can read stderr and choose its message.
+function runGhForDeploy(
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv } = {}
+): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    cliExec(
+      "gh",
+      args,
+      { timeout: 30000, ...(options.env ? { env: options.env } : {}) },
+      (err, stdout, stderr) => {
+        resolve({
+          code: err ? err.code || 1 : 0,
+          stdout: stdout || "",
+          stderr: stderr || ""
+        });
+      }
+    );
+  });
+}
+
+// Like runGhForDeploy but feeds a value (e.g. a secret JSON) over stdin so it
+// never lands on the argv/process list.
+function runGhWithStdinForDeploy(
+  args: string[],
+  stdin: string,
+  options: { env?: NodeJS.ProcessEnv } = {}
+): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    const child = cliExec(
+      "gh",
+      args,
+      { timeout: 30000, ...(options.env ? { env: options.env } : {}) },
+      (err, stdout, stderr) => {
+        resolve({
+          code: err ? err.code || 1 : 0,
+          stdout: stdout || "",
+          stderr: stderr || ""
+        });
+      }
+    );
+    if (stdin !== undefined) child.stdin?.end(stdin);
+  });
+}
+
+const deployPlannedGraphService = createPlannedGraphRecoveryService({
+  prepareSourceRefResources: (entry, view, context) =>
+    prepareSourceRefResources(entry, view, context),
+  setSourceRefResources: (entry, view, resources, context, expectedToken) =>
+    setSourceRefResources(entry, view, resources, context, expectedToken),
+  fetchBicepSelection: (entry, repo, branch) =>
+    fetchBicepSelection(entry as CanvasServerEntry, repo, branch),
+  radArtifactsDirForSelection: ({
+    isLocal,
+    state,
+    repo,
+    branch,
+    bicepRepoPath,
+    log
+  }) =>
+    radArtifactsDirForSelection({
+      isLocal,
+      state,
+      github,
+      repo,
+      branch,
+      bicepRepoPath,
+      log
+    }),
+  buildGraphViaRad: (content, bicepPath, options) =>
+    buildGraphViaRad(content, bicepPath, options),
+  fetchRecipePack: (provider) => fetchRecipePack(github, provider),
+  resolveRecipeOutputs: (parsed, recipes, provider) =>
+    resolveRecipeOutputs(github, parsed, recipes, provider),
+  canvasGraphResources,
+  errorMessage
+});
+
+const deployDispatchService = createDeployDispatchService({
+  deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
+  deployWorkflowFiles: [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
+  branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
+  getBranchHeadSha,
+  getDefaultBranch,
+  runGh: runGhForDeploy,
+  runGhWithStdin: runGhWithStdinForDeploy,
+  readProcessEnv: () => process.env,
+  fetchFileForSelection: (entry, repo, branch, repoPath) =>
+    fetchFileForSelection(entry as CanvasServerEntry, repo, branch, repoPath),
+  appParams,
+  resolveDeployParams: (params) => resolveDeployParams(params),
+  partitionParams,
+  extractAppName,
+  buildDeployRadCommand,
+  buildAppGraphRadCommand,
+  ensureDeployWorkflowsOnBranch,
+  ensureWorkflowsCurrent,
+  classifyDeployDispatchFailure,
+  invalidateDeployListCache: (repo) => {
+    deployListCache.delete(repo);
+  },
+  errorMessage,
+  now: () => Date.now()
+});
+
+const deployOutcomeService = createDeployOutcomeService({
+  settleDeployStatuses,
+  fetchRunLog,
+  extractGitHubActionsStepLog,
+  explainOidcEnterpriseClaim,
+  extractRadDeployError: (logText) => extractRadDeployError(logText),
+  sleep: (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  now: () => Date.now()
+});
+
+const deployMonitorService = createDeployMonitorService({
+  plannedGraph: deployPlannedGraphService,
+  dispatch: deployDispatchService,
+  outcome: deployOutcomeService,
+  deployRadCommandsStep: DEPLOY_RAD_COMMANDS_STEP,
+  unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+  findWorkflowRun,
+  getRunDetail,
+  createStatusReader: (state, repo, branch, runId) =>
+    deployStatusReaderFromState(state, repo, branch, runId),
+  buildDeployStatusMap,
+  buildDeployMessageMap,
+  applyDeployMessages,
+  applyDeployStatusToResources,
+  generatePortalUrl,
+  optionalString,
+  errorMessage,
+  sleep: (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  now: () => Date.now()
+});
+
+const deployRequestService = createDeployRequestService({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  resolveDeployRepairLoop,
+  resolveDeploymentEnvironment,
+  activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+  localDeploymentBlocksMutation: (state) =>
+    localDeploymentBlocksMutation(state),
+  reserveDeploymentMutation: (state, reservation) =>
+    reserveDeploymentMutation(state, reservation),
+  releaseDeploymentMutation,
+  deploymentStatusBlocksMutation,
+  resolveEnvDeployment,
+  runCommand: (command, args) => runCommand(command, args),
+  canvasGraphResources,
+  beginDeployAttempt,
+  triggerDeployRepairHandoff: (entry, instanceId) =>
+    triggerDeployRepairHandoff(entry, instanceId),
+  monitor: deployMonitorService,
+  unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+  repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
+  errorMessage
+});
 
 // gh runner that REJECTS on failure, so callers can fail closed instead of
 // silently treating a GitHub outage or timeout as "no data". Used by the
@@ -2008,111 +2977,6 @@ export function resolveDeployStatus(rec: DeployStatusRecord): string {
   return "pending";
 }
 
-// True when an `az role assignment create` error means the assignee principal
-// has not replicated through Microsoft Graph yet, so the SAME command is worth
-// retrying after a short delay. Genuine failures — above all AuthorizationFailed
-// (the signed-in user lacks permission to assign roles) — return false so they
-// surface immediately instead of being masked by pointless retries. See the
-// Step-6 role-assignment block for why this race exists and why it is platform
-// independent (not a macOS/Windows difference).
-export function isReplicationLagError(stderr?: string): boolean {
-  if (!stderr) return false;
-  return /does not exist in the directory|PrincipalNotFound|Cannot find (?:principal|user or service principal)|No matching principal|not found in the directory/i.test(
-    stderr
-  );
-}
-
-// Build the argument vector for `az role assignment create`. Assign by the
-// Service Principal's OBJECT ID (not its appId): `--assignee <appId>` forces az
-// to resolve the appId to its SP object first, which races Graph replication
-// right after `az ad sp create` and, on some CLI versions, silently no-ops so
-// the role is never written (the identity then signs in but sees "No
-// subscriptions found"). `--assignee-object-id` with an explicit
-// `--assignee-principal-type ServicePrincipal` skips that lookup entirely.
-export function buildRoleAssignmentArgs({
-  objectId,
-  role,
-  scope,
-  subscriptionId
-}: RoleAssignmentInput): string[] {
-  return [
-    "role",
-    "assignment",
-    "create",
-    "--assignee-object-id",
-    objectId,
-    "--assignee-principal-type",
-    "ServicePrincipal",
-    "--role",
-    role,
-    "--scope",
-    scope,
-    "--subscription",
-    subscriptionId,
-    "--output",
-    "none"
-  ];
-}
-
-// Detect the federated-credential NAME collision that reintroduces AADSTS700213.
-// FIC creation dedups on SUBJECT, but Azure keys FIC uniqueness on NAME, and
-// `buildFederatedCredentialName` runs the env name through clean() (collapsing
-// non-alphanumerics to "-") while the subject keeps its "%3A"-encoded colon. So
-// two environments whose names normalize to the same string (e.g. "prod:west"
-// and "prod-west") produce ONE name with TWO subjects. Given the post-dedup list
-// to create and a name→subject map of the FICs already on the app, return the
-// first credential whose name already exists with a DIFFERENT subject (a real
-// collision that must fail loud), or null when there is none. `desired` items
-// with a subject already present would have been deduped upstream, so any name
-// hit here is genuinely a different environment.
-export function findFederatedCredentialNameCollision(
-  desired: Array<Partial<FederatedCredential>> | null,
-  existingNameToSubject: Map<string, string> | Record<string, string> | null
-): {
-  name: string;
-  existingSubject: string | undefined;
-  desiredSubject: string;
-} | null {
-  if (!desired || !existingNameToSubject) return null;
-  const lookup =
-    existingNameToSubject instanceof Map ?
-      existingNameToSubject
-    : new Map(Object.entries(existingNameToSubject));
-  for (const fic of desired) {
-    if (!fic || !fic.name || !fic.subject) continue;
-    if (lookup.has(fic.name) && lookup.get(fic.name) !== fic.subject) {
-      return {
-        name: fic.name,
-        existingSubject: lookup.get(fic.name),
-        desiredSubject: fic.subject
-      };
-    }
-  }
-  return null;
-}
-
-// Choose the resource group that actually holds the AKS cluster, for building
-// the Cluster Admin role scope. The deployment resource group (the editable RG
-// combo in the dialog) and the cluster's own resource group can legitimately
-// differ: a cluster in "rg-shared" can be targeted by an environment that
-// deploys into "rg-app". The dialog auto-syncs the RG combo to the cluster's RG
-// when a cluster is picked, but the combo stays editable — so a user who then
-// changes the RG would otherwise scope the AKS grant to a resource group that
-// does NOT contain the cluster, landing the Cluster Admin assignment on a path
-// where the cluster doesn't exist and failing the deploy at "Verify AKS Access".
-// `clusterResourceGroup` is sourced from /api/discover (which returns each
-// cluster's own resourceGroup) and is therefore authoritative when present;
-// fall back to the deployment resource group only when it is absent (e.g. a
-// custom-typed cluster name that never came from discovery).
-export function pickAksResourceGroup(
-  clusterResourceGroup: unknown,
-  resourceGroup: string
-): string {
-  const own =
-    typeof clusterResourceGroup === "string" ? clusterResourceGroup.trim() : "";
-  return own || resourceGroup;
-}
-
 // Read the `default:` of the `environment` input under `on.workflow_dispatch.inputs`.
 // Indentation-aware rather than a bare regex, because `environment:` also appears as a
 // job-level key and matching the wrong one would silently mis-target a deploy. Kept as
@@ -2352,15 +3216,12 @@ async function ensureDeployWorkflowsOnBranch(
   }
 }
 
-// request handler and read by the host-channel keepalive via the getter below
-// to tell whether a panel is actively open (so the process isn't idle-reaped).
-let lastWebviewActivityAt = 0;
 export function getLastWebviewActivityAt(): number {
-  return lastWebviewActivityAt;
+  return canvasServer.getLastActivityAt();
 }
 
 function accessForSelection(
-  entry: CanvasServerEntry,
+  entry: { state: CanvasState },
   repo: string,
   branch: string
 ) {
@@ -2390,8 +3251,11 @@ function repoMatchesWorkspace(state: CanvasState, repo: string): boolean {
 // supplied the content (not when we fell back to the remote repo), and
 // `bicepPath` is the repo-relative path of the local file so callers can save
 // sibling artifacts next to the exact app.bicep that was graphed.
+// Takes only the state-bearing shape of an instance entry, not the whole
+// `CanvasServerEntry`, so the migrated `graphs-planning` write routes can inject
+// it against their own narrow entry type without a cast.
 async function fetchBicepSelection(
-  entry: CanvasServerEntry,
+  entry: { state: CanvasState },
   repo: string,
   branch: string
 ): Promise<{
@@ -2455,7 +3319,26 @@ export function isCrossSiteMutation(
   return site !== "same-origin" && site !== "none";
 }
 
-function createRequestHandler(
+// Global pre-routing shared by typed routes and unmatched page requests. Reject
+// cross-site mutations before any routing or body parse, then synchronise the
+// requested page onto the instance entry.
+function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
+  const { request } = context;
+  if (isCrossSiteMutation(request.method, request.headers["sec-fetch-site"])) {
+    context.json(403, {
+      error: "Cross-site request rejected.",
+      code: "cross-site-forbidden"
+    });
+    return true;
+  }
+  syncRequestedPage(
+    canvasServer.instances.get(context.instanceId),
+    context.url.searchParams.get("page")
+  );
+  return false;
+}
+
+function createInstanceRequestCoordinator(
   instanceId: string,
   resolveBaseUrl: () => string
 ) {
@@ -2653,6792 +3536,17 @@ function createRequestHandler(
     }
   }
 
-  const handler = async (
+  const handleUnmatchedRequest = async (
     req: IncomingMessage,
     res: ServerResponse<IncomingMessage>
   ): Promise<void> => {
     const url = new URL(req.url || "/", `http://localhost`);
-    const pathname = url.pathname;
-    const isServerOwnedRequest =
-      req.headers["x-radius-server-owned"] === serverOwnedToken;
-    if (!isServerOwnedRequest) lastWebviewActivityAt = Date.now();
-    // CSRF defense-in-depth: reject cross-site state-changing requests before
-    // any routing or body parse. See isCrossSiteMutation for the rules.
-    if (isCrossSiteMutation(req.method, req.headers["sec-fetch-site"])) {
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(403);
-      res.end(
-        JSON.stringify({
-          error: "Cross-site request rejected.",
-          code: "cross-site-forbidden"
-        })
-      );
-      return;
-    }
+    // Cross-site rejection and requested-page synchronisation now run in the
+    // shared pre-routing step so typed routes cannot bypass them; the page
+    // handler below still needs the raw value. Webview-activity marking also
+    // moved to that seam, where it is gated on isServerOwned so server-owned
+    // internal calls still do not count as user activity.
     const requestedPage = url.searchParams.get("page");
-    const canvasEntry = servers.get(instanceId);
-    if (canvasEntry && requestedPage) {
-      canvasEntry.page = requestedPage;
-      if (requestedPage === "graph")
-        canvasEntry.state.activeGraphView = "graph";
-      else if (requestedPage === "planned")
-        canvasEntry.state.activeGraphView = "planned";
-      else if (
-        requestedPage === "graph-diff" ||
-        requestedPage === "graphDiff"
-      ) {
-        canvasEntry.state.activeGraphView = "diff";
-      }
-    }
-
-    // Lightweight liveness probe used by the client-side heartbeat so pages
-    // can detect when the server has come back after an idle respawn.
-    if (pathname === "/api/ping") {
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(200);
-      res.end(JSON.stringify({ ok: true, instanceId }));
-      return;
-    }
-
-    // Operation status. The panel polls this instead of waiting on the POST,
-    // which is what lets it stop blocking: the record outlives the request
-    // that created it, so a reload or a trip to another page can rejoin an
-    // operation already in flight.
-    //
-    // Polled rather than streamed on purpose. SSE would be smoother, but the
-    // canvas reloads on navigation and a reload mid-operation is a routine
-    // event here, not an edge case — a plain GET is trivially resumable and
-    // a reconnecting EventSource is not.
-    if (pathname === "/api/operations" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const record = repo ? operations.latest(repo) : operations.latestAny();
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(200);
-      res.end(
-        JSON.stringify({ operation: record ? toClientView(record) : null })
-      );
-      return;
-    }
-    if (pathname === "/api/operations" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let data: any;
-      try {
-        data = JSON.parse(body);
-      } catch {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({ error: "Invalid JSON body.", code: "invalid-json" })
-        );
-        return;
-      }
-      const repo = String(data.repo || "");
-      const environment = String(data.environment || data.name || "dev").trim();
-      const provider = data.provider === "aws" ? "aws" : "azure";
-      if (!isValidRepoSlug(repo)) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: `Invalid repository "${repo}". Expected "owner/repo".`,
-            code: "invalid-repo"
-          })
-        );
-        return;
-      }
-      if (!environment.trim()) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: "Environment name is required.",
-            code: "environment-required"
-          })
-        );
-        return;
-      }
-      if (provider === "azure") {
-        if (
-          !isResourceGroupName(String(data.resourceGroup || "")) ||
-          !isAksClusterName(String(data.cluster || "")) ||
-          !isUuid(String(data.tenantId || "")) ||
-          !isUuid(String(data.subscriptionId || ""))
-        ) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error:
-                "Azure setup requires valid tenantId, subscriptionId, resourceGroup, and cluster values.",
-              code: "invalid-azure-operation-input"
-            })
-          );
-          return;
-        }
-      } else if (
-        !String(data.roleArn || "").trim() ||
-        !String(data.accountId || "").trim() ||
-        !String(data.region || "").trim() ||
-        !String(data.cluster || "").trim()
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error:
-              "AWS setup requires roleArn, accountId, region, and cluster.",
-            code: "invalid-aws-operation-input"
-          })
-        );
-        return;
-      }
-      const needsAzureCredentials =
-        provider === "azure" && !String(data.clientId || "").trim();
-      const op = createOperation({
-        provider,
-        repo,
-        environment,
-        stages: buildStages({ includeIdentity: needsAzureCredentials }),
-        journey: {
-          origin: data.origin || null,
-          resumeTarget: data.resumeTarget || null,
-          resumeBranch: data.resumeBranch || data.branch || null,
-          resumeReason: data.resumeReason || null
-        }
-      });
-      op.request = {
-        needsAzureCredentials,
-        azure: {
-          resourceGroup: data.resourceGroup || "",
-          cluster: data.cluster || "",
-          clusterResourceGroup: data.clusterResourceGroup || "",
-          subscriptionId: data.subscriptionId || "",
-          tenantId: data.tenantId || "",
-          appName: data.appName,
-          appId: data.appId || "",
-          createNew: data.createNew === true,
-          serviceManagementReference: data.serviceManagementReference || ""
-        },
-        environment: { ...data, environment, provider }
-      };
-      if (provider === "azure") {
-        op.resumeRequest = {
-          needsAzureCredentials,
-          azure: structuredClone(op.request.azure),
-          environment: {
-            repo,
-            environment,
-            provider,
-            cluster: data.cluster || "",
-            namespace: data.namespace || "",
-            profileName: data.profileName || "",
-            branch: data.branch || "",
-            tenantId: data.tenantId || "",
-            subscriptionId: data.subscriptionId || "",
-            resourceGroup: data.resourceGroup || "",
-            origin: data.origin || null,
-            resumeTarget: data.resumeTarget || null,
-            resumeBranch: data.resumeBranch || null,
-            resumeReason: data.resumeReason || null
-          }
-        };
-      }
-      const started = operations.start(op);
-      if (!started.ok) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(409);
-        res.end(
-          JSON.stringify({
-            error: `Setup is already running for ${repo}.`,
-            code: "operation-in-progress",
-            operationId: started.conflict.operationId
-          })
-        );
-        return;
-      }
-      try {
-        await operations.persist();
-      } catch (error) {
-        finish(op, "failed", {
-          failure: {
-            code: "operation-registration-persist-failed",
-            stage: op.currentStage,
-            stepSeq: null,
-            message:
-              "Radius could not durably register the environment operation.",
-            classification: "unknown",
-            evidence: errorMessage(error)
-          }
-        });
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            error:
-              "Radius could not durably register the environment operation. No setup work was started.",
-            code: "operation-registration-persist-failed"
-          })
-        );
-        return;
-      }
-      const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Location", statusUrl);
-      res.writeHead(202);
-      res.end(JSON.stringify({ operationId: op.operationId, statusUrl }));
-      scheduleServerOwnedTask(op.operationId, () =>
-        runEnvironmentOperation(op.operationId)
-      );
-      return;
-    }
-    const resumeMatch = pathname.match(
-      /^\/api\/operations\/([^/]+)\/resume\/([^/]+)$/
-    );
-    if (resumeMatch && req.method === "POST") {
-      const operationId = decodeURIComponent(resumeMatch[1]);
-      const code = decodeURIComponent(resumeMatch[2]);
-      const op = operations.get(operationId);
-      if (!op) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(404);
-        res.end(
-          JSON.stringify({
-            error: "Unknown operation.",
-            code: "unknown-operation"
-          })
-        );
-        return;
-      }
-      if (
-        op.state === "failed_partial" &&
-        op.failure?.code === "operation-input-expired"
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(410);
-        res.end(
-          JSON.stringify({
-            error: op.failure.message,
-            code: "operation-input-expired",
-            operation: toClientView(op)
-          })
-        );
-        return;
-      }
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let data: any;
-      try {
-        data = JSON.parse(body);
-      } catch {
-        data = {};
-      }
-      if (
-        !canResumeInput(op, {
-          code,
-          checkpoint: data.checkpoint,
-          repo: data.repo,
-          environment: data.environment,
-          provider: data.provider
-        })
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(409);
-        res.end(
-          JSON.stringify({
-            error: "The operation is not waiting for this input.",
-            code: "operation-resume-mismatch",
-            operationId
-          })
-        );
-        return;
-      }
-      if (!op.request && op.resumeRequest) {
-        op.request = structuredClone(op.resumeRequest);
-      }
-      const resumeSnapshot = {
-        inputRequired: structuredClone(op.inputRequired),
-        request: structuredClone(op.request),
-        resumeRequest:
-          op.resumeRequest ? structuredClone(op.resumeRequest) : undefined
-      };
-      if (code === "service-management-reference-required") {
-        op.request.azure.serviceManagementReference =
-          data.serviceManagementReference || "";
-        if (op.resumeRequest?.azure) {
-          op.resumeRequest.azure.serviceManagementReference =
-            data.serviceManagementReference || "";
-        }
-      } else if (code === "app-selection-required") {
-        op.request.azure.appId = data.appId || "";
-        op.request.azure.createNew = data.createNew === true;
-        if (op.resumeRequest?.azure) {
-          op.resumeRequest.azure.appId = data.appId || "";
-          op.resumeRequest.azure.createNew = data.createNew === true;
-        }
-      } else {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: "Unsupported resume prompt.",
-            code: "unsupported-resume"
-          })
-        );
-        return;
-      }
-      resumeAfterInput(op);
-      try {
-        await operations.persist();
-      } catch (error) {
-        op.request = resumeSnapshot.request;
-        if (resumeSnapshot.resumeRequest === undefined) delete op.resumeRequest;
-        else op.resumeRequest = resumeSnapshot.resumeRequest;
-        requireInput(op, resumeSnapshot.inputRequired);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            error:
-              "Radius could not persist the resumed operation. Your answer was not accepted; retry the prompt.",
-            code: "operation-resume-persist-failed",
-            operationId,
-            detail: errorMessage(error)
-          })
-        );
-        return;
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(202);
-      res.end(
-        JSON.stringify({
-          operationId,
-          statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
-        })
-      );
-      scheduleServerOwnedTask(operationId, () =>
-        runEnvironmentOperation(operationId)
-      );
-      return;
-    }
-    const abandonMatch = pathname.match(
-      /^\/api\/operations\/([^/]+)\/abandon$/
-    );
-    if (abandonMatch && req.method === "POST") {
-      const operationId = decodeURIComponent(abandonMatch[1]);
-      const op = operations.get(operationId);
-      if (
-        !op ||
-        op.state !== INPUT_REQUIRED_STATE ||
-        op.executionActive ||
-        isTerminalState(op.state)
-      ) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(op ? 409 : 404);
-        res.end(
-          JSON.stringify({
-            error:
-              op ?
-                "The operation is not waiting for input."
-              : "Unknown operation.",
-            code: op ? "operation-abandon-mismatch" : "unknown-operation"
-          })
-        );
-        return;
-      }
-      finish(op, "cancelled");
-      try {
-        await operations.persist();
-      } catch (error) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            error: "Radius could not persist the abandoned operation.",
-            code: "operation-abandon-persist-failed",
-            detail: errorMessage(error)
-          })
-        );
-        return;
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ operation: toClientView(op) }));
-      return;
-    }
-    if (pathname.startsWith("/api/operations/") && req.method === "GET") {
-      const operationId = decodeURIComponent(
-        pathname.slice("/api/operations/".length)
-      );
-      const record = operations.get(operationId);
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      res.writeHead(record ? 200 : 404);
-      res.end(
-        JSON.stringify(
-          record ?
-            { operation: toClientView(record) }
-          : { error: "Unknown operation." }
-        )
-      );
-      return;
-    }
-
-    // canvas (side pane). Only the webview for a local-workspace graph calls
-    // this (client passes localSource); the actual open is delegated to the
-    // SDK session via the handler registered in extension.ts. Status codes
-    // are meaningful so the webview can flag a failed open to the user:
-    // 400 invalid path, 503 handler unavailable, 500 open failed, 200 ok.
-    if (pathname === "/api/open-source" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "no-store");
-      let relPath: string;
-      // `line` is reserved: the editor canvas has no line-selection input
-      // yet, so it is validated and threaded through but not acted on. When
-      // the canvas gains line support, the handler can start honoring it.
-      let line: number;
-      try {
-        const data = JSON.parse(body || "{}");
-        relPath = toSafeRepoRelPath(data.path);
-        const lineRaw = Number.parseInt(data.line, 10);
-        line = Number.isFinite(lineRaw) && lineRaw > 0 ? lineRaw : 0;
-      } catch {
-        res.writeHead(400);
-        res.end(JSON.stringify({ ok: false, error: "invalid path" }));
-        return;
-      }
-      if (typeof openSourceHandler !== "function") {
-        res.writeHead(503);
-        res.end(JSON.stringify({ ok: false, error: "unavailable" }));
-        return;
-      }
-      try {
-        const entry = servers.get(instanceId);
-        await Promise.resolve(
-          openSourceHandler({
-            path: relPath,
-            line,
-            instanceId,
-            state: entry?.state
-          })
-        );
-        res.writeHead(200);
-        res.end(JSON.stringify({ ok: true }));
-      } catch (e) {
-        res.writeHead(500);
-        res.end(
-          JSON.stringify({
-            ok: false,
-            error: e instanceof Error ? e.message : "failed"
-          })
-        );
-      }
-      return;
-    }
-
-    // JSON API: OIDC validation
-    if (pathname === "/api/oidc" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        if (data.provider === "azure") {
-          // Real Azure validation via az CLI
-          const validation = await validateAzureCredentials(data);
-          const entry = servers.get(instanceId);
-          if (validation.success) {
-            const result = {
-              message: `✅ Azure authentication confirmed — logged in as ${
-                validation.userName || "user"
-              }`,
-              validated: true,
-              tenantId: validation.tenantId,
-              subscriptionId: validation.subscriptionId,
-              subscriptionName: validation.subscriptionName,
-              userName: validation.userName,
-              output: generateAzureOIDC(data).output
-            };
-            if (entry) {
-              entry.state.oidcAzure = {
-                ...result,
-                clientId: data.clientId || "",
-                tenantName: "",
-                clientName: ""
-              };
-            }
-            // Persist credentials
-            sharedCredentials.azure = {
-              tenantId: validation.tenantId,
-              subscriptionId: validation.subscriptionId,
-              subscriptionName: validation.subscriptionName,
-              userName: validation.userName,
-              clientId: data.clientId || ""
-            };
-            saveCredentials();
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(200);
-            res.end(JSON.stringify(result));
-          } else {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(200);
-            res.end(
-              JSON.stringify({
-                message: `❌ ${validation.error}`,
-                validated: false,
-                output: ""
-              })
-            );
-          }
-        } else {
-          const result = generateAWSOIDC(data);
-          const entry = servers.get(instanceId);
-          if (entry) {
-            entry.state.oidcAws = {
-              ...result,
-              accountId: data.accountId || "",
-              accountName: data.accountName || "",
-              region: data.region || ""
-            };
-          }
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(JSON.stringify(result));
-        }
-      } catch (e) {
-        const detail = e instanceof Error ? e.message : String(e || "");
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: detail || "Bad request." }));
-      }
-      return;
-    }
-
-    // Verify Azure CLI login with specified tenant/subscription
-    if (pathname === "/api/verify-azure-login" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const tenantId = (data.tenantId || "").trim();
-        const subscriptionId = (data.subscriptionId || "").trim();
-
-        // Reject non-GUID credential identifiers before using them in
-        // command guidance or passing the subscription to the az argv.
-        // On Windows cliExec routes az through `cmd.exe /c`, and libuv only
-        // quotes args containing whitespace, so a value like "x&calc" would
-        // be parsed by cmd.exe as a command separator. An empty value is
-        // allowed (fall back to the ambient CLI context). Mirrors the guard
-        // already enforced in /api/azure-auto-setup.
-        const validationError = azureCredentialIdValidationError({
-          tenantId,
-          subscriptionId
-        });
-        if (validationError) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(JSON.stringify({ error: validationError }));
-          return;
-        }
-
-        // NOTE: we intentionally do NOT run `az login` here. Interactive
-        // login opens a browser/device-code flow that blocks indefinitely
-        // and would hang this server. Instead we verify the user's existing
-        // Azure CLI session (and optionally switch subscription). If there
-        // is no session, the canvas can ask Copilot to start device-code login.
-        if (subscriptionId) {
-          try {
-            await runCommand(
-              "az",
-              ["account", "set", "--subscription", subscriptionId],
-              { timeout: 10000 }
-            );
-          } catch (e) {}
-        }
-
-        let acct;
-        try {
-          const acctJson = await runCommand(
-            "az",
-            ["account", "show", "-o", "json"],
-            { timeout: 10000 }
-          );
-          acct = JSON.parse(acctJson);
-        } catch (e) {
-          const detail = e instanceof Error ? e.message : String(e || "");
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          if (isCliCommandMissing(detail)) {
-            res.end(
-              JSON.stringify({
-                error: "Azure CLI is not installed.",
-                code: "az-cli-missing",
-                tenantId
-              })
-            );
-          } else {
-            res.end(JSON.stringify(azureLoginRequiredResponse({ tenantId })));
-          }
-          return;
-        }
-
-        // If a tenant was specified and the active session is for a
-        // different tenant, surface a clear, actionable message.
-        if (
-          tenantId &&
-          acct.tenantId &&
-          acct.tenantId.toLowerCase() !== tenantId.toLowerCase()
-        ) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify(
-              azureLoginRequiredResponse({
-                tenantId,
-                activeTenantId: acct.tenantId
-              })
-            )
-          );
-          return;
-        }
-
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            user: acct.user?.name || "",
-            tenantId: acct.tenantId,
-            subscriptionId: acct.id,
-            subscriptionName: acct.name
-          })
-        );
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            error: "Azure CLI verification failed: " + errorMessage(e)
-          })
-        );
-      }
-      return;
-    }
-
-    if (pathname === "/api/azure-cli-assist" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const action = data.action === "install" ? "install" : "login";
-        const requestedTenantId =
-          typeof data.tenantId === "string" ? data.tenantId.trim() : "";
-        const tenantId = isUuid(requestedTenantId) ? requestedTenantId : "";
-        const prompt = azureCliAssistMessage({ action, tenantId });
-        const promptResult = await invokeSessionPrompt(
-          sessionPromptHandler,
-          prompt
-        );
-        if (promptResult.error) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(promptResult.status);
-          res.end(JSON.stringify({ error: promptResult.error }));
-          return;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            message:
-              action === "install" ?
-                "Asked Copilot to help install Azure CLI and start Azure login. Complete the steps it opens, then click Verify Credentials again."
-              : "Asked Copilot to start Azure login. Complete the sign-in flow it opens, then click Verify Credentials again."
-          })
-        );
-      } catch (e) {
-        const detail = e instanceof Error ? e.message : String(e || "");
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: detail || "Bad request." }));
-      }
-      return;
-    }
-
-    // Verify an AWS CLI session for a credential profile. Like the Azure
-    // verify, we do NOT log in interactively — we check the caller's existing
-    // `aws sts get-caller-identity` and (optionally) note the requested region.
-    if (pathname === "/api/verify-aws-login" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        let ident;
-        try {
-          const out = await runCommand(
-            "aws",
-            ["sts", "get-caller-identity", "--output", "json"],
-            { timeout: 15000 }
-          );
-          ident = JSON.parse(out);
-        } catch (e) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error:
-                'No active AWS CLI session. Run "aws configure" (or "aws sso login") in your terminal, then click Verify again.'
-            })
-          );
-          return;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            accountId: ident.Account || data.accountId || "",
-            arn: ident.Arn || "",
-            user:
-              ident.Arn ?
-                String(ident.Arn).split("/").pop()
-              : ident.Account || "",
-            region: data.region || ""
-          })
-        );
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            error: "AWS CLI verification failed: " + errorMessage(e)
-          })
-        );
-      }
-      return;
-    }
-
-    // List the saved credential profiles for a repo.
-    if (pathname === "/api/credential-profiles" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(
-        JSON.stringify({ profiles: repo ? listCredentialProfiles(repo) : [] })
-      );
-      return;
-    }
-
-    // Report the GitHub identity setup will act as, plus switchable accounts.
-    // Used by the Create Environment dialog to warn when the acting account
-    // differs from the one the host UI shows, or lacks the workflow scope.
-    if (pathname === "/api/github-identity" && req.method === "GET") {
-      res.setHeader("Content-Type", "application/json");
-      try {
-        // A re-check (?fresh=1) means the user just changed their gh auth
-        // out-of-band (e.g. ran `gh auth refresh` to add write:packages).
-        // The snapshot is memoized for the process, so drop it first and
-        // force `gh auth status` to be re-read; otherwise we'd return the
-        // stale pre-refresh scopes and the warning would never clear.
-        if (url.searchParams.get("fresh") === "1") resetGhIdentityCache();
-        // Resolve identity first — this primes the token strategy, so the
-        // repo preflight below (via ghApiJson→ghChildEnv) acts as the same
-        // account setup will. When the dialog passes its repo, fold in the
-        // admin/read preflight so a non-admin (write/maintain) account is
-        // surfaced HERE, at dialog open next to the account it concerns,
-        // instead of only after the user fills the form and submits. This
-        // mirrors the submit-time gates (which stay authoritative); a
-        // missing/invalid repo just skips the preflight — the identity
-        // response must still render.
-        const identity = await getGitHubIdentity();
-        const repoParam = (url.searchParams.get("repo") || "").trim();
-        if (repoParam && isValidRepoSlug(repoParam)) {
-          try {
-            const accessMsg = await preflightRepoAdmin(repoParam);
-            if (accessMsg) identity.repoAccess = accessMsg;
-          } catch {
-            /* preflight is advisory here; never fail identity on it */
-          }
-        }
-        res.writeHead(200);
-        res.end(JSON.stringify(identity));
-      } catch (e) {
-        res.writeHead(200);
-        res.end(JSON.stringify({ error: errorMessage(e), accounts: [] }));
-      }
-      return;
-    }
-
-    // Switch the active GitHub account setup acts as.
-    if (pathname === "/api/github-account" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      res.setHeader("Content-Type", "application/json");
-      try {
-        const data = JSON.parse(body || "{}");
-        const login = (data.login || "").trim();
-        const result = await switchGhAccount(login);
-        if (!result.ok) {
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: result.error || "Failed to switch account."
-            })
-          );
-          return;
-        }
-        // Persist the explicit choice machine-wide so it survives a
-        // restart. Without this the in-memory preference dies with the
-        // process and the token strategy reverts to the injected token's
-        // account — the same wrong-identity failure this flow exists to
-        // prevent, deferred by one process lifetime.
-        setPreferredGitHubLogin(login);
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({ success: true, identity: await getGitHubIdentity() })
-        );
-      } catch (e) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    // Create / update a credential profile (already verified client-side).
-    if (pathname === "/api/save-credential-profile" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = (data.repo || "").trim();
-        const name = (data.name || "").trim();
-        if (!repo || !name) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: "repo and name are required." }));
-          return;
-        }
-        const saved = saveCredentialProfile(repo, data);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true, profile: saved }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    // Delete a credential profile.
-    if (
-      pathname === "/api/delete-credential-profile" &&
-      req.method === "POST"
-    ) {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = (data.repo || "").trim();
-        const name = (data.name || "").trim();
-        const removed = deleteCredentialProfile(repo, name);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true, removed }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    // Delete a GitHub environment (from the Environments table "Delete Env").
-    if (pathname === "/api/delete-environment" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = (data.repo || "").trim();
-        const envName = (data.environment || "").trim();
-        if (!repo || !envName) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({ error: "repo and environment are required." })
-          );
-          return;
-        }
-        // Guard: an environment must not be deleted while an application is
-        // still deployed to it (its cloud resources would be orphaned).
-        // Require the app deployment to be torn down first and point the
-        // client at the app-deletion flow.
-        let active = null;
-        try {
-          // Resolve the real app name (from app.bicep) so the guard's
-          // message, redirect, and delete target the app declared in the
-          // bicep rather than the repo basename.
-          const delEntry = servers.get(instanceId);
-          const delBranch =
-            delEntry?.state?.contextBranch ||
-            delEntry?.state?.plannedBranch ||
-            delEntry?.state?.graphBranch ||
-            "main";
-          const delAppName = await resolveRepoAppName(repo, delBranch);
-          active = await resolveEnvDeployment(repo, envName, delAppName);
-        } catch (e) {
-          // Fail closed: if we can't confirm whether an app is still
-          // deployed (e.g. GitHub is unavailable), do NOT delete — that
-          // could orphan the application's cloud resources.
-          console.error(
-            `[radius delete-environment] active-app check failed for ${repo}/${envName}: ${errorMessage(
-              e
-            )}`
-          );
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({
-              error: `Could not verify whether an application is still deployed to "${envName}" (GitHub API error: ${errorMessage(
-                e
-              )}). The environment was not deleted — please try again.`
-            })
-          );
-          return;
-        }
-        if (active) {
-          const deleting = active.status === "deleting";
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(409);
-          res.end(
-            JSON.stringify({
-              error:
-                deleting ?
-                  `Application "${active.app}" is still being deleted from environment "${envName}". Wait for that to finish before deleting the environment.`
-                : `Application "${active.app}" is still deployed to environment "${envName}". Delete the application deployment first, then delete the environment.`,
-              code: "app-deployed",
-              app: active.app,
-              environment: envName,
-              redirect: `/?page=deploying&app=${encodeURIComponent(
-                active.app
-              )}&env=${encodeURIComponent(envName)}`
-            })
-          );
-          return;
-        }
-        try {
-          await runCommand(
-            "gh",
-            [
-              "api",
-              "--method",
-              "DELETE",
-              "/repos/" + repo + "/environments/" + encodeURIComponent(envName)
-            ],
-            { timeout: 20000 }
-          );
-        } catch (e) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(500);
-          res.end(
-            JSON.stringify({
-              error: "Could not delete environment: " + errorMessage(e)
-            })
-          );
-          return;
-        }
-        envListCache.delete(repo);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    // Auto-setup Azure credentials: create App Registration, federated cred (OIDC), role assignment
-    if (pathname === "/api/azure-auto-setup" && req.method === "POST") {
-      if (!isServerOwnedRequest) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(403);
-        res.end(
-          JSON.stringify({
-            error: "This endpoint is reserved for server-owned operations.",
-            code: "server-owned-operation-required"
-          })
-        );
-        return;
-      }
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      // Cleaned up in finally; declared here so it's reachable from finally.
-      let fedTmpFile = null;
-      // Declared out here so the generic catch below can close it. Null
-      // until the pure input-validation guards have passed, because those
-      // reject before any operation conceptually starts.
-      let op: any = null;
-      let steps: string[] = [];
-      let runCmd: typeof runCliCommand | null = null;
-      try {
-        const data = JSON.parse(body);
-        const targetRepo = data.repo || "";
-        const envName = data.environment || "dev";
-        const resourceGroup = data.resourceGroup || "";
-        const clusterName = data.cluster || "";
-        // The resource group that actually holds the AKS cluster, sourced
-        // from /api/discover (per-cluster resourceGroup) independently of
-        // the editable RG combo. Used to scope the AKS Cluster Admin grant
-        // so it lands on the cluster's real path even when the deployment
-        // resource group differs. Absent for a custom-typed cluster.
-        const clusterResourceGroup = (data.clusterResourceGroup || "").trim();
-        const serviceManagementReference =
-          data.serviceManagementReference || "";
-        // ROUND 9 app-registration selection inputs:
-        //   data.appId     — an explicit App Registration the user picked
-        //                    (duplicate picker or the opt-in "use an
-        //                    existing application" cross-repo flow).
-        //   data.createNew — user explicitly chose "create a new
-        //                    application instead" from the picker.
-        //   data.appName   — an editable display name for a NEW app.
-        const explicitAppId = (data.appId || "").trim();
-        const createNewApp = data.createNew === true;
-        // Distinguish "field omitted" from "explicitly sent blank": a
-        // present-but-blank name is a user error (invalid-app-name), not
-        // a silent fall-back to the derived default.
-        const appNameProvided = typeof data.appName === "string";
-        const requestedAppName = appNameProvided ? data.appName : "";
-        // Subscription the user selected (profile). Required so we can pin
-        // the az CLI context to it before the Graph calls (issue #125).
-        const requestedSubscriptionId = (data.subscriptionId || "").trim();
-
-        const fail = async (
-          status: number,
-          error: string,
-          code: string,
-          extra: Record<string, unknown> = {}
-        ): Promise<void> => {
-          // Every early return through here is a terminal state. Closing
-          // the record in one place beats remembering to do it at each of
-          // the thirty-odd call sites.
-          const retryablePrompt =
-            code === "app-selection-required" ||
-            code === "service-management-reference-required";
-          if (op && retryablePrompt) {
-            requireInput(op, {
-              code,
-              message: error,
-              checkpoint:
-                code === "app-selection-required" ?
-                  "azure-app-selection"
-                : "azure-service-management-reference",
-              metadata:
-                code === "app-selection-required" ?
-                  {
-                    candidates:
-                      Array.isArray(extra.candidates) ? extra.candidates : [],
-                    defaultAppId: extra.defaultAppId || null
-                  }
-                : null
-            });
-            await operations.persist();
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(status);
-            res.end(
-              JSON.stringify({
-                error,
-                inputRequired: true,
-                ...(code ? { code } : {}),
-                ...(op ? { operationId: op.operationId } : {}),
-                ...sanitizeFailureExtra(extra || {})
-              })
-            );
-            return;
-          }
-          const failure = await finalizeSetupFailure(op, {
-            status,
-            error,
-            code,
-            extra,
-            steps,
-            evidence: typeof extra.azError === "string" ? extra.azError : null,
-            runAz: runCmd ? (args) => runCmd!("az", args) : null
-          });
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(failure.status);
-          res.end(JSON.stringify(failure.body));
-        };
-        const checkpoint = () =>
-          persistMutationCheckpoint({
-            operation: op,
-            persist: () => operations.persist(),
-            report: (diagnostic) => operations.report?.(diagnostic),
-            fail
-          });
-
-        if (!targetRepo || !resourceGroup || !clusterName) {
-          await fail(
-            400,
-            "repo, resourceGroup, and cluster are required.",
-            "missing-params"
-          );
-          return;
-        }
-        // Validate every value that reaches an `az`/`gh` argv. execFile
-        // does not use a shell, but a leading '-' could still be parsed
-        // as a flag, and a bad repo slug would corrupt the OIDC subject.
-        if (!isValidRepoSlug(targetRepo)) {
-          await fail(
-            400,
-            `Invalid repository "${targetRepo}". Expected "owner/repo".`,
-            "invalid-repo"
-          );
-          return;
-        }
-        if (!isResourceGroupName(resourceGroup)) {
-          await fail(
-            400,
-            `Invalid resource group name "${resourceGroup}".`,
-            "invalid-resource-group"
-          );
-          return;
-        }
-        if (!isAksClusterName(clusterName)) {
-          await fail(
-            400,
-            `Invalid cluster name "${clusterName}".`,
-            "invalid-cluster"
-          );
-          return;
-        }
-        if (
-          clusterResourceGroup &&
-          !isResourceGroupName(clusterResourceGroup)
-        ) {
-          await fail(
-            400,
-            `Invalid cluster resource group name "${clusterResourceGroup}".`,
-            "invalid-cluster-resource-group"
-          );
-          return;
-        }
-        if (data.tenantId && !isUuid(data.tenantId)) {
-          await fail(
-            400,
-            `Invalid tenantId "${data.tenantId}" (expected a GUID).`,
-            "invalid-tenant"
-          );
-          return;
-        }
-        if (data.subscriptionId && !isUuid(data.subscriptionId)) {
-          await fail(
-            400,
-            `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`,
-            "invalid-subscription"
-          );
-          return;
-        }
-        // The Service Management Reference is only surfaced by the UI
-        // AFTER a first attempt fails with the Entra policy error
-        // (progressive disclosure), so it is optional here. When present
-        // it must be a GUID (for Microsoft-internal tenants this is the
-        // Service Tree ID).
-        if (serviceManagementReference && !isUuid(serviceManagementReference)) {
-          await fail(
-            400,
-            `Invalid Service Management Reference "${serviceManagementReference}". It must be a GUID (for Microsoft-internal tenants, your Service Tree ID).`,
-            "invalid-smr"
-          );
-          return;
-        }
-
-        // A subscription is required so we can pin the az CLI context to
-        // the selected profile. Without it, the `az ad` (Graph) calls
-        // below fall back to the ambient default context and create the
-        // App Registration / SP in the wrong tenant (issue #125).
-        if (!requestedSubscriptionId) {
-          await fail(
-            400,
-            "subscriptionId is required so setup targets the selected profile, not the ambient Azure CLI default.",
-            "subscription-required"
-          );
-          return;
-        }
-
-        steps = [];
-
-        // The operation record. Created before the first mutation-adjacent
-        // call so a failure has something to describe: the repo-admin
-        // preflight below is one of the most common failure points, and it
-        // used to run before any state existed at all, leaving nothing but
-        // a bare 403 string.
-        const continuationId =
-          typeof data.operationId === "string" ? data.operationId : "";
-        if (continuationId) {
-          const existing = operations.get(continuationId);
-          if (
-            !existing ||
-            isStale(existing) ||
-            existing.repo !== targetRepo ||
-            existing.environment !== envName ||
-            existing.provider !== "azure" ||
-            existing.currentStage !== STAGE_AUTHORIZE_IDENTITY ||
-            (!isServerOwnedRequest && !existing.inputRequired)
-          ) {
-            await fail(
-              409,
-              "The setup operation cannot be resumed with these inputs.",
-              "operation-continuation-mismatch"
-            );
-            return;
-          }
-          op = existing;
-          if (existing.inputRequired) resumeAfterInput(op);
-        } else {
-          op = createOperation({
-            provider: "azure",
-            repo: targetRepo,
-            environment: envName,
-            stages: buildStages(),
-            journey: {
-              origin: data.origin || null,
-              resumeTarget: data.resumeTarget || null,
-              resumeBranch: data.resumeBranch || null,
-              resumeReason: data.resumeReason || null
-            }
-          });
-          setContext(op, {
-            resourceGroup,
-            clusterName,
-            clusterResourceGroup,
-            requestedAppName: requestedAppName || null
-          });
-          setCloudContext(op, "azure", {
-            subscriptionId: requestedSubscriptionId,
-            tenantId: (data.tenantId || "").trim(),
-            resourceGroup,
-            clusterName
-          });
-          const started = operations.start(op);
-          if (!started.ok) {
-            // One setup per repository. Two concurrent runs would race on
-            // the same App Registration, federated credentials and
-            // environment secrets, and the loser would silently overwrite
-            // the winner.
-            op = null;
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(
-              JSON.stringify({
-                error: `Setup is already running for ${targetRepo}.`,
-                code: "operation-in-progress",
-                operationId: started.conflict.operationId
-              })
-            );
-            return;
-          }
-          try {
-            await operations.persist();
-          } catch (error) {
-            operations.report?.({
-              code: "operation-store-write-failed",
-              message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
-            });
-            finish(op, "failed", {
-              failure: {
-                code: "operation-persistence-failed",
-                stage: op.currentStage,
-                stepSeq: null,
-                message:
-                  "Radius changed no cloud resources because it could not save the setup recovery record.",
-                classification: "unknown"
-              }
-            });
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(500);
-            res.end(
-              JSON.stringify({
-                error:
-                  "Radius changed no cloud resources because it could not save the setup recovery record.",
-                code: "operation-persistence-failed",
-                operationId: op.operationId
-              })
-            );
-            return;
-          }
-        }
-        enterStage(op, STAGE_AUTHORIZE_IDENTITY);
-
-        // Mirror every step into the record as it is pushed. Wrapping the
-        // instance's push keeps the two representations in sync by
-        // construction, which is worth more than converting fifty-odd call
-        // sites in one diff and hoping none were missed.
-        //
-        // The step strings carry their own state, and that convention is
-        // now load-bearing — `addLegacyStep` parses it. When adding a step:
-        //
-        //   'Doing the thing...'  trailing ellipsis  -> running
-        //   '✅ Did the thing'                        -> succeeded
-        //   '⚠️ Did it, with a caveat'                -> warning
-        //   '❌ Could not do it'                      -> failed
-        //   '⏭️ Did not need to do it'                -> skipped
-        //   '👉 Now go do this yourself'              -> prompt
-        //   'Anything else'                          -> succeeded (default)
-        //
-        // An unmarked step lands on that last line, so mark anything that
-        // is not a plain successful observation.
-        const rawPush = steps.push.bind(steps);
-        steps.push = (...items) => {
-          for (const item of items) {
-            try {
-              addLegacyStep(op, item);
-            } catch {
-              /* narration must never break setup */
-            }
-          }
-          return rawPush(...items);
-        };
-
-        // Record the GitHub identity setup is acting as, so the setup
-        // log makes it obvious when mutations run as a different account
-        // than the one the host UI shows (e.g. an enterprise/EMU login
-        // that may lack access to the target repo or Azure tenant).
-        // Captured before the preflight, not after, so a preflight 403 can
-        // still say which account it was acting as — which is usually the
-        // whole explanation.
-        try {
-          const ghId = await getGitHubIdentity();
-          if (ghId && ghId.actingLogin) {
-            setContext(op, { githubLogin: ghId.actingLogin });
-            steps.push(`Acting on GitHub as @${ghId.actingLogin}.`);
-            if (ghId.mismatch && ghId.displayLogin) {
-              steps.push(
-                `⚠️ Note: the app shows @${ghId.displayLogin} but setup is acting as @${ghId.actingLogin}. If setup fails with a permission error, switch accounts in the Create Environment dialog.`
-              );
-            }
-          }
-        } catch {
-          /* identity is advisory — never block setup on it */
-        }
-
-        // Preflight repo access + admin BEFORE creating any App
-        // Registration. Catches both a wrong-active-gh-account 404 and an
-        // insufficient-permission (non-admin) 404, which GitHub otherwise
-        // returns as bare, unhelpful 404s later in the flow.
-        const accessMsg = await preflightRepoAdmin(targetRepo);
-        if (accessMsg) {
-          await fail(403, accessMsg, "repo-admin-required");
-          return;
-        }
-        const ghcrPreflight = await preflightGhcrPackageWriteAccess();
-        if (!ghcrPreflight.ok) {
-          await fail(
-            ghcrPreflight.status,
-            ghcrPreflight.error,
-            ghcrPreflight.code,
-            {
-              steps
-            }
-          );
-          return;
-        }
-
-        // Run `az` non-interactively: close stdin so it can never block on
-        // an interactive prompt inside this GUI host process.
-        runCmd = runCliCommand;
-        const ghJsonRunner: GitHubJsonRunner = async (
-          apiPath: string
-        ): Promise<GitHubJsonResponse> => {
-          const result = await ghApiJson(apiPath, {
-            headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
-          });
-          return {
-            ok: result.ok,
-            status: result.status,
-            json:
-              (
-                result.json !== null &&
-                typeof result.json === "object" &&
-                !Array.isArray(result.json)
-              ) ?
-                record(result.json)
-              : null,
-            stderr: result.stderr
-          };
-        };
-
-        // Step 1: Pin the az CLI context to the SELECTED profile, then
-        // confirm login and align the tenant. Microsoft Graph / AAD
-        // commands (`az ad app create`, `az ad sp create`, `az ad app
-        // federated-credential create`) do NOT accept a `--subscription`
-        // flag — they target the tenant of the active `az` login context.
-        // If we rely on the ambient default the App Registration / SP can
-        // be created in the wrong tenant (issue #125), so we switch the
-        // active subscription first and then verify the resulting tenant.
-        let tenantId = (data.tenantId || "").trim();
-        let subscriptionId = requestedSubscriptionId;
-
-        steps.push(`Selecting subscription ${subscriptionId}...`);
-        const setResult = await runCmd!("az", [
-          "account",
-          "set",
-          "--subscription",
-          subscriptionId
-        ]);
-        if (setResult.code !== 0) {
-          // Surface the CLI stderr — the failure may be a logged-out
-          // session, expired credentials, or a tenant restriction, not
-          // just an unknown subscription.
-          const detail = (setResult.stderr || "").trim();
-          await fail(
-            400,
-            `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${
-              detail ? " Azure CLI: " + detail : ""
-            }`,
-            "az-subscription-set-failed",
-            { steps }
-          );
-          return;
-        }
-
-        // Read the now-active account — the source of truth for what the
-        // subsequent `az ad` (Graph) calls will actually target.
-        steps.push("Checking Azure CLI login...");
-        const acctResult = await runCmd!("az", [
-          "account",
-          "show",
-          "--output",
-          "json"
-        ]);
-        if (acctResult.code !== 0) {
-          await fail(
-            400,
-            'Azure CLI not logged in. Run "az login" first.',
-            "az-not-logged-in",
-            { steps }
-          );
-          return;
-        }
-        let account: Record<string, unknown>;
-        try {
-          const parsed: unknown = JSON.parse(acctResult.stdout);
-          account = record(parsed);
-        } catch (e) {
-          await fail(
-            400,
-            'Could not parse "az account show" output.',
-            "az-account-parse",
-            { steps }
-          );
-          return;
-        }
-        const activeTenantId = optionalString(account.tenantId);
-        // Prefer the active account's id as the canonical subscription
-        // after switching context.
-        subscriptionId = optionalString(account.id) || subscriptionId;
-
-        // Fail with guidance when the selected tenant is not the active
-        // one — otherwise the app would land in the wrong directory.
-        if (
-          tenantId &&
-          activeTenantId &&
-          tenantId.toLowerCase() !== activeTenantId.toLowerCase()
-        ) {
-          await fail(
-            400,
-            `Azure CLI is signed in to tenant ${activeTenantId}, but tenant ${tenantId} was requested. ` +
-              `Run "az login --tenant ${tenantId}" and retry.`,
-            "az-tenant-mismatch",
-            { steps }
-          );
-          return;
-        }
-        tenantId = tenantId || activeTenantId;
-
-        // Validate the resolved subscription id before it reaches an
-        // `az` scope argument, and ensure the tenant is known.
-        if (!isUuid(subscriptionId)) {
-          await fail(
-            400,
-            `Resolved subscription id "${subscriptionId}" is not a valid GUID.`,
-            "invalid-subscription",
-            { steps }
-          );
-          return;
-        }
-        if (!activeTenantId) {
-          await fail(
-            400,
-            'Could not determine the active Azure tenant. Run "az login" and "az account set --subscription <id>", then try again.',
-            "az-account-incomplete",
-            { steps }
-          );
-          return;
-        }
-        steps.push(
-          `✅ Using subscription=${subscriptionId}, tenant=${tenantId}`
-        );
-
-        // Step 2: Resolve the federated credential(s) BEFORE creating
-        // anything. This reads the canonical repo + subject customization
-        // from GitHub. A proven immutable default creates only ID-bound trust;
-        // an inconclusive default creates both forms for rollout compatibility.
-        // A customized subject builds the single exact subject (failing loud
-        // only if a repo/repository claim needs an immutability decision).
-        steps.push("Resolving GitHub OIDC subject...");
-        // Note: enterprise-claim rejection (AADSTS7002381) is handled at
-        // Actions-run failure time via explainOidcEnterpriseClaim (deploy.ts),
-        // which surfaces a tenant-agnostic explanation. Package-scope /
-        // workflow-permission changes remain out of scope for this fix.
-        const oidcSuffix = buildEnvironmentSuffix(envName);
-        let oidc: ResolveOidcSubjectResult;
-        try {
-          oidc = await resolveOidcSubject(
-            {
-              targetRepo,
-              envName,
-              suffix: oidcSuffix
-            },
-            ghJsonRunner
-          );
-        } catch (e) {
-          await fail(
-            400,
-            errorMessage(e),
-            errorCode(e, "oidc-subject-failed"),
-            {
-              steps
-            }
-          );
-          return;
-        }
-        steps.push(
-          `✅ OIDC subject(s): ${oidc.federatedCredentials
-            .map((f) => f.subject)
-            .join(", ")}`
-        );
-
-        // Step 3: Resolve the target App Registration idempotently
-        // (lookup-then-create). Creating unconditionally would spawn a
-        // new app on every run (Azure AD allows duplicate display
-        // names) — tenant sprawl, a new clientId that orphans the
-        // AZURE_CLIENT_ID already wired into the GitHub environment, and
-        // a fresh app with no Service Management Reference (forcing the
-        // user to redo the approval-gated SMR). Instead we reuse an
-        // existing app the caller OWNS when one exists.
-        // The default per-repo deploy identity name. Editable: when the
-        // user supplies data.appName (create path), we validate and use
-        // it instead — but only for the name lookup / create below, never
-        // to repoint an already-wired AZURE_CLIENT_ID. When an explicit
-        // appId is chosen the name is irrelevant (we reuse that app), so
-        // validation is skipped there.
-        let appName = `radius-deploy-${oidc.fullName.replace("/", "-")}`;
-        if (!explicitAppId) {
-          // Always validate the FINAL effective name — including the
-          // derived default, which for a very long owner/repo could
-          // exceed Entra's 120-char limit. A present-but-blank name is
-          // an explicit error rather than a silent derive.
-          if (appNameProvided) {
-            const nameCheck = validateAppRegistrationName(requestedAppName);
-            if (!nameCheck.ok) {
-              await fail(400, nameCheck.reason, "invalid-app-name", { steps });
-              return;
-            }
-            appName = nameCheck.name;
-          } else {
-            const nameCheck = validateAppRegistrationName(appName);
-            if (!nameCheck.ok) {
-              await fail(
-                400,
-                "The derived App Registration name is invalid: " +
-                  nameCheck.reason +
-                  " Supply a shorter appName.",
-                "invalid-app-name",
-                { steps }
-              );
-              return;
-            }
-            appName = nameCheck.name;
-          }
-        }
-
-        // The repo's existing AZURE_CLIENT_ID (if any). Read from the
-        // request body first, else the GitHub environment variable. We
-        // prefer the identity already wired into the environment so a
-        // repo rename or a hand-made app is never silently repointed.
-        let existingClientId = (data.clientId || "").trim();
-        if (!existingClientId) {
-          const varRes = await ghJsonRunner(
-            `/repos/${oidc.fullName}/environments/${encodeURIComponent(
-              envName
-            )}/variables/AZURE_CLIENT_ID`
-          );
-          if (
-            varRes?.ok &&
-            varRes.json &&
-            typeof varRes.json.value === "string"
-          ) {
-            existingClientId = varRes.json.value.trim();
-          }
-          // A 404 (no environment/variable yet) is expected on a first
-          // run; a hard transport/permission failure is non-fatal here
-          // (the name lookup below still resolves the app).
-        }
-
-        // Signed-in user id + ownership check, fetched once and cached —
-        // reused for both the existingClientId path and name scoping.
-        let signedInUserId: string | null = null;
-        const getSignedInUserId = async (): Promise<
-          { ok: true; id: string } | { ok: false; stderr: string }
-        > => {
-          if (signedInUserId !== null) return { ok: true, id: signedInUserId };
-          const meRes = await runCmd!("az", [
-            "ad",
-            "signed-in-user",
-            "show",
-            "--query",
-            "id",
-            "-o",
-            "tsv"
-          ]);
-          if (meRes.code !== 0) return { ok: false, stderr: meRes.stderr };
-          signedInUserId = meRes.stdout.trim().toLowerCase();
-          return { ok: true, id: signedInUserId };
-        };
-        const isOwnedBySignedInUser = async (appId: string) => {
-          const me = await getSignedInUserId();
-          if (!me.ok) return { ok: false, stderr: me.stderr };
-          const ownRes = await runCmd!("az", buildAppOwnerListArgs({ appId }));
-          if (ownRes.code !== 0) return { ok: false, stderr: ownRes.stderr };
-          const owners = parseDirectoryObjectIds(ownRes.stdout);
-          return { ok: true, owned: owners.includes(me.id) };
-        };
-        const readRadiusProvenance = async (
-          appId: string
-        ): Promise<RadiusAppProvenanceInput | undefined> => {
-          const tagRes = await runCmd!("az", buildAppTagShowArgs({ appId }));
-          if (tagRes.code !== 0) return undefined;
-          return {
-            tags: parseAppTags(tagRes.stdout) || [],
-            repo: oidc.fullName,
-            environment: envName
-          };
-        };
-
-        // TODO(defer): TOCTOU race — two concurrent requests could both
-        // observe "no app" and each create one. Left unhandled by design:
-        // this is a single-user local canvas server, so concurrent
-        // same-repo setup is implausible; a mutex+re-list+delete-loser is
-        // disproportionate.
-        let clientId = "";
-        const rollbackCreatedAppAndFail = async (
-          error: string,
-          code: string,
-          azError: string
-        ) =>
-          fail(400, error, code, {
-            steps,
-            azError,
-            clientId,
-            appName
-          });
-
-        // Step 3a: existingClientId-first. If AZURE_CLIENT_ID already
-        // points at an app we own, reuse it directly — the wired identity
-        // wins over any name match, so we never overwrite a working
-        // deployment's identity or churn its FICs/role.
-        if (existingClientId) {
-          steps.push(
-            `Verifying the repository's existing AZURE_CLIENT_ID: ${existingClientId}...`
-          );
-          const showRes = await runCmd!("az", [
-            "ad",
-            "app",
-            "show",
-            "--id",
-            existingClientId,
-            "--query",
-            "id",
-            "-o",
-            "tsv"
-          ]);
-          let showStatus;
-          if (showRes.code === 0 && showRes.stdout.trim()) {
-            showStatus = "found";
-          } else if (isAzResourceNotFound(showRes.stderr)) {
-            showStatus = "not-found";
-          } else {
-            showStatus = "lookup-failed";
-          }
-          let owned = false;
-          let radiusProvenance: RadiusAppProvenanceInput | undefined;
-          if (showStatus === "found") {
-            const own = await isOwnedBySignedInUser(existingClientId);
-            if (!own.ok) {
-              await fail(
-                400,
-                `Could not read owners of the existing AZURE_CLIENT_ID app ${existingClientId}: ` +
-                  own.stderr,
-                "app-owner-lookup-failed",
-                { steps, azError: own.stderr }
-              );
-              return;
-            }
-            owned = own.owned === true;
-            if (!owned) {
-              radiusProvenance = await readRadiusProvenance(existingClientId);
-            }
-          }
-          const decision = decideExistingClientId({
-            clientId: existingClientId,
-            showStatus,
-            owned,
-            radiusProvenance
-          });
-          if (decision.action === "fatal") {
-            await fail(
-              400,
-              `Could not verify the repository's AZURE_CLIENT_ID (${existingClientId}): ` +
-                showRes.stderr,
-              decision.code || "existing-client-id-failed",
-              { steps, azError: showRes.stderr }
-            );
-            return;
-          }
-          if (decision.action === "error") {
-            await fail(
-              400,
-              decision.reason ||
-                `The repository's AZURE_CLIENT_ID (${existingClientId}) references an App Registration the current signed-in user does not own. Verify or clear the variable and retry.`,
-              decision.code || "existing-client-id-not-owned",
-              { steps }
-            );
-            return;
-          }
-          if (decision.action === "reuse") {
-            clientId = existingClientId;
-            // Reuse path: never touch the existing Service Management
-            // Reference — it may be approval-gated.
-            steps.push(
-              `✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${clientId}`
-            );
-            recordAzureApp(op, {
-              state: "reused",
-              appId: clientId,
-              displayName: null
-            });
-            try {
-              await operations.persist();
-            } catch (error) {
-              operations.report?.({
-                code: "operation-store-write-failed",
-                message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
-              });
-              finish(op, "failed", {
-                failure: {
-                  code: "operation-persistence-failed",
-                  stage: op.currentStage,
-                  stepSeq: null,
-                  message:
-                    "Radius changed no cloud resources because it could not save the setup recovery record.",
-                  classification: "unknown"
-                }
-              });
-              res.setHeader("Content-Type", "application/json");
-              res.writeHead(500);
-              res.end(
-                JSON.stringify({
-                  error:
-                    "Radius changed no cloud resources because it could not save the setup recovery record.",
-                  code: "operation-persistence-failed",
-                  operationId: op.operationId
-                })
-              );
-              return;
-            }
-          }
-          // 'fallthrough' (empty / stale not-found) → name lookup below.
-        }
-
-        // Step 3b: explicit selection, or name lookup + ownership scoping
-        // (only when the wired identity did not already resolve the app).
-        if (!clientId) {
-          // Per-candidate FIC → served-repos enrichment. Best-effort: a
-          // FIC-list failure just omits servesRepos for that candidate.
-          const listServesRepos = async (appId: string) => {
-            const ficRes = await runCmd!("az", [
-              "ad",
-              "app",
-              "federated-credential",
-              "list",
-              "--id",
-              appId,
-              "--query",
-              "[].subject",
-              "-o",
-              "json"
-            ]);
-            if (ficRes.code !== 0) return undefined;
-            try {
-              return parseServedReposFromSubjects(JSON.parse(ficRes.stdout));
-            } catch {
-              return undefined;
-            }
-          };
-
-          // Explicit choice: the duplicate picker or the opt-in "use an
-          // existing application" (cross-repo) flow resubmits with an
-          // appId. Verify ownership of THAT exact app and reuse it — this
-          // deliberately bypasses the name lookup so a shared,
-          // non-name-matched identity is honored. Ownership is still
-          // enforced (an app we don't own would fail FIC/role writes and
-          // could hijack another user's identity).
-          if (explicitAppId) {
-            if (!isUuid(explicitAppId)) {
-              await fail(
-                400,
-                "The selected App Registration id is not a valid GUID.",
-                "invalid-app-id",
-                { steps }
-              );
-              return;
-            }
-            const own = await isOwnedBySignedInUser(explicitAppId);
-            if (!own.ok) {
-              await fail(
-                400,
-                `Could not read owners of App Registration ${explicitAppId}: ` +
-                  own.stderr,
-                "app-owner-lookup-failed",
-                { steps, azError: own.stderr }
-              );
-              return;
-            }
-            if (!own.owned) {
-              const ownershipDecision = decideRadiusAppOwnership({
-                ownedBySignedInUser: false,
-                radiusProvenance: await readRadiusProvenance(explicitAppId)
-              });
-              await fail(
-                400,
-                ownershipDecision.reason ||
-                  "The selected App Registration is not owned by the current signed-in user. Choose one you own or create a new application.",
-                ownershipDecision.code || "app-registration-not-owned",
-                { steps, appName }
-              );
-              return;
-            }
-            clientId = explicitAppId;
-            // Reuse path: never touch SMR (may be approval-gated).
-            steps.push(`✅ Using the selected App Registration: ${clientId}`);
-            recordAzureApp(op, {
-              state: "reused",
-              appId: clientId,
-              displayName: null
-            });
-          }
-
-          if (!clientId) {
-            steps.push(`Looking up existing App Registration: ${appName}...`);
-            const listRes = await runCmd!("az", [
-              "ad",
-              "app",
-              "list",
-              // single-quote-safe: appName was replaced with the
-              // validateAppRegistrationName() result above, whose
-              // allow-list forbids quotes, so it cannot break out of
-              // this OData single-quoted string literal.
-              "--filter",
-              `displayName eq '${appName}'`,
-              "--query",
-              "[].{appId:appId,id:id,displayName:displayName,createdDateTime:createdDateTime,tags:tags}",
-              "-o",
-              "json"
-            ]);
-            if (listRes.code !== 0) {
-              // FATAL: a silent fall-through to create would resurrect
-              // the sprawl bug this fix exists to prevent.
-              await fail(
-                400,
-                "Failed to look up existing App Registrations: " +
-                  listRes.stderr,
-                "app-lookup-failed",
-                { steps, azError: listRes.stderr }
-              );
-              return;
-            }
-            // `az ... -o json` returns a literal `[]` for no matches, so
-            // an empty string is anomalous. Only a genuine array
-            // proceeds; a non-array or unparseable result is FATAL. A
-            // legitimately EMPTY array still proceeds to create.
-            let matches;
-            try {
-              const parsed = JSON.parse(listRes.stdout);
-              if (!Array.isArray(parsed)) {
-                await fail(
-                  400,
-                  "The App Registration lookup returned an unexpected (non-array) result.",
-                  "app-lookup-parse",
-                  { steps }
-                );
-                return;
-              }
-              matches = parsed;
-            } catch (e) {
-              await fail(
-                400,
-                "Could not parse the App Registration lookup result.",
-                "app-lookup-parse",
-                { steps }
-              );
-              return;
-            }
-
-            // Scope matches to apps the signed-in user owns; reusing an
-            // app we don't own would fail on FIC/role writes and risks
-            // hijacking another user's app in a shared tenant.
-            let ownedMatches = [];
-            let unownedRadiusProvenance;
-            for (const m of matches) {
-              if (!m || !m.appId) continue;
-              const own = await isOwnedBySignedInUser(m.appId);
-              if (!own.ok) {
-                await fail(
-                  400,
-                  `Could not read owners of App Registration ${m.appId}: ` +
-                    own.stderr,
-                  "app-owner-lookup-failed",
-                  { steps, azError: own.stderr }
-                );
-                return;
-              }
-              if (own.owned) ownedMatches.push(m);
-              else if (!unownedRadiusProvenance) {
-                unownedRadiusProvenance = {
-                  tags: Array.isArray(m.tags) ? m.tags : [],
-                  repo: oidc.fullName,
-                  environment: envName
-                };
-              }
-            }
-
-            const selection = decideAppSelection({
-              ownedMatches,
-              hasUnownedMatch: matches.length > ownedMatches.length,
-              radiusProvenance: unownedRadiusProvenance,
-              existingClientId,
-              createNew: createNewApp
-            });
-
-            if (selection.action === "error") {
-              await fail(
-                400,
-                selection.reason || "Could not select an App Registration.",
-                selection.code || "app-selection-failed",
-                { steps, appName }
-              );
-              return;
-            }
-
-            if (selection.action === "needs-selection") {
-              // >1 owned name-matches and no explicit choice yet.
-              // Enrich each candidate with the repos it already serves
-              // (from its FIC subjects) so the user can choose
-              // knowingly, then ask the frontend to prompt.
-              const candidates = [];
-              for (const c of selection.candidates || []) {
-                const servesRepos = await listServesRepos(c.appId);
-                candidates.push({
-                  appId: c.appId,
-                  displayName: c.displayName,
-                  createdDateTime: c.createdDateTime,
-                  ...(servesRepos ? { servesRepos } : {})
-                });
-              }
-              await fail(
-                400,
-                "Multiple owned App Registrations found — choose which identity to use.",
-                "app-selection-required",
-                {
-                  steps,
-                  appName,
-                  candidates,
-                  defaultAppId: selection.defaultAppId
-                }
-              );
-              return;
-            }
-
-            if (selection.action === "reuse") {
-              clientId = selection.appId || "";
-              // Reuse path: never touch the existing Service Management
-              // Reference — it may be approval-gated. SMR only applies
-              // when creating a new app below.
-              steps.push(`✅ Reusing existing App Registration: ${clientId}`);
-              recordAzureApp(op, {
-                state: "reused",
-                appId: clientId,
-                displayName: appName
-              });
-              try {
-                await operations.persist();
-              } catch (error) {
-                operations.report?.({
-                  code: "operation-store-write-failed",
-                  message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
-                });
-                finish(op, "failed", {
-                  failure: {
-                    code: "operation-persistence-failed",
-                    stage: op.currentStage,
-                    stepSeq: null,
-                    message:
-                      "Radius changed no cloud resources because it could not save the setup recovery record.",
-                    classification: "unknown"
-                  }
-                });
-                res.setHeader("Content-Type", "application/json");
-                res.writeHead(500);
-                res.end(
-                  JSON.stringify({
-                    error:
-                      "Radius changed no cloud resources because it could not save the setup recovery record.",
-                    code: "operation-persistence-failed",
-                    operationId: op.operationId
-                  })
-                );
-                return;
-              }
-            } else {
-              // Create a fresh App Registration. Attempt WITHOUT a
-              // Service Management Reference first; only if Entra policy
-              // rejects it do we ask the user for one (progressive
-              // disclosure) — `az ad app create` fails atomically, so
-              // the retry is clean with no orphaned app. Ownership and
-              // provenance tagging are enforced immediately below.
-              steps.push(`Creating App Registration: ${appName}...`);
-              const appResult = await runCmd!(
-                "az",
-                buildAppCreateArgs({
-                  appName,
-                  serviceManagementReference
-                }).filter((arg): arg is string => typeof arg === "string")
-              );
-              if (appResult.code !== 0) {
-                if (
-                  !serviceManagementReference &&
-                  isServiceManagementReferenceError(appResult.stderr)
-                ) {
-                  await fail(
-                    400,
-                    "This Entra tenant requires a Service Management Reference on new App Registrations. " +
-                      "Enter your Service Management Reference (for Microsoft-internal tenants, your Service Tree ID GUID) and retry.",
-                    "service-management-reference-required",
-                    { steps, azError: appResult.stderr }
-                  );
-                  return;
-                }
-                await fail(
-                  400,
-                  "Failed to create App Registration: " + appResult.stderr,
-                  "app-create-failed",
-                  { steps, azError: appResult.stderr }
-                );
-                return;
-              }
-              clientId = appResult.stdout.trim();
-              steps.push(`✅ App Registration created: ${clientId}`);
-              recordAzureApp(op, {
-                state: "created",
-                appId: clientId,
-                displayName: appName,
-                serviceManagementReference: serviceManagementReference || null
-              });
-              if (!(await checkpoint())) return;
-              const me = await getSignedInUserId();
-              if (!me.ok) {
-                await rollbackCreatedAppAndFail(
-                  "Failed to read the signed-in Entra user after creating the App Registration: " +
-                    me.stderr,
-                  "app-owner-lookup-failed",
-                  me.stderr
-                );
-                return;
-              }
-
-              steps.push(
-                "Assigning the signed-in user as an owner of the new App Registration..."
-              );
-              const ownerAddRes = await runCmd!(
-                "az",
-                buildAppOwnerAddArgs({
-                  appId: clientId,
-                  ownerObjectId: me.id
-                })
-              );
-              if (
-                ownerAddRes.code !== 0 &&
-                !isAppOwnerAlreadyAssignedError(ownerAddRes.stderr)
-              ) {
-                await rollbackCreatedAppAndFail(
-                  "Failed to assign the signed-in user as an owner of the new App Registration: " +
-                    ownerAddRes.stderr,
-                  "app-owner-add-failed",
-                  ownerAddRes.stderr
-                );
-                return;
-              }
-
-              steps.push(
-                "Verifying the signed-in user owns the new App Registration..."
-              );
-              const ownerListRes = await runCmd!(
-                "az",
-                buildAppOwnerListArgs({ appId: clientId })
-              );
-              if (ownerListRes.code !== 0) {
-                await rollbackCreatedAppAndFail(
-                  "Failed to verify owners of the new App Registration: " +
-                    ownerListRes.stderr,
-                  "app-owner-lookup-failed",
-                  ownerListRes.stderr
-                );
-                return;
-              }
-              const ownerIds = parseDirectoryObjectIds(ownerListRes.stdout);
-              if (!ownerIds.includes(me.id.toLowerCase())) {
-                await rollbackCreatedAppAndFail(
-                  "The signed-in user was not present in the App Registration owners after creation.",
-                  "app-owner-verify-failed",
-                  ownerListRes.stdout
-                );
-                return;
-              }
-              steps.push(
-                "✅ Signed-in user verified as App Registration owner"
-              );
-
-              const provenanceTags = buildRadiusAppProvenanceTags({
-                repo: oidc.fullName,
-                environment: envName,
-                operationId: op.operationId
-              });
-              steps.push(
-                "Applying Radius provenance tags to the new App Registration..."
-              );
-              const tagPatchRes = await runCmd!(
-                "az",
-                buildAppTagPatchArgs({ appId: clientId, tags: provenanceTags })
-              );
-              if (tagPatchRes.code !== 0) {
-                await rollbackCreatedAppAndFail(
-                  "Failed to apply Radius provenance tags to the new App Registration: " +
-                    tagPatchRes.stderr,
-                  "app-tag-update-failed",
-                  tagPatchRes.stderr
-                );
-                return;
-              }
-
-              steps.push("Verifying Radius provenance tags...");
-              const tagShowRes = await runCmd!(
-                "az",
-                buildAppTagShowArgs({ appId: clientId })
-              );
-              if (tagShowRes.code !== 0) {
-                await rollbackCreatedAppAndFail(
-                  "Failed to read the App Registration tags after update: " +
-                    tagShowRes.stderr,
-                  "app-tag-read-failed",
-                  tagShowRes.stderr
-                );
-                return;
-              }
-              const actualTags = parseAppTags(tagShowRes.stdout);
-              if (!actualTags) {
-                await rollbackCreatedAppAndFail(
-                  "Could not parse the App Registration tags after update.",
-                  "app-tag-parse-failed",
-                  tagShowRes.stdout
-                );
-                return;
-              }
-              const missingTags = missingRequiredAppTags(
-                actualTags,
-                provenanceTags
-              );
-              if (missingTags.length > 0) {
-                await rollbackCreatedAppAndFail(
-                  `The new App Registration is missing required Radius provenance tags: ${missingTags.join(
-                    ", "
-                  )}.`,
-                  "app-tag-verify-failed",
-                  JSON.stringify(actualTags)
-                );
-                return;
-              }
-              steps.push("✅ Radius provenance tags verified");
-            }
-          }
-        }
-
-        // Step 4: Create Service Principal (FATAL on failure). By this
-        // point a NEW app has already passed owner/tag verification, so
-        // any later failure returns clientId/appName for manual cleanup.
-        steps.push("Creating Service Principal...");
-        const spReady = await ensureServicePrincipal(clientId, (args) =>
-          runCmd!("az", args)
-        );
-        if (!spReady.ok) {
-          await fail(
-            400,
-            "Could not create or find the Service Principal: " + spReady.stderr,
-            "sp-failed",
-            { steps, clientId, appName, azError: spReady.stderr }
-          );
-          return;
-        }
-        steps.push("✅ Service Principal ready");
-        recordServicePrincipal(op, {
-          state: spReady.state,
-          appId: clientId,
-          ...(spReady.objectId ? { objectId: spReady.objectId } : {})
-        });
-        if (!(await checkpoint())) return;
-
-        // Step 5: Create the Federated Credential(s) (FATAL on failure).
-        // Idempotent by SUBJECT: on a reused app (or a rerun) skip any
-        // FIC whose subject already exists, so we stay under Azure's
-        // ~20-FIC/app cap and don't churn credentials. "already exists" is
-        // never trusted blindly — a name collision is caught up front and
-        // a stale-list race is verified by reading the FIC back (below).
-        const { writeFileSync } = await import("node:fs");
-        const { tmpdir } = await import("node:os");
-        const { join } = await import("node:path");
-        let existingSubjects: string[] = [];
-        let existingNameToSubject = new Map<string, string>();
-        // Fetch existing FICs as {name, subject} pairs. Dedup stays keyed
-        // on SUBJECT (below), but we also need the NAME→subject map to
-        // detect a name collision: clean() collapses ':' and '-' to the
-        // same FIC name while the subject keeps '%3A', so two distinct
-        // environments can map to one name with different subjects.
-        const ficListRes = await runCmd!("az", [
-          "ad",
-          "app",
-          "federated-credential",
-          "list",
-          "--id",
-          clientId,
-          "--query",
-          "[].{name:name,subject:subject}",
-          "-o",
-          "json"
-        ]);
-        if (ficListRes.code === 0) {
-          try {
-            const parsed = JSON.parse(ficListRes.stdout || "[]");
-            if (Array.isArray(parsed)) {
-              existingSubjects = parsed
-                .map((f) => f && f.subject)
-                .filter(Boolean);
-              existingNameToSubject = new Map(
-                parsed
-                  .filter((f) => f && f.name)
-                  .map((f) => [f.name, f.subject])
-              );
-            }
-          } catch {
-            /* fall back to attempting all, guarded by the read-back below */
-          }
-        }
-        const mutableCredentialName = findLegacyMutableCredentialName(
-          oidc,
-          oidcSuffix,
-          existingNameToSubject
-        );
-        if (mutableCredentialName) {
-          steps.push(
-            `⚠️ Legacy mutable federated credential "${mutableCredentialName}" is still present. ` +
-              `After immutable OIDC verification succeeds, remove it with: ` +
-              `az ad app federated-credential delete --id ${clientId} ` +
-              `--federated-credential-id ${mutableCredentialName}`
-          );
-        }
-        const ficsToCreate = selectMissingFederatedCredentials(
-          oidc.federatedCredentials,
-          existingSubjects
-        );
-        const skippedCount =
-          oidc.federatedCredentials.length - ficsToCreate.length;
-        if (skippedCount > 0) {
-          steps.push(
-            `✅ ${skippedCount} federated credential(s) already present — skipping`
-          );
-        }
-        // Fail loud on a NAME collision (two environments normalizing to
-        // one FIC name with different subjects). Creating the second would
-        // silently no-op ("already exists") and leave this environment
-        // with no matching credential → AADSTS700213 at deploy.
-        const ficCollision = findFederatedCredentialNameCollision(
-          ficsToCreate,
-          existingNameToSubject
-        );
-        if (ficCollision) {
-          await fail(
-            400,
-            `Federated credential name "${ficCollision.name}" already exists with a different subject ` +
-              `("${ficCollision.existingSubject}" vs required "${ficCollision.desiredSubject}"). Two environment ` +
-              `names normalize to the same credential name — rename this environment to avoid characters ` +
-              `that collapse together (for example ":" and "-").`,
-            "federated-credential-name-collision",
-            { steps, clientId, appName }
-          );
-          return;
-        }
-        for (const fic of ficsToCreate) {
-          steps.push(`Creating federated credential "${fic.name}"...`);
-          const fedParams = JSON.stringify({
-            name: fic.name,
-            issuer: "https://token.actions.githubusercontent.com",
-            subject: fic.subject,
-            audiences: ["api://AzureADTokenExchange"]
-          });
-          // Unpredictable filename so a shared tmpdir can't be
-          // pre-created or read by another local user.
-          fedTmpFile = join(
-            tmpdir(),
-            `radius-fed-cred-${randomBytes(12).toString("hex")}.json`
-          );
-          writeFileSync(fedTmpFile, fedParams, { mode: 0o600 });
-          const fedResult = await runCmd!("az", [
-            "ad",
-            "app",
-            "federated-credential",
-            "create",
-            "--id",
-            clientId,
-            "--parameters",
-            "@" + fedTmpFile
-          ]);
-          try {
-            (await import("node:fs")).unlinkSync(fedTmpFile);
-          } catch {
-            /* best-effort */
-          }
-          fedTmpFile = null;
-          const createdFederatedCredential = fedResult.code === 0;
-          if (fedResult.code !== 0) {
-            if (!fedResult.stderr.includes("already exists")) {
-              await fail(
-                400,
-                `Failed to create federated credential "${fic.name}": ` +
-                  fedResult.stderr,
-                "federated-credential-failed",
-                { steps, clientId, appName, azError: fedResult.stderr }
-              );
-              return;
-            }
-            // Backstop: the pre-create list was stale or a concurrent
-            // create won the race. Never trust "already exists" as
-            // success — read the FIC back and confirm its subject
-            // matches before reporting the credential as created.
-            const showRes = await runCmd!("az", [
-              "ad",
-              "app",
-              "federated-credential",
-              "show",
-              "--id",
-              clientId,
-              "--federated-credential-id",
-              fic.name,
-              "--query",
-              "subject",
-              "-o",
-              "tsv"
-            ]);
-            const actualSubject = (showRes.stdout || "").trim();
-            if (showRes.code !== 0 || actualSubject !== fic.subject) {
-              await fail(
-                400,
-                `Federated credential "${fic.name}" already exists but its subject ` +
-                  `("${actualSubject}") does not match the required subject ("${fic.subject}"). Rename this ` +
-                  `environment to avoid a credential-name collision.`,
-                "federated-credential-subject-mismatch",
-                { steps, clientId, appName }
-              );
-              return;
-            }
-          }
-          steps.push(`✅ Federated credential "${fic.name}" created`);
-          if (createdFederatedCredential) {
-            recordCreatedFederatedCredential(op, {
-              name: fic.name,
-              subject: fic.subject
-            });
-            if (!(await checkpoint())) return;
-          }
-        }
-
-        // Step 6: Assign Contributor role on the resource group (FATAL).
-        //
-        // Assign by the Service Principal's OBJECT ID, not its appId. A
-        // role assignment created with `--assignee <appId>` right after
-        // `az ad sp create` races Microsoft Graph replication: az must
-        // first resolve the appId to its SP object, and until that object
-        // has replicated the lookup can fail — or, on some az-CLI
-        // versions, silently no-op so the role is never written. The
-        // identity then signs in successfully but sees "No subscriptions
-        // found" because it has no effective RBAC. This is a real,
-        // platform-independent race, NOT a macOS/Windows difference; it
-        // just surfaces more often on some CLI-version/timing
-        // combinations (e.g. a reviewer's freshly reset machine) than on
-        // the author's.
-        //
-        // `--assignee-object-id` with an explicit
-        // `--assignee-principal-type ServicePrincipal` skips the appId
-        // lookup entirely, and a short retry absorbs the residual lag in
-        // the object itself becoming visible. Genuine authorization
-        // failures (the signed-in user cannot assign roles) are NOT
-        // retried, so they surface immediately with actionable detail.
-
-        // Errors meaning "the principal hasn't replicated yet" are
-        // retried; genuine failures (notably AuthorizationFailed) surface
-        // immediately. See isReplicationLagError / buildRoleAssignmentArgs.
-        const resolveSpObjectId = async () => {
-          let lastErr = "";
-          for (let attempt = 0; attempt < 6; attempt++) {
-            const show = await runCmd!("az", [
-              "ad",
-              "sp",
-              "show",
-              "--id",
-              clientId,
-              "--query",
-              "id",
-              "-o",
-              "tsv"
-            ]);
-            const objId = (show.stdout || "").trim();
-            if (show.code === 0 && objId) return { objectId: objId, error: "" };
-            lastErr = show.stderr || show.stdout || "";
-            if (attempt < 5)
-              await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
-          }
-          return { objectId: "", error: lastErr };
-        };
-
-        const assignRoleByObjectId = async (
-          objectId: string,
-          role: string,
-          scope: string
-        ) => {
-          let last: CommandResult = { code: 1, stdout: "", stderr: "" };
-          for (let attempt = 0; attempt < 6; attempt++) {
-            last = await runCmd!(
-              "az",
-              buildRoleAssignmentArgs({ objectId, role, scope, subscriptionId })
-            );
-            if (last.code === 0 || last.stderr.includes("already exists"))
-              return {
-                ok: true,
-                created:
-                  last.code === 0 && !last.stderr.includes("already exists"),
-                stderr: ""
-              };
-            if (!isReplicationLagError(last.stderr)) break;
-            if (attempt < 5)
-              await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
-          }
-          return { ok: false, created: false, stderr: last.stderr };
-        };
-
-        let spObjectId = spReady.objectId;
-        if (!spObjectId) {
-          steps.push("Resolving Service Principal object id...");
-          const spObjLookup = await resolveSpObjectId();
-          if (!spObjLookup.objectId) {
-            await fail(
-              400,
-              "Could not resolve the Service Principal object id needed to assign Azure roles: " +
-                spObjLookup.error,
-              "sp-objectid-failed",
-              { steps, clientId, appName, azError: spObjLookup.error }
-            );
-            return;
-          }
-          spObjectId = spObjLookup.objectId;
-        }
-        if (!spObjectId) {
-          await fail(
-            400,
-            "Could not resolve the Service Principal object id needed to assign Azure roles: " +
-              "missing object id",
-            "sp-objectid-failed",
-            { steps, clientId, appName, azError: "missing object id" }
-          );
-          return;
-        }
-        recordServicePrincipal(op, { objectId: spObjectId });
-        if (!(await checkpoint())) return;
-
-        const contributorScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
-        steps.push(`Assigning Contributor role on ${resourceGroup}...`);
-        const roleResult = await assignRoleByObjectId(
-          spObjectId,
-          "Contributor",
-          contributorScope
-        );
-        if (!roleResult.ok) {
-          await fail(
-            400,
-            "Failed to assign Contributor role: " + roleResult.stderr,
-            "role-assignment-failed",
-            { steps, clientId, appName, azError: roleResult.stderr }
-          );
-          return;
-        }
-        steps.push("✅ Contributor role assigned");
-        if (roleResult.created) {
-          recordCreatedRoleAssignment(op, {
-            role: "Contributor",
-            scope: contributorScope,
-            principalObjectId: spObjectId
-          });
-          if (!(await checkpoint())) return;
-        }
-
-        // Step 6b: Assign an AKS Kubernetes RBAC role scoped to the
-        // cluster (best-effort). Contributor on the resource group is a
-        // MANAGEMENT-plane role — it lets the identity read/manage the
-        // cluster *resource*, but on clusters with Azure RBAC for
-        // Kubernetes enabled (the default for AKS Automatic) every
-        // kubectl/data-plane call (e.g. `kubectl get services`) is
-        // authorized by Azure roles scoped to the cluster, NOT by
-        // Contributor. Without this the deploy identity signs in but
-        // gets "cannot list resource ... : User does not have access to
-        // the resource in Azure" and the run fails at Verify AKS Access.
-        // Cluster Admin is required because the Radius control plane
-        // installs cluster-scoped resources (CRDs, namespaces). This is
-        // a no-op on clusters that use only Kubernetes RBAC, so we
-        // attempt it whenever an AKS cluster is targeted and treat a
-        // failure as a warning rather than aborting the whole setup.
-        //
-        // Scope the grant to the cluster's OWN resource group — not the
-        // deployment resource group above. The two can differ, and the
-        // editable RG combo in the dialog can be changed after a cluster
-        // is picked; scoping to the wrong RG puts the assignment on a path
-        // where the cluster doesn't exist, so the deploy still fails at
-        // "Verify AKS Access". pickAksResourceGroup prefers the cluster's
-        // discovered resource group and falls back only when it's absent.
-        const aksResourceGroup = pickAksResourceGroup(
-          clusterResourceGroup,
-          resourceGroup
-        );
-        const clusterScope = `/subscriptions/${subscriptionId}/resourceGroups/${aksResourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
-        steps.push(
-          `Assigning Azure Kubernetes Service RBAC Cluster Admin on ${clusterName}...`
-        );
-        const aksRoleResult = await assignRoleByObjectId(
-          spObjectId,
-          "Azure Kubernetes Service RBAC Cluster Admin",
-          clusterScope
-        );
-        if (aksRoleResult.ok) {
-          steps.push("✅ AKS RBAC Cluster Admin role assigned");
-          if (aksRoleResult.created) {
-            recordCreatedRoleAssignment(op, {
-              role: "Azure Kubernetes Service RBAC Cluster Admin",
-              scope: clusterScope,
-              principalObjectId: spObjectId
-            });
-            if (!(await checkpoint())) return;
-          }
-        } else {
-          // Non-fatal: control-plane access is already in place, and
-          // clusters without Azure RBAC for Kubernetes don't need this.
-          // Surface actionable guidance so an Automatic-cluster user can
-          // grant it manually if the deploy later fails on AKS access.
-          steps.push(
-            "⚠️ Could not assign the AKS RBAC Cluster Admin role automatically. " +
-              'If your cluster uses Azure RBAC for Kubernetes (the default for AKS Automatic) the deploy will fail at "Verify AKS Access". ' +
-              `Grant it manually: az role assignment create --assignee-object-id ${spObjectId} --assignee-principal-type ServicePrincipal --role "Azure Kubernetes Service RBAC Cluster Admin" --scope ${clusterScope}. ` +
-              "Details: " +
-              aksRoleResult.stderr
-          );
-        }
-
-        // Credentials are done, but the operation is not: the client
-        // immediately POSTs /api/create-environment, which adopts this same
-        // record. Leaving it running is what makes the two requests read as
-        // one operation to the panel, and to the user.
-        setStageState(
-          op,
-          STAGE_AUTHORIZE_IDENTITY,
-          hasWarnings(op) ? "warning" : "succeeded"
-        );
-        setContext(op, { clientId, appName });
-        setCloudContext(op, "azure", {
-          subscriptionId,
-          tenantId,
-          resourceGroup,
-          clusterName
-        });
-
-        // Return all credentials for the environment setup
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            operationId: op.operationId,
-            clientId,
-            tenantId,
-            subscriptionId,
-            resourceGroup,
-            cluster: clusterName,
-            appName,
-            subjects: oidc.federatedCredentials.map((f) => f.subject),
-            steps
-          })
-        );
-      } catch (e) {
-        // The generic catch used to discard everything the route had
-        // learned. Close the record first so the panel gets a stage, a
-        // step history and a classification instead of one bare string.
-        const failure = await finalizeSetupFailure(op, {
-          status: 400,
-          error: errorMessage(e),
-          code: "setup-unhandled",
-          classification: "unknown",
-          evidence: e instanceof Error ? e.stack || null : null,
-          steps,
-          runAz: runCmd ? (args) => runCmd!("az", args) : null
-        });
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(failure.status);
-        res.end(JSON.stringify(failure.body));
-      } finally {
-        if (fedTmpFile) {
-          try {
-            (await import("node:fs")).unlinkSync(fedTmpFile);
-          } catch {
-            /* best-effort */
-          }
-        }
-      }
-      return;
-    }
-
-    // List all App Registrations owned by the signed-in user, enriched with
-    // the repos each already serves (from its FIC subjects). Backs the
-    // opt-in "use an existing application" cross-repo picker on the
-    // Environment page. Runs under the same agent-session-stripped cliExec
-    // env as the rest of the Azure setup.
-    if (
-      pathname === "/api/list-azure-app-registrations" &&
-      req.method === "GET"
-    ) {
-      const runCmd = runCliCommand;
-      try {
-        // `--show-mine` scopes to apps the signed-in user owns, so we
-        // avoid an O(N) owner lookup across the whole tenant.
-        const listRes = await runCmd("az", [
-          "ad",
-          "app",
-          "list",
-          "--show-mine",
-          "--query",
-          "[].{appId:appId,displayName:displayName,createdDateTime:createdDateTime}",
-          "-o",
-          "json"
-        ]);
-        if (listRes.code !== 0) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: "Failed to list App Registrations: " + listRes.stderr,
-              code: "app-list-failed",
-              azError: listRes.stderr
-            })
-          );
-          return;
-        }
-        let parsed;
-        try {
-          parsed = JSON.parse(listRes.stdout);
-        } catch {
-          parsed = null;
-        }
-        if (!Array.isArray(parsed)) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: "The App Registration list returned an unexpected result.",
-              code: "app-list-parse"
-            })
-          );
-          return;
-        }
-        // Return the owned apps immediately. The `servesRepos` label
-        // (which repos each app already deploys) needs one
-        // `az ad app federated-credential list` per app, so computing it
-        // up front made the picker block on N process spawns before any
-        // row rendered (a user owning 100 apps paid ~100 spawns). The
-        // client now lazy-loads that label per row via
-        // /api/azure-app-serves-repos, so the list appears at once and
-        // the labels fill in progressively.
-        const apps = parsed
-          .filter((a) => a && a.appId)
-          .map((a) => ({
-            appId: a.appId,
-            displayName: a.displayName,
-            createdDateTime: a.createdDateTime
-          }));
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ apps }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({ error: errorMessage(e), code: "app-list-failed" })
-        );
-      }
-      return;
-    }
-
-    // Lazy per-app companion to /api/list-azure-app-registrations: computes
-    // the "already serves" repo label for ONE App Registration from its
-    // federated-credential subjects. The picker calls this per row after the
-    // list renders, so owning many apps no longer blocks the picker on an
-    // up-front N+1 chain of `az` spawns. Best-effort: any failure yields a
-    // null label rather than an error the row would have to surface.
-    if (pathname === "/api/azure-app-serves-repos" && req.method === "GET") {
-      const appId = url.searchParams.get("appId") || "";
-      if (!isUuid(appId)) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(
-          JSON.stringify({
-            error: "A valid appId is required.",
-            code: "app-serves-bad-id"
-          })
-        );
-        return;
-      }
-      const runCmd = runCliCommand;
-      let servesRepos = null;
-      const ficRes = await runCmd("az", [
-        "ad",
-        "app",
-        "federated-credential",
-        "list",
-        "--id",
-        appId,
-        "--query",
-        "[].subject",
-        "-o",
-        "json"
-      ]);
-      if (ficRes.code === 0) {
-        try {
-          servesRepos =
-            parseServedReposFromSubjects(JSON.parse(ficRes.stdout)) || null;
-        } catch {
-          servesRepos = null;
-        }
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ servesRepos }));
-      return;
-    }
-
-    // Create GitHub Environment with secrets/variables and commit verify workflow
-    if (pathname === "/api/app-params" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        if (!repo) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({ error: "No repository specified.", params: [] })
-          );
-          return;
-        }
-        // Resolve the branch the deploy will run against (the caller's
-        // selection, else the repo default) and locate the app.bicep the
-        // same way the deploy route does (.radius/app.bicep, then app.bicep).
-        let branch = data.branch || "";
-        if (!branch) {
-          const def = await runCommand("gh", [
-            "repo",
-            "view",
-            repo,
-            "--json",
-            "defaultBranchRef",
-            "--jq",
-            ".defaultBranchRef.name"
-          ]).catch(() => "");
-          branch = (def || "").trim() || "main";
-        }
-        let source = await fetchFileFromRepo(repo, ".radius/app.bicep", branch);
-        if (!source)
-          source = await fetchFileFromRepo(repo, "app.bicep", branch);
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            branch,
-            found: !!source,
-            params: source ? appParams(source) : []
-          })
-        );
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ error: errorMessage(e), params: [] }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/create-environment" && req.method === "POST") {
-      if (!isServerOwnedRequest) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(403);
-        res.end(
-          JSON.stringify({
-            error: "This endpoint is reserved for server-owned operations.",
-            code: "server-owned-operation-required"
-          })
-        );
-        return;
-      }
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      // Declared out here so the generic catch below can close it rather
-      // than discarding everything the route had learned.
-      let op: any = null;
-      let steps: string[] = [];
-      let deleteGitHubEnvironmentRunner:
-        ((args: string[]) => Promise<unknown>) | null = null;
-      try {
-        const data = JSON.parse(body);
-        const targetRepo = data.repo || "";
-        const envName = data.environment || "dev";
-        const provider = data.provider || "azure";
-
-        if (!targetRepo) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: "No target repository specified." }));
-          return;
-        }
-
-        if (!isValidRepoSlug(targetRepo)) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(400);
-          res.end(
-            JSON.stringify({
-              error: `Invalid repository "${targetRepo}". Expected "owner/repo".`,
-              code: "invalid-repo"
-            })
-          );
-          return;
-        }
-
-        // Adopt the record /api/azure-auto-setup left running, so the two
-        // POSTs read as one operation. When credentials already exist that
-        // route never ran, so start a record here instead — with the
-        // identity stage omitted rather than shown as skipped, because a
-        // stage that cannot happen has no business in the checklist.
-        const continuationId =
-          typeof data.operationId === "string" ? data.operationId : "";
-        if (continuationId) {
-          const existing = operations.get(continuationId);
-          if (
-            !existing ||
-            isStale(existing) ||
-            existing.repo !== targetRepo ||
-            existing.environment !== envName ||
-            existing.provider !== provider ||
-            (existing.currentStage !== STAGE_AUTHORIZE_IDENTITY &&
-              existing.currentStage !== STAGE_CONFIGURE_ENVIRONMENT) ||
-            existing.inputRequired
-          ) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(
-              JSON.stringify({
-                error:
-                  "The environment request does not match the setup operation it is continuing.",
-                code: "operation-continuation-mismatch",
-                operationId: continuationId
-              })
-            );
-            return;
-          }
-          op = existing;
-          enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
-        } else {
-          op = createOperation({
-            provider,
-            repo: targetRepo,
-            environment: envName,
-            stages: buildStages({ includeIdentity: false }),
-            journey: {
-              origin: data.origin || null,
-              resumeTarget: data.resumeTarget || null,
-              resumeBranch: data.resumeBranch || data.branch || null,
-              resumeReason: data.resumeReason || null
-            }
-          });
-          const started = operations.start(op);
-          if (!started.ok) {
-            op = null;
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(
-              JSON.stringify({
-                error: `Setup is already running for ${targetRepo}.`,
-                code: "operation-in-progress",
-                operationId: started.conflict.operationId
-              })
-            );
-            return;
-          }
-          try {
-            await operations.persist();
-          } catch (error) {
-            operations.report?.({
-              code: "operation-store-write-failed",
-              message: `Could not persist setup operation ${op.operationId}: ${errorMessage(error)}`
-            });
-            finish(op, "failed", {
-              failure: {
-                code: "operation-persistence-failed",
-                stage: op.currentStage,
-                stepSeq: null,
-                message:
-                  "Radius changed no cloud resources because it could not save the setup recovery record.",
-                classification: "unknown"
-              }
-            });
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(500);
-            res.end(
-              JSON.stringify({
-                error:
-                  "Radius changed no cloud resources because it could not save the setup recovery record.",
-                code: "operation-persistence-failed",
-                operationId: op.operationId
-              })
-            );
-            return;
-          }
-          enterStage(op, STAGE_CONFIGURE_ENVIRONMENT);
-        }
-
-        steps = [];
-        const rawPush = steps.push.bind(steps);
-        steps.push = (...items: string[]) => {
-          for (const item of items) {
-            try {
-              addLegacyStep(op, item);
-            } catch {
-              /* narration must never break setup */
-            }
-          }
-          return rawPush(...items);
-        };
-
-        // Preflight repo access + admin BEFORE any GitHub mutation.
-        // Reachable directly when credentials already exist and
-        // azure-auto-setup is skipped, so guarding here too is required.
-        const accessMsg = await preflightRepoAdmin(targetRepo);
-        if (accessMsg) {
-          const failure = await finalizeSetupFailure(op, {
-            status: 403,
-            error: accessMsg,
-            code: "repo-admin-required",
-            stage: STAGE_CONFIGURE_ENVIRONMENT,
-            classification: "needs-someone-else",
-            steps,
-            runAz:
-              provider === "azure" ? (args) => runCliCommand("az", args) : null
-          });
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(failure.status);
-          res.end(JSON.stringify(failure.body));
-          return;
-        }
-
-        const runGh = (
-          args: string[],
-          stdin?: string,
-          extraOpts: CliOptions = {}
-        ): Promise<CommandResult> => {
-          return new Promise((resolve) => {
-            const child = cliExec(
-              "gh",
-              args,
-              { timeout: 30000, ...(extraOpts || {}) },
-              (err, stdout, stderr) => {
-                resolve({
-                  code: err ? err.code || 1 : 0,
-                  stdout: stdout || "",
-                  stderr: stderr || ""
-                });
-              }
-            );
-            if (stdin !== undefined) child.stdin?.end(stdin);
-          });
-        };
-
-        const runGhOrThrow = async (
-          args: string[],
-          message: string,
-          stdin?: string
-        ): Promise<CommandResult> => {
-          const result = await runGh(args, stdin);
-          if (result.code !== 0) {
-            const detail = (result.stderr || result.stdout || "").trim();
-            throw new Error(detail ? `${message}: ${detail}` : message);
-          }
-          return result;
-        };
-
-        const setEnvironmentVariable = async (
-          name: string,
-          value: string
-        ): Promise<boolean> => {
-          if (!value) return false;
-          await runGhOrThrow(
-            [
-              "variable",
-              "set",
-              name,
-              "--body",
-              value,
-              "--env",
-              envName,
-              "--repo",
-              targetRepo
-            ],
-            `Failed to set ${name} on GitHub environment "${envName}"`
-          );
-          return true;
-        };
-        deleteGitHubEnvironmentRunner = async (args) => {
-          const result = await runGh(args);
-          if (result.code !== 0) {
-            const detail = (result.stderr || result.stdout || "").trim();
-            throw new Error(detail || "GitHub API request failed.");
-          }
-        };
-
-        const fail = async (
-          status: number,
-          error: string,
-          code: string,
-          extra: Record<string, unknown> = {}
-        ): Promise<void> => {
-          const failure = await finalizeSetupFailure(op, {
-            status,
-            error,
-            code,
-            extra,
-            steps,
-            evidence:
-              typeof extra.azError === "string" ? extra.azError
-              : typeof extra.ghError === "string" ? extra.ghError
-              : null,
-            runAz:
-              provider === "azure" ? (args) => runCliCommand("az", args) : null,
-            runDeleteEnvironment: deleteGitHubEnvironmentRunner
-          });
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(failure.status);
-          res.end(JSON.stringify(failure.body));
-        };
-        const checkpoint = () =>
-          persistMutationCheckpoint({
-            operation: op,
-            persist: () => operations.persist(),
-            report: (diagnostic) => operations.report?.(diagnostic),
-            fail
-          });
-
-        // The host often injects GH_TOKEN (an OAuth app token) that lacks the
-        // `workflow` scope, which is required to create/update files under
-        // .github/workflows/ or to dispatch workflows. The user's stored gh
-        // credential (keyring) usually has that scope. For workflow-scoped
-        // commands, run normally first; if it fails while an injected token is
-        // present, retry with GH_TOKEN/GITHUB_TOKEN stripped so gh falls back
-        // to the keyring credential. (A missing `workflow` scope surfaces as
-        // either a 403 "without workflow scope" on updates or a bare 404 on
-        // creates, so we retry on any failure rather than pattern-matching.)
-        const needsWorkflowScope = (stderr?: string): boolean => {
-          return (
-            /workflow.{0,20}scope/i.test(stderr || "") ||
-            /without .?workflow.? scope/i.test(stderr || "")
-          );
-        };
-        const runGhWorkflow = async (
-          args: string[],
-          stdin?: string
-        ): Promise<CommandResult> => {
-          const first = await runGh(args, stdin);
-          if (first.code === 0) return first;
-          const hasInjectedToken = !!(
-            process.env.GH_TOKEN || process.env.GITHUB_TOKEN
-          );
-          if (!hasInjectedToken) return first;
-          const fallbackEnv = { ...process.env };
-          delete fallbackEnv.GH_TOKEN;
-          delete fallbackEnv.GITHUB_TOKEN;
-          const retry = await runGh(args, stdin, { env: fallbackEnv });
-          // Prefer the retry only if it actually succeeded; otherwise keep the
-          // original error, which is usually the more meaningful one.
-          return retry.code === 0 ? retry : first;
-        };
-        const defaultBranch = (await getDefaultBranch(targetRepo)) || "main";
-        const stateRegistry = stateRegistryForEnvironment(targetRepo, envName);
-
-        steps.push(
-          'Creating private GHCR state package "' + stateRegistry + '"...'
-        );
-        const ghcrPreflight = await preflightGhcrPackageWriteAccess();
-        if (!ghcrPreflight.ok) {
-          await fail(403, ghcrPreflight.error, ghcrPreflight.code, { steps });
-          return;
-        }
-        const packageCredentials = ghcrPreflight.credentials;
-        const statePackage = await bootstrapGHCRStatePackage({
-          targetRepository: targetRepo,
-          registry: stateRegistry,
-          credentials: packageCredentials
-        });
-        steps.push(
-          `✅ GHCR state package is ${statePackage.visibility} and linked to ${targetRepo}.`
-        );
-
-        // --- Workflow commit + PR-fallback plumbing ---------------------
-        // Workflow files are normally committed straight to the repo's
-        // default branch via the contents API. When that branch is
-        // protected (or the user otherwise lacks direct-push permission),
-        // the PUT fails; instead of aborting, we lazily create a feature
-        // branch, commit every workflow file there, and open a PR the user
-        // can merge. The PR link is surfaced in `steps`.
-        const { writeFileSync, unlinkSync } = await import("node:fs");
-        const { tmpdir } = await import("node:os");
-        const { join } = await import("node:path");
-
-        // A protected-branch / missing-write-access failure (as opposed to
-        // a missing `workflow` token scope, which a PR can't fix). Kept
-        // deliberately broad; branch creation gates the fallback, so a
-        // genuine no-access repo still surfaces the original error.
-        const isProtectedBranchFailure = (stderr: string): boolean => {
-          const s = stderr || "";
-          if (needsWorkflowScope(s)) return false;
-          return /HTTP 40[39]|protected branch|through a pull request|required status check|approving review|not have permission|Resource not accessible|refusing to allow|review is required|push declined|branch protection/i.test(
-            s
-          );
-        };
-
-        // PR-fallback state; populated lazily on the first protected-branch
-        // failure. Once set, every subsequent workflow commit targets the
-        // PR branch instead of the default branch.
-        let prState: PullRequestState | undefined;
-        const beginPrFallback = async (): Promise<PullRequestState> => {
-          if (prState) return prState;
-          const base = (await getDefaultBranch(targetRepo)) || "main";
-          const baseSha = await getBranchHeadSha(targetRepo, base);
-          if (!baseSha)
-            throw new Error(`could not resolve head of base branch "${base}"`);
-          const branch = `radius/setup-${envName}-workflows-${Date.now()}`;
-          const created = await createBranchRef(targetRepo, branch, baseSha);
-          if (!created.ok)
-            throw new Error(
-              `could not create branch "${branch}": ${created.stderr}`
-            );
-          prState = { branch, base };
-          steps.push(
-            `ℹ️ No permission to push to "${base}" directly — committing workflows to branch "${branch}" and opening a pull request.`
-          );
-          return prState;
-        };
-
-        // Commit one workflow file via the contents API. `branch === ''`
-        // targets the default branch. Looks up the existing blob SHA on the
-        // same ref so a re-commit is an update rather than a rejected
-        // create. Returns the raw runGhWorkflow result ({ code, stderr }).
-        const putWorkflowContent = async (
-          path: string,
-          contentB64: string,
-          message: string,
-          branch = ""
-        ): Promise<CommandResult> => {
-          const refQ = branch ? "?ref=" + encodeURIComponent(branch) : "";
-          const shaRes = await runGh([
-            "api",
-            "/repos/" + targetRepo + "/contents/" + path + refQ,
-            "--jq",
-            ".sha"
-          ]);
-          const sha = shaRes.code === 0 ? shaRes.stdout.trim() : "";
-          const bodyObj = {
-            message,
-            content: contentB64,
-            ...(branch ? { branch } : {}),
-            ...(sha ? { sha } : {})
-          };
-          const tmp = join(
-            tmpdir(),
-            "radius-wf-commit-" +
-              Date.now() +
-              "-" +
-              Math.random().toString(36).slice(2) +
-              ".json"
-          );
-          writeFileSync(tmp, JSON.stringify(bodyObj));
-          const r = await runGhWorkflow([
-            "api",
-            "--method",
-            "PUT",
-            "/repos/" + targetRepo + "/contents/" + path,
-            "--input",
-            tmp
-          ]);
-          try {
-            unlinkSync(tmp);
-          } catch {}
-          return r;
-        };
-
-        // Commit a workflow file, transparently switching to the PR branch
-        // (creating it on first use) when the default branch rejects the
-        // push for permission reasons. Returns { ok, stderr, viaPr }.
-        const commitWorkflowFileSmart = async (
-          path: string,
-          contentB64: string,
-          message: string
-        ): Promise<{ ok: boolean; stderr?: string; viaPr: boolean }> => {
-          if (prState) {
-            const r = await putWorkflowContent(
-              path,
-              contentB64,
-              message,
-              prState.branch
-            );
-            return { ok: r.code === 0, stderr: r.stderr, viaPr: true };
-          }
-          const direct = await putWorkflowContent(
-            path,
-            contentB64,
-            message,
-            ""
-          );
-          if (direct.code === 0) return { ok: true, viaPr: false };
-          if (isProtectedBranchFailure(direct.stderr)) {
-            let fallback: PullRequestState;
-            try {
-              fallback = await beginPrFallback();
-              prState = fallback;
-            } catch (e) {
-              return {
-                ok: false,
-                stderr: `${direct.stderr} (PR fallback failed: ${errorMessage(
-                  e
-                )})`,
-                viaPr: false
-              };
-            }
-            const r = await putWorkflowContent(
-              path,
-              contentB64,
-              message,
-              fallback.branch
-            );
-            return { ok: r.code === 0, stderr: r.stderr, viaPr: true };
-          }
-          return { ok: false, stderr: direct.stderr, viaPr: false };
-        };
-
-        // Step 1: Create the GitHub environment
-        const environmentPath =
-          "/repos/" +
-          targetRepo +
-          "/environments/" +
-          encodeURIComponent(envName);
-        const environmentLookup = await runGh(["api", environmentPath]);
-        const environmentState =
-          resolveGitHubEnvironmentCreateState(environmentLookup);
-        if (!environmentState) {
-          const detail =
-            (
-              environmentLookup.stderr ||
-              environmentLookup.stdout ||
-              ""
-            ).trim() || "The GitHub API lookup failed.";
-          throw new Error(
-            `Could not determine whether GitHub environment "${envName}" already exists before creating it. ${detail}`
-          );
-        }
-        steps.push('Creating GitHub environment "' + envName + '"...');
-        await runGhOrThrow(
-          ["api", "--method", "PUT", environmentPath],
-          'Failed to create GitHub environment "' + envName + '"'
-        );
-        recordGitHubEnvironment(op, {
-          state: environmentState,
-          repo: targetRepo,
-          name: envName
-        });
-        if (!(await checkpoint())) return;
-        // Tag the environment as Radius-managed so the listing can filter
-        // out environments created outside this extension.
-        await setEnvironmentVariable("RADIUS_MANAGED", "true");
-        // A new environment invalidates the cached listing for this repo.
-        envListCache.delete(targetRepo);
-
-        steps.push(
-          'Configuring Radius state package "' + stateRegistry + '"...'
-        );
-        await setEnvironmentVariable("RADIUS_STATE_BACKEND", OCI_STATE_BACKEND);
-        await setEnvironmentVariable("RADIUS_STATE_REGISTRY", stateRegistry);
-        await setEnvironmentVariable(
-          "RADIUS_STATE_ARCHIVE",
-          DEFAULT_STATE_ARCHIVE
-        );
-        steps.push(
-          `✅ Radius state package configured with archive tag "${DEFAULT_STATE_ARCHIVE}".`
-        );
-
-        // Record the credential profile this environment was created from
-        // so the Environments listing can show it in the Credentials column.
-        if (data.profileName) {
-          await setEnvironmentVariable(
-            "RADIUS_CREDENTIAL_PROFILE",
-            data.profileName
-          );
-        }
-
-        // Step 2: Set environment variables and secrets based on provider
-        steps.push("Setting environment variables and secrets...");
-        // Fall back to shared credentials for values not provided in the request
-        const azureCreds = cloudCredential(sharedCredentials.azure);
-        const awsCreds = cloudCredential(sharedCredentials.aws);
-
-        if (provider === "azure") {
-          const clientId = data.clientId || optionalString(azureCreds.clientId);
-          const tenantId = data.tenantId || optionalString(azureCreds.tenantId);
-          const subscriptionId =
-            data.subscriptionId || optionalString(azureCreds.subscriptionId);
-          const rg = data.resourceGroup || "";
-          const k8s = data.cluster || "";
-
-          await setEnvironmentVariable("AZURE_CLIENT_ID", clientId);
-          await setEnvironmentVariable("AZURE_TENANT_ID", tenantId);
-          await setEnvironmentVariable("AZURE_SUBSCRIPTION_ID", subscriptionId);
-          await setEnvironmentVariable("AZURE_RESOURCE_GROUP", rg);
-          await setEnvironmentVariable("AZURE_AKS_CLUSTER_NAME", k8s);
-          await setEnvironmentVariable("AZURE_LOCATION", data.location);
-          await setEnvironmentVariable("RADIUS_NAMESPACE", data.namespace);
-
-          const setCount = [
-            clientId,
-            tenantId,
-            subscriptionId,
-            rg,
-            k8s,
-            data.location,
-            data.namespace
-          ].filter(Boolean).length;
-          steps.push(`Set ${setCount} environment value(s) for Azure.`);
-          if (!clientId || !tenantId || !subscriptionId) {
-            steps.push(
-              "⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually."
-            );
-          }
-        } else {
-          const roleArn = data.roleArn || "";
-          const region =
-            data.region || optionalString(awsCreds.region) || "us-east-1";
-          const accountId =
-            data.accountId || optionalString(awsCreds.accountId);
-          const k8s = data.cluster || "";
-
-          await setEnvironmentVariable("AWS_ROLE_ARN", roleArn);
-          await setEnvironmentVariable("AWS_REGION", region);
-          await setEnvironmentVariable("AWS_ACCOUNT_ID", accountId);
-          await setEnvironmentVariable("AWS_EKS_CLUSTER_NAME", k8s);
-          await setEnvironmentVariable("RADIUS_VPC_ID", data.vpcId);
-          await setEnvironmentVariable("RADIUS_SUBNET_IDS", data.subnetIds);
-          await setEnvironmentVariable("RADIUS_NAMESPACE", data.namespace);
-        }
-
-        // Step 3: Commit the verify-credentials workflow
-        steps.push("Committing verify-credentials workflow...");
-        const verifyWorkflow = await generateVerifyWorkflow(envName, provider);
-        const verifyContent = Buffer.from(verifyWorkflow).toString("base64");
-        const verifyPath = ".github/workflows/radius-verify-credentials.yml";
-
-        const verifyCommit = await commitWorkflowFileSmart(
-          verifyPath,
-          verifyContent,
-          "Add Radius verify-credentials workflow for environment " + envName
-        );
-
-        if (!verifyCommit.ok) {
-          steps.push("❌ Failed to commit verify-credentials workflow.");
-          const scopeHint =
-            needsWorkflowScope(verifyCommit.stderr) ?
-              ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-            : " Check that you have write access to the repository and that GitHub Actions is enabled.";
-          await fail(
-            400,
-            "Failed to commit the verify-credentials workflow (" +
-              verifyPath +
-              ") to " +
-              targetRepo +
-              ". " +
-              ((verifyCommit.stderr || "").trim() ||
-                "The GitHub API request failed.") +
-              scopeHint,
-            "verify-workflow-commit-failed",
-            { steps, ghError: verifyCommit.stderr || "" }
-          );
-          return;
-        }
-        steps.push("✅ Verify workflow committed.");
-        recordCommittedWorkflowFile(op, {
-          path: verifyPath,
-          branch: verifyCommit.viaPr ? prState?.branch || null : defaultBranch,
-          mode: verifyCommit.viaPr ? "pull_request" : "default_branch"
-        });
-        if (!(await checkpoint())) return;
-
-        // Step 4: Also commit the deploy workflows (dispatcher + both
-        // provider workflows). The dispatcher references both provider
-        // files by path, so all three must exist in the target repo.
-        steps.push("Committing deploy workflows...");
-        const deployWorkflows = await generateDeployWorkflow(
-          envName,
-          ".radius/app.bicep"
-        );
-
-        for (const [fileName, content] of Object.entries(deployWorkflows)) {
-          const deployContent = Buffer.from(content).toString("base64");
-          const deployPath = ".github/workflows/" + fileName;
-
-          const deployCommit = await commitWorkflowFileSmart(
-            deployPath,
-            deployContent,
-            "Add Radius deploy workflow (" +
-              fileName +
-              ") for environment " +
-              envName
-          );
-
-          if (!deployCommit.ok) {
-            steps.push("❌ Failed to commit deploy workflow " + fileName + ".");
-            const scopeHint2 =
-              needsWorkflowScope(deployCommit.stderr) ?
-                ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-              : " Check that you have write access to the repository and that GitHub Actions is enabled.";
-            await fail(
-              400,
-              "Failed to commit the deploy workflow (" +
-                deployPath +
-                ") to " +
-                targetRepo +
-                ". " +
-                ((deployCommit.stderr || "").trim() ||
-                  "The GitHub API request failed.") +
-                scopeHint2,
-              "deploy-workflow-commit-failed",
-              { steps, ghError: deployCommit.stderr || "" }
-            );
-            return;
-          }
-          recordCommittedWorkflowFile(op, {
-            path: deployPath,
-            branch:
-              deployCommit.viaPr ? prState?.branch || null : defaultBranch,
-            mode: deployCommit.viaPr ? "pull_request" : "default_branch"
-          });
-          if (!(await checkpoint())) return;
-        }
-        // Best-effort: remove the legacy monolithic deploy workflow so it
-        // does not double-trigger alongside the new dispatcher. Skipped in
-        // PR-fallback mode since we can't push to the default branch.
-        if (!prState) await deleteLegacyDeployWorkflow(targetRepo);
-        steps.push("✅ Deploy workflows committed.");
-
-        // Step 4b: Commit the application-delete workflows (dispatcher +
-        // Azure provider workflow) so the Delete Deployment button can
-        // dispatch `rad app delete`. Only Azure workflows are generated and
-        // committed; the AWS provider file is never produced.
-        steps.push("Committing delete workflows...");
-        try {
-          const deleteWorkflows = await generateDeleteWorkflow(envName);
-          for (const [fileName, content] of Object.entries(deleteWorkflows)) {
-            const delContent = Buffer.from(content).toString("base64");
-            const delPath = ".github/workflows/" + fileName;
-
-            const delCommit = await commitWorkflowFileSmart(
-              delPath,
-              delContent,
-              "Add Radius delete workflow (" +
-                fileName +
-                ") for environment " +
-                envName
-            );
-
-            if (!delCommit.ok) {
-              steps.push(
-                "⚠️ Could not commit delete workflow " +
-                  fileName +
-                  ": " +
-                  ((delCommit.stderr || "").trim() ||
-                    "GitHub API request failed.")
-              );
-            }
-            if (delCommit.ok) {
-              recordCommittedWorkflowFile(op, {
-                path: delPath,
-                branch:
-                  delCommit.viaPr ? prState?.branch || null : defaultBranch,
-                mode: delCommit.viaPr ? "pull_request" : "default_branch"
-              });
-              if (!(await checkpoint())) return;
-            }
-          }
-          steps.push("✅ Delete workflows committed.");
-        } catch (delErr) {
-          // Delete workflows are non-critical to environment creation, so
-          // surface the failure but don't abort the whole flow.
-          steps.push(
-            "⚠️ Could not generate/commit delete workflows: " +
-              errorMessage(delErr)
-          );
-        }
-
-        // Step 4c: If any workflow commit fell back to a PR branch, open the
-        // pull request now so the user can merge it. Until it's merged, the
-        // workflows don't exist on the default branch, so we skip dispatching
-        // the verify run (it would 404) and tell the user to merge first.
-        let pullRequestUrl = "";
-        if (prState) {
-          const prTitle =
-            "Add Radius deploy workflows for environment " + envName;
-          const prBody = [
-            "This PR adds the GitHub Actions workflows that power the Radius extension for the **" +
-              envName +
-              "** environment:",
-            "",
-            "- `.github/workflows/radius-verify-credentials.yml`",
-            "- Radius deploy workflow(s) under `.github/workflows/`",
-            "- Radius delete workflow(s) under `.github/workflows/`",
-            "",
-            "They were committed to `" +
-              prState.branch +
-              "` because direct pushes to `" +
-              prState.base +
-              "` are not permitted. Merge this PR to enable deploying and deleting the application from the Radius canvas."
-          ].join("\n");
-          const pr = await createPullRequestApi(
-            targetRepo,
-            prState.branch,
-            prState.base,
-            prTitle,
-            prBody
-          );
-          if (pr.ok) {
-            pullRequestUrl = pr.url || "";
-            steps.push("✅ Opened pull request #" + pr.number + ": " + pr.url);
-            steps.push(
-              '👉 Merge the pull request above to finish setup; credential verification and deploys run once it lands on "' +
-                prState.base +
-                '".'
-            );
-          } else {
-            steps.push(
-              '⚠️ Committed workflows to branch "' +
-                prState.branch +
-                '" but could not open a pull request automatically: ' +
-                ((pr.stderr || "").trim() || "GitHub API request failed.") +
-                ' Open one manually from that branch into "' +
-                prState.base +
-                '".'
-            );
-          }
-        }
-        // Step 5: Dispatch the verify workflow.
-        //
-        // On the PR path this used to be an unconditional skip, which was
-        // right for a first-time setup and wrong for every repository that
-        // already had the workflows on its default branch. planCredentialVerification
-        // decides instead, and returns an empty pullRequestUrl when it
-        // dispatches so a merely informational PR is not mistaken for a
-        // blocking one.
-        let verifyRunUrl = "";
-        let verifyRunId = null;
-        const dispatchedAt = Date.now();
-        const verifyPlan = await planCredentialVerification({
-          targetRepo,
-          prState: prState || null,
-          pullRequestUrl,
-          fetchFile: fetchFileFromRepo,
-          resolveDefaultBranch: getDefaultBranch
-        });
-        pullRequestUrl = verifyPlan.pullRequestUrl;
-        if (!verifyPlan.shouldDispatch) {
-          steps.push(
-            `⏭️ Skipping credential verification until the pull request is merged — ${
-              verifyPlan.skipReason ||
-              "the workflows are not on the default branch yet"
-            }.`
-          );
-        } else {
-          if (verifyPlan.ref)
-            steps.push(
-              `ℹ️ The verify workflow is already on "${verifyPlan.defaultBranch}", so verification runs now against branch "${verifyPlan.ref}" rather than waiting for the merge.`
-            );
-          steps.push("Dispatching verify-credentials workflow...");
-          // Wait briefly for GitHub to index the workflow, then dispatch with
-          // a few retries to ride out indexing/propagation races.
-          await new Promise((r) => setTimeout(r, 3000));
-          const dispatchDelays = [0, 2000, 5000];
-          let dispatchResult: CommandResult = {
-            code: 1,
-            stdout: "",
-            stderr: ""
-          };
-          for (const delay of dispatchDelays) {
-            if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-            dispatchResult = await runGhWorkflow(
-              buildVerifyWorkflowDispatchArgs({
-                workflowFile: VERIFY_WORKFLOW_FILE,
-                targetRepo,
-                envName,
-                ref: verifyPlan.ref
-              })
-            );
-            if (dispatchResult.code === 0) break;
-          }
-
-          if (dispatchResult.code === 0) {
-            steps.push("✅ Verify workflow dispatched.");
-            await new Promise((r) => setTimeout(r, 5000));
-            const runsResult = await runGh([
-              "run",
-              "list",
-              "--workflow=radius-verify-credentials.yml",
-              "--limit",
-              "1",
-              "--json",
-              "databaseId,status,url",
-              "--repo",
-              targetRepo
-            ]);
-            try {
-              const parsed: unknown = JSON.parse(runsResult.stdout);
-              const runs = Array.isArray(parsed) ? parsed : [];
-              if (runs.length > 0) {
-                verifyRunId = runs[0].databaseId;
-                verifyRunUrl =
-                  "https://github.com/" +
-                  targetRepo +
-                  "/actions/runs/" +
-                  verifyRunId;
-                steps.push("Verify run: " + verifyRunUrl);
-              }
-            } catch {}
-            steps.push(
-              "Credentials verification dispatched. Deploy your application from the Environments list when ready."
-            );
-          } else {
-            const detail =
-              (dispatchResult.stderr || dispatchResult.stdout || "").trim() ||
-              "The GitHub CLI request failed.";
-            steps.push("❌ Could not dispatch verify workflow: " + detail);
-            await fail(
-              400,
-              "Environment and state package were configured, but the verify workflow could not be dispatched after multiple attempts. " +
-                detail,
-              "verify-dispatch-failed",
-              {
-                environment: envName,
-                provider,
-                repo: targetRepo,
-                stateBackend: OCI_STATE_BACKEND,
-                stateRegistry,
-                stateArchive: DEFAULT_STATE_ARCHIVE,
-                steps,
-                ghError: detail
-              }
-            );
-            return;
-          }
-        }
-
-        // Record dispatch markers so the deploy monitor can track the
-        // correct (newly-triggered) runs rather than any stale runs.
-        {
-          op.verification = {
-            dispatchedAt,
-            workflow: VERIFY_WORKFLOW_FILE,
-            ref: verifyPlan.ref || defaultBranch,
-            environment: envName,
-            runId: verifyRunId == null ? null : String(verifyRunId),
-            runUrl: verifyRunUrl || null
-          };
-          if (verifyPlan.shouldDispatch) enterStage(op, STAGE_VERIFY);
-          if (!(await checkpoint())) return;
-          const entry = servers.get(instanceId);
-          if (entry) {
-            entry.state.deployDispatchedAt = dispatchedAt;
-            entry.state.verifyRunId = verifyRunId;
-            entry.state.verifyRunUrl = verifyRunUrl;
-          }
-        }
-
-        const actionRequired = !verifyPlan.shouldDispatch;
-        recordCleanupState(op, { state: "not_needed" });
-        if (actionRequired) {
-          recordCommitState(op, {
-            mode: "pull_request",
-            branch: prState?.branch || defaultBranch,
-            baseBranch:
-              prState?.base || verifyPlan.defaultBranch || defaultBranch,
-            pullRequestUrl: pullRequestUrl || null
-          });
-          // The third terminal state, and the one the product kept
-          // getting wrong. Verification was never dispatched, so there
-          // is nothing to wait for and nothing failed — the operation is
-          // finished and the remaining work is the user's. The client
-          // used to poll for a verify run that could not exist and, eight
-          // minutes later, reported this as a timeout.
-          setStageState(op, STAGE_VERIFY, "skipped");
-          finish(op, "action_required", {
-            terminal: {
-              reason: "pr-merge-required",
-              pullRequestUrl: pullRequestUrl || null,
-              branch: prState?.branch || null,
-              baseBranch: prState?.base || verifyPlan.defaultBranch || null,
-              userMessage:
-                pullRequestUrl ?
-                  "Merge the pull request to finish setup; credential verification and deploys run once it lands."
-                : `Open and merge a pull request from "${
-                    prState?.branch || "the setup branch"
-                  }" into "${
-                    prState?.base ||
-                    verifyPlan.defaultBranch ||
-                    "the default branch"
-                  }" to finish setup.`
-            }
-          });
-          await persistBestEffort({
-            operation: op,
-            persist: () => operations.persist(),
-            report: (diagnostic) => operations.report?.(diagnostic)
-          });
-        } else {
-          recordCommitState(op, {
-            mode: prState ? "pull_request" : "default_branch",
-            branch: prState?.branch || defaultBranch,
-            baseBranch:
-              prState?.base || verifyPlan.defaultBranch || defaultBranch,
-            pullRequestUrl: pullRequestUrl || null
-          });
-          // Verification is dispatched but still running; stage and exact
-          // dispatch identity were persisted together above.
-        }
-
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            success: true,
-            operationId: op.operationId,
-            environment: envName,
-            provider,
-            repo: targetRepo,
-            stateBackend: OCI_STATE_BACKEND,
-            stateRegistry,
-            stateArchive: DEFAULT_STATE_ARCHIVE,
-            verifyRunUrl,
-            // Stated, not inferred. A pull request can exist on a run that
-            // verified perfectly well, so the client must not read a URL as
-            // a control-flow decision — that inference is what #247 was.
-            actionRequired,
-            pullRequestUrl,
-            pullRequestBranch: actionRequired ? prState?.branch || null : null,
-            pullRequestBaseBranch:
-              actionRequired ?
-                prState?.base || verifyPlan.defaultBranch || null
-              : null,
-            steps
-          })
-        );
-      } catch (e) {
-        const failure = await finalizeSetupFailure(op, {
-          status: 400,
-          error: errorMessage(e),
-          code: "create-environment-unhandled",
-          classification: "unknown",
-          evidence: e instanceof Error ? e.stack || null : null,
-          steps,
-          runAz:
-            op && op.provider === "azure" ?
-              (args) => runCliCommand("az", args)
-            : null,
-          runDeleteEnvironment: deleteGitHubEnvironmentRunner
-        });
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(failure.status);
-        res.end(JSON.stringify(failure.body));
-      }
-      return;
-    }
-
-    if (pathname === "/api/load-graph-stream" && req.method === "GET") {
-      const url = new URL(req.url || "/", `http://127.0.0.1`);
-      const repo = url.searchParams.get("repo") || "";
-      const entry = servers.get(instanceId);
-      if (!entry) {
-        res.writeHead(503);
-        res.end("Canvas server state is unavailable.");
-        return;
-      }
-      const branch =
-        url.searchParams.get("branch") || defaultBranchForState(entry?.state);
-      const sourceRefContext =
-        entry ?
-          prepareSourceRefResources(entry, "graph", { repo, branch })
-        : null;
-
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-      res.writeHead(200);
-
-      const sendProgress = (message: string): void => {
-        res.write(`event: progress\ndata: ${JSON.stringify({ message })}\n\n`);
-      };
-      const sendDone = (data: unknown): void => {
-        res.write(`event: done\ndata: ${JSON.stringify(data)}\n\n`);
-        res.end();
-      };
-
-      if (!repo) {
-        sendDone({ error: "Please select a repository." });
-        return;
-      }
-
-      try {
-        sendProgress(`Checking ${repo} for existing app.bicep...`);
-        const selection = await fetchBicepSelection(entry, repo, branch);
-        const content = selection.content;
-
-        if (content) {
-          sendProgress("Found existing app.bicep — parsing resources...");
-        } else {
-          triggerAppBicepHandoff(entry, repo, branch, "graph");
-          sendDone({
-            error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
-            needsAppBicep: true,
-            repo,
-            branch
-          });
-          return;
-        }
-
-        const graphJsonPath =
-          entry && selection.fromWorkspace ?
-            workspaceGraphJsonPath(entry.state, selection.bicepPath)
-          : "";
-        const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-          await radArtifactsDirForSelection({
-            isLocal: !!(entry && selection.fromWorkspace),
-            state: entry?.state,
-            github,
-            repo,
-            branch,
-            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-            log: sendProgress
-          });
-        const resources = canvasGraphResources(
-          await buildGraphViaRad(
-            content,
-            selection.bicepPath || ".radius/app.bicep",
-            {
-              log: sendProgress,
-              saveGraphJsonTo: graphJsonPath,
-              radArtifactsDir,
-              cleanupRadArtifactsDir: radArtifactsRemote
-            }
-          )
-        );
-        sendProgress(
-          `Mapped ${resources.length} resource(s) — rendering graph...`
-        );
-
-        if (entry && sourceRefContext) {
-          if (
-            !setSourceRefResources(
-              entry,
-              "graph",
-              resources,
-              { repo, branch },
-              sourceRefContext.token
-            )
-          ) {
-            sendDone({ stale: true });
-            return;
-          }
-          entry.state.graphTargetRepo = repo;
-          entry.state.graphBranch = branch;
-          // Authoritative provenance: true only when the local workspace
-          // actually supplied the app.bicep content (file is on disk).
-          entry.state.graphFromWorkspace = selection.fromWorkspace;
-          entry.state.activeGraphView = "graph";
-        }
-
-        sendDone({ reload: true });
-      } catch (e) {
-        sendDone({ error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/progress" && req.method === "GET") {
-      const entry = servers.get(instanceId);
-      const messages = entry?.state?.progressMessages || [];
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ messages }));
-      return;
-    }
-
-    if (pathname === "/api/deployed-graph" && req.method === "GET") {
-      const entry = servers.get(instanceId);
-      const reqUrl = new URL(req.url || "/", `http://127.0.0.1`);
-      const repo =
-        (reqUrl.searchParams.get("repo") || "").trim() ||
-        entry?.state?.contextRepo ||
-        entry?.state?.deployingRepo ||
-        entry?.state?.plannedRepo ||
-        entry?.state?.graphTargetRepo ||
-        "";
-      res.setHeader("Content-Type", "application/json");
-      if (!repo) {
-        res.writeHead(200);
-        res.end(JSON.stringify({ resources: [], repo: "" }));
-        return;
-      }
-      // Prefer the deployed graph published to GHCR by the deploy workflow
-      // (radius-project/radius PR #12591), falling back to the legacy
-      // radius-deploy-status branch and then any graph captured in state.
-      const reader = await deployStatusReaderFromState(
-        entry?.state || {},
-        repo,
-        ""
-      );
-      let graph = (await reader.graph()).graph;
-      if (!graph && entry?.state?.deployedGraph)
-        graph = entry.state.deployedGraph;
-      const graphRecord = record(graph);
-      let resources = canvasGraphResources(
-        Array.isArray(graph) ? graph
-        : Array.isArray(graphRecord.resources) ? graphRecord.resources
-        : []
-      );
-      // DEMO: present the deployed topology as container → cache → database.
-      resources = canvasGraphResources(
-        rewireDeployedGraphChain(resources) || []
-      );
-      // Re-derive connections (e.g. database→secret) that rad app graph
-      // omits, so the deployed graph renders connected like the planned one.
-      resources = canvasGraphResources(normalizeDeployedGraph(resources) || []);
-      // Hide implementation-detail resources (containerImages + their
-      // ghcr-registry-creds secret) from the deployed view too, matching
-      // every other graph state. Applied last so any edges the rewire/
-      // normalize steps synthesized toward those nodes are also stripped.
-      // The raw deploy-graph.json on the status branch is left untouched.
-      resources = filterGraphVisualizationResources(resources);
-      res.writeHead(200);
-      res.end(
-        JSON.stringify({
-          resources,
-          repo,
-          branch:
-            (
-              entry?.state?.workspaceBranch &&
-              repoMatchesWorkspace(entry.state, repo)
-            ) ?
-              entry.state.workspaceBranch
-            : "main"
-        })
-      );
-      return;
-    }
-
-    if (pathname === "/api/deploy-status" && req.method === "GET") {
-      const entry = servers.get(instanceId);
-      const resources =
-        entry?.state?.deployingResources ||
-        entry?.state?.plannedResources ||
-        [];
-      const logs = entry?.state?.deployLogs || [];
-      const logBase = entry?.state?.deployLogBase || 0;
-      const logTotal = logBase + logs.length;
-      const status = entry?.state?.deployStatus || "pending";
-      const error = entry?.state?.deployError || null;
-      const errorKind = entry?.state?.deployErrorKind || null;
-      const errorBranch = entry?.state?.deployErrorBranch || null;
-      const startedAt = entry?.state?.deployStartedAt || null;
-      const finishedAt = entry?.state?.deployFinishedAt || null;
-      const deployedGraph = entry?.state?.deployedGraph || null;
-      const deployRunUrl = entry?.state?.deployRunUrl || null;
-      // Every failure path converges on this poll, so it is where a failed
-      // deploy is handed to the agent to repair (once per repair loop).
-      const repairing =
-        triggerDeployRepairHandoff(entry, instanceId) ||
-        entry?.state?.deployRepairing ||
-        false;
-      const handoff = deployHandoffStatus(entry?.state || {});
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      // Incremental log delivery: when the client passes ?since=<absolute
-      // line index>, send only the new lines instead of re-serializing the
-      // entire (bounded) buffer on every 1.5s poll. Callers that omit it
-      // (e.g. the deployed-graph poller, which only reads resources) get the
-      // bounded buffer for backward compatibility.
-      const sinceRaw = url.searchParams.get("since");
-      const since = sinceRaw === null ? NaN : parseInt(sinceRaw, 10);
-      if (Number.isFinite(since)) {
-        const startIdx = Math.max(0, since - logBase);
-        const logsNew = logs.slice(startIdx);
-        res.end(
-          JSON.stringify({
-            resources,
-            logsNew,
-            logBase,
-            logTotal,
-            status,
-            error,
-            errorKind,
-            errorBranch,
-            startedAt,
-            finishedAt,
-            deployedGraph,
-            deployRunUrl,
-            repairing,
-            handoff
-          })
-        );
-      } else {
-        res.end(
-          JSON.stringify({
-            resources,
-            logs,
-            logBase,
-            logTotal,
-            status,
-            error,
-            errorKind,
-            errorBranch,
-            startedAt,
-            finishedAt,
-            deployedGraph,
-            deployRunUrl,
-            repairing,
-            handoff
-          })
-        );
-      }
-      return;
-    }
-
-    if (pathname === "/api/load-graph" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({ error: "Canvas server state is unavailable." })
-          );
-          return;
-        }
-        const state = entry.state;
-        const branch = data.branch || defaultBranchForState(state);
-        const requestGeneration =
-          entry ?
-            (entry.state.graphBuildGeneration =
-              (entry.state.graphBuildGeneration || 0) + 1)
-          : 0;
-        if (!repo) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(JSON.stringify({ error: "Please select a repository." }));
-          return;
-        }
-        const sourceRefContext =
-          entry ?
-            prepareSourceRefResources(entry, "graph", { repo, branch })
-          : null;
-
-        const addProgress = (msg: string): void => {
-          addGraphProgress(state, requestGeneration, msg);
-        };
-        // Reset progress
-        if (entry) entry.state.progressMessages = [];
-
-        addProgress(`Checking ${repo} for existing app.bicep...`);
-        const selection = await fetchBicepSelection(entry, repo, branch);
-        const content = selection.content;
-        if (content) {
-          addProgress("Found existing app.bicep — parsing resources...");
-        } else {
-          addProgress(
-            ".radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill."
-          );
-          triggerAppBicepHandoff(entry, repo, branch, "graph");
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
-              needsAppBicep: true,
-              repo,
-              branch
-            })
-          );
-          return;
-        }
-
-        const graphJsonPath =
-          entry && selection.fromWorkspace ?
-            workspaceGraphJsonPath(entry.state, selection.bicepPath)
-          : "";
-        const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-          await radArtifactsDirForSelection({
-            isLocal: !!(entry && selection.fromWorkspace),
-            state: entry?.state,
-            github,
-            repo,
-            branch,
-            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-            log: addProgress
-          });
-        const definitionHash = graphDefinitionHash(
-          content,
-          radArtifactsFingerprint(radArtifactsDir)
-        );
-        if (entry && entry.state.graphBuildGeneration !== requestGeneration) {
-          if (radArtifactsRemote && radArtifactsDir) {
-            try {
-              rmSync(radArtifactsDir, { recursive: true, force: true });
-            } catch {
-              /* best-effort */
-            }
-          }
-          res.writeHead(409);
-          res.end(JSON.stringify({ stale: true }));
-          return;
-        }
-        if (
-          data.refresh &&
-          entry &&
-          canReuseModeledGraph(entry.state, repo, branch, definitionHash)
-        ) {
-          if (radArtifactsRemote && radArtifactsDir)
-            rmSync(radArtifactsDir, { recursive: true, force: true });
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              reload: false,
-              resources: entry.state.graphResources,
-              cached: true
-            })
-          );
-          return;
-        }
-
-        const resources = canvasGraphResources(
-          await buildGraphViaRad(
-            content,
-            selection.bicepPath || ".radius/app.bicep",
-            {
-              log: addProgress,
-              saveGraphJsonTo: graphJsonPath,
-              radArtifactsDir,
-              cleanupRadArtifactsDir: radArtifactsRemote
-            }
-          )
-        );
-        addProgress(
-          `Mapped ${resources.length} resource(s) — rendering graph...`
-        );
-
-        if (entry && sourceRefContext) {
-          if (entry.state.graphBuildGeneration !== requestGeneration) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(JSON.stringify({ stale: true }));
-            return;
-          }
-          if (
-            !setSourceRefResources(
-              entry,
-              "graph",
-              resources,
-              { repo, branch },
-              sourceRefContext.token
-            )
-          ) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(JSON.stringify({ stale: true }));
-            return;
-          }
-          entry.state.graphTargetRepo = repo;
-          entry.state.graphBranch = branch;
-          // Authoritative provenance: true only when the local workspace
-          // actually supplied the app.bicep content (file is on disk).
-          entry.state.graphFromWorkspace = selection.fromWorkspace;
-          entry.state.activeGraphView = "graph";
-          entry.state.graphLoaded = true;
-          entry.state.graphDefinitionHash = definitionHash;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ reload: !data.refresh, resources }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/list-environments" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ environments: [] });
-        return;
-      }
-
-      const cached = envListCache.get(repo);
-      if (cached && Date.now() - cached.at < ENV_LIST_TTL_MS) {
-        respond(cached.payload);
-        return;
-      }
-
-      const gh = (args: string[], timeout = 12000): Promise<string> =>
-        new Promise<string>((resolve) => {
-          cliExec("gh", args, { timeout }, (err, stdout) => {
-            if (err) {
-              resolve("");
-              return;
-            }
-            resolve((stdout || "").trim());
-          });
-        });
-
-      try {
-        // 1) List environment names + ids for the repo. Kick off the
-        //    verify-credentials workflow-runs fetch in parallel — it's
-        //    independent of the names, so there's no reason to wait.
-        const verifyRunsPromise = gh([
-          "api",
-          `/repos/${repo}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
-          "--jq",
-          '.workflow_runs[] | (.id|tostring) + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
-        ]);
-        const namesRes = await new Promise<EnvironmentListResult>((resolve) => {
-          cliExec(
-            "gh",
-            [
-              "api",
-              "--paginate",
-              `/repos/${repo}/environments?per_page=100`,
-              "--jq",
-              '.environments[] | (.id|tostring) + "\\t" + .name'
-            ],
-            { timeout: 12000 },
-            (err, stdout, stderr) => {
-              if (err) {
-                resolve({
-                  error:
-                    (stderr || err.message || "").trim() ||
-                    "Failed to list environments."
-                });
-                return;
-              }
-              resolve({ stdout: (stdout || "").trim() });
-            }
-          );
-        });
-        // Surface a genuine API/auth/permission failure instead of
-        // silently reporting "no environments" (which hides real
-        // problems). Failures are not cached so a retry can recover.
-        if (namesRes.error) {
-          respond({ environments: [], error: namesRes.error });
-          return;
-        }
-        const namesRaw = namesRes.stdout || "";
-        const rows =
-          namesRaw ?
-            namesRaw
-              .split("\n")
-              .filter(Boolean)
-              .map((l) => {
-                const tab = l.indexOf("\t");
-                return tab === -1 ?
-                    { id: "", name: l }
-                  : { id: l.slice(0, tab), name: l.slice(tab + 1) };
-              })
-          : [];
-        if (rows.length === 0) {
-          const payload = { environments: [] };
-          respond(payload);
-          envListCache.set(repo, { at: Date.now(), payload });
-          return;
-        }
-
-        // Index the pre-fetched verify runs by run id. The environment
-        // status is derived from these (not from app deployments): an
-        // environment is "Success" only once it exists AND its
-        // verify-credentials workflow has passed.
-        const verifyRunsRaw = await verifyRunsPromise;
-        const verifyRuns = new Map<string, VerifyRun>();
-        if (verifyRunsRaw) {
-          for (const line of verifyRunsRaw.split("\n").filter(Boolean)) {
-            const [rid, rstatus, rconclusion] = line.split("\t");
-            verifyRuns.set(rid, { status: rstatus, conclusion: rconclusion });
-          }
-        }
-        // Map a verify run's outcome to an environment status.
-        const verifyStatusOf = (run?: VerifyRun): string | null => {
-          if (!run) return null;
-          if (run.status !== "completed") return "pending"; // queued / in_progress
-          if (run.conclusion === "success") return "success";
-          return "failed"; // failure / cancelled / timed_out / etc.
-        };
-
-        // 2) For each environment, derive provider (from stored variables)
-        //    and a status from the verify-credentials workflow. Both the
-        //    verify and deploy workflows create deployments to the same
-        //    environment, so we walk this env's deployments newest-first
-        //    until we find one created by a verify-credentials run.
-        const environments = await Promise.all(
-          rows.map(async ({ id, name }) => {
-            // The variables (provider) and deployments (status) lookups are
-            // independent, so fire them together.
-            const [varsRaw, depIdsRaw] = await Promise.all([
-              gh([
-                "api",
-                `/repos/${repo}/environments/${encodeURIComponent(
-                  name
-                )}/variables?per_page=100`,
-                "--jq",
-                '.variables[] | .name + "\\t" + (.value // "")'
-              ]),
-              verifyRuns.size > 0 ?
-                gh([
-                  "api",
-                  `/repos/${repo}/deployments?environment=${encodeURIComponent(
-                    name
-                  )}&per_page=10`,
-                  "--jq",
-                  ".[].id"
-                ])
-              : Promise.resolve("")
-            ]);
-            // Parse the "name<TAB>value" variable lines into a map. Only
-            // surface environments created by this extension (tagged with a
-            // RADIUS_MANAGED variable at creation time); anything without it
-            // was created outside Radius and is filtered out below.
-            const vars: Record<string, string> = {};
-            for (const line of varsRaw ?
-              varsRaw.split("\n").filter(Boolean)
-            : []) {
-              const tab = line.indexOf("\t");
-              if (tab === -1) {
-                vars[line] = "";
-                continue;
-              }
-              vars[line.slice(0, tab)] = line.slice(tab + 1);
-            }
-            if (!("RADIUS_MANAGED" in vars)) return null;
-
-            let provider = "";
-            const varNames = Object.keys(vars).join("\n");
-            if (/AZURE_/.test(varNames)) provider = "azure";
-            else if (/AWS_/.test(varNames)) provider = "aws";
-
-            const credentialProfile = vars.RADIUS_CREDENTIAL_PROFILE || "";
-
-            // Status reflects the verify-credentials workflow only:
-            // pending while it runs, success when it passes, failed if it
-            // fails. Default to "pending" until we find a matching run.
-            let status = "pending";
-            if (verifyRuns.size > 0) {
-              const depIds =
-                depIdsRaw ? depIdsRaw.split("\n").filter(Boolean) : [];
-              // Resolve every deployment's originating-run URL in parallel
-              // (deployments come back newest-first), then pick the newest
-              // one created by a verify-credentials run. Doing this serially
-              // was the main source of latency for this endpoint.
-              const logUrls = await Promise.all(
-                depIds.map((depId) =>
-                  gh([
-                    "api",
-                    `/repos/${repo}/deployments/${depId}/statuses?per_page=1`,
-                    "--jq",
-                    '.[0].log_url // .[0].target_url // ""'
-                  ])
-                )
-              );
-              for (const logUrl of logUrls) {
-                const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
-                if (!m) continue;
-                const run = verifyRuns.get(m[1]);
-                if (run) {
-                  status = verifyStatusOf(run) || status;
-                  break;
-                }
-              }
-            }
-
-            const webUrl =
-              id ?
-                `https://github.com/${repo}/settings/environments/${id}/edit`
-              : `https://github.com/${repo}/settings/environments`;
-            return { name, provider, status, webUrl, credentialProfile };
-          })
-        );
-
-        const managedEnvironments = environments.filter(
-          (environment) => environment !== null
-        );
-        respond({ environments: managedEnvironments });
-        envListCache.set(repo, {
-          at: Date.now(),
-          payload: { environments: managedEnvironments }
-        });
-        // Background self-heal: update any committed workflow files that
-        // have drifted from the upstream Radius templates. Also target the
-        // session worktree branch (when it's this repo's) so a
-        // worktree-consistent deploy runs the up-to-date workflows, not
-        // just the default branch. Fire-and-forget so it never blocks.
-        const syncEntry = servers.get(instanceId);
-        const workingBranch =
-          (
-            syncEntry?.state?.workspaceBranch &&
-            repoMatchesWorkspace(syncEntry.state, repo)
-          ) ?
-            syncEntry.state.workspaceBranch
-          : "";
-        kickoffWorkflowSync(repo, managedEnvironments, workingBranch);
-      } catch (e) {
-        respond({ environments: [], error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/list-applications" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ applications: [] });
-        return;
-      }
-      try {
-        // The application name is defined in the repo's app.bicep (a repo
-        // hosts a single Radius application in this model). Shared with the
-        // deployments/env-deletion paths via resolveRepoAppName.
-        const entry = servers.get(instanceId);
-        const branch =
-          entry?.state?.contextBranch ||
-          entry?.state?.plannedBranch ||
-          entry?.state?.graphBranch ||
-          "main";
-        const appName = await resolveRepoAppName(repo, branch);
-        respond({ applications: [{ name: appName }] });
-      } catch (e) {
-        respond({
-          applications: [{ name: repo.split("/").pop() || repo }],
-          error: errorMessage(e)
-        });
-      }
-      return;
-    }
-
-    if (pathname === "/api/list-deployments" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ deployments: [] });
-        return;
-      }
-
-      // (A) Serve a fresh cached listing when available. The fan-out below
-      // is expensive, so a short TTL keeps re-opens and the workflow poll
-      // snappy without showing stale state for long. `?fresh=1` bypasses the
-      // cache read so active status pollers (a running deploy/delete) always
-      // see live status rather than a value cached before the transition.
-      const freshDeploys = url.searchParams.get("fresh") === "1";
-      const cachedDeploys = freshDeploys ? null : deployListCache.get(repo);
-      if (cachedDeploys && Date.now() - cachedDeploys.at < DEPLOY_LIST_TTL_MS) {
-        respond(cachedDeploys.payload);
-        return;
-      }
-
-      try {
-        // Resolve the current deployment per environment from each
-        // environment's OWN history (see resolveEnvDeployment). Querying
-        // per environment — rather than a single repo-wide, capped page —
-        // means a busy environment can never crowd another's latest
-        // deploy/delete record out of the results.
-        const envNamesRaw = await ghOrThrow([
-          "api",
-          "--paginate",
-          `/repos/${repo}/environments?per_page=100`,
-          "--jq",
-          ".environments[].name"
-        ]);
-        const envNames =
-          envNamesRaw ?
-            [...new Set(envNamesRaw.split("\n").filter(Boolean))]
-          : [];
-        // Resolve the real app name once (from app.bicep) so every row targets
-        // the app declared in the bicep, not the repo basename.
-        const listEntry = servers.get(instanceId);
-        const listBranch =
-          listEntry?.state?.contextBranch ||
-          listEntry?.state?.plannedBranch ||
-          listEntry?.state?.graphBranch ||
-          "main";
-        const listAppName = await resolveRepoAppName(repo, listBranch);
-        const resolved = await Promise.all(
-          envNames.map((name) => resolveEnvDeployment(repo, name, listAppName))
-        );
-        const payload = { deployments: resolved.filter(Boolean) };
-        deployListCache.set(repo, { at: Date.now(), payload });
-        respond(payload);
-      } catch (e) {
-        // A GitHub failure surfaces as an error (not a silently-empty list)
-        // so the client keeps its current view / keeps polling rather than
-        // treating an incomplete listing as the truth.
-        respond({ deployments: [], error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/delete-deployment" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      const respond = (code: number, payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(code);
-        res.end(JSON.stringify(payload));
-      };
-      try {
-        const data = JSON.parse(body || "{}");
-        const repo = data.repo || "";
-        const environment = data.environment || "";
-        const application = data.application || "";
-        if (!repo || !environment || !application) {
-          respond(400, {
-            error: "repo, environment, and application are required."
-          });
-          return;
-        }
-
-        const gh = (
-          args: string[],
-          timeout = 20000,
-          extraEnv?: NodeJS.ProcessEnv
-        ): Promise<CommandResult> =>
-          new Promise<CommandResult>((resolve) => {
-            const opts: CliOptions = { timeout };
-            if (extraEnv) opts.env = extraEnv;
-            cliExec("gh", args, opts, (err, stdout, stderr) => {
-              resolve({
-                code: err ? err.code || 1 : 0,
-                stdout: (stdout || "").trim(),
-                stderr: stderr || ""
-              });
-            });
-          });
-        // Dispatching a workflow requires the `workflow` scope, which an
-        // injected GH_TOKEN often lacks. Retry with it stripped so gh falls
-        // back to the keyring credential.
-        const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
-          const first = await gh(args);
-          if (first.code === 0) return first;
-          if (!(process.env.GH_TOKEN || process.env.GITHUB_TOKEN)) return first;
-          const fallbackEnv = { ...process.env };
-          delete fallbackEnv.GH_TOKEN;
-          delete fallbackEnv.GITHUB_TOKEN;
-          const retry = await gh(args, 20000, fallbackEnv);
-          return retry.code === 0 ? retry : first;
-        };
-
-        // Deleting a deployment now runs `rad app delete` via the committed
-        // delete-application.yml workflow. This tears down the Radius
-        // application on the ephemeral control plane while leaving the
-        // GitHub Environment (and its credentials) intact.
-        //
-        // Ensure the delete workflow files are in sync with upstream before
-        // dispatching, so the run never executes a drifted copy — and author
-        // them if they're missing (the #273 case). Delete workflow content is
-        // provider-agnostic, and workflow_dispatch runs from the default
-        // branch, so provider/workingBranch aren't needed.
-        const sync = await ensureWorkflowsCurrent(repo, environment, "", [
-          DELETE_APP_DISPATCHER_FILE,
-          DELETE_AZURE_FILE
-        ]);
-        // If the sync couldn't commit the dispatcher to the default branch
-        // (e.g. it's protected, or the token lacks write access), the dispatch
-        // below will 404 on a genuinely-absent workflow. Fail fast with a
-        // specific message naming the branch instead of the generic hint.
-        const commitFail = sync.failed.find(
-          (f) => f.path.split("/").pop() === DELETE_APP_DISPATCHER_FILE
-        );
-        if (commitFail) {
-          respond(400, {
-            error:
-              "Couldn't commit the delete workflow (" +
-              DELETE_APP_DISPATCHER_FILE +
-              ') to the "' +
-              commitFail.branch +
-              '" branch of ' +
-              repo +
-              ", so there's nothing to dispatch. The branch may be protected" +
-              " or your GitHub token may lack write access to " +
-              repo +
-              "."
-          });
-          return;
-        }
-        // A just-authored workflow isn't registered by GitHub synchronously, so
-        // an immediate workflow_dispatch would 404. When we created it, wait
-        // briefly and retry the not-found race a few times (mirroring the
-        // create-environment verify dispatch); when it was already present, the
-        // single [0]-delay attempt keeps the common path fast.
-        const justCreated = sync.created.some(
-          (p) => p.split("/").pop() === DELETE_APP_DISPATCHER_FILE
-        );
-        const dispatchedAt = Date.now();
-        const dispatchArgs = [
-          "workflow",
-          "run",
-          DELETE_APP_DISPATCHER_FILE,
-          "-f",
-          "environment=" + environment,
-          "-f",
-          "application=" + application,
-          "--repo",
-          repo
-        ];
-        let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
-        const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
-        if (justCreated) await new Promise((r) => setTimeout(r, 3000));
-        for (const delay of dispatchDelays) {
-          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-          dispatch = await ghWorkflow(dispatchArgs);
-          if (dispatch.code === 0) break;
-          // Only the not-found registration race self-resolves; any other
-          // failure (scope, Actions disabled, …) won't, so stop retrying.
-          if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
-        }
-        if (dispatch.code !== 0) {
-          const de = (dispatch.stderr || "").trim();
-          const hint =
-            /workflow.{0,20}scope/i.test(de) ?
-              ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-            : " The delete workflow is committed to the default branch" +
-              " automatically before dispatch, so a persistent failure usually" +
-              " means GitHub Actions is disabled for " +
-              repo +
-              " or the default branch is protected — check both and retry.";
-          respond(400, {
-            error:
-              "Failed to start the delete workflow (" +
-              DELETE_APP_DISPATCHER_FILE +
-              ") on " +
-              repo +
-              ". " +
-              (de || "The dispatch request failed.") +
-              hint
-          });
-          return;
-        }
-
-        // Best-effort: resolve the dispatched run's URL so the client can
-        // link to it in GitHub.
-        let runUrl = "";
-        const runId = await findWorkflowRun(
-          repo,
-          DELETE_APP_DISPATCHER_FILE,
-          dispatchedAt,
-          null
-        );
-        if (runId)
-          runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
-        // A delete is now in flight, so the cached listing is stale — drop
-        // it so the next poll reflects the "Deleting…" state immediately.
-        deployListCache.delete(repo);
-        respond(200, { success: true, runUrl });
-      } catch (e) {
-        respond(400, { error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/verify-status" && req.method === "GET") {
-      const repo = url.searchParams.get("repo") || "";
-      const operationId = url.searchParams.get("operationId") || "";
-      const respond = (payload: unknown): void => {
-        res.setHeader("Content-Type", "application/json");
-        res.setHeader("Cache-Control", "no-store");
-        res.writeHead(200);
-        res.end(JSON.stringify(payload));
-      };
-      if (!repo) {
-        respond({ state: "unknown", error: "No repository specified." });
-        return;
-      }
-
-      try {
-        const entry = servers.get(instanceId);
-        const verifyOp = operationId ? operations.get(operationId) : null;
-        if (
-          operationId &&
-          (!verifyOp ||
-            verifyOp.repo !== repo ||
-            verifyOp.environment !==
-              (url.searchParams.get("environment") || verifyOp.environment))
-        ) {
-          respond({
-            state: "expired",
-            terminal: true,
-            error: "The verification operation does not match this request."
-          });
-          return;
-        }
-        if (verifyOp && !hasCompleteVerificationIdentity(verifyOp)) {
-          respond({
-            state: "expired",
-            terminal: true,
-            error:
-              "The verification operation has incomplete dispatch identity."
-          });
-          return;
-        }
-        const dispatchedAt =
-          verifyOp?.verification?.dispatchedAt ||
-          entry?.state?.deployDispatchedAt ||
-          0;
-        let runId =
-          verifyOp?.verification?.runId || entry?.state?.verifyRunId || null;
-        if (!runId) {
-          runId = await findWorkflowRun(
-            repo,
-            verifyOp?.verification?.workflow || VERIFY_WORKFLOW_FILE,
-            dispatchedAt,
-            null
-          );
-          if (runId && verifyOp) {
-            verifyOp.verification = {
-              dispatchedAt: verifyOp.verification.dispatchedAt,
-              workflow: verifyOp.verification.workflow,
-              ref: verifyOp.verification.ref,
-              environment: verifyOp.verification.environment,
-              runId: String(runId),
-              runUrl: "https://github.com/" + repo + "/actions/runs/" + runId
-            };
-            await persistBestEffort({
-              operation: verifyOp,
-              persist: () => operations.persist(),
-              report: (diagnostic) => operations.report?.(diagnostic)
-            });
-          } else if (runId && entry) entry.state.verifyRunId = runId;
-        }
-        if (!runId) {
-          respond({ state: "pending", runId: null });
-          return;
-        }
-
-        const detail = await getRunDetail(repo, runId);
-        const runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
-        if (!detail) {
-          respond({ state: "pending", runId, runUrl });
-          return;
-        }
-
-        if (detail.status !== "completed") {
-          // Name what the run is doing right now instead of leaving the
-          // caller with nothing but elapsed time. getRunDetail already
-          // returns per-step status, so this costs no extra API surface.
-          // Its jobs sub-resource 503s intermittently and the fallback
-          // deliberately returns no steps, so the activity line has to
-          // degrade silently rather than announce its own absence.
-          const active = (detail.steps || []).find(
-            (s) => s.status === "in_progress"
-          );
-          respond({
-            state: "in_progress",
-            runId,
-            runUrl,
-            activity: active ? active.name : null
-          });
-          return;
-        }
-        if (detail.conclusion === "success") {
-          if (verifyOp && verifyOp.currentStage === STAGE_VERIFY) {
-            finishSucceeded(verifyOp);
-            await persistBestEffort({
-              operation: verifyOp,
-              persist: () => operations.persist(),
-              report: (diagnostic) => operations.report?.(diagnostic)
-            });
-          }
-          respond({ state: "success", runId, runUrl });
-          return;
-        }
-        // Failed — surface the failing step + a few error lines.
-        const failed = (detail.steps || []).filter(
-          (s) =>
-            s.conclusion &&
-            s.conclusion !== "success" &&
-            s.conclusion !== "skipped"
-        );
-        let errMsg =
-          "Credential verification failed" +
-          (detail.conclusion ? " (" + detail.conclusion + ")" : "") +
-          ".";
-        if (failed.length)
-          errMsg +=
-            " Failed step: " + failed.map((s) => s.name).join(", ") + ".";
-        const log = await fetchRunLog(repo, runId);
-        const lines = extractErrorLines(log, 8);
-        if (lines.length) errMsg += "\n" + lines.join("\n");
-        const azureLoginLog = extractGitHubActionsStepLog(
-          log,
-          "Azure Login (OIDC)"
-        );
-        const oidcClaimHelp = explainOidcEnterpriseClaim(azureLoginLog);
-        if (oidcClaimHelp)
-          errMsg = oidcClaimHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
-        if (verifyOp && verifyOp.currentStage === STAGE_VERIFY) {
-          // Everything before verification succeeded and still exists, so
-          // this is partial rather than total failure.
-          finish(verifyOp, "failed_partial", {
-            failure: {
-              code: "verify-run-failed",
-              stage: STAGE_VERIFY,
-              message:
-                "Credential verification failed. " +
-                (failed.length ?
-                  "Failed step: " + failed.map((st) => st.name).join(", ") + "."
-                : ""),
-              classification: "user-fixable",
-              evidence: errMsg
-            }
-          });
-          await persistBestEffort({
-            operation: verifyOp,
-            persist: () => operations.persist(),
-            report: (diagnostic) => operations.report?.(diagnostic)
-          });
-        }
-        respond({ state: "failed", runId, runUrl, error: errMsg });
-      } catch (e) {
-        respond({ state: "unknown", error: errorMessage(e) });
-      }
-      return;
-    }
-
-    if (pathname === "/api/user-repos" && req.method === "GET") {
-      try {
-        // Fetch personal repos and org repos in parallel
-        const [personalRepos, orgRepos] = await Promise.all([
-          new Promise<string[]>((resolve) => {
-            cliExec(
-              "gh",
-              [
-                "repo",
-                "list",
-                "--limit",
-                "30",
-                "--json",
-                "nameWithOwner",
-                "--jq",
-                ".[].nameWithOwner"
-              ],
-              { timeout: 15000 },
-              (err, stdout) => {
-                if (err) {
-                  resolve([]);
-                  return;
-                }
-                resolve(stdout.trim().split("\n").filter(Boolean));
-              }
-            );
-          }),
-          new Promise<string[]>((resolve) => {
-            // Get orgs the user belongs to, then fetch repos from each
-            cliExec(
-              "gh",
-              ["org", "list"],
-              { timeout: 15000 },
-              (err, stdout) => {
-                if (err || !stdout.trim()) {
-                  resolve([]);
-                  return;
-                }
-                const orgs = stdout.trim().split("\n").filter(Boolean);
-                const orgPromises = orgs.map(
-                  (org) =>
-                    new Promise<string[]>((res2) => {
-                      cliExec(
-                        "gh",
-                        [
-                          "repo",
-                          "list",
-                          org,
-                          "--limit",
-                          "20",
-                          "--json",
-                          "nameWithOwner",
-                          "--jq",
-                          ".[].nameWithOwner"
-                        ],
-                        { timeout: 15000 },
-                        (err2, stdout2) => {
-                          if (err2) {
-                            res2([]);
-                            return;
-                          }
-                          res2(stdout2.trim().split("\n").filter(Boolean));
-                        }
-                      );
-                    })
-                );
-                Promise.all(orgPromises).then((results) =>
-                  resolve(results.flat())
-                );
-              }
-            );
-          })
-        ]);
-        const allRepos = [...new Set([...personalRepos, ...orgRepos])];
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ repos: allRepos }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ repos: [] }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/repo-branches" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo;
-        if (!repo) {
-          res.writeHead(200);
-          res.end(JSON.stringify({ branches: [] }));
-          return;
-        }
-        const result = await new Promise<string[]>((resolve) => {
-          cliExec(
-            "gh",
-            [
-              "api",
-              "--paginate",
-              `/repos/${repo}/branches?per_page=100`,
-              "--jq",
-              ".[].name"
-            ],
-            { timeout: 15000 },
-            (err, stdout) => {
-              if (err) {
-                resolve([]);
-                return;
-              }
-              resolve(stdout.trim().split("\n").filter(Boolean));
-            }
-          );
-        });
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ branches: result }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ branches: [] }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/plan-graph" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({ error: "Canvas server state is unavailable." })
-          );
-          return;
-        }
-        const branch = data.branch || defaultBranchForState(entry.state);
-        const provider = data.provider || "azure";
-        const sourceRefContext =
-          entry ?
-            prepareSourceRefResources(entry, "planned", { repo, branch })
-          : null;
-
-        const addProgress = (msg: string): void => {
-          if (entry) {
-            if (!entry.state.progressMessages)
-              entry.state.progressMessages = [];
-            entry.state.progressMessages.push(msg);
-          }
-        };
-        if (entry) entry.state.progressMessages = [];
-
-        addProgress(`Checking ${repo} for app.bicep...`);
-        const selection = await fetchBicepSelection(entry, repo, branch);
-        const content = selection.content;
-        if (!content) {
-          addProgress(
-            ".radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill."
-          );
-          triggerAppBicepHandoff(entry, repo, branch, "graph");
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
-              needsAppBicep: true,
-              repo,
-              branch
-            })
-          );
-          return;
-        }
-        addProgress("Found app.bicep — parsing resources...");
-
-        const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-          await radArtifactsDirForSelection({
-            isLocal: !!(entry && selection.fromWorkspace),
-            state: entry?.state,
-            github,
-            repo,
-            branch,
-            bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-            log: addProgress
-          });
-        const resources = canvasGraphResources(
-          await buildGraphViaRad(
-            content,
-            selection.bicepPath || ".radius/app.bicep",
-            {
-              log: addProgress,
-              radArtifactsDir,
-              cleanupRadArtifactsDir: radArtifactsRemote
-            }
-          )
-        );
-        addProgress(
-          `Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`
-        );
-
-        // Resolve recipes from the default recipe pack (radius-project/resource-types-contrib)
-        let recipes: unknown[] = [];
-        addProgress("Fetching the default recipe pack from GitHub...");
-        recipes = await fetchRecipePack(github, provider);
-        addProgress(
-          `Loaded ${
-            Array.isArray(recipes) ? recipes.length : 0
-          } recipe(s) from the default recipe pack.`
-        );
-
-        // Surface pack recipes we couldn't map to a concrete resource so
-        // the gap is visible (rather than silently rendering the abstract
-        // type). Empty today for the Azure pack; fires if the pack adds a
-        // recipe source the curated map doesn't yet cover.
-        const unmappedRecipes = recipes.filter((recipe) => {
-          const concrete = record(recipe).concreteResources;
-          return !Array.isArray(concrete) || concrete.length === 0;
-        });
-        if (unmappedRecipes.length) {
-          addProgress(
-            `Note: ${
-              unmappedRecipes.length
-            } pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes
-              .map((recipe) => optionalString(record(recipe).resourceType))
-              .join(", ")}); those nodes show their abstract Radius type.`
-          );
-        }
-
-        // For each abstract resource, resolve its recipe and concrete output resources
-        addProgress("Resolving recipe outputs for planned resources...");
-        const plannedResources = canvasGraphResources(
-          await resolveRecipeOutputs(github, resources, recipes, provider)
-        );
-        addProgress(
-          `Planned ${plannedResources.length} resource(s) — rendering graph...`
-        );
-
-        if (entry && sourceRefContext) {
-          if (
-            !setSourceRefResources(
-              entry,
-              "planned",
-              plannedResources,
-              { repo, branch },
-              sourceRefContext.token
-            )
-          ) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(JSON.stringify({ stale: true }));
-            return;
-          }
-          entry.state.plannedRepo = repo;
-          entry.state.plannedBranch = branch;
-          // Authoritative provenance: true only when the local workspace
-          // actually supplied the app.bicep content (file is on disk).
-          entry.state.plannedFromWorkspace = selection.fromWorkspace;
-          entry.state.plannedProvider = provider;
-          entry.state.resolvedRecipes = recipes;
-          entry.state.activeGraphView = "planned";
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ reload: true }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/discover-branches" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        const result = await new Promise<BranchResult>((resolve) => {
-          cliExec(
-            "gh",
-            ["api", "--paginate", `/repos/${repo}/branches?per_page=100`],
-            { timeout: 15000 },
-            (err, stdout, stderr) => {
-              if (err) {
-                resolve({ error: stderr || err.message });
-                return;
-              }
-              try {
-                const raw: unknown = JSON.parse(stdout.trim());
-                const branches =
-                  Array.isArray(raw) ?
-                    raw.map((value) => {
-                      const branch = record(value);
-                      return {
-                        name: optionalString(branch.name),
-                        sha: optionalString(record(branch.commit).sha)
-                      };
-                    })
-                  : [];
-                resolve({ branches });
-              } catch (e) {
-                resolve({ error: "Failed to parse branch data" });
-              }
-            }
-          );
-        });
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({ error: "Canvas server state is unavailable." })
-          );
-          return;
-        }
-        if (
-          entry?.state?.workspaceBranch &&
-          repoMatchesWorkspace(entry.state, repo)
-        ) {
-          const branches = result.branches || [];
-          if (!branches.some((b) => b.name === entry.state.workspaceBranch)) {
-            branches.unshift({
-              name: entry.state.workspaceBranch,
-              sha: "worktree"
-            });
-          }
-          result.branches = branches;
-          result.workspaceBranch = entry.state.workspaceBranch;
-        }
-        if (entry && result.branches) {
-          entry.state.branches = result.branches.map((b) => b.name);
-          entry.state.branchShas = {};
-          for (const b of result.branches)
-            entry.state.branchShas[b.name] = b.sha;
-          entry.state.diffTargetRepo = repo;
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify(result));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/diff-branches" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      let sourceRefContext = null;
-      try {
-        const data = JSON.parse(body);
-        const repo = data.repo || "";
-        const entry = servers.get(instanceId);
-        if (!entry) {
-          res.writeHead(503);
-          res.end(
-            JSON.stringify({ error: "Canvas server state is unavailable." })
-          );
-          return;
-        }
-        sourceRefContext = prepareSourceRefResources(entry, "diff", {
-          repo,
-          baseBranch: data.base,
-          headBranch: data.head
-        });
-        entry.state.diffBase = data.base;
-        entry.state.diffHead = data.head;
-        entry.state.diffTargetRepo = repo;
-        delete entry.state.diffError;
-
-        // Fetch the committed/persisted app.bicep on each branch. app.bicep
-        // generation is owned by the Radius app-bicep skill, so branches
-        // without one simply contribute nothing to the diff (added/removed).
-        const [baseSelection, headSelection] = await Promise.all([
-          fetchBicepSelection(entry, repo, data.base),
-          fetchBicepSelection(entry, repo, data.head)
-        ]);
-
-        if (!baseSelection.content && !headSelection.content) {
-          triggerAppBicepHandoff(
-            entry,
-            repo,
-            [data.base, data.head],
-            "graph-diff"
-          );
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
-              needsAppBicep: true,
-              repo
-            })
-          );
-          return;
-        }
-
-        const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-          await radArtifactsDirForSelection({
-            isLocal: !!(entry && baseSelection.fromWorkspace),
-            state: entry?.state,
-            github,
-            repo,
-            branch: data.base,
-            bicepRepoPath: baseSelection.bicepPath || ".radius/app.bicep"
-          });
-        const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-          await radArtifactsDirForSelection({
-            isLocal: !!(entry && headSelection.fromWorkspace),
-            state: entry?.state,
-            github,
-            repo,
-            branch: data.head,
-            bicepRepoPath: headSelection.bicepPath || ".radius/app.bicep"
-          });
-        const baseResources = canvasGraphResources(
-          await buildGraphViaRad(
-            baseSelection.content || "",
-            baseSelection.bicepPath || ".radius/app.bicep",
-            {
-              radArtifactsDir: baseRadArtifactsDir,
-              cleanupRadArtifactsDir: baseRadArtifactsRemote
-            }
-          )
-        );
-        const headResources = canvasGraphResources(
-          await buildGraphViaRad(
-            headSelection.content || "",
-            headSelection.bicepPath || ".radius/app.bicep",
-            {
-              radArtifactsDir: headRadArtifactsDir,
-              cleanupRadArtifactsDir: headRadArtifactsRemote
-            }
-          )
-        );
-
-        // Compute diff using the shared algorithm (see computeGraphDiff).
-        const diffResources = computeGraphDiff(baseResources, headResources);
-
-        if (entry && sourceRefContext) {
-          if (
-            !setSourceRefResources(
-              entry,
-              "diff",
-              diffResources,
-              {
-                repo,
-                baseBranch: data.base,
-                headBranch: data.head
-              },
-              sourceRefContext.token
-            )
-          ) {
-            res.setHeader("Content-Type", "application/json");
-            res.writeHead(409);
-            res.end(JSON.stringify({ stale: true }));
-            return;
-          }
-          entry.state.diffBaseGenerated = false;
-          entry.state.diffHeadGenerated = false;
-          entry.state.page = "graphDiff";
-          entry.state.activeGraphView = "diff";
-          delete entry.state.diffError;
-        }
-
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            message: `Comparing ${data.base} → ${data.head}`,
-            reload: true
-          })
-        );
-      } catch (e) {
-        const entry = servers.get(instanceId);
-        if (
-          entry &&
-          isCurrentSourceRefToken(
-            entry.state,
-            "diff",
-            sourceRefContext?.token || ""
-          )
-        ) {
-          entry.state.diffError = errorMessage(e);
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/deploy" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const entry = servers.get(instanceId);
-        // Re-validate the repair-loop attempt before touching any state: the
-        // tool checked it before sending, but a newer deploy may have started
-        // since, and a stale repair must not clobber it.
-        const loop = resolveDeployRepairLoop(
-          entry?.state || ({} as CanvasState),
-          data.attemptId
-        );
-        if (loop.error) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(409);
-          res.end(JSON.stringify({ error: loop.error }));
-          return;
-        }
-        // Store deploy params
-        if (entry) {
-          const repo =
-            data.targetRepo ||
-            entry.state.plannedRepo ||
-            entry.state.contextRepo ||
-            "";
-          // Resolve the branch to deploy. When the client doesn't specify
-          // one, fall back to the repo's real default branch (which may be
-          // master/develop, not main) so the dispatch --ref and the
-          // "branch not pushed" guard below target a branch that exists.
-          // Resolved up front, before any state is touched: beginDeployAttempt
-          // has to run without an await in front of it, or the previous attempt
-          // stays current across that window and its handoff can settle onto the
-          // deploy starting here.
-          let branch = data.branch || "";
-          if (!branch) {
-            const detectedDefault = (
-              (await runCommand("gh", [
-                "repo",
-                "view",
-                repo,
-                "--json",
-                "defaultBranchRef",
-                "--jq",
-                ".defaultBranchRef.name"
-              ]).catch(() => "")) || ""
-            ).trim();
-            branch = detectedDefault || "main";
-          }
-          entry.state.deployParams = data;
-          entry.state.envName = data.environment;
-          entry.state.deployProvider = data.provider;
-          entry.state.deployingRepo = data.targetRepo;
-          entry.state.appFile = data.appFile;
-
-          // Snapshot the planned graph (nodes start as pending). If the
-          // planned graph hasn't been resolved yet, it is built on the fly
-          // inside the monitor so the deploying page always shows it.
-          const cloned: unknown = JSON.parse(
-            JSON.stringify(entry.state.plannedResources || [])
-          );
-          let resources = canvasGraphResources(
-            Array.isArray(cloned) ? cloned : []
-          );
-          resources.forEach((r) => {
-            r.deployStatus = "pending";
-            if (r.outputResources)
-              r.outputResources.forEach((o) => {
-                o.deployStatus = "pending";
-              });
-          });
-          entry.state.deployingResources = resources;
-          entry.state.deployLogs = [];
-          entry.state.deployLogBase = 0;
-          const provider = data.provider || "azure";
-          beginDeployAttempt(entry.state, {
-            repo,
-            branch,
-            provider,
-            environment: entry.state.envName || data.environment || "",
-            appFile: data.appFile || ".radius/app.bicep",
-            repairLoop: loop.repairLoop,
-            attemptId: loop.attemptId
-          });
-          // Bounded ring buffer: a verbose deploy can stream tens of
-          // thousands of recipe/terraform log lines. Keeping them all in
-          // memory (and re-serializing the whole array to every 1.5s
-          // status poll) grew unbounded and got the extension process
-          // OOM-killed mid-deploy. Cap the buffer and track how many
-          // lines were dropped so the client can still page through new
-          // lines by absolute offset.
-          const DEPLOY_LOG_CAP = 4000;
-          const addLog = (msg: string): void => {
-            const dl = entry.state.deployLogs || [];
-            entry.state.deployLogs = dl;
-            dl.push(msg);
-            if (dl.length > DEPLOY_LOG_CAP) {
-              const drop = dl.length - DEPLOY_LOG_CAP;
-              dl.splice(0, drop);
-              entry.state.deployLogBase =
-                (entry.state.deployLogBase || 0) + drop;
-            }
-          };
-          const setStatus = (
-            r: CanvasGraphResource,
-            s: "pending" | "in_progress" | "success" | "failed"
-          ): void => {
-            r.deployStatus = s;
-            if (r.outputResources)
-              r.outputResources.forEach((o) => {
-                o.deployStatus = s;
-                if (s === "success") {
-                  const portalUrlKey = optionalString(
-                    provider === "azure" ?
-                      o.id || o.type || o.displayType || ""
-                    : o.type || o.displayType || o.id || ""
-                  );
-                  o.portalUrl = generatePortalUrl(
-                    portalUrlKey,
-                    provider,
-                    entry.state
-                  );
-                }
-              });
-          };
-
-          // Monitor BOTH workflows in sequence: first verify-credentials,
-          // then the deploy workflow. Do NOT dispatch — they were already
-          // triggered from the environment page.
-          (async () => {
-            const delay = (ms: number) =>
-              new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-            if (!repo) {
-              addLog("❌ No target repository specified.");
-              entry.state.deployError =
-                "No target repository was specified for the deployment.";
-              entry.state.deployStatus = "failed";
-              return;
-            }
-
-            // Build the planned graph if it wasn't resolved beforehand.
-            if (resources.length === 0) {
-              addLog("Resolving planned application graph for " + repo + "...");
-              const sourceRefContext = prepareSourceRefResources(
-                entry,
-                "planned",
-                { repo, branch }
-              );
-              try {
-                const selection = await fetchBicepSelection(
-                  entry,
-                  repo,
-                  branch
-                );
-                const content = selection.content;
-                if (content) {
-                  const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-                    await radArtifactsDirForSelection({
-                      isLocal: !!(entry && selection.fromWorkspace),
-                      state: entry?.state,
-                      github,
-                      repo,
-                      branch,
-                      bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-                      log: addLog
-                    });
-                  const parsed = canvasGraphResources(
-                    await buildGraphViaRad(
-                      content,
-                      selection.bicepPath || ".radius/app.bicep",
-                      {
-                        log: addLog,
-                        radArtifactsDir,
-                        cleanupRadArtifactsDir: radArtifactsRemote
-                      }
-                    )
-                  );
-                  const recipes = await fetchRecipePack(github, provider);
-                  const planned = canvasGraphResources(
-                    await resolveRecipeOutputs(
-                      github,
-                      parsed,
-                      recipes,
-                      provider
-                    )
-                  );
-                  planned.forEach((r) => {
-                    r.deployStatus = "pending";
-                    if (r.outputResources)
-                      r.outputResources.forEach((o) => {
-                        o.deployStatus = "pending";
-                      });
-                  });
-                  const committed = setSourceRefResources(
-                    entry,
-                    "planned",
-                    planned,
-                    {
-                      repo,
-                      branch
-                    },
-                    sourceRefContext.token
-                  );
-                  if (committed) entry.state.plannedRepo = repo;
-                  resources = planned;
-                  entry.state.deployingResources = resources;
-                  addLog("Planned " + planned.length + " resource(s).");
-                } else {
-                  addLog(
-                    "⚠ .radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill to show the planned graph."
-                  );
-                }
-              } catch (e) {
-                addLog("⚠ Could not resolve planned graph: " + errorMessage(e));
-              }
-            }
-
-            // ── Phase 1: Dispatch the run-rad-commands workflow ─────
-            // Credentials are verified separately when the environment
-            // is created, so deploying is now an explicit action: we
-            // dispatch the unified run-rad-commands workflow here (the
-            // "Repo Radius" entry point that runs `rad deploy` by
-            // default) rather than relying on a verify → deploy chain.
-            addLog("━━ Deploying Radius application ━━");
-            const envForDeploy =
-              entry.state.envName || data.environment || "dev";
-            // Persist the resolved environment so the deployed-graph
-            // reader (GHCR artifact tag) can be rebuilt from state later.
-            entry.state.deployEnvName = envForDeploy;
-            const deployWorkflowFile = DEPLOY_WORKFLOW_FILE;
-            // Deploy the SELECTED branch's code (worktree-consistent): run
-            // the workflow on `branch` so it checks out and `rad deploy`s
-            // that branch's app.bicep — the same file the params below are
-            // computed from — instead of always deploying the default branch.
-            // `branch` is already resolved to the selected branch or the
-            // repo's real default above, so it's never empty here.
-            const deployRef = branch;
-
-            // Fail fast (with clear, actionable guidance) when the
-            // selected branch hasn't been pushed to the remote yet. A
-            // worktree/feature branch that only exists locally has no
-            // ref on GitHub, so both publishing the workflow files and
-            // dispatching the run against `--ref <branch>` are doomed.
-            // We confirm the repo itself is reachable (its default
-            // branch resolves) before blaming the branch, so a
-            // transient/auth error isn't misreported as "not pushed".
-            if (deployRef) {
-              const refSha = await getBranchHeadSha(repo, deployRef);
-              if (!refSha) {
-                const repoDefault = await getDefaultBranch(repo);
-                if (repoDefault) {
-                  const pushCmd = "git push -u origin " + deployRef;
-                  addLog(
-                    '❌ Branch "' +
-                      deployRef +
-                      '" has not been pushed to ' +
-                      repo +
-                      "."
-                  );
-                  addLog("   Push it and redeploy:  " + pushCmd);
-                  entry.state.deployError =
-                    'The branch "' +
-                    deployRef +
-                    "\" hasn't been pushed to " +
-                    repo +
-                    " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
-                    pushCmd;
-                  entry.state.deployErrorKind = "branch-not-pushed";
-                  entry.state.deployErrorBranch = deployRef;
-                  entry.state.deployStatus = "failed";
-                  return;
-                }
-              }
-            }
-            const runGhDeploy = (
-              args: string[],
-              envOverride?: NodeJS.ProcessEnv
-            ): Promise<CommandResult> =>
-              new Promise<CommandResult>((resolve) => {
-                cliExec(
-                  "gh",
-                  args,
-                  {
-                    timeout: 30000,
-                    ...(envOverride ? { env: envOverride } : {})
-                  },
-                  (err, stdout, stderr) => {
-                    resolve({
-                      code: err ? err.code || 1 : 0,
-                      stdout: stdout || "",
-                      stderr: stderr || ""
-                    });
-                  }
-                );
-              });
-            // Like runGhDeploy but feeds a value (e.g. a secret JSON) over
-            // stdin so it never lands on the argv/process list.
-            const runGhDeployStdin = (
-              args: string[],
-              stdin: string,
-              envOverride?: NodeJS.ProcessEnv
-            ): Promise<CommandResult> =>
-              new Promise((resolve) => {
-                const child = cliExec(
-                  "gh",
-                  args,
-                  {
-                    timeout: 30000,
-                    ...(envOverride ? { env: envOverride } : {})
-                  },
-                  (err, stdout, stderr) => {
-                    resolve({
-                      code: err ? err.code || 1 : 0,
-                      stdout: stdout || "",
-                      stderr: stderr || ""
-                    });
-                  }
-                );
-                if (stdin !== undefined) child.stdin?.end(stdin);
-              });
-            const dispatchArgs = [
-              "workflow",
-              "run",
-              deployWorkflowFile,
-              "--ref",
-              deployRef,
-              "-f",
-              "environment=" + envForDeploy,
-              "--repo",
-              repo
-            ];
-
-            // Recompute the rad commands from the CURRENT app.bicep at
-            // dispatch time (rather than relying on the RADIUS_RAD_COMMANDS
-            // variable captured when the environment was created) so the
-            // deploy always reflects the latest bicep. Also append
-            // `rad app graph` so the deployed application graph is rendered
-            // as part of the run. Secret params are still appended by the
-            // workflow from the RADIUS_DEPLOY_PARAMS secret.
-            //
-            // A fatal secret-provisioning problem (the deployed bicep needs a
-            // secret param the environment can't be made to carry) is recorded
-            // here and short-circuits the dispatch below, so we never start a
-            // run that is guaranteed to fail `rad deploy` for a missing
-            // required parameter.
-            let deploySecretError = null;
-            try {
-              let bicepPath = ".radius/app.bicep";
-              let bicepSource = await fetchFileForSelection(
-                entry,
-                repo,
-                branch,
-                ".radius/app.bicep"
-              );
-              if (!bicepSource) {
-                bicepSource = await fetchFileForSelection(
-                  entry,
-                  repo,
-                  branch,
-                  "app.bicep"
-                );
-                if (bicepSource) bicepPath = "app.bicep";
-              }
-              if (bicepSource) {
-                const parsed = appParams(bicepSource);
-                const resolved = resolveDeployParams(parsed);
-                const { public: publicParams, secret: secretParams } =
-                  partitionParams(parsed, resolved);
-                // Capture the app name (as the producer extracts it) so
-                // the deployed-graph reader can derive the GHCR artifact
-                // tag "<environment>-<app>-latest".
-                entry.state.deployAppName = appNameForGraphTag(bicepSource);
-                // Ensure the environment carries the secret params the
-                // deployed app.bicep needs (e.g. an @secure() password).
-                // The workflow can ONLY read these from the
-                // RADIUS_DEPLOY_PARAMS secret — unlike the public rad
-                // commands, they can't be passed inline as a dispatch input
-                // — so if the secret is absent the deploy fails for a
-                // missing required parameter. Env creation seeds it, but
-                // that step is skipped when app.bicep isn't present yet, so
-                // reconcile here: provision the secret from the SAME branch
-                // bicep when the environment has none. If one already
-                // exists, leave it untouched so an auto-generated value
-                // stays stable across redeploys (we can't read it back to
-                // compare).
-                if (Object.keys(secretParams).length > 0) {
-                  const deployParamsPresent = async () => {
-                    const r = await runGhDeploy([
-                      "api",
-                      `/repos/${repo}/environments/${encodeURIComponent(
-                        envForDeploy
-                      )}/secrets`,
-                      "--jq",
-                      ".secrets[].name"
-                    ]);
-                    return (r.stdout || "")
-                      .split("\n")
-                      .map((s) => s.trim())
-                      .includes("RADIUS_DEPLOY_PARAMS");
-                  };
-                  if (!(await deployParamsPresent())) {
-                    addLog(
-                      'Provisioning RADIUS_DEPLOY_PARAMS for "' +
-                        envForDeploy +
-                        '" (' +
-                        Object.keys(secretParams).join(", ") +
-                        ")..."
-                    );
-                    const setArgs = [
-                      "secret",
-                      "set",
-                      "RADIUS_DEPLOY_PARAMS",
-                      "--env",
-                      envForDeploy,
-                      "--repo",
-                      repo
-                    ];
-                    let setRes = await runGhDeployStdin(
-                      setArgs,
-                      JSON.stringify(secretParams)
-                    );
-                    if (
-                      setRes.code !== 0 &&
-                      (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)
-                    ) {
-                      // The injected OAuth token may lack the scope to
-                      // write environment secrets; retry with it
-                      // stripped so gh falls back to the keyring cred.
-                      const fe = { ...process.env };
-                      delete fe.GH_TOKEN;
-                      delete fe.GITHUB_TOKEN;
-                      const retry = await runGhDeployStdin(
-                        setArgs,
-                        JSON.stringify(secretParams),
-                        fe
-                      );
-                      if (retry.code === 0) setRes = retry;
-                    }
-                    if (setRes.code !== 0) {
-                      deploySecretError =
-                        'Could not provision RADIUS_DEPLOY_PARAMS on environment "' +
-                        envForDeploy +
-                        '": ' +
-                        ((setRes.stderr || "").trim() || "unknown error") +
-                        ". The deploy would fail for a missing required parameter (" +
-                        Object.keys(secretParams).join(", ") +
-                        "), so it was not started.";
-                      addLog("❌ " + deploySecretError);
-                    } else if (!(await deployParamsPresent())) {
-                      deploySecretError =
-                        'RADIUS_DEPLOY_PARAMS was accepted but is not present on environment "' +
-                        envForDeploy +
-                        '". The deploy would fail for a missing required parameter (' +
-                        Object.keys(secretParams).join(", ") +
-                        "), so it was not started.";
-                      addLog("❌ " + deploySecretError);
-                    } else {
-                      addLog(
-                        '✅ RADIUS_DEPLOY_PARAMS is set on "' +
-                          envForDeploy +
-                          '".'
-                      );
-                    }
-                  }
-                }
-
-                const deployCmd = buildDeployRadCommand(
-                  bicepPath,
-                  envForDeploy,
-                  publicParams
-                );
-                const appName = extractAppName(bicepSource);
-                const commands = [deployCmd];
-                if (appName) commands.push(buildAppGraphRadCommand(appName));
-                const radCommandsInput = JSON.stringify(commands);
-                dispatchArgs.push("-f", "rad_commands=" + radCommandsInput);
-                addLog(
-                  "Deploying with rad commands: " + commands.join("  |  ")
-                );
-              } else {
-                addLog(
-                  "⚠ Could not read app.bicep at dispatch; falling back to the environment's RADIUS_RAD_COMMANDS / default deploy."
-                );
-              }
-            } catch (e) {
-              addLog(
-                "⚠ Could not compute rad commands from bicep (" +
-                  errorMessage(e) +
-                  "); falling back to the environment default."
-              );
-            }
-            // Fail fast: a required secret param couldn't be provisioned, so
-            // starting the run would only produce a guaranteed `rad deploy`
-            // failure. Surface the reason and stop before dispatching.
-            if (deploySecretError) {
-              entry.state.deployError = deploySecretError;
-              entry.state.deployStatus = "failed";
-              return;
-            }
-            // Make sure the workflow files exist on the branch we're
-            // about to dispatch on. The env-creation flow only commits
-            // them to the default branch, so a feature/worktree branch
-            // usually needs them published first.
-            try {
-              await ensureDeployWorkflowsOnBranch(
-                repo,
-                deployRef,
-                envForDeploy,
-                addLog
-              );
-            } catch (e) {
-              addLog(
-                '⚠ Could not publish deploy workflows to branch "' +
-                  deployRef +
-                  '": ' +
-                  errorMessage(e) +
-                  ". The dispatch below will fail if the branch has no run-rad-commands workflow."
-              );
-            }
-
-            // With the deploy workflows present, ensure they're in sync
-            // with the upstream Radius templates before running them, so
-            // the deploy never executes a drifted copy. Syncs the deploy
-            // files on both the default branch and the branch being
-            // deployed (deployRef), which a --ref dispatch checks out.
-            await ensureWorkflowsCurrent(
-              repo,
-              envForDeploy,
-              provider,
-              [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
-              deployRef
-            );
-
-            const deployDispatchedAt = Date.now();
-            addLog(
-              "🚀 Dispatching run rad commands workflow (" +
-                deployWorkflowFile +
-                ') on branch "' +
-                deployRef +
-                '" for environment "' +
-                envForDeploy +
-                '"...'
-            );
-            let dispatchDeployRes = await runGhDeploy(dispatchArgs);
-            if (
-              dispatchDeployRes.code !== 0 &&
-              (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)
-            ) {
-              // The injected OAuth token may lack the `workflow` scope; retry
-              // with it stripped so gh falls back to the keyring credential.
-              const fallbackEnv = { ...process.env };
-              delete fallbackEnv.GH_TOKEN;
-              delete fallbackEnv.GITHUB_TOKEN;
-              const retry = await runGhDeploy(dispatchArgs, fallbackEnv);
-              if (retry.code === 0) dispatchDeployRes = retry;
-            }
-            if (dispatchDeployRes.code !== 0) {
-              const de = (dispatchDeployRes.stderr || "").trim();
-              addLog(
-                "❌ Failed to dispatch the run rad commands workflow: " + de
-              );
-              // A "No ref found" (or unresolved ref) dispatch error
-              // means the branch isn't on the remote — surface the same
-              // clean, actionable "push the branch" guidance/UI.
-              if (
-                /no ref found|could not resolve|no commit found for the ref/i.test(
-                  de
-                )
-              ) {
-                const pushCmd = "git push -u origin " + deployRef;
-                addLog("   Push it and redeploy:  " + pushCmd);
-                entry.state.deployError =
-                  'The branch "' +
-                  deployRef +
-                  "\" hasn't been pushed to " +
-                  repo +
-                  " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
-                  pushCmd;
-                entry.state.deployErrorKind = "branch-not-pushed";
-                entry.state.deployErrorBranch = deployRef;
-                entry.state.deployStatus = "failed";
-                return;
-              }
-              const scopeHint =
-                /workflow.{0,20}scope/i.test(de) ?
-                  ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
-                : " Ensure " +
-                  deployWorkflowFile +
-                  ' exists on branch "' +
-                  deployRef +
-                  '" (push the branch so it carries the app.bicep and workflow files) and that GitHub Actions are enabled for ' +
-                  repo +
-                  ".";
-              entry.state.deployError =
-                "Failed to start the run rad commands workflow (" +
-                deployWorkflowFile +
-                ") on " +
-                repo +
-                ". " +
-                (de || "The dispatch request failed.") +
-                scopeHint;
-              entry.state.deployStatus = "failed";
-              return;
-            }
-            addLog("✅ Run rad commands workflow dispatched.");
-            // A new deploy is in flight, so any cached deployments
-            // listing is stale — drop it so the deploy page reflects the
-            // new run on the next poll.
-            deployListCache.delete(repo);
-
-            // ── Phase 2: Monitor the deploy run ─────────────────────
-            addLog("Waiting for the deploy workflow to start...");
-            let dRunId = null;
-            for (let attempt = 0; attempt < 24 && !dRunId; attempt++) {
-              dRunId = await findWorkflowRun(
-                repo,
-                deployWorkflowFile,
-                deployDispatchedAt,
-                null
-              );
-              if (!dRunId) await delay(5000);
-            }
-            if (!dRunId) {
-              addLog("⚠ No deploy run found for " + deployWorkflowFile + ".");
-              entry.state.deployError =
-                "The run rad commands workflow (" +
-                deployWorkflowFile +
-                ") did not start. Check that the workflow exists on the default branch and that Actions are enabled for " +
-                repo +
-                ".";
-              entry.state.deployStatus = "failed";
-              return;
-            }
-            entry.state.deployRunId = dRunId;
-            entry.state.deployRunUrl =
-              "https://github.com/" + repo + "/actions/runs/" + dRunId;
-            addLog(
-              "Tracking deploy run: https://github.com/" +
-                repo +
-                "/actions/runs/" +
-                dRunId
-            );
-            if (resources.length > 0 && resources[0].deployStatus === "pending")
-              setStatus(resources[0], "in_progress");
-
-            const seenD = new Set<string>();
-            const startedD = new Set<string>();
-            let deployStepStartedAt = 0;
-            let beatStep = "";
-            let beatStepStartedAt = 0;
-            let lastBeatAt = 0;
-            // Live `rad deploy` progress (published by the workflow to the
-            // radius-deploy-status branch). We track how many raw lines we've
-            // already surfaced so we only append new ones.
-            let liveLogShown = 0;
-            let deployStarted = false;
-            // Track which activity-log status changes we've already
-            // streamed so we only announce new transitions.
-            const activitySeen = new Set<string>();
-            // Track how many control-plane / recipe log lines we've surfaced.
-            let cpLogShown = 0;
-            let cpLogTail = "";
-            const DEPLOY_STEP = "Deploy Application";
-
-            // Poll the Azure activity log the workflow publishes and
-            // drive FINE-GRAINED per-resource (output) status, coloring
-            // each planned graph node individually as Azure creates it.
-            const pollActivity = async () => {
-              if (provider !== "azure" || resources.length === 0) return;
-              const actText = await fetchLiveActivityLog(repo);
-              if (!actText) return;
-              const entries = reduceActivityLog(actText);
-              if (entries.length === 0) return;
-              const changes = applyActivityToResources(
-                entries,
-                resources,
-                provider,
-                entry.state
-              );
-              for (const c of changes) {
-                if (!activitySeen.has(c)) {
-                  activitySeen.add(c);
-                  addLog("    ☁ " + c);
-                }
-              }
-            };
-
-            // Stream the Radius control-plane / recipe log (terraform/bicep
-            // execution from the radius-system pods). Real-time and carries
-            // the precise recipe failure cause. We append only new lines.
-            const pollControlPlane = async () => {
-              const cpText = await fetchLiveControlPlaneLog(repo);
-              if (!cpText) return;
-              cpLogTail = cpText;
-              const lines = cpText.split(/\r?\n/);
-              for (let i = cpLogShown; i < lines.length; i++) {
-                const t = lines[i].replace(/\s+$/, "");
-                if (t) addLog("    ⚙ " + t);
-              }
-              cpLogShown = lines.length;
-            };
-
-            // Advance per-resource status from any live log text so the
-            // graph shows gray→yellow→green/red per node. rad deploy in CI
-            // (non-TTY) prints no intermediate per-resource lines, so the
-            // control-plane/recipe log + activity log are the real signals.
-            const applyProgress = (text: string): void => {
-              if (!text) return;
-              const prog = parseResourceProgress(text, resources);
-              for (const r of resources) {
-                if (!r.name) continue;
-                const s = prog[r.name];
-                if (!s) continue;
-                const cur = r.deployStatus;
-                // Mid-deployment a node is NEVER painted red: a transient
-                // "error"/"failed"/"postponed" line in the live log does not
-                // mean the deployment failed. Such resources stay yellow
-                // (in_progress). Only the TERMINAL run conclusion (below)
-                // decides red vs green, so nodes go red solely on an actual
-                // failed deployment.
-                if (s === "success" && cur !== "success" && cur !== "failed") {
-                  setStatus(r, "success");
-                  addLog("  ✓ " + r.name + " deployed");
-                } else if (
-                  (s === "in_progress" || s === "failed") &&
-                  (cur === "pending" || !cur)
-                ) {
-                  setStatus(r, "in_progress");
-                  addLog("  ◐ " + r.name + " provisioning…");
-                }
-              }
-            };
-
-            for (let p = 0; p < 240; p++) {
-              const detail = await getRunDetail(repo, dRunId);
-              if (!detail) {
-                await delay(5000);
-                continue;
-              }
-
-              // Stream step lifecycle: announce when a step STARTS
-              // (in_progress) and again when it COMPLETES so the feed
-              // never goes silent during long-running steps.
-              for (const s of detail.steps) {
-                const stepName = s.name || "";
-                if (s.status === "in_progress" && !startedD.has(stepName)) {
-                  startedD.add(stepName);
-                  addLog("  ▶ " + stepName + "…");
-                }
-                if (s.status === "completed" && !seenD.has(stepName)) {
-                  seenD.add(stepName);
-                  addLog(
-                    "  " +
-                      (s.conclusion === "success" ? "✓"
-                      : s.conclusion ? "✗"
-                      : "•") +
-                      " " +
-                      stepName
-                  );
-                }
-              }
-
-              // Heartbeat: emit a "still running" line every ~30s for the
-              // currently-executing step so the user sees continuous activity
-              // even when GitHub provides no intra-step log lines (gh cannot
-              // stream a running job's stdout).
-              const running = detail.steps.find(
-                (s) => s.status === "in_progress"
-              );
-              if (running) {
-                const runningName = running.name || "";
-                if (beatStep !== runningName) {
-                  beatStep = runningName;
-                  beatStepStartedAt = Date.now();
-                  lastBeatAt = Date.now();
-                } else if (Date.now() - lastBeatAt > 30000) {
-                  lastBeatAt = Date.now();
-                  addLog(
-                    "    … " +
-                      runningName +
-                      " still running (" +
-                      Math.round((Date.now() - beatStepStartedAt) / 1000) +
-                      "s)"
-                  );
-                }
-              }
-
-              // While `rad deploy` runs, consume the live progress log
-              // the workflow publishes and drive REAL per-resource state.
-              const deployStep = detail.steps.find(
-                (s) => s.name === DEPLOY_STEP
-              );
-              if (
-                deployStep &&
-                deployStep.status === "in_progress" &&
-                resources.length > 0
-              ) {
-                if (!deployStarted) {
-                  deployStarted = true;
-                  deployStepStartedAt = Date.now();
-                  entry.state.deployStartedAt = deployStepStartedAt;
-                  addLog("🚀 rad deploy running — provisioning resources...");
-                  addLog(
-                    "  ⏱ Deployment started at " +
-                      new Date(deployStepStartedAt).toISOString()
-                  );
-                  // Leave nodes gray; each flips to yellow when its own
-                  // recipe/operation actually starts (see applyProgress).
-                }
-                const live = await fetchLiveDeployLog(repo);
-                if (live) {
-                  // Append any new raw rad-deploy output lines to the feed.
-                  const lines = live.split(/\r?\n/);
-                  for (let i = liveLogShown; i < lines.length; i++) {
-                    const t = lines[i].replace(/\s+$/, "");
-                    if (t) addLog("    │ " + t);
-                  }
-                  liveLogShown = lines.length;
-                  // Flip resources to their real status as the log reports them.
-                  applyProgress(live);
-                }
-                // Fine-grained Azure activity-log status per resource.
-                await pollActivity();
-                // Real-time control-plane / recipe (terraform) output.
-                await pollControlPlane();
-                // Drive per-node coloring from the control-plane/recipe log.
-                applyProgress(cpLogTail);
-                // Fallback: if nothing has advanced past pending ~25s into
-                // the deploy (no parseable per-resource signal), mark all
-                // pending nodes in_progress so the graph isn't stuck gray.
-                if (
-                  Date.now() - deployStepStartedAt > 25000 &&
-                  !resources.some(
-                    (r) => r.deployStatus && r.deployStatus !== "pending"
-                  )
-                ) {
-                  resources.forEach((r) => {
-                    if (!r.deployStatus || r.deployStatus === "pending")
-                      setStatus(r, "in_progress");
-                  });
-                }
-              }
-
-              if (detail.status === "completed") {
-                const conclusion = detail.conclusion;
-                // Final fine-grained activity sweep before settling.
-                await pollActivity();
-                await pollControlPlane();
-
-                // ── Finalize logs without cutting off ───────────
-                // The workflow writes the terminal deploy-state marker
-                // (succeeded/failed) LAST — only after the complete log
-                // and the deployed graph have been pushed to the status
-                // branch. Keep fetching the live log until the state is
-                // terminal AND its length stops growing, so we never drop
-                // the final rad-deploy output (e.g. the summary table).
-                let parsed;
-                let live = null;
-                let prevLen = -1;
-                let stableHits = 0;
-                for (let f = 0; f < 12; f++) {
-                  const ds = await fetchDeployState(repo);
-                  const cur = await fetchLiveDeployLog(repo);
-                  if (cur) live = cur;
-                  const len = cur ? cur.length : 0;
-                  const terminal = ds === "succeeded" || ds === "failed";
-                  if (len === prevLen) stableHits++;
-                  else stableHits = 0;
-                  prevLen = len;
-                  // Stream any control-plane lines that arrive late too.
-                  await pollControlPlane();
-                  if (terminal && (stableHits >= 1 || len === 0)) break;
-                  if (!terminal || stableHits < 1) await delay(2500);
-                }
-                if (live) {
-                  const lines = live.split(/\r?\n/);
-                  for (let i = liveLogShown; i < lines.length; i++) {
-                    const t = lines[i].replace(/\s+$/, "");
-                    if (t) addLog("    │ " + t);
-                  }
-                  parsed = parseRadDeployLog(live, resources, {
-                    stripPrefix: false
-                  });
-                } else {
-                  const logText = await fetchRunLog(repo, dRunId);
-                  parsed = parseRadDeployLog(logText, resources);
-                }
-
-                // Record stop time + duration.
-                const finishedAt = Date.now();
-                entry.state.deployFinishedAt = finishedAt;
-                if (deployStepStartedAt) {
-                  const secs = Math.round(
-                    (finishedAt - deployStepStartedAt) / 1000
-                  );
-                  addLog(
-                    "  ⏱ Deployment finished at " +
-                      new Date(finishedAt).toISOString() +
-                      " (" +
-                      secs +
-                      "s)"
-                  );
-                }
-
-                if (conclusion === "success") {
-                  // Overall success ⇒ every resource provisioned. Force all
-                  // nodes green; a transient "failed" token in the live log
-                  // must never leave a node red on a successful deployment.
-                  resources.forEach((r) => setStatus(r, "success"));
-                  // Fetch + store the REAL deployed application graph the
-                  // deploy published to GHCR (radius-project/radius PR
-                  // #12591), falling back to the legacy
-                  // radius-deploy-status branch when the artifact is
-                  // absent (older producers / git state backend).
-                  addLog("🗺  Retrieving deployed application graph…");
-                  const graphReader = await deployStatusReaderFromState(
-                    entry.state,
-                    repo,
-                    branch
-                  );
-                  let deployed = null;
-                  let graphSource = "none";
-                  let graphStatus = null;
-                  for (let g = 0; g < 6 && !deployed; g++) {
-                    const gr = await graphReader.graph();
-                    graphStatus = gr.status;
-                    if (gr.graph) {
-                      deployed = gr.graph;
-                      graphSource = gr.source;
-                      break;
-                    }
-                    // Permission failures won't resolve by retrying.
-                    if (gr.status === "auth") break;
-                    await delay(2500);
-                  }
-                  if (deployed) {
-                    entry.state.deployedGraph = deployed;
-                    entry.state.deployedGraphRepo = repo;
-                    addLog(
-                      graphSource === "ghcr" ?
-                        "  ✓ Deployed graph saved (from GHCR artifact " +
-                          graphReader.tag +
-                          ")."
-                      : "  ✓ Deployed graph saved (from radius-deploy-status branch)."
-                    );
-                  } else if (graphStatus === "auth") {
-                    addLog(
-                      "  ⚠ Deployed graph is published to a private GHCR package but access was denied."
-                    );
-                    addLog(
-                      "    Grant read access: gh auth refresh -s read:packages"
-                    );
-                  } else if (graphStatus === "malformed") {
-                    addLog(
-                      "  ⚠ Deployed graph artifact was found but could not be parsed (malformed). Continuing."
-                    );
-                  } else {
-                    addLog(
-                      "  ⚠ Deployed graph not available yet (continuing)."
-                    );
-                  }
-                  entry.state.deployStatus = "complete";
-                  addLog("");
-                  addLog(
-                    "🎉 Deployment complete! Application deployed to " +
-                      (provider === "aws" ? "AWS" : "Azure") +
-                      "."
-                  );
-                  addLog(
-                    "Click on deployed resources to view them in the " +
-                      (provider === "aws" ? "AWS Console" : "Azure Portal") +
-                      "."
-                  );
-                } else {
-                  resources.forEach((r) => {
-                    const resourceName = r.name || "";
-                    if (parsed[resourceName] === "success")
-                      setStatus(r, "success");
-                    else if (
-                      parsed[resourceName] === "failed" ||
-                      r.deployStatus === "pending" ||
-                      r.deployStatus === "in_progress"
-                    )
-                      setStatus(r, "failed");
-                  });
-                  entry.state.deployStatus = "failed";
-                  addLog("");
-                  addLog("❌ Deployment failed. Conclusion: " + conclusion);
-                  // Build a user-facing error from the failed step(s) + log.
-                  const failedSteps = detail.steps.filter(
-                    (s) =>
-                      s.conclusion &&
-                      s.conclusion !== "success" &&
-                      s.conclusion !== "skipped"
-                  );
-                  let dErr =
-                    "Deployment failed" +
-                    (conclusion ? " (" + conclusion + ")" : "") +
-                    ".";
-                  if (failedSteps.length)
-                    dErr +=
-                      " Failed step: " +
-                      failedSteps.map((s) => s.name).join(", ") +
-                      ".";
-                  // Surface the FULL detailed rad deploy failure block (root cause:
-                  // recipe/terraform/ARM operation errors). Prefer the live raw rad
-                  // output; fall back to the full run log.
-                  let failLog = live;
-                  if (!failLog) failLog = await fetchRunLog(repo, dRunId);
-                  // The OIDC "enterprise claim" rejection (AADSTS7002381) happens at the Azure Login
-                  // step, BEFORE rad runs — so it appears in the run log, not the live rad-deploy log.
-                  // A stale live-deploy log from a prior attempt (persisted on the status branch) could
-                  // otherwise mask it, so always consult the current run log for THIS run for the claim.
-                  const runLogForClaim =
-                    live ? await fetchRunLog(repo, dRunId) : failLog;
-                  const azureLoginLog = extractGitHubActionsStepLog(
-                    runLogForClaim,
-                    "Azure Login (OIDC)"
-                  );
-                  const claimHelp = explainOidcEnterpriseClaim(azureLoginLog);
-                  if (claimHelp)
-                    dErr = claimHelp + "\n\n\u2014 raw error \u2014\n" + dErr;
-                  const detailBlock = extractRadDeployError(failLog);
-                  if (detailBlock) {
-                    dErr += "\n\n" + detailBlock;
-                    addLog("");
-                    addLog("──────── failure details ────────");
-                    detailBlock.split("\n").forEach((l) => addLog("  " + l));
-                    addLog("─────────────────────────────────");
-                  }
-                  // The exact recipe (terraform/bicep) error is emitted by the
-                  // Radius control plane. Surface its tail if we captured it.
-                  if (cpLogTail) {
-                    const cpLines = cpLogTail
-                      .split(/\r?\n/)
-                      .filter((l) => l.trim());
-                    const cpErr = cpLines
-                      .filter((l) =>
-                        /error|failed|terraform|tofu|recipe/i.test(l)
-                      )
-                      .slice(-25);
-                    const cpShow = cpErr.length ? cpErr : cpLines.slice(-25);
-                    if (cpShow.length) {
-                      dErr +=
-                        "\n\n──── control-plane / recipe log ────\n" +
-                        cpShow.join("\n");
-                      addLog("");
-                      addLog("──────── control-plane / recipe log ────────");
-                      cpShow.forEach((l) => addLog("  " + l));
-                      addLog("─────────────────────────────────────────");
-                    }
-                  }
-                  dErr +=
-                    "\n\nView the full run: https://github.com/" +
-                    repo +
-                    "/actions/runs/" +
-                    dRunId;
-                  entry.state.deployError = dErr;
-                }
-                return;
-              }
-              await delay(5000);
-            }
-            addLog("⚠ Timed out waiting for the deploy workflow to complete.");
-            entry.state.deployError =
-              "Timed out waiting for the deploy workflow to complete. It may still be running — view it at https://github.com/" +
-              repo +
-              "/actions/runs/" +
-              dRunId;
-            entry.state.deployStatus = "failed";
-          })()
-            .catch((monErr) => {
-              // Never let the background monitor die silently (which would
-              // leave the page stuck polling an 'in_progress' that never
-              // resolves). Surface the error and settle the status.
-              try {
-                addLog(
-                  "❌ Deploy monitor stopped unexpectedly: " +
-                    (monErr && monErr.message ? monErr.message : monErr)
-                );
-                if (!entry.state.deployError)
-                  entry.state.deployError =
-                    "Deploy monitoring stopped unexpectedly: " +
-                    (monErr && monErr.message ? monErr.message : monErr);
-                entry.state.deployStatus = "failed";
-              } catch {
-                /* ignore */
-              }
-            })
-            .finally(() => {
-              // The monitor owns every terminal transition of this deploy, so
-              // firing here makes the repair loop independent of the webview.
-              // Previously the only trigger was the /api/deploy-status route,
-              // which the browser polls solely while the deployments page is
-              // mounted: closing the panel, navigating away, or reopening onto
-              // another page left a failed deploy orphaned with the handoff
-              // never attempted. The route keeps its own call as a fallback,
-              // and triggerDeployRepairHandoff is idempotent per repair loop.
-              triggerDeployRepairHandoff(entry, instanceId);
-            });
-        }
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify({ ok: true }));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: errorMessage(e) }));
-      }
-      return;
-    }
-
-    if (pathname === "/api/deploy-reset" && req.method === "POST") {
-      const entry = servers.get(instanceId);
-      if (entry) {
-        delete entry.state.deployResult;
-      }
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ ok: true }));
-      return;
-    }
-
-    if (pathname === "/api/discover" && req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      try {
-        const data = JSON.parse(body);
-        const result: DiscoveryResult = {
-          clusters: [],
-          resourceGroups: [],
-          namespaces: [],
-          vpcs: [],
-          subnets: []
-        };
-
-        // Reject a non-GUID subscriptionId before it reaches the az argv.
-        // On Windows cliExec routes az through `cmd.exe /c` and libuv only
-        // quotes args with whitespace, so "x&calc" would be split by cmd.exe
-        // as a command separator. Empty is allowed (ambient CLI context).
-        if (
-          data.subscriptionId &&
-          !isUuid(String(data.subscriptionId).trim())
-        ) {
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              error: `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`,
-              clusters: [],
-              resourceGroups: [],
-              namespaces: ["default"],
-              vpcs: [],
-              subnets: []
-            })
-          );
-          return;
-        }
-
-        if (data.provider === "azure") {
-          // Set tenant/subscription context before querying
-          if (data.subscriptionId) {
-            try {
-              await runCommand(
-                "az",
-                ["account", "set", "--subscription", data.subscriptionId],
-                { timeout: 10000 }
-              );
-            } catch (e) {}
-          }
-          const subArgs =
-            data.subscriptionId ? ["--subscription", data.subscriptionId] : [];
-          try {
-            const aksJson = await runCommand(
-              "az",
-              [
-                "aks",
-                "list",
-                "--query",
-                "[].{id:name, name:name, resourceGroup:resourceGroup}",
-                "-o",
-                "json",
-                ...subArgs
-              ],
-              { timeout: 30000 }
-            );
-            result.clusters = discoveryItems(JSON.parse(aksJson));
-          } catch (e) {
-            result.clusters = [];
-            result.errors = result.errors || {};
-            result.errors.clusters = errorMessage(e).slice(0, 800);
-          }
-          try {
-            const rgJson = await runCommand(
-              "az",
-              [
-                "group",
-                "list",
-                "--query",
-                "[].{id:name, name:name}",
-                "-o",
-                "json",
-                ...subArgs
-              ],
-              { timeout: 30000 }
-            );
-            result.resourceGroups = discoveryItems(JSON.parse(rgJson));
-          } catch (e) {
-            result.resourceGroups = [];
-            result.errors = result.errors || {};
-            result.errors.resourceGroups = errorMessage(e).slice(0, 800);
-          }
-          // If we got a cluster, try to get namespaces from it
-          if (result.clusters.length > 0) {
-            try {
-              const rg =
-                result.resourceGroups.length > 0 ?
-                  result.resourceGroups[0].id
-                : "";
-              const clusterName = result.clusters[0].id;
-              if (rg && clusterName) {
-                await runCommand(
-                  "az",
-                  [
-                    "aks",
-                    "get-credentials",
-                    "--name",
-                    clusterName,
-                    "--resource-group",
-                    rg,
-                    "--overwrite-existing"
-                  ],
-                  { timeout: 20000 }
-                );
-                const nsJson = await runCommand(
-                  "kubectl",
-                  [
-                    "get",
-                    "namespaces",
-                    "-o",
-                    "jsonpath={.items[*].metadata.name}"
-                  ],
-                  { timeout: 10000 }
-                );
-                result.namespaces = nsJson
-                  .replace(/"/g, "")
-                  .split(" ")
-                  .filter(Boolean);
-              } else {
-                result.namespaces = ["default", "kube-system", "radius-system"];
-              }
-            } catch (e) {
-              result.namespaces = ["default", "kube-system", "radius-system"];
-            }
-          } else {
-            result.namespaces = ["default", "kube-system", "radius-system"];
-          }
-        } else {
-          try {
-            const eksJson = await runCommand(
-              "aws",
-              [
-                "eks",
-                "list-clusters",
-                "--query",
-                "clusters",
-                "--output",
-                "json"
-              ],
-              { timeout: 15000 }
-            );
-            const clusterNames: unknown = JSON.parse(eksJson);
-            result.clusters =
-              Array.isArray(clusterNames) ?
-                clusterNames
-                  .filter((name): name is string => typeof name === "string")
-                  .map((name) => ({ id: name, name }))
-              : [];
-          } catch (e) {
-            result.clusters = [];
-            result.errors = result.errors || {};
-            result.errors.clusters = errorMessage(e).slice(0, 800);
-          }
-          try {
-            const vpcJson = await runCommand(
-              "aws",
-              [
-                "ec2",
-                "describe-vpcs",
-                "--query",
-                "Vpcs[].{id:VpcId, name:VpcId}",
-                "--output",
-                "json"
-              ],
-              { timeout: 15000 }
-            );
-            result.vpcs = discoveryItems(JSON.parse(vpcJson));
-          } catch (e) {
-            result.vpcs = [];
-            result.errors = result.errors || {};
-            result.errors.vpcs = errorMessage(e).slice(0, 800);
-          }
-          try {
-            const subnetJson = await runCommand(
-              "aws",
-              [
-                "ec2",
-                "describe-subnets",
-                "--query",
-                "Subnets[].{id:SubnetId, name:SubnetId}",
-                "--output",
-                "json"
-              ],
-              { timeout: 15000 }
-            );
-            result.subnets = discoveryItems(JSON.parse(subnetJson));
-          } catch (e) {
-            result.subnets = [];
-            result.errors = result.errors || {};
-            result.errors.subnets = errorMessage(e).slice(0, 800);
-          }
-          result.namespaces = ["default", "kube-system", "radius-system"];
-        }
-
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(JSON.stringify(result));
-      } catch (e) {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(200);
-        res.end(
-          JSON.stringify({
-            error: errorMessage(e),
-            clusters: [],
-            resourceGroups: [],
-            namespaces: ["default"],
-            vpcs: [],
-            subnets: []
-          })
-        );
-      }
-      return;
-    }
 
     // Default: serve the page HTML based on state
     await ensureVendorScripts();
@@ -9475,7 +3583,26 @@ function createRequestHandler(
       res.end(environmentPage(state));
     }
   };
-  return { handler, startRecoveredVerificationTasks };
+  // Exposed so the composition root can gate webview-activity marking: the
+  // scaffold marks activity for every request, but server-owned internal calls
+  // must not count as user activity or the idle-respawn timer never fires.
+  const isServerOwned = (req: IncomingMessage): boolean =>
+    req.headers["x-radius-server-owned"] === serverOwnedToken;
+  // Exposed so the migrated `POST /api/operations` route, which is composed once
+  // at module init, can reach this instance's server-owned task runner. The
+  // route registers and persists the operation itself and then hands the record
+  // back here to preserve the established scheduling order.
+  const scheduleEnvironmentOperation = (op: { operationId: string }): void => {
+    scheduleServerOwnedTask(op.operationId, () =>
+      runEnvironmentOperation(op.operationId)
+    );
+  };
+  return {
+    handleUnmatchedRequest,
+    startRecoveredVerificationTasks,
+    isServerOwned,
+    scheduleEnvironmentOperation
+  };
 }
 
 const PAGE_RENDERERS = {
@@ -9514,81 +3641,12 @@ async function preferredPortForInstance(instanceId: string): Promise<number> {
   return 20000 + (hash.readUInt32BE(0) % 40000);
 }
 
-function listenOn(server: HttpServer, port: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (err: Error) => {
-      server.removeListener("listening", onListening);
-      reject(err);
-    };
-    const onListening = () => {
-      server.removeListener("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(port, "127.0.0.1");
-  });
-}
-
-async function startServer(
-  instanceId: string,
-  page = DEFAULT_CANVAS_PAGE
-): Promise<CanvasServerEntry> {
-  let baseUrl = "";
-  const requestHandler = createRequestHandler(instanceId, () => baseUrl);
-  // Restore the user's explicitly chosen GitHub account (if any) before priming
-  // so the very first strategy resolution honors it. This is what makes the
-  // account choice stable across restarts.
-  const persistedLogin = getPreferredGitHubLogin();
-  if (persistedLogin) setPreferredGhLogin(persistedLogin);
-  // Warm the GitHub identity cache in the background at boot so the first gh
-  // calls find the token strategy already resolved instead of paying (or
-  // racing) the `gh auth status` probe. Fire-and-forget: single-flight and
-  // self-healing, so a failure here just means the next caller re-primes.
-  primeGhIdentity().catch(() => {});
-  const server = createServer(requestHandler.handler);
-  let port: number;
-  // Try the stable, instanceId-derived port first; fall back to an ephemeral
-  // port (listen(0)) only if it's already taken/unavailable.
-  const preferred = await preferredPortForInstance(instanceId);
-  try {
-    await listenOn(server, preferred);
-    port = preferred;
-  } catch {
-    await new Promise<void>((resolve) =>
-      server.listen(0, "127.0.0.1", resolve)
-    );
-    const address = server.address();
-    port = typeof address === "object" && address ? address.port : 0;
-  }
-  baseUrl = `http://127.0.0.1:${port}`;
-  const entry: CanvasServerEntry = {
-    server,
-    baseUrl,
-    url: `${baseUrl}/?page=${page}`,
-    page,
-    state: {}
-  };
-  servers.set(instanceId, entry);
-  shuttingDownInstances.delete(instanceId);
-  requestHandler.startRecoveredVerificationTasks();
-  return entry;
-}
-
 export async function getOrCreateServer(
   instanceId: string,
   page?: string
 ): Promise<CanvasServerEntry> {
-  let entry = servers.get(instanceId);
-  if (entry) {
-    if (page && entry.page !== page) {
-      entry.page = page;
-      entry.url = `${entry.baseUrl}/?page=${page}`;
-    }
-    return entry;
-  }
   // Start warming the page assets only when a canvas is actually opened. The
   // first HTML request awaits this same in-flight promise before rendering.
-  void ensureVendorScripts();
-  return await startServer(instanceId, page);
+  if (!servers.has(instanceId)) void ensureVendorScripts();
+  return await canvasServer.getOrCreate(instanceId, page);
 }
