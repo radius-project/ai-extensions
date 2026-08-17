@@ -186,14 +186,6 @@ describe("resolveBrowserContext", () => {
     [
       createScope({ console: undefined }),
       "Radius browser context is missing console.error."
-    ],
-    [
-      createScope({ confirm: undefined }),
-      "Radius browser context is missing confirm or alert."
-    ],
-    [
-      createScope({ alert: undefined }),
-      "Radius browser context is missing confirm or alert."
     ]
   ])("names a missing browser capability", (scope, message) => {
     expect(() => resolveBrowserContext(scope)).toThrow(message);
@@ -230,6 +222,24 @@ describe("resolveBrowserContext", () => {
       createScope({ confirm: () => true })
     );
     expect(approved.dialogs.confirm("Delete?")).toBe(true);
+  });
+
+  it("starts pages that never open a dialog on a host without modals", () => {
+    const logged: unknown[][] = [];
+    const context = resolveBrowserContext(
+      createScope({
+        confirm: undefined,
+        alert: undefined,
+        console: { error: (...args: unknown[]) => logged.push(args) }
+      })
+    );
+
+    expect(context.dialogs.confirm("Delete?")).toBe(false);
+    context.dialogs.notify("Could not delete.");
+    expect(logged).toEqual([
+      ["Radius could not confirm an action.", "Delete?"],
+      ["Radius could not display a notification.", "Could not delete."]
+    ]);
   });
 
   it("validates fetch responses and creates an optional abort handle", async () => {

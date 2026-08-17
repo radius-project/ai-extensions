@@ -355,6 +355,20 @@ function expectedHiddenApiPaths(
   }
 }
 
+// Projects the API surface a page's compiled entry reaches.
+//
+// For a page with a known legacy contract this returns that contract, not the
+// raw observation, and throws if any part of it went missing. Bundling pulls
+// transitive paths out of shared helpers into a page that never called them
+// itself, so projecting the observation here would record wiring rather than
+// behavior and churn this fixture on every unrelated import change.
+//
+// That is safe only because nothing is lost: the exact ordered observed set of
+// every compiled entry is asserted directly, per entry, by "compiled page entry
+// API contracts" and "compiled graph page network contracts" in pages.test.ts.
+// A page that gains or loses an endpoint fails there. Entries with no legacy
+// contract — the shared shell payloads — are projected as observed, so their
+// surface is pinned here instead.
 function projectVerifiedApiPaths(
   scoped: string,
   pageState: { id: string; value: Record<string, unknown> } | null

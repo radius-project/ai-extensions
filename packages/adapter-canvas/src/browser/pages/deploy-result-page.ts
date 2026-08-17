@@ -16,11 +16,13 @@ export function initializeDeployResultPage(
   if (!button || !context.dom.byId(DEPLOY_RESULT_STATE_ID)) {
     return NOOP_TEARDOWN;
   }
+  // Parsed before the binding is claimed: a throw here would otherwise leave
+  // the entry key claimed forever and escape the compiled entry's IIFE.
+  const state = readPageState(context, DEPLOY_RESULT_STATE_ID);
+  const attemptId = readString(state, "attemptId");
   const scope = beginEntry(context, DEPLOY_RESULT_ENTRY_KEY);
   if (!scope) return NOOP_TEARDOWN;
 
-  const state = readPageState(context, DEPLOY_RESULT_STATE_ID);
-  const attemptId = readString(state, "attemptId");
   const status = context.dom.byId("deploy-reset-status");
   let pending = false;
   let abort = context.net.createAbort();

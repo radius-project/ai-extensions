@@ -129,10 +129,12 @@ export function initializeEnvironmentPage(
   ) {
     return NOOP_TEARDOWN;
   }
+  // Parsed before the binding is claimed: a throw here would otherwise leave
+  // the entry key claimed forever and escape the compiled entry's IIFE.
+  const state = parsePageState(context);
   const scope = beginEntry(context, ENVIRONMENT_PAGE_ENTRY_KEY);
   if (!scope) return NOOP_TEARDOWN;
 
-  const state = parsePageState(context);
   const discovery = initializeDiscoveryPanel(context);
   let selectedProfile: CredentialProfile | null = null;
   let creating = false;
