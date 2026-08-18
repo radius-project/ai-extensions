@@ -5,7 +5,6 @@ import { createRequestContext } from "../request-context.js";
 import {
   createIdentityAuthRoutes,
   handleAzureCliAssist,
-  handleOidc,
   handleVerifyAwsLogin,
   handleVerifyAzureLogin,
   type IdentityAuthDependencies
@@ -86,14 +85,6 @@ const NO_SESSION_ERROR = "Please run az login";
 const CLI_MISSING_ERROR = "spawn az ENOENT";
 const AWS_CLI_MISSING_ERROR = "spawn aws ENOENT";
 
-const DEFAULT_AZURE_VALIDATION = {
-  success: true,
-  tenantId: TENANT_A,
-  subscriptionId: SUBSCRIPTION,
-  subscriptionName: SUBSCRIPTION_NAME,
-  userName: USER_NAME
-};
-
 const AZ_ACCOUNT = {
   tenantId: TENANT_A,
   id: SUBSCRIPTION,
@@ -172,38 +163,6 @@ function fakes(
   const commands = { ...DEFAULT_COMMANDS, ...(options.commands ?? {}) };
   const uuids = new Set(options.uuids ?? [TENANT_A, TENANT_B, SUBSCRIPTION]);
   const deps: IdentityAuthDependencies = {
-    validateAzureCredentials: (data) => {
-      calls.log.push(`validateAzureCredentials(${JSON.stringify(data)})`);
-      if (options.azureValidationThrows) {
-        return Promise.reject(options.azureValidationThrows);
-      }
-      return Promise.resolve(
-        options.azureValidation ?? DEFAULT_AZURE_VALIDATION
-      );
-    },
-    generateAzureOIDC: (data) => {
-      calls.log.push(`generateAzureOIDC(${JSON.stringify(data)})`);
-      if (options.generateAzureThrows) throw options.generateAzureThrows;
-      return { message: "azure-oidc-message", output: "azure-oidc-output" };
-    },
-    generateAWSOIDC: (data) => {
-      calls.log.push(`generateAWSOIDC(${JSON.stringify(data)})`);
-      if (options.generateAwsThrows) throw options.generateAwsThrows;
-      return { message: "aws-oidc-message", output: "aws-oidc-output" };
-    },
-    readInstanceState: (instanceId) => {
-      calls.log.push(`readInstanceState(${instanceId})`);
-      return state;
-    },
-    setSharedAzureCredentials: (credentials) => {
-      calls.log.push(
-        `setSharedAzureCredentials(${JSON.stringify(credentials)})`
-      );
-    },
-    saveCredentials: () => {
-      calls.log.push("saveCredentials");
-      if (options.saveThrows) throw options.saveThrows;
-    },
     azureCredentialIdValidationError: ({ tenantId, subscriptionId }) => {
       calls.log.push(
         `azureCredentialIdValidationError(${tenantId}|${subscriptionId})`
@@ -294,7 +253,6 @@ async function run(
   return recording;
 }
 
-const JSON_ONLY = ["Content-Type"];
 const SET_THEN_WRITE = (status: number) => [
   "set:Content-Type=application/json",
   `writeHead:${status}`,
@@ -302,199 +260,13 @@ const SET_THEN_WRITE = (status: number) => [
 ];
 
 describe("identity-auth routes (SU-08)", () => {
-  it("declares exactly the four routes it owns", () => {
+  it("declares exactly the three routes it owns", () => {
     const routes = createIdentityAuthRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
-      "POST /api/oidc",
       "POST /api/verify-azure-login",
       "POST /api/azure-cli-assist",
       "POST /api/verify-aws-login"
     ]);
-  });
-
-  // ── POST /api/oidc ────────────────────────────────────────────────────────
-
-  it("validates azure credentials, caches them, and persists them in order", async () => {
-    const calls: Calls = { log: [] };
-    const { deps, state } = fakes(calls);
-    const recording = await run(
-      "/api/oidc",
-      '{"provider":"azure","clientId":"client-1"}',
-      handleOidc,
-      deps
-    );
-    expect(recording.status).toBe(200);
-    expect(recording.headerOrder).toEqual(JSON_ONLY);
-    expect(recording.headerSteps).toEqual(SET_THEN_WRITE(200));
-    // Validation precedes generation, the entry is cached before the shared
-    // credential is written, and the save follows the write.
-    expect(calls.log).toEqual([
-      'validateAzureCredentials({"provider":"azure","clientId":"client-1"})',
-      "readInstanceState(panel-a)",
-      'generateAzureOIDC({"provider":"azure","clientId":"client-1"})',
-      `setSharedAzureCredentials({"tenantId":"${TENANT_A}","subscriptionId":"${SUBSCRIPTION}","subscriptionName":"Fixture Subscription","userName":"fixture-user@example.com","clientId":"client-1"})`,
-      "saveCredentials"
-    ]);
-    expect(state?.oidcAzure).toEqual({
-      message: `\u2705 Azure authentication confirmed \u2014 logged in as fixture-user@example.com`,
-      validated: true,
-      tenantId: TENANT_A,
-      subscriptionId: SUBSCRIPTION,
-      subscriptionName: "Fixture Subscription",
-      userName: "fixture-user@example.com",
-      output: "azure-oidc-output",
-      clientId: "client-1",
-      tenantName: "",
-      clientName: ""
-    });
-  });
-
-  // The success and failure payloads are the only non-ASCII response bytes in
-  // this family. They are asserted by code point, not by pasted glyph, so a
-  // re-encoding of this file (or of the handler) fails here instead of shipping
-  // a corrupted check mark to the canvas.
-  it("emits U+2705 and U+2014 in the azure success message", async () => {
-    const calls: Calls = { log: [] };
-    const { deps } = fakes(calls);
-    const recording = await run(
-      "/api/oidc",
-      '{"provider":"azure"}',
-      handleOidc,
-      deps
-    );
-    const message = String(
-      (JSON.parse(recording.body) as { message: unknown }).message
-    );
-    expect(message.codePointAt(0)).toBe(0x2705);
-    expect([...message].map((c) => c.codePointAt(0))).toContain(0x2014);
-    expect(message).toBe(
-      "\u2705 Azure authentication confirmed \u2014 logged in as fixture-user@example.com"
-    );
-    // No stray replacement characters or mojibake anywhere in the payload.
-    expect(recording.body).not.toContain("\ufffd");
-  });
-
-  it("emits U+274C on a failed azure validation and still answers 200", async () => {
-    const calls: Calls = { log: [] };
-    const { deps, state } = fakes(calls, {
-      azureValidation: { success: false, error: "no session" }
-    });
-    const recording = await run(
-      "/api/oidc",
-      '{"provider":"azure"}',
-      handleOidc,
-      deps
-    );
-    // A validation failure is a 200, not a 400. Only a throw reaches the 400.
-    expect(recording.status).toBe(200);
-    expect(recording.headerSteps).toEqual(SET_THEN_WRITE(200));
-    const message = String(
-      (JSON.parse(recording.body) as { message: unknown }).message
-    );
-    expect(message.codePointAt(0)).toBe(0x274c);
-    expect(message).toBe("\u274c no session");
-    expect(recording.body).toBe(
-      '{"message":"\u274c no session","validated":false,"output":""}'
-    );
-    // Nothing is generated, cached or persisted on the failure path.
-    expect(state?.oidcAzure).toBeUndefined();
-    expect(calls.log).toEqual([
-      'validateAzureCredentials({"provider":"azure"})',
-      "readInstanceState(panel-a)"
-    ]);
-  });
-
-  it("generates AWS instructions for any non-azure provider", async () => {
-    const calls: Calls = { log: [] };
-    const { deps, state } = fakes(calls);
-    const recording = await run(
-      "/api/oidc",
-      '{"provider":"aws","accountId":"acct-1","accountName":"Acct","region":"us-east-1"}',
-      handleOidc,
-      deps
-    );
-    expect(recording.status).toBe(200);
-    expect(recording.body).toBe(
-      '{"message":"aws-oidc-message","output":"aws-oidc-output"}'
-    );
-    // Generation precedes the entry read on this branch, unlike the azure one.
-    expect(calls.log).toEqual([
-      'generateAWSOIDC({"provider":"aws","accountId":"acct-1","accountName":"Acct","region":"us-east-1"})',
-      "readInstanceState(panel-a)"
-    ]);
-    expect(state?.oidcAws).toEqual({
-      message: "aws-oidc-message",
-      output: "aws-oidc-output",
-      accountId: "acct-1",
-      accountName: "Acct",
-      region: "us-east-1"
-    });
-  });
-
-  it("answers a missing instance entry without caching anything", async () => {
-    const calls: Calls = { log: [] };
-    const { deps, state } = fakes(calls, { missingEntry: true });
-    const recording = await run("/api/oidc", "{}", handleOidc, deps);
-    expect(recording.status).toBe(200);
-    expect(state).toBeUndefined();
-    expect(recording.body).toBe(
-      '{"message":"aws-oidc-message","output":"aws-oidc-output"}'
-    );
-  });
-
-  it("400s an empty body because the parse is unguarded", async () => {
-    const calls: Calls = { log: [] };
-    const { deps } = fakes(calls);
-    const recording = await run("/api/oidc", "", handleOidc, deps);
-    // Unlike the other three routes there is no `|| "{}"` fallback, so an empty
-    // body throws into the catch rather than being treated as `{}`.
-    expect(recording.status).toBe(400);
-    expect(recording.headerSteps).toEqual(SET_THEN_WRITE(400));
-    expect(JSON.parse(recording.body)).toHaveProperty("error");
-    expect(calls.log).toEqual([]);
-  });
-
-  it("400s a null body rather than routing it to the aws branch", async () => {
-    const calls: Calls = { log: [] };
-    const { deps } = fakes(calls);
-    const recording = await run("/api/oidc", "null", handleOidc, deps);
-    // `JSON.parse("null").provider` throws. A guard would silently send this to
-    // the AWS branch instead, which is why the bare read is preserved.
-    expect(recording.status).toBe(400);
-    expect(calls.log).toEqual([]);
-  });
-
-  it("400s a throwing azure validation with the inline detail, not the injected formatter", async () => {
-    const calls: Calls = { log: [] };
-    const { deps } = fakes(calls, {
-      azureValidationThrows: new Error("az exploded")
-    });
-    const recording = await run(
-      "/api/oidc",
-      '{"provider":"azure"}',
-      handleOidc,
-      deps
-    );
-    expect(recording.status).toBe(400);
-    // The `formatted:` prefix would appear if the handler used `errorMessage`.
-    expect(recording.body).toBe('{"error":"az exploded"}');
-  });
-
-  it("400s when persisting the shared credential throws", async () => {
-    const calls: Calls = { log: [] };
-    const { deps, state } = fakes(calls, {
-      saveThrows: new Error("disk full")
-    });
-    const recording = await run(
-      "/api/oidc",
-      '{"provider":"azure"}',
-      handleOidc,
-      deps
-    );
-    expect(recording.status).toBe(400);
-    expect(recording.body).toBe('{"error":"disk full"}');
-    // The entry cache was already written before the save failed.
-    expect(state?.oidcAzure).toBeDefined();
   });
 
   // ── POST /api/verify-azure-login ──────────────────────────────────────────
@@ -664,8 +436,8 @@ describe("identity-auth routes (SU-08)", () => {
       handleVerifyAzureLogin,
       deps
     );
-    // 200, not 400 — and the outer catch *does* use `errorMessage` here, unlike
-    // the /api/oidc catch, so the `formatted:` prefix must be present.
+    // 200, not 400 — and the outer catch uses `errorMessage`, so the
+    // `formatted:` prefix must be present.
     expect(recording.status).toBe(200);
     expect(recording.headerSteps).toEqual(SET_THEN_WRITE(200));
     expect(

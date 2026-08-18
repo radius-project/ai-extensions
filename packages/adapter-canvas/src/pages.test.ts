@@ -31,8 +31,7 @@ const sampleResources = [
 ];
 
 function compiledApiPaths(
-  entry:
-    "oidc-page" | "deploy-result-page" | "deploying-page" | "environment-page"
+  entry: "deploy-result-page" | "deploying-page" | "environment-page"
 ): string[] {
   const observed = [
     ...browserScript(entry).matchAll(/['"`(](\/api\/[a-z0-9-]+)/g)
@@ -173,7 +172,6 @@ describe("inline scripts", () => {
 
 describe("compiled page entry API contracts", () => {
   it.each([
-    ["oidc-page", ["/api/oidc"]],
     ["deploy-result-page", ["/api/deploy-reset"]],
     [
       "deploying-page",

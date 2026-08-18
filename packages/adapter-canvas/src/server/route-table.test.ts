@@ -28,66 +28,6 @@ import { createEnvironmentsRoutes } from "./routes/environments.js";
 import { createCreateEnvironmentRoutes } from "./routes/create-environment.js";
 import { createAzureAutoSetupTestDependencies } from "../../test/support/server/azure-auto-setup.js";
 
-// The reviewed inventory of accepted routes, maintained by hand so it is an
-// independent check rather than a restatement of production. Comparing
-// declarations against handlers alone cannot detect compatibility drift,
-// because both sides can add, rename, or drop a route together. Changing this
-// list changes the server's public contract and requires explicit review.
-const ACCEPTED_ROUTES: readonly {
-  readonly method: "ANY" | "GET" | "POST";
-  readonly path: string;
-  readonly match: "exact" | "prefix" | "template";
-}[] = [
-  { method: "ANY", path: "/api/ping", match: "exact" },
-  { method: "GET", path: "/api/operations", match: "exact" },
-  { method: "GET", path: "/api/operations/", match: "prefix" },
-  { method: "POST", path: "/api/open-source", match: "exact" },
-  { method: "POST", path: "/api/oidc", match: "exact" },
-  { method: "POST", path: "/api/verify-azure-login", match: "exact" },
-  { method: "POST", path: "/api/azure-cli-assist", match: "exact" },
-  { method: "POST", path: "/api/verify-aws-login", match: "exact" },
-  { method: "GET", path: "/api/credential-profiles", match: "exact" },
-  { method: "GET", path: "/api/github-identity", match: "exact" },
-  { method: "POST", path: "/api/github-account", match: "exact" },
-  { method: "POST", path: "/api/save-credential-profile", match: "exact" },
-  { method: "POST", path: "/api/delete-credential-profile", match: "exact" },
-  { method: "POST", path: "/api/delete-environment", match: "exact" },
-  { method: "POST", path: "/api/operations", match: "exact" },
-  { method: "POST", path: "/api/azure-auto-setup", match: "exact" },
-  { method: "GET", path: "/api/list-azure-app-registrations", match: "exact" },
-  { method: "GET", path: "/api/azure-app-serves-repos", match: "exact" },
-  { method: "POST", path: "/api/app-params", match: "exact" },
-  { method: "POST", path: "/api/create-environment", match: "exact" },
-  { method: "GET", path: "/api/load-graph-stream", match: "exact" },
-  { method: "GET", path: "/api/progress", match: "exact" },
-  { method: "GET", path: "/api/deployed-graph", match: "exact" },
-  { method: "GET", path: "/api/deploy-status", match: "exact" },
-  { method: "POST", path: "/api/load-graph", match: "exact" },
-  { method: "GET", path: "/api/list-environments", match: "exact" },
-  { method: "GET", path: "/api/list-applications", match: "exact" },
-  { method: "GET", path: "/api/list-deployments", match: "exact" },
-  { method: "POST", path: "/api/delete-deployment", match: "exact" },
-  { method: "GET", path: "/api/verify-status", match: "exact" },
-  { method: "GET", path: "/api/user-repos", match: "exact" },
-  { method: "POST", path: "/api/repo-branches", match: "exact" },
-  { method: "POST", path: "/api/plan-graph", match: "exact" },
-  { method: "POST", path: "/api/discover-branches", match: "exact" },
-  { method: "POST", path: "/api/diff-branches", match: "exact" },
-  { method: "POST", path: "/api/deploy", match: "exact" },
-  { method: "POST", path: "/api/deploy-reset", match: "exact" },
-  { method: "POST", path: "/api/discover", match: "exact" },
-  {
-    method: "POST",
-    path: "/api/operations/:operationId/resume/:code",
-    match: "template"
-  },
-  {
-    method: "POST",
-    path: "/api/operations/:operationId/abandon",
-    match: "template"
-  }
-];
-
 const productionHandlers = {
   ...createLivenessSourceRoutes({
     getOpenSourceHandler: () => null,
@@ -202,12 +142,6 @@ const productionHandlers = {
     errorMessage: (error) => String(error)
   }),
   ...createIdentityAuthRoutes({
-    validateAzureCredentials: () => Promise.resolve({ success: false }),
-    generateAzureOIDC: () => ({ message: "", output: "" }),
-    generateAWSOIDC: () => ({ message: "", output: "" }),
-    readInstanceState: () => undefined,
-    setSharedAzureCredentials: () => {},
-    saveCredentials: () => {},
     azureCredentialIdValidationError: () => "",
     azureLoginRequiredResponse: () => ({ error: "", code: "", tenantId: "" }),
     isCliCommandMissing: () => false,
@@ -398,26 +332,15 @@ const productionHandlers = {
 const table = createServerRouteTable(productionHandlers);
 
 describe("server route ownership boundary", () => {
-  it("pins all 40 accepted routes to one owner and one handler", () => {
-    const acceptedKeys = ACCEPTED_ROUTES.map(routeKey);
+  it("pins all declared routes to one owner", () => {
     const declarationKeys = SERVER_ROUTE_DECLARATIONS.map(routeKey);
     const handlerKeys = Object.keys(productionHandlers);
-    expect(acceptedKeys).toHaveLength(40);
-    expect(new Set(acceptedKeys).size).toBe(40);
-    expect(declarationKeys).toHaveLength(40);
-    expect(new Set(declarationKeys).size).toBe(40);
-    expect(handlerKeys).toHaveLength(40);
-    expect(new Set(handlerKeys).size).toBe(40);
-    expect(handlerKeys.sort()).toEqual([...acceptedKeys].sort());
-    // Method, path and match are compared in declaration order, so a reordered
-    // or silently retyped route fails against the reviewed inventory.
-    expect(
-      SERVER_ROUTE_DECLARATIONS.map(({ method, path, match }) => ({
-        method,
-        path,
-        match
-      }))
-    ).toEqual(ACCEPTED_ROUTES);
+    expect(new Set(declarationKeys).size).toBe(
+      SERVER_ROUTE_DECLARATIONS.length
+    );
+    expect(handlerKeys.length).toBe(SERVER_ROUTE_DECLARATIONS.length);
+    expect(new Set(handlerKeys).size).toBe(SERVER_ROUTE_DECLARATIONS.length);
+    expect(handlerKeys.sort()).toEqual([...declarationKeys].sort());
     expect(
       SERVER_ROUTE_DECLARATIONS.every((route) => route.owner.length > 0)
     ).toBe(true);

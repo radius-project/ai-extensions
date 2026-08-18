@@ -29,7 +29,6 @@ import { ensureVendorScripts } from "./vendor.js";
 import {
   sharedCredentials,
   cloudCredential,
-  saveCredentials,
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
@@ -139,9 +138,6 @@ import {
   setSourceRefResources
 } from "./source-refs.js";
 import {
-  generateAzureOIDC,
-  validateAzureCredentials,
-  generateAWSOIDC,
   generateVerifyWorkflow,
   generateDeployWorkflow,
   generateDeleteWorkflow,
@@ -697,22 +693,11 @@ const identityProfilesRoutes = createIdentityProfilesRoutes({
 });
 
 // Composition root for the auth/verify half of the `identity-credentials`
-// family. Fourteen narrow function seams: the two OIDC generators and the Azure
-// credential validator from `infra.ts`, the CLI runner from `gh.ts`, the shared
-// credential writer and its save, an instance-state reader, and the GUID,
-// Azure-message, prompt-builder and error helpers that stay defined here. The
-// session-prompt hook is bound here too so the route module never reads the
+// family. Eight narrow function seams: the CLI runner from `gh.ts`, and the
+// GUID, Azure-message, prompt-builder and error helpers that stay defined here.
+// The session-prompt hook is bound here too so the route module never reads the
 // mutable module-level handler.
 const identityAuthRoutes = createIdentityAuthRoutes({
-  validateAzureCredentials,
-  generateAzureOIDC,
-  generateAWSOIDC,
-  readInstanceState: (instanceId) =>
-    canvasServer.instances.get(instanceId)?.state,
-  setSharedAzureCredentials: (credentials) => {
-    sharedCredentials.azure = credentials;
-  },
-  saveCredentials,
   azureCredentialIdValidationError,
   azureLoginRequiredResponse,
   isCliCommandMissing,

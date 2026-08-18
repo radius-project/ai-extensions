@@ -5,7 +5,6 @@ import { createRequestHandler } from "../../../src/server/create-request-handler
 import { createIdentityAuthRoutes } from "../../../src/server/routes/identity-auth.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
-import type { CanvasState } from "../../../src/shared.js";
 
 let container: CanvasServerContainer | undefined;
 
@@ -20,31 +19,13 @@ const SUBSCRIPTION = "33333333-3333-3333-3333-333333333333";
 
 interface Harness {
   calls: string[];
-  azureValidation: {
-    success: boolean;
-    error?: string;
-    tenantId?: string;
-    subscriptionId?: string;
-    subscriptionName?: string;
-    userName?: string;
-  };
   commands: Record<string, string | Error>;
   promptOutcome: { status: number; error?: string };
-  savedAzure: Record<string, unknown> | null;
-  saves: number;
-  states: Map<string, CanvasState>;
 }
 
 function start(): Harness {
   const harness: Harness = {
     calls: [],
-    azureValidation: {
-      success: true,
-      tenantId: TENANT_A,
-      subscriptionId: SUBSCRIPTION,
-      subscriptionName: "Fixture Subscription",
-      userName: "fixture-user@example.com"
-    },
     commands: {
       [`az account set --subscription ${SUBSCRIPTION}`]: "",
       "az account show -o json": JSON.stringify({
@@ -58,37 +39,12 @@ function start(): Harness {
         Arn: "arn:aws:iam::000011112222:user/fixture-user"
       })
     },
-    promptOutcome: { status: 200 },
-    savedAzure: null,
-    saves: 0,
-    states: new Map()
+    promptOutcome: { status: 200 }
   };
   const uuids = new Set([TENANT_A, TENANT_B, SUBSCRIPTION]);
 
   const routes = createTestRouteTable(
     createIdentityAuthRoutes({
-      validateAzureCredentials: (data) => {
-        harness.calls.push(`validate(${JSON.stringify(data)})`);
-        return Promise.resolve(harness.azureValidation);
-      },
-      generateAzureOIDC: () => {
-        harness.calls.push("generateAzure");
-        return { message: "azure-oidc-message", output: "azure-oidc-output" };
-      },
-      generateAWSOIDC: () => {
-        harness.calls.push("generateAws");
-        return { message: "aws-oidc-message", output: "aws-oidc-output" };
-      },
-      readInstanceState: (instanceId) => {
-        harness.calls.push(`state(${instanceId})`);
-        return harness.states.get(instanceId);
-      },
-      setSharedAzureCredentials: (credentials) => {
-        harness.savedAzure = credentials;
-      },
-      saveCredentials: () => {
-        harness.saves += 1;
-      },
       azureCredentialIdValidationError: ({ tenantId, subscriptionId }) => {
         if (tenantId && !uuids.has(tenantId)) {
           return `Invalid tenantId "${tenantId}" (expected a GUID).`;
@@ -141,9 +97,6 @@ function start(): Harness {
           response.end("unmatched");
         }
       }),
-    // The instance state the container hands out is the same object the
-    // `readInstanceState` seam above returns, so the OIDC cache written over a
-    // real socket is observable from the test.
     createState: () => ({}),
     defaultPage: "graph",
     now: () => Date.now(),
@@ -160,99 +113,6 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("identity-auth real-loopback HIT (RF-02)", () => {
-  it("returns the azure check mark and em dash as UTF-8 over the wire", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    harness.states.set("panel-a", entry.state);
-
-    const response = await post(
-      entry.baseUrl,
-      "/api/oidc",
-      '{"provider":"azure","clientId":"client-1"}'
-    );
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toBe("application/json");
-
-    // Decoded from the raw response bytes, so a server-side encoding slip shows
-    // up here as a replacement character rather than a matching string.
-    const raw = new Uint8Array(await response.arrayBuffer());
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(raw);
-    const payload = JSON.parse(text) as { message: string; output: string };
-    expect(payload.message).toBe(
-      "\u2705 Azure authentication confirmed \u2014 logged in as fixture-user@example.com"
-    );
-    expect(payload.message.codePointAt(0)).toBe(0x2705);
-    expect(text).not.toContain("\ufffd");
-    expect(payload.output).toBe("azure-oidc-output");
-
-    // The credential cache and the shared credential were both written.
-    expect(entry.state.oidcAzure).toMatchObject({
-      validated: true,
-      clientId: "client-1",
-      tenantName: "",
-      clientName: ""
-    });
-    expect(harness.savedAzure).toEqual({
-      tenantId: TENANT_A,
-      subscriptionId: SUBSCRIPTION,
-      subscriptionName: "Fixture Subscription",
-      userName: "fixture-user@example.com",
-      clientId: "client-1"
-    });
-    expect(harness.saves).toBe(1);
-  });
-
-  it("answers a failed azure validation with 200 and the cross mark", async () => {
-    const harness = start();
-    harness.azureValidation = { success: false, error: "no session" };
-    const entry = await container!.getOrCreate("panel-a");
-    harness.states.set("panel-a", entry.state);
-
-    const response = await post(
-      entry.baseUrl,
-      "/api/oidc",
-      '{"provider":"azure"}'
-    );
-    // A validation failure is a 200 on the wire, not a 4xx.
-    expect(response.status).toBe(200);
-    const payload = (await response.json()) as { message: string };
-    expect(payload.message.codePointAt(0)).toBe(0x274c);
-    expect(payload.message).toBe("\u274c no session");
-    expect(entry.state.oidcAzure).toBeUndefined();
-    expect(harness.saves).toBe(0);
-  });
-
-  it("caches the aws instructions and 400s an empty body", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    harness.states.set("panel-a", entry.state);
-
-    const aws = await post(
-      entry.baseUrl,
-      "/api/oidc",
-      '{"provider":"aws","accountId":"acct-1","region":"us-east-1"}'
-    );
-    expect(aws.status).toBe(200);
-    expect(await aws.text()).toBe(
-      '{"message":"aws-oidc-message","output":"aws-oidc-output"}'
-    );
-    expect(entry.state.oidcAws).toMatchObject({
-      accountId: "acct-1",
-      accountName: "",
-      region: "us-east-1"
-    });
-
-    // The parse is unguarded, so an empty body is a 400 rather than an AWS
-    // generation over `{}`.
-    const empty = await post(entry.baseUrl, "/api/oidc", "");
-    expect(empty.status).toBe(400);
-    expect(empty.headers.get("content-type")).toBe("application/json");
-
-    // GET is not declared for this path, so it reaches unmatched routing.
-    const wrongMethod = await fetch(`${entry.baseUrl}/api/oidc`);
-    expect(wrongMethod.status).toBe(404);
-  });
-
   it("verifies an azure session and reports mismatches and missing CLIs as 200", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");

@@ -327,7 +327,6 @@ describe("P0-C built Radius extension artifact", () => {
       "delete-dialog",
       "heartbeat",
       "operation-chip",
-      "oidc-page",
       "deploy-result-page",
       "environment-page",
       "deploying-page",

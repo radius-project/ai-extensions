@@ -106,7 +106,6 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("GET", "/api/operations", "exact", "none", "operations-status"),
   declare("GET", "/api/operations/", "prefix", "none", "operations-status"),
   declare("POST", "/api/open-source", "exact", "json", "liveness-source"),
-  declare("POST", "/api/oidc", "exact", "json", "identity-credentials"),
   declare(
     "POST",
     "/api/verify-azure-login",
