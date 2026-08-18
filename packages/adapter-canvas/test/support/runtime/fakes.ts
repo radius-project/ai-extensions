@@ -252,16 +252,6 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       resolveRadiusArtifactTarget: vi.fn(resolveRadiusArtifactTarget),
       validateGhcrTargetForRepo: vi.fn(validateGhcrTargetForRepo)
     },
-    infra: {
-      generateAzureOIDC: vi.fn((_data) => ({
-        message: "Azure OIDC configuration generated",
-        output: "# azure oidc script"
-      })),
-      generateAWSOIDC: vi.fn((_data) => ({
-        message: "AWS OIDC configuration generated",
-        output: "# aws oidc script"
-      }))
-    },
     hostCallbacks: {
       setAppBicepHandoff: vi.fn((fn) => {
         capturedHostCallbacks.appBicepHandoff = fn;

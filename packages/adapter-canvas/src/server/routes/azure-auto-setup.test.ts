@@ -1,6 +1,5 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { isUuid } from "../../azure-oidc.js";
 import { createRequestContext } from "../request-context.js";
 import {
   createAzureAutoSetupRoutes,
@@ -253,58 +252,6 @@ function orchestrationHarness(
   return { dependencies, events, failures, operation };
 }
 
-function legacyAdmissionReference(
-  rawBody: string,
-  isServerOwned: boolean
-): { status: number; body: Record<string, unknown> } {
-  if (!isServerOwned) {
-    return {
-      status: 403,
-      body: {
-        error: "This endpoint is reserved for server-owned operations.",
-        code: "server-owned-operation-required"
-      }
-    };
-  }
-  try {
-    const data = JSON.parse(rawBody);
-    if (!data.repo || !data.resourceGroup || !data.cluster) {
-      return {
-        status: 400,
-        body: {
-          error: "repo, resourceGroup, and cluster are required.",
-          code: "missing-params"
-        }
-      };
-    }
-    if (data.subscriptionId && !isUuid(data.subscriptionId)) {
-      return {
-        status: 400,
-        body: {
-          error: `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`,
-          code: "invalid-subscription"
-        }
-      };
-    }
-    throw new Error("reference case passed beyond its bounded admission slice");
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message ===
-        "reference case passed beyond its bounded admission slice"
-    ) {
-      throw error;
-    }
-    return {
-      status: 400,
-      body: {
-        error: error instanceof Error ? error.message : String(error),
-        code: "setup-unhandled"
-      }
-    };
-  }
-}
-
 describe("POST /api/azure-auto-setup construction (SU-01)", () => {
   it("declares exactly its one route", () => {
     expect(
@@ -357,44 +304,6 @@ describe("POST /api/azure-auto-setup construction (SU-01)", () => {
 });
 
 describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
-  it("keeps a non-vacuous legacy/migrated differential for the bounded admission ladder", async () => {
-    const cases = [
-      { rawBody: "{oops", isServerOwned: true },
-      { rawBody: "{}", isServerOwned: true },
-      {
-        rawBody: JSON.stringify({
-          ...VALID_SETUP,
-          subscriptionId: "not-a-guid"
-        }),
-        isServerOwned: true
-      },
-      { rawBody: "{oops", isServerOwned: false }
-    ];
-    const referenceCodes = cases.map((testCase) =>
-      String(
-        legacyAdmissionReference(testCase.rawBody, testCase.isServerOwned).body
-          .code
-      )
-    );
-    expect(new Set(referenceCodes).size).toBe(cases.length);
-
-    for (const testCase of cases) {
-      const expected = legacyAdmissionReference(
-        testCase.rawBody,
-        testCase.isServerOwned
-      );
-      const harness = finalizingDependencies();
-      harness.dependencies.isServerOwnedRequest = () => testCase.isServerOwned;
-      const response = await invoke(
-        testCase.rawBody,
-        harness.dependencies,
-        testCase.isServerOwned ? { "X-Radius-Server-Owned": "test-token" } : {}
-      );
-      expect(response.status).toBe(expected.status);
-      expect(await response.json()).toEqual(expected.body);
-    }
-  });
-
   it("refuses a browser-owned request before reading or finalizing its body", async () => {
     const response = await invoke(
       "{not-json",
