@@ -25,7 +25,6 @@ import {
   stateRegistryForEnvironment
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
-import { ensureVendorScripts } from "./vendor.js";
 import {
   sharedCredentials,
   cloudCredential,
@@ -3534,7 +3533,6 @@ function createInstanceRequestCoordinator(
     const requestedPage = url.searchParams.get("page");
 
     // Default: serve the page HTML based on state
-    await ensureVendorScripts();
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     const entry = servers.get(instanceId);
     let page = requestedPage || entry?.page || DEFAULT_CANVAS_PAGE;
@@ -3630,8 +3628,5 @@ export async function getOrCreateServer(
   instanceId: string,
   page?: string
 ): Promise<CanvasServerEntry> {
-  // Start warming the page assets only when a canvas is actually opened. The
-  // first HTML request awaits this same in-flight promise before rendering.
-  if (!servers.has(instanceId)) void ensureVendorScripts();
   return await canvasServer.getOrCreate(instanceId, page);
 }

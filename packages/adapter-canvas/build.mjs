@@ -15,7 +15,6 @@
 
 import * as esbuild from "esbuild";
 import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import {
   copyFileSync,
@@ -31,19 +30,6 @@ import {
 import { homedir } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
-
-function packageRoot(name) {
-  let current = dirname(require.resolve(name));
-  while (!existsSync(join(current, "package.json"))) {
-    const parent = dirname(current);
-    if (parent === current) {
-      throw new Error(`Unable to locate package root for "${name}".`);
-    }
-    current = parent;
-  }
-  return current;
-}
 const repoRoot = resolve(__dirname, "../..");
 
 // .node-version is the one place the supported Node major is declared; deriving
@@ -79,28 +65,15 @@ const optionalPluginSources = ["CHANGELOG.md"];
 // the source manifests alone.
 const stampedVersion = process.env.PLUGIN_VERSION?.trim();
 
-function writeThirdPartyNotices() {
-  const directPackages = [
-    ["react", "18.3.1"],
-    ["react-dom", "18.3.1"],
-    ["reactflow", "11.11.4"],
-    ["dagre", "0.8.5"]
-  ];
+function writeThirdPartyNotices(inputs) {
   const packages = new Map();
-  const visit = (name, fromRoot) => {
-    const root =
-      fromRoot ?
-        dirname(
-          require.resolve(name, {
-            paths: [fromRoot]
-          })
-        )
-      : packageRoot(name);
-    let current = root;
+  for (const input of inputs) {
+    if (!/[\\/]node_modules[\\/]/.test(input)) continue;
+    let current = dirname(input);
     while (!existsSync(join(current, "package.json"))) {
       const parent = dirname(current);
       if (parent === current) {
-        throw new Error(`Unable to locate package root for "${name}".`);
+        throw new Error(`Unable to locate package metadata for "${input}".`);
       }
       current = parent;
     }
@@ -108,19 +81,17 @@ function writeThirdPartyNotices() {
       readFileSync(join(current, "package.json"), "utf8")
     );
     const key = `${manifest.name}@${manifest.version}`;
-    if (packages.has(key)) return;
+    if (packages.has(key)) continue;
     packages.set(key, {
       manifest,
       root: current
     });
-    for (const dependency of Object.keys(manifest.dependencies ?? {})) {
-      // TypeScript declarations are package metadata, not code in the shipped
-      // browser bundles, so they do not need third-party notices.
-      if (dependency.startsWith("@types/")) continue;
-      visit(dependency, current);
-    }
-  };
-  for (const [name] of directPackages) visit(name);
+  }
+  if (packages.size === 0) {
+    throw new Error(
+      "The browser bundles contained no third-party package inputs."
+    );
+  }
 
   const notices = [...packages.values()]
     .sort(
@@ -129,7 +100,13 @@ function writeThirdPartyNotices() {
         String(a.manifest.version).localeCompare(String(b.manifest.version))
     )
     .map(({ manifest, root }) => {
-      const licensePath = ["LICENSE", "LICENSE.md", "license"]
+      const licensePath = [
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt",
+        "license",
+        "license.md"
+      ]
         .map((name) => join(root, name))
         .find(existsSync);
       if (!licensePath) {
@@ -159,7 +136,7 @@ function assembleDist() {
     cpSync(from, join(distDir, entry), { recursive: true });
   }
   resolveCatalogSpecifiers(join(distDir, "package.json"));
-  writeThirdPartyNotices();
+  writeThirdPartyNotices(browserBundleInputs);
   for (const manifest of ["package.json", "plugin.json"]) {
     stampVersion(join(distDir, manifest));
   }
@@ -286,6 +263,7 @@ const finalizePlugin = {
 
 const browserDir = join(__dirname, "src", "browser");
 let browserCompilerRevision = 0;
+let browserBundleInputs = [];
 
 function browserSourceFiles(directory = browserDir) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -311,66 +289,45 @@ const browserBundlePlugin = {
           "revision",
           String(browserCompilerRevision++)
         );
-        const { BROWSER_ENTRY_NAMES, compileAllBrowserEntries } = await import(
+        const { BROWSER_ENTRY_NAMES, compileAllBrowserBundles } = await import(
           compilerUrl.href
         );
-        const bundles = compileAllBrowserEntries();
+        const bundles = compileAllBrowserBundles();
+        browserBundleInputs = [
+          ...new Set(Object.values(bundles).flatMap((bundle) => bundle.inputs))
+        ];
+        const payloads = Object.fromEntries(
+          Object.entries(bundles).map(([name, bundle]) => [
+            name,
+            { script: bundle.script, style: bundle.style }
+          ])
+        );
         return {
           contents: `// AUTO-GENERATED at build time from packages/adapter-canvas/src/browser/entries.
 export const BROWSER_ENTRY_NAMES = ${JSON.stringify(BROWSER_ENTRY_NAMES)};
-const BROWSER_BUNDLES = ${JSON.stringify(bundles)};
+const BROWSER_BUNDLES = ${JSON.stringify(payloads)};
 export function loadBrowserScript(name) {
-  const code = BROWSER_BUNDLES[name];
-  if (typeof code !== "string") {
+  const bundle = BROWSER_BUNDLES[name];
+  if (bundle === undefined) {
     throw new Error(\`Unknown browser entry "\${name}".\`);
   }
-  return code;
+  return bundle.script;
+}
+export function loadBrowserStyle(name) {
+  const bundle = BROWSER_BUNDLES[name];
+  if (bundle === undefined) {
+    throw new Error(\`Unknown browser entry "\${name}".\`);
+  }
+  return bundle.style;
 }
 `,
           loader: "js",
-          watchFiles: browserSourceFiles()
+          watchFiles: [
+            ...new Set([...browserSourceFiles(), ...browserBundleInputs])
+          ]
         };
       }
     );
-  }
-};
-
-const vendorAssetsPlugin = {
-  name: "inline-vendor-assets",
-  setup(build) {
-    build.onLoad({ filter: /[\\/]src[\\/]vendor-assets\.ts$/ }, () => {
-      const assets = [
-        ["react", "react/umd/react.production.min.js"],
-        ["reactDom", "react-dom/umd/react-dom.production.min.js"],
-        ["reactFlow", "reactflow/dist/umd/index.js"],
-        ["dagre", "dagre/dist/dagre.min.js"],
-        ["reactFlowCss", "reactflow/dist/style.css"]
-      ];
-      const values = Object.fromEntries(
-        assets.map(([name, specifier]) => {
-          let path;
-          try {
-            const packageName = specifier.split("/")[0];
-            path = join(
-              packageRoot(packageName),
-              specifier.slice(packageName.length + 1)
-            );
-            if (!existsSync(path)) throw new Error("file does not exist");
-          } catch (error) {
-            throw new Error(
-              `Missing required Radius Canvas vendor asset "${specifier}". ` +
-                "Install the pinned canvas dependencies before building.",
-              { cause: error }
-            );
-          }
-          return [name, readFileSync(path, "utf8")];
-        })
-      );
-      return {
-        contents: `export function readVendorAssets() { return ${JSON.stringify(values)}; }`,
-        loader: "js"
-      };
-    });
   }
 };
 
@@ -403,7 +360,7 @@ const options = {
   banner: {
     js: "// AUTO-GENERATED by packages/adapter-canvas/build.mjs — do not edit by hand.\n// Source: packages/adapter-canvas/src + packages/core. Run `pnpm run build:canvas`."
   },
-  plugins: [vendorAssetsPlugin, browserBundlePlugin, finalizePlugin]
+  plugins: [browserBundlePlugin, finalizePlugin]
 };
 
 rmSync(distDir, { recursive: true, force: true });
