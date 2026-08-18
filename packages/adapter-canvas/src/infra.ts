@@ -29,7 +29,6 @@ import {
   getBranchHeadSha,
   commitFileToRepo
 } from "./gh.js";
-import type { CanvasState } from "./shared.js";
 
 interface ManagedEnvironment {
   name: string;
@@ -335,10 +334,9 @@ function stripWorkflowRunTrigger(yaml: string): string {
 }
 export function generatePortalUrl(
   resourceType: string,
-  provider: string,
-  state: CanvasState
+  provider: string
 ): string {
-  return coreGeneratePortalUrl(resourceType, provider, state);
+  return coreGeneratePortalUrl(resourceType, provider);
 }
 
 // Repo path of the shared verify-credentials workflow the extension commits.
