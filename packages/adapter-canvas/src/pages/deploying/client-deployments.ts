@@ -14,6 +14,13 @@ var envSelect = document.getElementById('deploy-env-select');
 var branchSelect = document.getElementById('deploy-branch-select');
 var inlineStatus = document.getElementById('deploy-inline-status');
 var ENV_PROVIDERS = {};
+// Creation status per environment, as /api/list-environments reports it:
+// 'success' once credential verification passed, 'pending' while it runs,
+// 'failed' when it did not. Only a verified environment can actually receive a
+// deployment, so this gates the Deploy button rather than merely labelling the
+// option — an environment whose creation failed has no working credentials.
+var ENV_STATUS = {};
+function envIsReady(name) { return ENV_STATUS[name] === 'success'; }
 var HAS_APPS = false;
 var HAS_ENVS = false;
 // Optimistic per-row status overrides for in-flight operations, keyed by
@@ -84,12 +91,23 @@ function refreshDeployBtn() {
         // failed/successful deployment, all leave the button enabled so a
         // (re)deploy can run.
         var blockedStatus = selEnv ? DEPLOYED_ENVS[selEnv] : '';
-        deployBtn.disabled = !(CTX_REPO && appSelect.value && selEnv) || !!blockedStatus;
+        // Separately, the environment itself must have finished being created.
+        // Deploying into an environment whose credential verification failed (or
+        // has not finished) cannot succeed, so it never satisfies the
+        // prerequisite for Deploy.
+        var envNotReady = selEnv && !envIsReady(selEnv);
+        deployBtn.disabled = !(CTX_REPO && appSelect.value && selEnv) || !!blockedStatus || !!envNotReady;
         if (blockedStatus) {
             if (blockedStatus === 'deleting') {
                 deployBtn.title = 'Application is being deleted from environment "' + selEnv + '". Wait for the delete to finish before deploying again.';
             } else {
                 deployBtn.title = 'A deployment is already in progress in environment "' + selEnv + '". Wait for it to finish before deploying again.';
+            }
+        } else if (envNotReady) {
+            if (ENV_STATUS[selEnv] === 'pending') {
+                deployBtn.title = 'Environment "' + selEnv + '" is still being created. Wait for its credential verification to finish before deploying.';
+            } else {
+                deployBtn.title = 'Environment "' + selEnv + '" was not created successfully, so it cannot be deployed to. Fix or recreate it first.';
             }
         } else {
             deployBtn.removeAttribute('title');
@@ -134,8 +152,22 @@ function loadEnvironmentsDropdown() {
             HAS_ENVS = envs.length > 0;
             if (envs.length === 0) { envSelect.innerHTML = '<option value="">No environments</option>'; refreshDeployBtn(); return; }
             ENV_PROVIDERS = {};
-            envs.forEach(function(e) { ENV_PROVIDERS[e.name] = e.provider || 'azure'; });
-            envSelect.innerHTML = envs.map(function(e) { return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(e.name) + '</option>'; }).join('');
+            ENV_STATUS = {};
+            envs.forEach(function(e) {
+                ENV_PROVIDERS[e.name] = e.provider || 'azure';
+                ENV_STATUS[e.name] = e.status || 'pending';
+            });
+            // An environment that is not (yet) usable stays in the list so the
+            // user can see it exists and why it is not an option, but its label
+            // says so and Deploy refuses it.
+            envSelect.innerHTML = envs.map(function(e) {
+                var suffix = e.status === 'success' ? '' : (e.status === 'failed' ? ' (creation failed)' : ' (being created…)');
+                return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(e.name + suffix) + '</option>';
+            }).join('');
+            // Land on an environment that can actually be deployed to when there
+            // is one, rather than whichever happens to be first.
+            var firstReady = envs.filter(function(e) { return e.status === 'success'; })[0];
+            if (firstReady) envSelect.value = firstReady.name;
             // Pre-select the environment passed via ?env= (e.g. from the
             // "Deploy Apps" button on the environments list).
             try {

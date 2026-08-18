@@ -166,10 +166,18 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defau
                 envSel.innerHTML = '';
                 envs.forEach(function(e) {
                     if (envProviders) envProviders[e.name] = e.provider || 'azure';
-                    var o = document.createElement('option'); o.value = e.name; o.textContent = e.name;
+                    RADIUS_PLAN_ENV_STATUS[e.name] = e.status || 'pending';
+                    var o = document.createElement('option'); o.value = e.name;
+                    o.textContent = e.name + (e.status === 'success' ? '' : (e.status === 'failed' ? ' (creation failed)' : ' (being created…)'));
                     if (defaultEnv && e.name === defaultEnv) o.selected = true;
                     envSel.appendChild(o);
                 });
+                if (!defaultEnv) {
+                    // Prefer an environment that finished being created; one that
+                    // failed cannot be deployed to.
+                    var firstReady = envs.filter(function(e) { return e.status === 'success'; })[0];
+                    if (firstReady) envSel.value = firstReady.name;
+                }
                 hasEnvResult = true;
             })
             .catch(function() {
@@ -191,6 +199,10 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defau
 // change handlers can refresh the subtitle hint (which names the selected
 // application/environment) without re-querying /api/list-environments.
 var RADIUS_PLAN_HAS_ENV = false;
+// Creation status per environment name, as /api/list-environments reports it.
+// An environment whose creation did not succeed has no working credentials, so
+// it cannot be deployed to no matter what else is selected.
+var RADIUS_PLAN_ENV_STATUS = {};
 var RADIUS_PLAN_ENVS_STALE = false;
 var RADIUS_PLAN_REQUEST_FAILED = false;
 
@@ -225,13 +237,18 @@ function radiusApplyPlanEnvState(hasEnv, statesUnavailable) {
         } else if (hasEnv) {
             btn.dataset.mode = 'deploy';
             btn.textContent = 'Deploy Application';
-            btn.disabled = !(branch && env);
+            var envReady = !env || RADIUS_PLAN_ENV_STATUS[env] === 'success';
+            btn.disabled = !(branch && env) || !envReady;
             if (!branch && !env) {
                 btn.setAttribute('title', 'Select a branch and an environment to deploy.');
             } else if (!branch) {
                 btn.setAttribute('title', 'Select the branch to deploy.');
             } else if (!env) {
                 btn.setAttribute('title', 'Select the environment to deploy to.');
+            } else if (!envReady) {
+                btn.setAttribute('title', RADIUS_PLAN_ENV_STATUS[env] === 'pending' ?
+                    'Environment "' + env + '" is still being created. Wait for its credential verification to finish before deploying.' :
+                    'Environment "' + env + '" was not created successfully, so it cannot be deployed to. Fix or recreate it first.');
             } else if (RADIUS_PLAN_REQUEST_FAILED) {
                 btn.disabled = true;
                 btn.setAttribute('title', 'The selected deployment plan could not be generated. Try another selection.');
@@ -248,7 +265,11 @@ function radiusApplyPlanEnvState(hasEnv, statesUnavailable) {
         } else if (hasEnv) {
             var appName = (appSel && appSel.value) || 'this application';
             var envName = env || 'the selected environment';
-            hint.innerHTML = ' To deploy this application (<strong>' + radiusEscapeHtml(appName) + '</strong>) to the environment (<strong>' + radiusEscapeHtml(envName) + '</strong>), click "Deploy Application".';
+            if (env && RADIUS_PLAN_ENV_STATUS[env] !== 'success') {
+                hint.innerHTML = ' The environment (<strong>' + radiusEscapeHtml(envName) + '</strong>) ' + (RADIUS_PLAN_ENV_STATUS[env] === 'pending' ? 'is still being created' : 'was not created successfully') + ', so it cannot be deployed to yet.';
+            } else {
+                hint.innerHTML = ' To deploy this application (<strong>' + radiusEscapeHtml(appName) + '</strong>) to the environment (<strong>' + radiusEscapeHtml(envName) + '</strong>), click "Deploy Application".';
+            }
         } else {
             hint.textContent = ' To plan the deployment of this application, you must first create an environment.';
         }

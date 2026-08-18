@@ -233,7 +233,8 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     envValue = "prod",
     branchValue = "main",
     statesUnavailable = false,
-    planFailed = false
+    planFailed = false,
+    envStatus = "success"
   ) {
     const btn: FakeBtn = {
       dataset: {},
@@ -262,10 +263,12 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
       "document",
       `${CLIENT_REPO_BRANCH_JS}; return {
         apply: radiusApplyPlanEnvState,
-        fail: function() { RADIUS_PLAN_REQUEST_FAILED = true; }
+        fail: function() { RADIUS_PLAN_REQUEST_FAILED = true; },
+        setStatus: function(name, status) { RADIUS_PLAN_ENV_STATUS[name] = status; }
       };`
     )(document);
     if (planFailed) controls.fail();
+    if (envValue) controls.setStatus(envValue, envStatus);
     controls.apply(hasEnv, statesUnavailable);
     return { btn, hint };
   }
@@ -357,6 +360,86 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     expect(envSel.innerHTML).toContain("Unable to load environments");
     expect(btn.dataset.mode).toBe("unavailable");
     expect(btn.disabled).toBe(true);
+  });
+
+  it("prefers a successfully created environment and labels the ones that are not", async () => {
+    const option = () => ({ value: "", textContent: "", selected: false });
+    const select = () => ({
+      value: "",
+      innerHTML: "",
+      options: [] as { value: string; textContent: string }[],
+      appendChild(child: {
+        value: string;
+        textContent: string;
+        selected: boolean;
+      }) {
+        this.options.push(child);
+        if (!this.value || child.selected) this.value = child.value;
+      }
+    });
+    const appSel = select();
+    const branchSel = select();
+    const envSel = select();
+    const btn = {
+      dataset: {} as { mode?: string },
+      textContent: "",
+      disabled: false,
+      title: "",
+      setAttribute(_name: string, value: string) {
+        this.title = value;
+      },
+      removeAttribute() {
+        this.title = "";
+      }
+    };
+    const hint = { textContent: "", innerHTML: "" };
+    const elements = {
+      "planned-app": appSel,
+      "planned-branch": branchSel,
+      "planned-env": envSel,
+      "plan-btn": btn,
+      "planned-subtitle-hint": hint
+    };
+    const document = {
+      getElementById: (id: keyof typeof elements) => elements[id] || null,
+      createElement: option
+    };
+    const fetch = (url: string) => {
+      if (url.startsWith("/api/list-environments"))
+        return Promise.resolve({
+          json: () =>
+            Promise.resolve({
+              environments: [
+                { name: "prod", provider: "azure", status: "failed" },
+                { name: "staging", provider: "azure", status: "success" }
+              ]
+            })
+        });
+      if (url === "/api/discover-branches")
+        return Promise.resolve({
+          json: () =>
+            Promise.resolve({ branches: [{ name: "main", sha: "1234567" }] })
+        });
+      return Promise.resolve({
+        json: () => Promise.resolve({ applications: [{ name: "web-app" }] })
+      });
+    };
+    const populate = new Function(
+      "document",
+      "window",
+      "fetch",
+      `${CLIENT_REPO_BRANCH_JS}; return radiusPopulatePlannedSelectors;`
+    )(document, { location: { search: "" } }, fetch);
+
+    await populate("octo/app", {}, "main", "");
+
+    expect(envSel.value).toBe("staging");
+    expect(envSel.options.map((o) => o.textContent)).toEqual([
+      "prod (creation failed)",
+      "staging"
+    ]);
+    expect(btn.dataset.mode).toBe("deploy");
+    expect(btn.disabled).toBe(false);
   });
 
   it("offers Deploy Application and names the app/environment in bold when one exists", () => {
@@ -464,6 +547,44 @@ describe("CLIENT_REPO_BRANCH_JS — Planned graph adaptive primary action", () =
     expect(hint.innerHTML).not.toContain("<img>");
     expect(hint.innerHTML).toContain("&lt;img&gt;");
     expect(hint.innerHTML).toContain("prod&quot;&#39;");
+  });
+
+  // An environment whose creation failed has no working credentials, so
+  // deploying into it cannot succeed no matter what else is selected.
+  it("stays disabled when the selected environment was not created successfully", () => {
+    const { btn, hint } = runApply(
+      true,
+      "web-app",
+      "prod",
+      "main",
+      false,
+      false,
+      "failed"
+    );
+    expect(btn.dataset.mode).toBe("deploy");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("not created successfully");
+    expect(hint.innerHTML).toContain("was not created successfully");
+  });
+
+  it("stays disabled while the selected environment is still being created", () => {
+    const { btn, hint } = runApply(
+      true,
+      "web-app",
+      "prod",
+      "main",
+      false,
+      false,
+      "pending"
+    );
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("still being created");
+    expect(hint.innerHTML).toContain("still being created");
+  });
+
+  it("stays disabled when the selected environment has no known creation status", () => {
+    const { btn } = runApply(true, "web-app", "prod", "main", false, false, "");
+    expect(btn.disabled).toBe(true);
   });
 
   it("triggers a deployment and redirects to the Deployments tab", async () => {
