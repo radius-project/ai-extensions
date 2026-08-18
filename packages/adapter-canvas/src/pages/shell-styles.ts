@@ -32,10 +32,19 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     --rad-link: var(--text-color-accent, #0969da);
     --rad-link-hover: var(--text-color-accent-emphasis, #0550ae);
     --rad-info: var(--text-color-accent, #0969da);
-    --rad-success: var(--text-color-success, color-mix(in srgb, #1a7f37 70%, CanvasText));
-    --rad-warning: var(--text-color-warning, color-mix(in srgb, #9a6700 70%, CanvasText));
-    --rad-danger: var(--text-color-danger, color-mix(in srgb, #cf222e 70%, CanvasText));
+    /* Status colors are read as text on the active surface, so they cannot be
+       used exactly as the host supplies them: a host may keep its light-theme
+       status palette in a dark canvas (the same issue the neutral layers above
+       work around), leaving mid-dark amber or green on a dark background. Mix
+       each toward the active text color to keep the hue while pinning contrast
+       to the theme — the mix lightens in a dark canvas and darkens in a light
+       one. Solid fills that carry white text use the raw *-solid tokens below
+       instead, because those must not follow the surface. */
+    --rad-success: color-mix(in srgb, var(--text-color-success, #1a7f37) 60%, var(--rad-text));
+    --rad-warning: color-mix(in srgb, var(--text-color-warning, #9a6700) 60%, var(--rad-text));
+    --rad-danger: color-mix(in srgb, var(--text-color-danger, #cf222e) 60%, var(--rad-text));
     --rad-success-solid: #1a7f37;
+    --rad-warning-solid: #9a6700;
     --rad-danger-text: var(--rad-danger);
     --rad-danger-solid: #c72222;
     --rad-danger-solid-border: #a61a1a;

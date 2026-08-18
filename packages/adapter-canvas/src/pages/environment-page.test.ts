@@ -9,6 +9,30 @@ import {
 import { readBrowserPageState } from "../../test/support/pages/browser-state.js";
 import { environmentPage } from "./environment-page.js";
 
+function styledClasses(html: string): Set<string> {
+  const styled = new Set<string>();
+  for (const block of html.matchAll(/<style>([\s\S]*?)<\/style>/g)) {
+    for (const rule of block[1].matchAll(/([^{}]+)\{[^{}]*\}/g)) {
+      for (const name of rule[1].matchAll(/\.([A-Za-z0-9_-]+)/g)) {
+        styled.add(name[1]);
+      }
+    }
+  }
+  return styled;
+}
+
+function markupClasses(html: string): Set<string> {
+  const used = new Set<string>();
+  // Inline scripts carry class names as unexpanded template text, so only the
+  // page's own markup is scanned.
+  const markup = html.replace(/<script[\s\S]*?<\/script>/g, "");
+  for (const attribute of markup.matchAll(/class="([^"]+)"/g)) {
+    for (const name of attribute[1].split(/\s+/))
+      if (name !== "") used.add(name);
+  }
+  return used;
+}
+
 describe("environmentPage", () => {
   it("renders both environment and credential panes with the environments tab active", () => {
     const html = environmentPage({
@@ -96,6 +120,39 @@ describe("environmentPage", () => {
     expect(html).not.toContain("<script>alert(1)</script>");
     expect(html).not.toContain("<img src=x onerror=alert(1)>");
     expectSafeInlineScripts(html);
+  });
+});
+
+describe("environmentPage styling", () => {
+  // Style rules and markup live in different modules, so a class can lose its
+  // rule in a merge and still render, leaving the step numbers as bare text.
+  it("defines a rule for every class the page renders", () => {
+    const html = environmentPage({ repo: "octo/app" });
+    const styled = styledClasses(html);
+    // These carry no styling of their own and only inherit from their parent.
+    // The two button variants are a pre-existing gap on main: both fall back to
+    // the base button rule, so fixing them belongs in its own change.
+    const inheritOnly = new Set([
+      "rad-wizard__label",
+      "rad-chosen__label",
+      "rad-btn--secondary",
+      "rad-btn--ghost"
+    ]);
+
+    const unstyled = [...markupClasses(html)]
+      .filter((name) => name.startsWith("rad-"))
+      .filter((name) => !styled.has(name) && !inheritOnly.has(name));
+
+    expect(unstyled).toEqual([]);
+  });
+
+  it("styles the wizard stepper it renders above the form", () => {
+    const html = environmentPage({ repo: "octo/app" });
+    const styled = styledClasses(html);
+
+    expect(styled).toContain("rad-wizard__num");
+    expect(styled).toContain("rad-wizard__sep");
+    expect(styled).toContain("rad-chosen");
   });
 });
 

@@ -8,6 +8,7 @@ import {
   isCredentialsPaneController
 } from "./credentials.js";
 import { initializeDiscoveryPanel } from "./discovery.js";
+import { createEnvironmentConfirmDialog } from "./confirm-dialog.js";
 import {
   initializeEnvironmentPane,
   isEnvironmentPaneController,
@@ -132,17 +133,36 @@ export function initializeEnvironmentPage(
     scope.teardown();
     return NOOP_TEARDOWN;
   }
+  const confirmDialog = createEnvironmentConfirmDialog(context);
 
   const profiles = initializeCredentialProfilesPanel(context, {
     repo: state.repo,
     onProfileChange(profile) {
       selectedProfile = profile;
+      const summary = context.dom.byId("env-profile-summary");
+      if (summary) {
+        summary.textContent =
+          profile ?
+            `${profile.name} (${profile.provider === "aws" ? "AWS" : "Azure"})`
+          : "No credential profile selected";
+      }
+      const detail = context.dom.byId("env-profile-detail");
+      const status = context.dom.byId("env-profile-status");
+      if (detail) {
+        detail.innerHTML = profile ? (status?.innerHTML ?? "") : "";
+        detail.style.display = profile ? "" : "none";
+      }
+      const next = context.dom.inputById("env-step1-next");
+      if (next) next.disabled = !profile;
+      const hint = context.dom.byId("env-step1-hint");
+      if (hint) hint.style.display = profile ? "none" : "";
     },
     discoverResources(provider, subscriptionId, tenantId) {
       void discovery.discoverResources(provider, subscriptionId, tenantId);
     }
   });
   if (!profiles) {
+    confirmDialog?.teardown();
     discovery.teardown();
     scope.teardown();
     return NOOP_TEARDOWN;
@@ -155,17 +175,28 @@ export function initializeEnvironmentPage(
   let environments: EnvironmentPaneController;
   const credentials = initializeCredentialsPane(
     context,
-    { repo: state.repo, decisions: context.dialogs },
+    {
+      repo: state.repo,
+      decisions: context.dialogs,
+      ...(confirmDialog ? { confirmDialog } : {})
+    },
     {
       selectEnvironmentsSubtab() {
         environments.switchSubtab("environments");
       },
       openEnvironmentForm(preset) {
         environments.showEnvironmentForm(preset);
+      },
+      credentialCreated(name) {
+        void profiles.loadProfiles(name).then(() => {
+          environments.showWizardStep(2);
+          environmentInput.focus();
+        });
       }
     }
   );
   if (!isCredentialsPaneController(credentials)) {
+    confirmDialog?.teardown();
     profiles.teardown();
     discovery.teardown();
     scope.teardown();
@@ -174,24 +205,35 @@ export function initializeEnvironmentPage(
 
   const initializedEnvironments = initializeEnvironmentPane(
     context,
-    { repo: state.repo, decisions: context.dialogs },
+    {
+      repo: state.repo,
+      decisions: context.dialogs,
+      ...(confirmDialog ? { confirmDialog } : {})
+    },
     {
       loadCredentialTable() {
         credentials.loadCredentialTable();
       },
       loadProfiles(preselectName) {
-        void profiles.loadProfiles(preselectName);
+        return profiles.loadProfiles(preselectName);
       },
       loadGitHubIdentity(fresh) {
         void profiles.loadGithubIdentity(fresh);
       },
       clearSharedAppPin() {
         discovery.clearSharedAppPin();
+      },
+      setPendingInfraSelection(config, provider) {
+        discovery.setPendingInfraSelection(config, provider);
+      },
+      currentInfraSelection(provider) {
+        return discovery.currentInfraSelection(provider);
       }
     }
   );
 
   if (!isEnvironmentPaneController(initializedEnvironments)) {
+    confirmDialog?.teardown();
     credentials.teardown();
     profiles.teardown();
     discovery.teardown();
@@ -208,6 +250,7 @@ export function initializeEnvironmentPage(
       showSetupWarnings: environments.showWarnings,
       showError: environments.showError,
       reloadEnvironmentsTable: environments.loadEnvironmentTable,
+      resetSubmitButton: environments.resetSubmitButton,
       promptServiceManagementReference:
         discovery.promptServiceManagementReference,
       promptAppSelection: discovery.promptAppSelection
@@ -215,6 +258,7 @@ export function initializeEnvironmentPage(
   });
 
   if (!operations) {
+    confirmDialog?.teardown();
     credentials.teardown();
     environments.teardown();
     profiles.teardown();
@@ -231,8 +275,7 @@ export function initializeEnvironmentPage(
 
   const restoreCreateButton = (): void => {
     creating = false;
-    createButton.disabled = false;
-    createButton.textContent = "Create Environment";
+    environments.resetSubmitButton();
   };
 
   const failCreate = (message: string): void => {
@@ -290,13 +333,13 @@ export function initializeEnvironmentPage(
     }
     if (provider === "azure" && (subscriptionId === "" || tenantId === "")) {
       showFormError(
-        "The selected profile needs both a tenant ID and subscription ID. Edit the profile before creating the environment."
+        "The selected profile needs both a tenant ID and subscription ID. Delete the profile and create it again with those values before creating the environment."
       );
       return;
     }
     if (provider === "aws" && (accountId === "" || region === "")) {
       showFormError(
-        "The selected profile needs both an account ID and region. Edit the profile before creating the environment."
+        "The selected profile needs both an account ID and region. Delete the profile and create it again with those values before creating the environment."
       );
       return;
     }
@@ -334,14 +377,18 @@ export function initializeEnvironmentPage(
 
     creating = true;
     createButton.disabled = true;
-    createButton.textContent = "Creating environment…";
+    createButton.textContent =
+      environmentInput.disabled ?
+        "Saving environment…"
+      : "Creating environment…";
     formStatus.style.display = "none";
     environments.showEnvironmentLanding();
     environments.hideTerminalBanners();
     operations.stopProgress();
-    operations.renderProgress(
-      optimisticOperation(environment, provider, context.clock.now())
-    );
+    operations.renderProgress({
+      ...optimisticOperation(environment, provider, context.clock.now()),
+      summary: `${environmentInput.disabled ? "Updating" : "Creating"} ${environment}…`
+    });
     operations.focusPanel();
 
     createAbort = context.net.createAbort();
@@ -406,8 +453,8 @@ export function initializeEnvironmentPage(
   scope.on(cancelEnvironment, "click", environments.showEnvironmentLanding);
   scope.on(createProfile, "click", (event) => {
     event.preventDefault();
-    environments.switchSubtab("credentials");
-    context.dom.dispatch(newCredential, "click");
+    environments.showWizardStep(1);
+    credentials.startWizardCreation();
   });
   scope.on(createButton, "click", createEnvironment);
 
@@ -430,6 +477,7 @@ export function initializeEnvironmentPage(
     operations.teardown();
     profiles.teardown();
     credentials.teardown();
+    confirmDialog?.teardown();
     environments.teardown();
     discovery.teardown();
     scope.teardown();
