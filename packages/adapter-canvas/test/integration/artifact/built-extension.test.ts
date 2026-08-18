@@ -137,8 +137,7 @@ describe("P0-C built Radius extension artifact", () => {
           /packages\/adapter-canvas\/src\/runtime\/bootstrap\.ts$/
         ),
         expect.stringMatching(/packages\/adapter-canvas\/src\/server\.ts$/),
-        // The page renderers are owned by src/pages/; src/pages.ts is only a
-        // behaviour-free re-export facade, so the bundler forwards through it.
+        // The page renderers are owned by focused modules under src/pages/.
         expect.stringMatching(
           /packages\/adapter-canvas\/src\/pages\/shell\.ts$/
         ),
@@ -280,7 +279,7 @@ describe("P0-C built Radius extension artifact", () => {
     }
   });
 
-  it("packages the extracted page modules behind the forwarding facade exactly once", () => {
+  it("packages each page module exactly once", () => {
     assertCurrentArtifact();
     const bundle = readFileSync(ARTIFACT, "utf8");
     const sourceMap = JSON.parse(readFileSync(SOURCE_MAP, "utf8")) as {
@@ -313,28 +312,6 @@ describe("P0-C built Radius extension artifact", () => {
         pageModule
       ).toHaveLength(1);
     }
-
-    // The compatibility facade holds no behaviour, so the bundler resolves its
-    // re-exports to the owning modules and contributes no module of its own.
-    // Logic added to src/pages.ts would show up here.
-    expect(
-      normalizedSources.filter((source) =>
-        source.endsWith("packages/adapter-canvas/src/pages.ts")
-      )
-    ).toHaveLength(0);
-    expect(
-      normalizedSources.filter((source) =>
-        source.endsWith("packages/adapter-canvas/src/pages/browser-function.ts")
-      )
-    ).toHaveLength(0);
-    // oidcPage is reachable only through the facade — no route renders it — so
-    // the bundler drops it. It stays exported for compatibility and is covered
-    // by its collocated unit tests.
-    expect(
-      normalizedSources.filter((source) =>
-        source.endsWith("packages/adapter-canvas/src/pages/oidc-page.ts")
-      )
-    ).toHaveLength(0);
 
     // Splitting the renderers must not duplicate page text in the artifact: the
     // shell stylesheet and the fragments shared by several pages stay
@@ -371,7 +348,6 @@ describe("P0-C built Radius extension artifact", () => {
       "delete-dialog",
       "heartbeat",
       "operation-chip",
-      "oidc-page",
       "deploy-result-page",
       "environment-page",
       "deploying-page",

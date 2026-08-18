@@ -189,16 +189,6 @@ export interface PublishTargetsDependencies {
   ): string | null;
 }
 
-export interface OidcResult {
-  message: string;
-  output: string;
-}
-
-export interface InfraDependencies {
-  generateAzureOIDC(data: Record<string, unknown>): OidcResult;
-  generateAWSOIDC(data: Record<string, unknown>): OidcResult;
-}
-
 export interface HostCallbackDependencies {
   setAppBicepHandoff(
     fn: (input: {
@@ -274,7 +264,6 @@ export interface RadiusExtensionDependencies {
   deployTools: DeployToolsDependencies;
   sourceRefs: SourceRefsDependencies;
   publishTargets: PublishTargetsDependencies;
-  infra: InfraDependencies;
   hostCallbacks: HostCallbackDependencies;
   process: ProcessDependencies;
   deploy: DeployRunnerDependencies;
