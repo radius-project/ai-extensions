@@ -121,8 +121,6 @@ export interface CanvasDeployResult {
 
 export interface CanvasState {
   [key: string]: unknown;
-  oidcAzure?: CloudCredential;
-  oidcAws?: CloudCredential;
   graphResources?: CanvasGraphResource[] | null;
   graphTargetRepo?: string;
   graphBranch?: string;

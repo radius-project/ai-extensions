@@ -2,7 +2,7 @@
 
 - **Author**: Ryan Waite (@ryanwaite)
 - **Date**: 2026-08
-- **Status**: Implemented in phases. The operation record, persistence and restart reconciliation, inline panel, ambient chip, timeline announcement, PR-path terminal state, and server-owned `POST /api/operations` start contract are implemented. Cooperative stop remains modeled but unwired. See [Implementation findings](#implementation-findings).
+- **Status**: Implemented in phases. The operation record, persistence and restart reconciliation, inline panel, ambient chip, timeline announcement, PR-path terminal state, and server-owned `POST /api/operations` start contract are implemented. Cooperative stop remains modeled but unwired.
 
 ## Overview
 
@@ -110,7 +110,7 @@ The panel keeps the existing form and changes what appears after the user clicks
 
 The design replaces `env-creating-modal` with an inline panel on the environments page. Prototype status in draft PR #244: the panel already shows a named stage, elapsed time, a collapsible step list, and distinct glyphs for pending, running, successful, warning, skipped, and failed work.
 
-**Sample input:** the user completes the existing Create Environment form on the environment page and clicks **Create Environment**. The form fields are unchanged by this design — profile, environment name, target repository, branch, resource group, AKS cluster, and namespace (`packages/adapter-canvas/src/pages.ts:3098-3122`). The only interaction change is what happens next.
+**Sample input:** the user completes the existing Create Environment form on the environment page and clicks **Create Environment**. The form fields are unchanged by this design — profile, environment name, target repository, branch, resource group, AKS cluster, and namespace (the environment page renderer under `packages/adapter-canvas/src/pages/`). The only interaction change is what happens next.
 
 **Sample output — mid-operation, `authorize_identity` running:**
 
@@ -179,8 +179,8 @@ Environment "dev" — ready                                             4m 06s
 Five behaviors define the experience:
 
 1. **The panel does not block the canvas.** The user can navigate away, and the operation continues. This is what makes the keepalive fix a hard prerequisite rather than a follow-up.
-2. **Failure renders in place.** The failing step is marked, everything above it stays on screen, and the next action sits next to it. The current `failEnv` handler (`pages.ts:3132-3136`) does the opposite: it hides the modal and writes one string into a status bar.
-3. **Warnings pin to their step.** `showEnvSetupWarnings` (`pages.ts:2336`) currently rakes the whole `steps[]` for `⚠️` lines after the fact. Those lines belong on the step that produced them.
+2. **Failure renders in place.** The failing step is marked, everything above it stays on screen, and the next action sits next to it. The current `failEnv` handler, a former environment-page handler, does the opposite: it hides the modal and writes one string into a status bar.
+3. **Warnings pin to their step.** `showEnvSetupWarnings`, a former environment-page handler, currently rakes the whole `steps[]` for `⚠️` lines after the fact. Those lines belong on the step that produced them.
 4. **Another canvas page still shows setup status.** The chip is visible from every page, and the final outcome produces one best-effort timeline entry.
 5. **Nothing ever seizes the user's attention.** The return route is offered, never taken on the user's behalf. See [Journey continuity](#journey-continuity).
 
@@ -190,7 +190,7 @@ Five behaviors define the experience:
 
 The graph page already implements the visual pattern this feature needs, and it is tempting to extract it wholesale. Its _progress model_, however, is exactly what we must not reuse.
 
-`updateWaitingProgress` (`packages/adapter-canvas/src/pages.ts:763-780`) fabricates its percentage from wall-clock elapsed time — `18 + ((elapsed / EXPECTED_GRAPH_DURATION_MS) * 50)`, clamped at 72 — and selects the active stage from hard-coded elapsed thresholds (`elapsed < 45000 ? 0 : elapsed < 150000 ? 1 : …`). `syncProgressMessages` (`pages.ts:782-816`) then infers real state by **string-prefix matching on prose**: `latest.indexOf('Checking ') === 0`, `'Found existing app.bicep'`, `'Mapped '`.
+`updateWaitingProgress`, a former graph-page handler, fabricates its percentage from wall-clock elapsed time — `18 + ((elapsed / EXPECTED_GRAPH_DURATION_MS) * 50)`, clamped at 72 — and selects the active stage from hard-coded elapsed thresholds (`elapsed < 45000 ? 0 : elapsed < 150000 ? 1 : …`). `syncProgressMessages`, its sibling on the same page, then infers real state by **string-prefix matching on prose**: `latest.indexOf('Checking ') === 0`, `'Found existing app.bicep'`, `'Mapped '`.
 
 That is a progress bar that is mostly guessing, driven by parsing display copy. **Take the visual vocabulary; leave the elapsed-time percentage and the string parsing behind.** The events this design emits are structured and typed, which is the entire point of defining a record contract.
 
@@ -487,7 +487,7 @@ If the repository or branch no longer exists, the target page shows a load error
 
 ### The state model: a branching flow, not a fixed checklist
 
-- **`authorize_identity` is optional.** It is skipped entirely when the user supplies an existing client ID (`pages.ts:3138`, `3156-3160`).
+- **`authorize_identity` is optional.** It is skipped entirely when the user supplies an existing client ID.
 - **`verify` is conditional, not merely deferred.** On the PR path, verification is **not dispatched at all** because the workflow file is not on the default branch yet and `workflow run` would 404.
 - **The number of steps varies.** Setup may create several federated credentials, retry a role assignment, open a pull request, or reuse resources that already exist. The panel can show the known major stages immediately, but it cannot promise a fixed number of detailed steps.
 
@@ -749,7 +749,7 @@ Multi-cloud rules:
 - Cooperative stop.
 - A bare-page redirect to the running environment operation.
 
-**Implemented in `pages.ts`, `client.ts`, and `ui.ts`:**
+**Implemented in the page renderers and the browser modules under `src/browser/`:**
 
 - Inline environment progress panel.
 - Cross-page status chip.
