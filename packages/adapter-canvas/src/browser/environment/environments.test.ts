@@ -433,9 +433,10 @@ describe("environment pane initialization", () => {
     expect(page.elements.environmentName.focusCount).toBe(0);
     expect(page.elements.stepTwoTitle.textContent).toBe("Edit Environment");
     expect(page.elements.nameHelp.textContent).toContain("cannot be renamed");
-    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith({
-      resourceGroup: "rg-prod"
-    });
+    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
+      { resourceGroup: "rg-prod" },
+      "azure"
+    );
   });
 
   it("labels a fresh form for creation and carries no pending infrastructure", () => {
@@ -447,7 +448,8 @@ describe("environment pane initialization", () => {
     expect(page.elements.stepTwoTitle.textContent).toBe("Create Environment");
     expect(page.elements.nameHelp.textContent).toContain("deploy apps into");
     expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
-      null
+      null,
+      "azure"
     );
   });
 
@@ -497,7 +499,8 @@ describe("environment pane initialization", () => {
     expect(page.elements.environmentName.disabled).toBe(true);
     expect(page.dependencies.loadProfiles).toHaveBeenCalledWith("azure-prod");
     expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
-      expect.objectContaining({ resourceGroup: "rg-dev" })
+      expect.objectContaining({ resourceGroup: "rg-dev" }),
+      "azure"
     );
   });
 
@@ -524,7 +527,8 @@ describe("environment pane initialization", () => {
     page.controller.showEnvironmentForm({ name: "prod", editing: "prod" });
 
     expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
-      null
+      null,
+      "azure"
     );
   });
 
@@ -560,9 +564,10 @@ describe("environment pane initialization", () => {
     page.controller.switchSubtab("environments");
 
     expect(page.dependencies.currentInfraSelection).toHaveBeenCalledWith("aws");
-    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith({
-      cluster: "eks-1"
-    });
+    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
+      { cluster: "eks-1" },
+      "aws"
+    );
     expect(page.dependencies.loadProfiles).toHaveBeenCalledWith("");
   });
 
@@ -577,7 +582,10 @@ describe("environment pane initialization", () => {
 
     page.controller.switchSubtab("environments");
 
-    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith({});
+    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
+      {},
+      "azure"
+    );
   });
 
   it("ignores an edit request for a row that is no longer listed", async () => {

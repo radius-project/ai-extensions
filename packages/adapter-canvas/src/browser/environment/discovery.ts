@@ -87,7 +87,10 @@ export interface DiscoveryPanelHandle {
   ): Promise<void>;
   getComboValue(selectId: string, customId: string): string;
   findAzureClusterResourceGroup(clusterId: string): string;
-  setPendingInfraSelection(config: EnvironmentInfrastructure | null): void;
+  setPendingInfraSelection(
+    config: EnvironmentInfrastructure | null,
+    provider: "azure" | "aws"
+  ): void;
   currentInfraSelection(provider: "azure" | "aws"): EnvironmentInfrastructure;
   teardown(): void;
 }
@@ -598,7 +601,15 @@ export function initializeDiscoveryPanel(
     azure: { identity: null, token: 0 },
     aws: { identity: null, token: 0 }
   };
-  let pendingInfrastructure: EnvironmentInfrastructure | null = null;
+  // A pending selection belongs to the provider whose form asked for it.
+  // Azure and AWS discovery can be outstanding at the same time, so the
+  // provider is recorded alongside the config and only a matching response is
+  // allowed to consume it — otherwise whichever request happened to settle
+  // first would swallow the other provider's saved values.
+  let pendingInfrastructure: {
+    provider: "azure" | "aws";
+    config: EnvironmentInfrastructure;
+  } | null = null;
 
   // Shared-identity pin helpers. The pin (az-selected-app-id) makes this repo
   // reuse another app's identity — deliberately wider blast radius, so it
@@ -902,8 +913,9 @@ export function initializeDiscoveryPanel(
   };
 
   const applyPendingInfrastructure = (provider: "azure" | "aws"): void => {
-    const config = pendingInfrastructure;
-    if (!config) return;
+    const pending = pendingInfrastructure;
+    if (!pending || pending.provider !== provider) return;
+    const config = pending.config;
     pendingInfrastructure = null;
     if (provider === "azure") {
       restoreInfrastructureValue(
@@ -952,8 +964,8 @@ export function initializeDiscoveryPanel(
     discoverResources,
     getComboValue,
     findAzureClusterResourceGroup,
-    setPendingInfraSelection(config) {
-      pendingInfrastructure = config;
+    setPendingInfraSelection(config, provider) {
+      pendingInfrastructure = config ? { provider, config } : null;
     },
     currentInfraSelection(provider) {
       return provider === "aws" ?

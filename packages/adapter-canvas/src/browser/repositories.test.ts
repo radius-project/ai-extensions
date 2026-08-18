@@ -1526,6 +1526,11 @@ describe("deployed pane state", () => {
       "failed",
       'Environment "dev" was not created successfully, so it cannot be deployed to. Fix or recreate it first.',
       "was not created successfully"
+    ],
+    [
+      "",
+      'The status of environment "dev" could not be determined, so it cannot be deployed to. Refresh to try again.',
+      "has an unknown status"
     ]
   ])(
     "explains why a %s environment blocks a deploy",
@@ -1615,9 +1620,18 @@ describe("deployed pane state", () => {
         status: "pending"
       })
     ).toBe("dev (being created…)");
+    // A missing status is genuinely unknown, not evidence of an in-flight
+    // creation, so it must not claim the environment is being created.
     expect(environmentOptionLabel({ name: "dev", provider: "azure" })).toBe(
-      "dev (being created…)"
+      "dev (status unknown)"
     );
+    expect(
+      environmentOptionLabel({
+        name: "dev",
+        provider: "azure",
+        status: "mystery"
+      })
+    ).toBe("dev (status unknown)");
   });
 
   it("escapes selector values in the hint", () => {

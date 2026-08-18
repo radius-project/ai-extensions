@@ -54,6 +54,7 @@ export function createEnvironmentConfirmDialog(
 
   const registrations: Registration[] = [];
   let pendingConfirm: (() => void) | null = null;
+  let restoreFocusTo: DomElement | null = null;
   const bind = (
     target: DomEventTarget,
     type: string,
@@ -62,9 +63,15 @@ export function createEnvironmentConfirmDialog(
     target.addEventListener(type, listener);
     registrations.push({ target, type, listener });
   };
+  const isOpen = (): boolean => modal.style.display !== "none";
   const close = (): void => {
     modal.style.display = "none";
     pendingConfirm = null;
+    // Return focus to whatever opened the dialog, so keyboard users are not
+    // dropped at the top of the document once it closes.
+    const restore = restoreFocusTo;
+    restoreFocusTo = null;
+    context.focus.focus(restore);
   };
   bind(cancel, "click", close);
   bind(confirm, "click", () => {
@@ -73,11 +80,30 @@ export function createEnvironmentConfirmDialog(
     run?.();
   });
   bind(context.dom.document, "keydown", (event) => {
-    if (event.key === "Escape" && modal.style.display !== "none") close();
+    if (!isOpen()) return;
+    if (event.key === "Escape") {
+      close();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    // The dialog is aria-modal, so Tab must cycle between its two buttons
+    // instead of walking into the inert page behind it.
+    event.preventDefault();
+    const active = context.focus.active();
+    const backwards = event.shiftKey === true;
+    const next =
+      backwards ?
+        active === confirm ?
+          cancel
+        : confirm
+      : active === cancel ? confirm
+      : cancel;
+    next.focus();
   });
 
   return {
     show(options) {
+      if (!isOpen()) restoreFocusTo = context.focus.active();
       pendingConfirm = options.onConfirm;
       title.textContent = options.title;
       message.textContent = options.message;
@@ -101,6 +127,9 @@ export function createEnvironmentConfirmDialog(
     },
     close,
     teardown() {
+      // Teardown is not a user-driven dismissal, so it must not yank focus
+      // back to whatever opened the dialog.
+      restoreFocusTo = null;
       close();
       for (const registration of registrations.splice(0)) {
         registration.target.removeEventListener(

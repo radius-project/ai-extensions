@@ -512,6 +512,10 @@ export function initializeCredentialsPane(
   };
 
   const endWizardCreation = (): void => {
+    // Leaving the form invalidates any save still in flight, exactly as
+    // showLanding does for the standalone form; otherwise a save that resolves
+    // after Cancel still passes the token check and reports a created profile.
+    formToken += 1;
     wizardFormHost.style.display = "none";
     wizardStepCard.style.display = "";
     moveFormTo(credForm);
@@ -651,18 +655,28 @@ export function initializeCredentialsPane(
     // action always has a repository to look usage up against.
     const usageRequest = context.net
       .fetch(`/api/list-environments?repo=${encodeURIComponent(options.repo)}`)
-      .then((response) => response.json())
-      .then((payload) => ({
-        usage: readArray(payload, "environments")
-          .filter(isRecord)
-          .filter(
-            (environment) =>
-              readString(environment, "credentialProfile") === name
-          )
-          .map((environment) => readString(environment, "name"))
-          .filter((environment) => environment !== ""),
-        checked: true
-      }))
+      .then((response) => {
+        // The handler reports its own failures as HTTP 200 with an `error`
+        // field, so a non-OK status is not the only failure shape to catch.
+        if (!response.ok) throw new Error("list-environments request failed");
+        return response.json();
+      })
+      .then((payload) => {
+        if (readString(payload, "error") !== "") {
+          throw new Error("list-environments reported an error");
+        }
+        return {
+          usage: readArray(payload, "environments")
+            .filter(isRecord)
+            .filter(
+              (environment) =>
+                readString(environment, "credentialProfile") === name
+            )
+            .map((environment) => readString(environment, "name"))
+            .filter((environment) => environment !== ""),
+          checked: true
+        };
+      })
       .catch(() => ({ usage: [] as string[], checked: false }));
     void usageRequest.then(({ usage, checked }) => {
       if (!active) return;

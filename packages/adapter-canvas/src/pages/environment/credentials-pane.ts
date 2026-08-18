@@ -1,11 +1,12 @@
 // Canvas adapter — markup for the Credentials sub-tab of the environment page:
 // the credential profile table plus the host the shared credential form docks
-// into when an existing profile is edited.
+// into when a profile is created from this sub-tab.
 //
-// Creating a profile is no longer a standalone flow: "New Credential Profile"
-// hands off to step 1 of the New Environment wizard, because a credential only
-// ever exists in service of an environment. The listing stays here so existing
-// profiles can still be edited and deleted.
+// A profile can be created from two places: "New Credential Profile" here, and
+// step 1 of the New Environment wizard. Both render the same form; only the
+// host and the save/cancel labels differ. Editing an existing profile is not
+// supported — a profile with the wrong values is deleted and recreated — so the
+// listing offers Delete Profile as its only row action.
 
 import { credentialFormMarkup } from "./credential-form.js";
 

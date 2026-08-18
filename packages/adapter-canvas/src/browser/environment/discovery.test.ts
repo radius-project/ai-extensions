@@ -1053,11 +1053,14 @@ describe("discoverResources", () => {
       discoverResponse(azurePayload())
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
-    handle?.setPendingInfraSelection({
-      resourceGroup: "rg-1",
-      cluster: "aks-1",
-      namespace: "default"
-    });
+    handle?.setPendingInfraSelection(
+      {
+        resourceGroup: "rg-1",
+        cluster: "aks-1",
+        namespace: "default"
+      },
+      "azure"
+    );
 
     await handle?.discoverResources("azure", "", "");
 
@@ -1072,7 +1075,7 @@ describe("discoverResources", () => {
       discoverResponse(azurePayload())
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
-    handle?.setPendingInfraSelection({ resourceGroup: "rg-gone" });
+    handle?.setPendingInfraSelection({ resourceGroup: "rg-gone" }, "azure");
 
     await handle?.discoverResources("azure", "", "");
 
@@ -1087,7 +1090,7 @@ describe("discoverResources", () => {
       discoverResponse(azurePayload())
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
-    handle?.setPendingInfraSelection({ resourceGroup: "rg-1" });
+    handle?.setPendingInfraSelection({ resourceGroup: "rg-1" }, "azure");
     await handle?.discoverResources("azure", "", "");
     page.selects["azure-rg-select"].value = "";
 
@@ -1117,7 +1120,7 @@ describe("discoverResources", () => {
       discoverResponse(azurePayload())
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
-    handle?.setPendingInfraSelection({});
+    handle?.setPendingInfraSelection({}, "azure");
 
     await handle?.discoverResources("azure", "", "");
 
@@ -1131,7 +1134,7 @@ describe("discoverResources", () => {
       discoverResponse({ clusters: [{ id: "eks-1", name: "EKS One" }] })
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
-    handle?.setPendingInfraSelection({});
+    handle?.setPendingInfraSelection({}, "aws");
 
     await handle?.discoverResources("aws", "", "");
 
@@ -1140,13 +1143,49 @@ describe("discoverResources", () => {
     expect(page.customs["aws-subnets-custom"].value).toBe("");
   });
 
+  it("does not let an azure response consume an aws pending selection", async () => {
+    const page = renderDiscoveryPage();
+    let resolveAzure: (value: HttpResponse) => void = () => {};
+    const azureFirst = new Promise<HttpResponse>((resolve) => {
+      resolveAzure = resolve;
+    });
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      const body = JSON.parse(init?.body ?? "{}");
+      if (body.provider === "azure") return azureFirst;
+      return discoverResponse({
+        clusters: [{ id: "eks-1", name: "EKS One" }],
+        namespaces: ["team-a"]
+      });
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    // An azure discovery is already outstanding when the user opens an aws
+    // edit form, which hands its saved selection over.
+    const azureCall = handle?.discoverResources("azure", "", "");
+    handle?.setPendingInfraSelection(
+      { cluster: "eks-1", namespace: "team-a" },
+      "aws"
+    );
+
+    resolveAzure(discoverResponse(azurePayload()));
+    await azureCall;
+    await flushPromises();
+    // The aws hand-off carries a namespace, so azure consuming it would show
+    // up as "team-a" here instead of azure's own discovered default.
+    expect(page.selects["azure-namespace-select"].value).toBe("default");
+    expect(page.customs["azure-cluster-custom"].value).toBe("");
+
+    await handle?.discoverResources("aws", "", "");
+    expect(page.selects["aws-cluster-select"].value).toBe("eks-1");
+    expect(page.selects["aws-namespace-select"].value).toBe("team-a");
+  });
+
   it("drops a saved value when its select is missing from the page", async () => {
     const page = renderDiscoveryPage(["azure-rg-select"]);
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
       discoverResponse(azurePayload())
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
-    handle?.setPendingInfraSelection({ resourceGroup: "rg-gone" });
+    handle?.setPendingInfraSelection({ resourceGroup: "rg-gone" }, "azure");
 
     await handle?.discoverResources("azure", "", "");
 
@@ -1159,7 +1198,7 @@ describe("discoverResources", () => {
       discoverResponse(azurePayload())
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
-    handle?.setPendingInfraSelection({ resourceGroup: "rg-gone" });
+    handle?.setPendingInfraSelection({ resourceGroup: "rg-gone" }, "azure");
 
     await handle?.discoverResources("azure", "", "");
 
@@ -1208,12 +1247,15 @@ describe("discoverResources", () => {
       })
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
-    handle?.setPendingInfraSelection({
-      cluster: "eks-1",
-      namespace: "team-a",
-      vpcId: "vpc-1",
-      subnetIds: "subnet-1"
-    });
+    handle?.setPendingInfraSelection(
+      {
+        cluster: "eks-1",
+        namespace: "team-a",
+        vpcId: "vpc-1",
+        subnetIds: "subnet-1"
+      },
+      "aws"
+    );
 
     await handle?.discoverResources("aws", "", "");
 

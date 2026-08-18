@@ -197,6 +197,89 @@ describe("createEnvironmentConfirmDialog", () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
+  it("traps Tab between the dialog's two buttons", () => {
+    const { dialog, elements, browser } = openDialog();
+    dialog.show({
+      title: "Delete environment?",
+      message: "This deletes the GitHub environment.",
+      confirmLabel: "Delete environment",
+      onConfirm: vi.fn()
+    });
+
+    // The dialog is aria-modal, so Tab must cycle inside it rather than walk
+    // into the page behind it.
+    browser.document.activeElement = elements["env-confirm-cancel"];
+    browser.document.dispatch("keydown", { key: "Tab" });
+    expect(elements["env-confirm-ok"].focusCount).toBe(1);
+
+    browser.document.activeElement = elements["env-confirm-ok"];
+    browser.document.dispatch("keydown", { key: "Tab" });
+    expect(elements["env-confirm-cancel"].focusCount).toBe(2);
+  });
+
+  it("traps Shift+Tab in the opposite direction", () => {
+    const { dialog, elements, browser } = openDialog();
+    dialog.show({
+      title: "Delete environment?",
+      message: "This deletes the GitHub environment.",
+      confirmLabel: "Delete environment",
+      onConfirm: vi.fn()
+    });
+
+    browser.document.activeElement = elements["env-confirm-cancel"];
+    browser.document.dispatch("keydown", { key: "Tab", shiftKey: true });
+    expect(elements["env-confirm-ok"].focusCount).toBe(1);
+
+    browser.document.activeElement = elements["env-confirm-ok"];
+    browser.document.dispatch("keydown", { key: "Tab", shiftKey: true });
+    expect(elements["env-confirm-cancel"].focusCount).toBe(2);
+  });
+
+  it("leaves Tab alone while the dialog is closed", () => {
+    const { elements, browser } = openDialog();
+
+    browser.document.activeElement = elements["env-confirm-cancel"];
+    browser.document.dispatch("keydown", { key: "Tab" });
+
+    expect(elements["env-confirm-ok"].focusCount).toBe(0);
+  });
+
+  it("returns focus to the element that opened it", () => {
+    const { dialog, elements, browser } = openDialog();
+    const trigger = createFakeElement("delete-btn");
+    browser.document.add(trigger);
+    browser.document.activeElement = trigger;
+
+    dialog.show({
+      title: "Delete environment?",
+      message: "This deletes the GitHub environment.",
+      confirmLabel: "Delete environment",
+      onConfirm: vi.fn()
+    });
+    browser.document.activeElement = elements["env-confirm-cancel"];
+    browser.document.dispatch("keydown", { key: "Escape" });
+
+    // Keyboard users must land back on the trigger, not at the top of the page.
+    expect(trigger.focusCount).toBe(1);
+  });
+
+  it("does not steal focus back when torn down", () => {
+    const { dialog, browser } = openDialog();
+    const trigger = createFakeElement("delete-btn");
+    browser.document.add(trigger);
+    browser.document.activeElement = trigger;
+
+    dialog.show({
+      title: "Delete environment?",
+      message: "This deletes the GitHub environment.",
+      confirmLabel: "Delete environment",
+      onConfirm: vi.fn()
+    });
+    dialog.teardown();
+
+    expect(trigger.focusCount).toBe(0);
+  });
+
   it("ignores keys other than Escape while open", () => {
     const { dialog, elements, browser } = openDialog();
     dialog.show({

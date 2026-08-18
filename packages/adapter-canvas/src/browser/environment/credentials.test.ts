@@ -572,6 +572,38 @@ describe("row actions", () => {
     );
   });
 
+  it("warns in the dialog when the usage lookup reports an error payload", async () => {
+    const { page, rows } = await readyTable();
+    page.confirmDialog.show.mockImplementation(() => {});
+    // The handler reports its own failures as HTTP 200 with an `error` field,
+    // so an empty environment list here means "unknown", not "unused".
+    page.browser.net.handle(USAGE_LOOKUP_URL, () =>
+      jsonResponse({ error: "repo lookup failed", environments: [] })
+    );
+    rows.remove.dispatch("click");
+    await flushPromises();
+    const shown = page.confirmDialog.show.mock.calls[0][0];
+    expect(shown.usage).toEqual([]);
+    expect(shown.message).toContain(
+      "Could not check which environments use this profile."
+    );
+  });
+
+  it("warns in the dialog when the usage lookup returns a non-OK status", async () => {
+    const { page, rows } = await readyTable();
+    page.confirmDialog.show.mockImplementation(() => {});
+    page.browser.net.handle(USAGE_LOOKUP_URL, () =>
+      jsonResponse({ environments: [] }, false, 500)
+    );
+    rows.remove.dispatch("click");
+    await flushPromises();
+    const shown = page.confirmDialog.show.mock.calls[0][0];
+    expect(shown.usage).toEqual([]);
+    expect(shown.message).toContain(
+      "Could not check which environments use this profile."
+    );
+  });
+
   it("deletes a profile and refreshes the table on success", async () => {
     const { page, rows } = await readyTable();
     page.browser.net.handle(CREDENTIAL_DELETE_PATH, () =>
@@ -1407,6 +1439,24 @@ describe("saving a credential profile", () => {
     expect(page.elements.wizardFormHost.style.display).toBe("none");
     expect(page.elements.wizardStepCard.style.display).toBe("");
     expect(page.elements.credFormCard.parentNode).toBe(page.elements.credForm);
+  });
+
+  it("does not hand back a profile whose save resolves after the wizard form is cancelled", async () => {
+    const page = renderPage();
+    page.controller.startWizardCreation();
+    await flushPromises();
+    await verifiedAzureForm(page, { open: false });
+    const deferred = createDeferred<HttpResponse>();
+    page.browser.net.handle(CREDENTIAL_SAVE_PATH, () => deferred.promise);
+
+    page.elements.saveCredBtn.dispatch("click");
+    page.elements.cancelCredBtn.dispatch("click");
+    deferred.resolve(jsonResponse({}));
+    await flushPromises();
+
+    // Cancelling abandons the form, so a save that lands afterwards must not
+    // advance the wizard with a profile the user walked away from.
+    expect(page.dependencies.credentialCreated).not.toHaveBeenCalled();
   });
 
   it("requires a profile name", () => {

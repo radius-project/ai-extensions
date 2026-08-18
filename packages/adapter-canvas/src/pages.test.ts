@@ -626,6 +626,11 @@ describe("legacy page renderer compatibility oracle", () => {
     expect(fixture.source.updatePolicy).toContain("reviewed");
     expect(fixture.source.excludedScriptPayloads.join(" ")).toContain("#367");
     expect(fixture.source.excludedScriptPayloads.join(" ")).toContain("#379");
+    // Non-additive marker edits must carry their own reviewed justification,
+    // otherwise the oracle silently stops tracking the legacy output.
+    expect(fixture.source.intentionalDivergences.join(" ")).toContain(
+      "Delete the application deployment first."
+    );
   });
 
   it("forwards exactly the legacy public export surface", () => {

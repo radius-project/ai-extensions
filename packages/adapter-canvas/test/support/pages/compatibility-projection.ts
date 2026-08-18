@@ -584,6 +584,11 @@ export interface PageCompatibilityFixture {
     projection: string;
     hostileInputs: string;
     excludedScriptPayloads: string[];
+    // Non-additive oracle edits: markers or expectations that no longer track
+    // the legacy output, each with the reviewed reason it was changed rather
+    // than added. Additive edits (new ids, roles, disabled entries) do not
+    // belong here.
+    intentionalDivergences: string[];
     updatePolicy: string;
   };
   exports: string[];
@@ -883,6 +888,10 @@ export function parsePageCompatibilityFixture(
       excludedScriptPayloads: asStringArray(
         source.excludedScriptPayloads,
         "fixture.source.excludedScriptPayloads"
+      ),
+      intentionalDivergences: asStringArray(
+        source.intentionalDivergences,
+        "fixture.source.intentionalDivergences"
       ),
       updatePolicy: asString(source.updatePolicy, "fixture.source.updatePolicy")
     },

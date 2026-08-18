@@ -1,9 +1,10 @@
 // Canvas adapter — markup for the credential profile form.
 //
-// The form is rendered exactly once per page and relocated by the client
-// script between its two hosts: step 1 of the New Environment wizard (creating
-// a profile in service of an environment) and the Credentials sub-tab (editing
-// an existing profile). Rendering it once keeps every element ID in this
+// The form always creates a new profile; existing profiles cannot be edited.
+// It is rendered exactly once per page and relocated by the client script
+// between its two hosts: step 1 of the New Environment wizard (creating a
+// profile in service of an environment) and the Credentials sub-tab (creating
+// a standalone profile). Rendering it once keeps every element ID in this
 // fragment unique in the document, so the credential client script can keep
 // addressing them by ID from either context.
 

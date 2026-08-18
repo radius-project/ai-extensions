@@ -31,6 +31,7 @@ export interface EnvironmentFormPreset {
   name?: string;
   profile?: string;
   config?: EnvironmentInfrastructure;
+  provider?: string;
   editing?: string;
   advance?: boolean;
 }
@@ -40,7 +41,10 @@ export interface EnvironmentPaneDependencies {
   loadProfiles(preselectName?: string): Promise<void> | void;
   loadGitHubIdentity(fresh?: boolean): void;
   clearSharedAppPin(): void;
-  setPendingInfraSelection?(config: EnvironmentInfrastructure | null): void;
+  setPendingInfraSelection?(
+    config: EnvironmentInfrastructure | null,
+    provider: "azure" | "aws"
+  ): void;
   currentInfraSelection?(provider: "azure" | "aws"): EnvironmentInfrastructure;
 }
 
@@ -342,6 +346,7 @@ export function initializeEnvironmentPane(
           name: environment.name,
           profile: environment.credentialProfile,
           config: environment.config,
+          provider: environment.provider,
           editing: environment.name
         });
       });
@@ -444,7 +449,8 @@ export function initializeEnvironmentPane(
         : "An environment cannot be renamed. Delete it and create a new one to change the name.";
     }
     dependencies.setPendingInfraSelection?.(
-      editTarget === "" ? null : (preset.config ?? null)
+      editTarget === "" ? null : (preset.config ?? null),
+      preset.provider === "aws" ? "aws" : "azure"
     );
     const clientId = requiredInput(context, "az-client-id");
     if (clientId) clientId.value = "";
@@ -465,7 +471,7 @@ export function initializeEnvironmentPane(
 
   const showEnvironmentLanding = (): void => {
     editTarget = "";
-    dependencies.setPendingInfraSelection?.(null);
+    dependencies.setPendingInfraSelection?.(null, "azure");
     environmentForm.style.display = "none";
     environmentLanding.style.display = "";
     loadEnvironmentTable();
@@ -525,7 +531,8 @@ export function initializeEnvironmentPane(
           "aws"
         : "azure";
       dependencies.setPendingInfraSelection?.(
-        dependencies.currentInfraSelection?.(provider) ?? {}
+        dependencies.currentInfraSelection?.(provider) ?? {},
+        provider
       );
       void dependencies.loadProfiles(profileSelect.value);
     }

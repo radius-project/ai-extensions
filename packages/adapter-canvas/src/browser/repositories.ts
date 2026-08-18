@@ -249,11 +249,20 @@ export function environmentIsReady(status: string): boolean {
   return status === "success";
 }
 
+// The server reports "success", "failed", or "pending". Anything else — an
+// empty string, or a value from a newer server — is genuinely unknown, so it is
+// labelled as such instead of being explained away as still being created.
+function environmentIsPending(status: string): boolean {
+  return status === "pending";
+}
+
 export function environmentOptionLabel(environment: EnvironmentInfo): string {
-  if (environmentIsReady(environment.status ?? "")) return environment.name;
-  return `${environment.name}${
-    environment.status === "failed" ? " (creation failed)" : " (being created…)"
-  }`;
+  const status = environment.status ?? "";
+  if (environmentIsReady(status)) return environment.name;
+  if (status === "failed") return `${environment.name} (creation failed)`;
+  if (environmentIsPending(status))
+    return `${environment.name} (being created…)`;
+  return `${environment.name} (status unknown)`;
 }
 
 export function firstReadyEnvironmentName(
@@ -274,13 +283,16 @@ export function environmentNotReadyReason(
   if (status === "failed") {
     return `Environment "${name}" was not created successfully, so it cannot be deployed to. Fix or recreate it first.`;
   }
-  return `Environment "${name}" is still being created. Wait for its credential verification to finish before deploying.`;
+  if (environmentIsPending(status)) {
+    return `Environment "${name}" is still being created. Wait for its credential verification to finish before deploying.`;
+  }
+  return `The status of environment "${name}" could not be determined, so it cannot be deployed to. Refresh to try again.`;
 }
 
 export function environmentNotReadyPhrase(status: string): string {
-  return status === "failed" ?
-      "was not created successfully"
-    : "is still being created";
+  if (status === "failed") return "was not created successfully";
+  if (environmentIsPending(status)) return "is still being created";
+  return "has an unknown status";
 }
 
 function selectValue(select: DomSelectElement | null): string {

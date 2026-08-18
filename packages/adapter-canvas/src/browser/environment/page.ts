@@ -223,8 +223,8 @@ export function initializeEnvironmentPage(
       clearSharedAppPin() {
         discovery.clearSharedAppPin();
       },
-      setPendingInfraSelection(config) {
-        discovery.setPendingInfraSelection(config);
+      setPendingInfraSelection(config, provider) {
+        discovery.setPendingInfraSelection(config, provider);
       },
       currentInfraSelection(provider) {
         return discovery.currentInfraSelection(provider);
@@ -333,13 +333,13 @@ export function initializeEnvironmentPage(
     }
     if (provider === "azure" && (subscriptionId === "" || tenantId === "")) {
       showFormError(
-        "The selected profile needs both a tenant ID and subscription ID. Edit the profile before creating the environment."
+        "The selected profile needs both a tenant ID and subscription ID. Delete the profile and create it again with those values before creating the environment."
       );
       return;
     }
     if (provider === "aws" && (accountId === "" || region === "")) {
       showFormError(
-        "The selected profile needs both an account ID and region. Edit the profile before creating the environment."
+        "The selected profile needs both an account ID and region. Delete the profile and create it again with those values before creating the environment."
       );
       return;
     }

@@ -22,6 +22,9 @@
       "environment-result contentIds/roles/statuses - the reset button previously reloaded on any response. It now fails closed and reports a rejected or non-ok reset in a new #deploy-reset-status alert region, so that id, its role and its empty initial status text are additions the oracle records rather than regressions.",
       "environment-list markerOrder - Phase 4C moved executable row-action wiring into the importable environment entry, where row handlers are declared before the initial table load. Every legacy marker and semantic assertion remains present; only the declaration order changed, and collocated behavior tests execute the load-then-wire lifecycle."
     ],
+    "intentionalDivergences": [
+      "environment-list, environment-form markers - this PR replaced the notify() fallback string \"Delete the application deployment first.\" with a confirm dialog titled \"Delete the application first\", so the legacy string no longer appears in the rendered payload. The marker was retargeted rather than dropped so the slot keeps asserting the same ordering position for the same user-facing message; every other change to these cases is additive (new ids, one new dialog role, one newly disabled control) and leaves the legacy expectations unchanged."
+    ],
     "updatePolicy": "This fixture is a reviewed compatibility decision. Do not regenerate it from current renderers and do not edit expected values to make a test pass: change it only with an explicit, reviewed compatibility change that explains why legacy behaviour is intentionally no longer preserved."
   },
   "exports": [
