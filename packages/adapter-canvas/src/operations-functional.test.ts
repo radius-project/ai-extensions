@@ -563,7 +563,8 @@ describe("cooperative control functional coverage", () => {
     expect(recovered.control.commands).toEqual([
       expect.objectContaining({
         commandId: accepted.command.commandId,
-        idempotencyKey: accepted.command.idempotencyKey
+        kind: "retry_setup",
+        attempt: 2
       })
     ]);
     // The same command cannot be accepted twice after a restart.

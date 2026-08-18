@@ -17,20 +17,10 @@ import {
 } from "./operations-control.js";
 import { routeKey } from "../route-table.js";
 import {
-  acceptCommand,
-  applySetupResumePoint,
-  applyStopRequest,
-  announceOperationTerminal,
   beginRetryAttempt,
   buildStages,
-  canContinueSetup,
-  canRetryCleanup,
-  canRetrySetup,
-  canRetryVerification,
-  canStartRollback,
   createOperation,
   enterStage,
-  findActiveCommand,
   finish,
   onOperationTerminal,
   recordAzureApp,
@@ -41,12 +31,7 @@ import {
   recordServicePrincipal,
   requestStop,
   requireInput,
-  rollbackRetryAttempt,
-  setCommandState,
-  setStageState,
-  snapshotRetryState,
   stopAtBoundary,
-  toClientView,
   STAGE_VERIFY,
   type OperationControlRecord
 } from "../../operations.js";
@@ -127,14 +112,15 @@ function postContext(
 }
 
 interface Journal {
-  scheduled: Array<{ kind: string; instanceId: string; commandId?: string }>;
+  scheduled: Array<{ kind: string; instanceId: string; commandId: string }>;
   persistCalls: number;
 }
 
-// Real model functions wherever they are pure state transitions — faking
-// `applyStopRequest` or `canRetrySetup` would only let this suite drift from the
-// eligibility rules it exists to protect. The doubles are the three seams a test
-// must control: the registry lookup, the durable write, and the schedulers.
+// The route module calls the pure model directly, so the only doubles a test
+// needs are the genuine I/O seams: the registry lookup, the durable write, the
+// merge proof, and the per-instance runner. `get` and `isPullRequestMerged`
+// throw until a scenario models them, so a route that reaches an seam it must
+// not touch fails instead of quietly succeeding.
 function dependencies(
   overrides: Partial<OperationsControlDependencies> = {}
 ): OperationsControlDependencies & { journal: Journal } {
@@ -148,46 +134,13 @@ function dependencies(
       journal.persistCalls += 1;
       return Promise.resolve();
     },
-    toClientView,
-    applyStopRequest,
-    announceOperationTerminal,
-    snapshotRetryState,
-    rollbackRetryAttempt,
-    beginRetryAttempt,
-    acceptCommand,
-    findActiveCommand,
-    setCommandState,
-    canContinueSetup,
-    canRetrySetup,
-    canRetryVerification,
-    canStartRollback,
-    canRetryCleanup,
-    applySetupResumePoint,
-    setStageState,
-    enterStage,
-    finish,
-    stageVerify: STAGE_VERIFY,
     isPullRequestMerged: () => {
       throw new Error("isPullRequestMerged not stubbed");
     },
-    scheduleSetupContinuation: (instanceId) => {
-      journal.scheduled.push({ kind: "setup", instanceId });
+    schedule: ({ kind, instanceId, commandId }) => {
+      journal.scheduled.push({ kind, instanceId, commandId });
       return true;
-    },
-    scheduleVerificationRetry: (instanceId, _operation, commandId) => {
-      journal.scheduled.push({ kind: "verification", instanceId, commandId });
-      return true;
-    },
-    scheduleCleanupRetry: (instanceId, _operation, commandId) => {
-      journal.scheduled.push({ kind: "cleanup", instanceId, commandId });
-      return true;
-    },
-    scheduleRollback: (instanceId, _operation, commandId) => {
-      journal.scheduled.push({ kind: "rollback", instanceId, commandId });
-      return true;
-    },
-    errorMessage: (error) =>
-      error instanceof Error ? error.message : String(error)
+    }
   };
   return Object.assign(base, overrides, { journal });
 }
@@ -219,7 +172,10 @@ function retryableSetup(repo = "contoso/store"): OperationFixture {
   return op;
 }
 
-function mergeHandoff(repo = "contoso/store"): OperationRecord {
+function mergeHandoff({
+  repo = "contoso/store",
+  pullRequestUrl = "https://github.com/contoso/store/pull/7"
+}: { repo?: string; pullRequestUrl?: string | null } = {}): OperationRecord {
   const op = newOperation(repo);
   recordAzureApp(op, { state: "created", appId: "app-1" });
   recordServicePrincipal(op, { state: "created", appId: "app-1" });
@@ -232,7 +188,7 @@ function mergeHandoff(repo = "contoso/store"): OperationRecord {
     mode: "pull_request",
     branch: "radius-setup",
     baseBranch: "main",
-    pullRequestUrl: "https://github.com/contoso/store/pull/7"
+    pullRequestUrl
   });
   enterStage(op, STAGE_VERIFY);
   op.verification = {
@@ -244,10 +200,7 @@ function mergeHandoff(repo = "contoso/store"): OperationRecord {
     runUrl: null
   };
   finish(op, "action_required", {
-    terminal: {
-      reason: "pr-merge-required",
-      pullRequestUrl: "https://github.com/contoso/store/pull/7"
-    }
+    terminal: { reason: "pr-merge-required", pullRequestUrl }
   });
   return op;
 }
@@ -418,22 +371,6 @@ describe("POST /api/operations/{id}/stop", () => {
     expect(announced).toEqual([]);
   });
 
-  it("answers 404 for an operation it does not know", async () => {
-    const deps = dependencies({ get: () => null });
-    const out = recorder();
-
-    await handleStopOperation(
-      postContext("/api/operations/op_missing/stop", out.response),
-      deps
-    );
-
-    expect(out.recording.status).toBe(404);
-    expect(out.payload()).toEqual({
-      error: "Unknown operation.",
-      code: "unknown-operation"
-    });
-  });
-
   it("answers 404 rather than throwing on an undecodable operation id", async () => {
     const deps = dependencies({
       get: () => {
@@ -521,7 +458,11 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     // it rather than creating a second one.
     expect(op.resumeFrom).toBe("service_principal");
     expect(deps.journal.scheduled).toEqual([
-      { kind: "setup", instanceId: "panel-a" }
+      {
+        kind: "setup_continuation",
+        instanceId: "panel-a",
+        commandId: payload.commandId
+      }
     ]);
     // Saved before any work was scheduled.
     expect(deps.journal.persistCalls).toBe(1);
@@ -617,7 +558,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     ]);
     expect(deps.journal.scheduled).toEqual([
       {
-        kind: "verification",
+        kind: "verification_retry",
         instanceId: "panel-a",
         commandId: payload.commandId
       }
@@ -649,17 +590,13 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     expect(deps.journal.scheduled).toEqual([]);
   });
 
-  it("fails closed when the eligibility result names no pull request", async () => {
-    const op = mergeHandoff();
+  it("fails closed when the saved record names no pull request", async () => {
+    // A merge-required record whose pull-request URL was never saved cannot be
+    // checked, so the retry must refuse rather than proceed on an unverifiable
+    // claim.
+    const op = mergeHandoff({ pullRequestUrl: null });
     const deps = dependencies({
       get: () => op,
-      // A retryable verdict that carries no pull request cannot be checked, so
-      // the retry must refuse rather than proceed on an unverifiable claim.
-      canRetryVerification: () => ({
-        ok: true,
-        code: "verification-retry-allowed",
-        requiresMergedPullRequest: true
-      }),
       isPullRequestMerged: (_operation, pullRequestUrl) => {
         expect(pullRequestUrl).toBeNull();
         return Promise.resolve(false);
@@ -705,29 +642,6 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     expect(out.recording.status).toBe(409);
     expect(out.payload().error).toBe("Another setup is already running for .");
     expect(out.recording.body).not.toContain("undefined");
-  });
-
-  it("reports a refused command registration without inventing an id", async () => {
-    const op = retryableSetup();
-    const deps = dependencies({
-      get: () => op,
-      acceptCommand: () => ({ ok: false, duplicate: false, command: null })
-    });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/setup`,
-        out.response
-      ),
-      deps
-    );
-
-    expect(out.recording.status).toBe(202);
-    expect(out.payload()).toMatchObject({ duplicate: true, commandId: null });
-    // Nothing was reopened and nothing was scheduled.
-    expect(op.state).toBe("failed_partial");
-    expect(deps.journal.scheduled).toEqual([]);
   });
 
   it("refuses a verification retry for a failure it cannot classify", async () => {
@@ -787,37 +701,12 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     const payload = out.payload();
     expect(payload.commandId).toBe(`${op.operationId}:retry_cleanup:1:cleanup`);
     expect(deps.journal.scheduled).toEqual([
-      { kind: "cleanup", instanceId: "panel-a", commandId: payload.commandId }
+      {
+        kind: "cleanup_retry",
+        instanceId: "panel-a",
+        commandId: payload.commandId
+      }
     ]);
-  });
-
-  it("refuses a retry while another operation owns the repository", async () => {
-    const op = retryableSetup();
-    const deps = dependencies({
-      get: () => op,
-      acquireForRetry: () => ({
-        ok: false,
-        conflict: { operationId: "op_live" }
-      })
-    });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/setup`,
-        out.response
-      ),
-      deps
-    );
-
-    expect(out.recording.status).toBe(409);
-    expect(out.payload()).toEqual({
-      error: "Another setup is already running for contoso/store.",
-      code: "operation-in-progress",
-      operationId: "op_live"
-    });
-    expect(op.state).toBe("failed_partial");
-    expect(deps.journal.scheduled).toEqual([]);
   });
 
   it("resolves a repeated submission to the command already in flight", async () => {
@@ -855,33 +744,6 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     expect(deps.journal.scheduled).toHaveLength(1);
   });
 
-  it("puts the record back when the retry cannot be saved", async () => {
-    const op = retryableSetup();
-    const deps = dependencies({
-      get: () => op,
-      persistOperations: () => Promise.reject(new Error("disk gone"))
-    });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/setup`,
-        out.response
-      ),
-      deps
-    );
-
-    expect(out.recording.status).toBe(500);
-    expect(out.payload()).toMatchObject({
-      code: "operation-retry-persist-failed",
-      detail: "disk gone"
-    });
-    expect(op.state).toBe("failed_partial");
-    expect(op.control.attempts.setup).toBe(1);
-    expect(op.control.commands).toEqual([]);
-    expect(deps.journal.scheduled).toEqual([]);
-  });
-
   it("closes a reopened operation no runner accepted", async () => {
     const op = retryableSetup();
     const persists: string[] = [];
@@ -891,7 +753,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
         persists.push("persist");
         return Promise.resolve();
       },
-      scheduleSetupContinuation: () => false
+      schedule: () => false
     });
     const out = recorder();
 
@@ -926,7 +788,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
             Promise.resolve()
           : Promise.reject(new Error("disk gone"));
       },
-      scheduleSetupContinuation: () => false
+      schedule: () => false
     });
     const out = recorder();
 
@@ -941,19 +803,6 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     expect(out.recording.status).toBe(202);
     expect(op.state).toBe("failed");
     expect(calls).toBe(2);
-  });
-
-  it("answers 404 for a retry against an unknown operation", async () => {
-    const deps = dependencies({ get: () => null });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext("/api/operations/op_missing/retry/setup", out.response),
-      deps
-    );
-
-    expect(out.recording.status).toBe(404);
-    expect(out.payload().code).toBe("unknown-operation");
   });
 
   it("refuses a retry kind it does not implement", async () => {
@@ -1050,7 +899,11 @@ describe("POST /api/operations/{id}/continue", () => {
     expect(payload.operation.state).toBe("running");
     expect(op.resumeFrom).toBe("federated_credentials");
     expect(deps.journal.scheduled).toEqual([
-      { kind: "setup", instanceId: "panel-a" }
+      {
+        kind: "setup_continuation",
+        instanceId: "panel-a",
+        commandId: payload.commandId
+      }
     ]);
     // The command is saved before any work is handed to a runner.
     expect(deps.journal.persistCalls).toBe(1);
@@ -1093,96 +946,6 @@ describe("POST /api/operations/{id}/continue", () => {
     expect(out.recording.status).toBe(409);
     expect(out.payload().code).toBe("operation-active");
     expect(deps.journal.scheduled).toEqual([]);
-  });
-
-  it("resolves a repeated continue to the command already in flight", async () => {
-    const op = stoppedSetup();
-    const deps = dependencies({ get: () => op });
-
-    const first = recorder();
-    await handleContinueOperation(
-      postContext(`/api/operations/${op.operationId}/continue`, first.response),
-      deps
-    );
-    const second = recorder();
-    await handleContinueOperation(
-      postContext(
-        `/api/operations/${op.operationId}/continue`,
-        second.response
-      ),
-      deps
-    );
-
-    expect(second.recording.status).toBe(202);
-    expect(second.payload()).toMatchObject({
-      duplicate: true,
-      commandId: first.payload().commandId
-    });
-    expect(deps.journal.scheduled).toHaveLength(1);
-  });
-
-  it("restores the stopped state when the continuation cannot be saved", async () => {
-    const op = stoppedSetup();
-    const deps = dependencies({
-      get: () => op,
-      persistOperations: () => Promise.reject(new Error("disk full"))
-    });
-    const out = recorder();
-
-    await handleContinueOperation(
-      postContext(`/api/operations/${op.operationId}/continue`, out.response),
-      deps
-    );
-
-    expect(out.recording.status).toBe(500);
-    expect(out.payload()).toMatchObject({
-      code: "operation-continue-persist-failed",
-      detail: "disk full"
-    });
-    expect(op.state).toBe("cancelled");
-    expect(op.control.commands).toEqual([]);
-    expect(deps.journal.scheduled).toEqual([]);
-  });
-
-  it("restores the stopped decision when no runner accepts the continuation", async () => {
-    const op = stoppedSetup();
-    const deps = dependencies({
-      get: () => op,
-      scheduleSetupContinuation: () => false
-    });
-    const out = recorder();
-
-    await handleContinueOperation(
-      postContext(`/api/operations/${op.operationId}/continue`, out.response),
-      deps
-    );
-
-    expect(out.recording.status).toBe(503);
-    expect(out.payload()).toMatchObject({
-      code: "operation-command-unscheduled"
-    });
-    // Nothing ran, so the customer is put back on the same decision rather than
-    // shown a failure that never happened, and no command is left behind to
-    // absorb their next click.
-    expect(op.state).toBe("cancelled");
-    expect(op.control.attempts.setup).toBe(1);
-    expect(op.control.commands).toEqual([]);
-    expect(
-      out.payload().operation.actions.map((a: { id: string }) => a.id)
-    ).toEqual(["continue-setup", "rollback"]);
-  });
-
-  it("answers 404 for a continue against an unknown operation", async () => {
-    const deps = dependencies({ get: () => null });
-    const out = recorder();
-
-    await handleContinueOperation(
-      postContext("/api/operations/op_missing/continue", out.response),
-      deps
-    );
-
-    expect(out.recording.status).toBe(404);
-    expect(out.payload().code).toBe("unknown-operation");
   });
 });
 
@@ -1273,104 +1036,12 @@ describe("POST /api/operations/{id}/rollback", () => {
     expect(deps.journal.scheduled).toEqual([]);
   });
 
-  it("resolves a duplicate rollback to the accepted command instead of deleting twice", async () => {
-    const op = stoppedSetup();
-    const deps = dependencies({ get: () => op });
-
-    const first = recorder();
-    await handleRollbackOperation(
-      postContext(`/api/operations/${op.operationId}/rollback`, first.response),
-      deps
-    );
-    const second = recorder();
-    await handleRollbackOperation(
-      postContext(
-        `/api/operations/${op.operationId}/rollback`,
-        second.response
-      ),
-      deps
-    );
-
-    expect(second.recording.status).toBe(202);
-    expect(second.payload()).toMatchObject({
-      duplicate: true,
-      commandId: first.payload().commandId
-    });
-    expect(deps.journal.scheduled).toHaveLength(1);
-  });
-
-  it("restores the stopped state and reports that no cleanup began when the save fails", async () => {
-    const op = stoppedSetup();
-    const deps = dependencies({
-      get: () => op,
-      persistOperations: () => Promise.reject(new Error("store offline"))
-    });
-    const out = recorder();
-
-    await handleRollbackOperation(
-      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
-      deps
-    );
-
-    expect(out.recording.status).toBe(500);
-    expect(out.payload()).toMatchObject({
-      code: "operation-rollback-persist-failed",
-      error:
-        "Radius could not save the rollback request, so no cleanup began. Try again."
-    });
-    expect(op.state).toBe("cancelled");
-    expect(op.control.attempts.cleanup).toBe(0);
-    expect(deps.journal.scheduled).toEqual([]);
-  });
-
-  it("leaves a terminal, actionable record when no runner accepts the rollback", async () => {
-    const op = stoppedSetup();
-    const deps = dependencies({ get: () => op, scheduleRollback: () => false });
-    const out = recorder();
-
-    await handleRollbackOperation(
-      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
-      deps
-    );
-
-    expect(out.recording.status).toBe(503);
-    expect(op.state).toBe("cancelled");
-    expect(
-      out.payload().operation.actions.map((entry: { id: string }) => entry.id)
-    ).toContain("rollback");
-  });
-
-  it("refuses a rollback while another operation owns the repository", async () => {
-    const op = stoppedSetup();
-    const deps = dependencies({
-      get: () => op,
-      acquireForRetry: () => ({
-        ok: false,
-        conflict: { operationId: "op_live" }
-      })
-    });
-    const out = recorder();
-
-    await handleRollbackOperation(
-      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
-      deps
-    );
-
-    expect(out.recording.status).toBe(409);
-    expect(out.payload()).toEqual({
-      error: "Another setup is already running for contoso/store.",
-      code: "operation-in-progress",
-      operationId: "op_live"
-    });
-    expect(op.state).toBe("cancelled");
-  });
-
   it("still restores the decision when the follow-up write also fails", async () => {
     const op = stoppedSetup();
     let allowFirstWrite = true;
     const deps = dependencies({
       get: () => op,
-      scheduleRollback: () => false,
+      schedule: () => false,
       persistOperations: () => {
         if (allowFirstWrite) {
           allowFirstWrite = false;
@@ -1392,17 +1063,211 @@ describe("POST /api/operations/{id}/rollback", () => {
     expect(op.state).toBe("cancelled");
     expect(op.control.attempts.cleanup).toBe(0);
   });
+});
 
-  it("answers 404 for a rollback against an unknown operation", async () => {
-    const deps = dependencies({ get: () => null });
-    const out = recorder();
+// The four routes carry different decisions but share one command executor, so
+// the behavior that does not vary by route is asserted once over every route
+// that reaches it rather than repeated in each suite. What each row states is
+// the part that is genuinely per-route: the code, the message, and the record
+// the customer is put back on.
+describe("contracts shared by every control route", () => {
+  const routes = [
+    {
+      name: "stop",
+      path: (id: string) => `/api/operations/${id}/stop`,
+      handler: handleStopOperation
+    },
+    {
+      name: "continue",
+      path: (id: string) => `/api/operations/${id}/continue`,
+      handler: handleContinueOperation
+    },
+    {
+      name: "rollback",
+      path: (id: string) => `/api/operations/${id}/rollback`,
+      handler: handleRollbackOperation
+    },
+    {
+      name: "retry",
+      path: (id: string) => `/api/operations/${id}/retry/setup`,
+      handler: handleRetryOperation
+    }
+  ] as const;
 
-    await handleRollbackOperation(
-      postContext("/api/operations/op_missing/rollback", out.response),
-      deps
-    );
+  it.each(routes)(
+    "answers 404 for an unknown operation on $name",
+    async ({ path, handler }) => {
+      const deps = dependencies({ get: () => null });
+      const out = recorder();
 
-    expect(out.recording.status).toBe(404);
-    expect(out.payload().code).toBe("unknown-operation");
-  });
+      await handler(postContext(path("op_missing"), out.response), deps);
+
+      expect(out.recording.status).toBe(404);
+      expect(out.payload()).toEqual({
+        error: "Unknown operation.",
+        code: "unknown-operation"
+      });
+      expect(deps.journal.persistCalls).toBe(0);
+    }
+  );
+
+  const commandRoutes = [
+    {
+      name: "continue",
+      path: (id: string) => `/api/operations/${id}/continue`,
+      handler: handleContinueOperation,
+      operation: stoppedSetup,
+      restoredState: "cancelled",
+      attemptKind: "setup",
+      restoredAttempt: 1,
+      persistFailureCode: "operation-continue-persist-failed",
+      persistFailureError:
+        "Radius could not save the request to continue setup, so no work was started. Try again."
+    },
+    {
+      name: "rollback",
+      path: (id: string) => `/api/operations/${id}/rollback`,
+      handler: handleRollbackOperation,
+      operation: stoppedSetup,
+      restoredState: "cancelled",
+      attemptKind: "cleanup",
+      restoredAttempt: 0,
+      persistFailureCode: "operation-rollback-persist-failed",
+      persistFailureError:
+        "Radius could not save the rollback request, so no cleanup began. Try again."
+    },
+    {
+      name: "retry/setup",
+      path: (id: string) => `/api/operations/${id}/retry/setup`,
+      handler: handleRetryOperation,
+      operation: retryableSetup,
+      restoredState: "failed_partial",
+      attemptKind: "setup",
+      restoredAttempt: 1,
+      persistFailureCode: "operation-retry-persist-failed",
+      persistFailureError:
+        "Radius could not save the retry request, so no work was started. Try again."
+    }
+  ] as const;
+
+  it.each(commandRoutes)(
+    "puts the record back and starts nothing when $name cannot be saved",
+    async (route) => {
+      const op = route.operation();
+      const deps = dependencies({
+        get: () => op,
+        persistOperations: () => Promise.reject(new Error("disk gone"))
+      });
+      const out = recorder();
+
+      await route.handler(
+        postContext(route.path(op.operationId), out.response),
+        deps
+      );
+
+      expect(out.recording.status).toBe(500);
+      expect(out.payload()).toMatchObject({
+        code: route.persistFailureCode,
+        error: route.persistFailureError,
+        detail: "disk gone"
+      });
+      expect(op.state).toBe(route.restoredState);
+      expect(op.control.attempts[route.attemptKind]).toBe(
+        route.restoredAttempt
+      );
+      expect(op.control.commands).toEqual([]);
+      expect(deps.journal.scheduled).toEqual([]);
+    }
+  );
+
+  it.each(commandRoutes)(
+    "refuses $name while another operation owns the repository",
+    async (route) => {
+      const op = route.operation();
+      const deps = dependencies({
+        get: () => op,
+        acquireForRetry: () => ({
+          ok: false,
+          conflict: { operationId: "op_live" }
+        })
+      });
+      const out = recorder();
+
+      await route.handler(
+        postContext(route.path(op.operationId), out.response),
+        deps
+      );
+
+      expect(out.recording.status).toBe(409);
+      expect(out.payload()).toEqual({
+        error: "Another setup is already running for contoso/store.",
+        code: "operation-in-progress",
+        operationId: "op_live"
+      });
+      expect(op.state).toBe(route.restoredState);
+      expect(deps.journal.scheduled).toEqual([]);
+    }
+  );
+
+  // The two first-choice commands answer a repeated submission with the command
+  // already in flight, so a double click never continues or deletes twice.
+  const firstChoiceRoutes = commandRoutes.filter(
+    (route) => route.name !== "retry/setup"
+  );
+
+  it.each(firstChoiceRoutes)(
+    "resolves a repeated $name to the command already in flight",
+    async (route) => {
+      const op = route.operation();
+      const deps = dependencies({ get: () => op });
+
+      const first = recorder();
+      await route.handler(
+        postContext(route.path(op.operationId), first.response),
+        deps
+      );
+      const second = recorder();
+      await route.handler(
+        postContext(route.path(op.operationId), second.response),
+        deps
+      );
+
+      expect(second.recording.status).toBe(202);
+      expect(second.payload()).toMatchObject({
+        duplicate: true,
+        commandId: first.payload().commandId
+      });
+      expect(deps.journal.scheduled).toHaveLength(1);
+    }
+  );
+
+  it.each(firstChoiceRoutes)(
+    "restores the stopped decision when no runner accepts $name",
+    async (route) => {
+      const op = route.operation();
+      const deps = dependencies({ get: () => op, schedule: () => false });
+      const out = recorder();
+
+      await route.handler(
+        postContext(route.path(op.operationId), out.response),
+        deps
+      );
+
+      // Nothing ran, so the customer is put back on the same decision rather
+      // than shown a failure that never happened, and no command is left behind
+      // to absorb their next click.
+      expect(out.recording.status).toBe(503);
+      expect(out.payload()).toMatchObject({
+        code: "operation-command-unscheduled"
+      });
+      expect(op.state).toBe("cancelled");
+      expect(op.control.attempts[route.attemptKind]).toBe(
+        route.restoredAttempt
+      );
+      expect(op.control.commands).toEqual([]);
+      expect(
+        out.payload().operation.actions.map((entry: { id: string }) => entry.id)
+      ).toEqual(["continue-setup", "rollback"]);
+    }
+  );
 });
