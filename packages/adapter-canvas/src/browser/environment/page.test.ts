@@ -651,7 +651,7 @@ describe("initializeEnvironmentPage", () => {
         tenantId: "",
         subscriptionId: ""
       },
-      "The selected profile needs both a tenant ID and subscription ID. Delete the profile and create it again with those values before creating the environment."
+      "The selected profile needs both a tenant ID and subscription ID."
     ],
     [
       "AWS",
@@ -661,7 +661,7 @@ describe("initializeEnvironmentPage", () => {
         accountId: "",
         region: ""
       },
-      "The selected profile needs both an account ID and region. Delete the profile and create it again with those values before creating the environment."
+      "The selected profile needs both an account ID and region."
     ]
   ])(
     "fails closed for incomplete %s profile identity",

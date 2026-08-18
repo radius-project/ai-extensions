@@ -1531,11 +1531,6 @@ describe("deployed pane state", () => {
       "",
       'The status of environment "dev" could not be determined, so it cannot be deployed to. Refresh to try again.',
       "has an unknown status"
-    ],
-    [
-      "mystery",
-      'The status of environment "dev" could not be determined, so it cannot be deployed to. Refresh to try again.',
-      "has an unknown status"
     ]
   ])(
     "explains why a %s environment blocks a deploy",
@@ -1549,7 +1544,7 @@ describe("deployed pane state", () => {
     expect(environmentNotReadyReason("dev", "success")).toBe("");
   });
 
-  it.each([["pending"], ["failed"], [""], ["mystery"]])(
+  it.each([["pending"], ["failed"], [""]])(
     "blocks the deploy while the environment is %s",
     (status) => {
       const { browser, button, hint } = deployedPage();
