@@ -323,8 +323,7 @@ export interface DeployRepairHandoffInput {
   instanceId: string;
 }
 
-// Payload for the informational failure notice. Carries the failure kind so the
-// runtime can pick the right (non-repair) wording, but no attemptId: a notice
+// Payload for the informational failure notice. Carries no attemptId: a notice
 // never opens a repair loop, so there is no attempt for the agent to address.
 export interface DeployFailureNoticeInput {
   repo: string;
