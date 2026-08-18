@@ -11,7 +11,7 @@ loopback HTTP host that backs the webview, and delegates all product logic to
 | `extension.ts` | SDK entry: `joinSession()` canvas + tool wiring, process lifecycle. |
 | `server.ts`    | Loopback HTTP host: request handler, page router, server lifecycle. |
 | `pages/`       | HTML page renderers split by page responsibility.                   |
-| `client.ts`    | Browser-side JS injected into pages as string constants.            |
+| `browser/`     | Browser behavior compiled in memory into inline page scripts.       |
 | `vendor.ts`    | CDN/vendor script caching.                                          |
 | `deploy.ts`    | Deploy monitoring + log parsing.                                    |
 | `infra.ts`     | OIDC / workflow / portal wrappers over the core.                    |
