@@ -17,7 +17,6 @@ export const ENVIRONMENTS_ENTRY_KEY = "environment-environments";
 export const ENVIRONMENT_LIST_PATH = "/api/list-environments";
 export const ENVIRONMENT_DELETE_PATH = "/api/delete-environment";
 export const ENVIRONMENT_POLL_MS = 10000;
-export const ENVIRONMENT_DELETE_REDIRECT_MS = 2000;
 
 export interface EnvironmentRecord {
   name: string;
@@ -42,9 +41,7 @@ export interface EnvironmentPaneDependencies {
   loadGitHubIdentity(fresh?: boolean): void;
   clearSharedAppPin(): void;
   setPendingInfraSelection?(config: EnvironmentInfrastructure | null): void;
-  currentInfraSelection?(
-    provider: "azure" | "aws"
-  ): EnvironmentInfrastructure;
+  currentInfraSelection?(provider: "azure" | "aws"): EnvironmentInfrastructure;
 }
 
 export interface EnvironmentDecisionPort {
@@ -304,7 +301,8 @@ export function initializeEnvironmentPane(
               options.confirmDialog?.show({
                 title: "Delete the application first",
                 message: `${
-                  error || "An application is still deployed to this environment."
+                  error ||
+                  "An application is still deployed to this environment."
                 }\n\nNothing has been deleted. Delete the application on the Deployments page, then delete this environment.`,
                 confirmLabel: "Go to Deployments",
                 confirmVariant: "primary",
@@ -523,7 +521,9 @@ export function initializeEnvironmentPane(
     loadEnvironmentTable();
     if (environmentForm.style.display !== "none") {
       const provider =
-        context.dom.inputById("env-provider")?.value === "aws" ? "aws" : "azure";
+        context.dom.inputById("env-provider")?.value === "aws" ?
+          "aws"
+        : "azure";
       dependencies.setPendingInfraSelection?.(
         dependencies.currentInfraSelection?.(provider) ?? {}
       );

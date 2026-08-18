@@ -52,8 +52,14 @@ export interface EnvironmentInfo {
   status?: string;
 }
 
+// The listing parser always resolves a status string, so consumers of a parsed
+// listing never have to re-apply a fallback for it.
+export interface ParsedEnvironmentInfo extends EnvironmentInfo {
+  status: string;
+}
+
 export interface EnvironmentListing {
-  environments: EnvironmentInfo[];
+  environments: ParsedEnvironmentInfo[];
   error: string;
 }
 
@@ -246,9 +252,7 @@ export function environmentIsReady(status: string): boolean {
 export function environmentOptionLabel(environment: EnvironmentInfo): string {
   if (environmentIsReady(environment.status ?? "")) return environment.name;
   return `${environment.name}${
-    environment.status === "failed" ?
-      " (creation failed)"
-    : " (being created…)"
+    environment.status === "failed" ? " (creation failed)" : " (being created…)"
   }`;
 }
 
@@ -258,8 +262,7 @@ export function firstReadyEnvironmentName(
   return (
     environments.find((environment) =>
       environmentIsReady(environment.status ?? "")
-    )
-      ?.name ?? ""
+    )?.name ?? ""
   );
 }
 
@@ -544,8 +547,7 @@ export function populatePlannedSelectors(
           for (const environment of listing.environments) {
             options.environmentProviders[environment.name] =
               environment.provider;
-            state.environmentStatuses[environment.name] =
-              environment.status ?? "";
+            state.environmentStatuses[environment.name] = environment.status;
           }
           dom.setOptions(
             envSelect,

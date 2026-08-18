@@ -17,6 +17,10 @@ import {
   buildEnvironmentOptions,
   buildRepoOptions,
   createDeployedState,
+  environmentIsReady,
+  environmentNotReadyPhrase,
+  environmentNotReadyReason,
+  environmentOptionLabel,
   createPlanScheduler,
   createPlanState,
   deployDeployedApp,
@@ -311,6 +315,18 @@ describe("selector option building", () => {
     expect(buildApplicationOptions([], "store")).toEqual([
       { value: "store", label: "store" }
     ]);
+  });
+
+  it("selects the first ready environment when none is requested", () => {
+    const options = buildEnvironmentOptions(
+      [
+        { name: "pending", provider: "azure" },
+        { name: "prod", provider: "aws", status: "success" }
+      ],
+      ""
+    );
+    expect(options[0].selected).toBe(false);
+    expect(options[1].selected).toBe(true);
   });
 
   it("marks the requested environment as selected", () => {
@@ -678,7 +694,10 @@ describe("planned selectors", () => {
     );
     browser.net.handle(`${ENVIRONMENTS_PATH}?repo=octo%2Fapp`, () =>
       jsonResponse({
-        environments: [{ name: "dev", provider: "aws", status: "success" }]
+        environments: [
+          { name: "dev", provider: "aws", status: "success" },
+          { name: "pending", provider: "aws" }
+        ]
       })
     );
 
@@ -693,7 +712,7 @@ describe("planned selectors", () => {
     expect(created["planned-app"].value).toBe("store");
     expect(created["planned-branch"].value).toBe("feature");
     expect(created["planned-env"].value).toBe("dev");
-    expect(providers).toEqual({ dev: "aws" });
+    expect(providers).toEqual({ dev: "aws", pending: "aws" });
     expect(state.hasEnv).toBe(true);
     expect(button.textContent).toBe("Deploy Application");
     expect(button.disabled).toBe(false);
@@ -939,6 +958,25 @@ describe("planned primary button state", () => {
 
       expect(button.disabled).toBe(true);
       expect(button.getAttribute("title")).toBe(reason);
+    }
+  );
+
+  it.each([["pending"], ["failed"], [""]])(
+    "refuses to plan a deploy into a %s environment",
+    (status) => {
+      const { browser, button, created } = plannedButtons();
+      created["planned-branch"].value = "feature";
+      created["planned-env"].value = "dev";
+      const state = createPlanState();
+      if (status !== "") state.environmentStatuses.dev = status;
+
+      applyPlanEnvState(browser.context, state, true, false);
+
+      expect(button.dataset.mode).toBe("deploy");
+      expect(button.disabled).toBe(true);
+      expect(button.getAttribute("title")).toBe(
+        environmentNotReadyReason("dev", status)
+      );
     }
   );
 
@@ -1361,7 +1399,9 @@ describe("deployed pane state", () => {
       true,
       false,
       "",
-      false
+      false,
+      false,
+      "success"
     );
 
     expect(mode).toBe("deploy");
@@ -1467,6 +1507,119 @@ describe("deployed pane state", () => {
     expect(state).toEqual({ hasEnv: true, hasDeployment: true });
   });
 
+  it.each([
+    ["success", true],
+    ["pending", false],
+    ["failed", false],
+    ["", false]
+  ])("treats %s as ready=%s", (status, ready) => {
+    expect(environmentIsReady(status)).toBe(ready);
+  });
+
+  it.each([
+    [
+      "pending",
+      'Environment "dev" is still being created. Wait for its credential verification to finish before deploying.',
+      "is still being created"
+    ],
+    [
+      "failed",
+      'Environment "dev" was not created successfully, so it cannot be deployed to. Fix or recreate it first.',
+      "was not created successfully"
+    ]
+  ])(
+    "explains why a %s environment blocks a deploy",
+    (status, reason, phrase) => {
+      expect(environmentNotReadyReason("dev", status)).toBe(reason);
+      expect(environmentNotReadyPhrase(status)).toBe(phrase);
+    }
+  );
+
+  it("gives no reason for a ready environment", () => {
+    expect(environmentNotReadyReason("dev", "success")).toBe("");
+  });
+
+  it.each([["pending"], ["failed"], [""]])(
+    "blocks the deploy while the environment is %s",
+    (status) => {
+      const { browser, button, hint } = deployedPage();
+
+      const mode = applyDeployedEnvState(
+        browser.context,
+        createDeployedState(),
+        true,
+        false,
+        "",
+        false,
+        false,
+        status
+      );
+
+      expect(mode).toBe("deploy");
+      expect(button.disabled).toBe(true);
+      expect(button.getAttribute("title")).toBe(
+        environmentNotReadyReason("dev", status)
+      );
+      expect(hint.innerHTML).toContain(
+        `The environment (<strong>dev</strong>) ${environmentNotReadyPhrase(status)}, so this application cannot be deployed to it yet.`
+      );
+    }
+  );
+
+  it("blocks the deploy when environments could not be loaded at all", () => {
+    const { browser, button, hint } = deployedPage();
+
+    const mode = applyDeployedEnvState(
+      browser.context,
+      createDeployedState(),
+      false,
+      false,
+      "",
+      false,
+      true,
+      "success"
+    );
+
+    // An unreadable environment listing cannot prove the environment is
+    // missing, so the pane offers a blocked deploy rather than inviting the
+    // user to create a duplicate environment.
+    expect(mode).toBe("deploy");
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toBe(
+      "Environments could not be loaded. Try again before deploying."
+    );
+    expect(hint.textContent).toBe(
+      " Environments could not be loaded, so deployment actions are temporarily unavailable."
+    );
+  });
+
+  it("labels environment options by readiness", () => {
+    expect(
+      environmentOptionLabel({
+        name: "dev",
+        provider: "azure",
+        status: "success"
+      })
+    ).toBe("dev");
+    expect(
+      environmentOptionLabel({
+        name: "dev",
+        provider: "azure",
+        status: "failed"
+      })
+    ).toBe("dev (creation failed)");
+    expect(
+      environmentOptionLabel({
+        name: "dev",
+        provider: "azure",
+        status: "pending"
+      })
+    ).toBe("dev (being created…)");
+    expect(environmentOptionLabel({ name: "dev", provider: "azure" })).toBe(
+      "dev (being created…)"
+    );
+  });
+
   it("escapes selector values in the hint", () => {
     const { browser, hint, created } = deployedPage();
     created["deployed-app-select"].value = '<img src=x onerror="x">';
@@ -1477,7 +1630,9 @@ describe("deployed pane state", () => {
       true,
       false,
       "",
-      false
+      false,
+      false,
+      "success"
     );
 
     expect(hint.innerHTML).not.toContain("<img");

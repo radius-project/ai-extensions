@@ -544,7 +544,7 @@ export function initializeDeployedGraphPage(
         hasEnvironments = listing.environments.length > 0;
         for (const environment of listing.environments) {
           providers[environment.name] = environment.provider;
-          environmentStatuses[environment.name] = environment.status ?? "";
+          environmentStatuses[environment.name] = environment.status;
         }
         if (!envSelect) return;
         context.dom.setOptions(

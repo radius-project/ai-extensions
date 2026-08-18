@@ -254,7 +254,7 @@ function selectOfferedValue(
   const select = context.dom.selectById(selectId);
   if (!select) return false;
   for (const option of Array.from(select.options)) {
-    if (!isDomOptionElement(option) || option.value !== value) continue;
+    if (option.value !== value) continue;
     select.value = value;
     return true;
   }
@@ -584,8 +584,6 @@ export function initializeDiscoveryPanel(
 
   let azureClusters: DiscoveryOption[] = [];
   let azureFilterWired = false;
-  let azureToken = 0;
-  let awsToken = 0;
   let azureInFlight = false;
   let awsInFlight = false;
   let pendingInfrastructure: EnvironmentInfrastructure | null = null;
@@ -762,10 +760,7 @@ export function initializeDiscoveryPanel(
       provider === "azure" ? "azure-refresh-btn" : "aws-refresh-btn"
     );
     if (refreshButton) refreshButton.disabled = true;
-    const token = provider === "azure" ? ++azureToken : ++awsToken;
-    const isStale = (): boolean =>
-      !scope.active ||
-      (provider === "azure" ? token !== azureToken : token !== awsToken);
+    const isStale = (): boolean => !scope.active;
     const statusEl = context.dom.byId(
       provider === "azure" ? "azure-discover-status" : "aws-discover-status"
     );
@@ -943,16 +938,10 @@ export function initializeDiscoveryPanel(
               "aws-namespace-custom"
             ),
             vpcId: getComboValue("aws-vpc-select", "aws-vpc-custom"),
-            subnetIds: getComboValue(
-              "aws-subnets-select",
-              "aws-subnets-custom"
-            )
+            subnetIds: getComboValue("aws-subnets-select", "aws-subnets-custom")
           }
         : {
-            resourceGroup: getComboValue(
-              "azure-rg-select",
-              "azure-rg-custom"
-            ),
+            resourceGroup: getComboValue("azure-rg-select", "azure-rg-custom"),
             cluster: getComboValue(
               "azure-cluster-select",
               "azure-cluster-custom"

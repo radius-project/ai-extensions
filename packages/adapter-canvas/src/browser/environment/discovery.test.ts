@@ -75,7 +75,7 @@ interface DiscoveryPage {
   appselectCancel: ReturnType<typeof createFakeInput>;
 }
 
-function renderDiscoveryPage(): DiscoveryPage {
+function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
   const browser = createFakeBrowser();
   const selects: Record<string, ReturnType<typeof createFakeSelect>> = {};
   const customs: Record<string, ReturnType<typeof createFakeInput>> = {};
@@ -84,8 +84,8 @@ function renderDiscoveryPage(): DiscoveryPage {
     const custom = createFakeInput(customId);
     selects[selectId] = select;
     customs[customId] = custom;
-    browser.document.add(select);
-    browser.document.add(custom);
+    if (!omit.includes(selectId)) browser.document.add(select);
+    if (!omit.includes(customId)) browser.document.add(custom);
   }
   const azureStatus = createFakeElement("azure-discover-status");
   const awsStatus = createFakeElement("aws-discover-status");
@@ -1047,6 +1047,182 @@ describe("discoverResources", () => {
     ).toEqual(["", ...DEFAULT_NAMESPACES, "__custom__"]);
   });
 
+  it("restores a saved azure selection once discovery has populated the lists", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(azurePayload())
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection({
+      resourceGroup: "rg-1",
+      cluster: "aks-1",
+      namespace: "default"
+    });
+
+    await handle?.discoverResources("azure", "", "");
+
+    expect(page.selects["azure-rg-select"].value).toBe("rg-1");
+    expect(page.selects["azure-cluster-select"].value).toBe("aks-1");
+    expect(page.selects["azure-namespace-select"].value).toBe("default");
+  });
+
+  it("restores an azure value the discovered lists do not offer as a custom entry", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(azurePayload())
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection({ resourceGroup: "rg-gone" });
+
+    await handle?.discoverResources("azure", "", "");
+
+    expect(page.selects["azure-rg-select"].value).toBe("__custom__");
+    expect(page.customs["azure-rg-custom"].value).toBe("rg-gone");
+    expect(page.customs["azure-rg-custom"].style.display).toBe("");
+  });
+
+  it("applies a saved selection only once", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(azurePayload())
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection({ resourceGroup: "rg-1" });
+    await handle?.discoverResources("azure", "", "");
+    page.selects["azure-rg-select"].value = "";
+
+    await handle?.discoverResources("azure", "", "");
+
+    // A restore is a one-shot hand-off from the edit form; re-running discovery
+    // must not overwrite what the user has since chosen.
+    expect(page.selects["azure-rg-select"].value).toBe("");
+  });
+
+  it("leaves the selects untouched when nothing was saved", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(azurePayload())
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("azure", "", "");
+
+    expect(page.selects["azure-rg-select"].value).toBe("");
+    expect(page.customs["azure-rg-custom"].value).toBe("");
+  });
+
+  it("ignores a saved selection whose fields are all empty", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(azurePayload())
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection({});
+
+    await handle?.discoverResources("azure", "", "");
+
+    expect(page.selects["azure-rg-select"].value).toBe("");
+    expect(page.customs["azure-rg-custom"].value).toBe("");
+  });
+
+  it("ignores a saved aws selection whose fields are all empty", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse({ clusters: [{ id: "eks-1", name: "EKS One" }] })
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection({});
+
+    await handle?.discoverResources("aws", "", "");
+
+    expect(page.customs["aws-cluster-custom"].value).toBe("");
+    expect(page.customs["aws-vpc-custom"].value).toBe("");
+    expect(page.customs["aws-subnets-custom"].value).toBe("");
+  });
+
+  it("drops a saved value when its select is missing from the page", async () => {
+    const page = renderDiscoveryPage(["azure-rg-select"]);
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(azurePayload())
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection({ resourceGroup: "rg-gone" });
+
+    await handle?.discoverResources("azure", "", "");
+
+    expect(page.customs["azure-rg-custom"].value).toBe("");
+  });
+
+  it("drops a saved value that has nowhere to go without its custom input", async () => {
+    const page = renderDiscoveryPage(["azure-rg-custom"]);
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(azurePayload())
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection({ resourceGroup: "rg-gone" });
+
+    await handle?.discoverResources("azure", "", "");
+
+    expect(page.selects["azure-rg-select"].value).toBe("");
+  });
+
+  it("reports the current aws selection for a form that is being reopened", () => {
+    const page = renderDiscoveryPage();
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    page.selects["aws-cluster-select"].value = "eks-1";
+    page.selects["aws-vpc-select"].value = "vpc-1";
+    page.selects["aws-subnets-select"].value = "subnet-1";
+
+    expect(handle?.currentInfraSelection("aws")).toEqual(
+      expect.objectContaining({
+        cluster: "eks-1",
+        vpcId: "vpc-1",
+        subnetIds: "subnet-1"
+      })
+    );
+  });
+
+  it("reports the current azure selection for a form that is being reopened", () => {
+    const page = renderDiscoveryPage();
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    page.selects["azure-rg-select"].value = "rg-1";
+    page.selects["azure-cluster-select"].value = "__custom__";
+    page.customs["azure-cluster-custom"].value = "aks-custom";
+
+    expect(handle?.currentInfraSelection("azure")).toEqual(
+      expect.objectContaining({
+        resourceGroup: "rg-1",
+        cluster: "aks-custom"
+      })
+    );
+  });
+
+  it("restores a saved aws selection across every infrastructure field", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse({
+        clusters: [{ id: "eks-1", name: "EKS One" }],
+        namespaces: ["team-a"],
+        vpcs: [{ id: "vpc-1", name: "vpc-1" }],
+        subnets: [{ id: "subnet-1", name: "subnet-1" }]
+      })
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection({
+      cluster: "eks-1",
+      namespace: "team-a",
+      vpcId: "vpc-1",
+      subnetIds: "subnet-1"
+    });
+
+    await handle?.discoverResources("aws", "", "");
+
+    expect(page.selects["aws-cluster-select"].value).toBe("eks-1");
+    expect(page.selects["aws-namespace-select"].value).toBe("team-a");
+    expect(page.selects["aws-vpc-select"].value).toBe("vpc-1");
+    expect(page.selects["aws-subnets-select"].value).toBe("subnet-1");
+  });
+
   it("renders an explicit empty namespaces array as no options, not the defaults", async () => {
     const page = renderDiscoveryPage();
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
@@ -1197,7 +1373,7 @@ describe("discoverResources", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("ignores a stale azure response superseded by a newer azure request", async () => {
+  it("refuses to start a second azure discovery while one is in flight", async () => {
     const page = renderDiscoveryPage();
     let resolveFirst: (value: HttpResponse) => void = () => {};
     const first = new Promise<HttpResponse>((resolve) => {
@@ -1221,10 +1397,13 @@ describe("discoverResources", () => {
     await firstCall;
     await flushPromises();
 
+    // The overlapping request never reaches the network, so the first
+    // response is the only one that can land.
+    expect(callCount).toBe(1);
     const clusterSelect = page.selects["azure-cluster-select"];
     expect(
       Array.from(clusterSelect.options).map((option) => option.value)
-    ).toEqual(["", "aks-2", "__custom__"]);
+    ).toEqual(["", "aks-1", "__custom__"]);
   });
 
   it("tracks azure and aws staleness independently", async () => {
@@ -1332,7 +1511,7 @@ describe("azure resource-group / cluster cross-filter", () => {
     await handle?.discoverResources("azure", "", "");
   }
 
-  it("filters the cluster list to the chosen resource group and clears the selection if it no longer matches", async () => {
+  it("filters the cluster list to the chosen resource group and reselects the only match", async () => {
     const page = renderDiscoveryPage();
     const handle = initializeDiscoveryPanel(page.browser.context);
     await loadTwoClusters(page, handle);
@@ -1346,7 +1525,9 @@ describe("azure resource-group / cluster cross-filter", () => {
     expect(
       Array.from(clusterSelect.options).map((option) => option.value)
     ).toEqual(["", "aks-1", "__custom__"]);
-    expect(clusterSelect.value).toBe("");
+    // The previous selection is no longer in the filtered list, and a single
+    // remaining cluster is unambiguous, so it is selected outright.
+    expect(clusterSelect.value).toBe("aks-1");
   });
 
   it("excludes a cluster without a resource group when filtering by resource group", async () => {

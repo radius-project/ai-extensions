@@ -385,12 +385,10 @@ export function initializeEnvironmentPage(
     environments.showEnvironmentLanding();
     environments.hideTerminalBanners();
     operations.stopProgress();
-    operations.renderProgress(
-      {
-        ...optimisticOperation(environment, provider, context.clock.now()),
-        summary: `${environmentInput.disabled ? "Updating" : "Creating"} ${environment}…`
-      }
-    );
+    operations.renderProgress({
+      ...optimisticOperation(environment, provider, context.clock.now()),
+      summary: `${environmentInput.disabled ? "Updating" : "Creating"} ${environment}…`
+    });
     operations.focusPanel();
 
     createAbort = context.net.createAbort();

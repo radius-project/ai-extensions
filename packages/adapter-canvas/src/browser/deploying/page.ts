@@ -535,7 +535,7 @@ export function initializeDeployingPage(
         const nextStatuses: Record<string, string> = {};
         for (const environment of listing.environments) {
           nextProviders[environment.name] = environment.provider;
-          nextStatuses[environment.name] = environment.status ?? "";
+          nextStatuses[environment.name] = environment.status;
         }
         providers = nextProviders;
         environmentStatuses = nextStatuses;

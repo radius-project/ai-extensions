@@ -95,8 +95,7 @@ export function createEnvironmentConfirmDialog(
         })
       );
       usageLabel.textContent = options.usageLabel ?? "";
-      usageBlock.style.display =
-        (options.usage?.length ?? 0) > 0 ? "" : "none";
+      usageBlock.style.display = (options.usage?.length ?? 0) > 0 ? "" : "none";
       modal.style.display = "flex";
       cancel.focus();
     },

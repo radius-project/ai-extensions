@@ -610,10 +610,7 @@ export function initializeCredentialsPane(
       );
   };
 
-  const deleteCredentialProfile = (
-    name: string,
-    button: DomElement
-  ): void => {
+  const deleteCredentialProfile = (name: string, button: DomElement): void => {
     setButtonState(button, true, "Deleting…");
     void context.net
       .fetch(CREDENTIAL_DELETE_PATH, {
@@ -648,40 +645,34 @@ export function initializeCredentialsPane(
       );
   };
 
-  const confirmCredentialDelete = (
-    name: string,
-    button: DomElement
-  ): void => {
+  const confirmCredentialDelete = (name: string, button: DomElement): void => {
     setButtonState(button, true, "Checking usage…");
-    const usageRequest =
-      options.repo === "" ?
-        Promise.resolve({ usage: [] as string[], checked: true })
-      : context.net
-          .fetch(
-            `/api/list-environments?repo=${encodeURIComponent(options.repo)}`
+    // Rows are only wired after a repository-scoped fetch succeeds, so a row
+    // action always has a repository to look usage up against.
+    const usageRequest = context.net
+      .fetch(`/api/list-environments?repo=${encodeURIComponent(options.repo)}`)
+      .then((response) => response.json())
+      .then((payload) => ({
+        usage: readArray(payload, "environments")
+          .filter(isRecord)
+          .filter(
+            (environment) =>
+              readString(environment, "credentialProfile") === name
           )
-          .then((response) => response.json())
-          .then((payload) => ({
-            usage: readArray(payload, "environments")
-              .filter(isRecord)
-              .filter(
-                (environment) =>
-                  readString(environment, "credentialProfile") === name
-              )
-              .map((environment) => readString(environment, "name"))
-              .filter((environment) => environment !== ""),
-            checked: true
-          }))
-          .catch(() => ({ usage: [] as string[], checked: false }));
+          .map((environment) => readString(environment, "name"))
+          .filter((environment) => environment !== ""),
+        checked: true
+      }))
+      .catch(() => ({ usage: [] as string[], checked: false }));
     void usageRequest.then(({ usage, checked }) => {
       if (!active) return;
       setButtonState(button, false, "Delete Profile");
       options.confirmDialog?.show({
         title: "Delete credential profile?",
         message: `This deletes the credential profile "${name}". You will not be able to create new environments from it.${
-          checked ?
-            ""
-          : "\n\nCould not check which environments use this profile."
+          checked ? "" : (
+            "\n\nCould not check which environments use this profile."
+          )
         }`,
         usageLabel:
           usage.length === 1 ?

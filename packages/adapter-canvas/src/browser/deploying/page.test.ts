@@ -1113,6 +1113,20 @@ describe("deploy flow", () => {
     expect(page.deployBtn.disabled).toBe(true);
   });
 
+  it("blocks deploy for an environment the listing reported no status for", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+
+    // A stale option can outlive the listing that produced it, so an unknown
+    // environment has to be treated as not ready rather than as ready.
+    page.envSelect.value = "ghost";
+    page.envSelect.dispatch("change");
+
+    expect(page.deployBtn.disabled).toBe(true);
+    expect(page.deployBtn.getAttribute("title")).toContain("ghost");
+  });
+
   it("defaults an environment with no provider metadata to Azure", async () => {
     const page = fixture({
       envPayload: { environments: [{ name: "dev", provider: "" }] }

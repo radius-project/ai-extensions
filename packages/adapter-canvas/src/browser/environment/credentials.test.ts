@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { EnvironmentConfirmOptions } from "./confirm-dialog.js";
 import {
   AZURE_CLI_ASSIST_PATH,
   CREDENTIAL_DELETE_PATH,
@@ -18,6 +19,8 @@ import {
   renderGitHubAccessView
 } from "./credentials.js";
 import type { CredentialProfile } from "./credentials.js";
+
+const USAGE_LOOKUP_URL = "/api/list-environments?repo=octo%2Fapp";
 import {
   createDeferred,
   createFakeBrowser,
@@ -96,7 +99,7 @@ function renderPage(repo = "octo/app") {
     notify: vi.fn()
   };
   const confirmDialog = {
-    show: vi.fn((options: { onConfirm: () => void }) => options.onConfirm()),
+    show: vi.fn((options: EnvironmentConfirmOptions) => options.onConfirm()),
     close: vi.fn(),
     teardown: vi.fn()
   };
@@ -121,14 +124,11 @@ function renderPage(repo = "octo/app") {
 function addRowButtons(browser: FakeBrowser, name = "acme-azure") {
   const createEnv = createFakeElement("row-createenv");
   createEnv.setAttribute("data-name", name);
-  const edit = createFakeElement("row-edit", "a");
-  edit.setAttribute("data-name", name);
   const remove = createFakeInput("row-delete");
   remove.setAttribute("data-name", name);
   browser.document.addSelectorAll(".js-cred-createenv", [createEnv]);
-  browser.document.addSelectorAll(".js-cred-edit", [edit]);
   browser.document.addSelectorAll(".js-cred-delete", [remove]);
-  return { createEnv, edit, remove };
+  return { createEnv, remove };
 }
 
 async function readyTable(profile: Partial<CredentialProfile> = {}) {
@@ -228,7 +228,10 @@ describe("credential profile parsing and markup", () => {
     ]);
     expect(markup).not.toContain("<img");
     expect(markup).toContain("&lt;img");
-    expect(markup).toContain("js-cred-edit");
+    // Profiles are create-and-delete only: an environment snapshots a
+    // profile's values at creation, so editing one could never update the
+    // environments already created from it.
+    expect(markup).not.toContain("js-cred-edit");
     expect(markup).toContain("js-cred-createenv");
     expect(markup).toContain("js-cred-delete");
     expect(markup).toContain("AWS");
@@ -473,40 +476,6 @@ describe("row actions", () => {
     });
   });
 
-  it("prevents navigation and opens the form populated for editing", async () => {
-    const { page, rows } = await readyTable({
-      provider: "aws",
-      accountId: "111122223333",
-      region: "us-east-1",
-      roleArn: "arn:aws:iam::111122223333:role/radius"
-    });
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
-    );
-    let prevented = false;
-    rows.edit.dispatch("click", {
-      preventDefault: () => {
-        prevented = true;
-      }
-    });
-    expect(prevented).toBe(true);
-    expect(page.elements.credNameInput.value).toBe("acme-azure");
-    expect(page.elements.credProviderSelect.value).toBe("aws");
-    expect(page.elements.credPanelAws.style.display).toBe("");
-    expect(page.elements.credPanelAzure.style.display).toBe("none");
-    expect(page.elements.awsAccountId.value).toBe("111122223333");
-    expect(page.elements.awsRegion.value).toBe("us-east-1");
-    expect(page.elements.awsRoleArn.value).toBe(
-      "arn:aws:iam::111122223333:role/radius"
-    );
-    expect(page.elements.credForm.style.display).toBe("");
-    expect(page.elements.credLanding.style.display).toBe("none");
-    expect(page.elements.credSuccessBanner.style.display).toBe("none");
-    expect(page.elements.credNameInput.focusCount).toBe(1);
-    await flushPromises();
-    expect(page.elements.credGhcrStatus.innerHTML).toContain("octocat");
-  });
-
   it("opens a blank form when a create-environment row is missing its profile name", async () => {
     const { page, rows } = await readyTable();
     rows.createEnv.removeAttribute("data-name");
@@ -516,19 +485,6 @@ describe("row actions", () => {
       name: "",
       profile: ""
     });
-  });
-
-  it("opens a blank form when editing a row whose profile can no longer be found", async () => {
-    const { page, rows } = await readyTable();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
-    );
-    rows.edit.removeAttribute("data-name");
-    rows.edit.dispatch("click", { preventDefault: () => {} });
-    expect(page.elements.credNameInput.value).toBe("");
-    expect(page.elements.credProviderSelect.value).toBe("azure");
-    expect(page.elements.credForm.style.display).toBe("");
-    await flushPromises();
   });
 
   it("opens an empty form when creating a new profile", async () => {
@@ -543,18 +499,76 @@ describe("row actions", () => {
     await flushPromises();
   });
 
-  it("cancels deletion without a name or confirmation", async () => {
+  it("does nothing when the row carries no profile name", async () => {
     const { page, rows } = await readyTable();
     rows.remove.removeAttribute("data-name");
     rows.remove.dispatch("click");
+    await flushPromises();
+    expect(page.confirmDialog.show).not.toHaveBeenCalled();
     expect(page.browser.net.calls).toHaveLength(1);
+  });
 
-    const { rows: rows2, page: page2 } = await readyTable();
-    page2.decisions.confirm.mockReturnValue(false);
-    rows2.remove.dispatch("click");
-    expect(page2.browser.net.calls).toHaveLength(1);
-    expect(page2.decisions.confirm).toHaveBeenCalledWith(
-      'Delete credential profile "acme-azure"?'
+  it("lists the environments created from the profile before confirming", async () => {
+    const { page, rows } = await readyTable();
+    page.confirmDialog.show.mockImplementation(() => {});
+    page.browser.net.handle(USAGE_LOOKUP_URL, () =>
+      jsonResponse({
+        environments: [
+          { name: "dev", credentialProfile: "acme-azure" },
+          { name: "prod", credentialProfile: "other" },
+          { name: "", credentialProfile: "acme-azure" },
+          "malformed"
+        ]
+      })
+    );
+    rows.remove.dispatch("click");
+    // Usage is looked up first so the dialog can name what stays behind.
+    expect(rows.remove.disabled).toBe(true);
+    expect(rows.remove.textContent).toBe("Checking usage…");
+    await flushPromises();
+    expect(page.confirmDialog.show).toHaveBeenCalledOnce();
+    const shown = page.confirmDialog.show.mock.calls[0][0];
+    expect(shown.title).toBe("Delete credential profile?");
+    expect(shown.confirmLabel).toBe("Delete profile");
+    expect(shown.usage).toEqual(["dev"]);
+    expect(shown.usageLabel).toContain("stored its own copy");
+    expect(shown.message).not.toContain("Could not check");
+    // Dismissing the dialog leaves the profile and the row untouched.
+    expect(rows.remove.disabled).toBe(false);
+    expect(rows.remove.textContent).toBe("Delete Profile");
+    expect(
+      page.browser.net.calls.some((call) =>
+        call.url.startsWith(CREDENTIAL_DELETE_PATH)
+      )
+    ).toBe(false);
+  });
+
+  it("does not confirm a deletion that resolves after teardown", async () => {
+    const { page, rows } = await readyTable();
+    const deferred = createDeferred<HttpResponse>();
+    page.browser.net.handle(USAGE_LOOKUP_URL, () => deferred.promise);
+
+    rows.remove.dispatch("click");
+    page.controller.teardown();
+    deferred.resolve(jsonResponse({ environments: [] }));
+    await flushPromises();
+
+    expect(page.confirmDialog.show).not.toHaveBeenCalled();
+    expect(rows.remove.textContent).toBe("Checking usage…");
+  });
+
+  it("warns in the dialog when the usage lookup fails", async () => {
+    const { page, rows } = await readyTable();
+    page.confirmDialog.show.mockImplementation(() => {});
+    page.browser.net.handle(USAGE_LOOKUP_URL, () =>
+      Promise.reject(new Error("offline"))
+    );
+    rows.remove.dispatch("click");
+    await flushPromises();
+    const shown = page.confirmDialog.show.mock.calls[0][0];
+    expect(shown.usage).toEqual([]);
+    expect(shown.message).toContain(
+      "Could not check which environments use this profile."
     );
   });
 
@@ -565,9 +579,8 @@ describe("row actions", () => {
     );
     rows.remove.dispatch("click");
     expect(rows.remove.disabled).toBe(true);
-    expect(rows.remove.textContent).toBe("Deleting…");
     await flushPromises();
-    expect(page.browser.net.calls).toHaveLength(3);
+    expect(page.browser.net.calls).toHaveLength(4);
     expect(
       page.browser.net.calls.some(
         (call) => call.url === `${CREDENTIAL_PROFILES_PATH}?repo=octo%2Fapp`
@@ -585,7 +598,7 @@ describe("row actions", () => {
     expect(rows.remove.disabled).toBe(false);
     expect(rows.remove.textContent).toBe("Delete Profile");
     expect(page.decisions.notify).toHaveBeenCalledWith("profile in use");
-    expect(page.browser.net.calls).toHaveLength(2);
+    expect(page.browser.net.calls).toHaveLength(3);
   });
 
   it("fails closed and restores the row on a non-ok response with no error field", async () => {
@@ -599,7 +612,7 @@ describe("row actions", () => {
     expect(page.decisions.notify).toHaveBeenCalledWith(
       "Could not delete the credential profile."
     );
-    expect(page.browser.net.calls).toHaveLength(2);
+    expect(page.browser.net.calls).toHaveLength(3);
   });
 
   it("fails closed and restores the row on a network error", async () => {
@@ -613,7 +626,7 @@ describe("row actions", () => {
     expect(page.decisions.notify).toHaveBeenCalledWith(
       "Could not delete the credential profile. Please try again."
     );
-    expect(page.browser.net.calls).toHaveLength(2);
+    expect(page.browser.net.calls).toHaveLength(3);
   });
 
   it("ignores a late delete response after teardown", async () => {
@@ -626,7 +639,7 @@ describe("row actions", () => {
     pending.resolve(jsonResponse({ success: true }));
     await flushPromises();
     expect(page.decisions.notify).not.toHaveBeenCalled();
-    expect(page.browser.net.calls).toHaveLength(2);
+    expect(page.browser.net.calls).toHaveLength(3);
   });
 
   it("ignores a late delete network failure after teardown", async () => {
@@ -1322,12 +1335,17 @@ describe("AWS verification", () => {
 });
 
 describe("saving a credential profile", () => {
-  async function verifiedAzureForm(page: ReturnType<typeof renderPage>) {
+  async function verifiedAzureForm(
+    page: ReturnType<typeof renderPage>,
+    options: { open?: boolean } = {}
+  ) {
     page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
       jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
     );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
+    if (options.open !== false) {
+      page.elements.newCredBtn.dispatch("click");
+      await flushPromises();
+    }
     page.elements.credNameInput.value = "acme";
     page.elements.azTenantId.value = "t";
     page.elements.azSubId.value = "s";
@@ -1342,6 +1360,54 @@ describe("saving a credential profile", () => {
     page.elements.btnVerifyAzure.dispatch("click");
     await flushPromises();
   }
+
+  it("hosts the credential form inside the wizard and returns it on cancel", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
+      jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
+    );
+
+    page.controller.startWizardCreation();
+    await flushPromises();
+
+    // In the wizard the form is relocated into the environment step so the
+    // user never leaves the environment they are creating.
+    expect(page.elements.credFormCard.parentNode).toBe(
+      page.elements.wizardFormHost
+    );
+    expect(page.elements.wizardFormHost.style.display).toBe("");
+    expect(page.elements.wizardStepCard.style.display).toBe("none");
+    expect(page.elements.saveCredBtn.textContent).toBe("Save & Continue");
+    expect(page.elements.cancelCredBtn.textContent).toBe("Cancel");
+
+    page.elements.cancelCredBtn.dispatch("click");
+
+    expect(page.elements.credFormCard.parentNode).toBe(page.elements.credForm);
+    expect(page.elements.wizardFormHost.style.display).toBe("none");
+    expect(page.elements.wizardStepCard.style.display).toBe("");
+    // Cancelling the wizard form returns the card to its standalone home but
+    // leaves it hidden, so the credentials pane is not revealed underneath.
+    expect(page.elements.credForm.style.display).toBe("none");
+  });
+
+  it("hands a profile saved in the wizard back to the environment step", async () => {
+    const page = renderPage();
+    page.controller.startWizardCreation();
+    await flushPromises();
+    await verifiedAzureForm(page, { open: false });
+    page.browser.net.handle(CREDENTIAL_SAVE_PATH, () => jsonResponse({}));
+
+    page.elements.saveCredBtn.dispatch("click");
+    await flushPromises();
+
+    expect(page.dependencies.credentialCreated).toHaveBeenCalledWith("acme");
+    // The wizard continues on the environment step, so the standalone landing
+    // success banner must not take over the pane.
+    expect(page.elements.credSuccessBanner.style.display).not.toBe("flex");
+    expect(page.elements.wizardFormHost.style.display).toBe("none");
+    expect(page.elements.wizardStepCard.style.display).toBe("");
+    expect(page.elements.credFormCard.parentNode).toBe(page.elements.credForm);
+  });
 
   it("requires a profile name", () => {
     const page = renderPage();
