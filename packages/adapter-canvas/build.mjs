@@ -122,17 +122,23 @@ function writeThirdPartyNotices() {
   };
   for (const [name] of directPackages) visit(name);
 
-  const notices = [...packages.values()].map(({ manifest, root }) => {
-    const licensePath = ["LICENSE", "LICENSE.md", "license"]
-      .map((name) => join(root, name))
-      .find(existsSync);
-    if (!licensePath) {
-      throw new Error(
-        `Missing license file for bundled dependency ${manifest.name}@${manifest.version} in ${root}.`
-      );
-    }
-    return `===== ${manifest.name}@${manifest.version} =====\n\n${readFileSync(licensePath, "utf8").trim()}`;
-  });
+  const notices = [...packages.values()]
+    .sort(
+      (a, b) =>
+        String(a.manifest.name).localeCompare(String(b.manifest.name)) ||
+        String(a.manifest.version).localeCompare(String(b.manifest.version))
+    )
+    .map(({ manifest, root }) => {
+      const licensePath = ["LICENSE", "LICENSE.md", "license"]
+        .map((name) => join(root, name))
+        .find(existsSync);
+      if (!licensePath) {
+        throw new Error(
+          `Missing license file for bundled dependency ${manifest.name}@${manifest.version} in ${root}.`
+        );
+      }
+      return `===== ${manifest.name}@${manifest.version} =====\n\n${readFileSync(licensePath, "utf8").trim()}`;
+    });
   writeFileSync(
     join(distDir, "THIRD-PARTY-NOTICES.txt"),
     `${notices.join("\n\n")}\n`
