@@ -447,6 +447,20 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         stdout: "dep-1\n"
       },
       {
+        // The environment-list route builds the same lookup with a different
+        // argument order and page size (routes/environments.ts). The fake CLI
+        // matches on exact argv, so it needs its own command or the shim exits
+        // 127 and the environment fails closed to "pending".
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/deployments?environment=fixture-environment&per_page=10`,
+          "--jq",
+          ".[].id"
+        ],
+        stdout: "dep-1\n"
+      },
+      {
         tool: "gh",
         args: [
           "api",

@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { unlabelledSelectIds } from "../../../test/support/pages/labelled-controls.js";
+import {
+  unlabelledSelectIds,
+  unlabelledTextInputIds
+} from "../../../test/support/pages/labelled-controls.js";
 import { environmentsPaneMarkup } from "./environments-pane.js";
 
 const baseOptions = {
@@ -14,6 +17,32 @@ describe("environmentsPaneMarkup", () => {
     expect(unlabelledSelectIds(environmentsPaneMarkup(baseOptions))).toEqual(
       []
     );
+  });
+
+  // The discovery selects and their "__custom__" free-text inputs sit in the
+  // same field, so a <label for="...-select"> names the select and leaves the
+  // input unnamed once it is revealed. Assert the whole set, not one control.
+  it("gives every text input in the create form a programmatic name", () => {
+    expect(unlabelledTextInputIds(environmentsPaneMarkup(baseOptions))).toEqual(
+      []
+    );
+  });
+
+  it("names each custom infrastructure input independently of its select", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    for (const [id, name] of [
+      ["azure-rg-custom", "Resource Group (custom)"],
+      ["azure-cluster-custom", "Cluster (custom)"],
+      ["azure-namespace-custom", "Namespace (custom)"],
+      ["aws-cluster-custom", "EKS Cluster (custom)"],
+      ["aws-namespace-custom", "Namespace (custom)"],
+      ["aws-vpc-custom", "VPC (custom)"],
+      ["aws-subnets-custom", "Subnets (custom)"]
+    ]) {
+      const tag = new RegExp(`<input id="${id}"[^>]*>`).exec(html)?.[0] ?? "";
+      expect(tag, `${id} should be rendered`).not.toBe("");
+      expect(tag).toContain(`aria-label="${name}"`);
+    }
   });
 
   it("renders one visible section when the environments sub-tab is active", () => {

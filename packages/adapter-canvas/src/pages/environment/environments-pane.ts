@@ -200,7 +200,7 @@ export function environmentsPaneMarkup(
       <div class="rad-section__title">3 · Deploy identity</div>
       <div class="rad-section__desc">The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets.</div>
       <div class="rad-field" id="env-identity-azure" style="max-width:560px;">
-        <label>Azure app registration</label>
+        <label for="az-app-name-input">Azure app registration</label>
         <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml(
           (ctxRepo || "").replace("/", "-")
         )}" data-default-name="radius-deploy-${escapeHtml(
@@ -234,17 +234,17 @@ export function environmentsPaneMarkup(
           <div class="rad-field">
             <label for="azure-rg-select">Resource Group</label>
             <select id="azure-rg-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-rg-custom" type="text" placeholder="Enter resource group" style="display:none; margin-top:4px;" />
+            <input id="azure-rg-custom" type="text" aria-label="Resource Group (custom)" placeholder="Enter resource group" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
             <label for="azure-cluster-select">Cluster</label>
             <select id="azure-cluster-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
+            <input id="azure-cluster-custom" type="text" aria-label="Cluster (custom)" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
             <label for="azure-namespace-select">Namespace</label>
             <select id="azure-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <input id="azure-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
           </div>
         </div>
       </div>
@@ -259,22 +259,22 @@ export function environmentsPaneMarkup(
           <div class="rad-field">
             <label for="aws-cluster-select">EKS Cluster</label>
             <select id="aws-cluster-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
+            <input id="aws-cluster-custom" type="text" aria-label="EKS Cluster (custom)" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
             <label for="aws-namespace-select">Namespace</label>
             <select id="aws-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <input id="aws-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
             <label for="aws-vpc-select">VPC</label>
             <select id="aws-vpc-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-vpc-custom" type="text" placeholder="vpc-xxxxxxxx" style="display:none; margin-top:4px;" />
+            <input id="aws-vpc-custom" type="text" aria-label="VPC (custom)" placeholder="vpc-xxxxxxxx" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
             <label for="aws-subnets-select">Subnets</label>
             <select id="aws-subnets-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-subnets-custom" type="text" placeholder="subnet-xxx,subnet-yyy" style="display:none; margin-top:4px;" />
+            <input id="aws-subnets-custom" type="text" aria-label="Subnets (custom)" placeholder="subnet-xxx,subnet-yyy" style="display:none; margin-top:4px;" />
           </div>
         </div>
       </div>

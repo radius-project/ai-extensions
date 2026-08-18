@@ -1,24 +1,12 @@
 # Phase 6 Chromium traceability
 
-Phase 6 runs two real-Chromium layers. The browser component layer (P1-A) is
-`packages/adapter-canvas/test/component/`, run by Vitest Browser Mode with the
-Playwright Chromium provider. The critical journey, keyboard and accessibility
-layers (P1-B and P1-C) are `packages/adapter-canvas/test/e2e/canvas-chromium.test.ts`,
-run by Playwright.
+Phase 6 runs two real-Chromium layers. The browser component layer (P1-A) is `packages/adapter-canvas/test/component/`, run by Vitest Browser Mode with the Playwright Chromium provider. The critical journey, keyboard and accessibility layers (P1-B and P1-C) are `packages/adapter-canvas/test/e2e/canvas-chromium.test.ts`, run by Playwright.
 
-Neither layer uses jsdom. Both drive real Chromium events, layout, focus and
-navigation, and both load the real React, React DOM, React Flow and dagre that
-production bundles into the graph browser entry, entirely offline with no
-mirror, no request interception and no test-only asset loader.
+Neither layer uses jsdom. Both drive real Chromium events, layout, focus and navigation, and both load the real React, React DOM, React Flow and dagre that production bundles into the graph browser entry, entirely offline with no mirror, no request interception and no test-only asset loader.
 
 ## Browser component layer
 
-`test/component/graph-view.test.ts` mounts the production graph modules
-(`src/browser/graph/`) into a real DOM through the real ReactDOM concurrent
-root, with the real graph libraries supplied by
-`test/component/support/real-vendor.ts`. Nothing in that support module stands
-in for a library: React's real hooks run, React Flow really measures its
-container and dagre really computes the layout.
+`test/component/graph-view.test.ts` mounts the production graph modules (`src/browser/graph/`) into a real DOM through the real ReactDOM concurrent root, with the real graph libraries supplied by `test/component/support/real-vendor.ts`. Nothing in that support module stands in for a library: React's real hooks run, React Flow really measures its container and dagre really computes the layout.
 
 | Case                     | What is actually proven                                                                                   |
 |--------------------------|-----------------------------------------------------------------------------------------------------------|
@@ -30,27 +18,13 @@ container and dagre really computes the layout.
 | Tab order                | Sequential tabbing reaches the control on every rendered card.                                            |
 | Update and unmount       | `update()` re-renders through the real root; `unmount()` detaches and the controller stops answering.     |
 
-The `Space` case exists because it found a real defect. React Flow treats
-`Enter`, `Space` and `Escape` as node-selection keys and calls `preventDefault`
-on them for a selectable node, so the browser never synthesised the click and
-the details button did nothing on `Space`. The fix adds React Flow's own
-`nokey` opt-out class to the interactive controls in `src/browser/graph/view.ts`.
-No jsdom or fake-React layer could have observed this.
+The `Space` case exists because it found a real defect. React Flow treats `Enter`, `Space` and `Escape` as node-selection keys and calls `preventDefault` on them for a selectable node, so the browser never synthesised the click and the details button did nothing on `Space`. The fix adds React Flow's own `nokey` opt-out class to the interactive controls in `src/browser/graph/view.ts`. No jsdom or fake-React layer could have observed this.
 
 ## Critical journey, keyboard and accessibility layers
 
-The real-browser suite is `packages/adapter-canvas/test/e2e/canvas-chromium.test.ts`.
-Every case drives the production Canvas server created by `getOrCreateServer`,
-bound to `127.0.0.1` on an OS-assigned port, with the real route table, the real
-page renderers and the real compiled browser entries. External boundaries are
-replaced by fake `gh`, `rad`, `az` and `aws` executables on `PATH`, an isolated
-`GH_CONFIG_DIR`, a per-test temporary workspace, and placeholder secrets. The
-Playwright route guard fails the test if the page requests any non-loopback
-origin.
+The real-browser suite is `packages/adapter-canvas/test/e2e/canvas-chromium.test.ts`. Every case drives the production Canvas server created by `getOrCreateServer`, bound to `127.0.0.1` on an OS-assigned port, with the real route table, the real page renderers and the real compiled browser entries. External boundaries are replaced by fake `gh`, `rad`, `az` and `aws` executables on `PATH`, an isolated `GH_CONFIG_DIR`, a per-test temporary workspace, and placeholder secrets. The Playwright route guard fails the test if the page requests any non-loopback origin.
 
-This document maps what the suite genuinely proves. Rows that say "not covered
-here" name the production seam that owns the behavior; they are dispositions,
-not silent deferrals.
+This document maps what the suite genuinely proves. Rows that say "not covered here" name the production seam that owns the behavior; they are dispositions, not silent deferrals.
 
 ## Tests in the suite
 
@@ -72,10 +46,7 @@ not silent deferrals.
 | T14 | reveals the environment form by keyboard and returns focus to the reveal control                       |
 | T15 | drives heartbeat to recovery threshold and reloads only after recovery                                 |
 
-Tests tagged `@safety` run in the `canvas-safety` Playwright project with
-`retries: 0`. The remaining tests run in the `canvas` project with the single
-diagnostic retry the test plan allows. Traces, screenshots and the HTML report
-are produced on failure only.
+Tests tagged `@safety` run in the `canvas-safety` Playwright project with `retries: 0`. The remaining tests run in the `canvas` project with the single diagnostic retry the test plan allows. Traces, screenshots and the HTML report are produced on failure only.
 
 ## Appendix B workflows
 
@@ -116,39 +87,13 @@ are produced on failure only.
 
 ## Explicit gaps
 
-Every gap below names the production seam that owns the behavior. None of them
-is a silent deferral.
+Every gap below names the production seam that owns the behavior. None of them is a silent deferral.
 
-- Graph diff base/head selection (J-04) is not exercised in Chromium. The diff
-  page's branch resolution is a server contract covered by the graph HTTP
-  integration suite; adding a browser case would duplicate it without new
-  browser behavior. The `diff` and `deployed` pages are therefore the two of the
-  seven page values that no Chromium test loads, and they receive no axe check
-  here; their markup is covered by the page renderer unit suites.
-- Repository-without-model handoff (J-02) and plan-application output (J-03) are
-  not exercised in Chromium. Both are server-rendered outcomes with no
-  browser-owned interaction beyond navigation, and their de-duplication,
-  no-fabrication and missing-recipe wording are asserted by the planned-graph
-  page renderer and HTTP integration suites.
-- Credential save, select and delete (J-05), deployment success and retry
-  (J-07), and delete active-app conflict and fail-closed API errors (J-08) are
-  covered here only at their browser-owned edges: form validation, focus
-  behavior, destructive confirmation, and request shape. Their remaining state
-  transitions are owned by the environment, deploying and delete HTTP routes and
-  are asserted in the HTTP integration suite.
-- Stale-token graph source reload (part of J-10) is not exercised in Chromium.
-  Token staleness never reaches the browser; it is fenced in the `gh` adapter
-  and asserted at the runtime and HTTP layers.
-- T8 and T10 drive their routes through an in-page `fetch` rather than through
-  the owning form control. T8 exists for the fake `az` subprocess boundary and
-  redaction, which no other layer exercises end to end; T10 uses `fetch` only to
-  start the operation, and its substance — navigating away twice and returning
-  to a durable result — is browser lifecycle behavior no lower layer can test.
-  Neither is a full UI journey for its workflow.
-- Real-host installation, discovery and panel lifecycle are Phase 8 concerns and
-  are not represented here. Loopback HTTP is not host coverage.
-- Golden visual baselines and scheduled reliability matrices are Phase 7 scope.
-  The screenshots and traces this suite writes on failure are diagnostics only
-  and are not an approved visual baseline.
-- Chromium runs on Linux in CI. The harness's Windows `.exe` shim path is
-  exercised only by local Windows runs.
+- Graph diff base/head selection (J-04) is not exercised in Chromium. The diff page's branch resolution is a server contract covered by the graph HTTP integration suite; adding a browser case would duplicate it without new browser behavior. The `diff` and `deployed` pages are therefore the two of the seven page values that no Chromium test loads, and they receive no axe check here; their markup is covered by the page renderer unit suites.
+- Repository-without-model handoff (J-02) and plan-application output (J-03) are not exercised in Chromium. Both are server-rendered outcomes with no browser-owned interaction beyond navigation, and their de-duplication, no-fabrication and missing-recipe wording are asserted by the planned-graph page renderer and HTTP integration suites.
+- Credential save, select and delete (J-05), deployment success and retry (J-07), and delete active-app conflict and fail-closed API errors (J-08) are covered here only at their browser-owned edges: form validation, focus behavior, destructive confirmation, and request shape. Their remaining state transitions are owned by the environment, deploying and delete HTTP routes and are asserted in the HTTP integration suite.
+- Stale-token graph source reload (part of J-10) is not exercised in Chromium. Token staleness never reaches the browser; it is fenced in the `gh` adapter and asserted at the runtime and HTTP layers.
+- T8 and T10 drive their routes through an in-page `fetch` rather than through the owning form control. T8 exists for the fake `az` subprocess boundary and redaction, which no other layer exercises end to end; T10 uses `fetch` only to start the operation, and its substance — navigating away twice and returning to a durable result — is browser lifecycle behavior no lower layer can test. Neither is a full UI journey for its workflow.
+- Real-host installation, discovery and panel lifecycle are Phase 8 concerns and are not represented here. Loopback HTTP is not host coverage.
+- Golden visual baselines and scheduled reliability matrices are Phase 7 scope. The screenshots and traces this suite writes on failure are diagnostics only and are not an approved visual baseline.
+- Chromium runs on Linux in CI. The harness's Windows `.exe` shim path is exercised only by local Windows runs.

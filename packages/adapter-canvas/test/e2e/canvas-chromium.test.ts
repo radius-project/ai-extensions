@@ -467,8 +467,13 @@ test.describe("Radius Canvas in Chromium", () => {
     const branchSelect = page.locator("#deploy-branch-select");
     await expect(branchSelect).toHaveValue(WORKTREE_BRANCH);
 
-    const deployNow = page.locator("#deploy-now-btn");
-    await expect(deployNow).toBeEnabled();
+    // This control doubles as "Create Application" / "Create Environment"
+    // navigation until the real listings load, and it is enabled in those
+    // modes too, so waiting only for "enabled" can click a navigation control
+    // instead of Deploy. Match the enabled control and its Deploy label in one
+    // retried assertion so there is no window between the two conditions.
+    const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+    await expect(deployNow).toHaveText("Deploy");
     await deployNow.click();
 
     // The dispatch is refused because the fake deployments lookup fails, and
