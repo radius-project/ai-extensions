@@ -495,6 +495,61 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     // The stale failure must not have clobbered the current (successful) state.
     expect(deps.servers.get("radius-panel")!.state.diffError).toBeUndefined();
   });
+
+  it("does not let a late graph result mutate the same instance after deferred close and reopen", async () => {
+    let releaseFirst: (() => void) | undefined;
+    let settled: (() => void) | undefined;
+    const firstResult = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const { canvas, deps } = setup();
+    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
+    vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
+      (_instanceId, listener) => {
+        settled = listener;
+        return vi.fn();
+      }
+    );
+    const buildGraph = deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>;
+    buildGraph
+      .mockImplementationOnce(async () => {
+        await firstResult;
+        return [{ id: "stale", name: "old", type: "old" }];
+      })
+      .mockResolvedValue([{ id: "current", name: "new", type: "new" }]);
+
+    const firstOpen = canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "old"
+      })
+    );
+    await vi.waitFor(() => expect(buildGraph).toHaveBeenCalledTimes(1));
+    const entry = deps.servers.get("radius-panel");
+    await canvas.onClose(ctx("radius-panel"));
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "new"
+      })
+    );
+    expect(deps.servers.get("radius-panel")).toBe(entry);
+    expect(settled).toBeDefined();
+    settled?.();
+    releaseFirst?.();
+    await firstOpen;
+
+    const state = deps.servers.get("radius-panel")!.state;
+    expect(state.diffHead).toBe("new");
+    expect(
+      state.diffResources?.map((resource) => resource.id) ?? []
+    ).not.toContain("stale");
+  });
 });
 
 // RU-16: missing-bicep handoff dedupe + nonblocking behavior.
