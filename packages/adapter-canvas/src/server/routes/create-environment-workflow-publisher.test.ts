@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   applyProviderConfiguration,
+  azureRoleScope,
+  buildManualRoleAssignmentGuidance,
   describeWorkflowCommitFailure,
   publishWorkflowFiles,
   VERIFY_WORKFLOW_PATH,
@@ -62,7 +64,8 @@ describe("applyProviderConfiguration", () => {
     ]);
     expect(steps).toEqual([
       "Setting environment variables and secrets...",
-      "Set 7 environment value(s) for Azure."
+      "Set 7 environment value(s) for Azure.",
+      'ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: az role assignment create --assignee client --role Contributor --scope /subscriptions/sub/resourceGroups/rg'
     ]);
   });
 
@@ -123,6 +126,34 @@ describe("applyProviderConfiguration", () => {
     expect(steps.some((step) => step.startsWith("⚠️"))).toBe(false);
   });
 
+  it("surfaces the manual subscription-role grant command when creds are complete", async () => {
+    // Issue #280: complete creds can still fail verify at Azure Login with
+    // "No subscriptions found"; the publisher surfaces the exact grant command,
+    // scoped to the resource group when one is set, without running it.
+    const { ports, steps } = configurationRecorder();
+
+    await applyProviderConfiguration(
+      "azure",
+      {
+        clientId: "app-1",
+        tenantId: "t",
+        subscriptionId: "sub-1",
+        resourceGroup: "rg-1"
+      },
+      ports
+    );
+
+    expect(
+      steps.some(
+        (step) =>
+          step.startsWith("ℹ️") &&
+          step.includes(
+            "az role assignment create --assignee app-1 --role Contributor --scope /subscriptions/sub-1/resourceGroups/rg-1"
+          )
+      )
+    ).toBe(true);
+  });
+
   it("writes the aws values and neither counts them nor warns", async () => {
     const { ports, variables, steps } = configurationRecorder();
     const data: CreateEnvironmentRequestData = {
@@ -169,6 +200,29 @@ describe("applyProviderConfiguration", () => {
     await applyProviderConfiguration("gcp", {}, ports);
 
     expect(variables.map(([name]) => name)).toContain("AWS_ROLE_ARN");
+  });
+});
+
+describe("azureRoleScope", () => {
+  it("scopes to the resource group when one is configured", () => {
+    expect(azureRoleScope("sub-1", "rg-1")).toBe(
+      "/subscriptions/sub-1/resourceGroups/rg-1"
+    );
+  });
+
+  it("falls back to the whole subscription when the resource group is absent or blank", () => {
+    expect(azureRoleScope("sub-1")).toBe("/subscriptions/sub-1");
+    expect(azureRoleScope("sub-1", "   ")).toBe("/subscriptions/sub-1");
+  });
+});
+
+describe("buildManualRoleAssignmentGuidance", () => {
+  it("builds the az role assignment create command with the assignee and scope", () => {
+    expect(
+      buildManualRoleAssignmentGuidance("app-1", "/subscriptions/sub-1")
+    ).toBe(
+      "az role assignment create --assignee app-1 --role Contributor --scope /subscriptions/sub-1"
+    );
   });
 });
 
