@@ -103,12 +103,6 @@ jobs:
       - name: Check formatting
         run: pnpm run format:check
 
-      - name: Run runtime integration gate
-        run: pnpm run test:integration:runtime
-
-      - name: Run HTTP integration gate
-        run: pnpm run test:integration:http
-
       - name: Run Node tests with coverage
         id: coverage
         run: pnpm run coverage

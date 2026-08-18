@@ -106,7 +106,7 @@ export interface GhApiResult {
 export function getInjectedGhToken(
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  return (env.GH_TOKEN || env.GITHUB_TOKEN || "").trim();
+  return env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() || "";
 }
 
 export function redactGhCredentials(value: string): string {
@@ -448,11 +448,13 @@ export function switchGhAccount(
         if (err) {
           resolve({
             ok: false,
-            error: (
-              (stderr || "").trim() ||
-              err.message ||
-              "gh auth switch failed"
-            ).trim()
+            error: redactGhCredentials(
+              (
+                (stderr || "").trim() ||
+                err.message ||
+                "gh auth switch failed"
+              ).trim()
+            )
           });
           return;
         }

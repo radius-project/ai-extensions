@@ -648,6 +648,8 @@ describe("getInjectedGhToken", () => {
     [{ GH_TOKEN: "gh-token" }, "gh-token"],
     [{ GITHUB_TOKEN: "github-token" }, "github-token"],
     [{ GH_TOKEN: "gh-token", GITHUB_TOKEN: "github-token" }, "gh-token"],
+    [{ GH_TOKEN: "  ", GITHUB_TOKEN: "github-token" }, "github-token"],
+    [{ GH_TOKEN: " gh-token ", GITHUB_TOKEN: "github-token" }, "gh-token"],
     [{}, ""]
   ])(
     "selects the documented injected-token precedence for %o",
@@ -769,16 +771,18 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
     expect(id.actingLogin).toBe("keyuser");
   });
 
-  it("returns an error when gh auth switch fails", async () => {
+  it("redacts injected credentials when gh auth switch fails", async () => {
     const gh = await loadGh("linux", {
-      token: "tok",
+      token: "placeholder-token",
       withToken: STATUS.tokenWithWorkflow,
       keyring: STATUS.keyringWithWorkflow,
-      switchError: "no such account"
+      switchError: "no such account for placeholder-token"
     });
     const res = await gh.switchGhAccount("ghost");
-    expect(res.ok).toBe(false);
-    expect(res.error).toContain("no such account");
+    expect(res).toEqual({
+      ok: false,
+      error: "no such account for [REDACTED]"
+    });
   });
 
   it("restores a persisted account choice via setPreferredGhLogin so it survives a restart", async () => {

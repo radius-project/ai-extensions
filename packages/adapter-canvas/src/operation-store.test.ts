@@ -44,7 +44,9 @@ describe("file operation store", () => {
     };
     await store.save(replacement);
     await expect(store.load()).resolves.toEqual(replacement);
-    expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
+    }
     expect(
       (await fs.readdir(path.dirname(filePath))).filter((name) =>
         name.endsWith(".tmp")

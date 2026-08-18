@@ -496,19 +496,27 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     expect(deps.servers.get("radius-panel")!.state.diffError).toBeUndefined();
   });
 
-  it("does not let a closed instance's late graph result mutate a reopened instance", async () => {
+  it("does not let a late graph result mutate the same instance after deferred close and reopen", async () => {
     let releaseFirst: (() => void) | undefined;
+    let settled: (() => void) | undefined;
     const firstResult = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
     const { canvas, deps } = setup();
+    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
+    vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
+      (_instanceId, listener) => {
+        settled = listener;
+        return vi.fn();
+      }
+    );
     const buildGraph = deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>;
     buildGraph
       .mockImplementationOnce(async () => {
         await firstResult;
         return [{ id: "stale", name: "old", type: "old" }];
       })
-      .mockResolvedValueOnce([{ id: "current", name: "new", type: "new" }]);
+      .mockResolvedValue([{ id: "current", name: "new", type: "new" }]);
 
     const firstOpen = canvas.open(
       ctx("radius-panel", {
@@ -519,6 +527,7 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
       })
     );
     await vi.waitFor(() => expect(buildGraph).toHaveBeenCalledTimes(1));
+    const entry = deps.servers.get("radius-panel");
     await canvas.onClose(ctx("radius-panel"));
 
     await canvas.open(
@@ -529,6 +538,8 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         headBranch: "new"
       })
     );
+    expect(deps.servers.get("radius-panel")).toBe(entry);
+    settled?.();
     releaseFirst?.();
     await firstOpen;
 
