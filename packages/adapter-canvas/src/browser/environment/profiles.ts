@@ -253,7 +253,13 @@ export function githubIdentityNote(
 
 const TERTIARY_STYLE = "color:var(--rad-text-tertiary);";
 const STRONG_STYLE = "color:var(--rad-text);";
-const VERIFIED_STYLE = "color:var(--rad-primary);font-weight:600;";
+// "Verified" is a success status, so it uses the status token rather than
+// --rad-primary. --rad-primary is a fixed brand green tuned for solid fills
+// behind white text; as small text on the panel background it fails WCAG AA
+// contrast, which the Chromium accessibility gate catches. --rad-success is
+// mixed toward the active canvas text colour, so it stays legible in both
+// themes.
+const VERIFIED_STYLE = "color:var(--rad-success);font-weight:600;";
 
 // Mirrors the legacy inline detail markup for the credential-profile summary
 // panel, rebuilt as element specs so no interpolated field can re-enter the

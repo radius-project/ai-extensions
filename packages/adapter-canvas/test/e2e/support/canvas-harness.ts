@@ -20,6 +20,9 @@ const PLACEHOLDER_SECRET = "ghp_PLACEHOLDER_DO_NOT_USE_000000000000";
 export const REPOSITORY = "fixture/radius-app";
 export const WORKTREE_BRANCH = "feature/phase-6";
 export const PROFILE_NAME = "fixture-azure";
+const PROFILE_USER = "fixture-user";
+const PROFILE_TENANT_ID = "11111111-1111-1111-1111-111111111111";
+const PROFILE_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
 export const OPERATION_ID = "operation-fixture-1";
 
 type ServerModule = typeof import("../../../src/server.js");
@@ -666,10 +669,30 @@ export class CanvasHarness {
     process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
     const ghModule = await import("../../../src/gh.js");
     ghModule.setPreferredGhLogin("");
-    ghModule.resetGhIdentityCache();
-    // Resolve this test's identity before the server starts so the page never
+    ghModule.resetGhIdentityCache(); // Resolve this test's identity before the server starts so the page never
     // observes a probe that a previous test left in flight.
     await ghModule.primeGhIdentity().catch(() => undefined);
+    // Environment creation opens on a credential-profile step, so the wizard
+    // only reaches the details step when a profile exists. Profiles live in
+    // module-scoped state whose backing file sits next to the server module
+    // rather than in this test's temp directory, so seed the store in memory:
+    // saving through the route would write `.radius-credentials.json` into the
+    // package source tree and leak the fixture between tests and into the repo.
+    const sharedModule = await import("../../../src/shared.js");
+    sharedModule.sharedCredentials.profiles = {
+      [REPOSITORY]: [
+        {
+          name: PROFILE_NAME,
+          provider: "azure",
+          status: "verified",
+          user: PROFILE_USER,
+          tenantId: PROFILE_TENANT_ID,
+          tenantName: "Fixture tenant",
+          subscriptionId: PROFILE_SUBSCRIPTION_ID,
+          subscriptionName: "Fixture subscription"
+        }
+      ]
+    };
     // The production SDK entry registers this hook to open a worktree file in
     // the editor canvas. The Chromium harness has no host SDK, so provide the
     // successful local boundary explicitly; otherwise the browser correctly
@@ -836,6 +859,10 @@ export class CanvasHarness {
     await this.ghModule.primeGhIdentity().catch(() => undefined);
     this.ghModule.setPreferredGhLogin("");
     this.ghModule.resetGhIdentityCache();
+    // The profile store is module-scoped and outlives this server, so drop the
+    // fixture rather than let it satisfy the next test's preconditions.
+    const sharedModule = await import("../../../src/shared.js");
+    delete sharedModule.sharedCredentials.profiles;
     for (const [key, value] of Object.entries(this.originalEnv)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

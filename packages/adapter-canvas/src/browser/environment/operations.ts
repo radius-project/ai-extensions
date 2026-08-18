@@ -195,6 +195,7 @@ export interface EnvironmentOperationsDeps {
   showSetupWarnings(warnings: readonly string[]): void;
   showError(message: string): void;
   reloadEnvironmentsTable(): void;
+  resetSubmitButton?(): void;
   promptServiceManagementReference(): Promise<string>;
   promptAppSelection(request: AppPickerRequest): Promise<AppPickerChoice>;
   prefersReducedMotion?(): boolean;
@@ -762,10 +763,13 @@ export function initializeEnvironmentOperations(
   }
 
   function applyTerminal(op: OperationRecord): void {
-    const btn = dom.inputById(DEPLOY_BUTTON_ID);
-    if (btn) {
-      btn.textContent = DEPLOY_BUTTON_IDLE_LABEL;
-      btn.disabled = false;
+    if (deps.resetSubmitButton) deps.resetSubmitButton();
+    else {
+      const btn = dom.inputById(DEPLOY_BUTTON_ID);
+      if (btn) {
+        btn.textContent = DEPLOY_BUTTON_IDLE_LABEL;
+        btn.disabled = false;
+      }
     }
     const warnings = op.steps
       .filter((step) => step.state === "warning")

@@ -27,6 +27,7 @@ export interface DomEvent {
   readonly target?: unknown;
   readonly currentTarget?: unknown;
   readonly key?: string;
+  readonly shiftKey?: boolean;
   preventDefault(): void;
   stopPropagation(): void;
 }

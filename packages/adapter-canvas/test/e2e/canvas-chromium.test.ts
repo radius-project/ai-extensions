@@ -6,6 +6,7 @@ import {
   defaultFakeCliScenario,
   expect,
   PLACEHOLDER_SECRET,
+  PROFILE_NAME,
   REPOSITORY,
   test,
   WORKTREE_BRANCH,
@@ -67,6 +68,38 @@ function bodyFor(canvas: CanvasHarness, pathName: string): unknown {
   return canvas.requests.find(
     (request) => request.method === "POST" && request.path === pathName
   )?.body;
+}
+
+// Environment creation is a two-step wizard: step 1 picks the cloud credential
+// profile, step 2 holds the environment name and the GitHub identity block.
+// Step 2 is hidden until a profile is chosen, so any journey that asserts on
+// step 2 has to pass through step 1 first. Driven entirely by keyboard, so this
+// also exercises the credential-selection listbox rather than skipping it.
+async function openEnvironmentWizard(page: Page): Promise<void> {
+  const newEnvironment = page.locator("#new-env-btn");
+  await newEnvironment.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#env-form")).toBeVisible();
+
+  // The wizard hands focus to the profile control, since that is the only
+  // decision available on step 1.
+  const profile = page.locator("#env-profile-button");
+  await expect(profile).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(profile).toHaveAttribute("aria-expanded", "true");
+
+  const option = page
+    .locator("#env-profile-menu")
+    .getByRole("option", { name: new RegExp(PROFILE_NAME) });
+  await option.focus();
+  await page.keyboard.press("Enter");
+  await expect(profile).toBeFocused();
+
+  const next = page.locator("#env-step1-next");
+  await expect(next).toBeEnabled();
+  await next.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#env-step-details")).toBeVisible();
 }
 
 test.describe("Radius Canvas in Chromium", () => {
@@ -212,7 +245,7 @@ test.describe("Radius Canvas in Chromium", () => {
     // effect and the acting account is the one the warning must name.
     await canvas.setGitHubKeyringScopes(["repo"]);
     await gotoCanvas(page, canvas, "environment");
-    await page.getByRole("button", { name: "New Environment" }).click();
+    await openEnvironmentWizard(page);
 
     const note = page.locator("#env-gh-identity-note");
     await expect(note).toBeVisible();
@@ -233,7 +266,7 @@ test.describe("Radius Canvas in Chromium", () => {
   }) => {
     await canvas.setGitHubKeyringScopes(["repo"]);
     await gotoCanvas(page, canvas, "environment");
-    await page.getByRole("button", { name: "New Environment" }).click();
+    await openEnvironmentWizard(page);
 
     const note = page.locator("#env-gh-identity-note");
     const recheck = page.getByRole("button", { name: "Re-check" });
@@ -264,8 +297,7 @@ test.describe("Radius Canvas in Chromium", () => {
   }) => {
     canvas.setGitHubToken(null);
     await gotoCanvas(page, canvas, "environment");
-    await page.locator("#new-env-btn").focus();
-    await page.keyboard.press("Enter");
+    await openEnvironmentWizard(page);
 
     const combo = page.locator("#env-gh-account-button");
     // Without an injected token the keyring's active account is the acting one.
@@ -576,11 +608,10 @@ test.describe("Radius Canvas in Chromium", () => {
   }) => {
     await gotoCanvas(page, canvas, "environment");
     const newEnvironment = page.locator("#new-env-btn");
-    await newEnvironment.focus();
-    await expect(newEnvironment).toBeFocused();
-    await page.keyboard.press("Enter");
-
-    await expect(page.locator("#env-form")).toBeVisible();
+    // Walks both wizard steps by keyboard, asserting focus placement at each
+    // hand-off: reveal control → profile combo → listbox option → combo →
+    // Continue → environment name.
+    await openEnvironmentWizard(page);
     await expect(page.getByLabel("Environment name")).toBeFocused();
     await expectNoWcagViolations(page);
 

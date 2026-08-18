@@ -274,7 +274,12 @@ describe("parseGithubIdentity", () => {
       ]
     });
     expect(identity.accounts).toEqual([
-      { login: "alice", hasWorkflow: true, hasPackages: true, switchable: true }
+      {
+        login: "alice",
+        hasWorkflow: true,
+        hasPackages: true,
+        switchable: true
+      }
     ]);
   });
 
@@ -484,6 +489,26 @@ describe("profileDetailSpecs", () => {
     );
     expect(specs).toHaveLength(2);
   });
+
+  // Regression: the verified badge used --rad-primary, a fixed brand green
+  // meant for solid fills behind white text. As small text it failed WCAG AA
+  // contrast on the profile panel, which the Chromium accessibility gate
+  // caught. Both branches must use the theme-aware status token.
+  it.each([
+    ["with a signed-in user", AZURE_PROFILE],
+    ["without a signed-in user", { ...AZURE_PROFILE, user: undefined }]
+  ])(
+    "styles the verified badge with the status token %s",
+    (_label, profile) => {
+      const specs = profileDetailSpecs(profile, "azure");
+      const styles = specs
+        .flatMap((spec) => spec.children ?? [])
+        .map((child) => String(child.attrs?.style ?? ""))
+        .filter((style) => style.includes("font-weight:600"));
+      expect(styles).toContain("color:var(--rad-success);font-weight:600;");
+      expect(styles.join(" ")).not.toContain("--rad-primary");
+    }
+  );
 
   it("shows the signed-in user as a hostile-safe text node", () => {
     const specs = profileDetailSpecs(

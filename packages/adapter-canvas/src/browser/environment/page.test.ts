@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   CREDENTIALS_ENTRY_KEY,
   CREDENTIAL_PROFILES_PATH,
-  GITHUB_IDENTITY_PATH
+  CREDENTIAL_SAVE_PATH,
+  GITHUB_IDENTITY_PATH,
+  VERIFY_AZURE_PATH
 } from "./credentials.js";
 import { DISCOVER_ENDPOINT, DISCOVERY_PANEL_ENTRY_KEY } from "./discovery.js";
 import {
@@ -70,6 +72,8 @@ const REQUIRED_INPUTS = [
   "azure-refresh-btn",
   "aws-refresh-btn",
   "deploy-btn",
+  "env-step1-next",
+  "env-step2-back",
   "target-repo",
   "deploy-branch-select",
   "az-client-id",
@@ -127,7 +131,30 @@ const REQUIRED_ELEMENTS = [
   "deploy-status",
   "new-env-btn",
   "cancel-env-btn",
-  "env-create-profile-link"
+  "env-create-profile-link",
+  // The credential form is one relocatable fragment: it is physically moved
+  // between the wizard host and the Credentials sub-tab, so both the card it
+  // lives in and the two hosts have to exist for the pane to initialize.
+  "cred-form-card",
+  "cred-form-title",
+  "env-cred-form-host",
+  "env-step-credentials-card",
+  "env-step-credentials",
+  "env-step-details",
+  "env-wizard-step-1",
+  "env-wizard-step-2",
+  "env-step1-hint",
+  "env-profile-summary",
+  "env-profile-detail",
+  "env-profile-status",
+  "env-confirm-modal",
+  "env-confirm-title",
+  "env-confirm-message",
+  "env-confirm-usage",
+  "env-confirm-usage-label",
+  "env-confirm-usage-list",
+  "env-confirm-ok",
+  "env-confirm-cancel"
 ] as const;
 
 function fixture(
@@ -136,6 +163,7 @@ function fixture(
     branch?: string;
     activeSubtab?: string;
     search?: string;
+    omit?: readonly string[];
   } = {}
 ): PageFixture {
   const browser = createFakeBrowser();
@@ -153,8 +181,13 @@ function fixture(
     activeSubtab: state.activeSubtab ?? "environments"
   });
   add(stateElement);
-  for (const id of REQUIRED_ELEMENTS) add(createFakeElement(id));
-  for (const id of REQUIRED_INPUTS) add(createFakeInput(id));
+  const omitted = new Set(state.omit ?? []);
+  for (const id of REQUIRED_ELEMENTS) {
+    if (!omitted.has(id)) add(createFakeElement(id));
+  }
+  for (const id of REQUIRED_INPUTS) {
+    if (!omitted.has(id)) add(createFakeInput(id));
+  }
   for (const id of REQUIRED_SELECTS) add(createFakeSelect(id));
   const setValue = (id: string, value: string): void => {
     const element = browser.context.dom.inputById(id);
@@ -165,6 +198,16 @@ function fixture(
   setValue("deploy-branch-select", branch);
   setValue("cred-provider-select", "azure");
   elements["env-profile-menu"].style.display = "none";
+  const environmentTab = createFakeElement("environment-subtab", "a");
+  environmentTab.setAttribute("data-subtab", "environments");
+  const credentialTab = createFakeElement("credentials-subtab", "a");
+  credentialTab.setAttribute("data-subtab", "credentials");
+  elements[environmentTab.id] = environmentTab;
+  elements[credentialTab.id] = credentialTab;
+  browser.document.addSelectorAll("#env-subtabs .rad-subtab", [
+    environmentTab,
+    credentialTab
+  ]);
   browser.nav.search = state.search ?? "?page=environment";
   browser.nav.href = `http://localhost/${browser.nav.search}`;
   browser.net.handle(
@@ -361,6 +404,139 @@ describe("initializeEnvironmentPage", () => {
     page.elements["env-create-profile-link"].dispatch("click");
     expect(page.elements["pane-credentials"].style.display).toBe("");
     expect(page.elements["cred-form"].style.display).toBe("");
+  });
+
+  it("summarizes the chosen credential profile and unlocks the wizard", async () => {
+    const page = fixture();
+    page.elements["env-profile-status"].innerHTML = "<b>Account 1234</b>";
+
+    await openWithProfile(page, "aws");
+
+    expect(page.elements["env-profile-summary"].textContent).toBe(
+      "aws-prod (AWS)"
+    );
+    expect(page.elements["env-profile-detail"].innerHTML).toBe(
+      "<b>Account 1234</b>"
+    );
+    expect(page.elements["env-profile-detail"].style.display).toBe("");
+    expect(pageInput(page, "env-step1-next").disabled).toBe(false);
+    expect(page.elements["env-step1-hint"].style.display).toBe("none");
+  });
+
+  it("keeps the wizard locked while no credential profile is chosen", async () => {
+    const page = fixture();
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    page.elements["new-env-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(page.elements["env-profile-summary"].textContent).toBe(
+      "No credential profile selected"
+    );
+    expect(page.elements["env-profile-detail"].innerHTML).toBe("");
+    expect(page.elements["env-profile-detail"].style.display).toBe("none");
+    expect(pageInput(page, "env-step1-next").disabled).toBe(true);
+    expect(page.elements["env-step1-hint"].style.display).toBe("");
+  });
+
+  it("returns to the environment step with the profile just created in the wizard", async () => {
+    const page = fixture();
+    let profiles: readonly ReturnType<typeof profile>[] = [];
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => jsonResponse({ profiles })
+    );
+    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
+      jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
+    );
+    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
+      jsonResponse({
+        user: "octocat",
+        tenantId: "tenant-1",
+        subscriptionId: "sub-1",
+        subscriptionName: "Production"
+      })
+    );
+    page.browser.net.handle(CREDENTIAL_SAVE_PATH, () => {
+      profiles = [profile("azure")];
+      return jsonResponse({});
+    });
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    page.elements["new-env-btn"].dispatch("click");
+    page.elements["env-create-profile-link"].dispatch("click");
+    await flushPromises();
+    pageInput(page, "cred-name-input").value = "azure-prod";
+    pageInput(page, "az-tenant-id").value = "tenant-1";
+    pageInput(page, "az-sub-id").value = "sub-1";
+    page.elements["btn-verify-azure"].dispatch("click");
+    await flushPromises();
+    page.elements["save-cred-btn"].dispatch("click");
+    await flushPromises();
+
+    // Saving inside the wizard hands the new profile straight back to the
+    // environment step instead of dropping the user on the credentials pane.
+    expect(page.elements["env-step-details"].style.display).toBe("");
+    expect(page.elements["env-step-credentials"].style.display).toBe("none");
+    expect(page.elements["env-name-input"].focusCount).toBe(1);
+  });
+
+  it("leaves the profile detail empty when the status markup is absent", async () => {
+    const page = fixture({ omit: ["env-profile-status"] });
+
+    const teardown = await openWithProfile(page, "azure");
+
+    expect(page.elements["env-profile-detail"].innerHTML).toBe("");
+    expect(page.elements["env-profile-detail"].style.display).toBe("");
+    teardown();
+  });
+
+  it("still runs when the optional wizard summary and confirm dialog are absent", async () => {
+    const page = fixture({
+      omit: [
+        "env-profile-summary",
+        "env-profile-detail",
+        "env-profile-status",
+        "env-step1-hint",
+        "env-step1-next",
+        "env-confirm-modal",
+        "env-confirm-title",
+        "env-confirm-message",
+        "env-confirm-usage",
+        "env-confirm-usage-label",
+        "env-confirm-usage-list",
+        "env-confirm-ok",
+        "env-confirm-cancel"
+      ]
+    });
+
+    const teardown = await openWithProfile(page, "azure");
+
+    // The wizard summary and the shared dialog are presentation extras, so the
+    // page must still select a profile and stay usable without them.
+    expect(page.browser.net.calls.length).toBeGreaterThan(0);
+    expect(page.elements["env-step-details"]).toBeDefined();
+    expect(() => teardown()).not.toThrow();
+  });
+
+  it("loads the credential table when the credentials subtab is chosen", async () => {
+    const page = fixture();
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    const before = page.browser.net.calls.length;
+
+    page.elements["credentials-subtab"].dispatch("click", {
+      preventDefault() {}
+    });
+    await flushPromises();
+
+    expect(
+      page.browser.net.calls
+        .slice(before)
+        .some((call) => call.url.startsWith(CREDENTIAL_PROFILES_PATH))
+    ).toBe(true);
   });
 
   it("reads deep-link values without a leading question mark", async () => {
@@ -568,6 +744,32 @@ describe("initializeEnvironmentPage", () => {
       }
     });
     expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("");
+  });
+
+  it("labels the submit as a save and defaults the namespace when editing", async () => {
+    const page = fixture();
+    let createInit: HttpRequestInit | undefined;
+    await openWithProfile(page, "azure");
+    // Editing locks the name, which is what marks this submission as a save of
+    // an existing environment rather than the creation of a new one.
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "env-name-input").disabled = true;
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    pageInput(page, "azure-namespace-select").value = "";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, (init) => {
+      createInit = init;
+      return jsonResponse({ operationId: "op-1" }, true, 202);
+    });
+
+    page.elements["deploy-btn"].dispatch("click");
+
+    expect(page.elements["deploy-btn"].textContent).toBe("Saving environment…");
+    await flushPromises();
+    expect(JSON.parse(String(createInit?.body))).toMatchObject({
+      environment: "dev",
+      namespace: "default"
+    });
   });
 
   it("clears the create latch when the tracked operation becomes terminal", async () => {
