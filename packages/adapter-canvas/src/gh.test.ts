@@ -666,6 +666,44 @@ describe("decideGhTokenStrategy", () => {
   });
 });
 
+describe("getInjectedGhToken", () => {
+  it.each([
+    [{ GH_TOKEN: "gh-token" }, "gh-token"],
+    [{ GITHUB_TOKEN: "github-token" }, "github-token"],
+    [{ GH_TOKEN: "gh-token", GITHUB_TOKEN: "github-token" }, "gh-token"],
+    [{ GH_TOKEN: "  ", GITHUB_TOKEN: "github-token" }, "github-token"],
+    [{ GH_TOKEN: " gh-token ", GITHUB_TOKEN: "github-token" }, "gh-token"],
+    [{}, ""]
+  ])(
+    "selects the documented injected-token precedence for %o",
+    async (env, expected) => {
+      const { getInjectedGhToken } = await import("./gh.js");
+      expect(getInjectedGhToken(env)).toBe(expected);
+    }
+  );
+});
+
+describe("GitHub diagnostic redaction", () => {
+  it("redacts injected and credential-shaped tokens from surfaced errors", async () => {
+    const { redactGhCredentials } = await import("./gh.js");
+    expect(
+      redactGhCredentials(
+        "gh failed with placeholder-token and ghp_fixture_secret",
+        { GH_TOKEN: "  placeholder-token  " }
+      )
+    ).toBe("gh failed with [REDACTED] and [REDACTED]");
+  });
+
+  it("does not replace incidental text matching a short injected value", async () => {
+    const { redactGhCredentials } = await import("./gh.js");
+    expect(
+      redactGhCredentials("authentication token unavailable", {
+        GH_TOKEN: "token"
+      })
+    ).toBe("authentication token unavailable");
+  });
+});
+
 describe.sequential("getGitHubIdentity / switchGhAccount", () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();
@@ -806,16 +844,18 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
     expect(id.actingLogin).toBe("keyuser");
   });
 
-  it("returns an error when gh auth switch fails", async () => {
+  it("redacts injected credentials when gh auth switch fails", async () => {
     const gh = await loadGh("linux", {
-      token: "tok",
+      token: "placeholder-token",
       withToken: STATUS.tokenWithWorkflow,
       keyring: STATUS.keyringWithWorkflow,
-      switchError: "no such account"
+      switchError: "no such account for placeholder-token"
     });
     const res = await gh.switchGhAccount("ghost");
-    expect(res.ok).toBe(false);
-    expect(res.error).toContain("no such account");
+    expect(res).toEqual({
+      ok: false,
+      error: "no such account for [REDACTED]"
+    });
   });
 
   it("restores a persisted account choice via setPreferredGhLogin so it survives a restart", async () => {
