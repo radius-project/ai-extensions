@@ -3,13 +3,13 @@ import {
   createGraphNavigation,
   initializeGraphNavigation
 } from "../graph/navigation.js";
-import { resolveGraphVendor } from "../graph/vendor.js";
 import { publishBrowserGlobals } from "../globals.js";
 import { isRecord } from "../json.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { resolvePageRegistry, runBrowserEntry } from "../registry.js";
 import type { GraphOptions } from "../graph/build.js";
 import type { GraphResource } from "../graph/model.js";
+import type { GraphVendor } from "../graph/vendor.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type { BrowserContext } from "../ports.js";
 
@@ -54,21 +54,25 @@ function asOptions(value: unknown): GraphOptions {
   return options;
 }
 
-export function installGraphEntry(scope: unknown): BrowserTeardown {
+export function installGraphEntry(
+  scope: unknown,
+  vendor: GraphVendor | null
+): BrowserTeardown {
   return runBrowserEntry(
     scope,
-    (context, globalScope) => initializeGraphEntry(context, globalScope),
+    (context) => initializeGraphEntry(context, scope, vendor),
     "document"
   );
 }
 
 function initializeGraphEntry(
   context: BrowserContext,
-  scope: unknown
+  scope: unknown,
+  vendor: GraphVendor | null
 ): BrowserTeardown {
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
-  const surface = createGraphSurface(context, () => resolveGraphVendor(scope));
+  const surface = createGraphSurface(context, () => vendor);
   const navigation = createGraphNavigation(context, resolvePageRegistry(scope));
   const navigationTeardown = initializeGraphNavigation(context, navigation);
   entry.onTeardown(navigationTeardown);

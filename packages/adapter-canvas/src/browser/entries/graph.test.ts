@@ -43,12 +43,6 @@ function baseFixture() {
 function fixture() {
   const base = baseFixture();
   const vendor = createFakeGraphVendor();
-  Object.assign(base.browser.scope, {
-    React: vendor.react,
-    ReactDOM: vendor.reactDom,
-    ReactFlow: vendor.reactFlow,
-    dagre: vendor.dagre
-  });
   return { ...base, vendor };
 }
 
@@ -58,10 +52,10 @@ function fixtureWithoutVendor() {
 
 describe("graph browser entry", () => {
   it("installs through the shared registry, wires navigation once and publishes exactly the intended globals", () => {
-    const { browser } = fixture();
+    const { browser, vendor } = fixture();
 
-    installGraphEntry(browser.scope);
-    installGraphEntry(browser.scope);
+    installGraphEntry(browser.scope, vendor);
+    installGraphEntry(browser.scope, vendor);
 
     expect(browser.scope[PAGE_REGISTRY_GLOBAL]).toBe(
       resolvePageRegistry(browser.scope)
@@ -79,7 +73,7 @@ describe("graph browser entry", () => {
 
   it("renders filtered resources with threaded options and a legend, then destroys them on teardown", () => {
     const { browser, container, legends, vendor } = fixture();
-    installGraphEntry(browser.scope);
+    installGraphEntry(browser.scope, vendor);
 
     const rendered = callGlobal(
       browser.scope,
@@ -127,7 +121,7 @@ describe("graph browser entry", () => {
 
   it("treats a non-array resources argument as none and renders nothing", () => {
     const { browser, vendor } = fixture();
-    installGraphEntry(browser.scope);
+    installGraphEntry(browser.scope, vendor);
 
     const rendered = callGlobal(
       browser.scope,
@@ -142,8 +136,8 @@ describe("graph browser entry", () => {
   });
 
   it("ignores a non-record options argument and a non-string container id", () => {
-    const { browser } = fixture();
-    installGraphEntry(browser.scope);
+    const { browser, vendor } = fixture();
+    installGraphEntry(browser.scope, vendor);
 
     expect(() => {
       callGlobal(
@@ -158,7 +152,7 @@ describe("graph browser entry", () => {
 
   it("reports a missing graph library without a vendor bundle", () => {
     const { browser, container } = fixtureWithoutVendor();
-    installGraphEntry(browser.scope);
+    installGraphEntry(browser.scope, null);
 
     callGlobal(
       browser.scope,
@@ -174,8 +168,8 @@ describe("graph browser entry", () => {
   });
 
   it("delegates loading and error state to the surface by container id", () => {
-    const { browser, container } = fixture();
-    installGraphEntry(browser.scope);
+    const { browser, container, vendor } = fixture();
+    installGraphEntry(browser.scope, vendor);
 
     callGlobal(browser.scope, "radiusSetGraphLoading", "graph-container");
     expect(container.innerHTML).not.toBe("");

@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { browserEntryMarker, browserScript } from "../browser/scripts.js";
+import {
+  browserEntryMarker,
+  browserScript,
+  browserStyle
+} from "../browser/scripts.js";
 import { pageShell } from "./shell.js";
 
 describe("pageShell", () => {
@@ -56,6 +60,19 @@ describe("pageShell", () => {
       /\.react-flow, \.react-flow__renderer, \.react-flow__pane\s*\{([^}]*)\}/
     )?.[1];
     expect(flowStyles).toContain("background: transparent");
+  });
+
+  it("loads esbuild's React Flow stylesheet before Radius graph overrides", () => {
+    const html = pageShell("My Title", '<div id="graph-container"></div>');
+    const reactFlowStyle = browserStyle("graph");
+    expect(reactFlowStyle).toContain(".react-flow");
+    expect(html.split(reactFlowStyle)).toHaveLength(2);
+    expect(html.indexOf(reactFlowStyle)).toBeLessThan(
+      html.indexOf("--rad-brand: #da4c2a;")
+    );
+    expect(html.indexOf(reactFlowStyle)).toBeLessThan(
+      html.indexOf(browserEntryMarker("graph"))
+    );
   });
 
   it("excludes radio and checkbox inputs from the 100%-width form-field rule", () => {
