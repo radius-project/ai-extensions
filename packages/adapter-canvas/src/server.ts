@@ -154,6 +154,7 @@ import {
   extractGitHubActionsStepLog,
   extractRadDeployError,
   explainOidcEnterpriseClaim,
+  explainNoSubscriptions,
   explainRepoAccessForEnvSetup
 } from "./deploy.js";
 import {
@@ -860,6 +861,7 @@ const environmentsRoutes = createEnvironmentsRoutes({
   extractErrorLines: (logText, max) => extractErrorLines(logText, max),
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,
+  explainNoSubscriptions,
   addLegacyStep: (operation, text) => addLegacyStep(operation, text),
   isTerminalState,
   finish,
