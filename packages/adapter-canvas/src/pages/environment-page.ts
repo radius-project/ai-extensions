@@ -202,6 +202,7 @@ ${confirmDialogMarkup()}
 .env-progress__failure-label { font-size:12px; font-weight:600; color:var(--rad-text); margin-bottom:4px; }
 .env-progress__failure-block { display:flex; flex-direction:column; gap:4px; }
 .env-progress__failure-list { margin:0; padding-left:18px; font-size:12px; color:var(--rad-text); line-height:1.5; }
+.env-progress__state { margin-top:10px; padding:10px 12px; border-radius:8px; background:var(--rad-bg-subtle); border:1px solid var(--rad-stroke); display:flex; flex-direction:column; gap:8px; }
 .env-progress__details { margin-top:12px; }
 .env-progress__details > summary { font-size:12px; color:var(--rad-text-tertiary); cursor:pointer; }
 .env-progress__steps { list-style:none; margin:8px 0 0; padding:0; display:flex; flex-direction:column; gap:4px; max-height:220px; overflow:auto; }

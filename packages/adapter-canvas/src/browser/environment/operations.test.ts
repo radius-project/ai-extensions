@@ -1262,9 +1262,9 @@ describe("failure card rendering", () => {
     expect(browser.els[PROGRESS_IDS.failureMessage].textContent).toBe("");
     expect(browser.els[PROGRESS_IDS.cleanupStatus].textContent).toBe("");
     expect(browser.els[PROGRESS_IDS.retry].textContent).toBe("");
-    expect(
-      browser.els[PROGRESS_IDS.cleanupWarningsList].children
-    ).toHaveLength(0);
+    expect(browser.els[PROGRESS_IDS.cleanupWarningsList].children).toHaveLength(
+      0
+    );
     expect(browser.els[PROGRESS_IDS.cleanupRemovedList].children).toHaveLength(
       0
     );
@@ -1336,6 +1336,18 @@ describe("partial-state inventory", () => {
     ]) {
       expect(browser.els[id].style.display).toBe("");
     }
+  });
+
+  it("keeps the inventory out of sight while setup is still running", () => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(
+      record({
+        terminalState: null,
+        cleanup: { created: [{ target: "app radius-dev" }] }
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
   });
 
   it("hides an empty group and the panel when nothing survives", () => {
@@ -2038,9 +2050,7 @@ describe("rollback confirmation", () => {
     expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe(
       "Roll back resources"
     );
-    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe(
-      "Keep resources"
-    );
+    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe("Keep resources");
     expect(
       browser.els[PROGRESS_IDS.commandButtons].children[0].getAttribute(
         "aria-haspopup"
@@ -2075,9 +2085,7 @@ describe("rollback confirmation", () => {
     expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe(
       "Roll back resources"
     );
-    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe(
-      "Keep resources"
-    );
+    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe("Keep resources");
     expect(browser.els[ROLLBACK_IDS.removeBlock].style.display).toBe("none");
   });
 
@@ -2425,7 +2433,9 @@ describe("headline and rollback outcomes", () => {
 
   it("keeps the plain summary and hides the note when there is no headline", () => {
     const browser = setup();
-    controllerFor(browser)?.renderProgress(record({ summary: "Creating dev…" }));
+    controllerFor(browser)?.renderProgress(
+      record({ summary: "Creating dev…" })
+    );
 
     expect(browser.els[PROGRESS_IDS.title].textContent).toBe("Creating dev…");
     expect(browser.els[PROGRESS_IDS.headlineNote].style.display).toBe("none");
@@ -2530,9 +2540,7 @@ describe("headline and rollback outcomes", () => {
     // not finish.
     expect(deps.errors).toEqual([]);
     expect(
-      browser.els[PROGRESS_IDS.panel].classList.contains(
-        "env-progress--failed"
-      )
+      browser.els[PROGRESS_IDS.panel].classList.contains("env-progress--failed")
     ).toBe(true);
   });
 

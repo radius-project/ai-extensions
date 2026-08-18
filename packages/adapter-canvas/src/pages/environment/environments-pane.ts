@@ -86,32 +86,6 @@ export function environmentsPaneMarkup(
         <ul id="env-progress-cleanup-warnings" class="env-progress__failure-list"></ul>
       </div>
     </div>
-    <!-- Partial-state inventory. Named groups rather than one merged list: a
-         customer cannot act on "some resources exist" and can act on "Radius
-         created this and kept it so a retry can reuse it". -->
-    <div id="env-progress-state" class="env-progress__failure" style="display:none;">
-      <div class="env-progress__failure-title">What exists right now</div>
-      <div id="env-progress-state-created-block" class="env-progress__failure-block" style="display:none;">
-        <div class="env-progress__failure-label">Created by Radius and still present</div>
-        <ul id="env-progress-state-created" class="env-progress__failure-list"></ul>
-      </div>
-      <div id="env-progress-state-retained-block" class="env-progress__failure-block" style="display:none;">
-        <div class="env-progress__failure-label">Retained for a retry</div>
-        <ul id="env-progress-state-retained" class="env-progress__failure-list"></ul>
-      </div>
-      <div id="env-progress-state-reused-block" class="env-progress__failure-block" style="display:none;">
-        <div class="env-progress__failure-label">Reused — Radius does not own these</div>
-        <ul id="env-progress-state-reused" class="env-progress__failure-list"></ul>
-      </div>
-      <div id="env-progress-state-cleaned-block" class="env-progress__failure-block" style="display:none;">
-        <div class="env-progress__failure-label">Removed or already absent</div>
-        <ul id="env-progress-state-cleaned" class="env-progress__failure-list"></ul>
-      </div>
-      <div id="env-progress-state-manual-block" class="env-progress__failure-block" style="display:none;">
-        <div class="env-progress__failure-label">Needs an action from you</div>
-        <ul id="env-progress-state-manual" class="env-progress__failure-list"></ul>
-      </div>
-    </div>
     <!-- Server-projected commands. The page renders whatever the operation
          record says is allowed; it never re-derives eligibility itself. The
          forward action comes first and the destructive one second, and neither
@@ -129,6 +103,32 @@ export function environmentsPaneMarkup(
     <details id="env-progress-details" class="env-progress__details">
       <summary>Show details</summary>
       <ol id="env-progress-steps" class="env-progress__steps"></ol>
+      <!-- Resource inventory stays inside Details while work is active. The
+           renderer exposes it only for a terminal decision state, where the
+           customer must choose whether to continue or roll back. -->
+      <div id="env-progress-state" class="env-progress__state" style="display:none;">
+        <div class="env-progress__failure-title">What exists right now</div>
+        <div id="env-progress-state-created-block" class="env-progress__failure-block" style="display:none;">
+          <div class="env-progress__failure-label">Created by Radius and still present</div>
+          <ul id="env-progress-state-created" class="env-progress__failure-list"></ul>
+        </div>
+        <div id="env-progress-state-retained-block" class="env-progress__failure-block" style="display:none;">
+          <div class="env-progress__failure-label">Retained for a retry</div>
+          <ul id="env-progress-state-retained" class="env-progress__failure-list"></ul>
+        </div>
+        <div id="env-progress-state-reused-block" class="env-progress__failure-block" style="display:none;">
+          <div class="env-progress__failure-label">Reused — Radius does not own these</div>
+          <ul id="env-progress-state-reused" class="env-progress__failure-list"></ul>
+        </div>
+        <div id="env-progress-state-cleaned-block" class="env-progress__failure-block" style="display:none;">
+          <div class="env-progress__failure-label">Removed or already absent</div>
+          <ul id="env-progress-state-cleaned" class="env-progress__failure-list"></ul>
+        </div>
+        <div id="env-progress-state-manual-block" class="env-progress__failure-block" style="display:none;">
+          <div class="env-progress__failure-label">Needs an action from you</div>
+          <ul id="env-progress-state-manual" class="env-progress__failure-list"></ul>
+        </div>
+      </div>
     </details>
     <div id="env-progress-actions" class="env-progress__actions" style="display:none;">
       <a id="env-progress-resume" class="rad-btn rad-btn--secondary" href="#">View planned graph</a>

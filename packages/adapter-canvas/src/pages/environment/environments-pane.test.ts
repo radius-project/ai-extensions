@@ -323,9 +323,12 @@ describe("environmentsPaneMarkup — stop, continue and rollback", () => {
     expect(html).toContain("Radius will keep");
   });
 
-  it("places the inventory above the actions so the effect is read first", () => {
+  it("keeps the inventory inside the collapsed details disclosure", () => {
+    expect(html.indexOf('id="env-progress-state"')).toBeGreaterThan(
+      html.indexOf('id="env-progress-details"')
+    );
     expect(html.indexOf('id="env-progress-state"')).toBeLessThan(
-      html.indexOf('id="env-progress-commands"')
+      html.indexOf("</details>")
     );
   });
 });
