@@ -53,7 +53,30 @@ const STATUS = {
     - Token scopes: 'repo', 'read:org', 'workflow', 'read:packages', 'write:packages'
   ✓ Logged in to github.com account emuuser (keyring)
     - Active account: true
-    - Token scopes: 'repo', 'read:org', 'workflow', 'read:packages', 'write:packages'`
+    - Token scopes: 'repo', 'read:org', 'workflow', 'read:packages', 'write:packages'`,
+  // An injected GH_TOKEN for `pubuser` minted WITHOUT workflow, shadowing a
+  // keyring credential for the SAME login that DOES have workflow. gh switch/
+  // refresh mutate the keyring credential; the env token can't be changed.
+  tokenPubNoWorkflow: `github.com
+  ✓ Logged in to github.com account pubuser (GITHUB_TOKEN)
+    - Active account: true
+    - Token scopes: 'gist', 'repo', 'user'`,
+  keyringPubWithWorkflow: `github.com
+  ✓ Logged in to github.com account pubuser (keyring)
+    - Active account: true
+    - Token scopes: 'gist', 'read:org', 'repo', 'workflow', 'write:packages'`,
+  // Mirror of the above: the injected GH_TOKEN for `pubuser` HAS workflow, but
+  // its same-login keyring credential does NOT. The strategy keeps the token
+  // (token-has-workflow), so the acting credential already has the scope —
+  // scope reporting must not read the keyring credential and warn.
+  tokenPubWithWorkflow: `github.com
+  ✓ Logged in to github.com account pubuser (GITHUB_TOKEN)
+    - Active account: true
+    - Token scopes: 'gist', 'repo', 'workflow'`,
+  keyringPubNoWorkflow: `github.com
+  ✓ Logged in to github.com account pubuser (keyring)
+    - Active account: true
+    - Token scopes: 'gist', 'repo'`
 };
 
 function setPlatform(platform: NodeJS.Platform): void {
@@ -700,6 +723,53 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
     expect(pub).toBeDefined();
     if (!pub) throw new Error("pubuser account missing");
     expect(pub.hasPackages).toBe(true);
+  });
+
+  it("reads the workflow scope keyring-first when an injected token shadows a same-login keyring credential", async () => {
+    // pubuser's INJECTED token was minted without workflow, but its KEYRING
+    // credential has it. gh auth switch/refresh mutate the keyring credential,
+    // so the identity must report workflow from the keyring entry — reading the
+    // shadowing env token (which no gh command can change) would leave the
+    // Create Environment warning permanently stuck. Regression test for #213.
+    const { getGitHubIdentity } = await loadGh("linux", {
+      token: "tok",
+      withToken: STATUS.tokenPubNoWorkflow,
+      keyring: STATUS.keyringPubWithWorkflow
+    });
+    const id = await getGitHubIdentity();
+    expect(id.actingLogin).toBe("pubuser");
+    // Pin the configuration under test: pubuser is the active keyring account,
+    // so the strategy falls back to it (reporting and the acting credential
+    // agree here). Guards against the fixture drifting into a case where they
+    // diverge without the test noticing.
+    expect(id.reason).toBe("token-missing-workflow");
+    expect(id.actingHasWorkflow).toBe(true);
+    const pub = id.accounts.find((a) => a.login === "pubuser");
+    expect(pub).toBeDefined();
+    if (!pub) throw new Error("pubuser account missing");
+    expect(pub.hasWorkflow).toBe(true);
+  });
+
+  it("reports workflow from the injected token when it has the scope but its same-login keyring credential does not", async () => {
+    // Mirror of #213: the injected token HAS workflow, its same-login keyring
+    // credential does NOT. decideGhTokenStrategy keeps the token
+    // (token-has-workflow), so gh acts as the token and setup would succeed.
+    // Reporting must follow the acting credential (the token) — a blanket
+    // keyring-first read would wrongly warn that workflow is missing and tell
+    // the user to run a refresh the acting credential does not need.
+    const { getGitHubIdentity } = await loadGh("linux", {
+      token: "tok",
+      withToken: STATUS.tokenPubWithWorkflow,
+      keyring: STATUS.keyringPubNoWorkflow
+    });
+    const id = await getGitHubIdentity();
+    expect(id.actingLogin).toBe("pubuser");
+    expect(id.reason).toBe("token-has-workflow");
+    expect(id.actingHasWorkflow).toBe(true);
+    const pub = id.accounts.find((a) => a.login === "pubuser");
+    expect(pub).toBeDefined();
+    if (!pub) throw new Error("pubuser account missing");
+    expect(pub.hasWorkflow).toBe(true);
   });
 
   it("flags a mismatch when setup falls back to a different keyring account", async () => {
