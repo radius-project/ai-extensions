@@ -377,6 +377,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#cred-verify-status")).toContainText(
       "Please enter a Profile Name"
     );
+    await expectNoWcagViolations(page);
     expect(
       canvas.requests.some(
         (request) =>
@@ -635,6 +636,7 @@ test.describe("Radius Canvas in Chromium", () => {
     });
 
     await gotoCanvas(page, canvas, "planned");
+    await expectNoWcagViolations(page);
     const initialNavigations = navigations;
     await page.evaluate("window.dispatchEvent(new Event('focus'))");
     await expect.poll(() => pings).toBe(1);

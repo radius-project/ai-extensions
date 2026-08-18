@@ -80,22 +80,22 @@ are produced on failure only.
 
 ## Appendix B workflows
 
-| Workflow                         | Covered by                   | What is actually proven                                                                                                                                                                                                                     |
-|----------------------------------|------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Graph rendering and node details | T1, T2                       | Three real React Flow nodes render from fixture `rad app graph` output. The card's details control is reached and activated by keyboard, the details panel opens, and focus returns to the invoking control when it closes.                 |
-| Graph source links               | T3                           | The node source anchor is activated by keyboard and posts the repository-relative path and line to the real `/api/open-source` route instead of navigating the page away.                                                                   |
-| Branch selection                 | T1, T12                      | Graph loading and deployment dispatch both send the current worktree branch, never an implicit `main`.                                                                                                                                      |
-| GitHub identity display          | T5                           | The identity note reports the acting account and the missing-scope condition with an accessible name on the account control, and no placeholder token text reaches the DOM.                                                                 |
-| Account selection and switching  | T7, T8                       | The account combo opens a real listbox, an option is chosen by keyboard, focus returns to the combo, `/api/github-account` receives the chosen login, and the fake `gh auth switch` runs.                                                   |
-| Mismatch recovery                | T6                           | With the scope warning showing, the Re-check control is focused and activated by keyboard, the identity is re-probed, the warning is replaced by the normal "Acts as" note, and the control hides itself.                                   |
-| Credentials                      | T9, T10                      | Azure verification runs through the fake `az` boundary; a failing verification surfaces an actionable message while secret-shaped stderr stays out of the page. Missing required fields block the request before any external command runs. |
-| Environment actions              | T15, T11                     | The environment form is revealed by keyboard with focus return, and a durable setup operation is created through the real `/api/operations` route.                                                                                          |
-| Deployment actions               | T12                          | A refused dispatch surfaces the failure and the deploy request carries the selected worktree branch.                                                                                                                                        |
-| Destructive confirmation         | T13, T14                     | The delete dialog takes focus on open, restores focus on Escape, and requires all three steps plus an exact typed token; a near-miss token leaves the action disabled and sends no delete request.                                          |
-| Progress and resume              | T11                          | A running operation renders the progress region with `aria-live="polite"`, survives navigation away and back, and the resumed page shows the durable server outcome.                                                                        |
-| Recovery                         | T16                          | Heartbeat failure drives the recovery threshold and the page reloads only after the loopback server is reachable again.                                                                                                                     |
-| Keyboard and focus               | T2, T6, T7, T13, T14, T15    | Activation by `Enter`, focus placement on open, focus return on close, and focus retention across live updates are asserted through real browser focus, not markup inspection.                                                              |
-| Accessibility                    | T2, T5, T6, T7, T9, T13, T14 | `@axe-core/playwright` runs WCAG 2.0/2.1/2.2 A and AA rules at each material state and must report zero violations.                                                                                                                         |
+| Workflow                         | Covered by                              | What is actually proven                                                                                                                                                                                                                                                                                                                                                  |
+|----------------------------------|-----------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Graph rendering and node details | T1, T2                                  | Three real React Flow nodes render from fixture `rad app graph` output. The card's details control is reached and activated by keyboard, the details panel opens, and focus returns to the invoking control when it closes.                                                                                                                                              |
+| Graph source links               | T3                                      | The node source anchor is activated by keyboard and posts the repository-relative path and line to the real `/api/open-source` route instead of navigating the page away.                                                                                                                                                                                                |
+| Branch selection                 | T1, T12                                 | Graph loading and deployment dispatch both send the current worktree branch, never an implicit `main`.                                                                                                                                                                                                                                                                   |
+| GitHub identity display          | T5                                      | The identity note reports the acting account and the missing-scope condition with an accessible name on the account control, and no placeholder token text reaches the DOM.                                                                                                                                                                                              |
+| Account selection and switching  | T7, T8                                  | The account combo opens a real listbox, an option is chosen by keyboard, focus returns to the combo, `/api/github-account` receives the chosen login, and the fake `gh auth switch` runs.                                                                                                                                                                                |
+| Mismatch recovery                | T6                                      | With the scope warning showing, the Re-check control is focused and activated by keyboard, the identity is re-probed, the warning is replaced by the normal "Acts as" note, and the control hides itself.                                                                                                                                                                |
+| Credentials                      | T9, T10                                 | Azure verification runs through the fake `az` boundary and a failing verification returns an actionable error while secret-shaped stderr stays out of both the response and the document. Missing required fields block the request before any external command runs. The rendered verification message itself is asserted by the credentials pane unit suite, not here. |
+| Environment actions              | T15, T11                                | The environment form is revealed by keyboard with focus return, and a durable setup operation is created through the real `/api/operations` route.                                                                                                                                                                                                                       |
+| Deployment actions               | T12                                     | A refused dispatch is returned by the real `/api/deploy` route and the deploy request carries the selected worktree branch. The failure's rendered presentation is owned by the deploying page unit suite.                                                                                                                                                               |
+| Destructive confirmation         | T13, T14                                | The delete dialog takes focus on open, restores focus on Escape, and requires all three steps plus an exact typed token; a near-miss token leaves the action disabled and sends no delete request.                                                                                                                                                                       |
+| Progress and resume              | T11                                     | A running operation renders the progress region with `aria-live="polite"`, survives navigation away and back, and the resumed page shows the durable server outcome.                                                                                                                                                                                                     |
+| Recovery                         | T16                                     | Heartbeat failure drives the recovery threshold and the page reloads only after the loopback server is reachable again.                                                                                                                                                                                                                                                  |
+| Keyboard and focus               | T2, T6, T7, T13, T14, T15               | Activation by `Enter`, focus placement on open, focus return on close, and focus retention across live updates are asserted through real browser focus, not markup inspection.                                                                                                                                                                                           |
+| Accessibility                    | T2, T5, T6, T7, T10, T13, T14, T15, T16 | `@axe-core/playwright` runs WCAG 2.0/2.1/2.2 A and AA rules at each material state and must report zero violations. This covers the graph, environment, credentials, deploying and planned pages in their rendered states, including the revealed environment and credential forms.                                                                                      |
 
 ## Cancellation semantics
 
@@ -117,11 +117,37 @@ are produced on failure only.
 
 ## Explicit gaps
 
-- Graph diff base/head selection is not exercised in Chromium. The diff page's
-  branch resolution is a server contract covered by the graph HTTP integration
-  suite; adding a browser case would duplicate it without new browser behavior.
+Every gap below names the production seam that owns the behavior. None of them
+is a silent deferral.
+
+- Graph diff base/head selection (J-04) is not exercised in Chromium. The diff
+  page's branch resolution is a server contract covered by the graph HTTP
+  integration suite; adding a browser case would duplicate it without new
+  browser behavior. The `diff` and `deployed` pages are therefore the two of the
+  seven page values that no Chromium test loads, and they receive no axe check
+  here; their markup is covered by the page renderer unit suites.
+- Repository-without-model handoff (J-02) and plan-application output (J-03) are
+  not exercised in Chromium. Both are server-rendered outcomes with no
+  browser-owned interaction beyond navigation, and their de-duplication,
+  no-fabrication and missing-recipe wording are asserted by the planned-graph
+  page renderer and HTTP integration suites.
+- Credential save, select and delete (J-05), deployment success and retry
+  (J-07), and delete active-app conflict and fail-closed API errors (J-08) are
+  covered here only at their browser-owned edges: form validation, focus
+  behavior, destructive confirmation, and request shape. Their remaining state
+  transitions are owned by the environment, deploying and delete HTTP routes and
+  are asserted in the HTTP integration suite.
+- Stale-token graph source reload (part of J-10) is not exercised in Chromium.
+  Token staleness never reaches the browser; it is fenced in the `gh` adapter
+  and asserted at the runtime and HTTP layers.
+- T8, T9, T11 and T12 drive their routes through an in-page `fetch` rather than
+  through the owning form control. They assert the real route, the real fake CLI
+  boundary and redaction from inside the real page, but they are not full UI
+  journeys for those workflows.
 - Real-host installation, discovery and panel lifecycle are Phase 8 concerns and
   are not represented here. Loopback HTTP is not host coverage.
 - Golden visual baselines and scheduled reliability matrices are Phase 7 scope.
   The screenshots and traces this suite writes on failure are diagnostics only
   and are not an approved visual baseline.
+- Chromium runs on Linux in CI. The harness's Windows `.exe` shim path is
+  exercised only by local Windows runs.
