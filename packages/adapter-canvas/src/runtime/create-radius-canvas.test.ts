@@ -495,6 +495,49 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     // The stale failure must not have clobbered the current (successful) state.
     expect(deps.servers.get("radius-panel")!.state.diffError).toBeUndefined();
   });
+
+  it("does not let a closed instance's late graph result mutate a reopened instance", async () => {
+    let releaseFirst: (() => void) | undefined;
+    const firstResult = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const { canvas, deps } = setup();
+    const buildGraph = deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>;
+    buildGraph
+      .mockImplementationOnce(async () => {
+        await firstResult;
+        return [{ id: "stale", name: "old", type: "old" }];
+      })
+      .mockResolvedValueOnce([{ id: "current", name: "new", type: "new" }]);
+
+    const firstOpen = canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "old"
+      })
+    );
+    await vi.waitFor(() => expect(buildGraph).toHaveBeenCalledTimes(1));
+    await canvas.onClose(ctx("radius-panel"));
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "new"
+      })
+    );
+    releaseFirst?.();
+    await firstOpen;
+
+    const state = deps.servers.get("radius-panel")!.state;
+    expect(state.diffHead).toBe("new");
+    expect(
+      state.graphResources?.map((resource) => resource.id) ?? []
+    ).not.toContain("stale");
+  });
 });
 
 // RU-16: missing-bicep handoff dedupe + nonblocking behavior.

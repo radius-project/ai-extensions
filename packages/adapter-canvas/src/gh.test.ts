@@ -643,6 +643,39 @@ describe("decideGhTokenStrategy", () => {
   });
 });
 
+describe("getInjectedGhToken", () => {
+  it.each([
+    [{ GH_TOKEN: "gh-token" }, "gh-token"],
+    [{ GITHUB_TOKEN: "github-token" }, "github-token"],
+    [{ GH_TOKEN: "gh-token", GITHUB_TOKEN: "github-token" }, "gh-token"],
+    [{}, ""]
+  ])(
+    "selects the documented injected-token precedence for %o",
+    async (env, expected) => {
+      const { getInjectedGhToken } = await import("./gh.js");
+      expect(getInjectedGhToken(env)).toBe(expected);
+    }
+  );
+});
+
+describe("GitHub diagnostic redaction", () => {
+  it("redacts injected and credential-shaped tokens from surfaced errors", async () => {
+    const { redactGhCredentials } = await import("./gh.js");
+    const previousGhToken = process.env.GH_TOKEN;
+    process.env.GH_TOKEN = "placeholder-token";
+    try {
+      expect(
+        redactGhCredentials(
+          "gh failed with placeholder-token and ghp_fixture_secret"
+        )
+      ).toBe("gh failed with [REDACTED] and [REDACTED]");
+    } finally {
+      if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = previousGhToken;
+    }
+  });
+});
+
 describe.sequential("getGitHubIdentity / switchGhAccount", () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();

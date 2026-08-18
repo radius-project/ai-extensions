@@ -103,8 +103,28 @@ export interface GhApiResult {
   stderr: string;
 }
 
+export function getInjectedGhToken(
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  return (env.GH_TOKEN || env.GITHUB_TOKEN || "").trim();
+}
+
+export function redactGhCredentials(value: string): string {
+  let redacted = value;
+  for (const token of [process.env.GH_TOKEN, process.env.GITHUB_TOKEN]) {
+    if (token && token.length >= 4)
+      redacted = redacted.replaceAll(token, "[REDACTED]");
+  }
+  return redacted.replace(
+    /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/g,
+    "[REDACTED]"
+  );
+}
+
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return redactGhCredentials(
+    error instanceof Error ? error.message : String(error)
+  );
 }
 
 // The host app injects a GH_TOKEN/GITHUB_TOKEN into the session environment, and
@@ -238,7 +258,7 @@ function ensureGhSnapshot(): Promise<GhSnapshot> {
   if (_ghSnapshotPromise) return _ghSnapshotPromise;
   _ghSnapshotPromise = (async () => {
     const base = process.env;
-    const hasToken = !!(base.GH_TOKEN || base.GITHUB_TOKEN);
+    const hasToken = !!getInjectedGhToken(base);
     const stripped = { ...base };
     delete stripped.GH_TOKEN;
     delete stripped.GITHUB_TOKEN;
@@ -499,11 +519,7 @@ export async function getGhPackageCredentials(): Promise<{
     const token = await ghKeyringTokenForUser(login);
     if (token) return { token, username: login };
   }
-  const injected = (
-    process.env.GH_TOKEN ||
-    process.env.GITHUB_TOKEN ||
-    ""
-  ).trim();
+  const injected = getInjectedGhToken();
   if (injected) return { token: injected, username: login };
   throw new Error(
     `Could not obtain a GitHub token for @${login}. Sign in with: gh auth login`
@@ -596,7 +612,7 @@ export function runCommand(
   const { stdin, ...execOpts } = opts;
   return new Promise((resolve, reject) => {
     const child = cliExec(cmd, args, execOpts, (err, stdout, stderr) => {
-      if (err) reject(new Error(stderr || err.message));
+      if (err) reject(new Error(redactGhCredentials(stderr || err.message)));
       else resolve(stdout.trim());
     });
     if (stdin !== undefined) child.stdin?.end(stdin);
@@ -751,8 +767,9 @@ export function ghApiGetContentResult(
       { timeout },
       (err, stdout, stderr) => {
         if (err) {
-          const detail =
-            (stderr && stderr.trim()) || err.message || String(err);
+          const detail = redactGhCredentials(
+            (stderr && stderr.trim()) || err.message || String(err)
+          );
           resolve({ content: null, error: detail.trim() });
           return;
         }
@@ -873,7 +890,12 @@ export async function commitFileToRepo(
       ],
       { timeout },
       (err, _stdout, stderr) => {
-        if (err) reject(new Error((stderr && stderr.trim()) || err.message));
+        if (err)
+          reject(
+            new Error(
+              redactGhCredentials((stderr && stderr.trim()) || err.message)
+            )
+          );
         else resolve(true);
       }
     );
@@ -942,7 +964,9 @@ export function createBranchRef(
       (err, _stdout, stderr) => {
         resolve({
           ok: !err,
-          stderr: ((stderr && stderr.trim()) || err?.message || "").trim()
+          stderr: redactGhCredentials(
+            ((stderr && stderr.trim()) || err?.message || "").trim()
+          )
         });
       }
     );
@@ -975,7 +999,9 @@ export function createPullRequestApi(
         if (err) {
           resolve({
             ok: false,
-            stderr: ((stderr && stderr.trim()) || err.message || "").trim()
+            stderr: redactGhCredentials(
+              ((stderr && stderr.trim()) || err.message || "").trim()
+            )
           });
           return;
         }
@@ -1033,7 +1059,9 @@ export function ghApiJson(
         }
         return;
       }
-      const detail = ((stderr && stderr.trim()) || err.message || "").trim();
+      const detail = redactGhCredentials(
+        ((stderr && stderr.trim()) || err.message || "").trim()
+      );
       const m =
         detail.match(/\(HTTP (\d{3})\)/) || detail.match(/\bHTTP (\d{3})\b/);
       resolve({
