@@ -80,20 +80,58 @@ const optionalPluginSources = ["CHANGELOG.md"];
 const stampedVersion = process.env.PLUGIN_VERSION?.trim();
 
 function writeThirdPartyNotices() {
-  const packages = [
+  const directPackages = [
     ["react", "18.3.1"],
     ["react-dom", "18.3.1"],
     ["reactflow", "11.11.4"],
     ["dagre", "0.8.5"]
   ];
-  const notices = packages.map(([name, version]) => {
-    const licensePath = join(packageRoot(name), "LICENSE");
-    if (!existsSync(licensePath)) {
+  const packages = new Map();
+  const visit = (name, fromRoot) => {
+    const root =
+      fromRoot ?
+        dirname(
+          require.resolve(name, {
+            paths: [fromRoot]
+          })
+        )
+      : packageRoot(name);
+    let current = root;
+    while (!existsSync(join(current, "package.json"))) {
+      const parent = dirname(current);
+      if (parent === current) {
+        throw new Error(`Unable to locate package root for "${name}".`);
+      }
+      current = parent;
+    }
+    const manifest = JSON.parse(
+      readFileSync(join(current, "package.json"), "utf8")
+    );
+    const key = `${manifest.name}@${manifest.version}`;
+    if (packages.has(key)) return;
+    packages.set(key, {
+      manifest,
+      root: current
+    });
+    for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+      // TypeScript declarations are package metadata, not code in the shipped
+      // browser bundles, so they do not need third-party notices.
+      if (dependency.startsWith("@types/")) continue;
+      visit(dependency, current);
+    }
+  };
+  for (const [name] of directPackages) visit(name);
+
+  const notices = [...packages.values()].map(({ manifest, root }) => {
+    const licensePath = ["LICENSE", "LICENSE.md", "license"]
+      .map((name) => join(root, name))
+      .find(existsSync);
+    if (!licensePath) {
       throw new Error(
-        `Missing license file for packaged dependency ${name}@${version}: ${licensePath}`
+        `Missing license file for bundled dependency ${manifest.name}@${manifest.version} in ${root}.`
       );
     }
-    return `===== ${name}@${version} =====\n\n${readFileSync(licensePath, "utf8").trim()}`;
+    return `===== ${manifest.name}@${manifest.version} =====\n\n${readFileSync(licensePath, "utf8").trim()}`;
   });
   writeFileSync(
     join(distDir, "THIRD-PARTY-NOTICES.txt"),

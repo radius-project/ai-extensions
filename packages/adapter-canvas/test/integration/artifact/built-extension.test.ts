@@ -267,7 +267,10 @@ describe("P0-C built Radius extension artifact", () => {
       "===== react@18.3.1 =====",
       "===== react-dom@18.3.1 =====",
       "===== reactflow@11.11.4 =====",
-      "===== dagre@0.8.5 ====="
+      "===== dagre@0.8.5 =====",
+      "===== @reactflow/core@11.11.4 =====",
+      "===== graphlib@2.1.8 =====",
+      "===== lodash@4.18.1 ====="
     ]) {
       expect(notices).toContain(marker);
     }
