@@ -109,9 +109,12 @@ export function getInjectedGhToken(
   return env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() || "";
 }
 
-export function redactGhCredentials(value: string): string {
+export function redactGhCredentials(
+  value: string,
+  env: NodeJS.ProcessEnv = process.env
+): string {
   let redacted = value;
-  for (const token of [process.env.GH_TOKEN, process.env.GITHUB_TOKEN]) {
+  for (const token of [env.GH_TOKEN?.trim(), env.GITHUB_TOKEN?.trim()]) {
     if (token && token.length >= 4)
       redacted = redacted.replaceAll(token, "[REDACTED]");
   }

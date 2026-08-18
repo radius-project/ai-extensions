@@ -663,18 +663,12 @@ describe("getInjectedGhToken", () => {
 describe("GitHub diagnostic redaction", () => {
   it("redacts injected and credential-shaped tokens from surfaced errors", async () => {
     const { redactGhCredentials } = await import("./gh.js");
-    const previousGhToken = process.env.GH_TOKEN;
-    process.env.GH_TOKEN = "placeholder-token";
-    try {
-      expect(
-        redactGhCredentials(
-          "gh failed with placeholder-token and ghp_fixture_secret"
-        )
-      ).toBe("gh failed with [REDACTED] and [REDACTED]");
-    } finally {
-      if (previousGhToken === undefined) delete process.env.GH_TOKEN;
-      else process.env.GH_TOKEN = previousGhToken;
-    }
+    expect(
+      redactGhCredentials(
+        "gh failed with placeholder-token and ghp_fixture_secret",
+        { GH_TOKEN: "  placeholder-token  " }
+      )
+    ).toBe("gh failed with [REDACTED] and [REDACTED]");
   });
 });
 
