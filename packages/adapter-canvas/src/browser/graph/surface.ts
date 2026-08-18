@@ -25,7 +25,7 @@ import type { BrowserContext, DomElement, DomParentElement } from "../ports.js";
 import { isCallable, isRecord } from "../json.js";
 
 export const GRAPH_LIBRARY_ERROR =
-  "The graph library failed to load. Restore network connectivity, then reload the graph.";
+  "The graph library failed to load. Reload the graph to try again.";
 export const GRAPH_RENDER_ERROR =
   "The application graph could not be rendered. Reload the graph to try again.";
 

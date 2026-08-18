@@ -19,10 +19,10 @@ import {
 } from "../../support/artifact/harness.js";
 import {
   BROWSER_ENTRY_NAMES,
-  compileBrowserEntry
+  compileBrowserEntry,
+  compileBrowserStyle
 } from "../../../src/browser/build.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
-import { readVendorAssets } from "../../../src/vendor-assets.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
@@ -170,6 +170,8 @@ describe("P0-C built Radius extension artifact", () => {
     expect(bundle).not.toContain("unpkg.com");
     expect(bundle).not.toContain("fetchVendorScript");
     expect(bundle).not.toContain("vendorCache");
+    expect(bundle).not.toContain("readVendorAssets");
+    expect(bundle).not.toContain("react/umd/react.production.min.js");
     expect(normalizedSources).not.toEqual(
       expect.arrayContaining([
         expect.stringMatching(/packages\/adapter-canvas\/src\/client\.ts$/)
@@ -411,15 +413,16 @@ describe("P0-C built Radius extension artifact", () => {
     expect(smoke.renderedPage).not.toMatch(/<script[^>]+src=/);
   });
 
-  it("renders each packaged vendor payload exactly once under blocked network", () => {
+  it("renders the native esbuild graph bundle and stylesheet exactly once under blocked network", () => {
     assertCurrentArtifact();
-    const assets = readVendorAssets();
-    for (const [name, source] of Object.entries(assets)) {
-      expect(
-        smoke.renderedPage.split(source).length - 1,
-        `${name} payload count`
-      ).toBe(1);
-    }
+    const script = compileBrowserEntry("graph");
+    const style = compileBrowserStyle("graph");
+    expect(style).toContain(".react-flow");
+    expect(smoke.renderedPage.split(script)).toHaveLength(2);
+    expect(smoke.renderedPage.split(style)).toHaveLength(2);
+    expect(smoke.renderedPage.indexOf(style)).toBeLessThan(
+      smoke.renderedPage.indexOf("--rad-brand: #da4c2a;")
+    );
   });
 
   it("installs the third-party notices beside the local extension", () => {
