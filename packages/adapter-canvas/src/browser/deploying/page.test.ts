@@ -78,7 +78,9 @@ function fixture(options: FixtureOptions = {}) {
     withProgressModalElement = withProgressModal,
     withDeleteDialog = true,
     appPayload = { applications: [{ name: "app" }] },
-    envPayload = { environments: [{ name: "dev", provider: "azure" }] },
+    envPayload = {
+      environments: [{ name: "dev", provider: "azure", status: "success" }]
+    },
     branchPayload = {
       branches: [{ name: "feature", sha: "abc1234" }],
       workspaceBranch: "feature"
@@ -1110,6 +1112,54 @@ describe("deploy flow", () => {
 
     expect(page.deployBtn.disabled).toBe(true);
   });
+
+  it("blocks deploy when the listing has no status for a stale selection", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+
+    // A stale option is not proof that verification ever completed.
+    page.envSelect.value = "ghost";
+    page.envSelect.dispatch("change");
+
+    expect(page.deployBtn.disabled).toBe(true);
+    expect(page.deployBtn.getAttribute("title")).toContain("ghost");
+  });
+
+  it("allows deploy when verification history explicitly aged out", async () => {
+    const page = fixture({
+      envPayload: {
+        environments: [{ name: "dev", provider: "azure", status: "unknown" }]
+      }
+    });
+
+    init(page);
+    await flushPromises();
+
+    expect(page.deployBtn.disabled).toBe(false);
+    expect(page.deployBtn.getAttribute("title")).toBeNull();
+  });
+
+  it.each([
+    ["pending", "still being created"],
+    ["failed", "was not created successfully"],
+    ["mystery", "could not be determined"]
+  ])(
+    "blocks deploy when environment verification is %s",
+    async (status, reason) => {
+      const page = fixture({
+        envPayload: {
+          environments: [{ name: "dev", provider: "azure", status }]
+        }
+      });
+
+      init(page);
+      await flushPromises();
+
+      expect(page.deployBtn.disabled).toBe(true);
+      expect(page.deployBtn.getAttribute("title")).toContain(reason);
+    }
+  );
 
   it("defaults an environment with no provider metadata to Azure", async () => {
     const page = fixture({

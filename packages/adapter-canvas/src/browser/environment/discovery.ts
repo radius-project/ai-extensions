@@ -87,7 +87,20 @@ export interface DiscoveryPanelHandle {
   ): Promise<void>;
   getComboValue(selectId: string, customId: string): string;
   findAzureClusterResourceGroup(clusterId: string): string;
+  setPendingInfraSelection(
+    config: EnvironmentInfrastructure | null,
+    provider: "azure" | "aws"
+  ): void;
+  currentInfraSelection(provider: "azure" | "aws"): EnvironmentInfrastructure;
   teardown(): void;
+}
+
+export interface EnvironmentInfrastructure {
+  readonly resourceGroup?: string;
+  readonly cluster?: string;
+  readonly namespace?: string;
+  readonly vpcId?: string;
+  readonly subnetIds?: string;
 }
 
 export function abandonedOperationError(
@@ -236,6 +249,21 @@ function renderSelect(
   renderSelectOptions(context, select, items, placeholder);
 }
 
+function selectOfferedValue(
+  context: BrowserContext,
+  selectId: string,
+  value: string
+): boolean {
+  const select = context.dom.selectById(selectId);
+  if (!select) return false;
+  for (const option of Array.from(select.options)) {
+    if (option.value !== value) continue;
+    select.value = value;
+    return true;
+  }
+  return false;
+}
+
 // Populate the AKS cluster dropdown from a (possibly RG-filtered) list, keeping
 // the current selection when it is still present in the new list.
 function renderAzureClusters(
@@ -246,7 +274,10 @@ function renderAzureClusters(
   const select = context.dom.selectById("azure-cluster-select");
   if (!select) return;
   renderSelectOptions(context, select, list, "Select AKS cluster…");
-  if (keepValue === "") return;
+  if (keepValue === "") {
+    if (list.length === 1) select.value = list[0].id;
+    return;
+  }
   // Both callers pass a non-empty value only after confirming it is present in
   // the list being rendered, so no second membership branch is needed here.
   select.value = keepValue;
@@ -556,8 +587,29 @@ export function initializeDiscoveryPanel(
 
   let azureClusters: DiscoveryOption[] = [];
   let azureFilterWired = false;
-  let azureToken = 0;
-  let awsToken = 0;
+  // Discovery is de-duplicated by request identity, not merely by provider.
+  // Two requests are the same question only when they target the same provider
+  // *and* the same account, so re-selecting the running profile is suppressed
+  // while switching to a different account supersedes the outstanding request.
+  // `token` is the per-provider sequence number: only the newest request may
+  // render results or re-enable Refresh, which drops a superseded response
+  // instead of letting it overwrite the newer account's resource list.
+  const discoveryRequests: Record<
+    "azure" | "aws",
+    { identity: string | null; token: number }
+  > = {
+    azure: { identity: null, token: 0 },
+    aws: { identity: null, token: 0 }
+  };
+  // A pending selection belongs to the provider whose form asked for it.
+  // Azure and AWS discovery can be outstanding at the same time, so the
+  // provider is recorded alongside the config and only a matching response is
+  // allowed to consume it — otherwise whichever request happened to settle
+  // first would swallow the other provider's saved values.
+  let pendingInfrastructure: {
+    provider: "azure" | "aws";
+    config: EnvironmentInfrastructure;
+  } | null = null;
 
   // Shared-identity pin helpers. The pin (az-selected-app-id) makes this repo
   // reuse another app's identity — deliberately wider blast radius, so it
@@ -724,10 +776,24 @@ export function initializeDiscoveryPanel(
     subscriptionId: string,
     tenantId: string
   ): Promise<void> => {
-    const token = provider === "azure" ? ++azureToken : ++awsToken;
-    const isStale = (): boolean =>
-      !scope.active ||
-      (provider === "azure" ? token !== azureToken : token !== awsToken);
+    const refreshButton = context.dom.inputById(
+      provider === "azure" ? "azure-refresh-btn" : "aws-refresh-btn"
+    );
+    const request = discoveryRequests[provider];
+    const identity = `${subscriptionId}\u0000${tenantId}`;
+    if (request.identity === identity) {
+      // The very same lookup is already running. Re-assert the disabled state
+      // because callers enable Refresh optimistically when a profile is
+      // selected, which would otherwise leave it clickable mid-discovery.
+      if (refreshButton) refreshButton.disabled = true;
+      return;
+    }
+    // A different account supersedes whatever is outstanding: claim the newest
+    // token so the in-flight response is discarded when it lands.
+    const token = ++request.token;
+    request.identity = identity;
+    if (refreshButton) refreshButton.disabled = true;
+    const isStale = (): boolean => !scope.active || request.token !== token;
     const statusEl = context.dom.byId(
       provider === "azure" ? "azure-discover-status" : "aws-discover-status"
     );
@@ -768,17 +834,22 @@ export function initializeDiscoveryPanel(
           ),
           "Select namespace…"
         );
+        selectOfferedValue(context, "azure-namespace-select", "default");
         wireAzureInfraFilter();
       } else {
         if (statusEl) statusEl.textContent = discoverStatusText(data, "aws");
+        const awsClusters = sortDiscoveryOptions(
+          parseDiscoveryOptions(readArray(raw, "clusters"))
+        );
         renderSelect(
           context,
           "aws-cluster-select",
-          sortDiscoveryOptions(
-            parseDiscoveryOptions(readArray(raw, "clusters"))
-          ),
+          awsClusters,
           "Select EKS cluster…"
         );
+        if (awsClusters.length === 1) {
+          selectOfferedValue(context, "aws-cluster-select", awsClusters[0].id);
+        }
         renderSelect(
           context,
           "aws-namespace-select",
@@ -789,6 +860,7 @@ export function initializeDiscoveryPanel(
           ),
           "Select namespace…"
         );
+        selectOfferedValue(context, "aws-namespace-select", "default");
         renderSelect(
           context,
           "aws-vpc-select",
@@ -802,10 +874,19 @@ export function initializeDiscoveryPanel(
           "Select subnets…"
         );
       }
+      applyPendingInfrastructure(provider);
     } catch (error) {
       if (isStale()) return;
       if (statusEl)
         statusEl.textContent = `Discovery error: ${errorMessageOf(error)}`;
+    } finally {
+      // Only the newest request clears the slot; a superseded one must leave
+      // both the identity and the disabled Refresh button owned by its
+      // successor.
+      if (request.token === token) {
+        request.identity = null;
+        if (scope.active && refreshButton) refreshButton.disabled = false;
+      }
     }
   };
 
@@ -819,6 +900,63 @@ export function initializeDiscoveryPanel(
     return select.value;
   };
 
+  const restoreInfrastructureValue = (
+    selectId: string,
+    customId: string,
+    value: string
+  ): void => {
+    if (value === "" || selectOfferedValue(context, selectId, value)) return;
+    const custom = context.dom.inputById(customId);
+    if (!custom || !selectOfferedValue(context, selectId, "__custom__")) return;
+    custom.value = value;
+    custom.style.display = "";
+  };
+
+  const applyPendingInfrastructure = (provider: "azure" | "aws"): void => {
+    const pending = pendingInfrastructure;
+    if (!pending || pending.provider !== provider) return;
+    const config = pending.config;
+    pendingInfrastructure = null;
+    if (provider === "azure") {
+      restoreInfrastructureValue(
+        "azure-rg-select",
+        "azure-rg-custom",
+        config.resourceGroup ?? ""
+      );
+      restoreInfrastructureValue(
+        "azure-cluster-select",
+        "azure-cluster-custom",
+        config.cluster ?? ""
+      );
+      restoreInfrastructureValue(
+        "azure-namespace-select",
+        "azure-namespace-custom",
+        config.namespace ?? ""
+      );
+      return;
+    }
+    restoreInfrastructureValue(
+      "aws-cluster-select",
+      "aws-cluster-custom",
+      config.cluster ?? ""
+    );
+    restoreInfrastructureValue(
+      "aws-namespace-select",
+      "aws-namespace-custom",
+      config.namespace ?? ""
+    );
+    restoreInfrastructureValue(
+      "aws-vpc-select",
+      "aws-vpc-custom",
+      config.vpcId ?? ""
+    );
+    restoreInfrastructureValue(
+      "aws-subnets-select",
+      "aws-subnets-custom",
+      config.subnetIds ?? ""
+    );
+  };
+
   return {
     clearSharedAppPin,
     promptServiceManagementReference: () => promptSmr(context),
@@ -826,6 +964,32 @@ export function initializeDiscoveryPanel(
     discoverResources,
     getComboValue,
     findAzureClusterResourceGroup,
+    setPendingInfraSelection(config, provider) {
+      pendingInfrastructure = config ? { provider, config } : null;
+    },
+    currentInfraSelection(provider) {
+      return provider === "aws" ?
+          {
+            cluster: getComboValue("aws-cluster-select", "aws-cluster-custom"),
+            namespace: getComboValue(
+              "aws-namespace-select",
+              "aws-namespace-custom"
+            ),
+            vpcId: getComboValue("aws-vpc-select", "aws-vpc-custom"),
+            subnetIds: getComboValue("aws-subnets-select", "aws-subnets-custom")
+          }
+        : {
+            resourceGroup: getComboValue("azure-rg-select", "azure-rg-custom"),
+            cluster: getComboValue(
+              "azure-cluster-select",
+              "azure-cluster-custom"
+            ),
+            namespace: getComboValue(
+              "azure-namespace-select",
+              "azure-namespace-custom"
+            )
+          };
+    },
     teardown() {
       scope.teardown();
     }

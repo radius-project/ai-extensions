@@ -45,6 +45,35 @@ export interface ProviderCredentialStatus {
   missingCredNote: string;
 }
 
+// The RBAC scope at which to grant the environment identity a subscription-
+// visible role. A role assignment at resource-group scope still surfaces the
+// parent subscription to `az account list` / azure/login (fixing the
+// "No subscriptions found" credential-verification failure, issue #280), while
+// staying narrower than a subscription-wide grant, so prefer the resource group
+// when one is configured; fall back to the whole subscription otherwise. Pure.
+export function azureRoleScope(
+  subscriptionId: string,
+  resourceGroup?: string
+): string {
+  const rg = (resourceGroup || "").trim();
+  return rg ?
+      `/subscriptions/${subscriptionId}/resourceGroups/${rg}`
+    : `/subscriptions/${subscriptionId}`;
+}
+
+// The exact `az role assignment create` command a user can run to grant the
+// configured identity a subscription-visible role. Uses the app/client id as the
+// assignee (what the user has on hand); az resolves it to the service principal.
+// On the manual-credentials path the extension surfaces this command rather than
+// running it: the app registration may be shared or owned by another team, so we
+// don't silently grant Contributor to it using the operator's local az. Pure.
+export function buildManualRoleAssignmentGuidance(
+  assignee: string,
+  scope: string
+): string {
+  return `az role assignment create --assignee ${assignee} --role Contributor --scope ${scope}`;
+}
+
 // Step 2. Values from the request win; anything absent falls back to the
 // shared credential record. `||` rather than `??` throughout, so an empty
 // string is treated as absent exactly as it was inline.
@@ -99,6 +128,16 @@ export async function applyProviderConfiguration(
           "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
       };
     }
+    // Credentials are complete, but a manually-entered app registration may have
+    // no role assignment that surfaces the subscription — verify then fails at
+    // Azure Login with "No subscriptions found" (issue #280). Surface the exact
+    // grant command rather than running it, since the identity may be shared or
+    // owned by another team.
+    const roleScope = azureRoleScope(subscriptionId, rg);
+    ports.pushStep(
+      'ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: ' +
+        buildManualRoleAssignmentGuidance(clientId, roleScope)
+    );
     return { credentialsComplete: true, missingCredNote: "" };
   }
 
