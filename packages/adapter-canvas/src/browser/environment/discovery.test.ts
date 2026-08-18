@@ -1373,7 +1373,7 @@ describe("discoverResources", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("refuses to start a second azure discovery while one is in flight", async () => {
+  it("suppresses a duplicate azure discovery for the same account while one is in flight", async () => {
     const page = renderDiscoveryPage();
     let resolveFirst: (value: HttpResponse) => void = () => {};
     const first = new Promise<HttpResponse>((resolve) => {
@@ -1397,13 +1397,128 @@ describe("discoverResources", () => {
     await firstCall;
     await flushPromises();
 
-    // The overlapping request never reaches the network, so the first
-    // response is the only one that can land.
+    // The overlapping request repeats the same account, so it never reaches
+    // the network and the first response is the only one that can land.
     expect(callCount).toBe(1);
     const clusterSelect = page.selects["azure-cluster-select"];
     expect(
       Array.from(clusterSelect.options).map((option) => option.value)
     ).toEqual(["", "aks-1", "__custom__"]);
+  });
+
+  it("keeps Refresh disabled when a duplicate request is suppressed", async () => {
+    const page = renderDiscoveryPage();
+    const refreshBtn = createFakeInput("azure-refresh-btn");
+    page.browser.document.add(refreshBtn);
+    let resolveFirst: (value: HttpResponse) => void = () => {};
+    const first = new Promise<HttpResponse>((resolve) => {
+      resolveFirst = resolve;
+    });
+    page.browser.net.handle(DISCOVER_ENDPOINT, () => first);
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    const firstCall = handle?.discoverResources("azure", "sub-1", "tenant-1");
+    // Profile selection optimistically re-enables Refresh before delegating
+    // back into discovery; the suppressed duplicate must re-assert it.
+    refreshBtn.disabled = false;
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    expect(refreshBtn.disabled).toBe(true);
+
+    resolveFirst(discoverResponse(azurePayload()));
+    await firstCall;
+    await flushPromises();
+    expect(refreshBtn.disabled).toBe(false);
+  });
+
+  it("supersedes an in-flight azure discovery when the account changes", async () => {
+    const page = renderDiscoveryPage();
+    let resolveFirst: (value: HttpResponse) => void = () => {};
+    const first = new Promise<HttpResponse>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const bodies: string[] = [];
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      bodies.push(init?.body ?? "");
+      return bodies.length === 1 ?
+          first
+        : discoverResponse(
+            azurePayload({
+              clusters: [
+                { id: "aks-2", name: "AKS Two", resourceGroup: "rg-2" }
+              ]
+            })
+          );
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    const firstCall = handle?.discoverResources("azure", "sub-1", "tenant-1");
+    // Switching to a different subscription is a different question, so it
+    // must be issued rather than dropped as a duplicate.
+    await handle?.discoverResources("azure", "sub-2", "tenant-1");
+    await flushPromises();
+
+    expect(bodies).toHaveLength(2);
+    expect(JSON.parse(bodies[1]).subscriptionId).toBe("sub-2");
+    const clusterSelect = page.selects["azure-cluster-select"];
+    expect(
+      Array.from(clusterSelect.options).map((option) => option.value)
+    ).toEqual(["", "aks-2", "__custom__"]);
+
+    // The superseded response lands last and must not overwrite the newer
+    // account's resource list.
+    resolveFirst(discoverResponse(azurePayload()));
+    await firstCall;
+    await flushPromises();
+    expect(
+      Array.from(clusterSelect.options).map((option) => option.value)
+    ).toEqual(["", "aks-2", "__custom__"]);
+  });
+
+  it("leaves Refresh disabled when a superseded response settles first", async () => {
+    const page = renderDiscoveryPage();
+    const refreshBtn = createFakeInput("azure-refresh-btn");
+    page.browser.document.add(refreshBtn);
+    let resolveFirst: (value: HttpResponse) => void = () => {};
+    let resolveSecond: (value: HttpResponse) => void = () => {};
+    const first = new Promise<HttpResponse>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const second = new Promise<HttpResponse>((resolve) => {
+      resolveSecond = resolve;
+    });
+    let callCount = 0;
+    page.browser.net.handle(DISCOVER_ENDPOINT, () => {
+      callCount += 1;
+      return callCount === 1 ? first : second;
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    const firstCall = handle?.discoverResources("azure", "sub-1", "tenant-1");
+    const secondCall = handle?.discoverResources("azure", "sub-2", "tenant-1");
+
+    resolveFirst(discoverResponse(azurePayload()));
+    await firstCall;
+    await flushPromises();
+    // The newer request still owns the panel, so its predecessor completing
+    // must not hand Refresh back to the user.
+    expect(refreshBtn.disabled).toBe(true);
+
+    resolveSecond(discoverResponse(azurePayload()));
+    await secondCall;
+    await flushPromises();
+    expect(refreshBtn.disabled).toBe(false);
+  });
+
+  it("re-runs a discovery for an account whose earlier request already finished", async () => {
+    const page = renderDiscoveryPage();
+    let callCount = 0;
+    page.browser.net.handle(DISCOVER_ENDPOINT, () => {
+      callCount += 1;
+      return discoverResponse(azurePayload());
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    // Suppression is scoped to in-flight requests; an explicit Refresh for the
+    // same account after the first settled must still reach the network.
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    expect(callCount).toBe(2);
   });
 
   it("tracks azure and aws staleness independently", async () => {

@@ -584,8 +584,20 @@ export function initializeDiscoveryPanel(
 
   let azureClusters: DiscoveryOption[] = [];
   let azureFilterWired = false;
-  let azureInFlight = false;
-  let awsInFlight = false;
+  // Discovery is de-duplicated by request identity, not merely by provider.
+  // Two requests are the same question only when they target the same provider
+  // *and* the same account, so re-selecting the running profile is suppressed
+  // while switching to a different account supersedes the outstanding request.
+  // `token` is the per-provider sequence number: only the newest request may
+  // render results or re-enable Refresh, which drops a superseded response
+  // instead of letting it overwrite the newer account's resource list.
+  const discoveryRequests: Record<
+    "azure" | "aws",
+    { identity: string | null; token: number }
+  > = {
+    azure: { identity: null, token: 0 },
+    aws: { identity: null, token: 0 }
+  };
   let pendingInfrastructure: EnvironmentInfrastructure | null = null;
 
   // Shared-identity pin helpers. The pin (az-selected-app-id) makes this repo
@@ -753,14 +765,24 @@ export function initializeDiscoveryPanel(
     subscriptionId: string,
     tenantId: string
   ): Promise<void> => {
-    if (provider === "azure" ? azureInFlight : awsInFlight) return;
-    if (provider === "azure") azureInFlight = true;
-    else awsInFlight = true;
     const refreshButton = context.dom.inputById(
       provider === "azure" ? "azure-refresh-btn" : "aws-refresh-btn"
     );
+    const request = discoveryRequests[provider];
+    const identity = `${subscriptionId}\u0000${tenantId}`;
+    if (request.identity === identity) {
+      // The very same lookup is already running. Re-assert the disabled state
+      // because callers enable Refresh optimistically when a profile is
+      // selected, which would otherwise leave it clickable mid-discovery.
+      if (refreshButton) refreshButton.disabled = true;
+      return;
+    }
+    // A different account supersedes whatever is outstanding: claim the newest
+    // token so the in-flight response is discarded when it lands.
+    const token = ++request.token;
+    request.identity = identity;
     if (refreshButton) refreshButton.disabled = true;
-    const isStale = (): boolean => !scope.active;
+    const isStale = (): boolean => !scope.active || request.token !== token;
     const statusEl = context.dom.byId(
       provider === "azure" ? "azure-discover-status" : "aws-discover-status"
     );
@@ -847,9 +869,13 @@ export function initializeDiscoveryPanel(
       if (statusEl)
         statusEl.textContent = `Discovery error: ${errorMessageOf(error)}`;
     } finally {
-      if (provider === "azure") azureInFlight = false;
-      else awsInFlight = false;
-      if (scope.active && refreshButton) refreshButton.disabled = false;
+      // Only the newest request clears the slot; a superseded one must leave
+      // both the identity and the disabled Refresh button owned by its
+      // successor.
+      if (request.token === token) {
+        request.identity = null;
+        if (scope.active && refreshButton) refreshButton.disabled = false;
+      }
     }
   };
 
