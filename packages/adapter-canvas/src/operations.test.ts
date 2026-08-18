@@ -47,7 +47,6 @@ import {
   ambiguousSetupOwnership,
   beginRetryAttempt,
   buildCommandId,
-  buildIdempotencyKey,
   canContinueSetup,
   canRetryCleanup,
   canRetrySetup,
@@ -55,7 +54,6 @@ import {
   canStartRollback,
   classifyVerificationRetry,
   createOperationControl,
-  discardCommand,
   findActiveCommand,
   findCommand,
   getOperationControl,
@@ -1982,11 +1980,8 @@ describe("command identity and idempotency", () => {
     expect(buildCommandId(input)).toBe(
       "op_1:retry_verification:2:verification"
     );
-    expect(buildIdempotencyKey(input)).toBe(
-      "idem:op_1:retry_verification:2:verification"
-    );
     // Rebuilt after a restart from the same saved facts, byte for byte.
-    expect(buildIdempotencyKey({ ...input })).toBe(buildIdempotencyKey(input));
+    expect(buildCommandId({ ...input })).toBe(buildCommandId(input));
   });
 
   it("refuses a duplicate command and hands back the saved one", () => {
@@ -2005,7 +2000,10 @@ describe("command identity and idempotency", () => {
     expect(second).toMatchObject({ ok: false, duplicate: true });
     expect(second.command.commandId).toBe(first.command.commandId);
     expect(op.control.commands).toHaveLength(1);
-    expect(op.control.idempotency[first.command.idempotencyKey]).toBe("setup");
+    // The derived command id is the whole identity: no separate alias is saved
+    // beside it that a restart could disagree with.
+    expect(first.command).not.toHaveProperty("idempotencyKey");
+    expect(op.control).not.toHaveProperty("idempotency");
   });
 
   it("distinguishes a new attempt from a repeated one", () => {
@@ -2018,19 +2016,6 @@ describe("command identity and idempotency", () => {
     });
     expect(next.ok).toBe(true);
     expect(op.control.commands).toHaveLength(2);
-  });
-
-  it("discards a command whose durable save failed", () => {
-    const op = newOp();
-    const accepted = acceptCommand(op, {
-      kind: "stop",
-      attempt: 1,
-      target: "operation"
-    });
-    expect(discardCommand(op, accepted.command.commandId)).toBe(true);
-    expect(op.control.commands).toEqual([]);
-    expect(op.control.idempotency).toEqual({});
-    expect(discardCommand(op, "missing")).toBe(false);
   });
 
   it("tracks command progress without inventing an unknown state", () => {
@@ -2081,31 +2066,18 @@ describe("schema version 2 migration", () => {
       stop: { requestedAt: "2026-01-01T00:00:00.000Z" },
       attempts: { setup: "nonsense", verification: 3 },
       commands: [
-        {
-          kind: "not-a-command",
-          commandId: "a",
-          idempotencyKey: "k",
-          state: "accepted"
-        },
-        { kind: "stop", commandId: "", idempotencyKey: "k", state: "accepted" },
-        { kind: "stop", commandId: "b", idempotencyKey: "", state: "accepted" },
-        {
-          kind: "stop",
-          commandId: "c",
-          idempotencyKey: "k",
-          state: "invented"
-        },
+        { kind: "not-a-command", commandId: "a", state: "accepted" },
+        { kind: "stop", commandId: "", state: "accepted" },
+        { kind: "stop", commandId: "c", state: "invented" },
         null,
         {
           kind: "stop",
           commandId: "ok",
-          idempotencyKey: "idem:ok",
           state: "accepted",
           attempt: 1,
           target: "operation"
         }
       ],
-      idempotency: { "idem:ok": "operation" },
       outcomes: [
         { kind: "not-a-kind", state: "failed" },
         { kind: "setup", state: "" },
@@ -2117,6 +2089,41 @@ describe("schema version 2 migration", () => {
     expect(control.outcomes).toHaveLength(1);
     expect(control.stop.acknowledgedAt).toBeNull();
     expect(readOperationControl(null)).toEqual(createOperationControl());
+  });
+
+  it("still loads a saved record that carries the retired idempotency fields", () => {
+    const control = readOperationControl({
+      attempts: { setup: 2, verification: 1, cleanup: 0 },
+      commands: [
+        {
+          kind: "retry_setup",
+          commandId: "op_1:retry_setup:2:setup",
+          attempt: 2,
+          target: "setup",
+          idempotencyKey: "idem:op_1:retry_setup:2:setup",
+          state: "accepted",
+          acceptedAt: "2026-01-01T00:00:00.000Z",
+          completedAt: null,
+          outcome: null
+        }
+      ],
+      idempotency: { "idem:op_1:retry_setup:2:setup": "setup" },
+      outcomes: []
+    });
+    expect(control.commands).toEqual([
+      {
+        kind: "retry_setup",
+        commandId: "op_1:retry_setup:2:setup",
+        attempt: 2,
+        target: "setup",
+        state: "accepted",
+        acceptedAt: "2026-01-01T00:00:00.000Z",
+        completedAt: null,
+        outcome: null
+      }
+    ]);
+    expect(control).not.toHaveProperty("idempotency");
+    expect(control.attempts.setup).toBe(2);
   });
 
   it("creates the control record on demand for a legacy in-memory operation", () => {
@@ -2732,7 +2739,6 @@ describe("control record guard rails", () => {
       command: null
     });
     expect(findCommand(null, "id")).toBeNull();
-    expect(discardCommand(null, "id")).toBe(false);
     expect(setCommandState(null, "id", "running")).toBeNull();
     expect(isStopPending(null)).toBe(false);
   });
@@ -2756,13 +2762,6 @@ describe("control record guard rails", () => {
     expect(op.control.outcomes).toHaveLength(20);
     expect(op.control.commands[19].attempt).toBe(25);
     expect(op.control.outcomes[19].attempt).toBe(25);
-  });
-
-  it("normalizes an idempotency map with unusable entries", () => {
-    const control = readOperationControl({
-      idempotency: { "": "dropped", good: null }
-    });
-    expect(control.idempotency).toEqual({ good: "" });
   });
 
   it("rejects a record that is not an operation at all", () => {

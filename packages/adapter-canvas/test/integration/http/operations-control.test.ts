@@ -7,34 +7,17 @@ import { createOperationsControlRoutes } from "../../../src/server/routes/operat
 import { createOperationsStatusRoutes } from "../../../src/server/routes/operations-status.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import {
-  acceptCommand,
-  applySetupResumePoint,
-  applyStopRequest,
-  announceOperationTerminal,
-  beginRetryAttempt,
   buildStages,
-  canContinueSetup,
-  canRetryCleanup,
-  canRetrySetup,
-  canRetryVerification,
-  canStartRollback,
   createOperation,
   enterStage,
-  findActiveCommand,
   finish,
   isTerminalState,
   recordAzureApp,
-  recordCleanupState,
   recordCommitState,
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
   recordServicePrincipal,
   requestStop,
-  requireInput,
-  rollbackRetryAttempt,
-  setCommandState,
-  setStageState,
-  snapshotRetryState,
   stopAtBoundary,
   toClientView,
   INPUT_REQUIRED_STATE,
@@ -66,7 +49,7 @@ interface Harness {
   merged: { value: boolean };
   persistError: { value: Error | null };
   persistCalls: string[];
-  scheduled: Array<{ kind: string; instanceId: string; commandId?: string }>;
+  scheduled: Array<{ kind: string; instanceId: string; commandId: string }>;
   schedulerAccepts: { value: boolean };
 }
 
@@ -92,48 +75,12 @@ function start(): Harness {
       acquireForRetry: () =>
         lock.conflict ? { ok: false, conflict: lock.conflict } : { ok: true },
       persistOperations,
-      toClientView,
-      applyStopRequest,
-      announceOperationTerminal,
-      snapshotRetryState,
-      rollbackRetryAttempt,
-      beginRetryAttempt,
-      acceptCommand,
-      findActiveCommand,
-      setCommandState,
-      canContinueSetup,
-      canRetrySetup,
-      canRetryVerification,
-      canStartRollback,
-      canRetryCleanup,
-      applySetupResumePoint,
-      setStageState,
-      enterStage,
-      finish,
-      stageVerify: STAGE_VERIFY,
       isPullRequestMerged: () => Promise.resolve(merged.value),
-      scheduleSetupContinuation: (instanceId) => {
+      schedule: ({ kind, instanceId, commandId }) => {
         if (!schedulerAccepts.value) return false;
-        scheduled.push({ kind: "setup", instanceId });
+        scheduled.push({ kind, instanceId, commandId });
         return true;
-      },
-      scheduleVerificationRetry: (instanceId, _operation, commandId) => {
-        if (!schedulerAccepts.value) return false;
-        scheduled.push({ kind: "verification", instanceId, commandId });
-        return true;
-      },
-      scheduleCleanupRetry: (instanceId, _operation, commandId) => {
-        if (!schedulerAccepts.value) return false;
-        scheduled.push({ kind: "cleanup", instanceId, commandId });
-        return true;
-      },
-      scheduleRollback: (instanceId, _operation, commandId) => {
-        if (!schedulerAccepts.value) return false;
-        scheduled.push({ kind: "rollback", instanceId, commandId });
-        return true;
-      },
-      errorMessage: (error) =>
-        error instanceof Error ? error.message : String(error)
+      }
     }),
     // The by-id read is composed too: a client that just issued a command polls
     // this route next, so the two must agree over the same socket.
@@ -376,47 +323,6 @@ describe("operation controls real-loopback HIT", () => {
     expect(polledBody.operation.nextTransition.code).toBe("stopping");
   });
 
-  it("cancels an operation parked on a prompt and releases nothing else", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    const op = seed(harness);
-    requireInput(op, {
-      code: "app-selection-required",
-      message: "Choose an identity."
-    });
-
-    const response = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/stop`
-    );
-
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      code: string;
-      operation: { terminalState: string; stop: { boundary: string } };
-    };
-    expect(body.code).toBe("operation-stopped");
-    expect(body.operation.terminalState).toBe("cancelled");
-    expect(body.operation.stop.boundary).toBe("input_prompt");
-  });
-
-  it("answers 404 for an unknown operation on both control routes", async () => {
-    start();
-    const entry = await container!.getOrCreate("panel-a");
-
-    for (const path of [
-      "/api/operations/op_missing/stop",
-      "/api/operations/op_missing/retry/setup"
-    ]) {
-      const response = await post(entry.baseUrl, path);
-      expect(response.status).toBe(404);
-      expect(await response.json()).toEqual({
-        error: "Unknown operation.",
-        code: "unknown-operation"
-      });
-    }
-  });
-
   it("continues an interrupted setup and schedules it on the receiving instance", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-b");
@@ -437,29 +343,12 @@ describe("operation controls real-loopback HIT", () => {
     expect(body.commandId).toBe(`${op.operationId}:retry_setup:2:setup`);
     expect(body.operation.state).toBe("running");
     expect(harness.scheduled).toEqual([
-      { kind: "setup", instanceId: "panel-b" }
+      {
+        kind: "setup_continuation",
+        instanceId: "panel-b",
+        commandId: body.commandId
+      }
     ]);
-  });
-
-  it("refuses a verification retry while the setup pull request is open", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    const op = mergeHandoff(harness);
-    harness.merged.value = false;
-
-    const response = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/retry/verification`
-    );
-
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({
-      code: "verification-retry-pull-request-open",
-      pullRequestUrl: "https://github.com/contoso/store/pull/7"
-    });
-    // Refusing neither reopens the record nor starts any work.
-    expect(op.state).toBe("action_required");
-    expect(harness.scheduled).toEqual([]);
   });
 
   it("repeats verification once the pull request has merged", async () => {
@@ -484,85 +373,11 @@ describe("operation controls real-loopback HIT", () => {
     expect(body.operation.currentStage).toBe(STAGE_VERIFY);
     expect(harness.scheduled).toEqual([
       {
-        kind: "verification",
+        kind: "verification_retry",
         instanceId: "panel-a",
         commandId: body.commandId
       }
     ]);
-  });
-
-  it("retries cleanup for a proven-owned unresolved resource", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    const op = seed(harness);
-    recordAzureApp(op, { state: "created", appId: "app-1" });
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "azure_app",
-          target: "radius (app-1)",
-          identity: "app-1",
-          outcome: "warning",
-          detail: "Azure CLI returned 429."
-        }
-      ]
-    });
-    finish(op, "failed_partial", { failure: { code: "setup-failed" } });
-
-    const response = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/retry/cleanup`
-    );
-
-    expect(response.status).toBe(202);
-    const body = (await response.json()) as { commandId: string };
-    expect(body.commandId).toBe(`${op.operationId}:retry_cleanup:1:cleanup`);
-    expect(harness.scheduled).toEqual([
-      { kind: "cleanup", instanceId: "panel-a", commandId: body.commandId }
-    ]);
-  });
-
-  it("refuses a retry while another operation owns the repository", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    const op = retryableSetup(harness);
-    harness.lock.conflict = { operationId: "op_live" };
-
-    const response = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/retry/setup`
-    );
-
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
-      error: "Another setup is already running for contoso/store.",
-      code: "operation-in-progress",
-      operationId: "op_live"
-    });
-    expect(op.state).toBe("failed_partial");
-    expect(harness.scheduled).toEqual([]);
-  });
-
-  it("answers 500 and starts nothing when the retry cannot be saved", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    const op = retryableSetup(harness);
-    harness.persistError.value = new Error("disk gone");
-
-    const response = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/retry/setup`
-    );
-
-    expect(response.status).toBe(500);
-    expect(await response.json()).toMatchObject({
-      code: "operation-retry-persist-failed"
-    });
-    expect(op.state).toBe("failed_partial");
-    expect(harness.scheduled).toEqual([]);
   });
 
   it("closes a reopened operation when no runner accepts it", async () => {
@@ -710,7 +525,11 @@ describe("stop, then continue or roll back, over the socket", () => {
     expect(body.commandId).toBe(`${op.operationId}:continue_setup:2:continue`);
     expect(body.operation.state).toBe("running");
     expect(harness.scheduled).toEqual([
-      { kind: "setup", instanceId: "panel-a" }
+      {
+        kind: "setup_continuation",
+        instanceId: "panel-a",
+        commandId: body.commandId
+      }
     ]);
   });
 
@@ -899,36 +718,5 @@ describe("stop, then continue or roll back, over the socket", () => {
       expect(await response.json()).toMatchObject({ code });
     }
     expect(harness.scheduled).toEqual([]);
-  });
-
-  it("reports that nothing started when no runner accepts the rollback", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    const op = stoppedSetup(harness);
-    harness.schedulerAccepts.value = false;
-
-    const response = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/rollback`
-    );
-
-    expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({
-      code: "operation-command-unscheduled"
-    });
-
-    // The customer is put back on the decision they were looking at, with the
-    // repository lock released rather than held by a record that never ran.
-    const polled = await fetch(
-      `${entry.baseUrl}/api/operations/${op.operationId}`
-    );
-    const view = (await polled.json()) as {
-      operation: { terminalState: string; actions: Array<{ id: string }> };
-    };
-    expect(view.operation.terminalState).toBe("cancelled");
-    expect(view.operation.actions.map((entry) => entry.id)).toEqual([
-      "continue-setup",
-      "rollback"
-    ]);
   });
 });

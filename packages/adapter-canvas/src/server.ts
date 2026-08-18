@@ -138,22 +138,10 @@ import {
   requireInput,
   resumeAfterInput,
   setExecutionActive,
-  applyStopRequest,
   announceOperationTerminal,
   shouldStop,
   stopAtBoundary,
-  acceptCommand,
   setCommandState,
-  beginRetryAttempt,
-  rollbackRetryAttempt,
-  snapshotRetryState,
-  applySetupResumePoint,
-  canContinueSetup,
-  canRetrySetup,
-  canRetryVerification,
-  canRetryCleanup,
-  canStartRollback,
-  findActiveCommand,
   provenOwnedCleanupTargets,
   unresolvedCleanupTargets,
   INPUT_REQUIRED_STATE,
@@ -566,17 +554,29 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
   toSafeRepoRelPath
 });
 
+// Server-owned work is scheduled on the instance that received the request, so
+// an instance that is gone reports a miss instead of silently dropping accepted
+// work. Every route that schedules resolves its runner through here.
+function resolveInstanceRunner(
+  instanceId: string,
+  operationId: string
+): ReturnType<typeof createInstanceRequestCoordinator> | null {
+  const coordinator = instanceRequestCoordinators.get(instanceId);
+  if (!coordinator) {
+    console.error(
+      `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operationId}.`
+    );
+    return null;
+  }
+  return coordinator;
+}
+
 function scheduleEnvironmentOperationForInstance(
   instanceId: string,
   operation: { operationId: string }
 ): boolean {
-  const coordinator = instanceRequestCoordinators.get(instanceId);
-  if (!coordinator) {
-    console.error(
-      `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operation.operationId}.`
-    );
-    return false;
-  }
+  const coordinator = resolveInstanceRunner(instanceId, operation.operationId);
+  if (!coordinator) return false;
   coordinator.scheduleEnvironmentOperation(operation);
   return true;
 }
@@ -621,79 +621,34 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
 );
 
 // Composition root for the cooperative controls in the same `operations-status`
-// family: stop, and the setup, verification, and cleanup retries.
+// family: stop, continue, rollback, and the setup, verification, and cleanup
+// retries.
 //
-// Eligibility, command identity, and the retry snapshot all stay in
-// `operations.ts`; the merge proof stays in its own service with a single
-// GitHub port. The three schedulers resolve the per-instance server-owned task
-// runner the same way the registration route does, so an instance that is gone
-// reports a miss instead of silently dropping accepted work.
-function resolveInstanceRunner(
-  instanceId: string,
-  operationId: string
-): ReturnType<typeof createInstanceRequestCoordinator> | null {
-  const coordinator = instanceRequestCoordinators.get(instanceId);
-  if (!coordinator) {
-    console.error(
-      `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operationId}.`
-    );
-    return null;
-  }
-  return coordinator;
-}
-
+// Eligibility, command identity, and the retry snapshot are imported directly by
+// the route module from `operations.ts`, which is independently tested; the
+// merge proof stays in its own service with a single GitHub port. What is
+// injected here is the genuine I/O the routes cannot decide alone.
 const operationsControlRoutes = createOperationsControlRoutes({
   get: (operationId) => operations.get(operationId),
   acquireForRetry: (op) => operations.acquireForRetry(op),
   persistOperations: () => operations.persist(),
-  toClientView,
-  applyStopRequest,
-  announceOperationTerminal,
-  snapshotRetryState,
-  rollbackRetryAttempt,
-  beginRetryAttempt,
-  acceptCommand,
-  findActiveCommand: (op, kinds) => findActiveCommand(op, kinds),
-  setCommandState,
-  canContinueSetup,
-  canRetrySetup,
-  canRetryVerification,
-  canStartRollback,
-  canRetryCleanup,
-  applySetupResumePoint,
-  setStageState,
-  enterStage,
-  finish,
-  stageVerify: STAGE_VERIFY,
   isPullRequestMerged: (op, pullRequestUrl) =>
     isSetupPullRequestMerged(String(op.repo || ""), pullRequestUrl, (apiPath) =>
       ghApiJson(apiPath)
     ),
-  scheduleSetupContinuation: (instanceId, op) => {
-    const coordinator = resolveInstanceRunner(instanceId, op.operationId);
+  schedule: ({ kind, instanceId, operation, commandId }) => {
+    const coordinator = resolveInstanceRunner(
+      instanceId,
+      operation.operationId
+    );
     if (!coordinator) return false;
-    coordinator.scheduleEnvironmentOperation(op);
+    if (kind === "setup_continuation") {
+      coordinator.scheduleEnvironmentOperation(operation);
+    } else {
+      coordinator.scheduleCommandTask(kind, operation, commandId);
+    }
     return true;
-  },
-  scheduleVerificationRetry: (instanceId, op, commandId) => {
-    const coordinator = resolveInstanceRunner(instanceId, op.operationId);
-    if (!coordinator) return false;
-    coordinator.scheduleVerificationRetry(op, commandId);
-    return true;
-  },
-  scheduleCleanupRetry: (instanceId, op, commandId) => {
-    const coordinator = resolveInstanceRunner(instanceId, op.operationId);
-    if (!coordinator) return false;
-    coordinator.scheduleCleanupRetry(op, commandId);
-    return true;
-  },
-  scheduleRollback: (instanceId, op, commandId) => {
-    const coordinator = resolveInstanceRunner(instanceId, op.operationId);
-    if (!coordinator) return false;
-    coordinator.scheduleRollback(op, commandId);
-    return true;
-  },
-  errorMessage
+  }
 });
 
 // Composition root for the migrated `repositories` family. Three seams: the
@@ -4241,18 +4196,42 @@ function createInstanceRequestCoordinator(
     });
   }
 
+  // The confirmed first rollback and the cleanup retry are the same deletion
+  // pass over a different selection, so they share one executor. A rollback
+  // takes the whole proven-owned set; a retry takes only what the previous
+  // attempt proved it created and could not remove. Reused resources, committed
+  // workflow files, an unprovable GitHub environment, and anything discovered by
+  // name are never touched by either.
+  const CLEANUP_COMMANDS = {
+    rollback: {
+      selectTargets: provenOwnedCleanupTargets,
+      cleanedOutcome: "rolled-back",
+      terminalReason: "rollback-complete",
+      incompleteMessage:
+        "Radius removed what it could, but some resources it created are still present."
+    },
+    cleanup_retry: {
+      selectTargets: unresolvedCleanupTargets,
+      cleanedOutcome: "cleaned",
+      terminalReason: "cleanup-complete",
+      incompleteMessage:
+        "Radius removed what it could, but some resources it created still need attention."
+    }
+  } as const;
+
+  type CleanupCommandKind = keyof typeof CLEANUP_COMMANDS;
+
   /**
-   * Remove everything this attempt proved it created, before the commit point.
+   * Delete the selected resources this attempt created, before the commit point.
    *
-   * This is the confirmed first rollback, so it takes the whole proven-owned
-   * set rather than the unresolved subset a retry repeats, and it deletes in
-   * reverse dependency order: the GitHub environment first, then the Azure role
-   * assignments, federated credentials, Service Principal, and finally the App
-   * Registration everything else hangs off. Each result is written to the
-   * ledger and persisted before the next deletion starts, so an interrupted
-   * rollback still reports exactly what it removed.
+   * Deletion runs in reverse dependency order: the GitHub environment first,
+   * then the Azure role assignments, federated credentials, Service Principal,
+   * and finally the App Registration everything else hangs off. Each result is
+   * written to the ledger and persisted before the next deletion starts, so an
+   * interrupted pass still reports exactly what it removed.
    */
-  async function runRollback(
+  async function runCleanupCommand(
+    kind: CleanupCommandKind,
     operationId: string,
     commandId: string
   ): Promise<void> {
@@ -4262,8 +4241,9 @@ function createInstanceRequestCoordinator(
     }
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
+    const command = CLEANUP_COMMANDS[kind];
+    const selected = command.selectTargets(op);
     const ledger = getSetupArtifactLedger(op);
-    const targets = provenOwnedCleanupTargets(op);
     const priorResults: SetupCleanupResult[] =
       Array.isArray(ledger?.cleanup?.results) ?
         [...ledger.cleanup.results]
@@ -4284,7 +4264,14 @@ function createInstanceRequestCoordinator(
       ...results
     ];
 
-    if (targets.some((entry) => entry.artifactType === "github_environment")) {
+    // A GitHub environment can be one of the selected targets, and skipping it
+    // here would report a clean removal while the environment survived.
+    if (
+      selected.some(
+        (entry: { artifactType: string }) =>
+          entry.artifactType === "github_environment"
+      )
+    ) {
       const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
         attempt,
         runDeleteEnvironment: (args) => ghOrThrow(args, 20000),
@@ -4316,15 +4303,17 @@ function createInstanceRequestCoordinator(
         );
         endChildInput(child);
       });
-    const azureTargets = new Set<string>(
-      targets
-        .filter((entry) => entry.artifactType !== "github_environment")
-        .map((entry) => entry.key)
-    );
     const azureCleanup = await cleanupAzureSetupArtifacts(op, {
       runAz,
       steps,
-      only: azureTargets,
+      only: new Set<string>(
+        selected
+          .filter(
+            (entry: { artifactType: string }) =>
+              entry.artifactType !== "github_environment"
+          )
+          .map((entry: { key: string }) => entry.key)
+      ),
       onResultRecorded: persist
     });
     warnings.push(...azureCleanup.warnings);
@@ -4340,7 +4329,7 @@ function createInstanceRequestCoordinator(
       op,
       commandId,
       "finished",
-      warnings.length ? "warnings" : "rolled-back"
+      warnings.length ? "warnings" : command.cleanedOutcome
     );
     if (warnings.length > 0) {
       finish(op, "failed_partial", {
@@ -4348,8 +4337,7 @@ function createInstanceRequestCoordinator(
           code: "setup-cleanup-incomplete",
           stage: op.currentStage,
           stepSeq: null,
-          message:
-            "Radius removed what it could, but some resources it created are still present.",
+          message: command.incompleteMessage,
           classification: "user-fixable",
           evidence: null
         }
@@ -4357,126 +4345,7 @@ function createInstanceRequestCoordinator(
     } else {
       finish(op, "cancelled", {
         terminal: {
-          reason: "rollback-complete",
-          userMessage:
-            "Radius removed the resources it created during this attempt."
-        }
-      });
-    }
-    await persist();
-  }
-
-  /**
-   * Delete only the resources the ledger proves Radius created and could not
-   * remove on the previous attempt. Reused resources, committed workflow files,
-   * an unprovable GitHub environment, and anything discovered by name are never
-   * touched here.
-   */
-  async function runCleanupRetry(
-    operationId: string,
-    commandId: string
-  ): Promise<void> {
-    if (environmentOperationTestRunner) {
-      await environmentOperationTestRunner(operationId, commandId);
-      return;
-    }
-    const op = operations.get(operationId);
-    if (!op || op.endedAt) return;
-    const unresolved = unresolvedCleanupTargets(op);
-    const targets = new Set<string>(unresolved.map((entry: any) => entry.key));
-    const ledger = getSetupArtifactLedger(op);
-    const priorResults: SetupCleanupResult[] =
-      Array.isArray(ledger?.cleanup?.results) ?
-        [...ledger.cleanup.results]
-      : [];
-    const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
-    const persist = async (): Promise<void> => {
-      await persistBestEffort({
-        operation: op,
-        persist: () => operations.persist(),
-        report: (diagnostic) => operations.report?.(diagnostic)
-      });
-    };
-    const warnings: string[] = [];
-    let results: SetupCleanupResult[] = [];
-    const carriedResults = () => [
-      ...priorResults.filter((entry) => entry.attempt < attempt),
-      ...results
-    ];
-    const steps: string[] = [];
-
-    // A GitHub environment can be one of the unresolved targets, and skipping
-    // it here would report a clean rollback while the environment survived.
-    if (
-      unresolved.some(
-        (entry: any) => entry.artifactType === "github_environment"
-      )
-    ) {
-      const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
-        attempt,
-        runDeleteEnvironment: (args) => ghOrThrow(args, 20000),
-        steps
-      });
-      warnings.push(...environmentCleanup.warnings);
-      results = [...results, ...environmentCleanup.results];
-      if (environmentCleanup.results.length > 0) {
-        recordCleanupState(op, { state: "running", results: carriedResults() });
-        await persist();
-      }
-    }
-
-    const runAz = (args: string[]): Promise<Partial<CommandResult>> =>
-      new Promise((resolve) => {
-        const child = cliExec(
-          "az",
-          args,
-          { timeout: 60000 },
-          (err, stdout, stderr) => {
-            resolve({
-              code: err ? err.code || 1 : 0,
-              stdout: stdout || "",
-              stderr: stderr || ""
-            });
-          }
-        );
-        endChildInput(child);
-      });
-    const cleanup = await cleanupAzureSetupArtifacts(op, {
-      runAz,
-      steps,
-      only: targets,
-      onResultRecorded: persist
-    });
-    warnings.push(...cleanup.warnings);
-    results = [...results, ...cleanup.results];
-    for (const step of steps) addLegacyStep(op, step);
-    recordCleanupState(op, {
-      attempts: cleanup.attempt,
-      state: warnings.length ? "succeeded_with_warnings" : "succeeded",
-      results: carriedResults()
-    });
-    setCommandState(
-      op,
-      commandId,
-      "finished",
-      warnings.length ? "warnings" : "cleaned"
-    );
-    if (warnings.length > 0) {
-      finish(op, "failed_partial", {
-        failure: {
-          code: "setup-cleanup-incomplete",
-          stage: op.currentStage,
-          stepSeq: null,
-          message:
-            "Radius removed what it could, but some resources it created still need attention.",
-          classification: "user-fixable",
-          evidence: null
-        }
-      });
-    } else {
-      finish(op, "cancelled", {
-        terminal: {
-          reason: "cleanup-complete",
+          reason: command.terminalReason,
           userMessage:
             "Radius removed the resources it created during this attempt."
         }
@@ -4586,28 +4455,15 @@ function createInstanceRequestCoordinator(
   // The three cooperative-control runners, exposed for the same reason: the
   // control routes are composed once at module init and hand the accepted
   // command back to the instance that received the request.
-  const scheduleVerificationRetry = (
+  const scheduleCommandTask = (
+    kind: "verification_retry" | "cleanup_retry" | "rollback",
     op: { operationId: string },
     commandId: string
   ): void => {
     scheduleServerOwnedTask(op.operationId, () =>
-      runVerificationRetry(op.operationId, commandId)
-    );
-  };
-  const scheduleCleanupRetry = (
-    op: { operationId: string },
-    commandId: string
-  ): void => {
-    scheduleServerOwnedTask(op.operationId, () =>
-      runCleanupRetry(op.operationId, commandId)
-    );
-  };
-  const scheduleRollback = (
-    op: { operationId: string },
-    commandId: string
-  ): void => {
-    scheduleServerOwnedTask(op.operationId, () =>
-      runRollback(op.operationId, commandId)
+      kind === "verification_retry" ?
+        runVerificationRetry(op.operationId, commandId)
+      : runCleanupCommand(kind, op.operationId, commandId)
     );
   };
   return {
@@ -4617,9 +4473,7 @@ function createInstanceRequestCoordinator(
     isServerOwned,
     validateBrowserMutation,
     scheduleEnvironmentOperation,
-    scheduleVerificationRetry,
-    scheduleCleanupRetry,
-    scheduleRollback
+    scheduleCommandTask
   };
 }
 

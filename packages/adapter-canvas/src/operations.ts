@@ -32,9 +32,9 @@ import {
 } from "./operation-store.js";
 
 // Version 2 adds the cooperative control record (stop, attempts, commands,
-// idempotency keys, outcome history). Version 1 records written by the durable
-// store and the server-owned executor still load: `readOperationControl` fills
-// the new fields with safe defaults rather than discarding the operation.
+// outcome history). Version 1 records written by the durable store and the
+// server-owned executor still load: `readOperationControl` fills the new fields
+// with safe defaults rather than discarding the operation.
 export const OPERATION_SCHEMA_VERSION = 2;
 export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([1, 2]);
 
@@ -166,7 +166,6 @@ export type OperationCommandRecord = {
   commandId: string;
   attempt: number;
   target: string;
-  idempotencyKey: string;
   state: OperationCommandState;
   acceptedAt: string;
   completedAt: string | null;
@@ -197,7 +196,6 @@ export type OperationControlRecord = {
   stop: OperationStopRecord;
   attempts: OperationAttemptCounters;
   commands: OperationCommandRecord[];
-  idempotency: Record<string, string>;
   outcomes: OperationOutcomeRecord[];
 };
 
@@ -209,7 +207,6 @@ export function createOperationControl(): OperationControlRecord {
     stop: { requestedAt: null, acknowledgedAt: null, boundary: null },
     attempts: { setup: 1, verification: 0, cleanup: 0 },
     commands: [],
-    idempotency: {},
     outcomes: []
   };
 }
@@ -244,6 +241,11 @@ const ATTEMPT_KINDS = Object.freeze(["setup", "verification", "cleanup"]);
  * A command whose saved shape cannot be trusted is dropped rather than repaired:
  * a half-read command identity is the one thing that could let a retry run
  * twice, so this fails closed on the individual record instead of the operation.
+ *
+ * Fields an earlier build wrote and this one no longer keeps — the derived
+ * `idempotencyKey` alias and the `idempotency` map beside it — are ignored
+ * rather than rejected, so a version 2 record saved before they were dropped
+ * still loads without a schema bump.
  */
 export function readOperationControl(value: any): OperationControlRecord {
   const control = createOperationControl();
@@ -266,26 +268,17 @@ export function readOperationControl(value: any): OperationControlRecord {
       if (!entry || typeof entry !== "object") continue;
       if (!COMMAND_KINDS.includes(entry.kind)) continue;
       if (typeof entry.commandId !== "string" || !entry.commandId) continue;
-      if (typeof entry.idempotencyKey !== "string" || !entry.idempotencyKey)
-        continue;
       if (!COMMAND_STATES.includes(entry.state)) continue;
       control.commands.push({
         kind: entry.kind,
         commandId: entry.commandId,
         attempt: positiveInt(entry.attempt, 0),
         target: String(entry.target || "operation"),
-        idempotencyKey: entry.idempotencyKey,
         state: entry.state,
         acceptedAt: isoOrNull(entry.acceptedAt) || nowIso(),
         completedAt: isoOrNull(entry.completedAt),
         outcome: isoOrNull(entry.outcome)
       });
-    }
-  }
-  if (value.idempotency && typeof value.idempotency === "object") {
-    for (const [key, target] of Object.entries(value.idempotency)) {
-      if (typeof key !== "string" || !key) continue;
-      control.idempotency[key] = String(target == null ? "" : target);
     }
   }
   if (Array.isArray(value.outcomes)) {
@@ -2652,10 +2645,11 @@ export function applyStopRequest(
 }
 
 // ─── Commands and idempotency ────────────────────────────────────────────────
-// Every key is built from facts that are already saved: the operation id, the
-// command kind, the attempt number, and the logical target. No timestamp and no
-// random value, so a restarted executor rebuilds exactly the same key and a
-// repeated mutation is recognisable as the same one.
+// The command id is the idempotency identity, and it is built from facts that
+// are already saved: the operation id, the command kind, the attempt number, and
+// the logical target. No timestamp and no random value, so a restarted executor
+// rebuilds exactly the same id and a repeated mutation is recognisable as the
+// same one.
 
 export function operationCommandKey({
   operationId,
@@ -2676,10 +2670,6 @@ export function operationCommandKey({
 
 export function buildCommandId(input: any): string {
   return operationCommandKey(input);
-}
-
-export function buildIdempotencyKey(input: any): string {
-  return `idem:${operationCommandKey(input)}`;
 }
 
 export function findCommand(op: any, commandId: any): any {
@@ -2753,12 +2743,6 @@ export function acceptCommand(
     commandId,
     attempt: positiveInt(attempt, 0),
     target: String(target || "operation"),
-    idempotencyKey: buildIdempotencyKey({
-      operationId: op.operationId,
-      kind,
-      attempt,
-      target
-    }),
     state: "accepted" as OperationCommandState,
     acceptedAt: nowIso(),
     completedAt: null,
@@ -2768,22 +2752,8 @@ export function acceptCommand(
   if (control.commands.length > MAX_RETAINED_COMMANDS) {
     control.commands.splice(0, control.commands.length - MAX_RETAINED_COMMANDS);
   }
-  control.idempotency[command.idempotencyKey] = command.target;
   op.lastActivityAt = command.acceptedAt;
   return { ok: true, duplicate: false, command };
-}
-
-/** Undo an accepted command when the durable save that must follow it failed. */
-export function discardCommand(op: any, commandId: any): boolean {
-  const control = op?.control;
-  if (!control) return false;
-  const index = control.commands.findIndex(
-    (entry: any) => entry.commandId === commandId
-  );
-  if (index < 0) return false;
-  const [removed] = control.commands.splice(index, 1);
-  delete control.idempotency[removed.idempotencyKey];
-  return true;
 }
 
 export function setCommandState(
@@ -3547,8 +3517,7 @@ export function toClientView(op: any): any {
       boundary: control.stop.boundary
     },
     attempts: { ...control.attempts },
-    // The idempotency key is derived from saved facts and is never needed in the
-    // browser, so only the command's identity and state travel.
+    // Only the command's identity and state travel to the browser.
     command:
       command ?
         {

@@ -129,14 +129,12 @@ describe("file operation store", () => {
                 commandId: "op_1:retry_setup:2:setup",
                 attempt: 2,
                 target: "setup",
-                idempotencyKey: "idem:op_1:retry_setup:2:setup",
                 state: "accepted",
                 acceptedAt: "2026-01-01T00:00:00.000Z",
                 completedAt: null,
                 outcome: null
               }
             ],
-            idempotency: { "idem:op_1:retry_setup:2:setup": "setup" },
             outcomes: []
           }
         }
