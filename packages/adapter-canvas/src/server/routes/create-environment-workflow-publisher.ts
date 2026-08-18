@@ -61,7 +61,7 @@ export async function applyProviderConfiguration(
     await ports.setEnvironmentVariable("AZURE_RESOURCE_GROUP", rg);
     await ports.setEnvironmentVariable("AZURE_AKS_CLUSTER_NAME", k8s);
     await ports.setEnvironmentVariable("AZURE_LOCATION", data.location);
-    await ports.setEnvironmentVariable("RADIUS_NAMESPACE", data.namespace);
+    await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
 
     const setCount = [
       clientId,
@@ -93,7 +93,7 @@ export async function applyProviderConfiguration(
   await ports.setEnvironmentVariable("AWS_EKS_CLUSTER_NAME", k8s);
   await ports.setEnvironmentVariable("RADIUS_VPC_ID", data.vpcId);
   await ports.setEnvironmentVariable("RADIUS_SUBNET_IDS", data.subnetIds);
-  await ports.setEnvironmentVariable("RADIUS_NAMESPACE", data.namespace);
+  await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
 }
 
 // The message a failed workflow commit is reported with. Pure, so the hint
