@@ -413,15 +413,21 @@ export async function handleCreateEnvironment(
     }
 
     // Step 2: Set environment variables and secrets based on provider
-    await applyProviderConfiguration(provider, data, {
-      azureCredential: () => dependencies.azureCredential(),
-      awsCredential: () => dependencies.awsCredential(),
-      optionalString: (value) => dependencies.optionalString(value),
-      setEnvironmentVariable,
-      pushStep: (message) => {
-        steps.push(message);
-      }
-    });
+    const { credentialsComplete, missingCredNote } =
+      await applyProviderConfiguration(provider, data, {
+        azureCredential: () => dependencies.azureCredential(),
+        awsCredential: () => dependencies.awsCredential(),
+        optionalString: (value) => dependencies.optionalString(value),
+        setEnvironmentVariable,
+        pushStep: (message) => {
+          steps.push(message);
+        }
+      });
+    // When verification is deliberately not dispatched (incomplete cloud
+    // credentials, or workflows that only exist on a PR branch), this holds the
+    // reason so the response can signal the client to skip polling
+    // /api/verify-status, which would otherwise spin until the timeout.
+    let verifySkipReason = "";
 
     // Steps 3, 4 and 4b: publish the verify, deploy and delete workflow files.
     // `gate` is this use case's own `checkpoint`, passed in so the gates fire at
@@ -529,11 +535,24 @@ export async function handleCreateEnvironment(
     });
     pullRequestUrl = verifyPlan.pullRequestUrl;
     if (!verifyPlan.shouldDispatch) {
+      verifySkipReason =
+        verifyPlan.skipReason ||
+        "Credential verification will run automatically once the workflows are on the default branch.";
       steps.push(
         `⏭️ Skipping credential verification until the pull request is merged — ${
           verifyPlan.skipReason ||
           "the workflows are not on the default branch yet"
         }.`
+      );
+    } else if (!credentialsComplete) {
+      // The identifying cloud credentials the verify workflow needs to log in
+      // weren't configured, so dispatching would only produce a run that fails
+      // at the cloud-login step (issue #219). Skip it and tell the user how to
+      // finish, rather than surfacing an unexplained failure.
+      verifySkipReason = missingCredNote;
+      steps.push(
+        "⏭️ Skipping credential verification — cloud credentials are not fully configured. " +
+          missingCredNote
       );
     } else {
       if (verifyPlan.ref)
@@ -564,7 +583,7 @@ export async function handleCreateEnvironment(
       }
 
       if (dispatchResult.code === 0) {
-        steps.push("✅ Verify workflow dispatched.");
+        steps.push("✅ Credentials verification dispatched.");
         await dependencies.sleep(5000);
         const runsResult = await runGh([
           "run",
@@ -590,9 +609,6 @@ export async function handleCreateEnvironment(
             steps.push("Verify run: " + verifyRunUrl);
           }
         } catch {}
-        steps.push(
-          "Credentials verification dispatched. Deploy your application from the Environments list when ready."
-        );
       } else {
         const detail =
           (dispatchResult.stderr || dispatchResult.stdout || "").trim() ||
@@ -683,6 +699,35 @@ export async function handleCreateEnvironment(
         report: (diagnostic) =>
           dependencies.reportOperationDiagnostic(diagnostic)
       });
+    } else if (!credentialsComplete) {
+      // Verify was deliberately not dispatched because the identifying cloud
+      // credentials are incomplete (issue #219). There is no run to wait for, so
+      // finish the operation as action_required carrying the reason, rather than
+      // leaving it in progress polling a verify run that will never exist.
+      dependencies.recordCommitState(operation, {
+        mode: prState ? "pull_request" : "default_branch",
+        branch: prState?.branch || defaultBranch,
+        baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
+        pullRequestUrl: pullRequestUrl || null
+      });
+      dependencies.setStageState(
+        operation,
+        dependencies.stageVerify,
+        "skipped"
+      );
+      dependencies.finish(operation, "action_required", {
+        terminal: {
+          reason: "credentials-incomplete",
+          pullRequestUrl: pullRequestUrl || null,
+          userMessage: missingCredNote
+        }
+      });
+      await dependencies.persistBestEffort({
+        operation,
+        persist: () => dependencies.persistOperations(),
+        report: (diagnostic) =>
+          dependencies.reportOperationDiagnostic(diagnostic)
+      });
     } else {
       dependencies.recordCommitState(operation, {
         mode: prState ? "pull_request" : "default_branch",
@@ -714,6 +759,12 @@ export async function handleCreateEnvironment(
         actionRequired ?
           prState?.base || verifyPlan.defaultBranch || null
         : null,
+      // Distinct signal for a deliberately-skipped verification (incomplete
+      // cloud credentials, or workflows not yet on the default branch) so a
+      // direct API caller can tell it apart from a dispatched run; the canvas
+      // itself reads the operation's terminal state, not this field.
+      verifySkipped: verifySkipReason !== "",
+      verifySkipReason,
       steps
     });
   } catch (e) {

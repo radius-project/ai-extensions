@@ -49,10 +49,17 @@ export interface ApplicationInfo {
 export interface EnvironmentInfo {
   name: string;
   provider: string;
+  status?: string;
+}
+
+// The listing parser always resolves a status string, so consumers of a parsed
+// listing never have to re-apply a fallback for it.
+export interface ParsedEnvironmentInfo extends EnvironmentInfo {
+  status: string;
 }
 
 export interface EnvironmentListing {
-  environments: EnvironmentInfo[];
+  environments: ParsedEnvironmentInfo[];
   error: string;
 }
 
@@ -64,10 +71,16 @@ export interface PlanState {
   hasEnv: boolean;
   envsStale: boolean;
   requestFailed: boolean;
+  environmentStatuses: Record<string, string>;
 }
 
 export function createPlanState(): PlanState {
-  return { hasEnv: false, envsStale: false, requestFailed: false };
+  return {
+    hasEnv: false,
+    envsStale: false,
+    requestFailed: false,
+    environmentStatuses: {}
+  };
 }
 
 export function parseBranchListing(payload: unknown): BranchListing {
@@ -95,7 +108,8 @@ export function parseEnvironmentListing(payload: unknown): EnvironmentListing {
     environments: readArray(payload, "environments")
       .map((entry) => ({
         name: readString(entry, "name"),
-        provider: readString(entry, "provider") || "azure"
+        provider: readString(entry, "provider") || "azure",
+        status: readString(entry, "status")
       }))
       .filter((environment) => environment.name !== ""),
     error: readString(payload, "error")
@@ -222,12 +236,72 @@ export function buildEnvironmentOptions(
   environments: readonly EnvironmentInfo[],
   defaultEnvironment: string
 ): OptionSpec[] {
+  const selectedEnvironment =
+    defaultEnvironment || firstReadyEnvironmentName(environments);
   return environments.map((environment) => ({
     value: environment.name,
-    label: environment.name,
-    selected:
-      defaultEnvironment !== "" && environment.name === defaultEnvironment
+    label: environmentOptionLabel(environment),
+    selected: environment.name === selectedEnvironment
   }));
+}
+
+export function environmentIsReady(status: string): boolean {
+  return status === "success";
+}
+
+export function environmentAllowsDeploy(status: string): boolean {
+  return environmentIsReady(status) || status === "unknown";
+}
+
+// The server reports "success", "failed", or "pending". Anything else — an
+// empty string, or a value from a newer server — is genuinely unknown, so it is
+// labelled as such instead of being explained away as still being created.
+function environmentIsPending(status: string): boolean {
+  return status === "pending";
+}
+
+export function environmentOptionLabel(environment: EnvironmentInfo): string {
+  const status = environment.status ?? "";
+  if (environmentIsReady(status)) return environment.name;
+  if (status === "failed") return `${environment.name} (creation failed)`;
+  if (environmentIsPending(status))
+    return `${environment.name} (being created…)`;
+  if (status === "unknown") return `${environment.name} (available)`;
+  return `${environment.name} (status unknown)`;
+}
+
+export function firstReadyEnvironmentName(
+  environments: readonly EnvironmentInfo[]
+): string {
+  return (
+    environments.find((environment) =>
+      environmentIsReady(environment.status ?? "")
+    )?.name ??
+    environments.find((environment) =>
+      environmentAllowsDeploy(environment.status ?? "")
+    )?.name ??
+    ""
+  );
+}
+
+export function environmentNotReadyReason(
+  name: string,
+  status: string
+): string {
+  if (environmentAllowsDeploy(status)) return "";
+  if (status === "failed") {
+    return `Environment "${name}" was not created successfully, so it cannot be deployed to. Fix or recreate it first.`;
+  }
+  if (environmentIsPending(status)) {
+    return `Environment "${name}" is still being created. Wait for its credential verification to finish before deploying.`;
+  }
+  return `The status of environment "${name}" could not be determined, so it cannot be deployed to. Refresh to try again.`;
+}
+
+export function environmentNotReadyPhrase(status: string): string {
+  if (status === "failed") return "was not created successfully";
+  if (environmentIsPending(status)) return "is still being created";
+  return "has an unknown status";
 }
 
 function selectValue(select: DomSelectElement | null): string {
@@ -494,6 +568,7 @@ export function populatePlannedSelectors(
           for (const environment of listing.environments) {
             options.environmentProviders[environment.name] =
               environment.provider;
+            state.environmentStatuses[environment.name] = environment.status;
           }
           dom.setOptions(
             envSelect,
@@ -551,6 +626,7 @@ export function applyPlanEnvState(
   const envSelect = dom.selectById("planned-env");
   const branch = selectValue(branchSelect).trim();
   const environment = selectValue(envSelect);
+  const environmentStatus = state.environmentStatuses[environment] ?? "";
 
   if (button) {
     button.removeAttribute("title");
@@ -565,7 +641,9 @@ export function applyPlanEnvState(
     } else if (hasEnv) {
       button.dataset.mode = "deploy";
       button.textContent = "Deploy Application";
-      button.disabled = !(branch && environment);
+      const environmentReady =
+        environment === "" || environmentAllowsDeploy(environmentStatus);
+      button.disabled = !(branch && environment) || !environmentReady;
       if (!branch && !environment) {
         button.setAttribute(
           "title",
@@ -575,6 +653,11 @@ export function applyPlanEnvState(
         button.setAttribute("title", "Select the branch to deploy.");
       } else if (!environment) {
         button.setAttribute("title", "Select the environment to deploy to.");
+      } else if (!environmentReady) {
+        button.setAttribute(
+          "title",
+          environmentNotReadyReason(environment, environmentStatus)
+        );
       } else if (state.requestFailed) {
         button.disabled = true;
         button.setAttribute(
@@ -596,7 +679,10 @@ export function applyPlanEnvState(
     } else if (hasEnv) {
       const appName = selectValue(appSelect) || "this application";
       const envName = environment || "the selected environment";
-      hint.innerHTML = ` To deploy this application (<strong>${escapeBrowserHtml(appName)}</strong>) to the environment (<strong>${escapeBrowserHtml(envName)}</strong>), click "Deploy Application".`;
+      hint.innerHTML =
+        environment !== "" && !environmentAllowsDeploy(environmentStatus) ?
+          ` The environment (<strong>${escapeBrowserHtml(envName)}</strong>) ${environmentNotReadyPhrase(environmentStatus)}, so it cannot be deployed to yet.`
+        : ` To deploy this application (<strong>${escapeBrowserHtml(appName)}</strong>) to the environment (<strong>${escapeBrowserHtml(envName)}</strong>), click "Deploy Application".`;
     } else {
       hint.textContent =
         " To plan the deployment of this application, you must first create an environment.";
@@ -784,7 +870,8 @@ export function applyDeployedEnvState(
   hasDeployment: boolean,
   deploymentStatus: string,
   statesUnavailable: boolean,
-  environmentsUnavailable = false
+  environmentsUnavailable = false,
+  environmentCreationStatus = ""
 ): DeployedMode {
   state.hasEnv = hasEnv;
   state.hasDeployment = hasDeployment;
@@ -816,7 +903,8 @@ export function applyDeployedEnvState(
       button.disabled =
         !(application && environment) ||
         statesUnavailable ||
-        environmentsUnavailable;
+        environmentsUnavailable ||
+        !environmentAllowsDeploy(environmentCreationStatus);
       if (environmentsUnavailable) {
         button.setAttribute(
           "title",
@@ -826,6 +914,11 @@ export function applyDeployedEnvState(
         button.setAttribute(
           "title",
           "The current deployment state could not be loaded. Retrying…"
+        );
+      } else if (!environmentAllowsDeploy(environmentCreationStatus)) {
+        button.setAttribute(
+          "title",
+          environmentNotReadyReason(environment, environmentCreationStatus)
         );
       }
     } else {
@@ -868,7 +961,10 @@ export function applyDeployedEnvState(
       hint.textContent =
         " To deploy this application, you must first create an environment.";
     } else if (mode === "deploy") {
-      hint.innerHTML = ` To deploy this application (${appLabel}) to the environment (${envLabel}), click "Deploy Application".`;
+      hint.innerHTML =
+        !environmentAllowsDeploy(environmentCreationStatus) ?
+          ` The environment (${envLabel}) ${environmentNotReadyPhrase(environmentCreationStatus)}, so this application cannot be deployed to it yet.`
+        : ` To deploy this application (${appLabel}) to the environment (${envLabel}), click "Deploy Application".`;
     } else if (pending) {
       hint.innerHTML = ` The application (${appLabel}) is currently being deployed to the environment (${envLabel}). Watch its progress on the Deployments tab.`;
     } else if (deleting) {

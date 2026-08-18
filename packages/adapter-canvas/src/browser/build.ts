@@ -1,6 +1,6 @@
 import { buildSync } from "esbuild";
 import type { BuildOptions, BuildResult } from "esbuild";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PageRegistryGlobal } from "./globals.js";
 
@@ -8,7 +8,12 @@ const BROWSER_SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 
 export type BrowserEntryName =
   | "graph"
+  | "delete-dialog"
   | "heartbeat"
+  | "operation-chip"
+  | "deploy-result-page"
+  | "environment-page"
+  | "deploying-page"
   | "graph-page"
   | "planned-graph-page"
   | "graph-diff-page"
@@ -42,9 +47,39 @@ export const BROWSER_ENTRIES: readonly BrowserEntrySpec<BrowserEntryName>[] = [
     ]
   },
   {
+    name: "delete-dialog",
+    file: "./entries/delete-dialog.ts",
+    initializer: "installDeleteDialogEntry",
+    globals: ["radiusCreateDeleteDeploymentDialog"]
+  },
+  {
     name: "heartbeat",
     file: "./entries/heartbeat.ts",
     initializer: "installHeartbeatEntry",
+    globals: []
+  },
+  {
+    name: "operation-chip",
+    file: "./entries/operation-chip.ts",
+    initializer: "installOperationChipEntry",
+    globals: []
+  },
+  {
+    name: "deploy-result-page",
+    file: "./entries/deploy-result-page.ts",
+    initializer: "installDeployResultPageEntry",
+    globals: []
+  },
+  {
+    name: "environment-page",
+    file: "./entries/environment-page.ts",
+    initializer: "installEnvironmentPageEntry",
+    globals: []
+  },
+  {
+    name: "deploying-page",
+    file: "./entries/deploying-page.ts",
+    initializer: "installDeployingPageEntry",
     globals: []
   },
   {
@@ -144,6 +179,10 @@ export function makeInlineSafe(code: string): string {
     .replace(/\u2029/g, "\\u2029");
 }
 
+export function makeInlineStyleSafe(style: string): string {
+  return style.replace(/<\/(style)/gi, "<\\/$1");
+}
+
 export function assertInlineSafe(name: string, code: string): void {
   const hazards: string[] = [];
   if (/<\/script/i.test(code)) hazards.push("a script end tag");
@@ -173,7 +212,7 @@ export function assertSelfContained(name: string, code: string): void {
     [/\bimport\s*\(/, "a dynamic import"],
     [/\bimport\s*\.\s*meta\b/, "import.meta"],
     [/(^|\n)\s*export\s/, "an export"],
-    [/\b(?:__require\d*|require)\s*\(/, "a require call"]
+    [/(?<![.\w$])(?:__require\d*|require)\s*\(/, "a require call"]
   ] as const;
   const found = hazards
     .filter(([pattern]) => pattern.test(code))
@@ -185,6 +224,77 @@ export function assertSelfContained(name: string, code: string): void {
   }
 }
 
+// Reject Node-only globals. esbuild's browser platform does not shim these, so
+// a stray one is emitted verbatim and throws a page error on first evaluation —
+// which takes the whole entry, and therefore the page's behavior, down with it.
+// The usual way one arrives is transitively: a browser module imports a barrel
+// that also re-exports server code reading `process.env` at module scope.
+//
+// This is a textual gate over esbuild's output, not a parse of it, so it is a
+// safety net rather than a proof: sufficiently indirect access (a computed
+// member name, a value threaded through an unrelated identifier) still gets
+// through. It is sized for the shape the bundler actually emits, which with
+// `minify: false` preserves the original identifiers and access syntax.
+//
+// A bare `typeof process !== "undefined"` feature-detect is legitimate and
+// stays allowed, so the namespace globals are flagged only where they are
+// really *used*: member access by dot or bracket, aliasing or destructuring off
+// the binding, or access qualified through the global object. The lookbehind
+// keeps unrelated properties (`options.process`) and longer identifiers
+// (`processResults`, `globalThis`) from matching.
+const NODE_NAMESPACE_GLOBALS = ["process", "Buffer", "global"] as const;
+
+// No browser meaning at all, so any mention is a hazard.
+const NODE_BARE_GLOBALS = [
+  "__dirname",
+  "__filename",
+  "setImmediate",
+  "clearImmediate"
+] as const;
+
+const GLOBAL_OBJECTS = "globalThis|window|self|global";
+
+function nodeGlobalHazards(): readonly (readonly [RegExp, string])[] {
+  const hazards: (readonly [RegExp, string])[] = [];
+  for (const name of NODE_NAMESPACE_GLOBALS) {
+    hazards.push(
+      // `process.env`, `process["env"]`
+      [new RegExp(String.raw`(?<![.\w$])${name}\s*[.[]`), name],
+      // `const { env } = process`, `const p = process`
+      [new RegExp(String.raw`=\s*${name}\b`), name],
+      // `globalThis.process.env`
+      [
+        new RegExp(
+          String.raw`(?<![.\w$])(?:${GLOBAL_OBJECTS})\s*\.\s*${name}\b`
+        ),
+        name
+      ]
+    );
+  }
+  for (const name of NODE_BARE_GLOBALS) {
+    hazards.push([new RegExp(String.raw`(?<![.\w$])${name}\b`), name]);
+  }
+  return hazards;
+}
+
+const NODE_GLOBAL_HAZARDS = nodeGlobalHazards();
+
+export function assertBrowserSafe(name: string, code: string): void {
+  const found = [
+    ...new Set(
+      NODE_GLOBAL_HAZARDS.filter(([pattern]) => pattern.test(code)).map(
+        ([, description]) => description
+      )
+    )
+  ];
+  if (found.length > 0) {
+    throw new Error(
+      `Browser entry "${name}" reaches Node-only globals: ${found.join(", ")}. ` +
+        `Import from a browser-safe subpath instead of a package barrel that re-exports server code.`
+    );
+  }
+}
+
 function entryPath(spec: BrowserEntrySpec): string {
   return fileURLToPath(new URL(spec.file, import.meta.url));
 }
@@ -192,6 +302,7 @@ function entryPath(spec: BrowserEntrySpec): string {
 type BrowserBuildResult = {
   readonly outputFiles?: BuildResult["outputFiles"];
   readonly metafile?: {
+    readonly inputs: Readonly<Record<string, unknown>>;
     readonly outputs: Readonly<
       Record<
         string,
@@ -207,18 +318,59 @@ type BrowserBuildResult = {
 };
 export type BrowserBuild = (options: BuildOptions) => BrowserBuildResult;
 
+export interface BrowserEntryBundle {
+  readonly script: string;
+  readonly style: string;
+  readonly inputs: readonly string[];
+}
+
 const runEsbuild: BrowserBuild = (options) => buildSync(options);
+
+function browserEntrySource(spec: BrowserEntrySpec): string {
+  const installer = `import { ${spec.initializer} as install } from ${JSON.stringify(spec.file)};`;
+  if (spec.name !== "graph") {
+    return `${installer}\ninstall(globalThis);\n`;
+  }
+  return `import * as react from "react";
+import { createRoot } from "react-dom/client";
+import ReactFlow, {
+  Background,
+  Controls,
+  Handle,
+  Position,
+  useEdgesState,
+  useNodesState
+} from "reactflow";
+import dagre from "dagre";
+import "reactflow/dist/style.css";
+${installer}
+install(globalThis, {
+  react,
+  reactDom: { createRoot },
+  reactFlow: {
+    default: ReactFlow,
+    Background,
+    Controls,
+    Handle,
+    Position,
+    useEdgesState,
+    useNodesState
+  },
+  dagre
+});
+`;
+}
 
 export function compileBrowserEntrySpec(
   spec: BrowserEntrySpec,
   build: BrowserBuild = runEsbuild
-): string {
+): BrowserEntryBundle {
   validateBrowserEntrySpecs([spec]);
   let output: BrowserBuildResult;
   try {
     output = build({
       stdin: {
-        contents: `import { ${spec.initializer} as install } from ${JSON.stringify(spec.file)};\ninstall(globalThis);\n`,
+        contents: browserEntrySource(spec),
         resolveDir: BROWSER_SOURCE_DIR,
         sourcefile: `radius-browser-entry-${spec.name}.ts`,
         loader: "ts"
@@ -226,14 +378,24 @@ export function compileBrowserEntrySpec(
       absWorkingDir: BROWSER_SOURCE_DIR,
       bundle: true,
       write: false,
+      outdir: "out",
       format: "iife",
       platform: "browser",
       target: ["es2019"],
       charset: "utf8",
-      minify: false,
+      minify: spec.name === "graph",
       treeShaking: true,
       sourcemap: false,
       metafile: true,
+      define:
+        spec.name === "graph" ?
+          {
+            "process.env.NODE_ENV": '"production"',
+            clearImmediate: "undefined",
+            setImmediate: "undefined",
+            global: "globalThis"
+          }
+        : undefined,
       legalComments: "none",
       logLevel: "silent"
     });
@@ -244,12 +406,18 @@ export function compileBrowserEntrySpec(
     });
   }
   const files = output.outputFiles ?? [];
-  if (files.length !== 1) {
+  const scriptFiles = files.filter((file) => file.path.endsWith(".js"));
+  const styleFiles = files.filter((file) => file.path.endsWith(".css"));
+  if (
+    scriptFiles.length !== 1 ||
+    styleFiles.length > 1 ||
+    files.length !== scriptFiles.length + styleFiles.length
+  ) {
     throw new Error(
-      `Browser entry "${spec.name}" produced ${files.length} output files; expected exactly one self-contained script.`
+      `Browser entry "${spec.name}" produced ${scriptFiles.length} scripts, ${styleFiles.length} styles, and ${files.length - scriptFiles.length - styleFiles.length} unsupported outputs; expected one self-contained script and at most one stylesheet.`
     );
   }
-  const code = makeInlineSafe(files[0].text);
+  const code = makeInlineSafe(scriptFiles[0].text);
   if (code.trim() === "") {
     throw new Error(
       `Browser entry "${spec.name}" compiled to an empty script.`
@@ -258,6 +426,7 @@ export function compileBrowserEntrySpec(
   assertInlineSafe(spec.name, code);
   assertParseable(spec.name, code);
   assertSelfContained(spec.name, code);
+  assertBrowserSafe(spec.name, code);
   if (output.metafile === undefined) {
     throw new Error(
       `Browser entry "${spec.name}" produced no build metadata; cannot prove self-containment.`
@@ -273,34 +442,46 @@ export function compileBrowserEntrySpec(
         .join(", ")}.`
     );
   }
-  return code;
+  return {
+    script: code,
+    style: makeInlineStyleSafe(styleFiles[0]?.text ?? ""),
+    inputs: Object.keys(output.metafile.inputs).map((input) =>
+      resolve(BROWSER_SOURCE_DIR, input)
+    )
+  };
 }
 
 export interface BrowserCompiler {
   compile(name: string): string;
-  compileAll(): Record<string, string>;
+  compileStyle(name: string): string;
+  compileAllBundles(): Record<string, BrowserEntryBundle>;
 }
 
 export function createBrowserCompiler(
   build: BrowserBuild = runEsbuild
 ): BrowserCompiler {
-  const cache = new Map<BrowserEntryName, string>();
+  const cache = new Map<BrowserEntryName, BrowserEntryBundle>();
 
-  function compile(name: string): string {
+  function compileBundle(name: string): BrowserEntryBundle {
     const spec = browserEntrySpec(name);
     const cached = cache.get(spec.name);
     if (cached !== undefined) return cached;
-    const code = compileBrowserEntrySpec(spec, build);
-    cache.set(spec.name, code);
-    return code;
+    const bundle = compileBrowserEntrySpec(spec, build);
+    cache.set(spec.name, bundle);
+    return bundle;
   }
 
   return {
-    compile,
-    compileAll() {
-      const bundles: Record<string, string> = {};
+    compile(name) {
+      return compileBundle(name).script;
+    },
+    compileStyle(name) {
+      return compileBundle(name).style;
+    },
+    compileAllBundles() {
+      const bundles: Record<string, BrowserEntryBundle> = {};
       for (const spec of BROWSER_ENTRIES) {
-        bundles[spec.name] = compile(spec.name);
+        bundles[spec.name] = compileBundle(spec.name);
       }
       return bundles;
     }
@@ -313,8 +494,12 @@ export function compileBrowserEntry(name: string): string {
   return browserCompiler.compile(name);
 }
 
-export function compileAllBrowserEntries(): Record<string, string> {
-  return browserCompiler.compileAll();
+export function compileBrowserStyle(name: string): string {
+  return browserCompiler.compileStyle(name);
+}
+
+export function compileAllBrowserBundles(): Record<string, BrowserEntryBundle> {
+  return browserCompiler.compileAllBundles();
 }
 
 export function browserEntryFiles(): string[] {

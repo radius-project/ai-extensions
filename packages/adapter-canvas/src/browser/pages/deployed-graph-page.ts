@@ -2,6 +2,7 @@ import { optionalBrowserFunction, requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
 import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
+import { queryValue } from "../query.js";
 import {
   isCallable,
   isRecord,
@@ -76,19 +77,6 @@ function parseState(context: BrowserContext): DeployedPageState {
   };
 }
 
-function queryValue(search: string, name: string): string {
-  const query = search.startsWith("?") ? search.slice(1) : search;
-  for (const pair of query.split("&")) {
-    const separator = pair.indexOf("=");
-    const key = separator < 0 ? pair : pair.slice(0, separator);
-    if (decodeURIComponent(key) !== name) continue;
-    return decodeURIComponent(
-      (separator < 0 ? "" : pair.slice(separator + 1)).replace(/\+/g, " ")
-    );
-  }
-  return "";
-}
-
 function deploymentKey(application: string, environment: string): string {
   return `${encodeURIComponent(application)}|${encodeURIComponent(environment)}`;
 }
@@ -139,6 +127,7 @@ export function initializeDeployedGraphPage(
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
   const providers: EnvironmentProviders = {};
+  const environmentStatuses: Record<string, string> = {};
   const adaptive = createDeployedState();
   const deployments = new Map<string, string>();
   let hasEnvironments = false;
@@ -204,7 +193,8 @@ export function initializeDeployedGraphPage(
       exists,
       deploymentStatus,
       deploymentStatesStale,
-      environmentsUnavailable
+      environmentsUnavailable,
+      environmentStatuses[environment] ?? ""
     );
     if (label) {
       label.textContent =
@@ -554,6 +544,7 @@ export function initializeDeployedGraphPage(
         hasEnvironments = listing.environments.length > 0;
         for (const environment of listing.environments) {
           providers[environment.name] = environment.provider;
+          environmentStatuses[environment.name] = environment.status;
         }
         if (!envSelect) return;
         context.dom.setOptions(

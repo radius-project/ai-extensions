@@ -103,8 +103,35 @@ export interface GhApiResult {
   stderr: string;
 }
 
+export function getInjectedGhToken(
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  return env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() || "";
+}
+
+const MIN_OPAQUE_TOKEN_REDACTION_LENGTH = 12;
+
+// This module is the gh process boundary, so every diagnostic leaving it must
+// redact both recognizable GitHub credentials and opaque injected tokens.
+export function redactGhCredentials(
+  value: string,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  let redacted = value;
+  for (const token of [env.GH_TOKEN?.trim(), env.GITHUB_TOKEN?.trim()]) {
+    if (token && token.length >= MIN_OPAQUE_TOKEN_REDACTION_LENGTH)
+      redacted = redacted.replaceAll(token, "[REDACTED]");
+  }
+  return redacted.replace(
+    /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/g,
+    "[REDACTED]"
+  );
+}
+
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return redactGhCredentials(
+    error instanceof Error ? error.message : String(error)
+  );
 }
 
 // The host app injects a GH_TOKEN/GITHUB_TOKEN into the session environment, and
@@ -238,7 +265,7 @@ function ensureGhSnapshot(): Promise<GhSnapshot> {
   if (_ghSnapshotPromise) return _ghSnapshotPromise;
   _ghSnapshotPromise = (async () => {
     const base = process.env;
-    const hasToken = !!(base.GH_TOKEN || base.GITHUB_TOKEN);
+    const hasToken = !!getInjectedGhToken(base);
     const stripped = { ...base };
     delete stripped.GH_TOKEN;
     delete stripped.GITHUB_TOKEN;
@@ -366,20 +393,53 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
   // De-duplicated switchable account list. An account is switchable when it
   // exists in the keyring (gh auth switch operates on keyring accounts).
   const keyringLogins = new Set(s.keyringAccts.map((a) => a.login));
-  // GHCR pushes authenticate with the credential getGhPackageCredentials
-  // resolves: the keyring token pinned to the login when a keyring entry
-  // exists, else the injected token. So the *packages* scope must be read
-  // keyring-first — reading the token account first (as hasWorkflow does)
-  // would misreport for a login whose keyring credential differs from its
-  // injected one.
   const keyringScopesByLogin = new Map(
     s.keyringAccts.map((a) => [a.login, a.scopes])
   );
   const tokenScopesByLogin = new Map(
     s.withTokenAccts.map((a) => [a.login, a.scopes])
   );
-  const packageScopesFor = (login: string): string[] =>
-    keyringScopesByLogin.get(login) || tokenScopesByLogin.get(login) || [];
+  // Prefer the keyring scopes for a login, else the injected token's. Keys off
+  // Map.has, not the value's truthiness: parseGhAuthStatus yields scopes: [] for
+  // an account whose "Token scopes:" line is absent/unparsed, and an empty array
+  // is truthy — a `get(login) || …` chain would treat that as "resolved" and
+  // never consult the other credential. has() makes presence explicit instead.
+  const preferKeyring = (login: string): string[] =>
+    keyringScopesByLogin.has(login) ?
+      keyringScopesByLogin.get(login)!
+    : (tokenScopesByLogin.get(login) ?? []);
+  // GHCR pushes authenticate with the credential getGhPackageCredentials
+  // resolves: the keyring token pinned to the login when a keyring entry exists,
+  // else the injected token. Packages auth is independent of the workflow token
+  // strategy, so the write:packages scope is always resolved keyring-first.
+  const packagesScopesFor = (login: string): string[] => preferKeyring(login);
+  // The workflow scope must be read from the credential that will ACTUALLY act
+  // as a login — the one decideGhTokenStrategy selects — not blanket
+  // keyring-first. gh keeps the injected token when it already carries workflow
+  // (so the token's scopes are in effect) and falls back to the keyring
+  // credential only when the token lacks workflow. Reading keyring-first
+  // unconditionally misreports in both directions: it clears the warning when a
+  // keyring credential has MORE scopes than a shadowing same-login token (issue
+  // #213), but would wrongly report workflow missing in the mirror case where
+  // the injected token has workflow and its same-login keyring credential does
+  // not — telling the user to run a refresh for a scope the acting credential
+  // already has.
+  //   - Acting login: read exactly the credential the resolved strategy selected
+  //     (strat.useKeyring ? keyring : token) — what gh will run as. Do NOT cross
+  //     to the other credential when the selected one is present; its scopes are
+  //     what runs, even if empty. Only fall back if the selected credential has
+  //     no entry for the login at all (unusual).
+  //   - Any other switchable account is a keyring login; switching to it sets a
+  //     preference other than the token login, which forces the keyring
+  //     credential (decideGhTokenStrategy), so its keyring scopes apply.
+  const workflowScopesFor = (login: string): string[] => {
+    if (login === actingLogin) {
+      const selected =
+        strat.useKeyring ? keyringScopesByLogin : tokenScopesByLogin;
+      if (selected.has(login)) return selected.get(login)!;
+    }
+    return preferKeyring(login);
+  };
   const seen = new Set<string>();
   const accounts: GitHubIdentityAccount[] = [];
   for (const a of [...s.withTokenAccts, ...s.keyringAccts]) {
@@ -387,8 +447,8 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
     seen.add(a.login);
     accounts.push({
       login: a.login,
-      hasWorkflow: a.scopes.includes("workflow"),
-      hasPackages: packageScopesFor(a.login).includes("write:packages"),
+      hasWorkflow: workflowScopesFor(a.login).includes("workflow"),
+      hasPackages: packagesScopesFor(a.login).includes("write:packages"),
       switchable: keyringLogins.has(a.login),
       acting: a.login === actingLogin
     });
@@ -428,11 +488,13 @@ export function switchGhAccount(
         if (err) {
           resolve({
             ok: false,
-            error: (
-              (stderr || "").trim() ||
-              err.message ||
-              "gh auth switch failed"
-            ).trim()
+            error: redactGhCredentials(
+              (
+                (stderr || "").trim() ||
+                err.message ||
+                "gh auth switch failed"
+              ).trim()
+            )
           });
           return;
         }
@@ -499,11 +561,7 @@ export async function getGhPackageCredentials(): Promise<{
     const token = await ghKeyringTokenForUser(login);
     if (token) return { token, username: login };
   }
-  const injected = (
-    process.env.GH_TOKEN ||
-    process.env.GITHUB_TOKEN ||
-    ""
-  ).trim();
+  const injected = getInjectedGhToken();
   if (injected) return { token: injected, username: login };
   throw new Error(
     `Could not obtain a GitHub token for @${login}. Sign in with: gh auth login`
@@ -596,7 +654,7 @@ export function runCommand(
   const { stdin, ...execOpts } = opts;
   return new Promise((resolve, reject) => {
     const child = cliExec(cmd, args, execOpts, (err, stdout, stderr) => {
-      if (err) reject(new Error(stderr || err.message));
+      if (err) reject(new Error(redactGhCredentials(stderr || err.message)));
       else resolve(stdout.trim());
     });
     if (stdin !== undefined) child.stdin?.end(stdin);
@@ -751,8 +809,9 @@ export function ghApiGetContentResult(
       { timeout },
       (err, stdout, stderr) => {
         if (err) {
-          const detail =
-            (stderr && stderr.trim()) || err.message || String(err);
+          const detail = redactGhCredentials(
+            (stderr && stderr.trim()) || err.message || String(err)
+          );
           resolve({ content: null, error: detail.trim() });
           return;
         }
@@ -873,7 +932,12 @@ export async function commitFileToRepo(
       ],
       { timeout },
       (err, _stdout, stderr) => {
-        if (err) reject(new Error((stderr && stderr.trim()) || err.message));
+        if (err)
+          reject(
+            new Error(
+              redactGhCredentials((stderr && stderr.trim()) || err.message)
+            )
+          );
         else resolve(true);
       }
     );
@@ -942,7 +1006,9 @@ export function createBranchRef(
       (err, _stdout, stderr) => {
         resolve({
           ok: !err,
-          stderr: ((stderr && stderr.trim()) || err?.message || "").trim()
+          stderr: redactGhCredentials(
+            ((stderr && stderr.trim()) || err?.message || "").trim()
+          )
         });
       }
     );
@@ -975,7 +1041,9 @@ export function createPullRequestApi(
         if (err) {
           resolve({
             ok: false,
-            stderr: ((stderr && stderr.trim()) || err.message || "").trim()
+            stderr: redactGhCredentials(
+              ((stderr && stderr.trim()) || err.message || "").trim()
+            )
           });
           return;
         }
@@ -1033,7 +1101,9 @@ export function ghApiJson(
         }
         return;
       }
-      const detail = ((stderr && stderr.trim()) || err.message || "").trim();
+      const detail = redactGhCredentials(
+        ((stderr && stderr.trim()) || err.message || "").trim()
+      );
       const m =
         detail.match(/\(HTTP (\d{3})\)/) || detail.match(/\bHTTP (\d{3})\b/);
       resolve({

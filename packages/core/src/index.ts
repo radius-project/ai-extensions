@@ -62,12 +62,19 @@ export {
   VERIFY_AZURE_FILE,
   VERIFY_AWS_FILE,
   generateDeployWorkflow,
+  defaultDeployTemplateVars,
   RADIUS_REF,
   RADIUS_WORKFLOW_REPO,
   RADIUS_WORKFLOW_DIR,
   DEPLOY_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
   DEPLOY_AWS_FILE,
+  DEPLOY_TEMPLATE_VAR_TARGET_CLUSTER_ARCH_MODE,
+  DEPLOY_TEMPLATE_VAR_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS,
+  DEFAULT_TARGET_CLUSTER_ARCH_MODE,
+  DEFAULT_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS,
+  RADIUS_BUILD_ARCH_MODE_VAR,
+  RADIUS_BUILD_PLATFORMS_VAR,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
@@ -79,6 +86,8 @@ export {
 } from "./workflows/index.js";
 export type {
   DeployWorkflowFiles,
+  DeployWorkflowOptions,
+  DeployWorkflowTemplateVars,
   DeleteWorkflowFiles
 } from "./workflows/index.js";
 export type {

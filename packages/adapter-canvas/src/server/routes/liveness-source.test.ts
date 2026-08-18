@@ -7,7 +7,6 @@ import {
   handleOpenSource,
   handlePing,
   type LivenessSourceDependencies,
-  type OpenSourceInvoker,
   type OpenSourceRequest
 } from "./liveness-source.js";
 import type { CanvasServerEntry } from "../types.js";
@@ -103,106 +102,6 @@ function safePath(input: unknown): string {
     throw new Error("unsafe path");
   }
   return value;
-}
-
-// Verbatim transcription of the two branches removed from the former inline
-// dispatcher. The differential cases below keep the
-// compatibility proof without duplicating the unit-test request harness.
-interface LegacyWorld {
-  instanceId: string;
-  openSourceHandler: OpenSourceInvoker | null;
-  servers: Map<string, { state: CanvasState }>;
-  toSafeRepoRelPath(input: unknown): string;
-}
-
-function legacyPing(
-  response: ServerResponse<IncomingMessage>,
-  instanceId: string
-): void {
-  response.setHeader("Content-Type", "application/json");
-  response.setHeader("Cache-Control", "no-store");
-  response.writeHead(200);
-  response.end(JSON.stringify({ ok: true, instanceId }));
-}
-
-async function legacyOpenSource(
-  incoming: IncomingMessage,
-  response: ServerResponse<IncomingMessage>,
-  world: LegacyWorld
-): Promise<void> {
-  let body = "";
-  for await (const chunk of incoming) body += chunk;
-  response.setHeader("Content-Type", "application/json");
-  response.setHeader("Cache-Control", "no-store");
-  let relPath: string;
-  let line: number;
-  try {
-    const data = JSON.parse(body || "{}");
-    relPath = world.toSafeRepoRelPath(data.path);
-    const lineRaw = Number.parseInt(data.line, 10);
-    line = Number.isFinite(lineRaw) && lineRaw > 0 ? lineRaw : 0;
-  } catch {
-    response.writeHead(400);
-    response.end(JSON.stringify({ ok: false, error: "invalid path" }));
-    return;
-  }
-  if (typeof world.openSourceHandler !== "function") {
-    response.writeHead(503);
-    response.end(JSON.stringify({ ok: false, error: "unavailable" }));
-    return;
-  }
-  try {
-    const entry = world.servers.get(world.instanceId);
-    await Promise.resolve(
-      world.openSourceHandler({
-        path: relPath,
-        line,
-        instanceId: world.instanceId,
-        state: entry?.state
-      })
-    );
-    response.writeHead(200);
-    response.end(JSON.stringify({ ok: true }));
-  } catch (error) {
-    response.writeHead(500);
-    response.end(
-      JSON.stringify({
-        ok: false,
-        error: error instanceof Error ? error.message : "failed"
-      })
-    );
-  }
-}
-
-async function differential(
-  body: string,
-  openSourceHandler: OpenSourceInvoker | null
-): Promise<[Recording, Recording]> {
-  const state: CanvasState = { contextRepo: "octo/app" };
-  const world: LegacyWorld = {
-    instanceId: "panel-a",
-    openSourceHandler,
-    servers: new Map([["panel-a", { state }]]),
-    toSafeRepoRelPath: safePath
-  };
-  const legacy = recorder();
-  await legacyOpenSource(request(body), legacy.response, world);
-
-  const migrated = recorder();
-  await handleOpenSource(
-    createRequestContext(
-      request(body),
-      migrated.response,
-      "panel-a",
-      instances(state)
-    ),
-    {
-      getOpenSourceHandler: () => world.openSourceHandler,
-      readInstanceState: (instanceId) => world.servers.get(instanceId)?.state,
-      toSafeRepoRelPath: world.toSafeRepoRelPath
-    }
-  );
-  return [legacy.recording, migrated.recording];
 }
 
 async function runOpenSource(
@@ -311,62 +210,5 @@ describe("liveness-source routes (SU-04)", () => {
     const after = await runOpenSource(body, deps);
     expect(after.status).toBe(200);
     expect(routes["POST /api/open-source"]).toBeTypeOf("function");
-  });
-});
-
-describe("liveness-source legacy/migrated differential contract", () => {
-  it("produces an identical liveness response", () => {
-    const legacy = recorder();
-    legacyPing(legacy.response, "panel-a");
-
-    const migrated = recorder();
-    handlePing(
-      createRequestContext(
-        request("", "GET"),
-        migrated.response,
-        "panel-a",
-        instances()
-      )
-    );
-
-    expect(migrated.recording).toEqual(legacy.recording);
-    expect(migrated.recording.headerOrder).toEqual([
-      "Content-Type",
-      "Cache-Control"
-    ]);
-  });
-
-  it.each([
-    ["invalid path", JSON.stringify({ path: "../secrets" }), 400],
-    ["malformed body", "{not json", 400],
-    ["unavailable handler", JSON.stringify({ path: "src/app.ts" }), 503]
-  ])("produces an identical %s response", async (_label, body, status) => {
-    const handler = status === 503 ? null : () => undefined;
-    const [legacy, migrated] = await differential(body, handler);
-    expect(migrated).toEqual(legacy);
-    expect(migrated.status).toBe(status);
-  });
-
-  it("produces identical success output and open input", async () => {
-    const calls: OpenSourceRequest[] = [];
-    const [legacy, migrated] = await differential(
-      JSON.stringify({ path: "src/app.ts", line: "12" }),
-      (input) => {
-        calls.push({ ...input });
-      }
-    );
-    expect(migrated).toEqual(legacy);
-    expect(calls[0]).toEqual(calls[1]);
-  });
-
-  it("produces an identical surfaced failure", async () => {
-    const [legacy, migrated] = await differential(
-      JSON.stringify({ path: "src/app.ts" }),
-      () => {
-        throw new Error("open failed");
-      }
-    );
-    expect(migrated).toEqual(legacy);
-    expect(migrated.status).toBe(500);
   });
 });

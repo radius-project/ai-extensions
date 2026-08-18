@@ -1,10 +1,14 @@
 import {
   existsSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   type Dirent
 } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -15,7 +19,8 @@ import {
 } from "../../support/artifact/harness.js";
 import {
   BROWSER_ENTRY_NAMES,
-  compileBrowserEntry
+  compileBrowserEntry,
+  compileBrowserStyle
 } from "../../../src/browser/build.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
 
@@ -132,8 +137,7 @@ describe("P0-C built Radius extension artifact", () => {
           /packages\/adapter-canvas\/src\/runtime\/bootstrap\.ts$/
         ),
         expect.stringMatching(/packages\/adapter-canvas\/src\/server\.ts$/),
-        // The page renderers are owned by src/pages/; src/pages.ts is only a
-        // behaviour-free re-export facade, so the bundler forwards through it.
+        // The page renderers are owned by focused modules under src/pages/.
         expect.stringMatching(
           /packages\/adapter-canvas\/src\/pages\/shell\.ts$/
         ),
@@ -143,7 +147,6 @@ describe("P0-C built Radius extension artifact", () => {
         expect.stringMatching(
           /packages\/adapter-canvas\/src\/browser\/scripts\.ts$/
         ),
-        expect.stringMatching(/packages\/adapter-canvas\/src\/client\.ts$/),
         expect.stringMatching(/packages\/adapter-canvas\/src\/skill\.ts$/),
         expect.stringMatching(/skills\/radius-app-bicep\/SKILL\.md$/),
         expect.stringMatching(
@@ -164,6 +167,16 @@ describe("P0-C built Radius extension artifact", () => {
     ).toBe(false);
     expect(bundle).not.toContain("packages/adapter-canvas/test/support");
     expect(bundle).not.toContain("RADIUS_CANVAS_TEST_SKIP_VENDOR_PREFETCH");
+    expect(bundle).not.toContain("unpkg.com");
+    expect(bundle).not.toContain("fetchVendorScript");
+    expect(bundle).not.toContain("vendorCache");
+    expect(bundle).not.toContain("readVendorAssets");
+    expect(bundle).not.toContain("react/umd/react.production.min.js");
+    expect(normalizedSources).not.toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/packages\/adapter-canvas\/src\/client\.ts$/)
+      ])
+    );
 
     expect(
       readdirSync(DIST)
@@ -174,6 +187,7 @@ describe("P0-C built Radius extension artifact", () => {
       "package.json",
       "plugin.json",
       "README.md",
+      "THIRD-PARTY-NOTICES.txt",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-graph/references/source-code-references.md"
@@ -253,9 +267,21 @@ describe("P0-C built Radius extension artifact", () => {
         readFileSync(sourceSkill, "utf8")
       );
     }
+    const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
+    for (const marker of [
+      "===== react@18.3.1 =====",
+      "===== react-dom@18.3.1 =====",
+      "===== reactflow@11.11.4 =====",
+      "===== dagre@0.8.5 =====",
+      "===== @reactflow/core@11.11.4 =====",
+      "===== graphlib@2.1.8 =====",
+      "===== lodash@4.18.1 ====="
+    ]) {
+      expect(notices).toContain(marker);
+    }
   });
 
-  it("packages the extracted page modules behind the forwarding facade exactly once", () => {
+  it("packages each page module exactly once", () => {
     assertCurrentArtifact();
     const bundle = readFileSync(ARTIFACT, "utf8");
     const sourceMap = JSON.parse(readFileSync(SOURCE_MAP, "utf8")) as {
@@ -265,7 +291,7 @@ describe("P0-C built Radius extension artifact", () => {
       source.replaceAll("\\", "/")
     );
     const pageModules = [
-      "pages/browser-function.ts",
+      "pages/browser-state-ids.ts",
       "pages/encoding.ts",
       "pages/shell-styles.ts",
       "pages/shell.ts",
@@ -278,13 +304,7 @@ describe("P0-C built Radius extension artifact", () => {
       "pages/environment-page.ts",
       "pages/environment/environments-pane.ts",
       "pages/environment/credentials-pane.ts",
-      "pages/environment/client-environments.ts",
-      "pages/environment/client-operations.ts",
-      "pages/environment/client-profiles.ts",
-      "pages/environment/client-discovery.ts",
-      "pages/environment/client-credentials.ts",
-      "pages/deploying-page.ts",
-      "pages/deploying/client-deployments.ts"
+      "pages/deploying-page.ts"
     ];
     for (const pageModule of pageModules) {
       expect(
@@ -294,23 +314,6 @@ describe("P0-C built Radius extension artifact", () => {
         pageModule
       ).toHaveLength(1);
     }
-
-    // The compatibility facade holds no behaviour, so the bundler resolves its
-    // re-exports to the owning modules and contributes no module of its own.
-    // Logic added to src/pages.ts would show up here.
-    expect(
-      normalizedSources.filter((source) =>
-        source.endsWith("packages/adapter-canvas/src/pages.ts")
-      )
-    ).toHaveLength(0);
-    // oidcPage is reachable only through the facade — no route renders it — so
-    // the bundler drops it. It stays exported for compatibility and is covered
-    // by its collocated unit tests.
-    expect(
-      normalizedSources.filter((source) =>
-        source.endsWith("packages/adapter-canvas/src/pages/oidc-page.ts")
-      )
-    ).toHaveLength(0);
 
     // Splitting the renderers must not duplicate page text in the artifact: the
     // shell stylesheet and the fragments shared by several pages stay
@@ -344,12 +347,22 @@ describe("P0-C built Radius extension artifact", () => {
 
     expect(BROWSER_ENTRY_NAMES).toEqual([
       "graph",
+      "delete-dialog",
       "heartbeat",
+      "operation-chip",
+      "deploy-result-page",
+      "environment-page",
+      "deploying-page",
       "graph-page",
       "planned-graph-page",
       "graph-diff-page",
       "deployed-graph-page"
     ]);
+    expect(
+      normalizedSources.some((source) =>
+        /\/pages\/(?:environment|deploying)\/client-/.test(source)
+      )
+    ).toBe(false);
     expect(browserSources).toHaveLength(2);
     expect(browserSources).toEqual(
       expect.arrayContaining([
@@ -398,5 +411,38 @@ describe("P0-C built Radius extension artifact", () => {
       );
     }
     expect(smoke.renderedPage).not.toMatch(/<script[^>]+src=/);
+  });
+
+  it("renders the native esbuild graph bundle and stylesheet exactly once under blocked network", () => {
+    assertCurrentArtifact();
+    const script = compileBrowserEntry("graph");
+    const style = compileBrowserStyle("graph");
+    expect(style).toContain(".react-flow");
+    expect(smoke.renderedPage.split(script)).toHaveLength(2);
+    expect(smoke.renderedPage.split(style)).toHaveLength(2);
+    expect(smoke.renderedPage.indexOf(style)).toBeLessThan(
+      smoke.renderedPage.indexOf("--rad-brand: #da4c2a;")
+    );
+  });
+
+  it("installs the third-party notices beside the local extension", () => {
+    const installDir = mkdtempSync(join(tmpdir(), "radius-canvas-install-"));
+    const installPath = join(installDir, "extension.mjs");
+    try {
+      execFileSync(process.execPath, ["build.mjs", "--install"], {
+        cwd: join(REPO_ROOT, "packages", "adapter-canvas"),
+        env: {
+          ...process.env,
+          RADIUS_CANVAS_INSTALL_PATH: installPath
+        },
+        stdio: "pipe"
+      });
+
+      expect(
+        readFileSync(join(installDir, "THIRD-PARTY-NOTICES.txt"), "utf8")
+      ).toBe(readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8"));
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
   });
 });

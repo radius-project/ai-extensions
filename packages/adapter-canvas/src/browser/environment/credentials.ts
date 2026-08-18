@@ -1,0 +1,981 @@
+// Canvas adapter — importable browser behavior for the Credentials sub-tab:
+// the credential profile table, the Azure/AWS provider form, GitHub Packages
+// access verification, and credential save/delete. Root-page initialization,
+// deep-linking, and resuming an in-flight operation belong to the page
+// controller that composes this module with the Environments pane, not here.
+
+import { escapeBrowserHtml } from "../html.js";
+import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
+import { isRecord, readArray, readBoolean, readString } from "../json.js";
+import { environmentStatusMarkup, providerLabel } from "./environments.js";
+import type { BrowserTeardown } from "../lifecycle.js";
+import type {
+  BrowserContext,
+  DomElement,
+  DomEventListener,
+  DomEventTarget
+} from "../ports.js";
+import type {
+  EnvironmentDecisionPort,
+  EnvironmentFormPreset
+} from "./environments.js";
+import type { EnvironmentConfirmDialog } from "./confirm-dialog.js";
+
+export const CREDENTIALS_ENTRY_KEY = "environment-credentials";
+export const CREDENTIAL_PROFILES_PATH = "/api/credential-profiles";
+export const CREDENTIAL_DELETE_PATH = "/api/delete-credential-profile";
+export const CREDENTIAL_SAVE_PATH = "/api/save-credential-profile";
+export const GITHUB_IDENTITY_PATH = "/api/github-identity";
+export const AZURE_CLI_ASSIST_PATH = "/api/azure-cli-assist";
+export const VERIFY_AZURE_PATH = "/api/verify-azure-login";
+export const VERIFY_AWS_PATH = "/api/verify-aws-login";
+export const GHCR_COPY_RESET_MS = 1500;
+
+export interface CredentialProfile {
+  name: string;
+  provider: string;
+  status: string;
+  tenantId: string;
+  subscriptionId: string;
+  accountId: string;
+  region: string;
+  roleArn: string;
+}
+
+export type VerifiedCredentials =
+  | {
+      readonly provider: "azure";
+      readonly user: string;
+      readonly tenantId: string;
+      readonly subscriptionId: string;
+      readonly subscriptionName: string;
+    }
+  | {
+      readonly provider: "aws";
+      readonly user: string;
+      readonly accountId: string;
+      readonly region: string;
+    };
+
+export interface GitHubPackagesIdentity {
+  error: string;
+  actingLogin: string;
+  actingHasPackages: boolean;
+}
+
+export interface GitHubAccessView {
+  packagesVerified: boolean;
+  statusText: string;
+  statusHtml: string | null;
+  statusColor: string;
+  commandVisible: boolean;
+  command: string;
+  retryVisible: boolean;
+}
+
+export type AzureCliAssistAction = "install" | "login";
+
+export interface AzureCliAssistPromptView {
+  title: string;
+  message: string;
+  confirmLabel: string;
+}
+
+export interface CredentialsPaneDependencies {
+  selectEnvironmentsSubtab(): void;
+  openEnvironmentForm(preset: EnvironmentFormPreset): void;
+  credentialCreated(name: string): void;
+}
+
+export interface CredentialsPaneOptions {
+  repo: string;
+  decisions: EnvironmentDecisionPort;
+  confirmDialog?: EnvironmentConfirmDialog;
+}
+
+export interface CredentialsPaneController {
+  loadCredentialTable(): void;
+  startWizardCreation(): void;
+  endWizardCreation(): void;
+  teardown(): void;
+}
+
+interface Registration {
+  target: DomEventTarget;
+  type: string;
+  listener: DomEventListener;
+}
+
+export function parseCredentialProfiles(payload: unknown): CredentialProfile[] {
+  return readArray(payload, "profiles")
+    .filter(isRecord)
+    .map((entry) => ({
+      name: readString(entry, "name"),
+      provider: readString(entry, "provider"),
+      status: readString(entry, "status") || "verified",
+      tenantId: readString(entry, "tenantId"),
+      subscriptionId: readString(entry, "subscriptionId"),
+      accountId: readString(entry, "accountId"),
+      region: readString(entry, "region"),
+      roleArn: readString(entry, "roleArn")
+    }))
+    .filter((entry) => entry.name !== "");
+}
+
+export function credentialRowsMarkup(
+  profiles: readonly CredentialProfile[]
+): string {
+  if (profiles.length === 0) {
+    return '<tr><td class="rad-table__env">No credential profiles created yet.</td><td></td><td></td><td class="rad-table__actions"></td></tr>';
+  }
+  return profiles
+    .map((profile) => {
+      const name = escapeBrowserHtml(profile.name);
+      return (
+        "<tr>" +
+        `<td class="rad-table__env">${name}</td>` +
+        `<td class="rad-table__provider">${escapeBrowserHtml(
+          providerLabel(profile.provider)
+        )}</td>` +
+        `<td>${environmentStatusMarkup(profile.status)}</td>` +
+        '<td class="rad-table__actions">' +
+        `<button class="rad-btn rad-btn--neutral js-cred-createenv" data-name="${name}" style="margin:0;">Create Env</button>` +
+        `<button class="rad-btn rad-btn--danger-outline js-cred-delete" data-name="${name}" style="margin:0;">Delete Profile</button>` +
+        "</td></tr>"
+      );
+    })
+    .join("");
+}
+
+export function parseGitHubPackagesIdentity(
+  payload: unknown
+): GitHubPackagesIdentity {
+  return {
+    error: readString(payload, "error"),
+    actingLogin: readString(payload, "actingLogin"),
+    actingHasPackages: readBoolean(payload, "actingHasPackages")
+  };
+}
+
+export function renderGitHubAccessView(
+  identity: GitHubPackagesIdentity
+): GitHubAccessView {
+  if (identity.error !== "" || identity.actingLogin === "") {
+    return {
+      packagesVerified: false,
+      statusText:
+        "Could not detect a GitHub CLI account. Sign in with gh auth login, then retry.",
+      statusHtml: null,
+      statusColor: "var(--rad-danger)",
+      commandVisible: false,
+      command: "",
+      retryVisible: false
+    };
+  }
+  if (identity.actingHasPackages) {
+    return {
+      packagesVerified: true,
+      statusText: "",
+      statusHtml: `✓ GitHub Packages access verified for <strong>@${escapeBrowserHtml(
+        identity.actingLogin
+      )}</strong>.`,
+      statusColor: "var(--rad-primary)",
+      commandVisible: false,
+      command: "",
+      retryVisible: false
+    };
+  }
+  const command = `gh auth switch -h github.com -u ${identity.actingLogin} && gh auth refresh -h github.com -s read:packages -s write:packages`;
+  return {
+    packagesVerified: false,
+    statusText: "",
+    statusHtml:
+      `The active account <strong>@${escapeBrowserHtml(
+        identity.actingLogin
+      )}</strong> cannot publish packages. Run the command below, complete the GitHub authorization, then retry. ` +
+      "<strong>Note:</strong> <code>gh auth switch</code> changes the active account machine-wide until you switch back.",
+    statusColor: "var(--rad-warning)",
+    commandVisible: true,
+    command,
+    retryVisible: true
+  };
+}
+
+export function azureCliAssistPromptView(
+  action: AzureCliAssistAction
+): AzureCliAssistPromptView {
+  if (action === "install") {
+    return {
+      title: "Install Azure CLI?",
+      message:
+        "Azure CLI is not installed. Would you like Copilot to attempt to install it and then start Azure login?",
+      confirmLabel: "Ask Copilot to install"
+    };
+  }
+  return {
+    title: "Start Azure login?",
+    message:
+      "No active Azure session was found. Would you like Copilot to start the Azure login flow?",
+    confirmLabel: "Start Azure login"
+  };
+}
+
+function setButtonState(
+  button: DomElement,
+  disabled: boolean,
+  text: string
+): void {
+  Reflect.set(button, "disabled", disabled);
+  button.textContent = text;
+}
+
+function bind(
+  registrations: Registration[],
+  target: DomEventTarget,
+  type: string,
+  listener: DomEventListener
+): void {
+  target.addEventListener(type, listener);
+  registrations.push({ target, type, listener });
+}
+
+function release(registrations: Registration[]): void {
+  for (const registration of registrations.splice(0)) {
+    registration.target.removeEventListener(
+      registration.type,
+      registration.listener
+    );
+  }
+}
+
+export function initializeCredentialsPane(
+  context: BrowserContext,
+  options: CredentialsPaneOptions,
+  dependencies: CredentialsPaneDependencies
+): CredentialsPaneController | BrowserTeardown {
+  const credLanding = context.dom.byId("cred-landing");
+  const credForm = context.dom.byId("cred-form");
+  const credFormCard = context.dom.byId("cred-form-card");
+  const credFormTitle = context.dom.byId("cred-form-title");
+  const wizardFormHost = context.dom.byId("env-cred-form-host");
+  const wizardStepCard = context.dom.byId("env-step-credentials-card");
+  const credProviderSelect = context.dom.selectById("cred-provider-select");
+  const credPanelAzure = context.dom.byId("cred-panel-azure");
+  const credPanelAws = context.dom.byId("cred-panel-aws");
+  const credTableBody = context.dom.byId("cred-table-body");
+  const newCredBtn = context.dom.byId("new-cred-btn");
+  const cancelCredBtn = context.dom.byId("cancel-cred-btn");
+  const credSuccessBanner = context.dom.byId("cred-success-banner");
+  const credSuccessBannerText = context.dom.byId("cred-success-banner-text");
+  const credSuccessBannerClose = context.dom.byId("cred-success-banner-close");
+  const credNameInput = context.dom.inputById("cred-name-input");
+  const azTenantId = context.dom.inputById("az-tenant-id");
+  const azSubId = context.dom.inputById("az-sub-id");
+  const awsAccountId = context.dom.inputById("aws-account-id");
+  const awsRegion = context.dom.inputById("aws-region");
+  const awsRoleArn = context.dom.inputById("aws-role-arn");
+  const credVerifyStatus = context.dom.byId("cred-verify-status");
+  const credVerifyHint = context.dom.byId("cred-verify-hint");
+  const saveCredBtn = context.dom.inputById("save-cred-btn");
+  const btnVerifyAzure = context.dom.inputById("btn-verify-azure");
+  const btnVerifyAws = context.dom.inputById("btn-verify-aws");
+  const credGhcrStatus = context.dom.byId("cred-ghcr-status");
+  const credGhcrCommandRow = context.dom.byId("cred-ghcr-command-row");
+  const credGhcrCommand = context.dom.byId("cred-ghcr-command");
+  const credGhcrRetry = context.dom.inputById("cred-ghcr-retry");
+  const credGhcrCopy = context.dom.byId("cred-ghcr-copy");
+  const envVerifyModal = context.dom.byId("env-verify-modal");
+  const envVerifyTitle = context.dom.byId("env-verify-title");
+  const azureCliAssistModal = context.dom.byId("azure-cli-assist-modal");
+  const azureCliAssistTitle = context.dom.byId("azure-cli-assist-title");
+  const azureCliAssistMessage = context.dom.byId("azure-cli-assist-message");
+  const azureCliAssistConfirm = context.dom.byId("azure-cli-assist-confirm");
+  const azureCliAssistCancel = context.dom.byId("azure-cli-assist-cancel");
+
+  if (
+    !credLanding ||
+    !credForm ||
+    !credFormCard ||
+    !credFormTitle ||
+    !wizardFormHost ||
+    !wizardStepCard ||
+    !credProviderSelect ||
+    !credPanelAzure ||
+    !credPanelAws ||
+    !credTableBody ||
+    !newCredBtn ||
+    !cancelCredBtn ||
+    !credSuccessBanner ||
+    !credSuccessBannerText ||
+    !credSuccessBannerClose ||
+    !credNameInput ||
+    !azTenantId ||
+    !azSubId ||
+    !awsAccountId ||
+    !awsRegion ||
+    !awsRoleArn ||
+    !credVerifyStatus ||
+    !credVerifyHint ||
+    !saveCredBtn ||
+    !btnVerifyAzure ||
+    !btnVerifyAws ||
+    !credGhcrStatus ||
+    !credGhcrCommandRow ||
+    !credGhcrCommand ||
+    !credGhcrRetry ||
+    !credGhcrCopy ||
+    !envVerifyModal ||
+    !envVerifyTitle ||
+    !azureCliAssistModal ||
+    !azureCliAssistTitle ||
+    !azureCliAssistMessage ||
+    !azureCliAssistConfirm ||
+    !azureCliAssistCancel
+  ) {
+    return NOOP_TEARDOWN;
+  }
+
+  const scope = beginEntry(context, CREDENTIALS_ENTRY_KEY);
+  if (!scope) return NOOP_TEARDOWN;
+
+  const rows: Registration[] = [];
+  let tableRequest = 0;
+  let tableAbort = context.net.createAbort();
+  // Bumped whenever the form context changes (opening/reopening the form for
+  // a different profile, returning to the landing table, or restarting
+  // verification). Async verify/save/assist responses compare against this
+  // token so a response for an earlier form/profile/provider can never
+  // overwrite the state of whatever the user is looking at now.
+  let formToken = 0;
+  let ghChecking = false;
+  let credVerified: VerifiedCredentials | null = null;
+  let credPackagesVerified = false;
+  let formContext: "standalone" | "wizard" = "standalone";
+  let pendingAssist: {
+    action: AzureCliAssistAction;
+    tenantId: string;
+    fallbackMessage: string;
+  } | null = null;
+  let active = true;
+
+  const updateSaveState = (): void => {
+    saveCredBtn.disabled = !(credVerified !== null && credPackagesVerified);
+  };
+
+  const applyProvider = (provider: string): void => {
+    const isAws = provider === "aws";
+    credPanelAzure.style.display = isAws ? "none" : "";
+    credPanelAws.style.display = isAws ? "" : "none";
+  };
+
+  const resetVerification = (): void => {
+    formToken += 1;
+    credVerified = null;
+    credVerifyStatus.style.display = "none";
+    credVerifyStatus.innerHTML = "";
+    credVerifyHint.style.display = "";
+    updateSaveState();
+  };
+
+  const verifyError = (message: string): void => {
+    credVerifyStatus.style.display = "block";
+    credVerifyStatus.innerHTML = `<span style="color:var(--rad-danger);">${escapeBrowserHtml(
+      message
+    )}</span>`;
+  };
+
+  const verifyInfo = (message: string): void => {
+    credVerifyStatus.style.display = "block";
+    credVerifyStatus.innerHTML = `<span>${escapeBrowserHtml(message)}</span>`;
+  };
+
+  const markVerified = (verified: VerifiedCredentials): void => {
+    credVerified = verified;
+    credVerifyStatus.style.display = "flex";
+    credVerifyStatus.innerHTML =
+      '<span class="rad-verified-pill">✓ Credentials verified</span>' +
+      (verified.user ?
+        `<span class="rad-verified-meta">Logged in as <strong>${escapeBrowserHtml(
+          verified.user
+        )}</strong></span>`
+      : "");
+    credVerifyHint.style.display = "none";
+    updateSaveState();
+  };
+
+  const applyGitHubAccessView = (identity: GitHubPackagesIdentity): void => {
+    const view = renderGitHubAccessView(identity);
+    credPackagesVerified = view.packagesVerified;
+    credGhcrCommandRow.style.display = view.commandVisible ? "flex" : "none";
+    credGhcrRetry.style.display = view.retryVisible ? "" : "none";
+    if (view.statusHtml !== null) {
+      credGhcrStatus.innerHTML = view.statusHtml;
+    } else {
+      credGhcrStatus.textContent = view.statusText;
+    }
+    credGhcrStatus.style.color = view.statusColor;
+    credGhcrCommand.textContent = view.command;
+    updateSaveState();
+  };
+
+  // Every real call site always requests a fresh identity check (opening the
+  // form and the manual retry both need the latest GitHub CLI account), so
+  // this always appends the fresh-check query rather than branching on a
+  // parameter no caller ever passes as false.
+  const loadGitHubAccess = (): void => {
+    if (ghChecking) return;
+    ghChecking = true;
+    credGhcrStatus.textContent = "Checking GitHub Packages access…";
+    credGhcrStatus.style.color = "var(--rad-text-tertiary)";
+    credGhcrRetry.disabled = true;
+    credGhcrRetry.textContent = "Checking…";
+    void context.net
+      .fetch(`${GITHUB_IDENTITY_PATH}?fresh=1`)
+      .then((response) => response.json())
+      .then(
+        (payload) => parseGitHubPackagesIdentity(payload),
+        (): GitHubPackagesIdentity => ({
+          error: "GitHub identity check failed",
+          actingLogin: "",
+          actingHasPackages: false
+        })
+      )
+      .then((identity) => {
+        ghChecking = false;
+        if (!active) return;
+        applyGitHubAccessView(identity);
+        credGhcrRetry.disabled = false;
+        credGhcrRetry.textContent = "I’ve updated permissions — retry";
+      });
+  };
+
+  const loadCredentialTable = (): void => {
+    tableAbort?.abort();
+    tableAbort = context.net.createAbort();
+    const request = ++tableRequest;
+    release(rows);
+    if (!options.repo) {
+      credTableBody.innerHTML = credentialRowsMarkup([]);
+      return;
+    }
+    credTableBody.innerHTML =
+      '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Loading credential profiles…</td></tr>';
+    void context.net
+      .fetch(
+        `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(options.repo)}`,
+        tableAbort ? { signal: tableAbort.signal } : undefined
+      )
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(
+        (payload) => {
+          if (!active || request !== tableRequest) return;
+          const profiles = parseCredentialProfiles(payload);
+          credTableBody.innerHTML = credentialRowsMarkup(profiles);
+          wireRows();
+        },
+        (error: unknown) => {
+          if (
+            !active ||
+            request !== tableRequest ||
+            (error instanceof Error && error.name === "AbortError")
+          ) {
+            return;
+          }
+          credTableBody.innerHTML =
+            '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Could not load credential profiles.</td></tr>';
+        }
+      );
+  };
+
+  const showLanding = (): void => {
+    formToken += 1;
+    credForm.style.display = "none";
+    credLanding.style.display = "";
+    loadCredentialTable();
+  };
+
+  const showSuccessBanner = (name: string): void => {
+    credSuccessBannerText.innerHTML = `Successfully created credential profile ${escapeBrowserHtml(
+      name
+    )}`;
+    credSuccessBanner.style.display = "flex";
+  };
+
+  const saveLabel = (): string =>
+    formContext === "wizard" ? "Save & Continue" : "Save Credential Profile";
+
+  const moveFormTo = (host: DomElement): void => {
+    host.appendChild(credFormCard);
+  };
+
+  const endWizardCreation = (): void => {
+    // Leaving the form invalidates any save still in flight, exactly as
+    // showLanding does for the standalone form; otherwise a save that resolves
+    // after Cancel still passes the token check and reports a created profile.
+    formToken += 1;
+    wizardFormHost.style.display = "none";
+    wizardStepCard.style.display = "";
+    moveFormTo(credForm);
+    credForm.style.display = "none";
+    credLanding.style.display = "";
+    formContext = "standalone";
+  };
+
+  const showCredentialsForm = (mode: "standalone" | "wizard"): void => {
+    formContext = mode;
+    credSuccessBanner.style.display = "none";
+    credFormTitle.textContent = "Create Credential Profile";
+    saveCredBtn.textContent = saveLabel();
+    cancelCredBtn.textContent =
+      mode === "wizard" ? "Cancel" : "← Back to credentials";
+    credNameInput.value = "";
+    credProviderSelect.value = "azure";
+    applyProvider("azure");
+    azTenantId.value = "";
+    azSubId.value = "";
+    awsAccountId.value = "";
+    awsRegion.value = "";
+    awsRoleArn.value = "";
+    resetVerification();
+    credPackagesVerified = false;
+    updateSaveState();
+    if (mode === "wizard") {
+      moveFormTo(wizardFormHost);
+      wizardStepCard.style.display = "none";
+      wizardFormHost.style.display = "";
+    } else {
+      endWizardCreation();
+      formContext = "standalone";
+      moveFormTo(credForm);
+      credLanding.style.display = "none";
+      credForm.style.display = "";
+    }
+    loadGitHubAccess();
+    credNameInput.focus();
+  };
+
+  const closeAssistPrompt = (): void => {
+    azureCliAssistModal.style.display = "none";
+    pendingAssist = null;
+  };
+
+  const showAssistPrompt = (
+    action: AzureCliAssistAction,
+    tenantId: string,
+    fallbackMessage: string
+  ): void => {
+    pendingAssist = { action, tenantId, fallbackMessage };
+    const view = azureCliAssistPromptView(action);
+    azureCliAssistTitle.textContent = view.title;
+    azureCliAssistMessage.textContent = view.message;
+    azureCliAssistConfirm.textContent = view.confirmLabel;
+    azureCliAssistModal.style.display = "flex";
+    azureCliAssistConfirm.focus();
+  };
+
+  // The sole caller (the confirm handler below) only ever supplies the
+  // original, non-empty Azure verification error as fallbackMessage, so it is
+  // always appended rather than conditionally included.
+  const requestAzureCliAssist = (
+    action: AzureCliAssistAction,
+    tenantId: string,
+    fallbackMessage: string
+  ): void => {
+    const token = formToken;
+    void context.net
+      .fetch(AZURE_CLI_ASSIST_PATH, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, tenantId })
+      })
+      .then((response) => response.json())
+      .then(
+        (payload) => {
+          if (!active || token !== formToken) return;
+          const error = readString(payload, "error");
+          if (error !== "") {
+            verifyError(`${error} ${fallbackMessage}`);
+            return;
+          }
+          const message = readString(payload, "message");
+          verifyInfo(
+            message ||
+              "Copilot is helping with Azure CLI setup. After it finishes, click Verify Credentials again."
+          );
+        },
+        () => {
+          if (!active || token !== formToken) return;
+          verifyError(
+            `Could not reach Copilot for Azure CLI help. ${fallbackMessage}`
+          );
+        }
+      );
+  };
+
+  const deleteCredentialProfile = (name: string, button: DomElement): void => {
+    setButtonState(button, true, "Deleting…");
+    void context.net
+      .fetch(CREDENTIAL_DELETE_PATH, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: options.repo, name })
+      })
+      .then(async (response) => ({
+        ok: response.ok,
+        body: await response.json()
+      }))
+      .then(
+        (result) => {
+          if (!active) return;
+          const error = readString(result.body, "error");
+          if (!result.ok || error !== "") {
+            setButtonState(button, false, "Delete Profile");
+            options.decisions.notify(
+              error || "Could not delete the credential profile."
+            );
+            return;
+          }
+          loadCredentialTable();
+        },
+        () => {
+          if (!active) return;
+          setButtonState(button, false, "Delete Profile");
+          options.decisions.notify(
+            "Could not delete the credential profile. Please try again."
+          );
+        }
+      );
+  };
+
+  const confirmCredentialDelete = (name: string, button: DomElement): void => {
+    setButtonState(button, true, "Checking usage…");
+    // Rows are only wired after a repository-scoped fetch succeeds, so a row
+    // action always has a repository to look usage up against.
+    const usageRequest = context.net
+      .fetch(`/api/list-environments?repo=${encodeURIComponent(options.repo)}`)
+      .then((response) => {
+        // The handler reports its own failures as HTTP 200 with an `error`
+        // field, so a non-OK status is not the only failure shape to catch.
+        if (!response.ok) throw new Error("list-environments request failed");
+        return response.json();
+      })
+      .then((payload) => {
+        if (readString(payload, "error") !== "") {
+          throw new Error("list-environments reported an error");
+        }
+        return {
+          usage: readArray(payload, "environments")
+            .filter(isRecord)
+            .filter(
+              (environment) =>
+                readString(environment, "credentialProfile") === name
+            )
+            .map((environment) => readString(environment, "name"))
+            .filter((environment) => environment !== ""),
+          checked: true
+        };
+      })
+      .catch(() => ({ usage: [] as string[], checked: false }));
+    void usageRequest.then(({ usage, checked }) => {
+      if (!active) return;
+      setButtonState(button, false, "Delete Profile");
+      options.confirmDialog?.show({
+        title: "Delete credential profile?",
+        message: `This deletes the credential profile "${name}". You will not be able to create new environments from it.${
+          checked ? "" : (
+            "\n\nCould not check which environments use this profile."
+          )
+        }`,
+        usageLabel:
+          usage.length === 1 ?
+            "This environment was created from this credential profile and will keep working as the environment has stored its own copy of the credential values:"
+          : "These environments were created from this credential profile and will keep working as each environment has stored its own copy of the credential values:",
+        usage,
+        confirmLabel: "Delete profile",
+        onConfirm: () => deleteCredentialProfile(name, button)
+      });
+    });
+  };
+
+  function wireRows(): void {
+    release(rows);
+    for (const button of context.dom.all(
+      context.dom.document,
+      ".js-cred-createenv"
+    )) {
+      bind(rows, button, "click", () => {
+        const name = button.getAttribute("data-name") ?? "";
+        dependencies.selectEnvironmentsSubtab();
+        dependencies.openEnvironmentForm({ name: "", profile: name });
+      });
+    }
+    for (const button of context.dom.all(
+      context.dom.document,
+      ".js-cred-delete"
+    )) {
+      bind(rows, button, "click", () => {
+        const name = button.getAttribute("data-name") ?? "";
+        if (name !== "") confirmCredentialDelete(name, button);
+      });
+    }
+  }
+
+  scope.on(credProviderSelect, "change", () => {
+    applyProvider(credProviderSelect.value);
+    resetVerification();
+  });
+
+  scope.on(newCredBtn, "click", () => showCredentialsForm("standalone"));
+  scope.on(cancelCredBtn, "click", () => {
+    if (formContext === "wizard") {
+      endWizardCreation();
+      return;
+    }
+    showLanding();
+  });
+  scope.on(credSuccessBannerClose, "click", () => {
+    credSuccessBanner.style.display = "none";
+  });
+
+  scope.on(credGhcrRetry, "click", () => loadGitHubAccess());
+  scope.on(credGhcrCopy, "click", () => {
+    const command = credGhcrCommand.textContent ?? "";
+    void context.clipboard.write(command).then((ok) => {
+      if (!active || !ok) return;
+      credGhcrCopy.textContent = "Copied";
+      scope.after(GHCR_COPY_RESET_MS, () => {
+        credGhcrCopy.textContent = "Copy command";
+      });
+    });
+  });
+
+  scope.on(azureCliAssistCancel, "click", () => {
+    const fallbackMessage = pendingAssist?.fallbackMessage ?? "";
+    closeAssistPrompt();
+    if (fallbackMessage) verifyError(fallbackMessage);
+  });
+
+  scope.on(azureCliAssistConfirm, "click", () => {
+    const request = pendingAssist;
+    closeAssistPrompt();
+    if (request) {
+      requestAzureCliAssist(
+        request.action,
+        request.tenantId,
+        request.fallbackMessage
+      );
+    }
+  });
+
+  scope.on(btnVerifyAzure, "click", () => {
+    const profileName = credNameInput.value.trim();
+    const tenantId = azTenantId.value.trim();
+    const subId = azSubId.value.trim();
+    resetVerification();
+    if (!profileName) {
+      verifyError("Please enter a Profile Name before verifying.");
+      return;
+    }
+    if (!tenantId || !subId) {
+      verifyError(
+        "Please enter both a Tenant ID and a Subscription ID before verifying."
+      );
+      return;
+    }
+    const token = formToken;
+    btnVerifyAzure.disabled = true;
+    btnVerifyAzure.textContent = "⏳ Verifying…";
+    envVerifyTitle.textContent = "Verifying authentication to Azure…";
+    envVerifyModal.style.display = "flex";
+    void context.net
+      .fetch(VERIFY_AZURE_PATH, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tenantId, subscriptionId: subId })
+      })
+      .then((response) => response.json())
+      .then(
+        (payload) => {
+          if (!active || token !== formToken) return;
+          envVerifyModal.style.display = "none";
+          btnVerifyAzure.disabled = false;
+          btnVerifyAzure.textContent = "Verify Credentials";
+          const error = readString(payload, "error");
+          if (error !== "") {
+            const code = readString(payload, "code");
+            const returnedTenantId =
+              readString(payload, "tenantId") || tenantId;
+            if (code === "az-login-required") {
+              showAssistPrompt("login", returnedTenantId, error);
+              return;
+            }
+            if (code === "az-cli-missing") {
+              showAssistPrompt("install", returnedTenantId, error);
+              return;
+            }
+            verifyError(error);
+            return;
+          }
+          const returnedTenantId = readString(payload, "tenantId");
+          const returnedSubId = readString(payload, "subscriptionId");
+          if (returnedTenantId) azTenantId.value = returnedTenantId;
+          if (returnedSubId) azSubId.value = returnedSubId;
+          markVerified({
+            provider: "azure",
+            user: readString(payload, "user"),
+            tenantId: returnedTenantId || tenantId,
+            subscriptionId: returnedSubId || subId,
+            subscriptionName: readString(payload, "subscriptionName")
+          });
+        },
+        () => {
+          if (!active || token !== formToken) return;
+          envVerifyModal.style.display = "none";
+          btnVerifyAzure.disabled = false;
+          btnVerifyAzure.textContent = "Verify Credentials";
+          verifyError("Could not verify credentials. Please try again.");
+        }
+      );
+  });
+
+  scope.on(btnVerifyAws, "click", () => {
+    const profileName = credNameInput.value.trim();
+    const accountId = awsAccountId.value.trim();
+    const region = awsRegion.value.trim();
+    resetVerification();
+    if (!profileName) {
+      verifyError("Please enter a Profile Name before verifying.");
+      return;
+    }
+    const token = formToken;
+    btnVerifyAws.disabled = true;
+    btnVerifyAws.textContent = "⏳ Verifying…";
+    envVerifyTitle.textContent = "Verifying authentication to AWS…";
+    envVerifyModal.style.display = "flex";
+    void context.net
+      .fetch(VERIFY_AWS_PATH, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId, region })
+      })
+      .then((response) => response.json())
+      .then(
+        (payload) => {
+          if (!active || token !== formToken) return;
+          envVerifyModal.style.display = "none";
+          btnVerifyAws.disabled = false;
+          btnVerifyAws.textContent = "Verify Credentials";
+          const error = readString(payload, "error");
+          if (error !== "") {
+            verifyError(error);
+            return;
+          }
+          const returnedAccountId = readString(payload, "accountId");
+          if (returnedAccountId) awsAccountId.value = returnedAccountId;
+          markVerified({
+            provider: "aws",
+            user: readString(payload, "user") || readString(payload, "arn"),
+            accountId: returnedAccountId || accountId,
+            region
+          });
+        },
+        () => {
+          if (!active || token !== formToken) return;
+          envVerifyModal.style.display = "none";
+          btnVerifyAws.disabled = false;
+          btnVerifyAws.textContent = "Verify Credentials";
+          verifyError("Could not verify credentials. Please try again.");
+        }
+      );
+  });
+
+  scope.on(saveCredBtn, "click", () => {
+    const name = credNameInput.value.trim();
+    if (!name) {
+      options.decisions.notify("Please enter a profile name.");
+      return;
+    }
+    if (!credVerified) {
+      options.decisions.notify("Please verify your credentials first.");
+      return;
+    }
+    const provider = credVerified.provider;
+    const profile: Record<string, string> = {
+      repo: options.repo,
+      name,
+      provider,
+      user: credVerified.user || ""
+    };
+    if (credVerified.provider === "azure") {
+      profile.tenantId = credVerified.tenantId;
+      profile.subscriptionId = credVerified.subscriptionId;
+      profile.subscriptionName = credVerified.subscriptionName;
+    } else {
+      profile.accountId = credVerified.accountId;
+      profile.region = credVerified.region;
+      profile.roleArn = awsRoleArn.value.trim();
+    }
+    const token = formToken;
+    const wizard = formContext === "wizard";
+    saveCredBtn.disabled = true;
+    saveCredBtn.textContent = "Saving…";
+    void context.net
+      .fetch(CREDENTIAL_SAVE_PATH, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(profile)
+      })
+      .then((response) => response.json())
+      .then(
+        (payload) => {
+          if (!active || token !== formToken) return;
+          saveCredBtn.disabled = false;
+          saveCredBtn.textContent = saveLabel();
+          const error = readString(payload, "error");
+          if (error !== "") {
+            options.decisions.notify(`Could not save profile: ${error}`);
+            return;
+          }
+          if (wizard) {
+            endWizardCreation();
+            dependencies.credentialCreated(name);
+          } else {
+            showLanding();
+            showSuccessBanner(name);
+          }
+        },
+        () => {
+          if (!active || token !== formToken) return;
+          saveCredBtn.disabled = false;
+          saveCredBtn.textContent = saveLabel();
+          options.decisions.notify(
+            "Could not save the credential profile. Please try again."
+          );
+        }
+      );
+  });
+
+  return {
+    loadCredentialTable,
+    startWizardCreation() {
+      showCredentialsForm("wizard");
+    },
+    endWizardCreation,
+    teardown() {
+      if (!active) return;
+      active = false;
+      tableAbort?.abort();
+      release(rows);
+      scope.teardown();
+    }
+  };
+}
+
+export function isCredentialsPaneController(
+  value: CredentialsPaneController | BrowserTeardown
+): value is CredentialsPaneController {
+  return "loadCredentialTable" in value;
+}

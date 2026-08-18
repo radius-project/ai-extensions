@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { browserEntryMarker } from "../browser/scripts.js";
+import {
+  browserEntryMarker,
+  browserScript,
+  browserStyle
+} from "../browser/scripts.js";
 import { pageShell } from "./shell.js";
 
 describe("pageShell", () => {
@@ -36,9 +40,18 @@ describe("pageShell", () => {
     );
     expect(html).toContain("--rad-neutral-bg: var(--rad-bg-subtle)");
     expect(html).toContain("--rad-node-bg: var(--rad-surface)");
-    expect(html).toContain("--rad-success: var(--text-color-success");
-    expect(html).toContain("--rad-warning: var(--text-color-warning");
-    expect(html).toContain("--rad-danger: var(--text-color-danger");
+    // Status colors still flow from the host, but are mixed toward the active
+    // text color so a host palette that does not follow the canvas theme cannot
+    // leave them unreadable (see shell-styles.test.ts for the contrast ratios).
+    expect(html).toContain(
+      "--rad-success: color-mix(in srgb, var(--text-color-success"
+    );
+    expect(html).toContain(
+      "--rad-warning: color-mix(in srgb, var(--text-color-warning"
+    );
+    expect(html).toContain(
+      "--rad-danger: color-mix(in srgb, var(--text-color-danger"
+    );
     expect(html).not.toContain("localStorage");
     expect(html).not.toContain("matchMedia");
     expect(html).not.toContain("prefers-color-scheme");
@@ -56,6 +69,19 @@ describe("pageShell", () => {
       /\.react-flow, \.react-flow__renderer, \.react-flow__pane\s*\{([^}]*)\}/
     )?.[1];
     expect(flowStyles).toContain("background: transparent");
+  });
+
+  it("loads esbuild's React Flow stylesheet before Radius graph overrides", () => {
+    const html = pageShell("My Title", '<div id="graph-container"></div>');
+    const reactFlowStyle = browserStyle("graph");
+    expect(reactFlowStyle).toContain(".react-flow");
+    expect(html.split(reactFlowStyle)).toHaveLength(2);
+    expect(html.indexOf(reactFlowStyle)).toBeLessThan(
+      html.indexOf("--rad-brand: #da4c2a;")
+    );
+    expect(html.indexOf(reactFlowStyle)).toBeLessThan(
+      html.indexOf(browserEntryMarker("graph"))
+    );
   });
 
   it("excludes radio and checkbox inputs from the 100%-width form-field rule", () => {
@@ -150,6 +176,8 @@ describe("operation status chip in the top navigation", () => {
   it("carries the poller that fills it in", () => {
     expect(shell).toContain("/api/operations");
     expect(shell).toContain("radiusOpChipAck");
+    expect(shell).toContain(browserEntryMarker("operation-chip"));
+    expect(shell.split(browserScript("operation-chip"))).toHaveLength(2);
   });
 
   it("stops the pulse for anyone who has asked for less motion", () => {
@@ -185,6 +213,11 @@ describe("pageShell document structure", () => {
     expect(blocks).not.toHaveLength(0);
     expect(blocks).toHaveLength(count("</script>"));
     expect(count("<style>")).toBe(count("</style>"));
+  });
+
+  it("injects the shared delete dialog entry exactly once", () => {
+    expect(html).toContain(browserEntryMarker("delete-dialog"));
+    expect(html.split(browserScript("delete-dialog"))).toHaveLength(2);
   });
 
   it.each([
@@ -240,9 +273,7 @@ describe("pageShell document structure", () => {
 
   it("ships the shared client scripts before the page body that calls them", () => {
     const graph = html.indexOf(browserEntryMarker("graph"));
-    const deleteDialog = html.indexOf(
-      "function radiusCreateDeleteDeploymentDialog"
-    );
+    const deleteDialog = html.indexOf(browserEntryMarker("delete-dialog"));
     const body = html.indexOf('<div class="main-content">');
     expect(graph).toBeGreaterThan(-1);
     expect(deleteDialog).toBeGreaterThan(graph);

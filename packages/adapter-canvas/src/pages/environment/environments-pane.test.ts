@@ -81,4 +81,111 @@ describe("environmentsPaneMarkup", () => {
       'role="region" aria-label="Environment setup progress" tabindex="-1"'
     );
   });
+
+  it("splits creation into a credentials step followed by an environment step", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain('id="env-wizard-steps"');
+    expect(html.indexOf('id="env-step-credentials"')).toBeLessThan(
+      html.indexOf('id="env-step-details"')
+    );
+    // Step 1 is the entry point, so only step 2 starts hidden.
+    expect(html).toContain('<div id="env-step-credentials">');
+    expect(html).toContain('<div id="env-step-details" style="display:none;">');
+  });
+
+  it("marks step 1 as the current step and step 2 as pending", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toMatch(
+      /id="env-wizard-step-1"[^>]*data-step="1" aria-current="step"/
+    );
+    expect(html).toContain(
+      'class="rad-wizard__step rad-wizard__step--active" id="env-wizard-step-1"'
+    );
+    expect(html).toContain(
+      '<li class="rad-wizard__step" id="env-wizard-step-2" data-step="2">'
+    );
+  });
+
+  it("numbers the wizard only in the stepper, not again in the card titles", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain(
+      '<div class="rad-card__title" style="margin:0;">Choose cloud credentials</div>'
+    );
+    expect(html).toContain(
+      '<div class="rad-card__title" id="env-step2-title" style="margin:0;">Create Environment</div>'
+    );
+    // The stepper above the cards already carries the ordinals, so repeating
+    // "Step N" in a title would number the same thing twice.
+    const titles = [
+      ...html.matchAll(/class="rad-card__title"[^>]*>([^<]*)</g)
+    ].map((match) => match[1]);
+    expect(titles).toContain("Choose cloud credentials");
+    expect(titles).toContain("Create Environment");
+    for (const title of titles) expect(title).not.toMatch(/step/i);
+  });
+
+  it("chooses the credential profile in step 1, including creating a new one", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    const stepOne = html.slice(
+      html.indexOf('id="env-step-credentials"'),
+      html.indexOf('id="env-step-details"')
+    );
+    expect(stepOne).toContain('id="env-profile-combo"');
+    expect(stepOne).toContain('id="env-profile-select"');
+    expect(stepOne).toContain('id="env-create-profile-link"');
+    expect(stepOne).toContain('id="env-cred-form-host"');
+  });
+
+  it("gates the step 1 continue action until a profile is selected", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toMatch(/id="env-step1-next"[^>]*disabled/);
+    expect(html).toContain('id="env-step1-hint"');
+  });
+
+  it("echoes the chosen profile in step 2 with a way back to change it", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    const stepTwo = html.slice(html.indexOf('id="env-step-details"'));
+    expect(stepTwo).toContain('id="env-profile-summary"');
+    expect(stepTwo).toContain('id="env-change-profile-link"');
+    expect(stepTwo).toContain('id="env-profile-detail"');
+    expect(stepTwo).toContain('id="env-step2-back"');
+    // The combo itself belongs to step 1; step 2 only reflects the choice.
+    expect(stepTwo).not.toContain('id="env-profile-combo"');
+  });
+
+  it("keeps leaving the wizard available from either step", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html.indexOf('id="cancel-env-btn"')).toBeLessThan(
+      html.indexOf('id="env-step-credentials"')
+    );
+  });
+
+  it("keeps the environment details and their step numbering in step 2", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    const stepTwo = html.slice(html.indexOf('id="env-step-details"'));
+    for (const title of [
+      "1 · Name this environment",
+      "2 · Connect GitHub to a cloud",
+      "3 · Deploy identity",
+      "4 · Infrastructure"
+    ]) {
+      expect(stepTwo).toContain(title);
+    }
+    expect(stepTwo).toContain('id="deploy-btn"');
+  });
+
+  it("presents the two connection sides as one trust, not a choice", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    const conn = html.slice(html.indexOf('class="rad-conn"'));
+    const github = conn.indexOf("GitHub");
+    const cloud = conn.indexOf("Cloud credentials");
+    expect(github).toBeGreaterThan(-1);
+    expect(cloud).toBeGreaterThan(github);
+    // The cloud side only echoes the profile chosen in step 1, so it carries no
+    // ordinal of its own.
+    expect(conn).not.toContain("rad-conn__ord");
+    expect(html).toContain(
+      "These are the two ends of that trust, not a choice between them: the cloud credentials are the profile you selected, shown here to confirm."
+    );
+  });
 });

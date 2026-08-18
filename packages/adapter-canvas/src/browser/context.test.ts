@@ -50,6 +50,8 @@ function createScope(
     navigator: {
       clipboard: { writeText: () => Promise.resolve() }
     },
+    confirm: () => false,
+    alert: () => undefined,
     console: { error: () => undefined },
     open: () => null,
     ...overrides
@@ -194,6 +196,50 @@ describe("resolveBrowserContext", () => {
       window: undefined
     });
     expect(resolveBrowserContext(scope).page).toBe(scope);
+  });
+
+  it("fails closed on confirmation and reports notifications through browser dialogs", () => {
+    const confirmations: string[] = [];
+    const notifications: string[] = [];
+    const context = resolveBrowserContext(
+      createScope({
+        confirm: (message: string) => {
+          confirmations.push(message);
+          return "yes";
+        },
+        alert: (message: string) => {
+          notifications.push(message);
+        }
+      })
+    );
+
+    expect(context.dialogs.confirm("Delete?")).toBe(false);
+    context.dialogs.notify("Could not delete.");
+    expect(confirmations).toEqual(["Delete?"]);
+    expect(notifications).toEqual(["Could not delete."]);
+
+    const approved = resolveBrowserContext(
+      createScope({ confirm: () => true })
+    );
+    expect(approved.dialogs.confirm("Delete?")).toBe(true);
+  });
+
+  it("starts pages that never open a dialog on a host without modals", () => {
+    const logged: unknown[][] = [];
+    const context = resolveBrowserContext(
+      createScope({
+        confirm: undefined,
+        alert: undefined,
+        console: { error: (...args: unknown[]) => logged.push(args) }
+      })
+    );
+
+    expect(context.dialogs.confirm("Delete?")).toBe(false);
+    context.dialogs.notify("Could not delete.");
+    expect(logged).toEqual([
+      ["Radius could not confirm an action.", "Delete?"],
+      ["Radius could not display a notification.", "Could not delete."]
+    ]);
   });
 
   it("validates fetch responses and creates an optional abort handle", async () => {

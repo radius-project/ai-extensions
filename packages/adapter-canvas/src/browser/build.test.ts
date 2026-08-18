@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  assertBrowserSafe,
   assertInlineSafe,
   assertParseable,
   assertSelfContained,
@@ -11,9 +12,10 @@ import {
   browserEntrySpec,
   BROWSER_ENTRIES,
   BROWSER_ENTRY_NAMES,
-  compileAllBrowserEntries,
+  compileAllBrowserBundles,
   compileBrowserEntry,
   compileBrowserEntrySpec,
+  compileBrowserStyle,
   createBrowserCompiler,
   makeInlineSafe,
   SHARED_ENTRY_GLOBALS,
@@ -24,16 +26,18 @@ import {
   browserEntryMarker,
   browserScript,
   browserScriptTag,
+  browserStyle,
+  browserStyleTag,
   BROWSER_ENTRY_MARKER
 } from "./scripts.js";
 import { PAGE_REGISTRY_GLOBAL } from "./globals.js";
-import { loadBrowserScript } from "./generated.js";
+import { loadBrowserScript, loadBrowserStyle } from "./generated.js";
 import { resolvePageRegistry } from "./registry.js";
 import { createFakeBrowserScope } from "../../test/support/browser/fakes.js";
 
-function outputFile(text: string) {
+function outputFile(text: string, path = "out.js") {
   return {
-    path: "out.js",
+    path,
     contents: new TextEncoder().encode(text),
     hash: "test",
     text
@@ -42,13 +46,19 @@ function outputFile(text: string) {
 
 function buildResult(
   text: string,
-  imports: readonly { path: string; kind: string }[] = []
+  imports: readonly { path: string; kind: string }[] = [],
+  style = ""
 ) {
   return {
-    outputFiles: [outputFile(text)],
+    outputFiles: [
+      outputFile(text),
+      ...(style === "" ? [] : [outputFile(style, "out.css")])
+    ],
     metafile: {
+      inputs: {},
       outputs: {
-        "out.js": { imports }
+        "out.js": { imports },
+        ...(style === "" ? {} : { "out.css": { imports: [] } })
       }
     }
   };
@@ -70,7 +80,12 @@ describe("browser entry specifications", () => {
   it("registers every implemented repository and graph entry exactly once", () => {
     expect(BROWSER_ENTRY_NAMES).toEqual([
       "graph",
+      "delete-dialog",
       "heartbeat",
+      "operation-chip",
+      "deploy-result-page",
+      "environment-page",
+      "deploying-page",
       "graph-page",
       "planned-graph-page",
       "graph-diff-page",
@@ -79,7 +94,12 @@ describe("browser entry specifications", () => {
     expect(SHARED_ENTRY_GLOBALS).toEqual([PAGE_REGISTRY_GLOBAL]);
     expect(BROWSER_ENTRIES.map((entry) => entry.initializer)).toEqual([
       "installGraphEntry",
+      "installDeleteDialogEntry",
       "installHeartbeatEntry",
+      "installOperationChipEntry",
+      "installDeployResultPageEntry",
+      "installEnvironmentPageEntry",
+      "installDeployingPageEntry",
       "installGraphPageEntry",
       "installPlannedGraphPageEntry",
       "installGraphDiffPageEntry",
@@ -191,24 +211,126 @@ describe("inline browser safety", () => {
       assertSelfContained("valid", "(() => { const value = 1; })();")
     ).not.toThrow();
   });
+
+  it("names every Node-only global a bundle must not reach", () => {
+    expect(() =>
+      assertBrowserSafe("env", "var ref = process.env.RADIUS_DELETE_REF;")
+    ).toThrow(
+      /Browser entry "env" reaches Node-only globals: process\. Import from a browser-safe subpath/
+    );
+    expect(() =>
+      assertBrowserSafe("buffered", "var raw = Buffer.from(value);")
+    ).toThrow(/reaches Node-only globals: Buffer\./);
+    expect(() =>
+      assertBrowserSafe("scoped", "var target = global.setTimeout;")
+    ).toThrow(/reaches Node-only globals: global\./);
+    expect(() =>
+      assertBrowserSafe("pathed", "var here = __dirname + __filename;")
+    ).toThrow(/reaches Node-only globals: __dirname, __filename\./);
+    expect(() =>
+      assertBrowserSafe("several", "process.cwd(); Buffer.alloc(1);")
+    ).toThrow(/reaches Node-only globals: process, Buffer\./);
+  });
+
+  // The dotted form is what esbuild emits today, but the gate is named for the
+  // globals rather than for one access syntax, so the other ways of reaching
+  // the same binding have to be rejected too.
+  it("rejects bracketed, aliased, destructured, and globalThis-qualified access", () => {
+    expect(() =>
+      assertBrowserSafe("bracketed", 'var ref = process["env"].RADIUS_REF;')
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("aliased", "var proc = process; proc.exit(0);")
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("destructured", "const { env } = process;")
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("qualified", "var ref = globalThis.process.env.REF;")
+    ).toThrow(/reaches Node-only globals: process\./);
+    expect(() =>
+      assertBrowserSafe("windowed", "var raw = window.Buffer.from(value);")
+    ).toThrow(/reaches Node-only globals: Buffer\./);
+    expect(() => assertBrowserSafe("selfed", "var g = self.global;")).toThrow(
+      /reaches Node-only globals: global\./
+    );
+  });
+
+  it("rejects the Node-only immediate timers", () => {
+    expect(() =>
+      assertBrowserSafe("immediate", "setImmediate(() => refresh());")
+    ).toThrow(/reaches Node-only globals: setImmediate\./);
+    expect(() =>
+      assertBrowserSafe("cleared", "clearImmediate(handle);")
+    ).toThrow(/reaches Node-only globals: clearImmediate\./);
+  });
+
+  // A global reached more than one way is still one thing to go fix.
+  it("names each global once however many ways the bundle reaches it", () => {
+    expect(() =>
+      assertBrowserSafe(
+        "repeated",
+        'var p = process; p.env.A; process["env"].B; globalThis.process.C;'
+      )
+    ).toThrow(/reaches Node-only globals: process\. Import from/);
+  });
+
+  // The guard must not fire on ordinary browser code that merely reads like a
+  // Node global, or the next contributor learns to work around it.
+  it("allows feature detects, own properties, and similarly named identifiers", () => {
+    expect(() =>
+      assertBrowserSafe(
+        "clean",
+        [
+          'if (typeof process !== "undefined") return;',
+          "var state = options.process.id;",
+          "var done = processResults(items);",
+          "globalThis.radiusPageRegistry = registry;",
+          "var label = deployment.Buffer;",
+          "var later = setImmediateRetry(fn);",
+          "var own = scope.setImmediate;",
+          "var mapped = items.map((entry) => entry.global);"
+        ].join("\n")
+      )
+    ).not.toThrow();
+  });
 });
 
 describe("in-memory browser compiler", () => {
   it("compiles deterministic, parseable, self-contained entry bytes", () => {
-    const first = compileAllBrowserEntries();
-    const second = compileAllBrowserEntries();
+    const first = compileAllBrowserBundles();
+    const second = compileAllBrowserBundles();
 
     expect(Object.keys(first)).toEqual(BROWSER_ENTRY_NAMES);
     expect(second).toEqual(first);
     for (const name of BROWSER_ENTRY_NAMES) {
       const code = compileBrowserEntry(name);
-      expect(code).toBe(first[name]);
+      const style = compileBrowserStyle(name);
+      expect(code).toBe(first[name].script);
       expect(code.length).toBeGreaterThan(0);
       expect(() => new Function(code)).not.toThrow();
       expect(() => assertInlineSafe(name, code)).not.toThrow();
       expect(() => assertSelfContained(name, code)).not.toThrow();
+      expect(() => assertBrowserSafe(name, code)).not.toThrow();
       expect(code).not.toContain(".mjs");
       expect(code).not.toMatch(/<script[^>]+src=/);
+      if (name === "graph") {
+        expect(style).toContain(".react-flow");
+        expect(style).not.toMatch(/<\/style/i);
+      } else {
+        expect(style).toBe("");
+      }
+    }
+    const graphInputs = first.graph.inputs.map((input) =>
+      input.replaceAll("\\", "/")
+    );
+    for (const packageName of ["react", "react-dom", "reactflow", "dagre"]) {
+      expect(
+        graphInputs.some((input) =>
+          input.includes(`/node_modules/${packageName}/`)
+        ),
+        packageName
+      ).toBe(true);
     }
   });
 
@@ -245,13 +367,13 @@ describe("in-memory browser compiler", () => {
     const alphaScope: Record<string, unknown> = {};
     const betaScope: Record<string, unknown> = {};
 
-    new Function("globalThis", alpha)(alphaScope);
-    new Function("globalThis", beta)(betaScope);
+    new Function("globalThis", alpha.script)(alphaScope);
+    new Function("globalThis", beta.script)(betaScope);
 
     expect(alphaScope).toEqual({ radiusAlpha: "alpha" });
     expect(betaScope).toEqual({ radiusBeta: "beta" });
-    expect(alpha).not.toContain("radiusBeta");
-    expect(beta).not.toContain("radiusAlpha");
+    expect(alpha.script).not.toContain("radiusBeta");
+    expect(beta.script).not.toContain("radiusAlpha");
   });
 
   it.each([
@@ -274,6 +396,16 @@ describe("in-memory browser compiler", () => {
         globals: []
       },
       /contains a require call|retained runtime module loads/
+    ],
+    [
+      "Node global reached through a package barrel",
+      {
+        name: "node-global",
+        file: "../../test/fixtures/browser/entry-node-global.ts",
+        initializer: "installNodeGlobal",
+        globals: []
+      },
+      /reaches Node-only globals: process\b/
     ]
   ])("rejects a compiled entry with a residual %s", (_label, spec, error) => {
     expect(() => compileBrowserEntrySpec(spec)).toThrow(error);
@@ -306,7 +438,7 @@ describe("in-memory browser compiler", () => {
     resolvePageRegistry(browser.scope).teardownAll();
   });
 
-  it("memoizes compiled entries across compile and compileAll", () => {
+  it("memoizes compiled entries across individual and aggregate compilation", () => {
     const calls: string[] = [];
     const build: BrowserBuild = (options) => {
       calls.push(options.stdin?.sourcefile ?? "");
@@ -317,17 +449,32 @@ describe("in-memory browser compiler", () => {
     expect(compiler.compile("heartbeat")).toBe("(() => {})();");
     expect(compiler.compile("heartbeat")).toBe("(() => {})();");
     expect(calls).toHaveLength(1);
-    const allEntries = Object.fromEntries(
-      BROWSER_ENTRY_NAMES.map((name) => [name, "(() => {})();"])
+    const allBundles = Object.fromEntries(
+      BROWSER_ENTRY_NAMES.map((name) => [
+        name,
+        { script: "(() => {})();", style: "", inputs: [] }
+      ])
     );
-    expect(compiler.compileAll()).toEqual(allEntries);
-    expect(compiler.compileAll()).toEqual(allEntries);
+    expect(compiler.compileAllBundles()).toEqual(allBundles);
+    expect(compiler.compileAllBundles()).toEqual(allBundles);
     expect(calls).toHaveLength(BROWSER_ENTRY_NAMES.length);
 
     const seeded = createBrowserCompiler(build);
-    expect(seeded.compileAll()).toEqual(allEntries);
+    expect(seeded.compileAllBundles()).toEqual(allBundles);
     expect(seeded.compile("heartbeat")).toBe("(() => {})();");
     expect(calls).toHaveLength(BROWSER_ENTRY_NAMES.length * 2);
+  });
+
+  it("returns an optional inline-safe stylesheet from the same build", () => {
+    const compiler = createBrowserCompiler(() =>
+      buildResult("(() => {})();", [], ".flow::after{content:'</style>'}")
+    );
+
+    expect(compiler.compileStyle("heartbeat")).toBe(
+      ".flow::after{content:'<\\/style>'}"
+    );
+    expect(compiler.compile("heartbeat")).toBe("(() => {})();");
+    expect(compileBrowserStyle("heartbeat")).toBe("");
   });
 
   it("passes an explicit browser-only build contract to esbuild", () => {
@@ -344,6 +491,7 @@ describe("in-memory browser compiler", () => {
       expect.objectContaining({
         bundle: true,
         write: false,
+        outdir: "out",
         format: "iife",
         platform: "browser",
         target: ["es2019"],
@@ -381,17 +529,17 @@ describe("in-memory browser compiler", () => {
     expect(() =>
       compileBrowserEntrySpec(HEARTBEAT_SPEC, () => ({ outputFiles: [] }))
     ).toThrow(
-      'Browser entry "heartbeat-test" produced 0 output files; expected exactly one self-contained script.'
+      'Browser entry "heartbeat-test" produced 0 scripts, 0 styles, and 0 unsupported outputs; expected one self-contained script and at most one stylesheet.'
     );
     expect(() => compileBrowserEntrySpec(HEARTBEAT_SPEC, () => ({}))).toThrow(
-      'Browser entry "heartbeat-test" produced 0 output files; expected exactly one self-contained script.'
+      'Browser entry "heartbeat-test" produced 0 scripts, 0 styles, and 0 unsupported outputs; expected one self-contained script and at most one stylesheet.'
     );
     expect(() =>
       compileBrowserEntrySpec(HEARTBEAT_SPEC, () => ({
         outputFiles: [outputFile("one"), outputFile("two")]
       }))
     ).toThrow(
-      'Browser entry "heartbeat-test" produced 2 output files; expected exactly one self-contained script.'
+      'Browser entry "heartbeat-test" produced 2 scripts, 0 styles, and 0 unsupported outputs; expected one self-contained script and at most one stylesheet.'
     );
     expect(() =>
       compileBrowserEntrySpec(HEARTBEAT_SPEC, () => ({
@@ -442,11 +590,22 @@ describe("renderer browser script wiring", () => {
     expect(tag).not.toMatch(/<script[^>]+src=/);
   });
 
+  it("wraps the graph stylesheet once and omits empty entry styles", () => {
+    const style = browserStyle("graph");
+    expect(style).toBe(compileBrowserStyle("graph"));
+    expect(browserStyleTag("graph")).toBe(`<style>\n${style}\n</style>`);
+    expect(browserStyleTag("heartbeat")).toBe("");
+  });
+
   it("loads the registered entry and rejects an unknown generated name", () => {
     expect(loadBrowserScript("heartbeat")).toBe(
       compileBrowserEntry("heartbeat")
     );
     expect(() => loadBrowserScript("unknown")).toThrow(
+      'Unknown browser entry "unknown".'
+    );
+    expect(loadBrowserStyle("graph")).toBe(compileBrowserStyle("graph"));
+    expect(() => loadBrowserStyle("unknown")).toThrow(
       'Unknown browser entry "unknown".'
     );
   });
