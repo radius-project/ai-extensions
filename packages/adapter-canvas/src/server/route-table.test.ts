@@ -250,6 +250,7 @@ const productionHandlers = {
     extractErrorLines: () => [],
     extractGitHubActionsStepLog: () => "",
     explainOidcEnterpriseClaim: () => "",
+    explainNoSubscriptions: () => "",
     addLegacyStep: () => null,
     isTerminalState: () => false,
     finish: () => null,

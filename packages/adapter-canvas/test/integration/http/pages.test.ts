@@ -3,14 +3,7 @@
 // (RF-09), the unknown-page fallback, active graph view synchronisation, and the
 // in-progress deployment redirect.
 //
-// The vendored CDN assets are the only external boundary the HTML path touches,
-// so node:https is faked here; nothing else about the server is stubbed.
-import { EventEmitter } from "node:events";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-
-const https = vi.hoisted(() => ({ get: vi.fn() }));
-
-vi.mock("node:https", () => ({ default: https }));
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { getOrCreateServer } from "../../../src/server.js";
 import { deployedGraphPage } from "../../../src/pages/deployed-graph-page.js";
@@ -30,14 +23,6 @@ import {
 const INSTANCE_ID = "pages-http-test";
 
 let entry: CanvasServerEntry;
-
-// Offline vendor assets: the warm-up must resolve without reaching a CDN, so
-// every request fails fast exactly as it does on a disconnected machine.
-https.get.mockImplementation(() => {
-  const request = new EventEmitter();
-  queueMicrotask(() => request.emit("error", new Error("offline")));
-  return request;
-});
 
 async function get(path: string): Promise<{
   status: number;
@@ -254,10 +239,7 @@ describe("canvas pages over real loopback HTTP", () => {
 
     expect(response.body).not.toMatch(/<script[^>]+src=/);
     expect(response.body).not.toContain('rel="stylesheet"');
-    // The only outbound requests are the faked vendor warm-up fetches.
-    for (const call of https.get.mock.calls) {
-      expect(String(call[0])).toContain("unpkg.com");
-    }
+    expect(response.body).not.toContain("unpkg.com");
   });
 
   it.each([

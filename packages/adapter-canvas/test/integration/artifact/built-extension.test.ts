@@ -1,10 +1,14 @@
 import {
   existsSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   type Dirent
 } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -15,7 +19,8 @@ import {
 } from "../../support/artifact/harness.js";
 import {
   BROWSER_ENTRY_NAMES,
-  compileBrowserEntry
+  compileBrowserEntry,
+  compileBrowserStyle
 } from "../../../src/browser/build.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
 
@@ -162,6 +167,11 @@ describe("P0-C built Radius extension artifact", () => {
     ).toBe(false);
     expect(bundle).not.toContain("packages/adapter-canvas/test/support");
     expect(bundle).not.toContain("RADIUS_CANVAS_TEST_SKIP_VENDOR_PREFETCH");
+    expect(bundle).not.toContain("unpkg.com");
+    expect(bundle).not.toContain("fetchVendorScript");
+    expect(bundle).not.toContain("vendorCache");
+    expect(bundle).not.toContain("readVendorAssets");
+    expect(bundle).not.toContain("react/umd/react.production.min.js");
     expect(normalizedSources).not.toEqual(
       expect.arrayContaining([
         expect.stringMatching(/packages\/adapter-canvas\/src\/client\.ts$/)
@@ -177,6 +187,7 @@ describe("P0-C built Radius extension artifact", () => {
       "package.json",
       "plugin.json",
       "README.md",
+      "THIRD-PARTY-NOTICES.txt",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-graph/references/source-code-references.md"
@@ -255,6 +266,18 @@ describe("P0-C built Radius extension artifact", () => {
       expect(readFileSync(join(DIST, relative), "utf8")).toBe(
         readFileSync(sourceSkill, "utf8")
       );
+    }
+    const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
+    for (const marker of [
+      "===== react@18.3.1 =====",
+      "===== react-dom@18.3.1 =====",
+      "===== reactflow@11.11.4 =====",
+      "===== dagre@0.8.5 =====",
+      "===== @reactflow/core@11.11.4 =====",
+      "===== graphlib@2.1.8 =====",
+      "===== lodash@4.18.1 ====="
+    ]) {
+      expect(notices).toContain(marker);
     }
   });
 
@@ -388,5 +411,38 @@ describe("P0-C built Radius extension artifact", () => {
       );
     }
     expect(smoke.renderedPage).not.toMatch(/<script[^>]+src=/);
+  });
+
+  it("renders the native esbuild graph bundle and stylesheet exactly once under blocked network", () => {
+    assertCurrentArtifact();
+    const script = compileBrowserEntry("graph");
+    const style = compileBrowserStyle("graph");
+    expect(style).toContain(".react-flow");
+    expect(smoke.renderedPage.split(script)).toHaveLength(2);
+    expect(smoke.renderedPage.split(style)).toHaveLength(2);
+    expect(smoke.renderedPage.indexOf(style)).toBeLessThan(
+      smoke.renderedPage.indexOf("--rad-brand: #da4c2a;")
+    );
+  });
+
+  it("installs the third-party notices beside the local extension", () => {
+    const installDir = mkdtempSync(join(tmpdir(), "radius-canvas-install-"));
+    const installPath = join(installDir, "extension.mjs");
+    try {
+      execFileSync(process.execPath, ["build.mjs", "--install"], {
+        cwd: join(REPO_ROOT, "packages", "adapter-canvas"),
+        env: {
+          ...process.env,
+          RADIUS_CANVAS_INSTALL_PATH: installPath
+        },
+        stdio: "pipe"
+      });
+
+      expect(
+        readFileSync(join(installDir, "THIRD-PARTY-NOTICES.txt"), "utf8")
+      ).toBe(readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8"));
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
   });
 });

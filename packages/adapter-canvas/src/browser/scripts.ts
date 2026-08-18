@@ -1,4 +1,8 @@
-import { BROWSER_ENTRY_NAMES, loadBrowserScript } from "./generated.js";
+import {
+  BROWSER_ENTRY_NAMES,
+  loadBrowserScript,
+  loadBrowserStyle
+} from "./generated.js";
 import type { BrowserEntryName } from "./generated.js";
 
 export { BROWSER_ENTRY_NAMES };
@@ -16,4 +20,13 @@ export function browserScript(name: BrowserEntryName): string {
 
 export function browserScriptTag(name: BrowserEntryName): string {
   return `<script>\n${browserEntryMarker(name)}\n${browserScript(name)}\n</script>`;
+}
+
+export function browserStyle(name: BrowserEntryName): string {
+  return loadBrowserStyle(name);
+}
+
+export function browserStyleTag(name: BrowserEntryName): string {
+  const style = browserStyle(name);
+  return style === "" ? "" : `<style>\n${style}\n</style>`;
 }

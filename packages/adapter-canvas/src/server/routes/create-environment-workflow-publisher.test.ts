@@ -58,7 +58,7 @@ describe("applyProviderConfiguration", () => {
       ["AZURE_RESOURCE_GROUP", "rg"],
       ["AZURE_AKS_CLUSTER_NAME", "aks"],
       ["AZURE_LOCATION", "westus2"],
-      ["RADIUS_NAMESPACE", "radius"]
+      ["KUBERNETES_NAMESPACE", "radius"]
     ]);
     expect(steps).toEqual([
       "Setting environment variables and secrets...",
@@ -144,7 +144,7 @@ describe("applyProviderConfiguration", () => {
       ["AWS_EKS_CLUSTER_NAME", "eks"],
       ["RADIUS_VPC_ID", "vpc-1"],
       ["RADIUS_SUBNET_IDS", "subnet-1"],
-      ["RADIUS_NAMESPACE", "radius"]
+      ["KUBERNETES_NAMESPACE", "radius"]
     ]);
     expect(steps).toEqual(["Setting environment variables and secrets..."]);
   });
