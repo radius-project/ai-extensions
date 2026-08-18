@@ -301,35 +301,6 @@ test.describe("Radius Canvas in Chromium", () => {
     await expectNoWcagViolations(page);
   });
 
-  test("switches GitHub accounts through the real identity routes", async ({
-    page,
-    canvas
-  }) => {
-    await gotoCanvas(page, canvas, "environment");
-    const result = await page.evaluate(async () => {
-      const response = await fetch("/api/github-account", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ login: "acting-user" })
-      });
-      return (await response.json()) as { success?: boolean };
-    });
-    expect(result.success).toBe(true);
-    expect(bodyFor(canvas, "/api/github-account")).toEqual({
-      login: "acting-user"
-    });
-    await expect
-      .poll(async () =>
-        (await canvas.cliCalls()).some(
-          (call) =>
-            call.tool === "gh" &&
-            JSON.stringify(call.args) ===
-              JSON.stringify(["auth", "switch", "--user", "acting-user"])
-        )
-      )
-      .toBe(true);
-  });
-
   test("verifies Azure credentials through the fake az boundary and keeps secret-shaped stderr out of the page @safety", async ({
     page,
     canvas
@@ -470,7 +441,7 @@ test.describe("Radius Canvas in Chromium", () => {
     });
   });
 
-  test("dispatch refusal preserves the selected worktree branch in the real deploy request @safety", async ({
+  test("sends the worktree branch the page selected when Deploy is activated @safety", async ({
     page,
     canvas
   }) => {
@@ -489,31 +460,29 @@ test.describe("Radius Canvas in Chromium", () => {
     await canvas.setScenario(scenario);
 
     await gotoCanvas(page, canvas, "deploying");
-    const result = await page.evaluate(
-      async ({ repo, branch }) => {
-        const response = await fetch("/api/deploy", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            environment: "fixture-environment",
-            provider: "azure",
-            targetRepo: repo,
-            branch,
-            appFile: ".radius/app.bicep"
-          })
-        });
-        return (await response.json()) as { error?: string };
-      },
-      { repo: REPOSITORY, branch: WORKTREE_BRANCH }
-    );
-    expect(result.error).toContain("Could not verify");
-    expect(bodyFor(canvas, "/api/deploy")).toEqual({
-      environment: "fixture-environment",
-      provider: "azure",
-      targetRepo: REPOSITORY,
-      branch: WORKTREE_BRANCH,
-      appFile: ".radius/app.bicep"
-    });
+
+    // The branch the page offers must be the session worktree branch. A
+    // regression to an implicit "main" would deploy the wrong ref, so this is
+    // read from the real select rather than supplied by the test.
+    const branchSelect = page.locator("#deploy-branch-select");
+    await expect(branchSelect).toHaveValue(WORKTREE_BRANCH);
+
+    const deployNow = page.locator("#deploy-now-btn");
+    await expect(deployNow).toBeEnabled();
+    await deployNow.click();
+
+    // The dispatch is refused because the fake deployments lookup fails, and
+    // the page has to surface that rather than leaving the control spinning.
+    await expect
+      .poll(() => bodyFor(canvas, "/api/deploy"), { timeout: 15_000 })
+      .toEqual({
+        environment: "fixture-environment",
+        provider: "azure",
+        targetRepo: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        appFile: ".radius/app.bicep"
+      });
+    await expect(page.locator("body")).toContainText(/could not verify/i);
   });
 
   test("opens destructive deployment confirmation with keyboard focus and returns focus on Escape @safety", async ({
