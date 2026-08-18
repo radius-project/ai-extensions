@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { DEPLOYING_CLIENT_JS } from "./client-deployments.js";
+import { CLIENT_REPO_BRANCH_JS } from "../../client.js";
 
 // The deployments page ships as a browser script string, so these tests
 // evaluate the real fragment against a hand-built document. Only the elements
@@ -126,7 +127,10 @@ function harness(environments: Environment[]) {
     "CTX_REPO",
     "CTX_BRANCH",
     "radiusCreateDeleteDeploymentDialog",
-    `${DEPLOYING_CLIENT_JS}
+    // Both scripts share page scope in the real canvas, and the deploying
+    // fragment relies on the shared environment-readiness helpers.
+    `${CLIENT_REPO_BRANCH_JS}
+     ${DEPLOYING_CLIENT_JS}
      return {
        loadEnvironments: loadEnvironmentsDropdown,
        refresh: refreshDeployBtn,

@@ -156,6 +156,82 @@ describe("CLIENT_GRAPH_JS — removed singleton/on-demand bicep UI", () => {
   });
 });
 
+describe("CLIENT_REPO_BRANCH_JS — shared environment readiness helpers", () => {
+  interface EnvLike {
+    name: string;
+    status?: string;
+  }
+  interface Helpers {
+    ready: (status?: string) => boolean;
+    label: (env: EnvLike) => string;
+    firstReady: (envs: EnvLike[]) => string;
+    reason: (name: string, status?: string) => string;
+    phrase: (status?: string) => string;
+  }
+
+  const helpers = new Function(
+    `${CLIENT_REPO_BRANCH_JS};
+     return {
+       ready: radiusEnvIsReady,
+       label: radiusEnvOptionLabel,
+       firstReady: radiusFirstReadyEnvName,
+       reason: radiusEnvNotReadyReason,
+       phrase: radiusEnvNotReadyPhrase
+     };`
+  )() as Helpers;
+
+  it("treats only a verified environment as deployable", () => {
+    expect(helpers.ready("success")).toBe(true);
+    expect(helpers.ready("pending")).toBe(false);
+    expect(helpers.ready("failed")).toBe(false);
+    expect(helpers.ready(undefined)).toBe(false);
+    expect(helpers.ready("")).toBe(false);
+  });
+
+  it("labels an option with why it is not selectable", () => {
+    expect(helpers.label({ name: "prod", status: "success" })).toBe("prod");
+    expect(helpers.label({ name: "prod", status: "failed" })).toBe(
+      "prod (creation failed)"
+    );
+    expect(helpers.label({ name: "prod", status: "pending" })).toBe(
+      "prod (being created…)"
+    );
+    expect(helpers.label({ name: "prod" })).toBe("prod (being created…)");
+  });
+
+  it("picks the first deployable environment, or none at all", () => {
+    expect(
+      helpers.firstReady([
+        { name: "broken", status: "failed" },
+        { name: "prod", status: "success" },
+        { name: "staging", status: "success" }
+      ])
+    ).toBe("prod");
+    expect(helpers.firstReady([{ name: "broken", status: "failed" }])).toBe("");
+    expect(helpers.firstReady([])).toBe("");
+  });
+
+  it("explains a refused deploy differently for a failed and an unfinished environment", () => {
+    expect(helpers.reason("prod", "success")).toBe("");
+    expect(helpers.reason("prod", "failed")).toContain(
+      "was not created successfully"
+    );
+    expect(helpers.reason("prod", "failed")).toContain('"prod"');
+    expect(helpers.reason("prod", "pending")).toContain(
+      "is still being created"
+    );
+    expect(helpers.reason("prod", undefined)).toContain(
+      "is still being created"
+    );
+  });
+
+  it("offers the same distinction as a subtitle fragment", () => {
+    expect(helpers.phrase("failed")).toBe("was not created successfully");
+    expect(helpers.phrase("pending")).toBe("is still being created");
+    expect(helpers.phrase(undefined)).toBe("is still being created");
+  });
+});
+
 describe("CLIENT_REPO_BRANCH_JS — Modeled graph adaptive primary action", () => {
   interface FakeBtn {
     dataset: { mode?: string; planLabel?: string };
@@ -744,7 +820,8 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
     appValue = "web-app",
     envValue = "prod",
     deploymentStatus?: string,
-    statesUnavailable?: boolean
+    statesUnavailable?: boolean,
+    envCreationStatus = "success"
   ) {
     const btn: FakeBtn = {
       dataset: {},
@@ -774,7 +851,8 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
       hasEnv,
       hasDeployment,
       deploymentStatus,
-      statesUnavailable
+      statesUnavailable,
+      envCreationStatus
     );
     return { btn, hint, mode };
   }
@@ -825,6 +903,75 @@ describe("CLIENT_REPO_BRANCH_JS — Deployed graph adaptive primary action", () 
     expect(btn.disabled).toBe(true);
     expect(btn.textContent).toBe("Deleting…");
     expect(btn.title).toContain("already being deleted");
+  });
+
+  // Deleting acts on a deployment that already exists, so it must stay possible
+  // whatever the environment's creation status says; only deploying into an
+  // unusable environment is blocked.
+  it("still allows deleting a deployment in an environment that failed to be created", () => {
+    const { btn, mode } = runApply(
+      true,
+      true,
+      "web-app",
+      "prod",
+      "success",
+      false,
+      "failed"
+    );
+    expect(mode).toBe("delete");
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("refuses to deploy into an environment whose creation failed", () => {
+    const { btn, hint, mode } = runApply(
+      true,
+      false,
+      "web-app",
+      "prod",
+      "",
+      false,
+      "failed"
+    );
+    expect(mode).toBe("deploy");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("not created successfully");
+    expect(hint.innerHTML).toContain("was not created successfully");
+  });
+
+  it("refuses to deploy while the environment is still being created", () => {
+    const { btn, hint } = runApply(
+      true,
+      false,
+      "web-app",
+      "prod",
+      "",
+      false,
+      "pending"
+    );
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("still being created");
+    expect(hint.innerHTML).toContain("still being created");
+  });
+
+  it("refuses to deploy when the environment has no known creation status", () => {
+    const { btn } = runApply(true, false, "web-app", "prod", "", false, "");
+    expect(btn.disabled).toBe(true);
+  });
+
+  // An unreadable deployment listing is the more urgent explanation because it
+  // also blocks Delete, so it keeps the tooltip.
+  it("prefers the stale-listing message over the environment message", () => {
+    const { btn } = runApply(
+      true,
+      false,
+      "web-app",
+      "prod",
+      "",
+      true,
+      "failed"
+    );
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toContain("could not be loaded");
   });
 
   it("offers Create Environment when the repo has no environment", () => {

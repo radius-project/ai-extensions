@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { deployedGraphPage } from "./deployed-graph-page.js";
+import { CLIENT_REPO_BRANCH_JS } from "../client.js";
 import {
   HOSTILE_STATE,
   expectSafeInlineScripts,
@@ -240,8 +241,123 @@ describe("deployedGraphPage", () => {
     });
   });
 
-  // The button must be held disabled while the listing is unreadable, and the
-  // page must keep polling so it recovers without a manual reload.
+  describe("environment selector labels and default selection", () => {
+    // Pull the emitted loadEnvironments out of the page and run it against a
+    // select that behaves like a real one, so the default it lands on is a
+    // meaningful assertion rather than a restatement of the assignment.
+    async function runLoadEnvs(
+      environments: Array<{ name: string; status?: string }>,
+      wantEnv = ""
+    ) {
+      const html = deployedGraphPage({ contextRepo: "octo/app" });
+      const start = html.indexOf("function loadEnvironments()");
+      expect(start).toBeGreaterThan(-1);
+      let depth = 0;
+      let end = -1;
+      for (let i = html.indexOf("{", start); i < html.length; i++) {
+        if (html[i] === "{") depth++;
+        else if (html[i] === "}") {
+          depth--;
+          if (depth === 0) {
+            end = i + 1;
+            break;
+          }
+        }
+      }
+      expect(end).toBeGreaterThan(start);
+      const source = html.slice(start, end);
+
+      // A select that adopts the first option when its list is replaced and
+      // rejects a value no option carries, like the real element.
+      class FakeSelect {
+        labels: string[] = [];
+        options: string[] = [];
+        stored = "";
+        set innerHTML(markup: string) {
+          this.options = [...markup.matchAll(/value="([^"]*)"/g)].map(
+            (m) => m[1]
+          );
+          this.labels = [...markup.matchAll(/>([^<]*)<\/option>/g)].map(
+            (m) => m[1]
+          );
+          this.stored = this.options[0] ?? "";
+        }
+        get value() {
+          return this.stored;
+        }
+        set value(next: string) {
+          if (this.options.includes(next)) this.stored = next;
+        }
+      }
+      const envSelect = new FakeSelect();
+      const state = { ENV_STATUS: {} as Record<string, string> };
+      const harness = new Function(
+        "CONTEXT_REPO",
+        "fetch",
+        "envSelect",
+        "wantEnv",
+        "state",
+        `${CLIENT_REPO_BRANCH_JS}
+         function escapeHtmlClient(s) { return String(s); }
+         var FALLBACK_PROVIDER = 'azure';
+         var ENV_PROVIDERS = {};
+         var ENV_STATUS = state.ENV_STATUS;
+         var HAS_ENVS = false;
+         ${source}
+         return loadEnvironments().then(function () {
+           return { labels: envSelect.labels, selected: envSelect.value, hasEnvs: HAS_ENVS };
+         });`
+      );
+      const fetchFake = () =>
+        Promise.resolve({ json: () => Promise.resolve({ environments }) });
+      const result = (await harness(
+        "octo/app",
+        fetchFake,
+        envSelect,
+        wantEnv,
+        state
+      )) as { labels: string[]; selected: string; hasEnvs: boolean };
+      return { ...result, statuses: state.ENV_STATUS };
+    }
+
+    it("says in the option label why an environment is not selectable", async () => {
+      const result = await runLoadEnvs([
+        { name: "prod", status: "success" },
+        { name: "broken", status: "failed" },
+        { name: "new", status: "pending" }
+      ]);
+      expect(result.labels).toEqual([
+        "prod",
+        "broken (creation failed)",
+        "new (being created…)"
+      ]);
+    });
+
+    it("lands on an environment that can actually be deployed to", async () => {
+      const result = await runLoadEnvs([
+        { name: "broken", status: "failed" },
+        { name: "prod", status: "success" }
+      ]);
+      expect(result.selected).toBe("prod");
+    });
+
+    it("keeps an explicitly requested environment even when it is not usable", async () => {
+      const result = await runLoadEnvs(
+        [
+          { name: "broken", status: "failed" },
+          { name: "prod", status: "success" }
+        ],
+        "broken"
+      );
+      expect(result.selected).toBe("broken");
+    });
+
+    it("records a missing status as unknown rather than assuming it is ready", async () => {
+      const result = await runLoadEnvs([{ name: "mystery" }]);
+      expect(result.statuses).toEqual({ mystery: "" });
+      expect(result.labels).toEqual(["mystery (being created…)"]);
+    });
+  });
   it("feeds the stale flag into the button state and polls until it clears", () => {
     const html = deployedGraphPage({ contextRepo: "octo/app" });
     expect(html).toContain("DEPLOYMENT_STATES_STALE");

@@ -14,13 +14,11 @@ var envSelect = document.getElementById('deploy-env-select');
 var branchSelect = document.getElementById('deploy-branch-select');
 var inlineStatus = document.getElementById('deploy-inline-status');
 var ENV_PROVIDERS = {};
-// Creation status per environment, as /api/list-environments reports it:
-// 'success' once credential verification passed, 'pending' while it runs,
-// 'failed' when it did not. Only a verified environment can actually receive a
-// deployment, so this gates the Deploy button rather than merely labelling the
-// option — an environment whose creation failed has no working credentials.
+// Creation status per environment, as /api/list-environments reports it. The
+// readiness rules live in the shared client script (radiusEnvIsReady and
+// friends), so every pane that can start a deploy answers this the same way.
 var ENV_STATUS = {};
-function envIsReady(name) { return ENV_STATUS[name] === 'success'; }
+function envIsReady(name) { return radiusEnvIsReady(ENV_STATUS[name]); }
 var HAS_APPS = false;
 var HAS_ENVS = false;
 // Optimistic per-row status overrides for in-flight operations, keyed by
@@ -104,11 +102,7 @@ function refreshDeployBtn() {
                 deployBtn.title = 'A deployment is already in progress in environment "' + selEnv + '". Wait for it to finish before deploying again.';
             }
         } else if (envNotReady) {
-            if (ENV_STATUS[selEnv] === 'pending') {
-                deployBtn.title = 'Environment "' + selEnv + '" is still being created. Wait for its credential verification to finish before deploying.';
-            } else {
-                deployBtn.title = 'Environment "' + selEnv + '" was not created successfully, so it cannot be deployed to. Fix or recreate it first.';
-            }
+            deployBtn.title = radiusEnvNotReadyReason(selEnv, ENV_STATUS[selEnv]);
         } else {
             deployBtn.removeAttribute('title');
         }
@@ -155,19 +149,18 @@ function loadEnvironmentsDropdown() {
             ENV_STATUS = {};
             envs.forEach(function(e) {
                 ENV_PROVIDERS[e.name] = e.provider || 'azure';
-                ENV_STATUS[e.name] = e.status || 'pending';
+                ENV_STATUS[e.name] = e.status || '';
             });
             // An environment that is not (yet) usable stays in the list so the
             // user can see it exists and why it is not an option, but its label
             // says so and Deploy refuses it.
             envSelect.innerHTML = envs.map(function(e) {
-                var suffix = e.status === 'success' ? '' : (e.status === 'failed' ? ' (creation failed)' : ' (being created…)');
-                return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(e.name + suffix) + '</option>';
+                return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(radiusEnvOptionLabel(e)) + '</option>';
             }).join('');
             // Land on an environment that can actually be deployed to when there
             // is one, rather than whichever happens to be first.
-            var firstReady = envs.filter(function(e) { return e.status === 'success'; })[0];
-            if (firstReady) envSelect.value = firstReady.name;
+            var firstReady = radiusFirstReadyEnvName(envs);
+            if (firstReady) envSelect.value = firstReady;
             // Pre-select the environment passed via ?env= (e.g. from the
             // "Deploy Apps" button on the environments list).
             try {

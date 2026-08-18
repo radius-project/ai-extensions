@@ -166,17 +166,15 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defau
                 envSel.innerHTML = '';
                 envs.forEach(function(e) {
                     if (envProviders) envProviders[e.name] = e.provider || 'azure';
-                    RADIUS_PLAN_ENV_STATUS[e.name] = e.status || 'pending';
+                    RADIUS_PLAN_ENV_STATUS[e.name] = e.status || '';
                     var o = document.createElement('option'); o.value = e.name;
-                    o.textContent = e.name + (e.status === 'success' ? '' : (e.status === 'failed' ? ' (creation failed)' : ' (being created…)'));
+                    o.textContent = radiusEnvOptionLabel(e);
                     if (defaultEnv && e.name === defaultEnv) o.selected = true;
                     envSel.appendChild(o);
                 });
                 if (!defaultEnv) {
-                    // Prefer an environment that finished being created; one that
-                    // failed cannot be deployed to.
-                    var firstReady = envs.filter(function(e) { return e.status === 'success'; })[0];
-                    if (firstReady) envSel.value = firstReady.name;
+                    var firstReady = radiusFirstReadyEnvName(envs);
+                    if (firstReady) envSel.value = firstReady;
                 }
                 hasEnvResult = true;
             })
@@ -198,10 +196,47 @@ function radiusPopulatePlannedSelectors(repo, envProviders, defaultBranch, defau
 // Tracks the last-known environment state for the Planned pane so selector
 // change handlers can refresh the subtitle hint (which names the selected
 // application/environment) without re-querying /api/list-environments.
+// --- Environment readiness (shared by every pane that can start a deploy) ---
+//
+// /api/list-environments reports how an environment's creation went: 'success'
+// once its credential verification passed, 'pending' while that runs, 'failed'
+// when it did not. Only a verified environment holds working credentials, so
+// deploying into anything else cannot succeed and is refused. An absent status
+// is deliberately not treated as ready: a listing that cannot say must not
+// enable a deploy by omission.
+function radiusEnvIsReady(status) { return status === 'success'; }
+
+// Label an environment option so the list itself explains why an entry is not
+// selectable, instead of silently refusing when the user picks it.
+function radiusEnvOptionLabel(env) {
+    if (radiusEnvIsReady(env.status)) return env.name;
+    return env.name + (env.status === 'failed' ? ' (creation failed)' : ' (being created…)');
+}
+
+// The environment a selector should land on: the first that can actually
+// receive a deployment, or '' when none can.
+function radiusFirstReadyEnvName(envs) {
+    for (var i = 0; i < envs.length; i++) {
+        if (radiusEnvIsReady(envs[i].status)) return envs[i].name;
+    }
+    return '';
+}
+
+// Why a deploy into this environment is refused, or '' when it is not.
+function radiusEnvNotReadyReason(name, status) {
+    if (radiusEnvIsReady(status)) return '';
+    if (status === 'failed') return 'Environment "' + name + '" was not created successfully, so it cannot be deployed to. Fix or recreate it first.';
+    return 'Environment "' + name + '" is still being created. Wait for its credential verification to finish before deploying.';
+}
+
+// The same distinction as a sentence fragment for the subtitle hints.
+function radiusEnvNotReadyPhrase(status) {
+    return status === 'failed' ? 'was not created successfully' : 'is still being created';
+}
+
 var RADIUS_PLAN_HAS_ENV = false;
 // Creation status per environment name, as /api/list-environments reports it.
-// An environment whose creation did not succeed has no working credentials, so
-// it cannot be deployed to no matter what else is selected.
+// See radiusEnvIsReady above for why this gates deploying.
 var RADIUS_PLAN_ENV_STATUS = {};
 var RADIUS_PLAN_ENVS_STALE = false;
 var RADIUS_PLAN_REQUEST_FAILED = false;
@@ -237,7 +272,7 @@ function radiusApplyPlanEnvState(hasEnv, statesUnavailable) {
         } else if (hasEnv) {
             btn.dataset.mode = 'deploy';
             btn.textContent = 'Deploy Application';
-            var envReady = !env || RADIUS_PLAN_ENV_STATUS[env] === 'success';
+            var envReady = !env || radiusEnvIsReady(RADIUS_PLAN_ENV_STATUS[env]);
             btn.disabled = !(branch && env) || !envReady;
             if (!branch && !env) {
                 btn.setAttribute('title', 'Select a branch and an environment to deploy.');
@@ -246,9 +281,7 @@ function radiusApplyPlanEnvState(hasEnv, statesUnavailable) {
             } else if (!env) {
                 btn.setAttribute('title', 'Select the environment to deploy to.');
             } else if (!envReady) {
-                btn.setAttribute('title', RADIUS_PLAN_ENV_STATUS[env] === 'pending' ?
-                    'Environment "' + env + '" is still being created. Wait for its credential verification to finish before deploying.' :
-                    'Environment "' + env + '" was not created successfully, so it cannot be deployed to. Fix or recreate it first.');
+                btn.setAttribute('title', radiusEnvNotReadyReason(env, RADIUS_PLAN_ENV_STATUS[env]));
             } else if (RADIUS_PLAN_REQUEST_FAILED) {
                 btn.disabled = true;
                 btn.setAttribute('title', 'The selected deployment plan could not be generated. Try another selection.');
@@ -265,8 +298,8 @@ function radiusApplyPlanEnvState(hasEnv, statesUnavailable) {
         } else if (hasEnv) {
             var appName = (appSel && appSel.value) || 'this application';
             var envName = env || 'the selected environment';
-            if (env && RADIUS_PLAN_ENV_STATUS[env] !== 'success') {
-                hint.innerHTML = ' The environment (<strong>' + radiusEscapeHtml(envName) + '</strong>) ' + (RADIUS_PLAN_ENV_STATUS[env] === 'pending' ? 'is still being created' : 'was not created successfully') + ', so it cannot be deployed to yet.';
+            if (env && !radiusEnvIsReady(RADIUS_PLAN_ENV_STATUS[env])) {
+                hint.innerHTML = ' The environment (<strong>' + radiusEscapeHtml(envName) + '</strong>) ' + radiusEnvNotReadyPhrase(RADIUS_PLAN_ENV_STATUS[env]) + ', so it cannot be deployed to yet.';
             } else {
                 hint.innerHTML = ' To deploy this application (<strong>' + radiusEscapeHtml(appName) + '</strong>) to the environment (<strong>' + radiusEscapeHtml(envName) + '</strong>), click "Deploy Application".';
             }
@@ -386,7 +419,7 @@ var RADIUS_DEPLOYED_HAS_DEPLOYMENT = false;
 // state is kept on screen, but it may be out of date, and dispatching against
 // state we cannot confirm risks starting an operation that conflicts with one
 // already running.
-function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus, statesUnavailable) {
+function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus, statesUnavailable, envCreationStatus) {
     RADIUS_DEPLOYED_HAS_ENV = !!hasEnv;
     RADIUS_DEPLOYED_HAS_DEPLOYMENT = !!hasDeployment;
     var btn = document.getElementById('deployed-delete-btn');
@@ -411,9 +444,16 @@ function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus, st
         } else if (mode === 'deploy') {
             btn.textContent = 'Deploy Application';
             btn.className = 'rad-btn rad-btn--primary';
-            btn.disabled = !(app && env) || unavailable;
+            // An environment that has not finished being created has no working
+            // credentials, so deploying into it cannot succeed. Deleting is
+            // deliberately not gated this way: a deployment that exists must
+            // stay removable whatever its environment's creation status says.
+            var envNotReady = !!env && !radiusEnvIsReady(envCreationStatus);
+            btn.disabled = !(app && env) || unavailable || envNotReady;
             if (unavailable) {
                 btn.setAttribute('title', 'The current deployment state could not be loaded. Retrying…');
+            } else if (envNotReady) {
+                btn.setAttribute('title', radiusEnvNotReadyReason(env, envCreationStatus));
             }
         } else {
             btn.textContent = pending ? 'Deploying…' : (deleting ? 'Deleting…' : 'Delete Deployment');
@@ -434,7 +474,9 @@ function radiusApplyDeployedEnvState(hasEnv, hasDeployment, deploymentStatus, st
         if (mode === 'create-env') {
             hint.textContent = ' To deploy this application, you must first create an environment.';
         } else if (mode === 'deploy') {
-            hint.innerHTML = ' To deploy this application (' + appLabel + ') to the environment (' + envLabel + '), click "Deploy Application".';
+            hint.innerHTML = (env && !radiusEnvIsReady(envCreationStatus))
+                ? ' The environment (' + envLabel + ') ' + radiusEnvNotReadyPhrase(envCreationStatus) + ', so this application cannot be deployed to it yet.'
+                : ' To deploy this application (' + appLabel + ') to the environment (' + envLabel + '), click "Deploy Application".';
         } else if (pending) {
             hint.innerHTML = ' The application (' + appLabel + ') is currently being deployed to the environment (' + envLabel + '). Watch its progress on the Deployments tab.';
         } else if (deleting) {

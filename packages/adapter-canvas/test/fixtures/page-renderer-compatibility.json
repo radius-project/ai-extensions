@@ -17,7 +17,7 @@
     "intentionalDivergences": [
       "environment, credentials — the environment creation form became a two-step wizard (choose or create a credential profile, then create the environment), because a credential profile only ever exists in service of an environment. The Credentials sub-tab keeps its own standalone create path, since clicking New Credential Profile expresses intent to manage a credential rather than to create an environment. Profiles are create-and-delete only: environments snapshot a profile's values into their own GitHub environment variables at creation, so editing one could never update an existing environment, and renaming was the only way a profile's name could drift from the one recorded on the environments created from it. Deleting an environment or a profile now confirms through one in-page modal (env-confirm-*) instead of window.confirm, and the profile dialog lists the environments created from that profile. The change is additive to the legacy projection: no legacy id, marker, navigation target, state value, pane visibility or /api path was removed. The recorded contentIds, roles, the newly disabled env-step1-next step gate, and the page script digest were re-recorded for the environment and credentials cases to accept the added wizard and confirmation-dialog elements.",
       "environment, credentials — infrastructure discovery now disables the provider's Refresh button for the life of its request and refuses a duplicate request while one is active, auto-selects a sole cluster, and preselects the default namespace. This is script-only: the page script digest was re-recorded for both cases, and every markup projection (contentIds, roles, disabled, panes, state values, /api paths) is byte-identical to the previous recording.",
-      "deploying, planned, graph — Deploy is now gated on an environment that finished being created. The deployments form and the planned pane read each environment's creation status from /api/list-environments, label an environment that failed or is still being created, prefer a usable one when selecting a default, and keep the primary button disabled with an explanatory title while the selected environment is not usable. This is script-only: the shared repoBranch digest and the two deploying page digests were re-recorded, and every markup projection is byte-identical to the previous recording."
+      "deploying, planned, deployed, graph — Deploy is now gated on an environment that finished being created. The deployments form, the planned pane and the deployed app graph read each environment's creation status from /api/list-environments, label an environment that failed or is still being created, prefer a usable one when selecting a default, and keep the primary button disabled with an explanatory title while the selected environment is not usable. On the deployed tab only the deploy mode is gated: an existing deployment stays deletable regardless of how its environment was created. The readiness, labelling and explanation rules live in one set of shared helpers in the repoBranch script so all three panes answer identically. This is script-only: the shared repoBranch digest, the deployed-context page digest and the two deploying page digests were re-recorded, and every markup projection is byte-identical to the previous recording."
     ]
   },
   "exports": [
@@ -34,7 +34,7 @@
     "serializeBrowserFunction"
   ],
   "sharedScriptDigests": {
-    "repoBranch": "e750a1013ee95a3c2241aa3368d3b704d3a267a662a3fde2cc7f8e2f1a44627d",
+    "repoBranch": "a8f3631be4e8b46870ec44658467a821c81e993829ede101ece096b4eeb2cced",
     "deleteDialog": "fd3d294849cb45a1f8ac07dc29b2299dbbb64cefc31a02fbd0cc18998a87d35c",
     "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
     "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
@@ -1253,7 +1253,7 @@
         },
         "removedTokens": [],
         "scriptDigests": {
-          "page": "b11f98d55ab25976dc3cc0fb5c3c47b4b2fbcae0901fb0a30547edf8b6fd9bdd"
+          "page": "6724c6a10ea1ab7d11e4424c3062dc470a6a95c08929521b2e86231fa3759d11"
         }
       }
     },
@@ -1541,7 +1541,7 @@
         },
         "removedTokens": [],
         "scriptDigests": {
-          "repoBranch": "e750a1013ee95a3c2241aa3368d3b704d3a267a662a3fde2cc7f8e2f1a44627d",
+          "repoBranch": "a8f3631be4e8b46870ec44658467a821c81e993829ede101ece096b4eeb2cced",
           "deleteDialog": "fd3d294849cb45a1f8ac07dc29b2299dbbb64cefc31a02fbd0cc18998a87d35c",
           "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
           "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
@@ -1844,7 +1844,7 @@
         },
         "removedTokens": [],
         "scriptDigests": {
-          "repoBranch": "e750a1013ee95a3c2241aa3368d3b704d3a267a662a3fde2cc7f8e2f1a44627d",
+          "repoBranch": "a8f3631be4e8b46870ec44658467a821c81e993829ede101ece096b4eeb2cced",
           "deleteDialog": "fd3d294849cb45a1f8ac07dc29b2299dbbb64cefc31a02fbd0cc18998a87d35c",
           "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
           "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
@@ -2042,7 +2042,7 @@
         },
         "removedTokens": [],
         "scriptDigests": {
-          "page": "6d2481f72e535cfc78b971cea94f2d6a5c056ec0ff58f463c041c9fb39e31a08"
+          "page": "5316e4a3342195924707d57133496d45e8b952fbec493d994798006587887341"
         }
       }
     },
@@ -2134,7 +2134,7 @@
         },
         "removedTokens": [],
         "scriptDigests": {
-          "page": "e616f783a8fdf7990b471887d9f12de59785afb126c90c50fa675c37bf3a7aa9"
+          "page": "1d3db89dfad3db2964903176dc36b8d8e0ffc21713ba41723aa1bbe9a6af8d9a"
         }
       }
     }

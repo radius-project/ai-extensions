@@ -93,6 +93,10 @@ var CONTEXT_BRANCH = ${inlineJson(deployBranch)};
 var GRAPH_BRANCH = ${inlineJson(targetBranch)};
 var FALLBACK_PROVIDER = ${inlineJson(deployProvider)};
 var ENV_PROVIDERS = {};
+// Creation status per environment, as /api/list-environments reports it. An
+// environment whose credential verification did not succeed cannot receive a
+// deployment, so it must not enable "Deploy Application" here either.
+var ENV_STATUS = {};
 
 function escapeHtmlClient(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
@@ -208,7 +212,7 @@ function escapeHtmlClient(s) {
 
     function refreshControls() {
         var app = appSelect.value, env = envSelect.value;
-        radiusApplyDeployedEnvState(HAS_ENVS, deploymentExists(app, env), deploymentStatus(app, env), DEPLOYMENT_STATES_STALE);
+        radiusApplyDeployedEnvState(HAS_ENVS, deploymentExists(app, env), deploymentStatus(app, env), DEPLOYMENT_STATES_STALE, env ? ENV_STATUS[env] : '');
         labelEl.innerHTML = (app && env)
             ? 'Application: <strong>' + escapeHtmlClient(app) + '</strong><br>Environment: <strong>' + escapeHtmlClient(env) + '</strong>'
             : '';
@@ -363,8 +367,17 @@ function escapeHtmlClient(s) {
                 var envs = (d && d.environments) || [];
                 if (!envs.length) { HAS_ENVS = false; envSelect.innerHTML = '<option value="">No environments</option>'; return; }
                 HAS_ENVS = true;
-                envs.forEach(function(e) { ENV_PROVIDERS[e.name] = e.provider || FALLBACK_PROVIDER; });
-                envSelect.innerHTML = envs.map(function(e) { return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(e.name) + '</option>'; }).join('');
+                envs.forEach(function(e) {
+                    ENV_PROVIDERS[e.name] = e.provider || FALLBACK_PROVIDER;
+                    ENV_STATUS[e.name] = e.status || '';
+                });
+                envSelect.innerHTML = envs.map(function(e) {
+                    return '<option value="' + escapeHtmlClient(e.name) + '">' + escapeHtmlClient(radiusEnvOptionLabel(e)) + '</option>';
+                }).join('');
+                // Land on an environment that can actually be deployed to, unless
+                // the caller asked for a specific one.
+                var firstReady = radiusFirstReadyEnvName(envs);
+                if (firstReady) { envSelect.value = firstReady; }
                 if (wantEnv) { envSelect.value = wantEnv; }
             })
             .catch(function() { HAS_ENVS = false; envSelect.innerHTML = '<option value="">Could not load</option>'; });
