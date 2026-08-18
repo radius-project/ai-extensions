@@ -4,7 +4,7 @@ import {
   getInlineVendorScripts,
   getInlineVendorStyles
 } from "./vendor.js";
-import { readVendorAssets } from "./vendor-assets.js";
+import { readVendorAssets, type VendorAssetReader } from "./vendor-assets.js";
 
 describe("fixed Radius Canvas vendor assets", () => {
   it("reads the exact installed graph library files", () => {
@@ -14,6 +14,32 @@ describe("fixed Radius Canvas vendor assets", () => {
     expect(assets.reactFlow).toContain("ReactFlow");
     expect(assets.dagre).toContain("dagre");
     expect(assets.reactFlowCss).toContain(".react-flow");
+  });
+
+  it("fails clearly when a required vendor input is missing", () => {
+    const missingReader: VendorAssetReader = {
+      resolvePackage: () => {
+        throw new Error("package is unavailable");
+      },
+      exists: () => false,
+      read: () => {
+        throw new Error("read should not be called");
+      }
+    };
+    expect(() => readVendorAssets(missingReader)).toThrow(
+      'Missing required Radius Canvas vendor asset "react/umd/react.production.min.js".'
+    );
+  });
+
+  it("fails clearly when a required vendor file cannot be read", () => {
+    const unreadableReader: VendorAssetReader = {
+      resolvePackage: () => "C:\\package",
+      exists: () => false,
+      read: () => ""
+    };
+    expect(() => readVendorAssets(unreadableReader)).toThrow(
+      /Unable to read required Radius Canvas vendor asset "react\/umd\/react\.production\.min\.js"/
+    );
   });
 
   it("embeds scripts in the required global initialization order", async () => {

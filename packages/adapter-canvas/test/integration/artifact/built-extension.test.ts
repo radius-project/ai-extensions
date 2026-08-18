@@ -18,6 +18,7 @@ import {
   compileBrowserEntry
 } from "../../../src/browser/build.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
+import { readVendorAssets } from "../../../src/vendor-assets.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
@@ -425,5 +426,16 @@ describe("P0-C built Radius extension artifact", () => {
       );
     }
     expect(smoke.renderedPage).not.toMatch(/<script[^>]+src=/);
+  });
+
+  it("renders each packaged vendor payload exactly once under blocked network", () => {
+    assertCurrentArtifact();
+    const assets = readVendorAssets();
+    for (const [name, source] of Object.entries(assets)) {
+      expect(
+        smoke.renderedPage.split(source).length - 1,
+        `${name} payload count`
+      ).toBe(1);
+    }
   });
 });

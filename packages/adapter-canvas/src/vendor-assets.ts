@@ -11,6 +11,12 @@ export interface VendorAssets {
   readonly reactFlowCss: string;
 }
 
+export interface VendorAssetReader {
+  resolvePackage(name: string): string;
+  exists(path: string): boolean;
+  read(path: string): string;
+}
+
 const require = createRequire(import.meta.url);
 
 const assetSpecifiers = {
@@ -26,6 +32,7 @@ function packageRoot(name: string): string {
   while (!existsSync(join(current, "package.json"))) {
     const parent = dirname(current);
     if (parent === current) {
+      // v8 ignore next -- require.resolve always starts inside an installed package tree.
       throw new Error(`Unable to locate package root for "${name}".`);
     }
     current = parent;
@@ -33,13 +40,22 @@ function packageRoot(name: string): string {
   return current;
 }
 
-function readAsset(name: keyof typeof assetSpecifiers): string {
+const defaultReader: VendorAssetReader = {
+  resolvePackage: (name) => packageRoot(name),
+  exists: existsSync,
+  read: (path) => readFileSync(path, "utf8")
+};
+
+function readAsset(
+  name: keyof typeof assetSpecifiers,
+  reader: VendorAssetReader
+): string {
   const specifier = assetSpecifiers[name];
   const packageName = specifier.split("/")[0];
   const relativePath = specifier.slice(packageName.length + 1);
   let path: string;
   try {
-    path = join(packageRoot(packageName), relativePath);
+    path = join(reader.resolvePackage(packageName), relativePath);
   } catch (error) {
     throw new Error(
       `Missing required Radius Canvas vendor asset "${specifier}". ` +
@@ -49,10 +65,10 @@ function readAsset(name: keyof typeof assetSpecifiers): string {
   }
 
   try {
-    if (!existsSync(path)) {
+    if (!reader.exists(path)) {
       throw new Error("file does not exist");
     }
-    return readFileSync(path, "utf8");
+    return reader.read(path);
   } catch (error) {
     throw new Error(
       `Unable to read required Radius Canvas vendor asset "${specifier}" at "${path}".`,
@@ -61,12 +77,14 @@ function readAsset(name: keyof typeof assetSpecifiers): string {
   }
 }
 
-export function readVendorAssets(): VendorAssets {
+export function readVendorAssets(
+  reader: VendorAssetReader = defaultReader
+): VendorAssets {
   return {
-    react: readAsset("react"),
-    reactDom: readAsset("reactDom"),
-    reactFlow: readAsset("reactFlow"),
-    dagre: readAsset("dagre"),
-    reactFlowCss: readAsset("reactFlowCss")
+    react: readAsset("react", reader),
+    reactDom: readAsset("reactDom", reader),
+    reactFlow: readAsset("reactFlow", reader),
+    dagre: readAsset("dagre", reader),
+    reactFlowCss: readAsset("reactFlowCss", reader)
   };
 }
