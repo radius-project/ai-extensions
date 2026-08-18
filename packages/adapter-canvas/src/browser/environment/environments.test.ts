@@ -41,6 +41,7 @@ function renderPage(repo = "octo/app", withoutInfraSelection = false) {
     stepTwoBack: createFakeElement("env-step2-back"),
     changeProfile: createFakeElement("env-change-profile-link"),
     profileButton: createFakeElement("env-profile-button"),
+    selectedProvider: createFakeInput("env-selected-provider", "azure"),
     stepTwoTitle: createFakeElement("env-step2-title"),
     nameHelp: createFakeElement("env-name-help"),
     clientId: createFakeInput("az-client-id", "old-client"),
@@ -178,7 +179,8 @@ describe("environment records and markup", () => {
     ["failed", "rad-dot--failed", "Failed"],
     ["pending", "rad-dot--pending", "Pending"],
     ["unverified", "rad-dot--pending", "Unverified"],
-    ["unknown", "rad-dot--pending", "Pending"]
+    ["unknown", "rad-dot--success", "Available"],
+    ["mystery", "rad-dot--pending", "Pending"]
   ])("renders %s status", (status, tone, label) => {
     const markup = environmentStatusMarkup(status);
     expect(markup).toContain(tone);
@@ -557,21 +559,18 @@ describe("environment pane initialization", () => {
     const page = renderPage();
 
     page.controller.showEnvironmentForm({ name: "prod", editing: "prod" });
-    page.controller.resetSubmitButton();
 
     expect(page.elements.submit.textContent).toBe("Save Environment");
     expect(page.elements.submit.disabled).toBe(false);
 
     page.controller.showEnvironmentForm();
-    page.controller.resetSubmitButton();
 
     expect(page.elements.submit.textContent).toBe("Create Environment");
   });
 
   it("restores the open form's infrastructure when returning from credentials", async () => {
     const page = renderPage();
-    const provider = createFakeInput("env-provider", "aws");
-    page.browser.document.add(provider);
+    page.elements.selectedProvider.value = "aws";
     page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
       jsonResponse({ environments: [] })
     );

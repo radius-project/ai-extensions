@@ -249,6 +249,10 @@ export function environmentIsReady(status: string): boolean {
   return status === "success";
 }
 
+export function environmentAllowsDeploy(status: string): boolean {
+  return environmentIsReady(status) || status === "unknown";
+}
+
 // The server reports "success", "failed", or "pending". Anything else — an
 // empty string, or a value from a newer server — is genuinely unknown, so it is
 // labelled as such instead of being explained away as still being created.
@@ -262,6 +266,7 @@ export function environmentOptionLabel(environment: EnvironmentInfo): string {
   if (status === "failed") return `${environment.name} (creation failed)`;
   if (environmentIsPending(status))
     return `${environment.name} (being created…)`;
+  if (status === "unknown") return `${environment.name} (available)`;
   return `${environment.name} (status unknown)`;
 }
 
@@ -271,7 +276,11 @@ export function firstReadyEnvironmentName(
   return (
     environments.find((environment) =>
       environmentIsReady(environment.status ?? "")
-    )?.name ?? ""
+    )?.name ??
+    environments.find((environment) =>
+      environmentAllowsDeploy(environment.status ?? "")
+    )?.name ??
+    ""
   );
 }
 
@@ -279,7 +288,7 @@ export function environmentNotReadyReason(
   name: string,
   status: string
 ): string {
-  if (environmentIsReady(status)) return "";
+  if (environmentAllowsDeploy(status)) return "";
   if (status === "failed") {
     return `Environment "${name}" was not created successfully, so it cannot be deployed to. Fix or recreate it first.`;
   }
@@ -617,6 +626,7 @@ export function applyPlanEnvState(
   const envSelect = dom.selectById("planned-env");
   const branch = selectValue(branchSelect).trim();
   const environment = selectValue(envSelect);
+  const environmentStatus = state.environmentStatuses[environment] ?? "";
 
   if (button) {
     button.removeAttribute("title");
@@ -632,8 +642,7 @@ export function applyPlanEnvState(
       button.dataset.mode = "deploy";
       button.textContent = "Deploy Application";
       const environmentReady =
-        environment === "" ||
-        environmentIsReady(state.environmentStatuses[environment] ?? "");
+        environment === "" || environmentAllowsDeploy(environmentStatus);
       button.disabled = !(branch && environment) || !environmentReady;
       if (!branch && !environment) {
         button.setAttribute(
@@ -647,10 +656,7 @@ export function applyPlanEnvState(
       } else if (!environmentReady) {
         button.setAttribute(
           "title",
-          environmentNotReadyReason(
-            environment,
-            state.environmentStatuses[environment] ?? ""
-          )
+          environmentNotReadyReason(environment, environmentStatus)
         );
       } else if (state.requestFailed) {
         button.disabled = true;
@@ -673,10 +679,9 @@ export function applyPlanEnvState(
     } else if (hasEnv) {
       const appName = selectValue(appSelect) || "this application";
       const envName = environment || "the selected environment";
-      const status = state.environmentStatuses[environment] ?? "";
       hint.innerHTML =
-        environment !== "" && !environmentIsReady(status) ?
-          ` The environment (<strong>${escapeBrowserHtml(envName)}</strong>) ${environmentNotReadyPhrase(status)}, so it cannot be deployed to yet.`
+        environment !== "" && !environmentAllowsDeploy(environmentStatus) ?
+          ` The environment (<strong>${escapeBrowserHtml(envName)}</strong>) ${environmentNotReadyPhrase(environmentStatus)}, so it cannot be deployed to yet.`
         : ` To deploy this application (<strong>${escapeBrowserHtml(appName)}</strong>) to the environment (<strong>${escapeBrowserHtml(envName)}</strong>), click "Deploy Application".`;
     } else {
       hint.textContent =
@@ -899,7 +904,7 @@ export function applyDeployedEnvState(
         !(application && environment) ||
         statesUnavailable ||
         environmentsUnavailable ||
-        !environmentIsReady(environmentCreationStatus);
+        !environmentAllowsDeploy(environmentCreationStatus);
       if (environmentsUnavailable) {
         button.setAttribute(
           "title",
@@ -910,7 +915,7 @@ export function applyDeployedEnvState(
           "title",
           "The current deployment state could not be loaded. Retrying…"
         );
-      } else if (!environmentIsReady(environmentCreationStatus)) {
+      } else if (!environmentAllowsDeploy(environmentCreationStatus)) {
         button.setAttribute(
           "title",
           environmentNotReadyReason(environment, environmentCreationStatus)
@@ -957,7 +962,7 @@ export function applyDeployedEnvState(
         " To deploy this application, you must first create an environment.";
     } else if (mode === "deploy") {
       hint.innerHTML =
-        !environmentIsReady(environmentCreationStatus) ?
+        !environmentAllowsDeploy(environmentCreationStatus) ?
           ` The environment (${envLabel}) ${environmentNotReadyPhrase(environmentCreationStatus)}, so this application cannot be deployed to it yet.`
         : ` To deploy this application (${appLabel}) to the environment (${envLabel}), click "Deploy Application".`;
     } else if (pending) {

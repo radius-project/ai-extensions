@@ -25,7 +25,7 @@ import {
   ENVIRONMENTS_PATH,
   WORKTREE_SHA,
   buildEnvironmentOptions,
-  environmentIsReady,
+  environmentAllowsDeploy,
   environmentNotReadyReason,
   parseApplicationListing,
   parseBranchListing,
@@ -444,9 +444,11 @@ export function initializeDeployingPage(
     const selectedEnvironment = envSelect.value;
     const blockedStatus =
       selectedEnvironment ? deployedEnvs.get(selectedEnvironment) : undefined;
+    const selectedEnvironmentStatus =
+      environmentStatuses[selectedEnvironment] ?? "";
     const environmentReady =
       selectedEnvironment !== "" &&
-      environmentIsReady(environmentStatuses[selectedEnvironment] ?? "");
+      environmentAllowsDeploy(selectedEnvironmentStatus);
     deployBtn.disabled =
       !(options.repo && appSelect.value && selectedEnvironment) ||
       Boolean(blockedStatus) ||
@@ -463,7 +465,7 @@ export function initializeDeployingPage(
         "title",
         environmentNotReadyReason(
           selectedEnvironment,
-          environmentStatuses[selectedEnvironment] ?? ""
+          selectedEnvironmentStatus
         )
       );
     } else {

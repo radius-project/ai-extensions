@@ -1399,6 +1399,10 @@ describe("saving a credential profile", () => {
       jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
     );
 
+    page.elements.newCredBtn.dispatch("click");
+    await flushPromises();
+    expect(page.elements.credLanding.style.display).toBe("none");
+
     page.controller.startWizardCreation();
     await flushPromises();
 
@@ -1420,10 +1424,14 @@ describe("saving a credential profile", () => {
     // Cancelling the wizard form returns the card to its standalone home but
     // leaves it hidden, so the credentials pane is not revealed underneath.
     expect(page.elements.credForm.style.display).toBe("none");
+    expect(page.elements.credLanding.style.display).toBe("");
   });
 
   it("hands a profile saved in the wizard back to the environment step", async () => {
     const page = renderPage();
+    page.elements.newCredBtn.dispatch("click");
+    await flushPromises();
+    expect(page.elements.credLanding.style.display).toBe("none");
     page.controller.startWizardCreation();
     await flushPromises();
     await verifiedAzureForm(page, { open: false });
@@ -1439,6 +1447,7 @@ describe("saving a credential profile", () => {
     expect(page.elements.wizardFormHost.style.display).toBe("none");
     expect(page.elements.wizardStepCard.style.display).toBe("");
     expect(page.elements.credFormCard.parentNode).toBe(page.elements.credForm);
+    expect(page.elements.credLanding.style.display).toBe("");
   });
 
   it("does not hand back a profile whose save resolves after the wizard form is cancelled", async () => {

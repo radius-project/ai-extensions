@@ -97,7 +97,8 @@ export function environmentStatusMarkup(status: string): string {
     verified: ["success", "Verified"],
     failed: ["failed", "Failed"],
     pending: ["pending", "Pending"],
-    unverified: ["pending", "Unverified"]
+    unverified: ["pending", "Unverified"],
+    unknown: ["success", "Available"]
   };
   const [tone, label] = mapped[status] ?? mapped.pending;
   return `<span class="rad-dot rad-dot--${tone}"></span><span class="rad-status-label">${label}</span>`;
@@ -466,6 +467,7 @@ export function initializeEnvironmentPane(
       if (editTarget === "") environmentName.focus();
     });
     dependencies.loadGitHubIdentity();
+    resetSubmitButton();
     context.dom.byId("env-profile-button")?.focus();
   };
 
@@ -527,7 +529,7 @@ export function initializeEnvironmentPane(
     loadEnvironmentTable();
     if (environmentForm.style.display !== "none") {
       const provider =
-        context.dom.inputById("env-provider")?.value === "aws" ?
+        context.dom.inputById("env-selected-provider")?.value === "aws" ?
           "aws"
         : "azure";
       dependencies.setPendingInfraSelection?.(

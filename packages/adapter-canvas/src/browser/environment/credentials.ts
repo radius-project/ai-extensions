@@ -520,6 +520,7 @@ export function initializeCredentialsPane(
     wizardStepCard.style.display = "";
     moveFormTo(credForm);
     credForm.style.display = "none";
+    credLanding.style.display = "";
     formContext = "standalone";
   };
 

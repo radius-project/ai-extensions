@@ -681,6 +681,39 @@ describe("environments — list-environments", () => {
     expect(envListCacheSet).toHaveBeenCalled();
   });
 
+  it("reports unknown instead of pending when verification history is absent", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "42\tcompleted\tsuccess" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout: "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+      [ENV_PATH.statuses("o/r", "100")]: {
+        stdout: "https://github.com/o/r/actions/runs/99"
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+
+    await handleListEnvironments(
+      ctx,
+      deps({
+        envListCacheGet: () => undefined,
+        envListCacheSet: vi.fn(),
+        now: () => 0,
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+
+    expect(JSON.parse(recording.body).environments[0].status).toBe("unknown");
+  });
+
   it.each([
     [
       "azure",
@@ -1114,6 +1147,132 @@ describe("environments — real loopback", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(await res.json()).toEqual({ environments: [] });
+  });
+
+  it("serves an aged-out verification status as unknown over controlled HTTP", async () => {
+    const script: CliScript = {
+      ["/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"]:
+        {
+          stdout: "42\tcompleted\tsuccess"
+        },
+      ["/repos/octo/app/environments?per_page=100"]: { stdout: "7\tdev" },
+      ["/repos/octo/app/environments/dev/variables?per_page=100"]: {
+        stdout: "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+      },
+      ["/repos/octo/app/deployments?environment=dev&per_page=10"]: {
+        stdout: "100"
+      },
+      ["/repos/octo/app/deployments/100/statuses?per_page=1"]: {
+        stdout: "https://github.com/octo/app/actions/runs/99"
+      }
+    };
+    const container = createControlledEnvironmentServer({
+      envListCacheGet: () => undefined,
+      envListCacheSet: vi.fn(),
+      now: () => 0,
+      cliExec: cliFake(script),
+      readInstanceEntry: () => undefined,
+      repoMatchesWorkspace: () => false,
+      kickoffWorkflowSync: vi.fn()
+    });
+
+    try {
+      const controlled = await container.getOrCreate("unknown-verification");
+      const res = await fetch(
+        controlled.baseUrl + "/api/list-environments?repo=octo/app"
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(await res.json()).toEqual({
+        environments: [
+          expect.objectContaining({ name: "dev", status: "unknown" })
+        ]
+      });
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("fails closed when verification history cannot be read", async () => {
+    const script: CliScript = {
+      ["/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"]:
+        { error: new Error("github unavailable") },
+      ["/repos/octo/app/environments?per_page=100"]: { stdout: "7\tdev" },
+      ["/repos/octo/app/environments/dev/variables?per_page=100"]: {
+        stdout: "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+      },
+      ["/repos/octo/app/deployments?environment=dev&per_page=10"]: {
+        stdout: "100"
+      }
+    };
+    const container = createControlledEnvironmentServer({
+      envListCacheGet: () => undefined,
+      envListCacheSet: vi.fn(),
+      now: () => 0,
+      cliExec: cliFake(script),
+      readInstanceEntry: () => undefined,
+      repoMatchesWorkspace: () => false,
+      kickoffWorkflowSync: vi.fn()
+    });
+    try {
+      const controlled = await container.getOrCreate(
+        "verification-lookup-failure"
+      );
+      const res = await fetch(
+        controlled.baseUrl + "/api/list-environments?repo=octo/app"
+      );
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        environments: [
+          expect.objectContaining({ name: "dev", status: "pending" })
+        ]
+      });
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("fails closed when a deployment status lookup cannot be read", async () => {
+    const script: CliScript = {
+      ["/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"]:
+        { stdout: "42\tcompleted\tsuccess" },
+      ["/repos/octo/app/environments?per_page=100"]: { stdout: "7\tdev" },
+      ["/repos/octo/app/environments/dev/variables?per_page=100"]: {
+        stdout: "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+      },
+      ["/repos/octo/app/deployments?environment=dev&per_page=10"]: {
+        stdout: "100"
+      },
+      ["/repos/octo/app/deployments/100/statuses?per_page=1"]: {
+        error: new Error("secondary rate limit")
+      }
+    };
+    const container = createControlledEnvironmentServer({
+      envListCacheGet: () => undefined,
+      envListCacheSet: vi.fn(),
+      now: () => 0,
+      cliExec: cliFake(script),
+      readInstanceEntry: () => undefined,
+      repoMatchesWorkspace: () => false,
+      kickoffWorkflowSync: vi.fn()
+    });
+    try {
+      const controlled = await container.getOrCreate("status-lookup-failure");
+      const res = await fetch(
+        controlled.baseUrl + "/api/list-environments?repo=octo/app"
+      );
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        environments: [
+          expect.objectContaining({ name: "dev", status: "pending" })
+        ]
+      });
+    } finally {
+      await container.stopAll();
+    }
   });
 
   it("answers GET verify-status for a missing repo", async () => {

@@ -15,12 +15,14 @@ import {
   buildBranchOptions,
   buildDiffBranchOptions,
   buildEnvironmentOptions,
+  environmentAllowsDeploy,
   buildRepoOptions,
   createDeployedState,
   environmentIsReady,
   environmentNotReadyPhrase,
   environmentNotReadyReason,
   environmentOptionLabel,
+  firstReadyEnvironmentName,
   createPlanScheduler,
   createPlanState,
   deployDeployedApp,
@@ -980,6 +982,20 @@ describe("planned primary button state", () => {
     }
   );
 
+  it("allows a planned deploy when verification history is unavailable", () => {
+    const { browser, button, created } = plannedButtons();
+    created["planned-branch"].value = "feature";
+    created["planned-env"].value = "dev";
+    const state = createPlanState();
+    state.environmentStatuses.dev = "unknown";
+
+    applyPlanEnvState(browser.context, state, true, false);
+
+    expect(button.dataset.mode).toBe("deploy");
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("title")).toBeNull();
+  });
+
   it("disables deployment while the last plan request failed", () => {
     const { browser, button, created } = plannedButtons();
     created["planned-branch"].value = "feature";
@@ -1517,6 +1533,16 @@ describe("deployed pane state", () => {
   });
 
   it.each([
+    ["success", true],
+    ["unknown", true],
+    ["", false],
+    ["pending", false],
+    ["failed", false]
+  ])("treats %s as deployable=%s", (status, allowed) => {
+    expect(environmentAllowsDeploy(status)).toBe(allowed);
+  });
+
+  it.each([
     [
       "pending",
       'Environment "dev" is still being created. Wait for its credential verification to finish before deploying.',
@@ -1532,16 +1558,37 @@ describe("deployed pane state", () => {
       'The status of environment "dev" could not be determined, so it cannot be deployed to. Refresh to try again.',
       "has an unknown status"
     ]
-  ])(
-    "explains why a %s environment blocks a deploy",
-    (status, reason, phrase) => {
-      expect(environmentNotReadyReason("dev", status)).toBe(reason);
-      expect(environmentNotReadyPhrase(status)).toBe(phrase);
-    }
-  );
+  ])("explains the environment's %s status", (status, reason, phrase) => {
+    expect(environmentNotReadyReason("dev", status)).toBe(reason);
+    expect(environmentNotReadyPhrase(status)).toBe(phrase);
+  });
 
   it("gives no reason for a ready environment", () => {
     expect(environmentNotReadyReason("dev", "success")).toBe("");
+  });
+
+  it("selects an environment with unknown verification history as a fallback", () => {
+    expect(
+      firstReadyEnvironmentName([
+        { name: "pending", provider: "azure", status: "pending" },
+        { name: "legacy", provider: "azure", status: "unknown" }
+      ])
+    ).toBe("legacy");
+  });
+
+  it("leaves every explicitly blocked environment unselected", () => {
+    expect(
+      firstReadyEnvironmentName([
+        { name: "pending", provider: "azure", status: "pending" },
+        { name: "failed", provider: "azure", status: "failed" }
+      ])
+    ).toBe("");
+  });
+
+  it("describes an unrecognized blocking status without treating it as pending", () => {
+    expect(environmentNotReadyReason("dev", "mystery")).toBe(
+      'The status of environment "dev" could not be determined, so it cannot be deployed to. Refresh to try again.'
+    );
   });
 
   it.each([["pending"], ["failed"], [""]])(
@@ -1570,6 +1617,26 @@ describe("deployed pane state", () => {
       );
     }
   );
+
+  it("allows deploy when verification history is no longer available", () => {
+    const { browser, button, hint } = deployedPage();
+
+    const mode = applyDeployedEnvState(
+      browser.context,
+      createDeployedState(),
+      true,
+      false,
+      "",
+      false,
+      false,
+      "unknown"
+    );
+
+    expect(mode).toBe("deploy");
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("title")).toBeNull();
+    expect(hint.innerHTML).toContain('click "Deploy Application"');
+  });
 
   it("blocks the deploy when environments could not be loaded at all", () => {
     const { browser, button, hint } = deployedPage();
@@ -1625,6 +1692,13 @@ describe("deployed pane state", () => {
     expect(environmentOptionLabel({ name: "dev", provider: "azure" })).toBe(
       "dev (status unknown)"
     );
+    expect(
+      environmentOptionLabel({
+        name: "dev",
+        provider: "azure",
+        status: "unknown"
+      })
+    ).toBe("dev (available)");
     expect(
       environmentOptionLabel({
         name: "dev",

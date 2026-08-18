@@ -267,12 +267,24 @@ export async function handleListEnvironments(
         resolve((stdout || "").trim());
       });
     });
+  const ghResult = (
+    args: string[],
+    timeout = 12000
+  ): Promise<{ ok: boolean; stdout: string }> =>
+    new Promise((resolve) => {
+      dependencies.cliExec("gh", args, { timeout }, (err, stdout) => {
+        resolve({
+          ok: !err,
+          stdout: err ? "" : (stdout || "").trim()
+        });
+      });
+    });
 
   try {
     // 1) List environment names + ids for the repo. Kick off the
     //    verify-credentials workflow-runs fetch in parallel — it's independent
     //    of the names, so there's no reason to wait.
-    const verifyRunsPromise = gh([
+    const verifyRunsPromise = ghResult([
       "api",
       `/repos/${repo}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
       "--jq",
@@ -334,7 +346,8 @@ export async function handleListEnvironments(
     // Index the pre-fetched verify runs by run id. The environment status is
     // derived from these (not from app deployments): an environment is
     // "Success" only once it exists AND its verify-credentials workflow passed.
-    const verifyRunsRaw = await verifyRunsPromise;
+    const verifyRunsResult = await verifyRunsPromise;
+    const verifyRunsRaw = verifyRunsResult.stdout;
     const verifyRuns = new Map<string, EnvironmentVerifyRun>();
     if (verifyRunsRaw) {
       for (const line of verifyRunsRaw.split("\n").filter(Boolean)) {
@@ -368,16 +381,14 @@ export async function handleListEnvironments(
             "--jq",
             '.variables[] | .name + "\\t" + (.value // "")'
           ]),
-          verifyRuns.size > 0 ?
-            gh([
-              "api",
-              `/repos/${repo}/deployments?environment=${encodeURIComponent(
-                name
-              )}&per_page=10`,
-              "--jq",
-              ".[].id"
-            ])
-          : Promise.resolve("")
+          gh([
+            "api",
+            `/repos/${repo}/deployments?environment=${encodeURIComponent(
+              name
+            )}&per_page=10`,
+            "--jq",
+            ".[].id"
+          ])
         ]);
         // Parse the "name<TAB>value" variable lines into a map. Only surface
         // environments created by this extension (tagged with a RADIUS_MANAGED
@@ -401,19 +412,21 @@ export async function handleListEnvironments(
 
         const credentialProfile = vars.RADIUS_CREDENTIAL_PROFILE || "";
 
-        // Status reflects the verify-credentials workflow only: pending while it
-        // runs, success when it passes, failed if it fails. Default to "pending"
-        // until we find a matching run.
-        let status = "pending";
-        if (verifyRuns.size > 0) {
-          const depIds = depIdsRaw ? depIdsRaw.split("\n").filter(Boolean) : [];
+        // A successful verification lookup plus existing deployments proves
+        // this is an established environment even when the verification
+        // deployment itself has aged out of the bounded history. Lookup
+        // failures and environments with no deployments fail closed as pending.
+        const depIds = depIdsRaw ? depIdsRaw.split("\n").filter(Boolean) : [];
+        let status =
+          verifyRunsResult.ok && depIds.length > 0 ? "unknown" : "pending";
+        if (verifyRunsResult.ok && verifyRuns.size > 0) {
           // Resolve every deployment's originating-run URL in parallel
           // (deployments come back newest-first), then pick the newest one
           // created by a verify-credentials run. Doing this serially was the
           // main source of latency for this endpoint.
-          const logUrls = await Promise.all(
+          const logResults = await Promise.all(
             depIds.map((depId) =>
-              gh([
+              ghResult([
                 "api",
                 `/repos/${repo}/deployments/${depId}/statuses?per_page=1`,
                 "--jq",
@@ -421,13 +434,17 @@ export async function handleListEnvironments(
               ])
             )
           );
-          for (const logUrl of logUrls) {
-            const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
-            if (!m) continue;
-            const run = verifyRuns.get(m[1]);
-            if (run) {
-              status = verifyStatusOf(run) || status;
-              break;
+          if (logResults.some((result) => !result.ok)) {
+            status = "pending";
+          } else {
+            for (const { stdout: logUrl } of logResults) {
+              const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
+              if (!m) continue;
+              const run = verifyRuns.get(m[1]);
+              if (run) {
+                status = verifyStatusOf(run) || status;
+                break;
+              }
             }
           }
         }
