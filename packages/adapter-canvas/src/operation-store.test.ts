@@ -44,13 +44,27 @@ describe("file operation store", () => {
     };
     await store.save(replacement);
     await expect(store.load()).resolves.toEqual(replacement);
-    expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
     expect(
       (await fs.readdir(path.dirname(filePath))).filter((name) =>
         name.endsWith(".tmp")
       )
     ).toEqual([]);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "restricts the persisted file to its owner on POSIX systems",
+    async () => {
+      const filePath = await temporaryFile();
+      const store = createFileOperationStore({ filePath });
+
+      await store.save({
+        schemaVersion: PERSISTED_OPERATIONS_VERSION,
+        operations: []
+      });
+
+      expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
+    }
+  );
 
   it("returns no records when the file does not exist", async () => {
     const store = createFileOperationStore({

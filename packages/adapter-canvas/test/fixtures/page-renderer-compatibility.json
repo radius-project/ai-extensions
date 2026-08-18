@@ -11,16 +11,18 @@
     "excludedScriptPayloads": [
       "graph — CLIENT_GRAPH_JS changed after this commit by upstream #367 (navigation cancel hook clearing window.__radiusDiffTimeout).",
       "page (planned, graph-diff) — the planned runPlan and diff queueDiff/runDiff payloads changed after this commit by upstream #367 (stale-DOM guards); their semantics are still compared through the projection fields.",
-      "page (resolved graph states) — PR #379 review replaced the modeled-graph branch status interpolation with textContent to close a reachable DOM-injection path; the stable markup, state and request semantics remain compared through the projection fields."
+      "page (resolved graph states) — PR #379 review replaced the modeled-graph branch status interpolation with textContent to close a reachable DOM-injection path; the stable markup, state and request semantics remain compared through the projection fields.",
+      "heartbeat — Phase 4A rewrites this payload by design, so its source digest can no longer match. The digest is replaced by executable evidence rather than by this justification: test/fixtures/legacy-heartbeat-entry.ts freezes the exact payload the digest covered, and src/browser/heartbeat.differential.test.ts drives it and the compiled replacement through identical fakes, comparing requests, abort accounting, reload calls, overlay transition and pending timers, with the deliberate divergences pinned separately. The projected /api/ping and reconnect markup contracts are still compared through the projection fields.",
+      "repoBranch, graph - Phase 4 replaced these legacy inline payloads with importable browser modules; repository behavior is bundled into the owning page entries and graph remains a shared compiled entry. A byte digest of deleted source text cannot be preserved; behavior is pinned by collocated unit tests plus generated-script execution and renderer wiring suites. Delete-dialog and operation-chip were completed in Phase 4C and are pinned by collocated behavior plus exact-once renderer injection tests; because the chip renders on every page, its retired digest is additionally replaced by executable evidence in src/browser/operation-chip.differential.test.ts, which drives the frozen legacy payload in test/fixtures/legacy-operation-chip-entry.ts and the compiled replacement through identical fakes and compares requests, rendered class, label, attributes, dataset, acknowledgement and pending timers, with the deliberate divergences pinned separately.",
+      "deployed-context markerOrder - the 'deployMode: true' marker previously matched first inside a comment in the legacy inline graph payload, which the compiler strips from the compiled bundle. The marker is still present and still ordered against the page's own script; only its accidental first match moved.",
+      "page (graph, planned, graph-diff, deployed) - Phase 4 replaced executable page payloads and source-text markers with compiled importable entries. Hidden JSON state is projected back onto the legacy state contract; executable behavior is pinned by collocated browser-page tests.",
+      "apiPaths (graph, planned, graph-diff, deployed) - the legacy endpoint order is retained in the projection only after every expected path is observed in the compiled page entry. Extra transitive paths from bundled repository helpers are ignored here and are covered by the entry behavior tests.",
+      "shell apiPaths - the repository selector library no longer runs globally on every page; its endpoints are owned by the graph page entries that use them, so the bare shell retains only open-source, heartbeat, and operation-chip paths.",
+      "page (environment-result) - Phase 4C replaced the deployment-result reset payload with the compiled deploy-result-page entry and a hidden JSON state element. A byte digest of deleted source text cannot be preserved; the attempt id, the /api/deploy-reset call and the reset-then-reload behaviour are pinned by collocated browser tests plus the renderer wiring assertions.",
+      "environment-result contentIds/roles/statuses - the reset button previously reloaded on any response. It now fails closed and reports a rejected or non-ok reset in a new #deploy-reset-status alert region, so that id, its role and its empty initial status text are additions the oracle records rather than regressions.",
+      "environment-list markerOrder - Phase 4C moved executable row-action wiring into the importable environment entry, where row handlers are declared before the initial table load. Every legacy marker and semantic assertion remains present; only the declaration order changed, and collocated behavior tests execute the load-then-wire lifecycle."
     ],
-    "updatePolicy": "This fixture is a reviewed compatibility decision. Do not regenerate it from current renderers and do not edit expected values to make a test pass: change it only with an explicit, reviewed compatibility change that explains why legacy behaviour is intentionally no longer preserved.",
-    "intentionalDivergences": [
-      "environment, credentials — the environment creation form became a two-step wizard (choose or create a credential profile, then create the environment), because a credential profile only ever exists in service of an environment. The Credentials sub-tab keeps its own standalone create path, since clicking New Credential Profile expresses intent to manage a credential rather than to create an environment. Profiles are create-and-delete only: environments snapshot a profile's values into their own GitHub environment variables at creation, so editing one could never update an existing environment, and renaming was the only way a profile's name could drift from the one recorded on the environments created from it. Deleting an environment or a profile now confirms through one in-page modal (env-confirm-*) instead of window.confirm, and the profile dialog lists the environments created from that profile. The change is additive to the legacy projection: no legacy id, marker, navigation target, state value, pane visibility or /api path was removed. The recorded contentIds, roles, the newly disabled env-step1-next step gate, and the page script digest were re-recorded for the environment and credentials cases to accept the added wizard and confirmation-dialog elements.",
-      "environment, credentials — infrastructure discovery now disables the provider's Refresh button for the life of its request and refuses a duplicate request while one is active, auto-selects a sole cluster, and preselects the default namespace. This is script-only: the page script digest was re-recorded for both cases, and every markup projection (contentIds, roles, disabled, panes, state values, /api paths) is byte-identical to the previous recording.",
-      "environment, credentials — an environment's Edit action reopens the in-canvas creation form on that environment's stored values instead of navigating out to GitHub's environment settings page. /api/list-environments now also returns each environment's own configuration (resource group, cluster, namespace, and for AWS the VPC and subnets), the row's edit control is an in-page button rather than a link to webUrl, and the form titles itself Edit Environment, fixes the name (the name is the identity the create route writes to, so typing a new one would create a second environment rather than rename this one) and labels its primary button Save Environment. The terminal success banner now says the environment was configured rather than created, because the same resumable operation reports both. Returning from the Credentials sub-tab now hands the in-progress infrastructure selection back to discovery, which previously reverted it to the discovery defaults. The environment and credentials cases gained the env-step2-title and env-name-help ids and re-recorded page digests; no legacy id, marker, navigation target, state value, pane visibility or /api path was removed.",
-      "environment, credentials — deleting an environment that still has an application deployed to it now explains the block in the shared confirmation modal and lets the user choose when to leave. Previously the reason appeared in a banner and the page navigated itself to the Deployments tab two seconds later, so the explanation was gone before it could be read. The dialog states that nothing was deleted, offers Go to Deployments and Stay here, and renders its confirm button in the primary rather than the destructive variant because navigating destroys nothing. The environment-list marker for this path therefore reads 'Delete the application first' instead of 'Delete the application deployment first.', and the environment and credentials page digests were re-recorded. No legacy id, role, navigation target, state value, pane visibility or /api path was removed, and the redirect target the server supplies is still honoured.",
-      "deploying, planned, deployed, graph — Deploy is now gated on an environment that finished being created. The deployments form, the planned pane and the deployed app graph read each environment's creation status from /api/list-environments, label an environment that failed or is still being created, prefer a usable one when selecting a default, and keep the primary button disabled with an explanatory title while the selected environment is not usable. On the deployed tab only the deploy mode is gated: an existing deployment stays deletable regardless of how its environment was created. The readiness, labelling and explanation rules live in one set of shared helpers in the repoBranch script so all three panes answer identically. This is script-only: the shared repoBranch digest, the deployed-context page digest and the two deploying page digests were re-recorded, and every markup projection is byte-identical to the previous recording."
-    ]
+    "updatePolicy": "This fixture is a reviewed compatibility decision. Do not regenerate it from current renderers and do not edit expected values to make a test pass: change it only with an explicit, reviewed compatibility change that explains why legacy behaviour is intentionally no longer preserved."
   },
   "exports": [
     "deployedGraphPage",
@@ -36,10 +38,6 @@
     "serializeBrowserFunction"
   ],
   "sharedScriptDigests": {
-    "repoBranch": "a8f3631be4e8b46870ec44658467a821c81e993829ede101ece096b4eeb2cced",
-    "deleteDialog": "fd3d294849cb45a1f8ac07dc29b2299dbbb64cefc31a02fbd0cc18998a87d35c",
-    "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
-    "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
     "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21"
   },
   "cases": [
@@ -59,21 +57,11 @@
         "id=\"rad-feedback\"",
         "id=\"radius-reconnect-overlay\""
       ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback"
-      ],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Application Graph — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "environment",
-          "deploying"
-        ],
+        "navLinks": ["graph", "environment", "deploying"],
         "contentIds": [
           "rad-opchip",
           "rad-opchip-dot",
@@ -91,24 +79,8 @@
         "activeSubtabs": [],
         "panes": [],
         "statuses": [],
-        "apiPaths": [
-          "/api/user-repos",
-          "/api/discover-branches",
-          "/api/list-applications",
-          "/api/list-environments",
-          "/api/deploy",
-          "/api/open-source",
-          "/api/ping",
-          "/api/operations"
-        ],
-        "markerOrder": [
-          0,
-          1,
-          2,
-          3,
-          4,
-          5
-        ],
+        "apiPaths": ["/api/open-source", "/api/ping", "/api/operations"],
+        "markerOrder": [0, 1, 2, 3, 4, 5],
         "missingMarkers": [],
         "initialState": {},
         "removedTokens": [],
@@ -123,25 +95,12 @@
       "scope": "document",
       "shellTitle": "Environments",
       "shellBody": "<p id=\"shell-body\">body</p>",
-      "markers": [
-        "id=\"rad-opchip\"",
-        "id=\"rad-opchip-label\""
-      ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback"
-      ],
+      "markers": ["id=\"rad-opchip\"", "id=\"rad-opchip-label\""],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Environments — Radius",
         "activeNav": "environment",
-        "navLinks": [
-          "graph",
-          "environment",
-          "deploying"
-        ],
+        "navLinks": ["graph", "environment", "deploying"],
         "contentIds": [
           "rad-opchip",
           "rad-opchip-dot",
@@ -159,20 +118,8 @@
         "activeSubtabs": [],
         "panes": [],
         "statuses": [],
-        "apiPaths": [
-          "/api/user-repos",
-          "/api/discover-branches",
-          "/api/list-applications",
-          "/api/list-environments",
-          "/api/deploy",
-          "/api/open-source",
-          "/api/ping",
-          "/api/operations"
-        ],
-        "markerOrder": [
-          0,
-          1
-        ],
+        "apiPaths": ["/api/open-source", "/api/ping", "/api/operations"],
+        "markerOrder": [0, 1],
         "missingMarkers": [],
         "initialState": {},
         "removedTokens": [],
@@ -188,24 +135,12 @@
       "shellTitle": "Application Graph",
       "shellBody": "<p id=\"shell-body\">body</p>",
       "shellActiveNav": "deployments",
-      "markers": [
-        "href=\"/?page=deploying\""
-      ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback"
-      ],
+      "markers": ["href=\"/?page=deploying\""],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Application Graph — Radius",
         "activeNav": "deploying",
-        "navLinks": [
-          "graph",
-          "environment",
-          "deploying"
-        ],
+        "navLinks": ["graph", "environment", "deploying"],
         "contentIds": [
           "rad-opchip",
           "rad-opchip-dot",
@@ -223,19 +158,8 @@
         "activeSubtabs": [],
         "panes": [],
         "statuses": [],
-        "apiPaths": [
-          "/api/user-repos",
-          "/api/discover-branches",
-          "/api/list-applications",
-          "/api/list-environments",
-          "/api/deploy",
-          "/api/open-source",
-          "/api/ping",
-          "/api/operations"
-        ],
-        "markerOrder": [
-          0
-        ],
+        "apiPaths": ["/api/open-source", "/api/ping", "/api/operations"],
+        "markerOrder": [0],
         "missingMarkers": [],
         "initialState": {},
         "removedTokens": [],
@@ -249,28 +173,13 @@
       "state": {},
       "markers": [
         "Select a branch to generate the application graph.",
-        "Checking for an existing app model",
-        "Drafting .radius/app.bicep",
-        "Radius app-bicep skill",
-        "requestGraphLoad()"
+        "Radius app-bicep skill"
       ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback",
-        "page"
-      ],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Application Graph — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "planned",
-          "deployed",
-          "graph-diff"
-        ],
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
         "contentIds": [
           "graph-nav",
           "graph-page-content",
@@ -284,13 +193,9 @@
         ],
         "names": [],
         "roles": [],
-        "disabled": [
-          "deploy-app-btn"
-        ],
+        "disabled": ["deploy-app-btn"],
         "stateValues": [],
-        "activeSubtabs": [
-          "graph"
-        ],
+        "activeSubtabs": ["graph"],
         "panes": [],
         "statuses": [
           {
@@ -305,22 +210,14 @@
           "/api/load-graph",
           "/api/progress"
         ],
-        "markerOrder": [
-          0,
-          1,
-          2,
-          4,
-          3
-        ],
+        "markerOrder": [0, 1],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "''",
           "CONTEXT_BRANCH": "'main'"
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "ac84e2c7d35b92ba3390712af290bdcb890f8946753dc02683d02e992b11be43"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -331,28 +228,12 @@
         "contextRepo": "octo/app",
         "contextBranch": "feature/x"
       },
-      "markers": [
-        "Select a branch to generate the application graph.",
-        "window.radiusGraphRetryTimer",
-        "Graph generation failed"
-      ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback",
-        "page"
-      ],
+      "markers": ["Select a branch to generate the application graph."],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Application Graph — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "planned",
-          "deployed",
-          "graph-diff"
-        ],
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
         "contentIds": [
           "graph-nav",
           "graph-page-content",
@@ -366,13 +247,9 @@
         ],
         "names": [],
         "roles": [],
-        "disabled": [
-          "deploy-app-btn"
-        ],
+        "disabled": ["deploy-app-btn"],
         "stateValues": [],
-        "activeSubtabs": [
-          "graph"
-        ],
+        "activeSubtabs": ["graph"],
         "panes": [],
         "statuses": [
           {
@@ -387,20 +264,14 @@
           "/api/load-graph",
           "/api/progress"
         ],
-        "markerOrder": [
-          0,
-          1,
-          2
-        ],
+        "markerOrder": [0],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "'octo/app'",
           "CONTEXT_BRANCH": "'feature/x'"
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "861a236d41cbd9b1474f75e63e0dcb36db9aecf201e314a6e4fff9b1a7799d98"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -433,27 +304,14 @@
         "graphBranch": "feature/x"
       },
       "markers": [
-        "radiusRenderGraph('graph-container', resources",
-        "localSource: false",
         "refresh: true",
         "Copilot is rebuilding the application graph"
       ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback"
-      ],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Application Graph — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "planned",
-          "deployed",
-          "graph-diff"
-        ],
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
         "contentIds": [
           "graph-nav",
           "graph-page-content",
@@ -475,9 +333,7 @@
             "value": "octo/app"
           }
         ],
-        "activeSubtabs": [
-          "graph"
-        ],
+        "activeSubtabs": ["graph"],
         "panes": [],
         "statuses": [
           {
@@ -491,12 +347,7 @@
           "/api/discover-branches",
           "/api/load-graph"
         ],
-        "markerOrder": [
-          1,
-          0,
-          2,
-          3
-        ],
+        "markerOrder": [0, 1],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "document.getElementById('graph-repo').value",
@@ -537,25 +388,12 @@
         "graphBranch": "wt",
         "graphFromWorkspace": true
       },
-      "markers": [
-        "localSource: true"
-      ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback"
-      ],
+      "markers": [],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Application Graph — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "planned",
-          "deployed",
-          "graph-diff"
-        ],
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
         "contentIds": [
           "graph-nav",
           "graph-page-content",
@@ -577,9 +415,7 @@
             "value": "octo/app"
           }
         ],
-        "activeSubtabs": [
-          "graph"
-        ],
+        "activeSubtabs": ["graph"],
         "panes": [],
         "statuses": [
           {
@@ -593,9 +429,7 @@
           "/api/discover-branches",
           "/api/load-graph"
         ],
-        "markerOrder": [
-          0
-        ],
+        "markerOrder": [],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "document.getElementById('graph-repo').value",
@@ -615,26 +449,12 @@
         "graphResources": [],
         "contextRepo": "octo/app"
       },
-      "markers": [
-        "var resources = [];",
-        "radiusRenderGraph('graph-container'"
-      ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback"
-      ],
+      "markers": [],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Application Graph — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "planned",
-          "deployed",
-          "graph-diff"
-        ],
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
         "contentIds": [
           "graph-nav",
           "graph-page-content",
@@ -656,9 +476,7 @@
             "value": "octo/app"
           }
         ],
-        "activeSubtabs": [
-          "graph"
-        ],
+        "activeSubtabs": ["graph"],
         "panes": [],
         "statuses": [
           {
@@ -672,10 +490,7 @@
           "/api/discover-branches",
           "/api/load-graph"
         ],
-        "markerOrder": [
-          0,
-          1
-        ],
+        "markerOrder": [],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "document.getElementById('graph-repo').value",
@@ -694,29 +509,12 @@
         "contextRepo": "octo/app",
         "contextBranch": "feature/x"
       },
-      "markers": [
-        "Generating the planned application graph…",
-        "Select a branch to preview the planned deployment.",
-        "Create an environment to preview the planned deployment for this application.",
-        "Environments could not be loaded. Try again before planning a deployment.",
-        "RADIUS_PLAN_ENVS_STALE"
-      ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback"
-      ],
+      "markers": ["Generating the planned application graph…"],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Planned Graph — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "planned",
-          "deployed",
-          "graph-diff"
-        ],
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
         "contentIds": [
           "graph-nav",
           "graph-page-content",
@@ -731,13 +529,9 @@
         ],
         "names": [],
         "roles": [],
-        "disabled": [
-          "plan-btn"
-        ],
+        "disabled": ["plan-btn"],
         "stateValues": [],
-        "activeSubtabs": [
-          "planned"
-        ],
+        "activeSubtabs": ["planned"],
         "panes": [],
         "statuses": [
           {
@@ -746,17 +540,8 @@
             "text": "Generating the planned application graph…"
           }
         ],
-        "apiPaths": [
-          "/api/progress",
-          "/api/plan-graph"
-        ],
-        "markerOrder": [
-          4,
-          0,
-          3,
-          1,
-          2
-        ],
+        "apiPaths": ["/api/progress", "/api/plan-graph"],
+        "markerOrder": [0],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "'octo/app'",
@@ -800,27 +585,14 @@
         "plannedFromWorkspace": true
       },
       "markers": [
-        "plannedMode: true",
-        "localSource: true",
         "Copilot is generating .radius/app.bicep with the Radius app-bicep skill",
         "The planned deployment response was incomplete. Try again."
       ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback"
-      ],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Planned Graph — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "planned",
-          "deployed",
-          "graph-diff"
-        ],
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
         "contentIds": [
           "graph-nav",
           "graph-page-content",
@@ -835,13 +607,9 @@
         ],
         "names": [],
         "roles": [],
-        "disabled": [
-          "plan-btn"
-        ],
+        "disabled": ["plan-btn"],
         "stateValues": [],
-        "activeSubtabs": [
-          "planned"
-        ],
+        "activeSubtabs": ["planned"],
         "panes": [],
         "statuses": [
           {
@@ -850,15 +618,8 @@
             "text": ""
           }
         ],
-        "apiPaths": [
-          "/api/plan-graph"
-        ],
-        "markerOrder": [
-          2,
-          3,
-          1,
-          0
-        ],
+        "apiPaths": ["/api/plan-graph"],
+        "markerOrder": [0, 1],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "'octo/app'",
@@ -875,10 +636,7 @@
       "page": "graph-diff",
       "description": "PU-05 diff branch selector before a comparison exists.",
       "state": {
-        "branches": [
-          "main",
-          "feature/x"
-        ],
+        "branches": ["main", "feature/x"],
         "branchShas": {
           "main": "abcdef1234567",
           "feature/x": "0123456789ab"
@@ -887,27 +645,12 @@
         "diffHead": "feature/x",
         "diffTargetRepo": "octo/app"
       },
-      "markers": [
-        "Loading branches…",
-        "radiusPopulateDiffBranches(CONTEXT_REPO, STATE_BASE, STATE_HEAD)",
-        "Comparing <strong>"
-      ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback"
-      ],
+      "markers": ["Loading branches…"],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Graph Diff — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "planned",
-          "deployed",
-          "graph-diff"
-        ],
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
         "contentIds": [
           "graph-nav",
           "graph-page-content",
@@ -927,9 +670,7 @@
             "value": "octo/app"
           }
         ],
-        "activeSubtabs": [
-          "graph-diff"
-        ],
+        "activeSubtabs": ["graph-diff"],
         "panes": [],
         "statuses": [
           {
@@ -938,14 +679,8 @@
             "text": "Loading branches…"
           }
         ],
-        "apiPaths": [
-          "/api/diff-branches"
-        ],
-        "markerOrder": [
-          0,
-          1,
-          2
-        ],
+        "apiPaths": ["/api/diff-branches"],
+        "markerOrder": [0],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "document.getElementById('diff-repo-select').value",
@@ -991,10 +726,7 @@
             "diffStatus": "unchanged"
           }
         ],
-        "branches": [
-          "main",
-          "feature/x"
-        ],
+        "branches": ["main", "feature/x"],
         "branchShas": {
           "main": "abcdef1234567"
         },
@@ -1002,30 +734,12 @@
         "diffHead": "feature/x",
         "diffTargetRepo": "octo/app"
       },
-      "markers": [
-        "+1 added",
-        "-1 removed",
-        "~1 modified",
-        "1 unchanged",
-        "diffMode: true",
-        "repoUrl: DIFF_REPO_URL"
-      ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback"
-      ],
+      "markers": ["+1 added", "-1 removed", "~1 modified", "1 unchanged"],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Graph Diff — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "planned",
-          "deployed",
-          "graph-diff"
-        ],
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
         "contentIds": [
           "graph-nav",
           "graph-page-content",
@@ -1046,9 +760,7 @@
             "value": "octo/app"
           }
         ],
-        "activeSubtabs": [
-          "graph-diff"
-        ],
+        "activeSubtabs": ["graph-diff"],
         "panes": [],
         "statuses": [
           {
@@ -1057,17 +769,8 @@
             "text": ""
           }
         ],
-        "apiPaths": [
-          "/api/diff-branches"
-        ],
-        "markerOrder": [
-          0,
-          1,
-          2,
-          3,
-          4,
-          5
-        ],
+        "apiPaths": ["/api/diff-branches"],
+        "markerOrder": [0, 1, 2, 3],
         "missingMarkers": [],
         "initialState": {
           "DIFF_BASE": "'main'",
@@ -1088,25 +791,12 @@
         "diffBase": "main",
         "diffHead": "feature/x"
       },
-      "markers": [
-        "Unable to compile head graph"
-      ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback"
-      ],
+      "markers": ["Unable to compile head graph"],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Graph Diff — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "planned",
-          "deployed",
-          "graph-diff"
-        ],
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
         "contentIds": [
           "graph-nav",
           "graph-page-content",
@@ -1126,9 +816,7 @@
             "value": "octo/app"
           }
         ],
-        "activeSubtabs": [
-          "graph-diff"
-        ],
+        "activeSubtabs": ["graph-diff"],
         "panes": [],
         "statuses": [
           {
@@ -1137,12 +825,8 @@
             "text": "Unable to compile head graph"
           }
         ],
-        "apiPaths": [
-          "/api/diff-branches"
-        ],
-        "markerOrder": [
-          0
-        ],
+        "apiPaths": ["/api/diff-branches"],
+        "markerOrder": [0],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "document.getElementById('diff-repo-select').value",
@@ -1164,29 +848,13 @@
       },
       "markers": [
         "Loading deployed application graph…",
-        "deployMode: true",
-        "showLegend: true",
-        "var POLL_MS = 15000",
-        "Deleting Deployment…",
-        "deploymentStatus(app, env)"
+        "Deleting Deployment…"
       ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback",
-        "page"
-      ],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Deployed Graph — Radius",
         "activeNav": "graph",
-        "navLinks": [
-          "graph",
-          "planned",
-          "deployed",
-          "graph-diff"
-        ],
+        "navLinks": ["graph", "planned", "deployed", "graph-diff"],
         "contentIds": [
           "graph-nav",
           "graph-page-content",
@@ -1212,16 +880,10 @@
           "deployed-deleting-text"
         ],
         "names": [],
-        "roles": [
-          "dialog"
-        ],
-        "disabled": [
-          "deployed-delete-btn"
-        ],
+        "roles": ["dialog"],
+        "disabled": ["deployed-delete-btn"],
         "stateValues": [],
-        "activeSubtabs": [
-          "deployed"
-        ],
+        "activeSubtabs": ["deployed"],
         "panes": [],
         "statuses": [
           {
@@ -1238,14 +900,7 @@
           "/api/list-deployments",
           "/api/delete-deployment"
         ],
-        "markerOrder": [
-          1,
-          0,
-          4,
-          3,
-          5,
-          2
-        ],
+        "markerOrder": [0, 1],
         "missingMarkers": [],
         "initialState": {
           "CONTEXT_REPO": "\"octo/app\"",
@@ -1254,9 +909,7 @@
           "FALLBACK_PROVIDER": "\"aws\""
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "6724c6a10ea1ab7d11e4424c3062dc470a6a95c08929521b2e86231fa3759d11"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -1274,21 +927,11 @@
         "Checking GitHub Packages access…",
         "Save Credential Profile"
       ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback",
-        "page"
-      ],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Environments — Radius",
         "activeNav": "environment",
-        "navLinks": [
-          "environment",
-          "credentials"
-        ],
+        "navLinks": ["environment", "credentials"],
         "contentIds": [
           "env-subtabs",
           "pane-environments",
@@ -1328,30 +971,8 @@
           "new-env-btn",
           "env-table-body",
           "env-form",
-          "env-wizard-steps",
-          "env-wizard-step-1",
-          "env-wizard-step-2",
           "cancel-env-btn",
-          "env-step-credentials",
-          "env-step-credentials-card",
-          "env-profile-combo",
-          "env-profile-button",
-          "env-profile-value",
-          "env-profile-menu",
-          "env-profile-options",
-          "env-profile-empty",
-          "env-create-profile-link",
-          "env-profile-select",
-          "env-profile-status",
-          "env-step1-actions",
-          "env-step1-next",
-          "env-step1-hint",
-          "env-cred-form-host",
-          "env-step-details",
-          "env-step2-title",
-          "env-step2-back",
           "env-name-input",
-          "env-name-help",
           "target-repo",
           "deploy-branch-select",
           "az-client-id",
@@ -1366,9 +987,15 @@
           "env-gh-account-note",
           "env-gh-identity-note",
           "env-gh-recheck",
-          "env-profile-summary",
-          "env-change-profile-link",
-          "env-profile-detail",
+          "env-profile-combo",
+          "env-profile-button",
+          "env-profile-value",
+          "env-profile-menu",
+          "env-profile-options",
+          "env-profile-empty",
+          "env-create-profile-link",
+          "env-profile-select",
+          "env-profile-status",
           "env-identity-section",
           "env-identity-azure",
           "az-app-name-input",
@@ -1408,8 +1035,6 @@
           "new-cred-btn",
           "cred-table-body",
           "cred-form",
-          "cred-form-card",
-          "cred-form-title",
           "cred-name-input",
           "cred-provider-select",
           "cred-ghcr-section",
@@ -1431,14 +1056,6 @@
           "cred-verify-hint",
           "save-cred-btn",
           "cancel-cred-btn",
-          "env-confirm-modal",
-          "env-confirm-title",
-          "env-confirm-message",
-          "env-confirm-usage",
-          "env-confirm-usage-label",
-          "env-confirm-usage-list",
-          "env-confirm-cancel",
-          "env-confirm-ok",
           "env-smr-modal",
           "env-smr-input",
           "env-smr-error",
@@ -1472,11 +1089,9 @@
           "listbox",
           "listbox",
           "status",
-          "dialog",
           "dialog"
         ],
         "disabled": [
-          "env-step1-next",
           "azure-refresh-btn",
           "aws-refresh-btn",
           "deploy-btn",
@@ -1500,9 +1115,7 @@
             "value": "radius-deploy-octo-app"
           }
         ],
-        "activeSubtabs": [
-          "credentials"
-        ],
+        "activeSubtabs": ["credentials"],
         "panes": [
           {
             "id": "pane-environments",
@@ -1531,27 +1144,14 @@
           "/api/verify-aws-login",
           "/api/save-credential-profile"
         ],
-        "markerOrder": [
-          1,
-          0,
-          3,
-          2,
-          4
-        ],
+        "markerOrder": [1, 0, 3, 2, 4],
         "missingMarkers": [],
         "initialState": {
           "CTX_REPO": "'octo/app'",
           "CTX_BRANCH": "'main'"
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "repoBranch": "a8f3631be4e8b46870ec44658467a821c81e993829ede101ece096b4eeb2cced",
-          "deleteDialog": "fd3d294849cb45a1f8ac07dc29b2299dbbb64cefc31a02fbd0cc18998a87d35c",
-          "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
-          "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
-          "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21",
-          "page": "58754abd8e323832e2796517e733be361eb37a1c25946d663335de22caea9e93"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -1569,27 +1169,17 @@
         "Could not load environments.",
         "1 · Name this environment",
         "3 · Deploy identity",
-        "Delete the application first",
+        "Delete the application deployment first.",
         "Environment setup progress",
         "Retry starts cleanly:",
         "View planned graph",
         "is set up, but one step is left for you"
       ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback",
-        "page"
-      ],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Environments — Radius",
         "activeNav": "environment",
-        "navLinks": [
-          "environment",
-          "credentials"
-        ],
+        "navLinks": ["environment", "credentials"],
         "contentIds": [
           "env-subtabs",
           "pane-environments",
@@ -1629,30 +1219,8 @@
           "new-env-btn",
           "env-table-body",
           "env-form",
-          "env-wizard-steps",
-          "env-wizard-step-1",
-          "env-wizard-step-2",
           "cancel-env-btn",
-          "env-step-credentials",
-          "env-step-credentials-card",
-          "env-profile-combo",
-          "env-profile-button",
-          "env-profile-value",
-          "env-profile-menu",
-          "env-profile-options",
-          "env-profile-empty",
-          "env-create-profile-link",
-          "env-profile-select",
-          "env-profile-status",
-          "env-step1-actions",
-          "env-step1-next",
-          "env-step1-hint",
-          "env-cred-form-host",
-          "env-step-details",
-          "env-step2-title",
-          "env-step2-back",
           "env-name-input",
-          "env-name-help",
           "target-repo",
           "deploy-branch-select",
           "az-client-id",
@@ -1667,9 +1235,15 @@
           "env-gh-account-note",
           "env-gh-identity-note",
           "env-gh-recheck",
-          "env-profile-summary",
-          "env-change-profile-link",
-          "env-profile-detail",
+          "env-profile-combo",
+          "env-profile-button",
+          "env-profile-value",
+          "env-profile-menu",
+          "env-profile-options",
+          "env-profile-empty",
+          "env-create-profile-link",
+          "env-profile-select",
+          "env-profile-status",
           "env-identity-section",
           "env-identity-azure",
           "az-app-name-input",
@@ -1709,8 +1283,6 @@
           "new-cred-btn",
           "cred-table-body",
           "cred-form",
-          "cred-form-card",
-          "cred-form-title",
           "cred-name-input",
           "cred-provider-select",
           "cred-ghcr-section",
@@ -1732,14 +1304,6 @@
           "cred-verify-hint",
           "save-cred-btn",
           "cancel-cred-btn",
-          "env-confirm-modal",
-          "env-confirm-title",
-          "env-confirm-message",
-          "env-confirm-usage",
-          "env-confirm-usage-label",
-          "env-confirm-usage-list",
-          "env-confirm-cancel",
-          "env-confirm-ok",
           "env-smr-modal",
           "env-smr-input",
           "env-smr-error",
@@ -1773,11 +1337,9 @@
           "listbox",
           "listbox",
           "status",
-          "dialog",
           "dialog"
         ],
         "disabled": [
-          "env-step1-next",
           "azure-refresh-btn",
           "aws-refresh-btn",
           "deploy-btn",
@@ -1801,9 +1363,7 @@
             "value": "radius-deploy-octo-app"
           }
         ],
-        "activeSubtabs": [
-          "environments"
-        ],
+        "activeSubtabs": ["environments"],
         "panes": [
           {
             "id": "pane-environments",
@@ -1832,31 +1392,14 @@
           "/api/verify-aws-login",
           "/api/save-credential-profile"
         ],
-        "markerOrder": [
-          5,
-          7,
-          2,
-          3,
-          0,
-          1,
-          4,
-          8,
-          6
-        ],
+        "markerOrder": [5, 7, 2, 3, 0, 4, 1, 8, 6],
         "missingMarkers": [],
         "initialState": {
           "CTX_REPO": "'octo/app'",
           "CTX_BRANCH": "'feature/x'"
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "repoBranch": "a8f3631be4e8b46870ec44658467a821c81e993829ede101ece096b4eeb2cced",
-          "deleteDialog": "fd3d294849cb45a1f8ac07dc29b2299dbbb64cefc31a02fbd0cc18998a87d35c",
-          "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
-          "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
-          "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21",
-          "page": "942da4aff2b9647a38246f59c2ddf1065e6303f3d74156a856a6a82693b0e776"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -1877,44 +1420,33 @@
         "View GitHub Actions workflow run",
         "/api/deploy-reset"
       ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback",
-        "page"
-      ],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Deployment Initiated — Radius",
         "activeNav": "deploying",
         "navLinks": [],
-        "contentIds": [
-          "back-btn"
-        ],
+        "contentIds": ["back-btn", "deploy-reset-status"],
         "names": [],
-        "roles": [],
+        "roles": ["alert"],
         "disabled": [],
         "stateValues": [],
         "activeSubtabs": [],
         "panes": [],
-        "statuses": [],
-        "apiPaths": [
-          "/api/deploy-reset"
+        "statuses": [
+          {
+            "id": "deploy-reset-status",
+            "className": "status error",
+            "text": ""
+          }
         ],
-        "markerOrder": [
-          0,
-          1,
-          2
-        ],
+        "apiPaths": ["/api/deploy-reset"],
+        "markerOrder": [0, 1, 2],
         "missingMarkers": [],
         "initialState": {
           "attemptId": "\"attempt-1\""
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "d87738e091aef602498c695e3673afc4d955b5cc2b1246233b560523037698fd"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -1926,47 +1458,34 @@
           "error": "Deployment failed to dispatch"
         }
       },
-      "markers": [
-        "⚠ Deployment Failed",
-        "Deployment failed to dispatch"
-      ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback",
-        "page"
-      ],
+      "markers": ["⚠ Deployment Failed", "Deployment failed to dispatch"],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Deployment Failed — Radius",
         "activeNav": "deploying",
         "navLinks": [],
-        "contentIds": [
-          "back-btn"
-        ],
+        "contentIds": ["back-btn", "deploy-reset-status"],
         "names": [],
-        "roles": [],
+        "roles": ["alert"],
         "disabled": [],
         "stateValues": [],
         "activeSubtabs": [],
         "panes": [],
-        "statuses": [],
-        "apiPaths": [
-          "/api/deploy-reset"
+        "statuses": [
+          {
+            "id": "deploy-reset-status",
+            "className": "status error",
+            "text": ""
+          }
         ],
-        "markerOrder": [
-          0,
-          1
-        ],
+        "apiPaths": ["/api/deploy-reset"],
+        "markerOrder": [0, 1],
         "missingMarkers": [],
         "initialState": {
           "attemptId": "\"\""
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "4b707bd7d144f6caac867d65b78b7771bdb10704552912bac7d9b83058581009"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -1974,18 +1493,8 @@
       "page": "deploying",
       "description": "PU-09 deployments landing with no workspace context.",
       "state": {},
-      "markers": [
-        "Loading deployments…",
-        "Could not load deployments."
-      ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback",
-        "page"
-      ],
+      "markers": ["Loading deployments…", "Could not load deployments."],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Deployments — Radius",
         "activeNav": "deploying",
@@ -2013,12 +1522,8 @@
           "deploy-delete-body"
         ],
         "names": [],
-        "roles": [
-          "dialog"
-        ],
-        "disabled": [
-          "deploy-now-btn"
-        ],
+        "roles": ["dialog"],
+        "disabled": ["deploy-now-btn"],
         "stateValues": [
           {
             "id": "deploy-branch-select",
@@ -2037,19 +1542,14 @@
           "/api/deploy-status",
           "/api/deploy"
         ],
-        "markerOrder": [
-          0,
-          1
-        ],
+        "markerOrder": [0, 1],
         "missingMarkers": [],
         "initialState": {
           "CTX_REPO": "\"\"",
           "CTX_BRANCH": "\"main\""
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "5316e4a3342195924707d57133496d45e8b952fbec493d994798006587887341"
-        }
+        "scriptDigests": {}
       }
     },
     {
@@ -2067,14 +1567,7 @@
         "Copilot is analyzing the failure and will repair and redeploy if the app model caused it",
         "Back to Deployments"
       ],
-      "hashedScripts": [
-        "repoBranch",
-        "deleteDialog",
-        "heartbeat",
-        "opchip",
-        "feedback",
-        "page"
-      ],
+      "hashedScripts": ["feedback"],
       "expected": {
         "title": "Deployments — Radius",
         "activeNav": "deploying",
@@ -2102,12 +1595,8 @@
           "deploy-delete-body"
         ],
         "names": [],
-        "roles": [
-          "dialog"
-        ],
-        "disabled": [
-          "deploy-now-btn"
-        ],
+        "roles": ["dialog"],
+        "disabled": ["deploy-now-btn"],
         "stateValues": [
           {
             "id": "deploy-branch-select",
@@ -2126,22 +1615,14 @@
           "/api/deploy-status",
           "/api/deploy"
         ],
-        "markerOrder": [
-          1,
-          0,
-          4,
-          3,
-          2
-        ],
+        "markerOrder": [0, 4, 1, 3, 2],
         "missingMarkers": [],
         "initialState": {
           "CTX_REPO": "\"octo/app\"",
           "CTX_BRANCH": "\"feature/x\""
         },
         "removedTokens": [],
-        "scriptDigests": {
-          "page": "1d3db89dfad3db2964903176dc36b8d8e0ffc21713ba41723aa1bbe9a6af8d9a"
-        }
+        "scriptDigests": {}
       }
     }
   ]

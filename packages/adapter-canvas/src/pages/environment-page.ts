@@ -4,18 +4,16 @@
 
 import { escapeHtml, type CanvasState } from "../shared.js";
 import { radiusMark } from "../ui.js";
+import { browserScriptTag } from "../browser/scripts.js";
+import {
+  DEPLOY_RESULT_STATE_ID,
+  ENVIRONMENT_PAGE_STATE_ID
+} from "./browser-state-ids.js";
 import { pageShell } from "./shell.js";
-import { inlineJson, inlineJsString, safeExternalHref } from "./encoding.js";
+import { inlineJson, safeExternalHref } from "./encoding.js";
 import { environmentsPaneMarkup } from "./environment/environments-pane.js";
 import { credentialsPaneMarkup } from "./environment/credentials-pane.js";
 import { confirmDialogMarkup } from "./environment/confirm-dialog.js";
-import { ENVIRONMENT_TABLE_CLIENT_JS } from "./environment/client-environments.js";
-import { ENVIRONMENT_CONFIRM_CLIENT_JS } from "./environment/client-confirm.js";
-import { ENVIRONMENT_OPERATION_CLIENT_JS } from "./environment/client-operations.js";
-import { ENVIRONMENT_PROFILE_CLIENT_JS } from "./environment/client-profiles.js";
-import { ENVIRONMENT_DISCOVERY_CLIENT_JS } from "./environment/client-discovery.js";
-import { ENVIRONMENT_WIZARD_CLIENT_JS } from "./environment/client-wizard.js";
-import { ENVIRONMENT_CREDENTIAL_CLIENT_JS } from "./environment/client-credentials.js";
 
 export function environmentPage(state: CanvasState = {}): string {
   const envName = state?.envName || "dev";
@@ -55,17 +53,11 @@ ${
   : ""
 }
 <button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--rad-neutral-bg); color:var(--rad-neutral-text); border:1px solid var(--rad-neutral-border); border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
-<script>
-document.getElementById('back-btn').addEventListener('click', function() {
-    fetch('/api/deploy-reset', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({attemptId: ${inlineJson(
-          state?.deployAttempt?.id || ""
-        )}})
-    }).then(function() { window.location.reload(); });
-});
-<\/script>`
+<div id="deploy-reset-status" class="status error" role="alert" style="display:none; margin-top:12px;"></div>
+<div hidden id="${DEPLOY_RESULT_STATE_ID}">${escapeHtml(
+        inlineJson({ attemptId: state?.deployAttempt?.id || "" })
+      )}</div>
+${browserScriptTag("deploy-result-page")}`
     );
   }
 
@@ -100,7 +92,6 @@ ${environmentsPaneMarkup({
   deployDefaultBranch
 })}
 ${credentialsPaneMarkup(activeSubtab)}
-
 
 ${confirmDialogMarkup()}
 
@@ -174,7 +165,7 @@ ${confirmDialogMarkup()}
 .env-error-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
 .env-error-banner__close:hover { color:var(--rad-text); }
 #env-warning-banner { display:flex; align-items:flex-start; gap:8px; padding:8px 10px 8px 14px; margin:0 0 12px; border-radius:8px; background:var(--rad-warning-bg); border:1px solid var(--rad-warning); box-shadow:0 1px 2px var(--rad-shadow); }
-.env-warning-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:var(--rad-warning-solid); color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.env-warning-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:var(--rad-warning); color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
 .env-warning-banner__text { flex:1 1 auto; font-size:13px; color:var(--rad-text); line-height:1.4; white-space:pre-wrap; }
 .env-warning-banner__text strong { font-weight:600; }
 .env-warning-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
@@ -277,31 +268,11 @@ ${confirmDialogMarkup()}
 .rad-combo__empty { padding:14px; font-size:13px; color:var(--rad-text-tertiary); }
 .rad-combo__action { display:block; width:100%; text-align:left; margin:0; padding:12px 14px; background:none; border:none; border-top:1px solid var(--rad-stroke); font-size:13px; font-weight:600; color:var(--rad-primary); font-family:var(--rad-font); cursor:pointer; }
 .rad-combo__action:hover { background:var(--rad-bg-subtle); }
-/* Two-step New Environment wizard: credentials, then the environment itself. */
-.rad-wizard-head { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:0 0 14px; }
-.rad-wizard { display:flex; align-items:center; gap:10px; list-style:none; margin:0; padding:0; }
-.rad-wizard__step { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:500; color:var(--rad-text-tertiary); }
-.rad-wizard__num { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:50%; border:1px solid var(--rad-stroke); font-size:12px; font-weight:600; }
-.rad-wizard__step--active { color:var(--rad-text); }
-.rad-wizard__step--active .rad-wizard__num { background:var(--rad-primary); border-color:var(--rad-primary); color:#fff; }
-.rad-wizard__step--done .rad-wizard__num { border-color:var(--rad-primary); color:var(--rad-primary); }
-.rad-wizard__sep { width:28px; height:1px; background:var(--rad-stroke); }
-/* Read-only echo of a choice made in an earlier step. */
-.rad-chosen { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 12px; background:var(--rad-bg-subtle); border:1px solid var(--rad-stroke); border-radius:8px; }
-.rad-chosen__value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; color:var(--rad-text); }
 </style>
 
-<script>
-var CTX_REPO = '${inlineJsString(ctxRepo)}';
-var CTX_BRANCH = '${inlineJsString(ctxBranch)}';
-
-${ENVIRONMENT_CONFIRM_CLIENT_JS}
-${ENVIRONMENT_TABLE_CLIENT_JS}
-${ENVIRONMENT_OPERATION_CLIENT_JS}
-${ENVIRONMENT_PROFILE_CLIENT_JS}
-${ENVIRONMENT_DISCOVERY_CLIENT_JS}
-${ENVIRONMENT_WIZARD_CLIENT_JS}
-${ENVIRONMENT_CREDENTIAL_CLIENT_JS}
-<\/script>`
+<div hidden id="${ENVIRONMENT_PAGE_STATE_ID}">${escapeHtml(
+      inlineJson({ repo: ctxRepo, branch: ctxBranch, activeSubtab })
+    )}</div>
+${browserScriptTag("environment-page")}`
   );
 }

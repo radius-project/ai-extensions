@@ -19,12 +19,14 @@ interface InfraMockState {
 // Shared mock state for the ./gh.ts stub. `vi.hoisted` runs before the module
 // factory below so the mock can close over it. `committed` is keyed by branch:
 // `{ [branch]: { [path]: body } }`, mirroring that each branch has its own copy
-// of the committed workflow files (and an unpushed branch has none).
-const h = vi.hoisted<InfraMockState>(() => ({
-  committed: {}, // branch -> { path -> committed body } (absent = file missing)
-  commits: [], // recorded commitFileToRepo calls
-  failCommits: false, // when true, commitFileToRepo rejects
-  upstream: {
+// of the committed workflow files (and an unpushed branch has none). BASE_UPSTREAM
+// is created inside the hoisted factory so it exists before the factory runs (a
+// module-level const would be in the temporal dead zone when hoisted runs).
+const { h, BASE_UPSTREAM } = vi.hoisted<{
+  h: InfraMockState;
+  BASE_UPSTREAM: Record<string, string>;
+}>(() => {
+  const BASE_UPSTREAM: Record<string, string> = {
     // Minimal stand-ins for radius-project/radius/.github/extension templates.
     "verify-azure.yml":
       "name: verify\njobs:\n  v:\n    default: '{{ENV}}'\n    uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
@@ -38,8 +40,17 @@ const h = vi.hoisted<InfraMockState>(() => ({
       "name: delete\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n",
     "delete-azure.yml":
       "name: delete-azure\njobs:\n  a:\n    uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
-  }
-}));
+  };
+  return {
+    BASE_UPSTREAM,
+    h: {
+      committed: {}, // branch -> { path -> committed body } (absent = file missing)
+      commits: [], // recorded commitFileToRepo calls
+      failCommits: false, // when true, commitFileToRepo rejects
+      upstream: { ...BASE_UPSTREAM }
+    }
+  };
+});
 
 vi.mock("./gh.js", () => ({
   cliExec: () => {},
@@ -127,6 +138,7 @@ describe("syncRepoWorkflows", () => {
     h.committed = {};
     h.commits = [];
     h.failCommits = false;
+    h.upstream = { ...BASE_UPSTREAM };
   });
 
   it("no-ops when there are no managed environments", async () => {

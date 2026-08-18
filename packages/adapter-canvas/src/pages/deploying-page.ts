@@ -3,9 +3,10 @@
 
 import { escapeHtml, type CanvasState } from "../shared.js";
 import { radiusMark } from "../ui.js";
+import { browserScriptTag } from "../browser/scripts.js";
+import { DEPLOYING_PAGE_STATE_ID } from "./browser-state-ids.js";
 import { pageShell } from "./shell.js";
 import { DELETE_DEPLOYMENT_DIALOG_HTML } from "./fragments.js";
-import { DEPLOYING_CLIENT_JS } from "./deploying/client-deployments.js";
 import { inlineJson } from "./encoding.js";
 
 export function deployingPage(state: CanvasState = {}): string {
@@ -127,12 +128,10 @@ ${DELETE_DEPLOYMENT_DIALOG_HTML}
   @keyframes spin { to { transform:rotate(360deg); } }
 </style>
 
-<script>
-var CTX_REPO = ${inlineJson(ctxRepo)};
-var CTX_BRANCH = ${inlineJson(ctxBranch)};
-
-${DEPLOYING_CLIENT_JS}
-<\/script>`,
+<div hidden id="${DEPLOYING_PAGE_STATE_ID}">${escapeHtml(
+      inlineJson({ repo: ctxRepo, branch: ctxBranch })
+    )}</div>
+${browserScriptTag("deploying-page")}`,
     "deployments"
   );
 }

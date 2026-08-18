@@ -1,0 +1,332 @@
+import { describe, expect, it } from "vitest";
+import {
+  DELETE_DIALOG_CONFIRM_BUTTON_ID,
+  DELETE_DIALOG_CONFIRM_INPUT_ID,
+  DELETE_DIALOG_IDS,
+  DELETE_DIALOG_STEP1_BUTTON_ID,
+  DELETE_DIALOG_STEP2_BUTTON_ID,
+  createDeleteDeploymentDialog,
+  deleteDialogConfirmSpecs,
+  deleteDialogConfirmToken,
+  deleteDialogEffectsSpecs,
+  deleteDialogIntentSpecs
+} from "./delete-dialog.js";
+import {
+  createFakeBrowser,
+  createFakeElement,
+  fakeById,
+  fakeInputById,
+  fakeText,
+  fakeTree
+} from "../../test/support/browser/fakes.js";
+
+const HOSTILE = '<img src=x onerror="alert(1)">';
+
+function setup() {
+  const browser = createFakeBrowser();
+  const modal = createFakeElement(DELETE_DIALOG_IDS.modal);
+  const body = createFakeElement(DELETE_DIALOG_IDS.body);
+  const app = createFakeElement(DELETE_DIALOG_IDS.app);
+  const environment = createFakeElement(DELETE_DIALOG_IDS.environment);
+  const closer = createFakeElement(DELETE_DIALOG_IDS.close);
+  for (const element of [modal, body, app, environment, closer]) {
+    browser.document.add(element);
+  }
+  return { ...browser, modal, body, app, environment, closer };
+}
+
+function advanceToConfirmation(browser: ReturnType<typeof setup>) {
+  fakeById(browser.body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+  fakeById(browser.body, DELETE_DIALOG_STEP2_BUTTON_ID).dispatch("click");
+  return {
+    input: fakeInputById(browser.body, DELETE_DIALOG_CONFIRM_INPUT_ID),
+    confirm: fakeInputById(browser.body, DELETE_DIALOG_CONFIRM_BUTTON_ID)
+  };
+}
+
+describe("delete dialog step specs", () => {
+  it("carries the confirmation control on the intent step", () => {
+    const specs = deleteDialogIntentSpecs();
+    expect(specs.map((spec) => spec.id)).toEqual([
+      undefined,
+      DELETE_DIALOG_STEP1_BUTTON_ID
+    ]);
+    expect(specs[0].text).toContain("tear down running containers");
+  });
+
+  it("keeps the target names as text rather than markup", () => {
+    const specs = deleteDialogEffectsSpecs({
+      app: HOSTILE,
+      environment: "prod&test"
+    });
+    const bullet = specs[1].children?.[0].children ?? [];
+    expect(bullet.map((child) => child.text)).toEqual([
+      "This will permanently delete the deployment of ",
+      HOSTILE,
+      " from environment ",
+      "prod&test",
+      ", including all associated resources."
+    ]);
+  });
+
+  it("places the token in the label and the placeholder attribute only", () => {
+    const specs = deleteDialogConfirmSpecs({ app: 'a"b', environment: "e<f" });
+    expect(specs[0].text).toBe('To confirm, type "a"b/e<f" in the box below');
+    expect(specs[1].attrs?.placeholder).toBe('a"b/e<f');
+    expect(specs[2].attrs?.disabled).toBeUndefined();
+  });
+
+  it("builds the confirmation token from the target pair", () => {
+    expect(deleteDialogConfirmToken("store", "prod")).toBe("store/prod");
+  });
+});
+
+describe("delete deployment dialog", () => {
+  it("returns nothing when the page has no dialog markup", () => {
+    const browser = createFakeBrowser();
+    expect(createDeleteDeploymentDialog(browser.context)).toBeNull();
+    const modalOnly = createFakeBrowser();
+    modalOnly.document.add(createFakeElement(DELETE_DIALOG_IDS.modal));
+    expect(createDeleteDeploymentDialog(modalOnly.context)).toBeNull();
+  });
+
+  it("opens on the first step and names the target", () => {
+    const browser = setup();
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+
+    expect(browser.modal.style.display).toBe("flex");
+    expect(browser.app.textContent).toBe("store");
+    expect(browser.environment.textContent).toBe("prod");
+    expect(fakeText(browser.body)).toContain("confirm your intention");
+  });
+
+  it("requires all three steps before confirming", () => {
+    const browser = setup();
+    const confirmed: Array<[string, string]> = [];
+    const dialog = createDeleteDeploymentDialog(browser.context, {
+      onConfirm: (app, environment) => confirmed.push([app, environment])
+    });
+
+    dialog?.open("store", "prod");
+    fakeById(browser.body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+    expect(fakeText(browser.body)).toContain("cannot be undone");
+    fakeById(browser.body, DELETE_DIALOG_STEP2_BUTTON_ID).dispatch("click");
+    const input = fakeInputById(browser.body, DELETE_DIALOG_CONFIRM_INPUT_ID);
+    const confirm = fakeInputById(
+      browser.body,
+      DELETE_DIALOG_CONFIRM_BUTTON_ID
+    );
+    expect(confirm.disabled).toBe(true);
+    expect(confirmed).toEqual([]);
+
+    confirm.dispatch("click");
+    expect(confirmed).toEqual([]);
+
+    input.value = "store/prod";
+    input.dispatch("input");
+    expect(confirm.disabled).toBe(false);
+    confirm.dispatch("click");
+
+    expect(confirmed).toEqual([["store", "prod"]]);
+    expect(browser.modal.style.display).toBe("none");
+    expect(browser.body.children).toHaveLength(0);
+  });
+
+  it("keeps deletion disabled until the token matches exactly", () => {
+    const browser = setup();
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+    const { input, confirm } = advanceToConfirmation(browser);
+
+    input.value = "store/pro";
+    input.dispatch("input");
+    expect(confirm.disabled).toBe(true);
+
+    input.value = "  store/prod  ";
+    input.dispatch("input");
+    expect(confirm.disabled).toBe(false);
+  });
+
+  it("confirms on Enter only when the token matches", () => {
+    const browser = setup();
+    const confirmed: string[] = [];
+    const dialog = createDeleteDeploymentDialog(browser.context, {
+      onConfirm: (app) => confirmed.push(app)
+    });
+    dialog?.open("store", "prod");
+    const { input } = advanceToConfirmation(browser);
+
+    input.value = "nope";
+    input.dispatch("keydown", { key: "Enter" });
+    expect(confirmed).toEqual([]);
+
+    input.value = "store/prod";
+    input.dispatch("keydown", { key: "Escape" });
+    expect(confirmed).toEqual([]);
+
+    input.dispatch("keydown", { key: "Enter" });
+    expect(confirmed).toEqual(["store"]);
+  });
+
+  it("closes without a callback when none was supplied", () => {
+    const browser = setup();
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+    const { input, confirm } = advanceToConfirmation(browser);
+    input.value = "store/prod";
+    input.dispatch("input");
+
+    expect(() => confirm.dispatch("click")).not.toThrow();
+    expect(browser.modal.style.display).toBe("none");
+  });
+
+  it("moves focus into the confirmation field", () => {
+    const browser = setup();
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+    const { input } = advanceToConfirmation(browser);
+
+    expect(input.focusCount).toBe(1);
+  });
+
+  it("renders hostile target names as text nodes only", () => {
+    const browser = setup();
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open(HOSTILE, "prod&test");
+    fakeById(browser.body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+
+    expect(fakeText(browser.body)).toContain(HOSTILE);
+    for (const node of fakeTree(browser.body)) {
+      expect(node.innerHTML).toBe("");
+      expect(node.tagName).not.toBe("img");
+    }
+  });
+
+  it("closes on control, backdrop, and Escape", () => {
+    const browser = setup();
+    const dialog = createDeleteDeploymentDialog(browser.context);
+
+    dialog?.open("store", "prod");
+    browser.closer.dispatch("click");
+    expect(browser.modal.style.display).toBe("none");
+
+    dialog?.open("store", "prod");
+    browser.modal.dispatch("click", { target: browser.modal });
+    expect(browser.modal.style.display).toBe("none");
+
+    dialog?.open("store", "prod");
+    browser.modal.dispatch("click", { target: browser.body });
+    expect(browser.modal.style.display).toBe("flex");
+
+    browser.document.dispatch("keydown", { key: "Escape" });
+    expect(browser.modal.style.display).toBe("none");
+  });
+
+  it("ignores Escape and other keys when already closed", () => {
+    const browser = setup();
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+    browser.document.dispatch("keydown", { key: "Enter" });
+    expect(browser.modal.style.display).toBe("flex");
+
+    dialog?.close();
+    browser.document.dispatch("keydown", { key: "Escape" });
+    expect(browser.body.children).toHaveLength(0);
+  });
+
+  it("restarts at the first step after reopening", () => {
+    const browser = setup();
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+    fakeById(browser.body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+    dialog?.close();
+
+    dialog?.open("cart", "staging");
+    expect(fakeText(browser.body)).toContain("confirm your intention");
+    expect(browser.app.textContent).toBe("cart");
+  });
+
+  it("drops the previous step's listeners when the step changes", () => {
+    const browser = setup();
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+    const intent = fakeById(browser.body, DELETE_DIALOG_STEP1_BUTTON_ID);
+    intent.dispatch("click");
+
+    expect(intent.listenerCount("click")).toBe(0);
+    expect(
+      fakeById(browser.body, DELETE_DIALOG_STEP2_BUTTON_ID).listenerCount(
+        "click"
+      )
+    ).toBe(1);
+  });
+
+  it("teardown removes every installed listener", () => {
+    const browser = setup();
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+    const intent = fakeById(browser.body, DELETE_DIALOG_STEP1_BUTTON_ID);
+    dialog?.teardown();
+
+    expect(browser.modal.listenerCount()).toBe(0);
+    expect(browser.closer.listenerCount()).toBe(0);
+    expect(browser.document.listenerCount()).toBe(0);
+    expect(intent.listenerCount()).toBe(0);
+  });
+
+  it("works without the optional label and close elements", () => {
+    const browser = createFakeBrowser();
+    const modal = createFakeElement(DELETE_DIALOG_IDS.modal);
+    const body = createFakeElement(DELETE_DIALOG_IDS.body);
+    browser.document.add(modal);
+    browser.document.add(body);
+
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+    expect(modal.style.display).toBe("flex");
+    expect(fakeText(body)).toContain("confirm your intention");
+  });
+
+  it("accepts custom element ids", () => {
+    const browser = createFakeBrowser();
+    const modal = createFakeElement("custom-modal");
+    const body = createFakeElement("custom-body");
+    const app = createFakeElement("custom-app");
+    const environment = createFakeElement("custom-env");
+    const closer = createFakeElement("custom-close");
+    for (const element of [modal, body, app, environment, closer]) {
+      browser.document.add(element);
+    }
+
+    const dialog = createDeleteDeploymentDialog(browser.context, {
+      modalId: "custom-modal",
+      bodyId: "custom-body",
+      appId: "custom-app",
+      envId: "custom-env",
+      closeId: "custom-close"
+    });
+    dialog?.open("store", "prod");
+
+    expect(modal.style.display).toBe("flex");
+    expect(app.textContent).toBe("store");
+    expect(environment.textContent).toBe("prod");
+    closer.dispatch("click");
+    expect(modal.style.display).toBe("none");
+  });
+
+  it("fails loudly when the host cannot create a real input control", () => {
+    const browser = setup();
+    browser.document.createElement = (tagName: string) =>
+      createFakeElement("", tagName);
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+
+    expect(() =>
+      fakeById(browser.body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click")
+    ).not.toThrow();
+    expect(() =>
+      fakeById(browser.body, DELETE_DIALOG_STEP2_BUTTON_ID).dispatch("click")
+    ).toThrow(/could not create the "del-confirm-input" control/);
+  });
+});

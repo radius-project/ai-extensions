@@ -567,6 +567,28 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(Array.isArray(payload.steps)).toBe(true);
   });
 
+  it("reports verification dispatch without implying the environment is ready", async () => {
+    const harness = start();
+
+    const response = await post({ repo: "octo/app", environment: "dev" });
+    const payload = (await response.json()) as { steps: string[] };
+
+    expect(payload.steps).toContain("✅ Credentials verification dispatched.");
+    expect(
+      payload.steps.filter(
+        (step) => step === "✅ Credentials verification dispatched."
+      )
+    ).toHaveLength(1);
+    expect(payload.steps).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "Environment created. Deploy your application from the Environments list when ready."
+        )
+      ])
+    );
+    expect(harness.steps).toContain("✅ Credentials verification dispatched.");
+  });
+
   it("preflights GHCR package scopes before bootstrapping the state package", async () => {
     // Migrated from the textual `createRoute` ordering assertion in
     // `operations.test.ts`: the same property, observed as call order.

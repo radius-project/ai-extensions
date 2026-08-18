@@ -22,6 +22,11 @@ import {
 } from "./environments.js";
 import type { CanvasServerEntry } from "../types.js";
 import { getOrCreateServer, persistBestEffort } from "../../server.js";
+import {
+  addLegacyStep as recordLegacyStep,
+  finishSucceeded as finishSetupSucceeded,
+  isTerminalState as isSetupTerminalState
+} from "../../operations.js";
 import { createTestRouteTable } from "../../../test/support/server/route-table.js";
 
 interface Recording {
@@ -119,6 +124,8 @@ function deps(
     extractErrorLines: unset("extractErrorLines") as never,
     extractGitHubActionsStepLog: unset("extractGitHubActionsStepLog") as never,
     explainOidcEnterpriseClaim: unset("explainOidcEnterpriseClaim") as never,
+    addLegacyStep: unset("addLegacyStep") as never,
+    isTerminalState: unset("isTerminalState") as never,
     finish: unset("finish") as never,
     finishSucceeded: unset("finishSucceeded") as never,
     persistBestEffort: unset("persistBestEffort") as never,
@@ -913,19 +920,75 @@ describe("environments — verify-status", () => {
     });
   });
 
-  it("reports success and finishes a verify-stage operation", async () => {
-    const finishSucceeded = vi.fn();
+  it("records completion once when repeated polls observe verification success", async () => {
+    const addLegacyStep = vi.fn();
+    const finishSucceeded = vi.fn((operation: { state: string }) => {
+      operation.state = "succeeded";
+    });
     const persistBestEffort = vi.fn(() => Promise.resolve(true));
     const op = {
       repo: "o/r",
       environment: "dev",
+      state: "running",
       currentStage: "verify",
       verification: { dispatchedAt: 1, runId: 9 }
     };
+    const dependencies = deps({
+      readInstanceEntry: () => undefined,
+      getOperation: () => op,
+      hasCompleteVerificationIdentity: () => true,
+      getRunDetail: () => Promise.resolve(detail({})),
+      addLegacyStep,
+      isTerminalState: isSetupTerminalState,
+      finishSucceeded,
+      persistBestEffort,
+      persistOperations: () => Promise.resolve(),
+      reportOperationDiagnostic: () => {}
+    });
+    const first = context("GET", "/api/verify-status?repo=o/r&operationId=op1");
+    const second = context(
+      "GET",
+      "/api/verify-status?repo=o/r&operationId=op1"
+    );
+    await handleVerifyStatus(first.ctx, dependencies);
+    await handleVerifyStatus(second.ctx, dependencies);
+
+    expect(addLegacyStep).toHaveBeenCalledWith(
+      op,
+      "✅ Environment created. Deploy your application from the Environments list when ready."
+    );
+    expect(addLegacyStep).toHaveBeenCalledOnce();
+    expect(finishSucceeded).toHaveBeenCalledOnce();
+    expect(persistBestEffort).toHaveBeenCalledOnce();
+    expect(JSON.parse(first.recording.body)).toEqual({
+      state: "success",
+      runId: 9,
+      runUrl: "https://github.com/o/r/actions/runs/9"
+    });
+    expect(JSON.parse(second.recording.body)).toEqual({
+      state: "success",
+      runId: 9,
+      runUrl: "https://github.com/o/r/actions/runs/9"
+    });
+  });
+
+  it("finishes a non-terminal verification operation that is not running", async () => {
+    const op = {
+      repo: "o/r",
+      environment: "dev",
+      state: "input_required",
+      currentStage: "verify",
+      verification: { dispatchedAt: 1, runId: 9 }
+    };
+    const finishSucceeded = vi.fn((operation: { state: string }) => {
+      operation.state = "succeeded";
+    });
+    const persistBestEffort = vi.fn(() => Promise.resolve(true));
     const { recording, ctx } = context(
       "GET",
       "/api/verify-status?repo=o/r&operationId=op1"
     );
+
     await handleVerifyStatus(
       ctx,
       deps({
@@ -933,13 +996,17 @@ describe("environments — verify-status", () => {
         getOperation: () => op,
         hasCompleteVerificationIdentity: () => true,
         getRunDetail: () => Promise.resolve(detail({})),
+        addLegacyStep: vi.fn(),
+        isTerminalState: isSetupTerminalState,
         finishSucceeded,
         persistBestEffort,
         persistOperations: () => Promise.resolve(),
         reportOperationDiagnostic: () => {}
       })
     );
-    expect(finishSucceeded).toHaveBeenCalledWith(op);
+
+    expect(finishSucceeded).toHaveBeenCalledOnce();
+    expect(persistBestEffort).toHaveBeenCalledOnce();
     expect(JSON.parse(recording.body)).toEqual({
       state: "success",
       runId: 9,
@@ -1118,7 +1185,10 @@ describe("environments — real loopback", () => {
     const operation = {
       repo: "octo/app",
       environment: "dev",
+      state: "running",
       currentStage: "verify",
+      stages: [{ id: "verify", state: "running" }],
+      steps: [],
       verification: {
         dispatchedAt: 123,
         workflow: "verify.yml",
@@ -1127,7 +1197,6 @@ describe("environments — real loopback", () => {
         runId: "55"
       }
     };
-    const finishSucceeded = vi.fn();
     const persistOperations = vi.fn(() => Promise.resolve());
     const container = createControlledEnvironmentServer({
       readInstanceEntry: () => undefined,
@@ -1139,7 +1208,9 @@ describe("environments — real loopback", () => {
           conclusion: "success",
           steps: []
         }),
-      finishSucceeded,
+      addLegacyStep: recordLegacyStep,
+      isTerminalState: isSetupTerminalState,
+      finishSucceeded: finishSetupSucceeded,
       persistBestEffort,
       persistOperations,
       reportOperationDiagnostic: () => {}
@@ -1156,7 +1227,16 @@ describe("environments — real loopback", () => {
         runId: "55",
         runUrl: "https://github.com/octo/app/actions/runs/55"
       });
-      expect(finishSucceeded).toHaveBeenCalledWith(operation);
+      expect(operation.state).toBe("succeeded");
+      expect(operation.steps).toEqual([
+        expect.objectContaining({
+          stage: "verify",
+          kind: "observation",
+          label:
+            "Environment created. Deploy your application from the Environments list when ready.",
+          state: "succeeded"
+        })
+      ]);
       expect(persistOperations).toHaveBeenCalledOnce();
     } finally {
       await container.stopAll();

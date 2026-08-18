@@ -21,7 +21,45 @@ export const DEPLOY_DISPATCHER_FILE = "run-rad-commands.yml";
 export const DEPLOY_AZURE_FILE = "run-rad-commands-azure.yml";
 export const DEPLOY_AWS_FILE = "run-rad-commands-aws.yml";
 
+export const DEPLOY_TEMPLATE_VAR_TARGET_CLUSTER_ARCH_MODE =
+  "TARGET_CLUSTER_ARCH_MODE";
+export const DEPLOY_TEMPLATE_VAR_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS =
+  "TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS";
+export const DEFAULT_TARGET_CLUSTER_ARCH_MODE = "detect";
+export const DEFAULT_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS =
+  "linux/amd64,linux/arm64";
+
+// GitHub Actions repository variables a repo can set to override the baked-in
+// architecture defaults per-environment, without editing the committed workflow.
+export const RADIUS_BUILD_ARCH_MODE_VAR = "RADIUS_BUILD_ARCH_MODE";
+export const RADIUS_BUILD_PLATFORMS_VAR = "RADIUS_BUILD_PLATFORMS";
+
 export type DeployWorkflowFiles = Record<string, string>;
+export type DeployWorkflowTemplateVars = Record<string, string>;
+
+export interface DeployWorkflowOptions {
+  templateVars?: DeployWorkflowTemplateVars;
+}
+
+// Build a GitHub Actions expression that reads an override repository variable
+// and falls back to a baked-in default: `${{ vars.<NAME> || '<default>' }}`.
+function ghVarWithDefault(varName: string, fallback: string): string {
+  return `\${{ vars.${varName} || '${fallback}' }}`;
+}
+
+export function defaultDeployTemplateVars(): DeployWorkflowTemplateVars {
+  return {
+    [DEPLOY_TEMPLATE_VAR_TARGET_CLUSTER_ARCH_MODE]: ghVarWithDefault(
+      RADIUS_BUILD_ARCH_MODE_VAR,
+      DEFAULT_TARGET_CLUSTER_ARCH_MODE
+    ),
+    [DEPLOY_TEMPLATE_VAR_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS]:
+      ghVarWithDefault(
+        RADIUS_BUILD_PLATFORMS_VAR,
+        DEFAULT_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS
+      )
+  };
+}
 
 /**
  * Build the application-deploy GitHub Actions workflows, mirroring the
@@ -31,8 +69,14 @@ export type DeployWorkflowFiles = Record<string, string>;
  * `.github/workflows/`: the unified `run-rad-commands.yml` dispatcher plus the
  * reusable `run-rad-commands-azure.yml` / `run-rad-commands-aws.yml` provider
  * workflows. The provider-agnostic phases live in composite actions referenced
- * from `radius-project/radius@{{RADIUS_REF}}` and are never copied here. Only
- * the `{{ENV}}`, `{{APP_FILE}}` and `{{RADIUS_REF}}` placeholders are filled.
+ * from `radius-project/radius@{{RADIUS_REF}}` and are never copied here. Core
+ * always fills the reserved `{{ENV}}`, `{{APP_FILE}}`, and `{{RADIUS_REF}}`
+ * placeholders. It also fills the architecture-aware
+ * `{{TARGET_CLUSTER_ARCH_MODE}}` and
+ * `{{TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS}}` placeholders with runtime
+ * GitHub-variable defaults. Callers may also supply additional
+ * `{{UPPER_SNAKE}}` template vars for upstream workflow features that this repo
+ * needs to thread through, and may override the architecture defaults.
  *
  * `templates` maps the committed file name to the raw template body fetched
  * from `radius-project/radius`. The caller must supply all three files; there
@@ -41,7 +85,8 @@ export type DeployWorkflowFiles = Record<string, string>;
 export function generateDeployWorkflow(
   env: string,
   appFile: string,
-  templates: DeployWorkflowFiles
+  templates: DeployWorkflowFiles,
+  options: DeployWorkflowOptions = {}
 ): DeployWorkflowFiles {
   const pick = (file: string): string => {
     const body = templates[file];
@@ -52,20 +97,20 @@ export function generateDeployWorkflow(
     }
     return body;
   };
+  const templateVars: DeployWorkflowTemplateVars = {
+    ...defaultDeployTemplateVars(),
+    ...(options.templateVars || {}),
+    ENV: env,
+    APP_FILE: appFile,
+    RADIUS_REF
+  };
   const files: DeployWorkflowFiles = {
-    [DEPLOY_DISPATCHER_FILE]: fillTemplate(pick(DEPLOY_DISPATCHER_FILE), {
-      ENV: env
-    }),
-    [DEPLOY_AZURE_FILE]: fillTemplate(pick(DEPLOY_AZURE_FILE), {
-      ENV: env,
-      APP_FILE: appFile,
-      RADIUS_REF
-    }),
-    [DEPLOY_AWS_FILE]: fillTemplate(pick(DEPLOY_AWS_FILE), {
-      ENV: env,
-      APP_FILE: appFile,
-      RADIUS_REF
-    })
+    [DEPLOY_DISPATCHER_FILE]: fillTemplate(
+      pick(DEPLOY_DISPATCHER_FILE),
+      templateVars
+    ),
+    [DEPLOY_AZURE_FILE]: fillTemplate(pick(DEPLOY_AZURE_FILE), templateVars),
+    [DEPLOY_AWS_FILE]: fillTemplate(pick(DEPLOY_AWS_FILE), templateVars)
   };
   for (const [file, body] of Object.entries(files)) {
     assertNoUnresolvedPlaceholders(body, `deploy workflow "${file}"`);
