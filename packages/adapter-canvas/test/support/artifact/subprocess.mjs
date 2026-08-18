@@ -1,8 +1,6 @@
 import childProcess from "node:child_process";
-import https from "node:https";
 import net from "node:net";
 import { pathToFileURL } from "node:url";
-import { syncBuiltinESMExports } from "node:module";
 import { renderArtifactPage } from "./sdk-stub.mjs";
 
 function blocked(kind, detail) {
@@ -59,22 +57,6 @@ net.Socket.prototype.connect = function (...args) {
   }
   return blocked("network-socket", JSON.stringify(args));
 };
-https.get = (...args) => {
-  if (!renderingPage) {
-    return blocked("https", String(args[0] ?? ""));
-  }
-  const request = {
-    on(event, listener) {
-      if (event === "error") {
-        queueMicrotask(() =>
-          listener(new Error("controlled vendor response unavailable"))
-        );
-      }
-      return request;
-    }
-  };
-  return request;
-};
 childProcess.spawn = (...args) =>
   blocked("subprocess-spawn", String(args[0] ?? ""));
 childProcess.execFile = (...args) => {
@@ -115,8 +97,6 @@ childProcess.execSync = (...args) =>
   blocked("subprocess-exec-sync", String(args[0] ?? ""));
 childProcess.execFileSync = (...args) =>
   blocked("subprocess-exec-file-sync", String(args[0] ?? ""));
-syncBuiltinESMExports();
-
 const artifact = process.env.RADIUS_ARTIFACT_PATH;
 if (!artifact) throw new Error("RADIUS_ARTIFACT_PATH is required");
 

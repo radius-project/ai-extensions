@@ -644,10 +644,14 @@ export async function handleVerifyStatus(
       log,
       "Azure Login (OIDC)"
     );
-    const oidcClaimHelp =
-      dependencies.explainOidcEnterpriseClaim(azureLoginLog);
-    if (oidcClaimHelp)
-      errMsg = oidcClaimHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
+    // Distinct failure stages (OIDC enterprise-claim rejection vs. a successful
+    // login with no visible subscription — issue #219), so at most one applies;
+    // take the first match so the raw-error separator is never emitted twice.
+    const failureHelp =
+      dependencies.explainOidcEnterpriseClaim(azureLoginLog) ||
+      dependencies.explainNoSubscriptions(log);
+    if (failureHelp)
+      errMsg = failureHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
     if (verifyOp && verifyOp.currentStage === dependencies.stageVerify) {
       // Everything before verification succeeded and still exists, so this is
       // partial rather than total failure.

@@ -345,6 +345,44 @@ export function explainOidcEnterpriseClaim(logText?: string | null): string {
   ].join("\n");
 }
 
+// Detects the Azure Login (azure/login) "No subscriptions found" failure that
+// the verify-credentials workflow hits when the configured identity has no RBAC
+// role that makes the target subscription visible. `az login` succeeds against
+// the OIDC federation but `az account list` returns empty, so the action aborts
+// with `No subscriptions found for <client-id>` and exit code 1. Returns a
+// friendly multi-line explanation, or '' if the signature isn't present. Pure —
+// no I/O, never throws.
+export function explainNoSubscriptions(logText?: string | null): string {
+  if (!logText) return "";
+  if (!/No subscriptions found/i.test(logText)) return "";
+  return [
+    "Azure Login succeeded, but the configured identity has no subscriptions it can see, so credential verification failed (\u201cNo subscriptions found\u201d).",
+    "This means the app registration / service principal has no Azure role assignment granting access to the subscription \u2014 signing in works, but it has no effective RBAC.",
+    "Fix: grant the identity a role (for example, Contributor) scoped to the subscription (or a resource group within it), then re-run credential verification. If you set up credentials manually, assign the role to the same app registration whose client ID is configured on the environment; if you used auto-setup, re-run it so the role assignment is (re)created."
+  ].join("\n");
+}
+
+// Whether the identifying cloud credentials the verify-credentials workflow
+// needs to authenticate are fully configured for the given provider. Azure OIDC
+// login requires client ID + tenant ID + subscription ID; AWS OIDC requires the
+// IAM role ARN. When these are absent, dispatching verify only produces a run
+// that fails at the cloud-login step (issue #219), so the create-environment
+// handler skips the dispatch and surfaces actionable guidance instead. Pure.
+export function cloudCredentialsComplete(
+  provider: string,
+  creds: {
+    clientId?: string;
+    tenantId?: string;
+    subscriptionId?: string;
+    roleArn?: string;
+  }
+): boolean {
+  if (provider === "azure") {
+    return !!(creds.clientId && creds.tenantId && creds.subscriptionId);
+  }
+  return !!creds.roleArn;
+}
+
 // Given the outcome of reading `gh api repos/{repo}` plus the acting gh login,
 // return a clear, actionable error string, or '' when the account can read the
 // repo AND has admin. Pure — no I/O, never throws. Catches the two bare-404
