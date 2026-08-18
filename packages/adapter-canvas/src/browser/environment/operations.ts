@@ -1027,7 +1027,9 @@ export function initializeEnvironmentOperations(
   function renderPartialState(op: OperationRecord | null): void {
     const statePanel = dom.byId(PROGRESS_IDS.partialState);
     if (!statePanel) return;
-    if (op === null) {
+    // The inventory is for a terminal decision — continue or roll back. While
+    // work is still running it is a moving list the customer cannot act on.
+    if (op === null || op.terminalState === null) {
       statePanel.style.display = "none";
       return;
     }
@@ -1350,8 +1352,7 @@ export function initializeEnvironmentOperations(
       const transitionMessage = op?.nextTransition?.message ?? "";
       if (op?.nextTransition) note.textContent = transitionMessage;
       else if (!hasGuidance) note.textContent = "";
-      container.style.display =
-        hasGuidance || op?.nextTransition ? "" : "none";
+      container.style.display = hasGuidance || op?.nextTransition ? "" : "none";
       return;
     }
     const record = op;
