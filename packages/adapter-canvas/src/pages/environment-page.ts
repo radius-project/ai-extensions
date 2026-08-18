@@ -252,22 +252,38 @@ ${confirmDialogMarkup()}
   font-size: 14px; font-weight: 600; color: var(--rad-primary); cursor: pointer;
 }
 .rad-combo__action:hover { background: var(--rad-bg-subtle); }
-/* Custom credential-profile dropdown (Figma: open panel with options + "+ Create new profile"). */
-.rad-combo { position:relative; }
-.rad-combo__button { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; margin:0; padding:9px 12px; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:8px; font-size:14px; font-weight:400; font-family:var(--rad-font); cursor:pointer; }
-.rad-combo__button:hover { background:var(--rad-bg-subtle); }
-.rad-combo--open .rad-combo__button { border-color:var(--rad-brand); }
-.rad-combo__value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.rad-combo__value--placeholder { color:var(--rad-text-tertiary); }
-.rad-combo__chevron { flex:0 0 auto; width:8px; height:8px; border-right:2px solid var(--rad-text-tertiary); border-bottom:2px solid var(--rad-text-tertiary); transform:translateY(-2px) rotate(45deg); transition:transform 0.15s; }
-.rad-combo--open .rad-combo__chevron { transform:translateY(1px) rotate(-135deg); }
-.rad-combo__menu { margin-top:6px; background:var(--rad-surface); border:1px solid var(--rad-stroke); border-radius:8px; overflow:hidden; box-shadow:0 6px 20px var(--rad-shadow); }
-.rad-combo__options:empty { display:none; }
-.rad-combo__option { display:block; width:100%; text-align:left; padding:11px 14px; background:none; border:none; margin:0; font-size:14px; color:var(--rad-text); font-family:var(--rad-font); cursor:pointer; }
-.rad-combo__option:hover, .rad-combo__option--active { background:var(--rad-bg-subtle); }
-.rad-combo__empty { padding:14px; font-size:13px; color:var(--rad-text-tertiary); }
-.rad-combo__action { display:block; width:100%; text-align:left; margin:0; padding:12px 14px; background:none; border:none; border-top:1px solid var(--rad-stroke); font-size:13px; font-weight:600; color:var(--rad-primary); font-family:var(--rad-font); cursor:pointer; }
-.rad-combo__action:hover { background:var(--rad-bg-subtle); }
+/* An option list that has not loaded yet must not draw an empty menu row. */
+.rad-combo__options:empty { display: none; }
+/* Two-step New Environment wizard: credentials, then the environment itself. */
+.rad-wizard-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 14px;
+}
+.rad-wizard { display: flex; align-items: center; gap: 10px; list-style: none; margin: 0; padding: 0; }
+.rad-wizard__step {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 500; color: var(--rad-text-tertiary);
+}
+.rad-wizard__num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 1px solid var(--rad-stroke); font-size: 12px; font-weight: 600;
+}
+.rad-wizard__step--active { color: var(--rad-text); }
+.rad-wizard__step--active .rad-wizard__num {
+  background: var(--rad-primary); border-color: var(--rad-primary); color: #fff;
+}
+.rad-wizard__step--done .rad-wizard__num { border-color: var(--rad-primary); color: var(--rad-primary); }
+.rad-wizard__sep { width: 28px; height: 1px; background: var(--rad-stroke); }
+/* Read-only echo of a choice made in an earlier step. */
+.rad-chosen {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 12px; background: var(--rad-bg-subtle);
+  border: 1px solid var(--rad-stroke); border-radius: 8px;
+}
+.rad-chosen__value {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 14px; color: var(--rad-text);
+}
 </style>
 
 <div hidden id="${ENVIRONMENT_PAGE_STATE_ID}">${escapeHtml(
