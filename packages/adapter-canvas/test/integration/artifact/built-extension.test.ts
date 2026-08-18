@@ -163,6 +163,9 @@ describe("P0-C built Radius extension artifact", () => {
     ).toBe(false);
     expect(bundle).not.toContain("packages/adapter-canvas/test/support");
     expect(bundle).not.toContain("RADIUS_CANVAS_TEST_SKIP_VENDOR_PREFETCH");
+    expect(bundle).not.toContain("unpkg.com");
+    expect(bundle).not.toContain("fetchVendorScript");
+    expect(bundle).not.toContain("vendorCache");
     expect(normalizedSources).not.toEqual(
       expect.arrayContaining([
         expect.stringMatching(/packages\/adapter-canvas\/src\/client\.ts$/)
@@ -178,6 +181,7 @@ describe("P0-C built Radius extension artifact", () => {
       "package.json",
       "plugin.json",
       "README.md",
+      "THIRD-PARTY-NOTICES.txt",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-graph/references/source-code-references.md"
@@ -256,6 +260,15 @@ describe("P0-C built Radius extension artifact", () => {
       expect(readFileSync(join(DIST, relative), "utf8")).toBe(
         readFileSync(sourceSkill, "utf8")
       );
+    }
+    const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
+    for (const marker of [
+      "===== react@18.3.1 =====",
+      "===== react-dom@18.3.1 =====",
+      "===== reactflow@11.11.4 =====",
+      "===== dagre@0.8.5 ====="
+    ]) {
+      expect(notices).toContain(marker);
     }
   });
 
