@@ -29,6 +29,11 @@ import {
   parseServedReposFromSubjects,
   validateAppRegistrationName,
   formatServesReposLabel,
+  buildFederatedCredentialListArgs,
+  buildFederatedCredentialDeleteArgs,
+  parseFederatedCredentials,
+  federatedCredentialListUnreadable,
+  selectEnvironmentFederatedCredentials,
   RADIUS_MANAGED_APP_TAG,
   type GitHubJsonResponse
 } from "./azure-oidc.js";
@@ -1576,5 +1581,183 @@ describe("validateAppRegistrationName", () => {
       ok: true,
       name: "radius-deploy-octo-app"
     });
+  });
+});
+
+describe("federated credential argv builders", () => {
+  it("builds the list argv targeting the app registration", () => {
+    expect(buildFederatedCredentialListArgs({ appId: "app-1" })).toEqual([
+      "ad",
+      "app",
+      "federated-credential",
+      "list",
+      "--id",
+      "app-1"
+    ]);
+  });
+
+  it("builds the delete argv targeting one credential by name", () => {
+    expect(
+      buildFederatedCredentialDeleteArgs({ appId: "app-1", name: "cred-a" })
+    ).toEqual([
+      "ad",
+      "app",
+      "federated-credential",
+      "delete",
+      "--id",
+      "app-1",
+      "--federated-credential-id",
+      "cred-a"
+    ]);
+  });
+});
+
+describe("parseFederatedCredentials", () => {
+  it("parses a JSON string array into id/name/subject", () => {
+    const creds = parseFederatedCredentials(
+      JSON.stringify([
+        { id: "c1", name: "n1", subject: "s1" },
+        { name: "n2", subject: "s2" }
+      ])
+    );
+    expect(creds).toEqual([
+      { id: "c1", name: "n1", subject: "s1" },
+      { id: "n2", name: "n2", subject: "s2" }
+    ]);
+  });
+
+  it("accepts an already-parsed array", () => {
+    expect(parseFederatedCredentials([{ name: "n", subject: "sub" }])).toEqual([
+      { id: "n", name: "n", subject: "sub" }
+    ]);
+  });
+
+  it("returns [] for empty, malformed, or non-array input", () => {
+    expect(parseFederatedCredentials("")).toEqual([]);
+    expect(parseFederatedCredentials("   ")).toEqual([]);
+    expect(parseFederatedCredentials("not json")).toEqual([]);
+    expect(parseFederatedCredentials("{}")).toEqual([]);
+    expect(parseFederatedCredentials(null)).toEqual([]);
+  });
+
+  it("skips entries without a usable name", () => {
+    expect(
+      parseFederatedCredentials([{ subject: "sub" }, "string", { name: "" }])
+    ).toEqual([]);
+  });
+});
+
+describe("federatedCredentialListUnreadable", () => {
+  it("treats a genuine empty result as readable", () => {
+    expect(federatedCredentialListUnreadable("")).toBe(false);
+    expect(federatedCredentialListUnreadable("   ")).toBe(false);
+    expect(federatedCredentialListUnreadable("[]")).toBe(false);
+    expect(federatedCredentialListUnreadable(null)).toBe(false);
+    expect(federatedCredentialListUnreadable(undefined)).toBe(false);
+    expect(federatedCredentialListUnreadable([])).toBe(false);
+    expect(federatedCredentialListUnreadable([{ name: "n" }])).toBe(false);
+  });
+
+  it("treats malformed or non-array payloads as unreadable", () => {
+    expect(federatedCredentialListUnreadable("not json")).toBe(true);
+    expect(federatedCredentialListUnreadable('{"name":"n"}')).toBe(true);
+    expect(federatedCredentialListUnreadable("42")).toBe(true);
+    expect(federatedCredentialListUnreadable({ name: "n" })).toBe(true);
+  });
+});
+
+describe("selectEnvironmentFederatedCredentials", () => {
+  const repoFullName = "octo/app";
+  it("matches by subject targeting the environment", () => {
+    const creds = [
+      {
+        id: "1",
+        name: "custom-name",
+        subject: "repo:octo/app:environment:dev"
+      },
+      { id: "2", name: "other", subject: "repo:octo/app:environment:prod" }
+    ];
+    const selected = selectEnvironmentFederatedCredentials(creds, {
+      repoFullName,
+      envName: "dev"
+    });
+    expect(selected.map((c) => c.name)).toEqual(["custom-name"]);
+  });
+
+  it("matches by the minted credential name variants", () => {
+    const creds = [
+      { id: "1", name: "github-octo-app-dev-mutable", subject: "" },
+      { id: "2", name: "github-octo-app-dev-immutable", subject: "" },
+      { id: "3", name: "github-octo-app-dev", subject: "" },
+      { id: "4", name: "github-octo-app-prod-mutable", subject: "" }
+    ];
+    const selected = selectEnvironmentFederatedCredentials(creds, {
+      repoFullName,
+      envName: "dev"
+    });
+    expect(selected.map((c) => c.name).sort()).toEqual([
+      "github-octo-app-dev",
+      "github-octo-app-dev-immutable",
+      "github-octo-app-dev-mutable"
+    ]);
+  });
+
+  it("does not select another repo's credential sharing the environment name", () => {
+    // A shared app registration may carry a credential for a different repo that
+    // targets the same environment name. Deleting this repo's "dev" environment
+    // must not remove the other repo's credential.
+    const creds = [
+      {
+        id: "1",
+        name: "custom-name",
+        subject: "repo:octo/app:environment:dev"
+      },
+      {
+        id: "2",
+        name: "foreign",
+        subject: "repo:other/repo:environment:dev"
+      }
+    ];
+    const selected = selectEnvironmentFederatedCredentials(creds, {
+      repoFullName,
+      envName: "dev"
+    });
+    expect(selected.map((c) => c.name)).toEqual(["custom-name"]);
+  });
+
+  it("matches an environment name whose colon is percent-encoded in the subject", () => {
+    const creds = [
+      {
+        id: "1",
+        name: "custom-name",
+        subject: "repo:octo/app:environment:dev%3Aeast"
+      }
+    ];
+    const selected = selectEnvironmentFederatedCredentials(creds, {
+      repoFullName,
+      envName: "dev:east"
+    });
+    expect(selected.map((c) => c.name)).toEqual(["custom-name"]);
+  });
+
+  it("returns [] when no credentials belong to the environment", () => {
+    expect(
+      selectEnvironmentFederatedCredentials(
+        [{ id: "1", name: "x", subject: "repo:octo/app:environment:prod" }],
+        { repoFullName, envName: "dev" }
+      )
+    ).toEqual([]);
+    expect(
+      selectEnvironmentFederatedCredentials([], {
+        repoFullName,
+        envName: "dev"
+      })
+    ).toEqual([]);
+    expect(
+      selectEnvironmentFederatedCredentials(
+        [{ id: "1", name: "x", subject: "" }],
+        { repoFullName, envName: "" }
+      )
+    ).toEqual([]);
   });
 });

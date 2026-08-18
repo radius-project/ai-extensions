@@ -9,6 +9,7 @@ import {
 import { DISCOVER_ENDPOINT, DISCOVERY_PANEL_ENTRY_KEY } from "./discovery.js";
 import {
   ENVIRONMENTS_ENTRY_KEY,
+  ENVIRONMENT_DELETE_PATH,
   ENVIRONMENT_LIST_PATH
 } from "./environments.js";
 import {
@@ -1217,5 +1218,147 @@ describe("initializeEnvironmentPage", () => {
         (call) => call.url === "/api/operations/late-op"
       )
     ).toBe(false);
+  });
+
+  it("follows an environment deletion through the shared progress panel", async () => {
+    const page = fixture();
+    const remove = createFakeInput("delete-row");
+    remove.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-delete-env", [remove]);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "azure" }]
+        })
+    );
+    let deleteRequested = false;
+    let operationPolls = 0;
+    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
+      deleteRequested = true;
+      return jsonResponse({ success: true }, true, 202);
+    });
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        if (!deleteRequested) return jsonResponse({ operation: null });
+        operationPolls += 1;
+        const terminal = operationPolls >= 2;
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            environment: "dev",
+            provider: "azure",
+            state: terminal ? "succeeded" : "running",
+            terminalState: terminal ? "succeeded" : null,
+            summary: "Deleting dev…"
+          }
+        });
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    remove.dispatch("click");
+    // The row click opens the in-DOM confirmation; confirming it performs the
+    // delete (native modals are suppressed under the canvas host).
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+
+    const deleteCall = page.browser.net.calls.find(
+      (entry) => entry.url === ENVIRONMENT_DELETE_PATH
+    );
+    expect(JSON.parse(String(deleteCall?.init?.body))).toEqual({
+      repo: "octo/app",
+      environment: "dev"
+    });
+    // The optimistic delete record opens the shared progress panel while the
+    // operation is tracked.
+    expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("");
+
+    const listCallsBefore = page.browser.net.calls.filter((entry) =>
+      entry.url.includes(ENVIRONMENT_LIST_PATH)
+    ).length;
+    page.browser.clock.tick(1600);
+    await flushPromises();
+
+    // Reaching a terminal state reloads the environment table.
+    expect(operationPolls).toBeGreaterThanOrEqual(2);
+    const listCallsAfter = page.browser.net.calls.filter((entry) =>
+      entry.url.includes(ENVIRONMENT_LIST_PATH)
+    ).length;
+    expect(listCallsAfter).toBeGreaterThan(listCallsBefore);
+
+    teardown();
+  });
+
+  it("confirms an app-registration delete prompt through the dialog seam", async () => {
+    const page = fixture();
+    page.browser.dialogs.nextConfirmation = true;
+    const remove = createFakeInput("delete-row");
+    remove.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-delete-env", [remove]);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "azure" }]
+        })
+    );
+    let deleteRequested = false;
+    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
+      deleteRequested = true;
+      return jsonResponse({ success: true }, true, 202);
+    });
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        if (!deleteRequested) return jsonResponse({ operation: null });
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            environment: "dev",
+            provider: "azure",
+            state: "input_required",
+            terminalState: null,
+            summary: "Delete the unused app registration?",
+            inputRequired: {
+              code: "delete-app-registration-decision",
+              checkpoint: "delete-app-registration-decision",
+              requestedAt: "2026-01-01T00:00:00.000Z",
+              message: 'Delete app registration "radius-deploy-octo-app"?',
+              metadata: { appDisplayName: "radius-deploy-octo-app" }
+            }
+          }
+        });
+      }
+    );
+    let resumeBody: unknown;
+    page.browser.net.handle(
+      "/api/operations/del-1/resume/delete-app-registration-decision",
+      (init) => {
+        resumeBody = JSON.parse(String(init?.body));
+        return jsonResponse({ operation: { operationId: "del-1" } }, true, 202);
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    remove.dispatch("click");
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+
+    // The wired dialog seam surfaced the prompt message, and the confirmed
+    // decision was posted back to the resume endpoint.
+    expect(page.browser.dialogs.confirmations).toContain(
+      'Delete app registration "radius-deploy-octo-app"?'
+    );
+    expect(resumeBody).toMatchObject({ deleteAppRegistration: true });
+
+    teardown();
   });
 });

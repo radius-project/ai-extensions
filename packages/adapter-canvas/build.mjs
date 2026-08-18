@@ -139,10 +139,35 @@ function assembleDist() {
     if (!existsSync(from)) continue;
     cpSync(from, join(distDir, entry), { recursive: true });
   }
+  copyStaticWorkflows();
   resolveCatalogSpecifiers(join(distDir, "package.json"));
   writeThirdPartyNotices(browserBundleInputs);
   for (const manifest of ["package.json", "plugin.json"]) {
     stampVersion(join(distDir, manifest));
+  }
+}
+
+// The environment-delete workflow (issue #303) is authored as static YAML in
+// this repo's .github/extension/ rather than fetched from radius-project/radius,
+// so it must ship inside the plugin: the runtime reads it from a `workflows/`
+// directory beside extension.mjs (see readBundledWorkflowTemplate in infra.ts)
+// and commits it into the target repo. Copy those files into dist/ here so a
+// built/installed plugin is self-contained.
+const staticWorkflowFiles = [
+  "delete-environment.yml",
+  "delete-environment-azure.yml"
+];
+
+function copyStaticWorkflows() {
+  const sourceDir = join(repoRoot, ".github", "extension");
+  const targetDir = join(distDir, "workflows");
+  mkdirSync(targetDir, { recursive: true });
+  for (const file of staticWorkflowFiles) {
+    const from = join(sourceDir, file);
+    if (!existsSync(from)) {
+      throw new Error(`Missing required static workflow asset: ${from}`);
+    }
+    cpSync(from, join(targetDir, file));
   }
 }
 
@@ -245,6 +270,20 @@ function installToLocal() {
       const tmp = `${manifestTo}.tmp-${process.pid}`;
       copyFileSync(manifestFrom, tmp);
       renameSync(tmp, manifestTo);
+    }
+    // The static delete-environment workflows must sit beside the installed
+    // extension.mjs so the runtime can read and commit them (see
+    // readBundledWorkflowTemplate in infra.ts).
+    const workflowsFrom = join(distDir, "workflows");
+    if (existsSync(workflowsFrom)) {
+      const workflowsTo = join(installDir, "workflows");
+      mkdirSync(workflowsTo, { recursive: true });
+      for (const file of readdirSync(workflowsFrom)) {
+        const to = join(workflowsTo, file);
+        const tmp = `${to}.tmp-${process.pid}`;
+        copyFileSync(join(workflowsFrom, file), tmp);
+        renameSync(tmp, to);
+      }
     }
     // Remove any legacy `.dev-reload` sentinel from older installs so it can't
     // keep the (now opt-in) self-reloader armed on this machine.

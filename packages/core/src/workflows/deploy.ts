@@ -47,6 +47,26 @@ function ghVarWithDefault(varName: string, fallback: string): string {
   return `\${{ vars.${varName} || '${fallback}' }}`;
 }
 
+// The upstream deploy template wraps some placeholders in single quotes, e.g.
+// `TARGET_CLUSTER_ARCH_MODE: '{{TARGET_CLUSTER_ARCH_MODE}}'`. That is safe for a
+// plain-string value, but an expression-valued placeholder (a `${{ ... }}`
+// GitHub Actions expression, whose fallback is itself a single-quoted string
+// literal) would produce nested single quotes and thus invalid YAML. Drop the
+// wrapping single quotes around any placeholder whose value is such an
+// expression so it is emitted as a bare YAML plain scalar (which GitHub Actions
+// evaluates identically), leaving plain-string placeholders untouched.
+function stripQuotesAroundExpressionPlaceholders(
+  template: string,
+  vars: DeployWorkflowTemplateVars
+): string {
+  let out = template;
+  for (const [name, value] of Object.entries(vars)) {
+    if (!value.startsWith("${{")) continue;
+    out = out.replaceAll(`'{{${name}}}'`, `{{${name}}}`);
+  }
+  return out;
+}
+
 export function defaultDeployTemplateVars(): DeployWorkflowTemplateVars {
   return {
     [DEPLOY_TEMPLATE_VAR_TARGET_CLUSTER_ARCH_MODE]: ghVarWithDefault(
@@ -104,13 +124,15 @@ export function generateDeployWorkflow(
     APP_FILE: appFile,
     RADIUS_REF
   };
-  const files: DeployWorkflowFiles = {
-    [DEPLOY_DISPATCHER_FILE]: fillTemplate(
-      pick(DEPLOY_DISPATCHER_FILE),
+  const fill = (file: string): string =>
+    fillTemplate(
+      stripQuotesAroundExpressionPlaceholders(pick(file), templateVars),
       templateVars
-    ),
-    [DEPLOY_AZURE_FILE]: fillTemplate(pick(DEPLOY_AZURE_FILE), templateVars),
-    [DEPLOY_AWS_FILE]: fillTemplate(pick(DEPLOY_AWS_FILE), templateVars)
+    );
+  const files: DeployWorkflowFiles = {
+    [DEPLOY_DISPATCHER_FILE]: fill(DEPLOY_DISPATCHER_FILE),
+    [DEPLOY_AZURE_FILE]: fill(DEPLOY_AZURE_FILE),
+    [DEPLOY_AWS_FILE]: fill(DEPLOY_AWS_FILE)
   };
   for (const [file, body] of Object.entries(files)) {
     assertNoUnresolvedPlaceholders(body, `deploy workflow "${file}"`);

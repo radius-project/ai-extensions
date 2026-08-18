@@ -57,8 +57,8 @@ on:
 jobs:
   detect:
     env:
-      TARGET_CLUSTER_ARCH_MODE: "{{TARGET_CLUSTER_ARCH_MODE}}"
-      TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: "{{TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS}}"
+      TARGET_CLUSTER_ARCH_MODE: '{{TARGET_CLUSTER_ARCH_MODE}}'
+      TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: '{{TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS}}'
     steps:
       - run: echo \
           \${{ github.sha }}
@@ -66,8 +66,8 @@ jobs:
   [DEPLOY_AZURE_FILE]: `name: deploy-azure
 env:
   APP_FILE: "{{APP_FILE}}"
-  TARGET_CLUSTER_ARCH_MODE: "{{TARGET_CLUSTER_ARCH_MODE}}"
-  TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: "{{TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS}}"
+  TARGET_CLUSTER_ARCH_MODE: '{{TARGET_CLUSTER_ARCH_MODE}}'
+  TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: '{{TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS}}'
 jobs:
   deploy:
     steps:
@@ -105,10 +105,10 @@ describe("generateDeployWorkflow", () => {
     );
 
     expect(files[DEPLOY_DISPATCHER_FILE]).toContain(
-      'TARGET_CLUSTER_ARCH_MODE: "multi_arch_only"'
+      "TARGET_CLUSTER_ARCH_MODE: 'multi_arch_only'"
     );
     expect(files[DEPLOY_AZURE_FILE]).toContain(
-      'TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: "linux/arm64"'
+      "TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: 'linux/arm64'"
     );
     expect(files[DEPLOY_DISPATCHER_FILE]).toContain("${{ github.sha }}");
   });
@@ -130,12 +130,20 @@ describe("generateDeployWorkflow", () => {
       [DEPLOY_TEMPLATE_VAR_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS]:
         platformsExpr
     });
+    // The default architecture vars are GitHub Actions expressions whose fallback
+    // is itself a single-quoted string literal. The upstream template wraps the
+    // placeholder in single quotes, so the expression must be emitted as a BARE
+    // YAML plain scalar (the wrapping quotes stripped) — otherwise the fallback's
+    // inner single quotes would nest and produce invalid YAML.
     expect(files[DEPLOY_DISPATCHER_FILE]).toContain(
-      `TARGET_CLUSTER_ARCH_MODE: "${modeExpr}"`
+      `TARGET_CLUSTER_ARCH_MODE: ${modeExpr}`
     );
     expect(files[DEPLOY_AZURE_FILE]).toContain(
-      `TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: "${platformsExpr}"`
+      `TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: ${platformsExpr}`
     );
+    // Regression guard: no nested single quotes (`'${{ ... 'detect' ... }}'`).
+    expect(files[DEPLOY_DISPATCHER_FILE]).not.toContain(`'${modeExpr}'`);
+    expect(files[DEPLOY_AZURE_FILE]).not.toContain(`'${platformsExpr}'`);
   });
 
   it("does not let caller supplied vars override reserved placeholders", () => {
@@ -161,7 +169,7 @@ describe("generateDeployWorkflow", () => {
       `radius-project/radius/.github/extension/actions/run-rad-commands@${RADIUS_REF}`
     );
     expect(files[DEPLOY_DISPATCHER_FILE]).toContain(
-      'TARGET_CLUSTER_ARCH_MODE: "single_arch_only"'
+      "TARGET_CLUSTER_ARCH_MODE: 'single_arch_only'"
     );
   });
 

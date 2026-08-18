@@ -47,6 +47,12 @@ export interface EnvironmentPaneDependencies {
   ): void;
   currentInfraSelection?(provider: "azure" | "aws"): EnvironmentInfrastructure;
   canSubmit?(): boolean;
+  // Deletion is an async operation (Radius env delete, credential cleanup,
+  // GitHub env delete, app-registration cleanup). The page composes the
+  // operation-progress controller, so once the request is accepted the pane
+  // hands the environment and provider back to follow it to a terminal state
+  // in the shared progress panel.
+  startDeleteProgress(environment: string, provider: string): void;
 }
 
 export interface EnvironmentDecisionPort {
@@ -279,7 +285,11 @@ export function initializeEnvironmentPane(
     banner.scrollIntoView({ block: "nearest" });
   };
 
-  const deleteEnvironment = (name: string, button: DomElement): void => {
+  const deleteEnvironment = (
+    name: string,
+    provider: string,
+    button: DomElement
+  ): void => {
     setButtonState(button, true, "Deleting…");
     void context.net
       .fetch(ENVIRONMENT_DELETE_PATH, {
@@ -322,7 +332,11 @@ export function initializeEnvironmentPane(
             );
             return;
           }
-          loadEnvironmentTable();
+          // The request was accepted; deletion now runs as a tracked
+          // operation. Follow it in the shared progress panel instead of
+          // refreshing the table immediately, so cleanup and any failure are
+          // surfaced the same way as environment creation.
+          dependencies.startDeleteProgress(name, provider);
         },
         () => {
           if (!active) return;
@@ -371,11 +385,13 @@ export function initializeEnvironmentPane(
       bind(rows, button, "click", () => {
         const name = button.getAttribute("data-env") ?? "";
         if (!name) return;
+        const environment = environmentRows.find((row) => row.name === name);
+        const provider = environment?.provider ?? "";
         options.confirmDialog?.show({
           title: "Delete environment?",
           message: `This deletes the GitHub environment "${name}" and its Radius configuration. Applications already deployed to it must be deleted first.`,
           confirmLabel: "Delete environment",
-          onConfirm: () => deleteEnvironment(name, button)
+          onConfirm: () => deleteEnvironment(name, provider, button)
         });
       });
     }
@@ -620,6 +636,18 @@ export function initializeEnvironmentPane(
       const banner = context.dom.byId("env-action-banner");
       const text = context.dom.byId("env-action-banner-text");
       if (!banner || !text) return;
+      // A delete operation that stopped because the environment still has
+      // deployed applications carries a ready-to-render message; show it
+      // verbatim rather than the create-flow "is set up, one step left"
+      // guidance, which does not apply to a halted deletion.
+      if (readString(terminal, "code") === "environment-has-applications") {
+        text.textContent =
+          readString(terminal, "userMessage") ||
+          "This environment still has one or more deployed applications. Delete the application(s) first, then delete the environment.";
+        banner.style.display = "flex";
+        banner.scrollIntoView({ block: "nearest" });
+        return;
+      }
       const hasPullRequest = /^https:\/\/github\.com\//.test(pullRequestUrl);
       let html = `<strong>${escapeBrowserHtml(
         providerLabel(provider)

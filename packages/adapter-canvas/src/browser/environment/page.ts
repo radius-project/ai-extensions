@@ -16,6 +16,7 @@ import {
 } from "./environments.js";
 import {
   initializeEnvironmentOperations,
+  type EnvironmentOperationsController,
   type OperationRecord
 } from "./operations.js";
 import {
@@ -57,7 +58,8 @@ function input(context: BrowserContext, id: string): DomInputElement | null {
 function optimisticOperation(
   environment: string,
   provider: string,
-  now: number
+  now: number,
+  summary: string
 ): OperationRecord {
   return {
     operationId: "pending",
@@ -65,7 +67,7 @@ function optimisticOperation(
     provider,
     state: "running",
     terminalState: null,
-    summary: `Creating ${environment}…`,
+    summary,
     currentStage: "",
     stages: [],
     steps: [],
@@ -189,6 +191,7 @@ export function initializeEnvironmentPage(
   // assigned immediately afterward. This makes the construction ordering
   // explicit without installing a silent nullable fallback.
   let environments: EnvironmentPaneController;
+  let operations: EnvironmentOperationsController;
   const credentials = initializeCredentialsPane(
     context,
     {
@@ -251,6 +254,21 @@ export function initializeEnvironmentPage(
           selectedProfile !== null &&
           githubReadiness?.ready === true
         );
+      },
+      startDeleteProgress(environment, provider) {
+        operations.stopProgress();
+        operations.renderProgress(
+          optimisticOperation(
+            environment,
+            provider,
+            context.clock.now(),
+            `Deleting ${environment}…`
+          )
+        );
+        operations.focusPanel();
+        operations.trackProgress(environment, provider, () => {
+          environments.loadEnvironmentTable();
+        });
       }
     }
   );
@@ -265,7 +283,7 @@ export function initializeEnvironmentPage(
   }
   environments = initializedEnvironments;
 
-  const operations = initializeEnvironmentOperations(context, {
+  const initializedOperations = initializeEnvironmentOperations(context, {
     repo: state.repo,
     mutationNonce: state.mutationNonce,
     deps: {
@@ -277,11 +295,13 @@ export function initializeEnvironmentPage(
       resetSubmitButton: environments.resetSubmitButton,
       promptServiceManagementReference:
         discovery.promptServiceManagementReference,
-      promptAppSelection: discovery.promptAppSelection
+      promptAppSelection: discovery.promptAppSelection,
+      confirmDeleteAppRegistration: ({ message }) =>
+        Promise.resolve(context.dialogs.confirm(message))
     }
   });
 
-  if (!operations) {
+  if (!initializedOperations) {
     confirmDialog?.teardown();
     credentials.teardown();
     environments.teardown();
@@ -290,6 +310,7 @@ export function initializeEnvironmentPage(
     scope.teardown();
     return NOOP_TEARDOWN;
   }
+  operations = initializedOperations;
 
   const showFormError = (message: string): void => {
     formStatus.className = "status error";
@@ -419,10 +440,14 @@ export function initializeEnvironmentPage(
     environments.showEnvironmentLanding();
     environments.hideTerminalBanners();
     operations.stopProgress();
-    operations.renderProgress({
-      ...optimisticOperation(environment, provider, context.clock.now()),
-      summary: `${environmentInput.disabled ? "Updating" : "Creating"} ${environment}…`
-    });
+    operations.renderProgress(
+      optimisticOperation(
+        environment,
+        provider,
+        context.clock.now(),
+        `${environmentInput.disabled ? "Updating" : "Creating"} ${environment}…`
+      )
+    );
     operations.focusPanel();
 
     createAbort = context.net.createAbort();

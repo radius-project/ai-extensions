@@ -142,11 +142,35 @@ export const STAGE_AUTHORIZE_IDENTITY = "authorize_identity";
 export const STAGE_CONFIGURE_ENVIRONMENT = "configure_environment";
 export const STAGE_VERIFY = "verify";
 
+// Deletion stages. Environment deletion is a distinct journey from creation, so
+// it owns its own stage inventory rather than reusing the create stages: it
+// deletes the Radius environment on the cluster (via a dispatched workflow),
+// removes the per-environment federated credential, deletes the GitHub
+// environment, and finally reviews whether the app registration is now unused.
+export const STAGE_DELETE_RADIUS_ENV = "delete_radius_environment";
+export const STAGE_DELETE_CREDENTIAL = "delete_federated_credential";
+export const STAGE_DELETE_GITHUB_ENV = "delete_github_environment";
+export const STAGE_REVIEW_APP_REGISTRATION = "review_app_registration";
+
 const STAGE_LABELS = {
   [STAGE_AUTHORIZE_IDENTITY]: "Authorize deploy identity",
   [STAGE_CONFIGURE_ENVIRONMENT]: "Configure environment",
-  [STAGE_VERIFY]: "Verify credentials"
+  [STAGE_VERIFY]: "Verify credentials",
+  [STAGE_DELETE_RADIUS_ENV]: "Delete Radius environment",
+  [STAGE_DELETE_CREDENTIAL]: "Remove federated credential",
+  [STAGE_DELETE_GITHUB_ENV]: "Delete GitHub environment",
+  [STAGE_REVIEW_APP_REGISTRATION]: "Review app registration"
 };
+
+// The operation kinds. A create operation prepares credentials and an
+// environment; a delete operation tears them down. The runner and the progress
+// UI both branch on this discriminator.
+export const OPERATION_KIND_CREATE = "create";
+export const OPERATION_KIND_DELETE = "delete";
+const OPERATION_KINDS = Object.freeze([
+  OPERATION_KIND_CREATE,
+  OPERATION_KIND_DELETE
+]);
 
 // The canvas `page` enum (extension.ts inputSchema). A resume target is
 // client-influenced data that ends up as an argument to a host RPC, so it is
@@ -193,6 +217,24 @@ export function buildStages({
   if (includeIdentity) ids.push(STAGE_AUTHORIZE_IDENTITY);
   ids.push(STAGE_CONFIGURE_ENVIRONMENT);
   if (includeVerify) ids.push(STAGE_VERIFY);
+  return ids.map((id) => ({ id, label: STAGE_LABELS[id], state: "pending" }));
+}
+
+/**
+ * Build the stage inventory for a delete operation.
+ *
+ * `delete_federated_credential` and `review_app_registration` are Azure-only:
+ * an AWS environment has no federated credential to remove and no app
+ * registration to review, so those stages are absent rather than
+ * present-and-skipped (the same checklist-honesty rule `buildStages` follows).
+ */
+export function buildDeleteStages({
+  includeAzureCleanup = true
+}: any = {}): any[] {
+  const ids = [STAGE_DELETE_RADIUS_ENV];
+  if (includeAzureCleanup) ids.push(STAGE_DELETE_CREDENTIAL);
+  ids.push(STAGE_DELETE_GITHUB_ENV);
+  if (includeAzureCleanup) ids.push(STAGE_REVIEW_APP_REGISTRATION);
   return ids.map((id) => ({ id, label: STAGE_LABELS[id], state: "pending" }));
 }
 
@@ -276,12 +318,14 @@ export function createOperation({
   stages,
   journey,
   operationId,
-  startedAt
+  startedAt,
+  kind
 }: any = {}): any {
   const resumeTarget = sanitizeResumeTarget(journey && journey.resumeTarget);
   return {
     operationId: operationId || `op_${randomUUID()}`,
     schemaVersion: OPERATION_SCHEMA_VERSION,
+    kind: OPERATION_KINDS.includes(kind) ? kind : OPERATION_KIND_CREATE,
     provider: provider || "",
     repo: repo || "",
     environment: environment || "",
@@ -995,6 +1039,7 @@ export function shouldStop(op: any): boolean {
 export function summarize(op: any): string {
   if (!op) return "";
   const env = op.environment || "environment";
+  if (op.kind === OPERATION_KIND_DELETE) return summarizeDelete(op, env);
   switch (op.state) {
     case RUNNING_STATE: {
       const stage = op.stages.find((s) => s.id === op.currentStage);
@@ -1026,6 +1071,46 @@ export function summarize(op: any): string {
       return `Creating environment "${env}" failed partway through — some resources exist.`;
     case "cancelled":
       return `Creating environment "${env}" was stopped.`;
+    default:
+      return "";
+  }
+}
+
+// Delete operations reuse the create OperationRecord model, so the summary line
+// must be re-worded for teardown or the panel and the persisted timeline would
+// announce a deletion as "Environment X is ready".
+function summarizeDelete(op: any, env: string): string {
+  switch (op.state) {
+    case RUNNING_STATE: {
+      const stage = op.stages.find((s) => s.id === op.currentStage);
+      return `Deleting ${env} — ${
+        stage ? stage.label.toLowerCase() : "working"
+      }…`;
+    }
+    case INPUT_REQUIRED_STATE:
+      return (
+        (op.inputRequired && op.inputRequired.message) ||
+        `Deleting ${env} needs a decision from you.`
+      );
+    case "succeeded":
+      return `Environment "${env}" deleted.`;
+    case "succeeded_with_warnings": {
+      const n = op.steps.filter((s) => s.state === "warning").length;
+      return `Environment "${env}" deleted, with ${n} warning${
+        n === 1 ? "" : "s"
+      }.`;
+    }
+    case "action_required":
+      return (
+        (op.terminal && op.terminal.userMessage) ||
+        `Deleting "${env}" needs one more step from you.`
+      );
+    case "failed":
+      return `Deleting environment "${env}" failed.`;
+    case "failed_partial":
+      return `Deleting environment "${env}" failed partway through — some resources may remain.`;
+    case "cancelled":
+      return `Deleting environment "${env}" was stopped.`;
     default:
       return "";
   }
@@ -1146,6 +1231,7 @@ export function isStale(op: any, now = Date.now()): boolean {
 const PERSISTED_OPERATION_KEYS = new Set([
   "operationId",
   "schemaVersion",
+  "kind",
   "provider",
   "repo",
   "environment",
@@ -1163,8 +1249,41 @@ const PERSISTED_OPERATION_KEYS = new Set([
   "failure",
   "inputRequired",
   "resumeRequest",
+  "deleteRecovery",
   "verification"
 ]);
+
+// The minimal, typed request needed to resume a delete operation after a
+// restart. The live delete op carries its inputs in a broad `op.request` (which
+// is deliberately NOT persisted — it can be large and may hold secrets), so a
+// hydrated delete op would otherwise lose the `clientId` its Azure-cleanup and
+// app-registration stages depend on. We persist only these scalar fields.
+interface PersistedDeleteRecovery {
+  repo?: string;
+  environment?: string;
+  provider?: string;
+  clientId?: string;
+  appDisplayName?: string;
+  deleteAppRegistration?: boolean;
+}
+
+function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
+  if (!request || typeof request !== "object") return null;
+  const out: PersistedDeleteRecovery = {};
+  for (const key of [
+    "repo",
+    "environment",
+    "provider",
+    "clientId",
+    "appDisplayName"
+  ] as const) {
+    if (typeof request[key] === "string") out[key] = request[key];
+  }
+  if (typeof request.deleteAppRegistration === "boolean") {
+    out.deleteAppRegistration = request.deleteAppRegistration;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
 
 function persistedFailure(failure: any): any {
   if (!failure) return null;
@@ -1188,6 +1307,15 @@ export function toPersistedOperation(op: any): any {
     if (op[key] !== undefined) record[key] = structuredClone(op[key]);
   }
   record.failure = persistedFailure(op.failure);
+  // Delete ops don't persist their broad `request`, so capture the typed
+  // minimum needed to resume them (clientId et al.) under `deleteRecovery`.
+  if (op.kind === OPERATION_KIND_DELETE) {
+    const recovery = persistedDeleteRecovery(op.request || op.deleteRecovery);
+    if (recovery) record.deleteRecovery = recovery;
+    else delete record.deleteRecovery;
+  } else {
+    delete record.deleteRecovery;
+  }
   if (
     typeof record.operationId !== "string" ||
     !record.operationId.startsWith("op_") ||
@@ -1213,12 +1341,36 @@ export function fromPersistedOperation(value: any): any {
 
 export function reconcileRestoredOperation(op: any): any {
   if (!op || isTerminalState(op.state)) return op;
+  // Rebuild a delete op's working request from the persisted typed minimum so
+  // its Azure-cleanup and app-registration stages still have the clientId.
+  if (
+    op.kind === OPERATION_KIND_DELETE &&
+    !op.request &&
+    op.deleteRecovery &&
+    typeof op.deleteRecovery === "object"
+  ) {
+    op.request = structuredClone(op.deleteRecovery);
+  }
   if (op.inputRequired) {
-    if (op.resumeRequest) {
+    // A delete op parked on the app-registration prompt has no resumeRequest,
+    // but its rebuilt request is enough to resume once the user answers.
+    if (op.resumeRequest || (op.kind === OPERATION_KIND_DELETE && op.request)) {
       op.state = INPUT_REQUIRED_STATE;
       op.recoveryState = "waiting_input";
       return op;
     }
+  }
+  // Preserve a live (mid-stage) delete operation instead of forcing it terminal.
+  // The delete runner is resume-safe — each stage re-runs only while it is still
+  // pending/running — so the delete recovery scheduler can pick it up and drive
+  // it to completion. Forcing `failed_partial` here would set `endedAt` and the
+  // scheduler would skip it, stranding the half-deleted environment.
+  if (op.kind === OPERATION_KIND_DELETE && op.request) {
+    for (const stage of op.stages || []) {
+      if (stage.state === "running") stage.state = "pending";
+    }
+    op.recoveryState = "interrupted";
+    return op;
   }
   if (hasCompleteVerificationIdentity(op)) {
     op.recoveryState = "verification_pending";
@@ -1522,6 +1674,7 @@ export function toClientView(op: any): any {
   return {
     operationId: op.operationId,
     schemaVersion: op.schemaVersion,
+    kind: op.kind || OPERATION_KIND_CREATE,
     provider: op.provider,
     repo: op.repo,
     environment: op.environment,

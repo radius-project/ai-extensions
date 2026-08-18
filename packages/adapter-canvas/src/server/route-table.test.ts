@@ -257,6 +257,16 @@ const productionHandlers = {
     resolveRepoAppName: () => Promise.resolve(""),
     resolveEnvDeployment: () => Promise.resolve(null),
     logError: () => {},
+    discoverEnvironmentTarget: () =>
+      Promise.resolve({ provider: "", clientId: "" }),
+    createOperation: () => ({ operationId: "op", currentStage: null }),
+    buildDeleteStages: () => [],
+    startOperation: () => ({
+      ok: true as const,
+      operation: { operationId: "op", currentStage: null }
+    }),
+    toClientView: () => ({}),
+    scheduleEnvironmentOperation: () => true,
     cliExec: () => {},
     envListCacheGet: () => undefined,
     envListCacheSet: () => {},

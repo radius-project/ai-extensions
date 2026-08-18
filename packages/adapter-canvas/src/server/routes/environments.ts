@@ -25,7 +25,9 @@ export type {
   EnvironmentRunDetail,
   EnvironmentBicepParam,
   EnvironmentsCliExec,
-  EnvironmentsDependencies
+  EnvironmentsDependencies,
+  DeleteOperationRecord,
+  DeleteStartResult
 } from "./environments-types.js";
 // Parameters for the app.bicep the deploy will run against. Resolves the branch
 // the same way the deploy route does (caller's selection, else the repo default)
@@ -181,31 +183,112 @@ export async function handleDeleteEnvironment(
       );
       return;
     }
+    // Deleting an environment is now an async operation (issue #303): it tears
+    // down the Radius environment on the cluster, removes the per-environment
+    // federated credential, deletes the GitHub environment, and — when the app
+    // registration is left unused — prompts before deleting it. The work runs
+    // in the background under the same OperationRecord + progress-panel model as
+    // environment creation, so the route only starts it and returns 202.
+    let target: { provider: string; clientId: string };
     try {
-      await dependencies.runCommand(
-        "gh",
-        [
-          "api",
-          "--method",
-          "DELETE",
-          "/repos/" + repo + "/environments/" + encodeURIComponent(envName)
-        ],
-        { timeout: 20000 }
-      );
+      target = await dependencies.discoverEnvironmentTarget(repo, envName);
     } catch (e) {
+      // Fail closed: without the provider/identity we cannot clean up the cloud
+      // artifacts, so refuse rather than delete only the GitHub environment and
+      // silently orphan the federated credential.
       response.setHeader("Content-Type", "application/json");
-      response.writeHead(500);
+      response.writeHead(503);
       response.end(
         JSON.stringify({
-          error: "Could not delete environment: " + dependencies.errorMessage(e)
+          error: `Could not read the configuration for environment "${envName}" (${dependencies.errorMessage(
+            e
+          )}). The environment was not deleted — please try again.`
         })
       );
       return;
     }
-    dependencies.envListCacheDelete(repo);
+    const provider = target.provider;
+    const clientId = target.clientId;
+    // Include the Azure cleanup stages whenever the environment is Azure-backed,
+    // even if the AZURE_CLIENT_ID could not be read. A missing client id is
+    // exactly when a federated credential is most likely orphaned, so the runner
+    // surfaces a warning for the credential and app-registration stages rather
+    // than silently skipping them (which would hide the orphan).
+    const includeAzureCleanup = provider === "azure";
+    const op = dependencies.createOperation({
+      kind: "delete",
+      provider,
+      repo,
+      environment: envName,
+      stages: dependencies.buildDeleteStages({ includeAzureCleanup })
+    });
+    op.request = { repo, environment: envName, provider, clientId };
+    const started = dependencies.startOperation(op);
+    if (!started.ok) {
+      response.setHeader("Content-Type", "application/json");
+      response.writeHead(409);
+      response.end(
+        JSON.stringify({
+          error: `An operation is already running for ${repo}.`,
+          code: "operation-in-progress",
+          operationId: started.conflict.operationId
+        })
+      );
+      return;
+    }
+    try {
+      await dependencies.persistOperations();
+    } catch (e) {
+      dependencies.finish(op, "failed", {
+        failure: {
+          code: "operation-registration-persist-failed",
+          stage: op.currentStage,
+          stepSeq: null,
+          message: "Radius could not durably register the delete operation.",
+          classification: "unknown",
+          evidence: dependencies.errorMessage(e)
+        }
+      });
+      response.setHeader("Content-Type", "application/json");
+      response.writeHead(500);
+      response.end(
+        JSON.stringify({
+          error:
+            "Radius could not durably register the delete operation. Nothing was deleted.",
+          code: "operation-registration-persist-failed"
+        })
+      );
+      return;
+    }
+    const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
     response.setHeader("Content-Type", "application/json");
-    response.writeHead(200);
-    response.end(JSON.stringify({ success: true }));
+    response.setHeader("Location", statusUrl);
+    response.writeHead(202);
+    response.end(
+      JSON.stringify({
+        operationId: op.operationId,
+        statusUrl,
+        operation: dependencies.toClientView(op)
+      })
+    );
+    const scheduled = dependencies.scheduleEnvironmentOperation(
+      context.instanceId,
+      op
+    );
+    if (!scheduled) {
+      dependencies.finish(op, "failed", {
+        failure: {
+          code: "operation-scheduling-failed",
+          stage: op.currentStage,
+          stepSeq: null,
+          message:
+            "Radius accepted the delete operation but could not start any work for it.",
+          classification: "unknown",
+          evidence: `No server-owned task runner was available for instance ${context.instanceId}.`
+        }
+      });
+      await dependencies.persistOperations().catch(() => {});
+    }
   } catch (e) {
     response.setHeader("Content-Type", "application/json");
     response.writeHead(400);

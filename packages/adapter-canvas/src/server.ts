@@ -108,6 +108,7 @@ import {
   toClientView,
   createOperation,
   buildStages,
+  buildDeleteStages,
   enterStage,
   setStageState,
   hasWarnings,
@@ -150,7 +151,9 @@ import {
   generatePortalUrl,
   syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE,
-  DEPLOY_AZURE_FILE
+  DEPLOY_AZURE_FILE,
+  DELETE_ENV_DISPATCHER_FILE,
+  DELETE_ENV_AZURE_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
@@ -216,6 +219,12 @@ import { createDeployMonitorService } from "./server/services/deploy-monitor.js"
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
+import { runEnvironmentDeletion } from "./server/services/environment-deletion.js";
+import { classifyCompletedDeleteEnvRun } from "./server/services/delete-env-run-classifier.js";
+import type {
+  RadiusEnvDeletionOutcome,
+  GitHubEnvDeletionOutcome
+} from "./server/services/environment-deletion.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -889,7 +898,42 @@ const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
 const ENV_LIST_TTL_MS = 15000;
 const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
 
-// Composition root for the migrated `environments` family. Its remaining
+// Reads the environment's stored GitHub variables to determine its provider and
+// the app registration id the delete cleanup targets. Kept beside the
+// `environments` composition root because it is only used by that route's
+// delete flow. Throws on an API/permission failure so the route fails closed.
+async function discoverEnvironmentTarget(
+  repo: string,
+  environment: string
+): Promise<{ provider: string; clientId: string }> {
+  const out = await runCommand(
+    "gh",
+    [
+      "api",
+      `/repos/${repo}/environments/${encodeURIComponent(
+        environment
+      )}/variables?per_page=100`,
+      "--jq",
+      '.variables[] | .name + "\\t" + (.value // "")'
+    ],
+    { timeout: 15000 }
+  );
+  const vars: Record<string, string> = {};
+  for (const line of (out || "").split("\n").filter(Boolean)) {
+    const tab = line.indexOf("\t");
+    if (tab === -1) {
+      vars[line] = "";
+      continue;
+    }
+    vars[line.slice(0, tab)] = line.slice(tab + 1);
+  }
+  const names = Object.keys(vars).join("\n");
+  let provider = "";
+  if (/AZURE_/.test(names)) provider = "azure";
+  else if (/AWS_/.test(names)) provider = "aws";
+  return { provider, clientId: vars.AZURE_CLIENT_ID || "" };
+}
+
 // route, `POST /api/create-environment`, is large enough to own a separate
 // composition root below. Every seam is a narrow named function: the two subprocess
 // runners (`cliExec`, `runCommand`), the repo-file fetch and bicep param parse
@@ -913,6 +957,13 @@ const environmentsRoutes = createEnvironmentsRoutes({
   resolveEnvDeployment: (repo, environment, appName) =>
     resolveEnvDeployment(repo, environment, appName),
   logError: (message) => console.error(message),
+  discoverEnvironmentTarget: (repo, environment) =>
+    discoverEnvironmentTarget(repo, environment),
+  createOperation,
+  buildDeleteStages: (options) => buildDeleteStages(options),
+  startOperation: (op) => operations.start(op),
+  toClientView,
+  scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
   cliExec: (command, args, options, callback) => {
     cliExec(command, args, options, callback);
   },
@@ -2207,6 +2258,142 @@ function runGhWithStdinForDeploy(
     );
     if (stdin !== undefined) child.stdin?.end(stdin);
   });
+}
+
+// Dispatch the just-committed delete-environment workflow and wait for its run
+// to finish. Tearing down the Radius environment needs cluster access, so it
+// runs on the ephemeral control plane the workflow spins up (authenticating with
+// the environment's still-present federated credential — hence this must run
+// before the credential is removed). Best-effort: a dispatch or run failure is
+// reported as a `failed` outcome the runner records as a warning, never a throw.
+async function deleteRadiusEnvironmentViaWorkflow(
+  repo: string,
+  environment: string
+): Promise<RadiusEnvDeletionOutcome> {
+  const sync = await ensureWorkflowsCurrent(repo, environment, "", [
+    DELETE_ENV_DISPATCHER_FILE,
+    DELETE_ENV_AZURE_FILE
+  ]);
+  const commitFail = sync.failed.find(
+    (f) => f.path.split("/").pop() === DELETE_ENV_DISPATCHER_FILE
+  );
+  if (commitFail) {
+    return {
+      outcome: "failed",
+      detail: `Could not commit ${DELETE_ENV_DISPATCHER_FILE} to the "${commitFail.branch}" branch of ${repo}.`
+    };
+  }
+  const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
+    const first = await runGhForDeploy(args);
+    if (first.code === 0) return first;
+    const env = process.env;
+    if (!(env.GH_TOKEN || env.GITHUB_TOKEN)) return first;
+    const fallbackEnv = { ...env };
+    delete fallbackEnv.GH_TOKEN;
+    delete fallbackEnv.GITHUB_TOKEN;
+    const retry = await runGhForDeploy(args, { env: fallbackEnv });
+    return retry.code === 0 ? retry : first;
+  };
+  const justCreated = sync.created.some(
+    (p) => p.split("/").pop() === DELETE_ENV_DISPATCHER_FILE
+  );
+  const dispatchedAt = Date.now();
+  const dispatchArgs = [
+    "workflow",
+    "run",
+    DELETE_ENV_DISPATCHER_FILE,
+    "-f",
+    "environment=" + environment,
+    "--repo",
+    repo
+  ];
+  let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
+  const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
+  if (justCreated) await sleepMs(3000);
+  for (const delay of dispatchDelays) {
+    if (delay > 0) await sleepMs(delay);
+    dispatch = await ghWorkflow(dispatchArgs);
+    if (dispatch.code === 0) break;
+    if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
+  }
+  if (dispatch.code !== 0) {
+    return {
+      outcome: "failed",
+      detail:
+        (dispatch.stderr || "").trim() ||
+        `Failed to start ${DELETE_ENV_DISPATCHER_FILE} on ${repo}.`
+    };
+  }
+  // Resolve and monitor the dispatched run so credential removal only starts
+  // after the Radius environment is actually gone.
+  let runId: number | string | null = null;
+  for (const delay of [0, 2000, 4000]) {
+    if (delay > 0) await sleepMs(delay);
+    runId = await findWorkflowRun(
+      repo,
+      DELETE_ENV_DISPATCHER_FILE,
+      dispatchedAt,
+      null
+    );
+    if (runId) break;
+  }
+  if (!runId) {
+    return {
+      outcome: "failed",
+      detail:
+        "The delete-environment workflow was dispatched but its run could not be found to confirm completion."
+    };
+  }
+  const deadline = Date.now() + 30 * 60 * 1000;
+  let delayMs = 5000;
+  while (Date.now() < deadline) {
+    const detail = await getRunDetail(repo, runId);
+    if (detail && detail.status === "completed") {
+      const classified = classifyCompletedDeleteEnvRun(
+        detail.conclusion,
+        detail.steps || []
+      );
+      return classified;
+    }
+    await sleepMs(Math.min(delayMs, 15000));
+    delayMs = Math.min(Math.ceil(delayMs * 1.5), 15000);
+  }
+  return {
+    outcome: "failed",
+    detail:
+      "The delete-environment workflow did not complete within 30 minutes."
+  };
+}
+
+// Delete the GitHub Environment. Idempotent: a 404 (already gone) is reported as
+// `not_found`, not a failure, so a re-run after a partial deletion converges.
+async function deleteGitHubEnvironmentIdempotent(
+  repo: string,
+  environment: string
+): Promise<GitHubEnvDeletionOutcome> {
+  const result = await runGhForDeploy([
+    "api",
+    "--method",
+    "DELETE",
+    "/repos/" + repo + "/environments/" + encodeURIComponent(environment)
+  ]);
+  if (result.code === 0) {
+    envListCache.delete(repo);
+    return { outcome: "deleted" };
+  }
+  if (/HTTP 404|not found/i.test(result.stderr || "")) {
+    envListCache.delete(repo);
+    return { outcome: "not_found" };
+  }
+  return {
+    outcome: "failed",
+    detail:
+      (result.stderr || "").trim() || "Deleting the GitHub environment failed."
+  };
+}
+
+function sleepMs(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 const deployPlannedGraphService = createPlannedGraphRecoveryService({
@@ -3754,6 +3941,19 @@ function createInstanceRequestCoordinator(
     }
     const op = operations.get(operationId);
     if (!op) return;
+    if (op.kind === "delete") {
+      await runEnvironmentDeletion(op, {
+        deleteRadiusEnvironment: (input) =>
+          deleteRadiusEnvironmentViaWorkflow(input.repo, input.environment),
+        runAz: (args) => runCliCommand("az", args),
+        deleteGitHubEnvironment: (input) =>
+          deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
+        persist: () => operations.persist(),
+        errorMessage,
+        log: (message) => console.error(message)
+      });
+      return;
+    }
     const request = op.request || op.resumeRequest || {};
     const selectedLogin =
       typeof op.context?.githubLogin === "string" ? op.context.githubLogin
@@ -3838,6 +4038,22 @@ function createInstanceRequestCoordinator(
 
   function startRecoveredVerificationTasks(): void {
     for (const op of operations.all()) {
+      // Resume a delete operation that was mid-flight when the process
+      // restarted. The runner is resume-safe (each stage re-runs only while
+      // pending/running), so re-scheduling converges. An operation waiting on
+      // the app-registration prompt (input_required) is left alone — it resumes
+      // only when the user answers.
+      if (
+        op.kind === "delete" &&
+        !op.endedAt &&
+        op.state !== INPUT_REQUIRED_STATE &&
+        !serverOwnedTasks.has(op.operationId)
+      ) {
+        scheduleServerOwnedTask(op.operationId, () =>
+          runEnvironmentOperation(op.operationId)
+        );
+        continue;
+      }
       if (
         op.recoveryState !== "verification_pending" ||
         op.currentStage !== STAGE_VERIFY ||

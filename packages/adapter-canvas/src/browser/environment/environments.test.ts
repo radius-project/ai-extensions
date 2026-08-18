@@ -79,7 +79,8 @@ function renderPage(repo = "octo/app", withoutInfraSelection = false) {
     loadGitHubIdentity: vi.fn(),
     clearSharedAppPin: vi.fn(),
     setPendingInfraSelection: vi.fn(),
-    currentInfraSelection: vi.fn(() => ({}))
+    currentInfraSelection: vi.fn(() => ({})),
+    startDeleteProgress: vi.fn()
   };
   const decisions = {
     confirm: vi.fn(() => true),
@@ -155,7 +156,8 @@ function renderRequiredOnly() {
       setPendingInfraSelection() {},
       currentInfraSelection() {
         return {};
-      }
+      },
+      startDeleteProgress() {}
     }
   );
   if (!isEnvironmentPaneController(initialized)) {
@@ -282,7 +284,8 @@ describe("environment pane initialization", () => {
         loadCredentialTable() {},
         loadProfiles() {},
         loadGitHubIdentity() {},
-        clearSharedAppPin() {}
+        clearSharedAppPin() {},
+        startDeleteProgress() {}
       }
     );
     expect(isEnvironmentPaneController(initialized)).toBe(false);
@@ -338,7 +341,8 @@ describe("environment pane initialization", () => {
         loadCredentialTable() {},
         loadProfiles() {},
         loadGitHubIdentity() {},
-        clearSharedAppPin() {}
+        clearSharedAppPin() {},
+        startDeleteProgress() {}
       }
     );
     expect(isEnvironmentPaneController(second)).toBe(false);
@@ -838,7 +842,7 @@ describe("environment deletion", () => {
     const rows = addRowButtons(page.browser, name);
     page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
       jsonResponse({
-        environments: [{ name: "dev", status: "success" }]
+        environments: [{ name: "dev", provider: "azure", status: "success" }]
       })
     );
     page.controller.loadEnvironmentTable();
@@ -862,7 +866,18 @@ describe("environment deletion", () => {
     expect(refused.page.browser.net.calls).toHaveLength(1);
   });
 
-  it("posts the exact target and refreshes only after explicit success", async () => {
+  it("confirms deletion with an empty provider when the row is unknown", async () => {
+    const { page, rows } = await readyDelete();
+    // A delete button whose environment is not among the loaded rows still
+    // confirms, threading an empty provider rather than throwing.
+    rows.remove.setAttribute("data-env", "ghost");
+    page.confirmDialog.show.mockImplementation(() => {});
+    rows.remove.dispatch("click");
+    expect(page.confirmDialog.show).toHaveBeenCalledOnce();
+    expect(page.confirmDialog.show.mock.calls[0][0].message).toContain("ghost");
+  });
+
+  it("posts the exact target and follows the delete operation on success", async () => {
     const { page, rows } = await readyDelete();
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
       jsonResponse({ success: true })
@@ -880,9 +895,18 @@ describe("environment deletion", () => {
       repo: "octo/app",
       environment: "dev"
     });
-    expect(page.browser.net.calls.at(-1)?.url).toBe(
-      `${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`
+    // Success hands off to the shared progress panel (with the row's provider)
+    // instead of refreshing the table, so cleanup and any failure surface the
+    // same way as environment creation.
+    expect(page.dependencies.startDeleteProgress).toHaveBeenCalledWith(
+      "dev",
+      "azure"
     );
+    expect(
+      page.browser.net.calls.filter((entry) =>
+        entry.url.includes(ENVIRONMENT_LIST_PATH)
+      )
+    ).toHaveLength(1);
   });
 
   it.each([
@@ -1093,6 +1117,34 @@ describe("environment terminal banners", () => {
     );
     expect(page.elements.actionText.innerHTML).not.toContain(
       "could not open a pull request"
+    );
+  });
+
+  it("renders a halted-deletion action-required state verbatim", () => {
+    const page = renderPage();
+
+    // A delete that stopped because applications are still deployed carries its
+    // own ready-to-render guidance and must be shown verbatim (as text, not the
+    // create-flow "one step left" HTML).
+    page.controller.showActionRequired("azure", "dev", "", {
+      code: "environment-has-applications",
+      userMessage:
+        "Delete the app in <prod> first, then delete the environment."
+    });
+    expect(page.elements.actionText.textContent).toBe(
+      "Delete the app in <prod> first, then delete the environment."
+    );
+    expect(page.elements.actionText.innerHTML).not.toContain(
+      "one step is left"
+    );
+    expect(page.elements.action.style.display).toBe("flex");
+
+    // Without a carried message it falls back to a default deletion prompt.
+    page.controller.showActionRequired("azure", "dev", "", {
+      code: "environment-has-applications"
+    });
+    expect(page.elements.actionText.textContent).toContain(
+      "still has one or more deployed applications"
     );
   });
 

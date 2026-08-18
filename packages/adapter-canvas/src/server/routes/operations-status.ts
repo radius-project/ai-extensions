@@ -4,6 +4,7 @@ import {
   templatePathParameters,
   type RouteHandlerRegistry
 } from "../route-table.js";
+import { DELETE_APP_REGISTRATION_DECISION } from "../services/environment-deletion.js";
 
 // The registry and the client projection stay in `operations.ts`, which is
 // independently tested. These routes are a thin lookup-and-project adapter, so
@@ -183,6 +184,7 @@ interface ResumeOperationBody extends Record<string, unknown> {
   repo?: string;
   environment?: string;
   provider?: string;
+  deleteAppRegistration?: unknown;
 }
 
 async function finishSchedulingFailure(
@@ -591,7 +593,52 @@ export async function handleResumeOperation(
   if (!operation.request && operation.resumeRequest) {
     operation.request = structuredClone(operation.resumeRequest);
   }
-  if (!isOperationRequest(operation.request)) {
+  const resumeSnapshot = {
+    inputRequired: structuredClone(operation.inputRequired),
+    request:
+      operation.request !== undefined ?
+        structuredClone(operation.request)
+      : undefined,
+    resumeRequest:
+      operation.resumeRequest ?
+        structuredClone(operation.resumeRequest)
+      : undefined
+  };
+  if (code === DELETE_APP_REGISTRATION_DECISION) {
+    // Delete operations carry a flat `{repo, environment, provider, clientId}`
+    // request with no `azure` block, so they never pass `isOperationRequest`.
+    // Record the user's decision directly on the request the runner reads. If
+    // the saved request was lost (e.g. a persistence gap left it absent),
+    // synthesize a minimal one from the prompt metadata and the resume body so
+    // the decision — and the client id the runner needs to act on it — still
+    // reach the runner instead of being silently dropped, which would otherwise
+    // 202 while the runner re-prompts on the same unanswered decision.
+    const request =
+      (operation.request as Record<string, unknown> | undefined) ?? {};
+    request.deleteAppRegistration = data.deleteAppRegistration === true;
+    const inputRequired = operation.inputRequired as
+      { metadata?: Record<string, unknown> | null } | null | undefined;
+    const metadata = inputRequired?.metadata;
+    if (request.clientId === undefined && metadata?.clientId !== undefined) {
+      request.clientId = metadata.clientId;
+    }
+    if (
+      request.appDisplayName === undefined &&
+      metadata?.appDisplayName !== undefined
+    ) {
+      request.appDisplayName = metadata.appDisplayName;
+    }
+    if (request.repo === undefined && data.repo !== undefined) {
+      request.repo = data.repo;
+    }
+    if (request.environment === undefined && data.environment !== undefined) {
+      request.environment = data.environment;
+    }
+    if (request.provider === undefined && data.provider !== undefined) {
+      request.provider = data.provider;
+    }
+    operation.request = request as OperationRequest;
+  } else if (!isOperationRequest(operation.request)) {
     jsonError(context, 409, {
       error:
         "The operation cannot be resumed because its saved request is unavailable.",
@@ -599,36 +646,29 @@ export async function handleResumeOperation(
       operationId
     });
     return;
-  }
-  const resumeSnapshot = {
-    inputRequired: structuredClone(operation.inputRequired),
-    request: structuredClone(operation.request),
-    resumeRequest:
-      operation.resumeRequest ?
-        structuredClone(operation.resumeRequest)
-      : undefined
-  };
-  const request = operation.request;
-  if (code === "service-management-reference-required") {
-    request.azure.serviceManagementReference =
-      data.serviceManagementReference || "";
-    if (operation.resumeRequest?.azure) {
-      operation.resumeRequest.azure.serviceManagementReference =
-        data.serviceManagementReference || "";
-    }
-  } else if (code === "app-selection-required") {
-    request.azure.appId = data.appId || "";
-    request.azure.createNew = data.createNew === true;
-    if (operation.resumeRequest?.azure) {
-      operation.resumeRequest.azure.appId = data.appId || "";
-      operation.resumeRequest.azure.createNew = data.createNew === true;
-    }
   } else {
-    jsonError(context, 400, {
-      error: "Unsupported resume prompt.",
-      code: "unsupported-resume"
-    });
-    return;
+    const request = operation.request;
+    if (code === "service-management-reference-required") {
+      request.azure.serviceManagementReference =
+        data.serviceManagementReference || "";
+      if (operation.resumeRequest?.azure) {
+        operation.resumeRequest.azure.serviceManagementReference =
+          data.serviceManagementReference || "";
+      }
+    } else if (code === "app-selection-required") {
+      request.azure.appId = data.appId || "";
+      request.azure.createNew = data.createNew === true;
+      if (operation.resumeRequest?.azure) {
+        operation.resumeRequest.azure.appId = data.appId || "";
+        operation.resumeRequest.azure.createNew = data.createNew === true;
+      }
+    } else {
+      jsonError(context, 400, {
+        error: "Unsupported resume prompt.",
+        code: "unsupported-resume"
+      });
+      return;
+    }
   }
   dependencies.resumeAfterInput(operation);
   try {

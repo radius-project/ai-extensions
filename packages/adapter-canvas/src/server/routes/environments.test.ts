@@ -19,7 +19,8 @@ import {
   type EnvironmentActiveDeployment,
   type EnvironmentRunDetail,
   type EnvironmentsDependencies,
-  type EnvironmentsInstanceEntry
+  type EnvironmentsInstanceEntry,
+  type DeleteOperationRecord
 } from "./environments.js";
 import type { CanvasServerEntry } from "../types.js";
 import { getOrCreateServer, persistBestEffort } from "../../server.js";
@@ -108,6 +109,14 @@ function deps(
     resolveRepoAppName: unset("resolveRepoAppName") as never,
     resolveEnvDeployment: unset("resolveEnvDeployment") as never,
     logError: unset("logError") as never,
+    discoverEnvironmentTarget: unset("discoverEnvironmentTarget") as never,
+    createOperation: unset("createOperation") as never,
+    buildDeleteStages: unset("buildDeleteStages") as never,
+    startOperation: unset("startOperation") as never,
+    toClientView: unset("toClientView") as never,
+    scheduleEnvironmentOperation: unset(
+      "scheduleEnvironmentOperation"
+    ) as never,
     cliExec: unset("cliExec") as never,
     envListCacheGet: unset("envListCacheGet") as never,
     envListCacheSet: unset("envListCacheSet") as never,
@@ -470,8 +479,10 @@ describe("environments — delete-environment refusal ladder", () => {
     expect(recording.body).toContain("is still being deleted from environment");
   });
 
-  it("rung 4: 500 when the DELETE command fails", async () => {
-    const runCommand = vi.fn(() => Promise.reject(new Error("boom")));
+  it("rung 4: 503 fail-closed when provider/identity discovery fails", async () => {
+    const discoverEnvironmentTarget = vi.fn(() =>
+      Promise.reject(new Error("boom"))
+    );
     const { recording, ctx } = context(
       "POST",
       "/api/delete-environment",
@@ -483,18 +494,31 @@ describe("environments — delete-environment refusal ladder", () => {
         readInstanceEntry: () => entryWith(),
         resolveRepoAppName: () => Promise.resolve("app"),
         resolveEnvDeployment: () => Promise.resolve(null),
-        runCommand
+        discoverEnvironmentTarget
       })
     );
-    expect(recording.status).toBe(500);
-    expect(JSON.parse(recording.body)).toEqual({
-      error: "Could not delete environment: boom"
-    });
+    expect(recording.status).toBe(503);
+    const body = JSON.parse(recording.body);
+    expect(body.error).toContain(
+      'Could not read the configuration for environment "dev"'
+    );
+    expect(body.error).toContain("boom");
   });
 
-  it("clean pass: deletes, invalidates the cache, and 200s", async () => {
-    const runCommand = vi.fn(() => Promise.resolve(""));
-    const envListCacheDelete = vi.fn();
+  it("clean pass: starts a delete operation and 202s with the client view", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-del-1",
+      currentStage: "delete-radius-env"
+    };
+    const createOperation = vi.fn(() => op);
+    const buildDeleteStages = vi.fn(() => [{ id: "s", state: "pending" }]);
+    const startOperation = vi.fn(() => ({ ok: true as const, operation: op }));
+    const persistOperations = vi.fn(() => Promise.resolve());
+    const toClientView = vi.fn(() => ({ operationId: "op-del-1", view: true }));
+    const scheduleEnvironmentOperation = vi.fn(() => true);
+    const discoverEnvironmentTarget = vi.fn(() =>
+      Promise.resolve({ provider: "azure", clientId: "app-123" })
+    );
     const { recording, ctx } = context(
       "POST",
       "/api/delete-environment",
@@ -506,18 +530,110 @@ describe("environments — delete-environment refusal ladder", () => {
         readInstanceEntry: () => entryWith(),
         resolveRepoAppName: () => Promise.resolve("app"),
         resolveEnvDeployment: () => Promise.resolve(null),
-        runCommand,
-        envListCacheDelete
+        discoverEnvironmentTarget,
+        createOperation,
+        buildDeleteStages,
+        startOperation,
+        persistOperations,
+        toClientView,
+        scheduleEnvironmentOperation
       })
     );
-    expect(runCommand).toHaveBeenCalledWith(
-      "gh",
-      ["api", "--method", "DELETE", "/repos/o/r/environments/dev"],
-      { timeout: 20000 }
+    expect(buildDeleteStages).toHaveBeenCalledWith({
+      includeAzureCleanup: true
+    });
+    expect(op.request).toEqual({
+      repo: "o/r",
+      environment: "dev",
+      provider: "azure",
+      clientId: "app-123"
+    });
+    expect(startOperation).toHaveBeenCalledWith(op);
+    expect(persistOperations).toHaveBeenCalledOnce();
+    expect(recording.status).toBe(202);
+    expect(recording.headers["Location"]).toBe("/api/operations/op-del-1");
+    const body = JSON.parse(recording.body);
+    expect(body.operationId).toBe("op-del-1");
+    expect(body.operation).toEqual({ operationId: "op-del-1", view: true });
+    expect(scheduleEnvironmentOperation).toHaveBeenCalledWith(
+      ctx.instanceId,
+      op
     );
-    expect(envListCacheDelete).toHaveBeenCalledWith("o/r");
-    expect(recording.status).toBe(200);
-    expect(JSON.parse(recording.body)).toEqual({ success: true });
+  });
+
+  it("includes Azure cleanup even when the client id could not be read", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-del-2",
+      currentStage: "delete-radius-env"
+    };
+    const buildDeleteStages = vi.fn(() => [{ id: "s", state: "pending" }]);
+    const startOperation = vi.fn(() => ({ ok: true as const, operation: op }));
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        readInstanceEntry: () => entryWith(),
+        resolveRepoAppName: () => Promise.resolve("app"),
+        resolveEnvDeployment: () => Promise.resolve(null),
+        // Azure provider but no readable AZURE_CLIENT_ID — the credential is most
+        // likely orphaned, so the Azure stages must still run (and warn).
+        discoverEnvironmentTarget: () =>
+          Promise.resolve({ provider: "azure", clientId: "" }),
+        createOperation: () => op,
+        buildDeleteStages,
+        startOperation,
+        persistOperations: () => Promise.resolve(),
+        toClientView: () => ({ operationId: "op-del-2" }),
+        scheduleEnvironmentOperation: () => true
+      })
+    );
+    expect(buildDeleteStages).toHaveBeenCalledWith({
+      includeAzureCleanup: true
+    });
+    expect(op.request).toEqual({
+      repo: "o/r",
+      environment: "dev",
+      provider: "azure",
+      clientId: ""
+    });
+    expect(recording.status).toBe(202);
+  });
+
+  it("409s when an operation is already running for the repo", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-new",
+      currentStage: null
+    };
+    const startOperation = vi.fn(() => ({
+      ok: false as const,
+      conflict: { operationId: "op-existing" }
+    }));
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        readInstanceEntry: () => entryWith(),
+        resolveRepoAppName: () => Promise.resolve("app"),
+        resolveEnvDeployment: () => Promise.resolve(null),
+        discoverEnvironmentTarget: () =>
+          Promise.resolve({ provider: "aws", clientId: "" }),
+        createOperation: () => op,
+        buildDeleteStages: () => [],
+        startOperation
+      })
+    );
+    expect(recording.status).toBe(409);
+    const body = JSON.parse(recording.body);
+    expect(body.code).toBe("operation-in-progress");
+    expect(body.operationId).toBe("op-existing");
   });
 
   it("outer catch: 400 when the body is malformed JSON", async () => {
@@ -1651,15 +1767,24 @@ describe("environments — real loopback", () => {
     }
   });
 
-  it("deletes and invalidates the environment cache over controlled HTTP", async () => {
-    const runCommand = vi.fn(() => Promise.resolve(""));
-    const envListCacheDelete = vi.fn();
+  it("starts a delete operation and 202s over controlled HTTP", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-http-del",
+      currentStage: "delete-radius-env"
+    };
+    const scheduleEnvironmentOperation = vi.fn(() => true);
     const container = createControlledEnvironmentServer({
       readInstanceEntry: () => undefined,
       resolveRepoAppName: () => Promise.resolve("todo-app"),
       resolveEnvDeployment: () => Promise.resolve(null),
-      runCommand,
-      envListCacheDelete
+      discoverEnvironmentTarget: () =>
+        Promise.resolve({ provider: "azure", clientId: "app-xyz" }),
+      createOperation: () => op,
+      buildDeleteStages: () => [{ id: "s", state: "pending" }],
+      startOperation: () => ({ ok: true as const, operation: op }),
+      persistOperations: () => Promise.resolve(),
+      toClientView: () => ({ operationId: "op-http-del" }),
+      scheduleEnvironmentOperation
     });
     try {
       const controlled = await container.getOrCreate("delete-success");
@@ -1668,14 +1793,15 @@ describe("environments — real loopback", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo: "octo/app", environment: "dev" })
       });
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ success: true });
-      expect(runCommand).toHaveBeenCalledWith(
-        "gh",
-        ["api", "--method", "DELETE", "/repos/octo/app/environments/dev"],
-        { timeout: 20000 }
-      );
-      expect(envListCacheDelete).toHaveBeenCalledWith("octo/app");
+      expect(res.status).toBe(202);
+      expect(res.headers.get("Location")).toBe("/api/operations/op-http-del");
+      const body = (await res.json()) as {
+        operationId: string;
+        operation: unknown;
+      };
+      expect(body.operationId).toBe("op-http-del");
+      expect(body.operation).toEqual({ operationId: "op-http-del" });
+      expect(scheduleEnvironmentOperation).toHaveBeenCalledOnce();
     } finally {
       await container.stopAll();
     }

@@ -15,6 +15,20 @@ export interface EnvironmentsInstanceEntry {
   state?: CanvasState;
 }
 
+// The delete OperationRecord as this route sees it. Typed as broadly as
+// `operations.ts` (all `any`) so the route stays a pass-through: it only sets
+// `request` and reads `operationId` / `currentStage`.
+export interface DeleteOperationRecord {
+  operationId: string;
+  currentStage: unknown;
+  request?: unknown;
+  [key: string]: unknown;
+}
+
+export type DeleteStartResult =
+  | { ok: true; operation: DeleteOperationRecord }
+  | { ok: false; conflict: { operationId: string; [key: string]: unknown } };
+
 // A workflow run's status/conclusion as `list-environments` reads it. The values
 // are the raw GitHub API strings, so both are plain strings (the empty string is
 // a real, distinct value the jq default `// ""` produces).
@@ -99,6 +113,24 @@ export interface EnvironmentsDependencies {
     appName: string
   ): Promise<EnvironmentActiveDeployment | null>;
   logError(message: string): void;
+  // Reads the environment's stored GitHub variables to determine its cloud
+  // provider and the app registration id (AZURE_CLIENT_ID) the cleanup targets.
+  // Throws on an API/permission failure so the route can fail closed rather than
+  // delete only the GitHub environment and orphan the federated credential.
+  discoverEnvironmentTarget(
+    repo: string,
+    environment: string
+  ): Promise<{ provider: string; clientId: string }>;
+  // Async delete-operation lifecycle (issue #303). Shares the create flow's
+  // OperationRecord registry, persistence, and server-owned task scheduler.
+  createOperation(input: unknown): DeleteOperationRecord;
+  buildDeleteStages(options: { includeAzureCleanup: boolean }): unknown;
+  startOperation(op: DeleteOperationRecord): DeleteStartResult;
+  toClientView(op: DeleteOperationRecord): unknown;
+  scheduleEnvironmentOperation(
+    instanceId: string,
+    op: DeleteOperationRecord
+  ): boolean;
 
   // --- list-environments ---
   cliExec: EnvironmentsCliExec;

@@ -33,6 +33,7 @@ import {
   recordGitHubEnvironment,
   recordServicePrincipal,
   reconcileRestoredOperation,
+  fromPersistedOperation,
   sanitizeResumeTarget,
   setCloudContext,
   setStageState,
@@ -43,7 +44,14 @@ import {
   OPERATION_SCHEMA_VERSION,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
-  STAGE_VERIFY
+  STAGE_VERIFY,
+  buildDeleteStages,
+  OPERATION_KIND_CREATE,
+  OPERATION_KIND_DELETE,
+  STAGE_DELETE_RADIUS_ENV,
+  STAGE_DELETE_CREDENTIAL,
+  STAGE_DELETE_GITHUB_ENV,
+  STAGE_REVIEW_APP_REGISTRATION
 } from "./operations.js";
 
 function newOp(overrides = {}) {
@@ -64,6 +72,25 @@ function addSafeResumeRequest(op) {
       environment: op.environment,
       provider: op.provider
     }
+  };
+  return op;
+}
+
+function newDeleteOp(requestOverrides = {}) {
+  const op = createOperation({
+    provider: "azure",
+    repo: "contoso/store",
+    environment: "dev",
+    kind: OPERATION_KIND_DELETE,
+    stages: buildDeleteStages({ includeAzureCleanup: true })
+  });
+  op.request = {
+    repo: op.repo,
+    environment: op.environment,
+    provider: op.provider,
+    clientId: "app-1",
+    appDisplayName: "radius-app",
+    ...requestOverrides
   };
   return op;
 }
@@ -108,6 +135,64 @@ describe("stage inventory", () => {
     op.stages[0].state = "warning";
     enterStage(op, STAGE_VERIFY);
     expect(op.stages[0].state).toBe("warning");
+  });
+});
+
+describe("delete stage inventory", () => {
+  it("lists the full Azure teardown sequence in order", () => {
+    const stages = buildDeleteStages();
+    expect(stages.map((s) => s.id)).toEqual([
+      STAGE_DELETE_RADIUS_ENV,
+      STAGE_DELETE_CREDENTIAL,
+      STAGE_DELETE_GITHUB_ENV,
+      STAGE_REVIEW_APP_REGISTRATION
+    ]);
+    expect(
+      stages.every((s) => typeof s.label === "string" && s.label.length > 0)
+    ).toBe(true);
+    expect(stages.every((s) => s.state === "pending")).toBe(true);
+  });
+
+  it("omits the Azure-only credential and app-registration stages for non-Azure providers", () => {
+    const stages = buildDeleteStages({ includeAzureCleanup: false });
+    expect(stages.map((s) => s.id)).toEqual([
+      STAGE_DELETE_RADIUS_ENV,
+      STAGE_DELETE_GITHUB_ENV
+    ]);
+  });
+});
+
+describe("operation kind", () => {
+  it("defaults to the create kind", () => {
+    expect(newOp().kind).toBe(OPERATION_KIND_CREATE);
+  });
+
+  it("stamps the delete kind when requested", () => {
+    const op = newOp({ kind: OPERATION_KIND_DELETE });
+    expect(op.kind).toBe(OPERATION_KIND_DELETE);
+  });
+
+  it("rejects an unknown kind and falls back to create", () => {
+    const op = newOp({ kind: "sideways" });
+    expect(op.kind).toBe(OPERATION_KIND_CREATE);
+  });
+
+  it("surfaces the kind in the client projection", () => {
+    const created = newOp();
+    const deleted = newOp({ kind: OPERATION_KIND_DELETE });
+    expect(toClientView(created).kind).toBe(OPERATION_KIND_CREATE);
+    expect(toClientView(deleted).kind).toBe(OPERATION_KIND_DELETE);
+  });
+
+  it("round-trips the kind through persistence", () => {
+    const op = newOp({ kind: OPERATION_KIND_DELETE });
+    expect(toPersistedOperation(op).kind).toBe(OPERATION_KIND_DELETE);
+  });
+
+  it("treats a persisted record with no kind as a create for backward compatibility", () => {
+    const op = newOp();
+    delete op.kind;
+    expect(toClientView(op).kind).toBe(OPERATION_KIND_CREATE);
   });
 });
 
@@ -521,6 +606,113 @@ describe("summaries and announcements", () => {
     expect(announcementLevel("failed_partial")).toBe("warning");
     expect(announcementLevel("failed")).toBe("error");
   });
+
+  it("words the summary for a delete operation rather than a create", () => {
+    const running = newOp({
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    });
+    enterStage(running, STAGE_DELETE_RADIUS_ENV);
+    expect(summarize(running)).toBe(
+      "Deleting dev — delete radius environment…"
+    );
+
+    const succeeded = newOp({
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    });
+    finishSucceeded(succeeded);
+    expect(summarize(succeeded)).toBe('Environment "dev" deleted.');
+
+    const withWarnings = newOp({
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    });
+    addStep(withWarnings, { label: "a", warning: { code: "x", message: "y" } });
+    finishSucceeded(withWarnings);
+    expect(summarize(withWarnings)).toBe(
+      'Environment "dev" deleted, with 1 warning.'
+    );
+
+    const failed = newOp({
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    });
+    finish(failed, "failed", {
+      failure: { code: "boom", message: "no" }
+    });
+    expect(summarize(failed)).toBe('Deleting environment "dev" failed.');
+
+    const prompting = newOp({
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    });
+    requireInput(prompting, { message: "Delete the app registration?" });
+    expect(summarize(prompting)).toBe("Delete the app registration?");
+  });
+
+  it("words every terminal and fallback state for a delete operation", () => {
+    const make = (mutate: (op: ReturnType<typeof newOp>) => void) => {
+      const op = newOp({
+        kind: OPERATION_KIND_DELETE,
+        stages: buildDeleteStages()
+      });
+      mutate(op);
+      return op;
+    };
+
+    // input_required with no message falls back to the delete-worded prompt.
+    const promptFallback = make((op) => {
+      requireInput(op, {});
+    });
+    expect(summarize(promptFallback)).toBe(
+      "Deleting dev needs a decision from you."
+    );
+
+    // succeeded_with_warnings pluralises correctly for more than one warning.
+    const twoWarnings = make((op) => {
+      addStep(op, { label: "a", warning: { code: "x", message: "y" } });
+      addStep(op, { label: "b", warning: { code: "z", message: "w" } });
+      finishSucceeded(op);
+    });
+    expect(summarize(twoWarnings)).toBe(
+      'Environment "dev" deleted, with 2 warnings.'
+    );
+
+    // action_required uses the terminal user message when present, else a
+    // delete-worded fallback.
+    const actionWithMessage = make((op) => {
+      op.state = "action_required";
+      op.terminal = { userMessage: "Approve the teardown PR." };
+    });
+    expect(summarize(actionWithMessage)).toBe("Approve the teardown PR.");
+    const actionFallback = make((op) => {
+      op.state = "action_required";
+      op.terminal = null;
+    });
+    expect(summarize(actionFallback)).toBe(
+      'Deleting "dev" needs one more step from you.'
+    );
+
+    const failedPartial = make((op) => {
+      op.state = "failed_partial";
+    });
+    expect(summarize(failedPartial)).toBe(
+      'Deleting environment "dev" failed partway through — some resources may remain.'
+    );
+
+    const cancelled = make((op) => {
+      op.state = "cancelled";
+    });
+    expect(summarize(cancelled)).toBe(
+      'Deleting environment "dev" was stopped.'
+    );
+
+    const unknown = make((op) => {
+      op.state = "some-unknown-state";
+    });
+    expect(summarize(unknown)).toBe("");
+  });
 });
 
 describe("client projection", () => {
@@ -873,6 +1065,62 @@ describe("registry", () => {
     });
   });
 
+  it("hydrates a mid-stage delete operation as resumable through the store", async () => {
+    let envelope = null;
+    const store = {
+      async load() {
+        return envelope;
+      },
+      async save(next) {
+        envelope = structuredClone(next);
+      }
+    };
+    const first = createRegistry({ store });
+    const op = newDeleteOp();
+    enterStage(op, STAGE_DELETE_CREDENTIAL);
+    first.put(op);
+    await first.persist();
+
+    const restored = createRegistry({ store });
+    await restored.hydrate();
+    const back = restored.get(op.operationId);
+    expect(back.state).toBe("running");
+    expect(back.endedAt).toBeNull();
+    expect(back.recoveryState).toBe("interrupted");
+    expect(back.request).toMatchObject({ clientId: "app-1" });
+  });
+
+  it("hydrates an input-required delete operation as waiting for input through the store", async () => {
+    let envelope = null;
+    const store = {
+      async load() {
+        return envelope;
+      },
+      async save(next) {
+        envelope = structuredClone(next);
+      }
+    };
+    const first = createRegistry({ store });
+    const op = newDeleteOp({ deleteAppRegistration: true });
+    enterStage(op, STAGE_REVIEW_APP_REGISTRATION);
+    requireInput(op, {
+      code: "delete-app-registration-decision",
+      message: "Delete it?"
+    });
+    first.put(op);
+    await first.persist();
+
+    const restored = createRegistry({ store });
+    await restored.hydrate();
+    const back = restored.get(op.operationId);
+    expect(back.state).toBe("input_required");
+    expect(back.recoveryState).toBe("waiting_input");
+    expect(back.request).toMatchObject({
+      clientId: "app-1",
+      deleteAppRegistration: true
+    });
+  });
+
   it("skips invalid persisted records, reports them, and rewrites a clean envelope", async () => {
     const valid = newOp();
     requireInput(valid, { code: "choose-app", message: "Choose an app." });
@@ -1043,6 +1291,74 @@ describe("startup reconciliation", () => {
     expect(op.state).toBe("failed_partial");
     expect(op.setupArtifacts.cleanup.state).toBe("not_needed");
     expect(op.failure.code).toBe("operation-interrupted");
+  });
+
+  it("persists a typed delete-recovery request for delete operations only", () => {
+    const del = newDeleteOp({ deleteAppRegistration: true });
+    const record = toPersistedOperation(del);
+    expect(record.deleteRecovery).toMatchObject({
+      repo: "contoso/store",
+      environment: "dev",
+      provider: "azure",
+      clientId: "app-1",
+      appDisplayName: "radius-app",
+      deleteAppRegistration: true
+    });
+    // The broad, secret-bearing `request` itself is never persisted.
+    expect(record.request).toBeUndefined();
+
+    const create = newOp();
+    create.request = { clientId: "app-1" };
+    expect(toPersistedOperation(create).deleteRecovery).toBeUndefined();
+  });
+
+  it("keeps a mid-stage delete operation live so the recovery scheduler resumes it", () => {
+    const op = newDeleteOp();
+    enterStage(op, STAGE_DELETE_CREDENTIAL);
+    // Round-trip through the store: the broad request is dropped, the typed
+    // deleteRecovery survives.
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+    expect(restored.request).toBeUndefined();
+    expect(restored.deleteRecovery).toMatchObject({ clientId: "app-1" });
+
+    reconcileRestoredOperation(restored);
+
+    expect(restored.state).toBe("running");
+    expect(restored.endedAt).toBeNull();
+    expect(restored.recoveryState).toBe("interrupted");
+    // The clientId the later stages need is rebuilt from deleteRecovery.
+    expect(restored.request).toMatchObject({ clientId: "app-1" });
+    // The interrupted stage is reset to pending so the resume-safe runner re-runs it.
+    expect(
+      restored.stages.find((s) => s.id === STAGE_DELETE_CREDENTIAL).state
+    ).toBe("pending");
+  });
+
+  it("restores an input-required delete operation from its typed recovery request", () => {
+    const op = newDeleteOp();
+    enterStage(op, STAGE_REVIEW_APP_REGISTRATION);
+    requireInput(op, {
+      code: "delete-app-registration-decision",
+      message: "Delete it?"
+    });
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+    // Delete ops never populate resumeRequest — only deleteRecovery carries the inputs.
+    expect(restored.resumeRequest).toBeUndefined();
+
+    reconcileRestoredOperation(restored);
+
+    expect(restored.state).toBe("input_required");
+    expect(restored.recoveryState).toBe("waiting_input");
+    expect(restored.request).toMatchObject({ clientId: "app-1" });
+  });
+
+  it("falls back to failed_partial for a delete op with no recoverable request", () => {
+    const op = newDeleteOp();
+    delete op.request;
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+    expect(restored.deleteRecovery).toBeUndefined();
+    reconcileRestoredOperation(restored);
+    expect(restored.state).toBe("failed_partial");
   });
 });
 

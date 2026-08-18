@@ -514,6 +514,25 @@ stateDiagram-v2
 
 The panel does not show a percentage because the amount of work varies by path. It shows the current stage, current step when available, elapsed time, and completed-step history.
 
+### Environment deletion reuses the operation model
+
+Issue #303 extends this model to environment deletion. Deleting an environment used to remove only the GitHub environment (`gh api DELETE …/environments/{env}`), leaving the Radius environment on the cluster and the per-environment Azure federated credential (`repo:<owner>/<repo>:environment:<env>`) orphaned. The orphaned credential later surfaces as a confusing OIDC error (`AADSTS7002138`) when an environment of the same name is created.
+
+Deletion is now a background `OperationRecord` with `kind: "delete"`, driven by the same registry, progress panel, journey continuity, keepalive, per-repository single-flight, and restart recovery as creation. `POST /api/delete-environment` fails closed on its existing guards (bad input, an unconfirmable active-app check, and a `409` when an application is still deployed with a redirect to the deployment-deletion flow), discovers the environment's `provider` and `AZURE_CLIENT_ID` from its GitHub variables, then returns `202 Accepted` with the operation view instead of deleting synchronously.
+
+`buildDeleteStages({ includeAzureCleanup })` produces the delete-specific stages. The Azure cleanup and app-registration review stages are included only when the environment resolved to an Azure client ID.
+
+The stage order is load-bearing:
+
+1. **Delete the Radius environment** by dispatching the delete-environment workflow and monitoring its Actions run to completion. This runs first, while the environment's federated credential still exists, because the workflow authenticates to the cluster with it.
+2. **Remove the federated credential** with `az ad app federated-credential delete`.
+3. **Delete the GitHub environment** and drop it from the environment-list cache.
+4. **Review the app registration**: list the remaining federated credentials on the client ID. If any remain, record an informational step and finish. If none remain, `requireInput` raises a `delete-app-registration-decision` prompt carrying the client ID and app display name.
+
+Every step is best-effort and idempotent: a not-found Radius environment, credential, GitHub environment, or app registration is treated as already-deleted and recorded as a warning step, so a partially completed prior deletion still converges. The operation finishes `succeeded` or, when best-effort warnings were recorded, `succeeded_with_warnings`.
+
+The app-registration decision is surfaced as an `input_required` prompt, never an automatic deletion, because the identity may be shared with other environments or repositories. The panel renders a Delete / Keep dialog; the resume request carries `{ checkpoint: "delete-app-registration-decision", repo, environment, provider, deleteAppRegistration }`. On `deleteAppRegistration: true` the runner calls `az ad app delete`; on `false` it records a "kept app registration" step. Because the runner is resume-safe — each stage runs only while it is still pending — a delete operation that was mid-flight when the extension restarted is rescheduled and converges, and an operation parked on the prompt resumes only when the user answers.
+
 ### Blocking prerequisites — operation lifecycle
 
 These are not polish items. Two of them can lose or corrupt a real cloud operation.
