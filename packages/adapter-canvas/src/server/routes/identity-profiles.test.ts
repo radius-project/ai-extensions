@@ -759,4 +759,149 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     expect(recording.status).toBe(400);
     expect(recording.body).toBe('{"error":"disk full"}');
   });
+
+  // ── Truthy non-string inputs (SU-06, SU-07) ────────────────────────────────
+  //
+  // `(value || "").trim()` has no `trim` to call on a truthy non-string, so the
+  // handler throws into its own catch and answers 400 *without* reaching the
+  // port. A future refactor that coerced these to strings instead would switch
+  // the account to "42", or write and delete a credential profile under a
+  // stringified key, while still answering plausibly. The ports below succeed
+  // when called, so only the recorded call count can fail these cases.
+
+  it.each([
+    ["numeric login", '{"login":42}'],
+    ["boolean login", '{"login":true}'],
+    ["array login", '{"login":["octocat"]}'],
+    ["object login", '{"login":{"name":"octocat"}}']
+  ])("rejects a %s without switching accounts", async (_label, body) => {
+    const switches: unknown[] = [];
+    const preferred: unknown[] = [];
+    const recording = await run(
+      "POST",
+      "/api/github-account",
+      body,
+      handleGitHubAccount,
+      dependencies({
+        switchGhAccount: (login) => {
+          switches.push(login);
+          return Promise.resolve({ ok: true });
+        },
+        setPreferredGitHubLogin: (login) => {
+          preferred.push(login);
+        },
+        getGitHubIdentity: () => Promise.resolve(identityFor("octocat"))
+      })
+    );
+    expect(recording.status).toBe(400);
+    expect(recording.headerSteps).toEqual(SET_THEN_WRITE(400));
+    expect(JSON.parse(recording.body)).toHaveProperty("error");
+    expect(switches).toEqual([]);
+    expect(preferred).toEqual([]);
+  });
+
+  it.each([
+    ["numeric repo", '{"repo":42,"name":"prod"}'],
+    ["boolean name", '{"repo":"octo/app","name":true}'],
+    // The array case would coerce to a plausible-looking slug, so a coercing
+    // refactor's response body would look correct while the write was wrong.
+    ["array repo and name", '{"repo":["octo/app"],"name":["prod"]}'],
+    ["object name", '{"repo":"octo/app","name":{"label":"prod"}}']
+  ])("rejects a %s without saving a profile", async (_label, body) => {
+    const saves: unknown[] = [];
+    const recording = await run(
+      "POST",
+      "/api/save-credential-profile",
+      body,
+      handleSaveCredentialProfile,
+      dependencies({
+        saveCredentialProfile: (repo, profile) => {
+          saves.push({ repo, profile });
+          return { name: "prod" };
+        }
+      })
+    );
+    expect(recording.status).toBe(400);
+    expect(recording.headerSteps).toEqual(SET_THEN_WRITE(400));
+    expect(JSON.parse(recording.body)).toHaveProperty("error");
+    expect(saves).toEqual([]);
+  });
+
+  it.each([
+    ["numeric repo", '{"repo":42,"name":"prod"}'],
+    ["boolean name", '{"repo":"octo/app","name":true}'],
+    ["array repo and name", '{"repo":["octo/app"],"name":["prod"]}'],
+    ["object name", '{"repo":"octo/app","name":{"label":"prod"}}']
+  ])("rejects a %s without deleting a profile", async (_label, body) => {
+    // The most consequential case: delete has no `!repo || !name` guard, so
+    // under coercion a truthy non-string would reach the store and destroy a
+    // profile the handler is supposed to reject.
+    const deletes: unknown[] = [];
+    const recording = await run(
+      "POST",
+      "/api/delete-credential-profile",
+      body,
+      handleDeleteCredentialProfile,
+      dependencies({
+        deleteCredentialProfile: (repo, name) => {
+          deletes.push([repo, name]);
+          return true;
+        }
+      })
+    );
+    expect(recording.status).toBe(400);
+    expect(recording.headerSteps).toEqual(SET_THEN_WRITE(400));
+    expect(JSON.parse(recording.body)).toHaveProperty("error");
+    expect(deletes).toEqual([]);
+  });
+
+  // Falsy non-strings are a different path: `||` rescues them before `.trim()`,
+  // so they reach the shared validation guard rather than throwing. That is the
+  // documented save/delete asymmetry, and it is pinned so the two paths cannot
+  // be conflated.
+
+  it.each([
+    ["zero repo", '{"repo":0,"name":"prod"}'],
+    ["false name", '{"repo":"octo/app","name":false}'],
+    ["null repo and name", '{"repo":null,"name":null}']
+  ])(
+    "rejects a %s by validation before the save store",
+    async (_label, body) => {
+      const saves: unknown[] = [];
+      const recording = await run(
+        "POST",
+        "/api/save-credential-profile",
+        body,
+        handleSaveCredentialProfile,
+        dependencies({
+          saveCredentialProfile: (repo, profile) => {
+            saves.push({ repo, profile });
+            return { name: "prod" };
+          }
+        })
+      );
+      expect(recording.status).toBe(400);
+      expect(recording.body).toBe('{"error":"repo and name are required."}');
+      expect(saves).toEqual([]);
+    }
+  );
+
+  it("passes falsy non-string delete fields to the store as empty strings", async () => {
+    const deletes: [string, string][] = [];
+    const recording = await run(
+      "POST",
+      "/api/delete-credential-profile",
+      '{"repo":false,"name":0}',
+      handleDeleteCredentialProfile,
+      dependencies({
+        deleteCredentialProfile: (repo, name) => {
+          deletes.push([repo, name]);
+          return false;
+        }
+      })
+    );
+    expect(recording.status).toBe(200);
+    expect(recording.body).toBe('{"success":true,"removed":false}');
+    expect(deletes).toEqual([["", ""]]);
+  });
 });

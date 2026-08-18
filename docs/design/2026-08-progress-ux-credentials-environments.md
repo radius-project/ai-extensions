@@ -179,8 +179,8 @@ Environment "dev" — ready                                             4m 06s
 Five behaviors define the experience:
 
 1. **The panel does not block the canvas.** The user can navigate away, and the operation continues. This is what makes the keepalive fix a hard prerequisite rather than a follow-up.
-2. **Failure renders in place.** The failing step is marked, everything above it stays on screen, and the next action sits next to it. The current `failEnv` handler in the environment page renderer does the opposite: it hides the modal and writes one string into a status bar.
-3. **Warnings pin to their step.** `showEnvSetupWarnings` in the environment page renderer currently rakes the whole `steps[]` for `⚠️` lines after the fact. Those lines belong on the step that produced them.
+2. **Failure renders in place.** The failing step is marked, everything above it stays on screen, and the next action sits next to it. The current `failEnv` handler, a former environment-page handler, does the opposite: it hides the modal and writes one string into a status bar.
+3. **Warnings pin to their step.** `showEnvSetupWarnings`, a former environment-page handler, currently rakes the whole `steps[]` for `⚠️` lines after the fact. Those lines belong on the step that produced them.
 4. **Another canvas page still shows setup status.** The chip is visible from every page, and the final outcome produces one best-effort timeline entry.
 5. **Nothing ever seizes the user's attention.** The return route is offered, never taken on the user's behalf. See [Journey continuity](#journey-continuity).
 
@@ -190,7 +190,7 @@ Five behaviors define the experience:
 
 The graph page already implements the visual pattern this feature needs, and it is tempting to extract it wholesale. Its _progress model_, however, is exactly what we must not reuse.
 
-`updateWaitingProgress` in the environment page renderer fabricates its percentage from wall-clock elapsed time — `18 + ((elapsed / EXPECTED_GRAPH_DURATION_MS) * 50)`, clamped at 72 — and selects the active stage from hard-coded elapsed thresholds (`elapsed < 45000 ? 0 : elapsed < 150000 ? 1 : …`). `syncProgressMessages` then infers real state by **string-prefix matching on prose**: `latest.indexOf('Checking ') === 0`, `'Found existing app.bicep'`, `'Mapped '`.
+`updateWaitingProgress`, a former graph-page handler, fabricates its percentage from wall-clock elapsed time — `18 + ((elapsed / EXPECTED_GRAPH_DURATION_MS) * 50)`, clamped at 72 — and selects the active stage from hard-coded elapsed thresholds (`elapsed < 45000 ? 0 : elapsed < 150000 ? 1 : …`). `syncProgressMessages`, its sibling on the same page, then infers real state by **string-prefix matching on prose**: `latest.indexOf('Checking ') === 0`, `'Found existing app.bicep'`, `'Mapped '`.
 
 That is a progress bar that is mostly guessing, driven by parsing display copy. **Take the visual vocabulary; leave the elapsed-time percentage and the string parsing behind.** The events this design emits are structured and typed, which is the entire point of defining a record contract.
 
@@ -749,7 +749,7 @@ Multi-cloud rules:
 - Cooperative stop.
 - A bare-page redirect to the running environment operation.
 
-**Implemented in the page renderers, `client.ts`, and `ui.ts`:**
+**Implemented in the page renderers and the browser modules under `src/browser/`:**
 
 - Inline environment progress panel.
 - Cross-page status chip.
