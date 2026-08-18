@@ -224,6 +224,11 @@ function installToLocal() {
       copyFileSync(from, tmp);
       renameSync(tmp, to);
     }
+    const noticesFrom = join(distDir, "THIRD-PARTY-NOTICES.txt");
+    const noticesTo = join(installDir, "THIRD-PARTY-NOTICES.txt");
+    const noticesTmp = `${noticesTo}.tmp-${process.pid}`;
+    copyFileSync(noticesFrom, noticesTmp);
+    renameSync(noticesTmp, noticesTo);
     const checkerFrom = join(
       distDir,
       "skills",

@@ -1,10 +1,14 @@
 import {
   existsSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   type Dirent
 } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -439,6 +443,27 @@ describe("P0-C built Radius extension artifact", () => {
         smoke.renderedPage.split(source).length - 1,
         `${name} payload count`
       ).toBe(1);
+    }
+  });
+
+  it("installs the third-party notices beside the local extension", () => {
+    const installDir = mkdtempSync(join(tmpdir(), "radius-canvas-install-"));
+    const installPath = join(installDir, "extension.mjs");
+    try {
+      execFileSync(process.execPath, ["build.mjs", "--install"], {
+        cwd: join(REPO_ROOT, "packages", "adapter-canvas"),
+        env: {
+          ...process.env,
+          RADIUS_CANVAS_INSTALL_PATH: installPath
+        },
+        stdio: "pipe"
+      });
+
+      expect(
+        readFileSync(join(installDir, "THIRD-PARTY-NOTICES.txt"), "utf8")
+      ).toBe(readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8"));
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
     }
   });
 });
