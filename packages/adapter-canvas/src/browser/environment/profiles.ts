@@ -497,6 +497,9 @@ export function initializeCredentialProfilesPanel(
       bind(profileOptionBindings, optionButton, "click", () => {
         setProfileValue(profile);
         openProfileMenu(false);
+        // Closing the listbox removes the focused option, so hand focus back to
+        // the control that owns the value.
+        button.focus();
       });
       optionsEl.appendChild(optionButton);
     }
@@ -553,6 +556,7 @@ export function initializeCredentialProfilesPanel(
           bind(githubAccountOptionBindings, optionButton, "click", () => {
             void switchGitHubAccount(account.login);
             openGhAccountMenu(false);
+            ghButton?.focus();
           });
         } else {
           // ElementStyle has no opacity/cursor: mark the non-actionable row via

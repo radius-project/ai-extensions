@@ -44,20 +44,20 @@ ${GRAPH_DIFF_SUBTITLE}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Application</label>
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);" for="diff-app">Application</label>
     <select id="diff-app" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:200px; width:auto; max-width:400px;">
       <option value="">Loading applications...</option>
     </select>
   </div>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Base</label>
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);" for="base-branch">Base</label>
     <select id="base-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:180px; width:auto; max-width:400px;">
       <option value="">Loading branches...</option>
     </select>
   </div>
   <span aria-label="from base branch to head branch" style="font-size:18px; color:var(--rad-text-tertiary);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Head</label>
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);" for="head-branch">Head</label>
     <select id="head-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:180px; width:auto; max-width:400px;">
       <option value="">Loading branches...</option>
     </select>
@@ -93,20 +93,20 @@ ${GRAPH_DIFF_SUBTITLE}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Application</label>
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);" for="diff-app">Application</label>
     <select id="diff-app" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:200px; width:auto; max-width:400px;">
       <option value="">Loading applications...</option>
     </select>
   </div>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Base</label>
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);" for="base-branch">Base</label>
     <select id="base-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:180px; width:auto; max-width:400px;">
       ${branchOptionsBase}
     </select>
   </div>
   <span aria-label="from base branch to head branch" style="font-size:18px; color:var(--rad-text-tertiary);">→</span>
   <div style="display:flex; flex-direction:column; gap:4px;">
-    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);">Head</label>
+    <label style="font-size:12px; font-weight:600; color:var(--rad-text-tertiary);" for="head-branch">Head</label>
     <select id="head-branch" style="padding:6px 10px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:13px; background:var(--rad-surface); color:var(--rad-text); min-width:180px; width:auto; max-width:400px;">
       ${branchOptionsHead}
     </select>

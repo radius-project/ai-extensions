@@ -31,11 +31,11 @@ export function credentialsPaneMarkup(activeSubtab: string): string {
     <div class="rad-section">
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
         <div class="rad-field">
-          <label>Profile Name</label>
+          <label for="cred-name-input">Profile Name</label>
           <input id="cred-name-input" type="text" placeholder="e.g. azure-production" />
         </div>
         <div class="rad-field">
-          <label>Provider</label>
+          <label for="cred-provider-select">Provider</label>
           <div class="rad-select-wrap" style="display:block;">
             <select id="cred-provider-select" style="width:100%; min-width:0;">
               <option value="azure">Azure</option>
@@ -62,11 +62,11 @@ export function credentialsPaneMarkup(activeSubtab: string): string {
       <div class="rad-section__title">Account</div>
       <div class="rad-section__desc">Enter your Azure tenant and subscription, then verify your CLI login to ensure you have the necessary credentials.</div>
       <div class="rad-field" style="margin-top:14px;">
-        <label>Tenant ID</label>
+        <label for="az-tenant-id">Tenant ID</label>
         <input id="az-tenant-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
       </div>
       <div class="rad-field" style="margin-top:14px;">
-        <label>Subscription ID</label>
+        <label for="az-sub-id">Subscription ID</label>
         <input id="az-sub-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
       </div>
       <button id="btn-verify-azure" class="rad-btn rad-btn--primary" style="margin-top:16px;">Verify Credentials</button>
@@ -77,10 +77,10 @@ export function credentialsPaneMarkup(activeSubtab: string): string {
       <div class="rad-section__title">Account</div>
       <div class="rad-section__desc">Enter your AWS account details, then verify your CLI login to ensure you have the necessary credentials.</div>
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px;">
-        <div class="rad-field"><label>Account ID</label><input id="aws-account-id" type="text" placeholder="123456789012" /></div>
-        <div class="rad-field"><label>Region</label><input id="aws-region" type="text" placeholder="us-east-1" /></div>
+        <div class="rad-field"><label for="aws-account-id">Account ID</label><input id="aws-account-id" type="text" placeholder="123456789012" /></div>
+        <div class="rad-field"><label for="aws-region">Region</label><input id="aws-region" type="text" placeholder="us-east-1" /></div>
       </div>
-      <div class="rad-field" style="margin-top:14px;"><label>Role ARN (optional)</label><input id="aws-role-arn" type="text" placeholder="arn:aws:iam::123456789012:role/radius-deploy" /></div>
+      <div class="rad-field" style="margin-top:14px;"><label for="aws-role-arn">Role ARN (optional)</label><input id="aws-role-arn" type="text" placeholder="arn:aws:iam::123456789012:role/radius-deploy" /></div>
       <button id="btn-verify-aws" class="rad-btn rad-btn--primary" style="margin-top:16px;">Verify Credentials</button>
     </div>
 

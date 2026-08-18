@@ -116,7 +116,7 @@ export function environmentsPaneMarkup(
     <div class="rad-section">
       <div class="rad-section__title">1 · Name this environment</div>
       <div class="rad-field" style="max-width:420px;">
-        <label>Environment name</label>
+        <label for="env-name-input">Environment name</label>
         <input id="env-name-input" type="text" placeholder="e.g. prod, test, eastus-prod" value="${escapeHtml(
           envName
         )}" />
@@ -232,17 +232,17 @@ export function environmentsPaneMarkup(
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="rad-field">
-            <label>Resource Group</label>
+            <label for="azure-rg-select">Resource Group</label>
             <select id="azure-rg-select"><option value="" disabled selected>Loading…</option></select>
             <input id="azure-rg-custom" type="text" placeholder="Enter resource group" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Cluster</label>
+            <label for="azure-cluster-select">Cluster</label>
             <select id="azure-cluster-select"><option value="" disabled selected>Loading…</option></select>
             <input id="azure-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Namespace</label>
+            <label for="azure-namespace-select">Namespace</label>
             <select id="azure-namespace-select"><option value="" disabled selected>Loading…</option></select>
             <input id="azure-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
           </div>
@@ -257,22 +257,22 @@ export function environmentsPaneMarkup(
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div class="rad-field">
-            <label>EKS Cluster</label>
+            <label for="aws-cluster-select">EKS Cluster</label>
             <select id="aws-cluster-select"><option value="" disabled selected>Loading…</option></select>
             <input id="aws-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Namespace</label>
+            <label for="aws-namespace-select">Namespace</label>
             <select id="aws-namespace-select"><option value="" disabled selected>Loading…</option></select>
             <input id="aws-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>VPC</label>
+            <label for="aws-vpc-select">VPC</label>
             <select id="aws-vpc-select"><option value="" disabled selected>Loading…</option></select>
             <input id="aws-vpc-custom" type="text" placeholder="vpc-xxxxxxxx" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Subnets</label>
+            <label for="aws-subnets-select">Subnets</label>
             <select id="aws-subnets-select"><option value="" disabled selected>Loading…</option></select>
             <input id="aws-subnets-custom" type="text" placeholder="subnet-xxx,subnet-yyy" style="display:none; margin-top:4px;" />
           </div>

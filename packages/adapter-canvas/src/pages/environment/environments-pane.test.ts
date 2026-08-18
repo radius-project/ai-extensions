@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { unlabelledSelectIds } from "../../../test/support/pages/labelled-controls.js";
 import { environmentsPaneMarkup } from "./environments-pane.js";
 
 const baseOptions = {
@@ -9,6 +10,12 @@ const baseOptions = {
 };
 
 describe("environmentsPaneMarkup", () => {
+  it("gives every selector in the create form a programmatic name", () => {
+    expect(unlabelledSelectIds(environmentsPaneMarkup(baseOptions))).toEqual(
+      []
+    );
+  });
+
   it("renders one visible section when the environments sub-tab is active", () => {
     const html = environmentsPaneMarkup(baseOptions);
     expect(html).toContain('<section id="pane-environments" style="">');
@@ -79,6 +86,13 @@ describe("environmentsPaneMarkup", () => {
     );
     expect(html).toContain(
       'role="region" aria-label="Environment setup progress" tabindex="-1"'
+    );
+  });
+
+  it("associates the environment label with its input", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain(
+      '<label for="env-name-input">Environment name</label>'
     );
   });
 });

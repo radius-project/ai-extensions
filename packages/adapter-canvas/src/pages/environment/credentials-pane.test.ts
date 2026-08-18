@@ -42,6 +42,16 @@ describe("credentialsPaneMarkup", () => {
     expect(html).toContain('id="cred-verify-hint"');
   });
 
+  it("associates credential labels with their controls", () => {
+    const html = credentialsPaneMarkup("credentials");
+    expect(html).toContain('<label for="cred-name-input">Profile Name</label>');
+    expect(html).toContain(
+      '<label for="cred-provider-select">Provider</label>'
+    );
+    expect(html).toContain('<label for="az-tenant-id">Tenant ID</label>');
+    expect(html).toContain('<label for="aws-account-id">Account ID</label>');
+  });
+
   it("is markup only, with no interpolation beyond the sub-tab state", () => {
     expect(credentialsPaneMarkup("credentials")).not.toContain("${");
   });

@@ -1,0 +1,30 @@
+{
+  "resources": [
+    {
+      "id": "/planes/radius/local/resourcegroups/default/providers/Applications.Core/applications/radius-app/resources/web",
+      "name": "web",
+      "type": "Radius.Compute/containers",
+      "provisioningState": "NotSpecified",
+      "diffHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "codeReference": "src/web/app.ts#L12",
+      "connections": [],
+      "outputResources": [
+        {
+          "id": "/subscriptions/fixture/resourceGroups/demo/providers/Microsoft.ContainerService/managedClusters/demo",
+          "name": "demo-cluster",
+          "type": "Microsoft.ContainerService/managedClusters"
+        }
+      ]
+    },
+    {
+      "id": "/planes/radius/local/resourcegroups/default/providers/Applications.Core/applications/radius-app/resources/db",
+      "name": "db",
+      "type": "Radius.Data/redisCaches",
+      "provisioningState": "NotSpecified",
+      "diffHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "connections": [],
+      "outputResources": []
+    }
+  ],
+  "icons": {}
+}
