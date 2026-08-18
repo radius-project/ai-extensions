@@ -4,14 +4,20 @@
 export const ENVIRONMENT_CONFIRM_CLIENT_JS = `// ======================== Confirm dialog =========================
 var pendingConfirm = null;
 
-// opts: { title, message, usageLabel, usage, confirmLabel, onConfirm }.
-// Every caller-supplied string reaches the DOM through textContent, so profile
-// and environment names are never parsed as markup.
+// opts: { title, message, usageLabel, usage, confirmLabel, cancelLabel,
+// confirmVariant, onConfirm }. Every caller-supplied string reaches the DOM
+// through textContent, so profile and environment names are never parsed as
+// markup. confirmVariant is 'danger' unless the caller says otherwise: the
+// dialog also explains blocked actions, where the way out is navigation rather
+// than destruction and a red button would misdescribe it.
 function showConfirmDialog(opts) {
     pendingConfirm = opts.onConfirm || null;
     document.getElementById('env-confirm-title').textContent = opts.title || 'Are you sure?';
     document.getElementById('env-confirm-message').textContent = opts.message || '';
-    document.getElementById('env-confirm-ok').textContent = opts.confirmLabel || 'Delete';
+    var okBtn = document.getElementById('env-confirm-ok');
+    okBtn.textContent = opts.confirmLabel || 'Delete';
+    okBtn.className = 'rad-btn ' + (opts.confirmVariant === 'primary' ? 'rad-btn--primary' : 'rad-btn--danger-outline');
+    document.getElementById('env-confirm-cancel').textContent = opts.cancelLabel || 'Cancel';
     var usage = opts.usage || [];
     var usageBlock = document.getElementById('env-confirm-usage');
     var usageList = document.getElementById('env-confirm-usage-list');

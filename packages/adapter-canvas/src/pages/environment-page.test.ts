@@ -725,18 +725,12 @@ describe("environmentPage — environment listing and deletion", () => {
     expect(html).toContain("envPollTimer = setTimeout(loadEnvTable, 10000);");
   });
 
-  it("confirms deletion and redirects the app-deployed conflict to the deployments page", () => {
+  it("routes deletion through the delete-environment API", () => {
     expect(html).toContain("fetch('/api/delete-environment'");
     expect(html).toContain("if (res.d && res.d.code === 'app-deployed')");
-    expect(html).toContain(
-      "showEnvError((res.d.error || 'Delete the application deployment first.') + ' Redirecting you to delete the application…');"
-    );
-    expect(html).toContain(
-      "var target = (res.d && res.d.redirect) || '/?page=deploying';"
-    );
-    expect(html).toContain(
-      "alert((res.d && res.d.error) || 'Could not delete the environment.');"
-    );
+    // The conflict never navigates on a timer: see client-environments.test.ts
+    // for the dialog behaviour this replaced.
+    expect(html).not.toContain("Redirecting you to delete the application");
   });
 
   it("selects a saved credential profile rather than inline cloud fields", () => {

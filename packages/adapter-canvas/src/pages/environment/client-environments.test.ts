@@ -48,7 +48,25 @@ interface EnvRow {
   config?: Record<string, string>;
 }
 
+interface ConfirmOptions {
+  title?: string;
+  message?: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  confirmVariant?: string;
+  onConfirm?: () => void;
+}
+
+interface DeleteResult {
+  ok: boolean;
+  body: Record<string, unknown>;
+}
+
 interface Harness {
+  deleteEnvironment: (name: string, button: FakeElement) => Promise<void>;
+  dialogs: ConfirmOptions[];
+  alerts: string[];
+  location: { href: string };
   showEnvForm: (preset: Record<string, unknown>) => void;
   showEnvSuccessBanner: (provider: string, name: string) => void;
   switchSubtab: (name: string) => void;
@@ -84,7 +102,10 @@ const ELEMENT_IDS = [
 ];
 
 // Builds the fragment's world. `envs` is what /api/list-environments returns.
-function harness(envs: EnvRow[] = []): Harness {
+function harness(
+  envs: EnvRow[] = [],
+  deleteResult: DeleteResult = { ok: true, body: {} }
+): Harness {
   const elements: Record<string, FakeElement> = {};
   for (const id of ELEMENT_IDS) elements[id] = element();
   // The pane ships with the wizard hidden behind the landing view.
@@ -104,8 +125,16 @@ function harness(envs: EnvRow[] = []): Harness {
     }
   };
 
-  const fetchStub = () =>
-    Promise.resolve({ json: () => Promise.resolve({ environments: envs }) });
+  const dialogs: ConfirmOptions[] = [];
+  const alerts: string[] = [];
+  const location = { href: "/?page=environment" };
+  const fetchStub = (url: string) =>
+    url.startsWith("/api/delete-environment") ?
+      Promise.resolve({
+        ok: deleteResult.ok,
+        json: () => Promise.resolve(deleteResult.body)
+      })
+    : Promise.resolve({ json: () => Promise.resolve({ environments: envs }) });
 
   const api = new Function(
     "document",
@@ -121,10 +150,12 @@ function harness(envs: EnvRow[] = []): Harness {
     "loadProfilesIntoEnvSelect",
     "loadGitHubIdentity",
     "loadCredTable",
-    `${ENVIRONMENT_TABLE_CLIENT_JS}; return { showEnvForm: showEnvForm, showEnvLanding: showEnvLanding, loadEnvTable: loadEnvTable, switchSubtab: switchSubtab, showEnvSuccessBanner: showEnvSuccessBanner, selectProfile: function(p) { selectedProfile = p; } };`
+    "showConfirmDialog",
+    "alert",
+    `${ENVIRONMENT_TABLE_CLIENT_JS}; return { showEnvForm: showEnvForm, showEnvLanding: showEnvLanding, loadEnvTable: loadEnvTable, switchSubtab: switchSubtab, showEnvSuccessBanner: showEnvSuccessBanner, deleteEnvironment: deleteEnvironment, selectProfile: function(p) { selectedProfile = p; } };`
   )(
     document,
-    { location: { href: "" } },
+    { location },
     fetchStub,
     "octo/app",
     (config: unknown) => pending.push(config),
@@ -141,8 +172,11 @@ function harness(envs: EnvRow[] = []): Harness {
       if (done) done(Boolean(preset));
     },
     () => {},
-    () => {}
+    () => {},
+    (options: ConfirmOptions) => dialogs.push(options),
+    (message: string) => alerts.push(message)
   ) as {
+    deleteEnvironment: (name: string, button: FakeElement) => void;
     switchSubtab: (name: string) => void;
     showEnvSuccessBanner: (provider: string, name: string) => void;
     selectProfile: (profile: unknown) => void;
@@ -153,6 +187,15 @@ function harness(envs: EnvRow[] = []): Harness {
 
   return {
     showEnvForm: api.showEnvForm,
+    deleteEnvironment: async (name, button) => {
+      api.deleteEnvironment(name, button);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    },
+    dialogs,
+    alerts,
+    location,
     switchSubtab: api.switchSubtab,
     showEnvSuccessBanner: api.showEnvSuccessBanner,
     selectProfile: api.selectProfile,
@@ -297,5 +340,73 @@ describe("environment table — the terminal success banner", () => {
     expect(dom.el("env-success-banner-text").innerHTML).toContain(
       "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;"
     );
+  });
+});
+
+describe("environment table — deleting an environment that still has a deployment", () => {
+  const conflict = {
+    ok: false,
+    body: {
+      code: "app-deployed",
+      error: 'Application "storefront" is still deployed to "prod".',
+      redirect: "/?page=deploying&env=prod"
+    }
+  };
+
+  it("explains the conflict in a dialog and navigates nowhere on its own", async () => {
+    const dom = harness([], conflict);
+    const button = element();
+    await dom.deleteEnvironment("prod", button);
+    expect(dom.dialogs).toHaveLength(1);
+    const dialog = dom.dialogs[0];
+    expect(dialog.title).toBe("Delete the application first");
+    expect(dialog.message).toContain('Application "storefront" is still');
+    expect(dialog.message).toContain("Nothing has been deleted");
+    expect(dialog.confirmLabel).toBe("Go to Deployments");
+    expect(dialog.cancelLabel).toBe("Stay here");
+    // Navigating is a choice, not a destruction, so the button is not red.
+    expect(dialog.confirmVariant).toBe("primary");
+    expect(dom.location.href).toBe("/?page=environment");
+    expect(dom.alerts).toEqual([]);
+  });
+
+  it("leaves the row's Delete button usable while the dialog is open", async () => {
+    const dom = harness([], conflict);
+    const button = element();
+    await dom.deleteEnvironment("prod", button);
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe("Delete Env");
+  });
+
+  it("navigates to the deployment the server pointed at, once the user asks", async () => {
+    const dom = harness([], conflict);
+    await dom.deleteEnvironment("prod", element());
+    dom.dialogs[0].onConfirm?.();
+    expect(dom.location.href).toBe("/?page=deploying&env=prod");
+  });
+
+  it("falls back to the deployments page when the server names no target", async () => {
+    const dom = harness([], {
+      ok: false,
+      body: { code: "app-deployed" }
+    });
+    await dom.deleteEnvironment("prod", element());
+    expect(dom.dialogs[0].message).toContain(
+      "An application is still deployed to this environment."
+    );
+    dom.dialogs[0].onConfirm?.();
+    expect(dom.location.href).toBe("/?page=deploying");
+  });
+
+  it("still alerts on a failure that is not a deployment conflict", async () => {
+    const dom = harness([], {
+      ok: false,
+      body: { error: "Insufficient permissions." }
+    });
+    const button = element();
+    await dom.deleteEnvironment("prod", button);
+    expect(dom.dialogs).toEqual([]);
+    expect(dom.alerts).toEqual(["Insufficient permissions."]);
+    expect(button.disabled).toBe(false);
   });
 });

@@ -151,12 +151,20 @@ function deleteEnvironment(envName, delBtn) {
             if (!res.ok) {
                 delBtn.disabled = false; delBtn.textContent = 'Delete Env';
                 // An environment can't be deleted while an app is still
-                // deployed to it — show the error and send the user to the
-                // application-deletion flow (Deployments page) to remove it.
+                // deployed to it. The way out is the Deployments page, but the
+                // user decides when to go: an automatic redirect took the view
+                // away before the explanation could be read.
                 if (res.d && res.d.code === 'app-deployed') {
-                    showEnvError((res.d.error || 'Delete the application deployment first.') + ' Redirecting you to delete the application…');
                     var target = (res.d && res.d.redirect) || '/?page=deploying';
-                    setTimeout(function() { window.location.href = target; }, 2000);
+                    showConfirmDialog({
+                        title: 'Delete the application first',
+                        message: (res.d.error || 'An application is still deployed to this environment.') +
+                            '\\n\\nNothing has been deleted. Delete the application on the Deployments page, then delete this environment.',
+                        confirmLabel: 'Go to Deployments',
+                        confirmVariant: 'primary',
+                        cancelLabel: 'Stay here',
+                        onConfirm: function() { window.location.href = target; }
+                    });
                     return;
                 }
                 alert((res.d && res.d.error) || 'Could not delete the environment.');

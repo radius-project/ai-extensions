@@ -18,6 +18,7 @@
       "environment, credentials — the environment creation form became a two-step wizard (choose or create a credential profile, then create the environment), because a credential profile only ever exists in service of an environment. The Credentials sub-tab keeps its own standalone create path, since clicking New Credential Profile expresses intent to manage a credential rather than to create an environment. Profiles are create-and-delete only: environments snapshot a profile's values into their own GitHub environment variables at creation, so editing one could never update an existing environment, and renaming was the only way a profile's name could drift from the one recorded on the environments created from it. Deleting an environment or a profile now confirms through one in-page modal (env-confirm-*) instead of window.confirm, and the profile dialog lists the environments created from that profile. The change is additive to the legacy projection: no legacy id, marker, navigation target, state value, pane visibility or /api path was removed. The recorded contentIds, roles, the newly disabled env-step1-next step gate, and the page script digest were re-recorded for the environment and credentials cases to accept the added wizard and confirmation-dialog elements.",
       "environment, credentials — infrastructure discovery now disables the provider's Refresh button for the life of its request and refuses a duplicate request while one is active, auto-selects a sole cluster, and preselects the default namespace. This is script-only: the page script digest was re-recorded for both cases, and every markup projection (contentIds, roles, disabled, panes, state values, /api paths) is byte-identical to the previous recording.",
       "environment, credentials — an environment's Edit action reopens the in-canvas creation form on that environment's stored values instead of navigating out to GitHub's environment settings page. /api/list-environments now also returns each environment's own configuration (resource group, cluster, namespace, and for AWS the VPC and subnets), the row's edit control is an in-page button rather than a link to webUrl, and the form titles itself Edit Environment, fixes the name (the name is the identity the create route writes to, so typing a new one would create a second environment rather than rename this one) and labels its primary button Save Environment. The terminal success banner now says the environment was configured rather than created, because the same resumable operation reports both. Returning from the Credentials sub-tab now hands the in-progress infrastructure selection back to discovery, which previously reverted it to the discovery defaults. The environment and credentials cases gained the env-step2-title and env-name-help ids and re-recorded page digests; no legacy id, marker, navigation target, state value, pane visibility or /api path was removed.",
+      "environment, credentials — deleting an environment that still has an application deployed to it now explains the block in the shared confirmation modal and lets the user choose when to leave. Previously the reason appeared in a banner and the page navigated itself to the Deployments tab two seconds later, so the explanation was gone before it could be read. The dialog states that nothing was deleted, offers Go to Deployments and Stay here, and renders its confirm button in the primary rather than the destructive variant because navigating destroys nothing. The environment-list marker for this path therefore reads 'Delete the application first' instead of 'Delete the application deployment first.', and the environment and credentials page digests were re-recorded. No legacy id, role, navigation target, state value, pane visibility or /api path was removed, and the redirect target the server supplies is still honoured.",
       "deploying, planned, deployed, graph — Deploy is now gated on an environment that finished being created. The deployments form, the planned pane and the deployed app graph read each environment's creation status from /api/list-environments, label an environment that failed or is still being created, prefer a usable one when selecting a default, and keep the primary button disabled with an explanatory title while the selected environment is not usable. On the deployed tab only the deploy mode is gated: an existing deployment stays deletable regardless of how its environment was created. The readiness, labelling and explanation rules live in one set of shared helpers in the repoBranch script so all three panes answer identically. This is script-only: the shared repoBranch digest, the deployed-context page digest and the two deploying page digests were re-recorded, and every markup projection is byte-identical to the previous recording."
     ]
   },
@@ -1549,7 +1550,7 @@
           "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
           "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
           "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21",
-          "page": "c9eb515af99de297ccfb0d211019f483300705f58c2361d28ac94a0754dfb656"
+          "page": "58754abd8e323832e2796517e733be361eb37a1c25946d663335de22caea9e93"
         }
       }
     },
@@ -1568,7 +1569,7 @@
         "Could not load environments.",
         "1 · Name this environment",
         "3 · Deploy identity",
-        "Delete the application deployment first.",
+        "Delete the application first",
         "Environment setup progress",
         "Retry starts cleanly:",
         "View planned graph",
@@ -1854,7 +1855,7 @@
           "heartbeat": "3cf7ca0baf30ad42277eece0b2288e29c6264350c919a9ddeba9bf738b4cb82f",
           "opchip": "eddca7b5341dcb4051211626612facefcf7c531d32c052b37e318dced357567b",
           "feedback": "7eb18dde16f53e349914a9dbb90da3659741ff205006b99f2a3fdf7836c4dc21",
-          "page": "03d3c29335cb483e31a1c585fa3f66823753a1f4513e0b88c858f18a8e693692"
+          "page": "942da4aff2b9647a38246f59c2ddf1065e6303f3d74156a856a6a82693b0e776"
         }
       }
     },
