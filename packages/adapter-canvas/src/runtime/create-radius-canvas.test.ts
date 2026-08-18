@@ -539,6 +539,7 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
       })
     );
     expect(deps.servers.get("radius-panel")).toBe(entry);
+    expect(settled).toBeDefined();
     settled?.();
     releaseFirst?.();
     await firstOpen;
@@ -546,7 +547,7 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     const state = deps.servers.get("radius-panel")!.state;
     expect(state.diffHead).toBe("new");
     expect(
-      state.graphResources?.map((resource) => resource.id) ?? []
+      state.diffResources?.map((resource) => resource.id) ?? []
     ).not.toContain("stale");
   });
 });

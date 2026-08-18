@@ -109,13 +109,17 @@ export function getInjectedGhToken(
   return env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() || "";
 }
 
+const MIN_OPAQUE_TOKEN_REDACTION_LENGTH = 12;
+
+// This module is the gh process boundary, so every diagnostic leaving it must
+// redact both recognizable GitHub credentials and opaque injected tokens.
 export function redactGhCredentials(
   value: string,
   env: NodeJS.ProcessEnv = process.env
 ): string {
   let redacted = value;
   for (const token of [env.GH_TOKEN?.trim(), env.GITHUB_TOKEN?.trim()]) {
-    if (token && token.length >= 4)
+    if (token && token.length >= MIN_OPAQUE_TOKEN_REDACTION_LENGTH)
       redacted = redacted.replaceAll(token, "[REDACTED]");
   }
   return redacted.replace(

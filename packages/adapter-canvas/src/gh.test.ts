@@ -670,6 +670,15 @@ describe("GitHub diagnostic redaction", () => {
       )
     ).toBe("gh failed with [REDACTED] and [REDACTED]");
   });
+
+  it("does not replace incidental text matching a short injected value", async () => {
+    const { redactGhCredentials } = await import("./gh.js");
+    expect(
+      redactGhCredentials("authentication token unavailable", {
+        GH_TOKEN: "token"
+      })
+    ).toBe("authentication token unavailable");
+  });
 });
 
 describe.sequential("getGitHubIdentity / switchGhAccount", () => {
