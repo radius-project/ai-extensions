@@ -29,7 +29,6 @@ import { ensureVendorScripts } from "./vendor.js";
 import {
   sharedCredentials,
   cloudCredential,
-  saveCredentials,
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
@@ -139,9 +138,6 @@ import {
   setSourceRefResources
 } from "./source-refs.js";
 import {
-  generateAzureOIDC,
-  validateAzureCredentials,
-  generateAWSOIDC,
   generateVerifyWorkflow,
   generateDeployWorkflow,
   generateDeleteWorkflow,
@@ -169,14 +165,12 @@ import {
   createDeployStatusReader,
   settleDeployStatuses
 } from "./deploy-artifacts.js";
-import {
-  graphPage,
-  plannedGraphPage,
-  graphDiffPage,
-  deployedGraphPage,
-  environmentPage,
-  deployingPage
-} from "./pages.js";
+import { graphPage } from "./pages/graph-page.js";
+import { plannedGraphPage } from "./pages/planned-graph-page.js";
+import { graphDiffPage } from "./pages/graph-diff-page.js";
+import { deployedGraphPage } from "./pages/deployed-graph-page.js";
+import { environmentPage } from "./pages/environment-page.js";
+import { deployingPage } from "./pages/deploying-page.js";
 import { createCanvasServer } from "./server/create-canvas-server.js";
 import { createRequestHandler as createScaffoldRequestHandler } from "./server/create-request-handler.js";
 import {
@@ -563,7 +557,7 @@ const deploymentsRoutes = createDeploymentsRoutes({
   }
 });
 
-// Composition root for the migrated `azure-discovery` routes. Four seams: the
+// Composition root for the `azure-discovery` routes. Four seams:
 // `az` runner (which carries the agent-session-stripped `cliExec` environment
 // the Azure setup routes run under), the general trimmed-stdout CLI runner the
 // discovery enumeration branches on, and the two pure `azure-oidc` helpers,
@@ -699,22 +693,11 @@ const identityProfilesRoutes = createIdentityProfilesRoutes({
 });
 
 // Composition root for the auth/verify half of the `identity-credentials`
-// family. Fourteen narrow function seams: the two OIDC generators and the Azure
-// credential validator from `infra.ts`, the CLI runner from `gh.ts`, the shared
-// credential writer and its save, an instance-state reader, and the GUID,
-// Azure-message, prompt-builder and error helpers that stay defined here. The
-// session-prompt hook is bound here too so the route module never reads the
+// family. Eight narrow function seams: the CLI runner from `gh.ts`, and the
+// GUID, Azure-message, prompt-builder and error helpers that stay defined here.
+// The session-prompt hook is bound here too so the route module never reads the
 // mutable module-level handler.
 const identityAuthRoutes = createIdentityAuthRoutes({
-  validateAzureCredentials,
-  generateAzureOIDC,
-  generateAWSOIDC,
-  readInstanceState: (instanceId) =>
-    canvasServer.instances.get(instanceId)?.state,
-  setSharedAzureCredentials: (credentials) => {
-    sharedCredentials.azure = credentials;
-  },
-  saveCredentials,
   azureCredentialIdValidationError,
   azureLoginRequiredResponse,
   isCliCommandMissing,
@@ -1067,7 +1050,7 @@ const canvasServer = createCanvasServer(
   })
 );
 
-// Compatibility facade shared with the SDK runtime during the route migration.
+// Shared instance registry used by the runtime and request handler.
 export const servers = canvasServer.instances;
 
 let environmentOperationTestRunner:

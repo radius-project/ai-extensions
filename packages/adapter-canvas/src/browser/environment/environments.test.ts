@@ -439,6 +439,27 @@ describe("environment pane initialization", () => {
     );
   });
 
+  it("restores aws infrastructure when editing an aws environment", async () => {
+    const page = renderPage();
+    page.dependencies.loadProfiles.mockImplementation((profile?: string) => {
+      page.elements.profileSelect.value = profile ?? "";
+    });
+
+    page.controller.showEnvironmentForm({
+      name: "prod",
+      profile: "aws-prod",
+      provider: "aws",
+      config: { cluster: "eks-prod" },
+      editing: "prod"
+    });
+    await flushPromises();
+
+    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
+      { cluster: "eks-prod" },
+      "aws"
+    );
+  });
+
   it("labels a fresh form for creation and carries no pending infrastructure", () => {
     const page = renderPage();
 

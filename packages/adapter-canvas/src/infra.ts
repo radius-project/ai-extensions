@@ -1,8 +1,7 @@
-// Canvas adapter — cloud infrastructure wrappers: OIDC bootstrap, Azure CLI
-// credential validation/login, and GitHub Actions workflow + portal-URL
-// generation. Provider-specific logic is delegated to the @radius-project/core
-// ComputePlatform; this module only orchestrates the local `az` login flow and
-// adapts core outputs for the canvas routes.
+// Canvas adapter — cloud infrastructure wrappers: GitHub Actions workflow and
+// portal-URL generation. Provider-specific logic is delegated to the
+// @radius-project/core ComputePlatform; this module only adapts core outputs
+// for the canvas routes.
 
 import {
   getPlatform,
@@ -24,39 +23,12 @@ import {
 } from "@radius-project/core";
 import type { DeployWorkflowOptions } from "@radius-project/core";
 import {
-  cliExec,
   fetchFileFromRepoResult,
   fetchFileFromRepo,
   getDefaultBranch,
   getBranchHeadSha,
   commitFileToRepo
 } from "./gh.js";
-import type { CanvasState } from "./shared.js";
-
-interface OidcInput {
-  [key: string]: unknown;
-}
-
-interface AzureCredentialInput {
-  tenantId?: string;
-  subscriptionId?: string;
-}
-
-export interface AzureCredentialResult {
-  success: boolean;
-  error?: string;
-  tenantId?: string;
-  subscriptionId?: string;
-  subscriptionName?: string;
-  userName?: string;
-}
-
-interface AzureAccount {
-  tenantId?: string;
-  id?: string;
-  name?: string;
-  user?: { name?: string };
-}
 
 interface ManagedEnvironment {
   name: string;
@@ -112,201 +84,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function parseAzureAccount(text: string): AzureAccount {
-  const value: unknown = JSON.parse(text);
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return {};
-  }
-  const fields = Object.fromEntries(Object.entries(value));
-  const user =
-    (
-      fields.user !== null &&
-      typeof fields.user === "object" &&
-      !Array.isArray(fields.user)
-    ) ?
-      Object.fromEntries(Object.entries(fields.user))
-    : {};
-  return {
-    tenantId: typeof fields.tenantId === "string" ? fields.tenantId : undefined,
-    id: typeof fields.id === "string" ? fields.id : undefined,
-    name: typeof fields.name === "string" ? fields.name : undefined,
-    user: { name: typeof user.name === "string" ? user.name : undefined }
-  };
-}
-
 export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
 export { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE };
-
-export function generateAzureOIDC(data: OidcInput) {
-  const platform = getPlatform("azure");
-  if (!platform) throw new Error("Azure platform is not registered.");
-  return platform.generateOidc(data);
-}
-
-export function validateAzureCredentials(
-  data: AzureCredentialInput
-): Promise<AzureCredentialResult> {
-  return new Promise((resolve) => {
-    const tenantId = data.tenantId || "";
-    const subscriptionId = data.subscriptionId || "";
-    // First check if already logged in
-    cliExec(
-      "az",
-      ["account", "show", "--output", "json"],
-      { timeout: 10000 },
-      (err, stdout) => {
-        if (err) {
-          // Not logged in — trigger login (with tenant if provided)
-          const loginArgs = ["login", "--output", "json"];
-          if (tenantId) loginArgs.splice(1, 0, "--tenant", tenantId);
-          cliExec("az", loginArgs, { timeout: 120000 }, (loginErr) => {
-            if (loginErr) {
-              resolve({
-                success: false,
-                error:
-                  "Azure login failed. Please ensure Azure CLI is installed and try again."
-              });
-              return;
-            }
-            finishAuth(subscriptionId, tenantId, resolve);
-          });
-          return;
-        }
-        // Already logged in
-        try {
-          const account = parseAzureAccount(stdout);
-          if (tenantId && account.tenantId !== tenantId) {
-            // Different tenant — re-login
-            cliExec(
-              "az",
-              ["login", "--tenant", tenantId, "--output", "json"],
-              { timeout: 120000 },
-              (loginErr) => {
-                if (loginErr) {
-                  resolve({
-                    success: false,
-                    error: `Failed to login to tenant ${tenantId}.`
-                  });
-                  return;
-                }
-                finishAuth(subscriptionId, tenantId, resolve);
-              }
-            );
-          } else {
-            finishAuth(
-              subscriptionId,
-              tenantId || account.tenantId || "",
-              resolve
-            );
-          }
-        } catch (e) {
-          finishAuth(subscriptionId, tenantId, resolve);
-        }
-      }
-    );
-  });
-}
-
-export function finishAuth(
-  subscriptionId: string,
-  tenantId: string,
-  resolve: (result: AzureCredentialResult) => void
-): void {
-  if (subscriptionId) {
-    setSubscription(subscriptionId, tenantId, resolve);
-  } else {
-    // No subscription specified — just read current account
-    cliExec(
-      "az",
-      ["account", "show", "--output", "json"],
-      { timeout: 10000 },
-      (err, stdout) => {
-        if (err) {
-          resolve({ success: false, error: "Failed to read account info." });
-          return;
-        }
-        try {
-          const info = parseAzureAccount(stdout);
-          resolve({
-            success: true,
-            tenantId: info.tenantId || tenantId,
-            subscriptionId: info.id || "",
-            subscriptionName: info.name || "",
-            userName: info.user?.name || ""
-          });
-        } catch (e) {
-          resolve({
-            success: true,
-            tenantId,
-            subscriptionId: "",
-            subscriptionName: "",
-            userName: ""
-          });
-        }
-      }
-    );
-  }
-}
-
-export function setSubscription(
-  subscriptionId: string,
-  tenantId: string,
-  resolve: (result: AzureCredentialResult) => void
-): void {
-  cliExec(
-    "az",
-    ["account", "set", "--subscription", subscriptionId],
-    { timeout: 15000 },
-    (err) => {
-      if (err) {
-        resolve({
-          success: false,
-          error: `Subscription ${subscriptionId} not found or not accessible.`
-        });
-        return;
-      }
-      // Verify by showing account info
-      cliExec(
-        "az",
-        ["account", "show", "--output", "json"],
-        { timeout: 10000 },
-        (err2, stdout2) => {
-          if (err2) {
-            resolve({
-              success: false,
-              error: "Failed to verify subscription."
-            });
-            return;
-          }
-          try {
-            const info = parseAzureAccount(stdout2);
-            resolve({
-              success: true,
-              tenantId: info.tenantId || tenantId,
-              subscriptionId: info.id || subscriptionId,
-              subscriptionName: info.name || "",
-              userName: info.user?.name || ""
-            });
-          } catch (e) {
-            resolve({
-              success: true,
-              tenantId,
-              subscriptionId,
-              subscriptionName: "",
-              userName: ""
-            });
-          }
-        }
-      );
-    }
-  );
-}
-
-export function generateAWSOIDC(data: OidcInput) {
-  const platform = getPlatform("aws");
-  if (!platform) throw new Error("AWS platform is not registered.");
-  return platform.generateOidc(data);
-}
 
 /**
  * Fetch a workflow template from radius-project/radius `.github/extension/` at
@@ -555,10 +334,9 @@ function stripWorkflowRunTrigger(yaml: string): string {
 }
 export function generatePortalUrl(
   resourceType: string,
-  provider: string,
-  state: CanvasState
+  provider: string
 ): string {
-  return coreGeneratePortalUrl(resourceType, provider, state);
+  return coreGeneratePortalUrl(resourceType, provider);
 }
 
 // Repo path of the shared verify-credentials workflow the extension commits.

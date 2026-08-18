@@ -11,7 +11,6 @@ export type BrowserEntryName =
   | "delete-dialog"
   | "heartbeat"
   | "operation-chip"
-  | "oidc-page"
   | "deploy-result-page"
   | "environment-page"
   | "deploying-page"
@@ -63,12 +62,6 @@ export const BROWSER_ENTRIES: readonly BrowserEntrySpec<BrowserEntryName>[] = [
     name: "operation-chip",
     file: "./entries/operation-chip.ts",
     initializer: "installOperationChipEntry",
-    globals: []
-  },
-  {
-    name: "oidc-page",
-    file: "./entries/oidc-page.ts",
-    initializer: "installOidcPageEntry",
     globals: []
   },
   {

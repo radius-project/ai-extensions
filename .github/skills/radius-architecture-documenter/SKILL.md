@@ -62,7 +62,7 @@ This is the most critical step. **Do not generate diagrams from memory or assump
 
 - **Respect the core boundary**: `packages/core` must not depend on an adapter, the Copilot SDK, HTTP, or the DOM. Anything touching the outside world goes through a **port**. When documenting a flow, show where it crosses that boundary.
 - **Find port implementations**: A port is defined in `packages/core` and implemented in an adapter (`packages/adapter-canvas`, `packages/adapter-shared`). Search for the port name across `packages/adapter-*` to find its concrete implementation.
-- **Follow canvas registration**: Start at `packages/adapter-canvas/src/extension.ts` (which calls `createCanvas({ id: "radius" })`), then trace how pages (`pages.ts`), the server (`server.ts`), and actions are wired.
+- **Follow canvas registration**: Start at `packages/adapter-canvas/src/extension.ts` (which calls `createCanvas({ id: "radius" })`), then trace how pages (`pages/`), the server (`server.ts`), and actions are wired.
 - **Understand packaging**: `packages/adapter-canvas/build.mjs` (esbuild) bundles the adapter and the `workspace:*` core into `plugins/radius/dist/extension.mjs`, then assembles the rest of the plugin around it. Note what is source vs. generated when documenting the build.
 - **Read test files**: `*.test.ts` files (for example, `appgraph.test.ts`, `rad.test.ts`) reveal expected behavior and interaction patterns.
 

@@ -13,14 +13,12 @@ const https = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock("node:https", () => ({ default: https }));
 
 import { getOrCreateServer } from "../../../src/server.js";
-import {
-  deployedGraphPage,
-  deployingPage,
-  environmentPage,
-  graphDiffPage,
-  graphPage,
-  plannedGraphPage
-} from "../../../src/pages.js";
+import { deployedGraphPage } from "../../../src/pages/deployed-graph-page.js";
+import { deployingPage } from "../../../src/pages/deploying-page.js";
+import { environmentPage } from "../../../src/pages/environment-page.js";
+import { graphDiffPage } from "../../../src/pages/graph-diff-page.js";
+import { graphPage } from "../../../src/pages/graph-page.js";
+import { plannedGraphPage } from "../../../src/pages/planned-graph-page.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { CanvasState } from "../../../src/shared.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";

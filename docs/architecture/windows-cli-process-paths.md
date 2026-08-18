@@ -7,7 +7,7 @@ graph TD
     Pages["Environment and credential pages"]
 
     subgraph Routes["packages/adapter-canvas/src/server/routes"]
-        Identity["identity-auth.ts<br/>POST /api/oidc<br/>POST /api/verify-azure-login<br/>POST /api/verify-aws-login"]
+        Identity["identity-auth.ts<br/>POST /api/verify-azure-login<br/>POST /api/verify-aws-login"]
         Discovery["azure-discovery.ts + discovery.ts<br/>list apps, discover resources"]
         AutoSetup["azure-auto-setup*.ts<br/>POST /api/azure-auto-setup"]
         CreateEnv["create-environment.ts<br/>Azure rollback only"]
@@ -15,7 +15,6 @@ graph TD
 
     subgraph Composition["packages/adapter-canvas/src"]
         Server["server.ts<br/>dependency composition"]
-        Infra["infra.ts<br/>validateAzureCredentials"]
         RunCli["runCliCommand<br/>result object"]
         RunCommand["gh.ts runCommand<br/>Promise wrapper"]
         CliExec["gh.ts cliExec<br/>shared process adapter"]
@@ -38,13 +37,11 @@ graph TD
     Pages -->|server-owned API| AutoSetup
     Pages -->|server-owned API| CreateEnv
 
-    Identity -->|OIDC credential validation| Infra
     Identity -->|Azure and AWS verification| Server
     Discovery -->|injected runners| Server
     AutoSetup -->|external.runAz| Server
     CreateEnv -->|failure cleanup runAzCommand| Server
 
-    Infra -->|direct calls| CliExec
     Server --> RunCli
     Server --> RunCommand
     RunCli --> CliExec
@@ -67,7 +64,6 @@ graph TD
 
 - **`gh.ts cliExec`** is the shared adapter boundary. It strips `COPILOT_AGENT_SESSION_ID`, applies GitHub token selection for `gh`, and calls Node's `execFile`.
 - **`server.ts`** injects `runCliCommand`, `runCommand`, or a direct `cliExec` port into route families. The route modules do not spawn processes themselves.
-- **`infra.ts`** is the one production module outside the route composition that calls `cliExec` directly. `POST /api/oidc` reaches it through `validateAzureCredentials`.
 - **Azure auto-setup** performs the largest set of affected calls: account selection, App Registration lookup and creation, ownership, provenance tags, federated credentials, service principals, and role assignments.
 - **Azure discovery** uses the same adapter for `az`, plus `kubectl` after AKS credentials are loaded. AWS discovery and credential verification use it for `aws`.
 - **Create environment** uses local `az` only on Azure failure-cleanup paths. Its normal GitHub workflow creation path uses `gh`.
@@ -76,11 +72,10 @@ graph TD
 
 The Canvas browser calls loopback routes owned by `server.ts`. The composition root supplies each route with a narrow runner rather than allowing route code to import `node:child_process`.
 
-The affected route families reach `cliExec` through three concrete paths:
+The affected route families reach `cliExec` through two concrete paths:
 
-1. `POST /api/oidc` calls `validateAzureCredentials` in `infra.ts`, which calls `cliExec("az", ...)` for account lookup, login, subscription selection, and verification.
-2. Identity verification and discovery routes call the injected `runCommand`; Azure application discovery and auto-setup call `runCliCommand`. Both wrappers end at `cliExec`.
-3. Azure cleanup from `POST /api/create-environment` calls the injected `runAzCommand`, which is `runCliCommand("az", args)` in `server.ts`.
+1. Identity verification and discovery routes call the injected `runCommand`; Azure application discovery and auto-setup call `runCliCommand`. Both wrappers end at `cliExec`.
+2. Azure cleanup from `POST /api/create-environment` calls the injected `runAzCommand`, which is `runCliCommand("az", args)` in `server.ts`.
 
 On Windows, `cliExec` detects `gh` and invokes `gh.exe` directly. Every other current CLI command is routed through `cmd.exe /c`; that branch is where argument boundaries can be lost and where the planned fix applies. On macOS and Linux, `cliExec` invokes the requested executable directly with the original argv array.
 

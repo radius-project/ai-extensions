@@ -9,7 +9,7 @@
 // Every function here is a pure function of its inputs, so the whole model is
 // unit tested without a browser. The string literals (SVG markup, colours,
 // labels) are reproduced verbatim from the legacy renderer so the compiled
-// bundle — which a page-compatibility oracle indexes — keeps the same text.
+// bundle keeps the same text.
 
 import { isRecord } from "../json.js";
 
