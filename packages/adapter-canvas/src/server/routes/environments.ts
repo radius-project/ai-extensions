@@ -213,6 +213,21 @@ export async function handleDeleteEnvironment(
   }
 }
 
+// The GitHub environment variables that hold what the creation form asks for,
+// mapped to the form's own field names. Everything else the environment stores
+// is either derived from the credential profile or internal Radius state.
+const AZURE_CONFIG_VARIABLES = {
+  resourceGroup: "AZURE_RESOURCE_GROUP",
+  cluster: "AZURE_AKS_CLUSTER_NAME",
+  namespace: "RADIUS_NAMESPACE"
+} as const;
+const AWS_CONFIG_VARIABLES = {
+  cluster: "AWS_EKS_CLUSTER_NAME",
+  namespace: "RADIUS_NAMESPACE",
+  vpcId: "RADIUS_VPC_ID",
+  subnetIds: "RADIUS_SUBNET_IDS"
+} as const;
+
 // The environment picker's listing. Repo-scoped, short-TTL cached, and filtered
 // to environments this extension created (tagged RADIUS_MANAGED). Status comes
 // from the verify-credentials workflow only, not app deployments. Every response
@@ -421,7 +436,19 @@ export async function handleListEnvironments(
           id ?
             `https://github.com/${repo}/settings/environments/${id}/edit`
           : `https://github.com/${repo}/settings/environments`;
-        return { name, provider, status, webUrl, credentialProfile };
+        // The environment's own configuration, so Edit can reopen the creation
+        // form on what this environment actually holds instead of sending the
+        // user to GitHub's settings page. Only the fields the form asks for:
+        // identity and subscription come from the credential profile, and no
+        // secret is stored as a variable in the first place.
+        const config: Record<string, string> = {};
+        for (const [key, variable] of Object.entries(
+          provider === "aws" ? AWS_CONFIG_VARIABLES : AZURE_CONFIG_VARIABLES
+        )) {
+          const value = vars[variable];
+          if (value) config[key] = value;
+        }
+        return { name, provider, status, webUrl, credentialProfile, config };
       })
     );
 

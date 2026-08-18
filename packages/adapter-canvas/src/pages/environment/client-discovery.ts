@@ -203,6 +203,60 @@ function setupAzureInfraFilter() {
         rgSel.value = cluster.resourceGroup;
     });
 }
+// The infrastructure values an edit should restore, held until discovery has
+// populated the dropdowns it must restore them into. Cleared once applied, so a
+// later refresh does not re-impose a selection the user has since changed.
+var PENDING_INFRA = null;
+function setPendingInfraSelection(config) {
+    PENDING_INFRA = config && Object.keys(config).length ? config : null;
+}
+// Restore one stored value. A value discovery still offers is simply selected;
+// one it no longer offers goes into the combo's custom input instead, because
+// dropping an environment's current configuration silently would let the user
+// save a change they never made.
+function restoreInfraValue(selectId, customId, value) {
+    if (!value) return;
+    if (selectOptionValue(selectId, value)) return;
+    var sel = document.getElementById(selectId);
+    var custom = document.getElementById(customId);
+    if (!sel || !custom) return;
+    if (!selectOptionValue(selectId, '__custom__')) return;
+    custom.value = value;
+    custom.style.display = '';
+}
+// What the form currently holds, in the shape setPendingInfraSelection wants.
+// Re-running discovery repopulates the dropdowns from scratch, so anything the
+// user (or an edit) had selected has to be handed back for restoring.
+function currentInfraSelection(provider) {
+    if (provider === 'aws') {
+        return {
+            cluster: getComboValue('aws-cluster-select', 'aws-cluster-custom'),
+            namespace: getComboValue('aws-namespace-select', 'aws-namespace-custom'),
+            vpcId: getComboValue('aws-vpc-select', 'aws-vpc-custom'),
+            subnetIds: getComboValue('aws-subnets-select', 'aws-subnets-custom')
+        };
+    }
+    return {
+        resourceGroup: getComboValue('azure-rg-select', 'azure-rg-custom'),
+        cluster: getComboValue('azure-cluster-select', 'azure-cluster-custom'),
+        namespace: getComboValue('azure-namespace-select', 'azure-namespace-custom')
+    };
+}
+function applyPendingInfraSelection(provider) {
+    if (!PENDING_INFRA) return;
+    var config = PENDING_INFRA;
+    PENDING_INFRA = null;
+    if (provider === 'azure') {
+        restoreInfraValue('azure-rg-select', 'azure-rg-custom', config.resourceGroup);
+        restoreInfraValue('azure-cluster-select', 'azure-cluster-custom', config.cluster);
+        restoreInfraValue('azure-namespace-select', 'azure-namespace-custom', config.namespace);
+    } else {
+        restoreInfraValue('aws-cluster-select', 'aws-cluster-custom', config.cluster);
+        restoreInfraValue('aws-namespace-select', 'aws-namespace-custom', config.namespace);
+        restoreInfraValue('aws-vpc-select', 'aws-vpc-custom', config.vpcId);
+        restoreInfraValue('aws-subnets-select', 'aws-subnets-custom', config.subnetIds);
+    }
+}
 function discoverResources(provider, subId, tenantId) {
     if (discoveryInFlight(provider)) return;
     var payload = { provider: provider };
@@ -233,6 +287,7 @@ function discoverResources(provider, subId, tenantId) {
                 populateSelect('aws-vpc-select', [{id:'', name:'None (optional)'}].concat(data.vpcs || []), 'Select VPC…');
                 populateSelect('aws-subnets-select', [{id:'', name:'None (optional)'}].concat(data.subnets || []), 'Select subnets…');
             }
+            applyPendingInfraSelection(provider);
             setDiscoveryBusy(provider, false);
         })
         .catch(function(e) {
@@ -421,6 +476,9 @@ function showAppPicker(opts) {
 
 deployBtn.addEventListener('click', function() {
     var btn = this;
+    // Captured now: showEnvLanding() below clears EDIT_TARGET when it closes
+    // the form, and the narration still has to say which action this was.
+    var editing = !!EDIT_TARGET;
     var statusEl = document.getElementById('deploy-status');
     function fail(msg) { statusEl.style.display = 'block'; statusEl.className = 'status error'; statusEl.textContent = msg; }
     if (!selectedProfile) { fail('Please select a credential profile.'); return; }
@@ -449,7 +507,7 @@ deployBtn.addEventListener('click', function() {
         if (!cluster) { fail('Please specify an EKS cluster.'); return; }
     }
 
-    btn.textContent = 'Creating environment…';
+    btn.textContent = editing ? 'Saving environment…' : 'Creating environment…';
     btn.disabled = true;
     statusEl.style.display = 'none';
     var staleWarn = document.getElementById('env-warning-banner');
@@ -465,7 +523,7 @@ deployBtn.addEventListener('click', function() {
     // element is hidden, so writing there would say nothing at all.
     function failEnv(msg) {
         stopEnvProgress();
-        btn.textContent = 'Create Environment'; btn.disabled = false;
+        resetEnvSubmitButton();
         statusEl.style.display = 'none';
         var panel = document.getElementById('env-progress-panel');
         if (panel) {
@@ -481,7 +539,7 @@ deployBtn.addEventListener('click', function() {
     if (provider === 'azure' && (!(selectedProfile.subscriptionId || '').trim() || !(selectedProfile.tenantId || '').trim())) {
         // Still a form-level error, so it belongs on the form, which is still on
         // screen: nothing has started yet.
-        btn.textContent = 'Create Environment'; btn.disabled = false;
+        resetEnvSubmitButton();
         fail('The selected profile needs both a tenant ID and subscription ID. Edit the profile before creating the environment.');
         return;
     }
@@ -494,7 +552,7 @@ deployBtn.addEventListener('click', function() {
     showEnvLanding();
     hideEnvTerminalBanners();
     renderEnvProgress({
-        summary: 'Creating ' + env + '…', provider: provider, environment: env,
+        summary: (editing ? 'Updating ' : 'Creating ') + env + '…', provider: provider, environment: env,
         stages: [], steps: [], terminalState: null, failure: null, startedAt: new Date().toISOString(),
     });
     focusEnvProgressPanel();
@@ -534,7 +592,7 @@ deployBtn.addEventListener('click', function() {
                 var envResult = startResult.d || {};
                 if (envResult.error) {
                     stopEnvProgress();
-                    btn.textContent = 'Create Environment'; btn.disabled = false;
+                    resetEnvSubmitButton();
                     statusEl.style.display = 'none';
                     syncEnvFailureOperation(envResult)
                         .then(function(rendered) {
@@ -550,7 +608,7 @@ deployBtn.addEventListener('click', function() {
             })
     .catch(function(err) {
         stopEnvProgress();
-        btn.textContent = 'Create Environment'; btn.disabled = false;
+        resetEnvSubmitButton();
         statusEl.style.display = 'none';
         syncEnvFailureOperation(err)
             .then(function(rendered) {

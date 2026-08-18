@@ -377,7 +377,7 @@ function resumeEnvProgress(repo) {
 // resumed path and the just-clicked path cannot disagree.
 function applyEnvTerminal(op) {
     var btn = document.getElementById('deploy-btn');
-    if (btn) { btn.textContent = 'Create Environment'; btn.disabled = false; }
+    if (btn) resetEnvSubmitButton();
     var warnings = op.steps.filter(function(s) { return s.state === 'warning'; })
         .map(function(s) { return '⚠️ ' + s.label; });
     if (op.terminalState === 'action_required') {

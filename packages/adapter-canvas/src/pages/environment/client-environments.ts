@@ -30,7 +30,13 @@ function switchSubtab(name) {
         // the landing view: the combo is hidden there, New Environment re-fetches
         // via showEnvForm(), and refreshing would fire resource discovery on a
         // hidden form.
-        if (envForm && envForm.style.display !== 'none') loadProfilesIntoEnvSelect(envProfileSelect.value);
+        // Re-syncing re-runs discovery, which repopulates the infrastructure
+        // dropdowns from scratch — so hand the current selection back first,
+        // or returning from the Credentials sub-tab silently reverts it.
+        if (envForm && envForm.style.display !== 'none') {
+            if (selectedProfile) setPendingInfraSelection(currentInfraSelection(selectedProfile.provider === 'aws' ? 'aws' : 'azure'));
+            loadProfilesIntoEnvSelect(envProfileSelect.value);
+        }
     }
 }
 (function() {
@@ -48,6 +54,12 @@ var envProfileSelect = document.getElementById('env-profile-select'); // hidden 
 var deployBtn = document.getElementById('deploy-btn');
 var PROFILES = [];
 var selectedProfile = null;
+// The most recent environment listing, and the environment currently open for
+// editing ('' while creating a new one). EDIT_TARGET is what makes the form an
+// edit: the create route is idempotent per environment name, so re-submitting
+// it for an existing name updates that environment rather than adding one.
+var ENV_ROWS = [];
+var EDIT_TARGET = '';
 
 function statusCell(status) {
     var map = { success: ['success','Success'], verified: ['success','Verified'], failed: ['failed','Failed'], pending: ['pending','Pending'], unverified: ['pending','Unverified'] };
@@ -74,19 +86,21 @@ function loadEnvTable() {
             body.innerHTML = envs.map(function(e) {
                 var prov = e.provider || '—';
                 var creds = e.credentialProfile || '—';
-                var editHref = e.webUrl || ('https://github.com/' + CTX_REPO + '/settings/environments');
                 return '<tr>' +
                     '<td class="rad-table__env">' + escapeHtmlClient(e.name) + '</td>' +
                     '<td>' + statusCell(e.status) + '</td>' +
                     '<td class="rad-table__provider">' + escapeHtmlClient(prov) + '</td>' +
                     '<td class="rad-table__creds">' + escapeHtmlClient(creds) + '</td>' +
                     '<td class="rad-table__actions">' +
-                        '<a class="rad-link" href="' + escapeHtmlClient(editHref) + '" target="_blank" rel="noopener noreferrer">edit</a>' +
+                        '<button class="rad-link js-edit-env" data-env="' + escapeHtmlClient(e.name) + '" style="background:none; border:none; padding:0; margin:0; font: inherit; cursor:pointer;">edit</button>' +
                         '<button class="rad-btn rad-btn--neutral js-deploy-apps" data-env="' + escapeHtmlClient(e.name) + '" style="margin:0;">Deploy Apps</button>' +
                         '<button class="rad-btn rad-btn--danger-outline js-delete-env" data-env="' + escapeHtmlClient(e.name) + '" style="margin:0;">Delete Env</button>' +
                     '</td>' +
                 '</tr>';
             }).join('');
+            // Keep the rows' own listing so edit can reopen the form on what
+            // this environment actually holds, without a second round trip.
+            ENV_ROWS = envs;
             wireRowActions();
             if (envPollTimer) { clearTimeout(envPollTimer); envPollTimer = null; }
             if (envs.some(function(e) { return e.status === 'pending'; })) {
@@ -98,6 +112,17 @@ function loadEnvTable() {
         });
 }
 function wireRowActions() {
+    document.querySelectorAll('.js-edit-env').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var envName = this.getAttribute('data-env') || '';
+            var row = null;
+            for (var i = 0; i < ENV_ROWS.length; i++) {
+                if (ENV_ROWS[i].name === envName) { row = ENV_ROWS[i]; break; }
+            }
+            if (!row) return;
+            showEnvForm({ name: row.name, profile: row.credentialProfile || '', config: row.config || {}, editing: row.name });
+        });
+    });
     document.querySelectorAll('.js-deploy-apps').forEach(function(btn) {
         btn.addEventListener('click', function() {
             var envName = this.getAttribute('data-env') || '';
@@ -148,10 +173,16 @@ function deleteEnvironment(envName, delBtn) {
 // Opens the two-step wizard. A preset profile (e.g. "Create Env" from the
 // credentials listing) satisfies step 1, so the wizard advances straight to the
 // environment details unless the caller is about to create a profile instead.
+// With preset.editing the same form describes an existing environment: its
+// stored values are pre-filled and its name is fixed, because the name is the
+// identity the create route writes to and typing a new one would silently
+// create a second environment rather than rename this one.
 function showEnvForm(preset) {
     preset = preset || {};
     hideEnvTerminalBanners();
+    EDIT_TARGET = preset.editing || '';
     envNameInput.value = preset.name !== undefined ? preset.name : '';
+    applyEnvEditMode(preset.config || {});
     document.getElementById('az-client-id').value = '';
     clearSharedAppPin();
     document.getElementById('deploy-status').style.display = 'none';
@@ -162,10 +193,37 @@ function showEnvForm(preset) {
     loadProfilesIntoEnvSelect(preset.profile, function(selected) {
         if (!selected || preset.advance === false) return;
         showEnvWizardStep(2);
-        envNameInput.focus();
+        if (!EDIT_TARGET) envNameInput.focus();
     });
     loadGitHubIdentity();
     envProfileButtonFocus();
+}
+// Reflect create-versus-edit in the form itself, and hand the environment's
+// stored infrastructure values to discovery so they are re-selected once the
+// dropdowns have something to select from.
+function applyEnvEditMode(config) {
+    var editing = !!EDIT_TARGET;
+    setPendingInfraSelection(editing ? config : null);
+    envNameInput.disabled = editing;
+    var title = document.getElementById('env-step2-title');
+    if (title) title.textContent = editing ? 'Edit Environment' : 'Create Environment';
+    var nameHelp = document.getElementById('env-name-help');
+    if (nameHelp) {
+        nameHelp.textContent = editing ?
+            'An environment cannot be renamed. Delete it and create a new one to change the name.' :
+            "The deployment target you'll deploy apps into by name.";
+    }
+    resetEnvSubmitLabel();
+}
+// One place decides what the primary button says, so every failure path that
+// re-enables it says the same thing the user pressed.
+function envSubmitLabel() { return EDIT_TARGET ? 'Save Environment' : 'Create Environment'; }
+function resetEnvSubmitLabel() {
+    if (deployBtn) deployBtn.textContent = envSubmitLabel();
+}
+function resetEnvSubmitButton() {
+    resetEnvSubmitLabel();
+    if (deployBtn) deployBtn.disabled = false;
 }
 // Step 1 opens on the credential profile combo, the only control there.
 function envProfileButtonFocus() {
@@ -174,6 +232,8 @@ function envProfileButtonFocus() {
 }
 function showEnvLanding() {
     endCredentialCreation();
+    EDIT_TARGET = '';
+    setPendingInfraSelection(null);
     envForm.style.display = 'none';
     envLanding.style.display = '';
     loadEnvTable();
@@ -182,7 +242,10 @@ function showEnvSuccessBanner(provider, name) {
     var banner = document.getElementById('env-success-banner');
     var text = document.getElementById('env-success-banner-text');
     if (!banner || !text) return;
-    text.innerHTML = 'Successfully created <strong>' + escapeHtmlClient(providerLabel(provider)) +
+    // "configured" rather than "created": the same flow saves an edit to an
+    // existing environment, and the operation this banner reports on can be
+    // resumed after a reload, when the client no longer knows which it was.
+    text.innerHTML = 'Successfully configured <strong>' + escapeHtmlClient(providerLabel(provider)) +
         '</strong> Environment <strong>' + escapeHtmlClient(name) + '</strong>';
     banner.style.display = 'flex';
 }

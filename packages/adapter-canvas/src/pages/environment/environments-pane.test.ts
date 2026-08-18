@@ -112,7 +112,7 @@ describe("environmentsPaneMarkup", () => {
       '<div class="rad-card__title" style="margin:0;">Choose cloud credentials</div>'
     );
     expect(html).toContain(
-      '<div class="rad-card__title" style="margin:0;">Create Environment</div>'
+      '<div class="rad-card__title" id="env-step2-title" style="margin:0;">Create Environment</div>'
     );
     // The stepper above the cards already carries the ordinals, so repeating
     // "Step N" in a title would number the same thing twice.

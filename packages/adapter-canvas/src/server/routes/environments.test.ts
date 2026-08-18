@@ -661,7 +661,8 @@ describe("environments — list-environments", () => {
         provider: "azure",
         status: "success",
         webUrl: "https://github.com/o/r/settings/environments/7/edit",
-        credentialProfile: "prod"
+        credentialProfile: "prod",
+        config: {}
       }
     ]);
     // A matched workspace branch is passed to the background sync.
@@ -671,6 +672,86 @@ describe("environments — list-environments", () => {
       "feat"
     );
     expect(envListCacheSet).toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "azure",
+      "AZURE_CLIENT_ID\tabc\nAZURE_RESOURCE_GROUP\tprod-rg\nAZURE_AKS_CLUSTER_NAME\tprod-aks\nRADIUS_NAMESPACE\tpayments\nAZURE_SUBSCRIPTION_ID\tsub-1",
+      { resourceGroup: "prod-rg", cluster: "prod-aks", namespace: "payments" }
+    ],
+    [
+      "aws",
+      "AWS_ROLE_ARN\tarn:aws:iam::1:role/r\nAWS_EKS_CLUSTER_NAME\teks-1\nRADIUS_NAMESPACE\tpayments\nRADIUS_VPC_ID\tvpc-1\nRADIUS_SUBNET_IDS\tsub-a,sub-b\nAWS_ACCOUNT_ID\t1",
+      {
+        cluster: "eks-1",
+        namespace: "payments",
+        vpcId: "vpc-1",
+        subnetIds: "sub-a,sub-b"
+      }
+    ]
+  ])(
+    "returns the %s environment's own configuration so Edit can reopen the form on it",
+    async (_provider, variables, expected) => {
+      const script: CliScript = {
+        [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+        [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+        [ENV_PATH.vars("o/r", "dev")]: {
+          stdout: `RADIUS_MANAGED\ttrue\n${variables}`
+        },
+        [ENV_PATH.deployments("o/r", "dev")]: { stdout: "" }
+      };
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+      await handleListEnvironments(
+        ctx,
+        deps({
+          now: () => 0,
+          envListCacheGet: () => undefined,
+          envListCacheSet: vi.fn(),
+          cliExec: cliFake(script),
+          readInstanceEntry: () => undefined,
+          repoMatchesWorkspace: () => false,
+          kickoffWorkflowSync: vi.fn()
+        })
+      );
+      expect(JSON.parse(recording.body).environments[0].config).toEqual(
+        expected
+      );
+    }
+  );
+
+  it("omits configuration the environment does not carry", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout:
+          "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc\nAZURE_RESOURCE_GROUP\t\nRADIUS_NAMESPACE\tpayments"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "" }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheSet: vi.fn(),
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+    expect(JSON.parse(recording.body).environments[0].config).toEqual({
+      namespace: "payments"
+    });
   });
 
   it("surfaces the top-level catch as an error payload", async () => {

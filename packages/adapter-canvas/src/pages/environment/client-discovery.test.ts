@@ -38,10 +38,22 @@ class FakeControl {
   addEventListener(): void {}
 }
 
+// The free-text escape hatch that sits under each combo. Only its value and
+// visibility matter to the restore path.
+class FakeCustomInput {
+  value = "";
+  style = { display: "none" };
+  addEventListener(): void {}
+  focus(): void {}
+}
+
 interface Harness {
   discover: (provider: string) => void;
   renderAzureClusters: (list: unknown[], keep: string) => void;
+  setPendingInfraSelection: (config: unknown) => void;
+  currentInfraSelection: (provider: string) => Record<string, string>;
   select: (id: string) => FakeSelect;
+  custom: (id: string) => FakeCustomInput;
   button: (id: string) => { disabled: boolean };
   status: (id: string) => { textContent: string };
   settle: () => Promise<void>;
@@ -74,8 +86,21 @@ function harness(respond: () => Promise<DiscoveryResponse>): Harness {
     "aws-discover-status": { textContent: "" }
   };
 
+  const customs: Record<string, FakeCustomInput> = {};
+  for (const id of [
+    "azure-cluster-custom",
+    "azure-rg-custom",
+    "azure-namespace-custom",
+    "aws-cluster-custom",
+    "aws-namespace-custom",
+    "aws-vpc-custom",
+    "aws-subnets-custom"
+  ]) {
+    customs[id] = new FakeCustomInput();
+  }
   const elements: Record<string, unknown> = {
     ...selects,
+    ...customs,
     ...buttons,
     ...statuses
   };
@@ -111,16 +136,21 @@ function harness(respond: () => Promise<DiscoveryResponse>): Harness {
     "fetch",
     "deployBtn",
     "showEnvLanding",
-    `${ENVIRONMENT_DISCOVERY_CLIENT_JS}; return { discoverResources: discoverResources, renderAzureClusters: renderAzureClusters };`
+    `${ENVIRONMENT_DISCOVERY_CLIENT_JS}; return { discoverResources: discoverResources, renderAzureClusters: renderAzureClusters, setPendingInfraSelection: setPendingInfraSelection, currentInfraSelection: currentInfraSelection };`
   )(document, {}, fetchStub, new FakeControl(), () => {}) as {
     discoverResources: (provider: string) => void;
     renderAzureClusters: (list: unknown[], keep: string) => void;
+    setPendingInfraSelection: (config: unknown) => void;
+    currentInfraSelection: (provider: string) => Record<string, string>;
   };
 
   return {
     discover: api.discoverResources,
     renderAzureClusters: api.renderAzureClusters,
+    setPendingInfraSelection: api.setPendingInfraSelection,
+    currentInfraSelection: api.currentInfraSelection,
     select: (id) => selects[id],
+    custom: (id) => customs[id],
     button: (id) => buttons[id],
     status: (id) => statuses[id],
     // Discovery settles across two microtask hops (response, then json), so the
@@ -261,5 +291,133 @@ describe("azure cluster rendering", () => {
     const dom = harness(ok({}));
     dom.renderAzureClusters([{ id: "only", name: "only" }], "");
     expect(dom.select("azure-cluster-select").value).toBe("only");
+  });
+});
+
+describe("restoring an environment's stored infrastructure", () => {
+  const azureResponse = ok({
+    clusters: [
+      { id: "prod-aks", name: "prod-aks", resourceGroup: "prod-rg" },
+      { id: "dev-aks", name: "dev-aks", resourceGroup: "dev-rg" }
+    ],
+    resourceGroups: [{ id: "prod-rg", name: "prod-rg" }],
+    namespaces: ["default", "payments"]
+  });
+
+  it("selects the stored values once discovery has populated the dropdowns", async () => {
+    const dom = harness(azureResponse);
+    dom.setPendingInfraSelection({
+      resourceGroup: "prod-rg",
+      cluster: "prod-aks",
+      namespace: "payments"
+    });
+    dom.discover("azure");
+    await dom.settle();
+    expect(dom.select("azure-rg-select").value).toBe("prod-rg");
+    expect(dom.select("azure-cluster-select").value).toBe("prod-aks");
+    expect(dom.select("azure-namespace-select").value).toBe("payments");
+  });
+
+  it("falls back to the custom input when discovery no longer offers a stored value", async () => {
+    const dom = harness(azureResponse);
+    dom.setPendingInfraSelection({ namespace: "retired-ns" });
+    dom.discover("azure");
+    await dom.settle();
+    expect(dom.select("azure-namespace-select").value).toBe("__custom__");
+    expect(dom.custom("azure-namespace-custom").value).toBe("retired-ns");
+    expect(dom.custom("azure-namespace-custom").style.display).toBe("");
+  });
+
+  it("leaves the discovery defaults alone when there is nothing to restore", async () => {
+    const dom = harness(azureResponse);
+    dom.setPendingInfraSelection({});
+    dom.discover("azure");
+    await dom.settle();
+    expect(dom.select("azure-namespace-select").value).toBe("default");
+    expect(dom.custom("azure-namespace-custom").style.display).toBe("none");
+  });
+
+  it("applies a restore only once, so a later refresh keeps the user's choice", async () => {
+    const dom = harness(azureResponse);
+    dom.setPendingInfraSelection({ namespace: "payments" });
+    dom.discover("azure");
+    await dom.settle();
+    expect(dom.select("azure-namespace-select").value).toBe("payments");
+    dom.discover("azure");
+    await dom.settle();
+    expect(dom.select("azure-namespace-select").value).toBe("default");
+  });
+
+  it("restores the AWS network values into their own dropdowns", async () => {
+    const dom = harness(
+      ok({
+        clusters: [{ id: "eks-1", name: "eks-1" }],
+        namespaces: ["default", "payments"],
+        vpcs: [{ id: "vpc-123", name: "vpc-123" }],
+        subnets: [{ id: "subnet-a", name: "subnet-a" }]
+      })
+    );
+    dom.setPendingInfraSelection({
+      cluster: "eks-1",
+      namespace: "payments",
+      vpcId: "vpc-123",
+      subnetIds: "subnet-a"
+    });
+    dom.discover("aws");
+    await dom.settle();
+    expect(dom.select("aws-cluster-select").value).toBe("eks-1");
+    expect(dom.select("aws-namespace-select").value).toBe("payments");
+    expect(dom.select("aws-vpc-select").value).toBe("vpc-123");
+    expect(dom.select("aws-subnets-select").value).toBe("subnet-a");
+  });
+});
+
+describe("capturing what the form currently holds", () => {
+  const azureResponse = ok({
+    clusters: [{ id: "prod-aks", name: "prod-aks", resourceGroup: "prod-rg" }],
+    resourceGroups: [{ id: "prod-rg", name: "prod-rg" }],
+    namespaces: ["default", "payments"]
+  });
+
+  it("reads the selected values back in the shape a restore expects", async () => {
+    const dom = harness(azureResponse);
+    dom.setPendingInfraSelection({
+      resourceGroup: "prod-rg",
+      cluster: "prod-aks",
+      namespace: "payments"
+    });
+    dom.discover("azure");
+    await dom.settle();
+    expect(dom.currentInfraSelection("azure")).toEqual({
+      resourceGroup: "prod-rg",
+      cluster: "prod-aks",
+      namespace: "payments"
+    });
+  });
+
+  it("reads a hand-typed value from the custom input rather than the combo", async () => {
+    const dom = harness(azureResponse);
+    dom.setPendingInfraSelection({ namespace: "retired-ns" });
+    dom.discover("azure");
+    await dom.settle();
+    expect(dom.currentInfraSelection("azure").namespace).toBe("retired-ns");
+  });
+
+  it("captures the AWS network fields for an AWS profile", async () => {
+    const dom = harness(
+      ok({
+        clusters: [{ id: "eks-1", name: "eks-1" }],
+        namespaces: ["default"],
+        vpcs: [{ id: "vpc-123", name: "vpc-123" }],
+        subnets: [{ id: "subnet-a", name: "subnet-a" }]
+      })
+    );
+    dom.setPendingInfraSelection({ vpcId: "vpc-123", subnetIds: "subnet-a" });
+    dom.discover("aws");
+    await dom.settle();
+    const captured = dom.currentInfraSelection("aws");
+    expect(captured.vpcId).toBe("vpc-123");
+    expect(captured.subnetIds).toBe("subnet-a");
+    expect(captured).not.toHaveProperty("resourceGroup");
   });
 });

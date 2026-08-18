@@ -163,7 +163,7 @@ export function environmentsPaneMarkup(
   <div id="env-step-details" style="display:none;">
   <div class="rad-card">
     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-      <div class="rad-card__title" style="margin:0;">Create Environment</div>
+      <div class="rad-card__title" id="env-step2-title" style="margin:0;">Create Environment</div>
       <button id="env-step2-back" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to credentials</button>
     </div>
     <!-- 1 · Name this environment -->
@@ -174,7 +174,7 @@ export function environmentsPaneMarkup(
         <input id="env-name-input" type="text" placeholder="e.g. prod, test, eastus-prod" value="${escapeHtml(
           envName
         )}" />
-        <div class="rad-field__help">The deployment target you'll deploy apps into by name.</div>
+        <div class="rad-field__help" id="env-name-help">The deployment target you'll deploy apps into by name.</div>
       </div>
       <!-- Repository and branch are assumed from the current workspace. -->
       <input type="hidden" id="target-repo" value="${escapeHtml(ctxRepo)}" />

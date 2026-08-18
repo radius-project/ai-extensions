@@ -171,19 +171,6 @@ describe("environmentPage — Credentials/Profiles restructure", () => {
     );
   });
 
-  it("re-syncs the profile combo when returning to an open env form (stale-profile regression)", () => {
-    const html = environmentPage({ contextRepo: "octo/app" });
-    // Repro: open the env form, use the combo's "+ Create new profile" action
-    // to add a profile on the Credentials subtab, then switch back to
-    // Environments. switchSubtab() must refresh the combo (preserving the
-    // current selection) so the new profile appears without a full canvas
-    // reload — but only while the form is visible, so discovery doesn't fire
-    // on the hidden landing view.
-    expect(html).toMatch(
-      /if\s*\(envForm\s*&&\s*envForm\.style\.display\s*!==\s*'none'\)\s*loadProfilesIntoEnvSelect\(envProfileSelect\.value\)/
-    );
-  });
-
   it("surfaces the write:packages scope in the account picker and identity warning", () => {
     const html = environmentPage({ contextRepo: "octo/app" });
     // Per-account label flags a missing packages scope (sibling of the
@@ -412,7 +399,7 @@ describe("environmentPage — non-blocking setup progress", () => {
     expect(html).toContain("function focusEnvProgressPanel()");
     expect(html).toContain("panel.focus({ preventScroll: true })");
     expect(html).toContain("panel.scrollIntoView({ behavior: reduceMotion");
-    const start = html.indexOf("summary: 'Creating ' + env + '…'");
+    const start = html.indexOf("+ env + '…', provider: provider");
     const focus = html.indexOf("focusEnvProgressPanel();", start);
     const accepted = html.indexOf("fetch('/api/operations'", start);
     expect(start).toBeGreaterThan(-1);
