@@ -21,6 +21,7 @@ interface LoadGhOptions {
     stdout?: string;
     stderr?: string;
   };
+  ghVersion?: string;
   prime?: boolean;
 }
 
@@ -109,6 +110,7 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
     switchError = null,
     apiLogin = "",
     commandResult,
+    ghVersion = "gh version 2.96.0",
     prime = false
   } = opts;
   setPlatform(platform);
@@ -147,6 +149,9 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
       const env = (options && options.env) || {};
       const hasTok = !!(env.GH_TOKEN || env.GITHUB_TOKEN);
       return done(null, hasTok ? withToken : keyring);
+    }
+    if (a[0] === "--version") {
+      return done(null, ghVersion);
     }
     if (a[0] === "api" && a[1] === "user" && a[2] === "--jq") {
       return done(null, apiLogin);
@@ -726,6 +731,20 @@ describe("GitHub diagnostic redaction", () => {
   });
 });
 
+describe("GitHub CLI multi-account compatibility", () => {
+  it.each([
+    ["gh version 2.39.1 (2024-01-01)", [2, 39], false],
+    ["gh version 2.40.0 (2024-01-01)", [2, 40], true],
+    ["gh version 3.0.0", [3, 0], true],
+    ["unexpected", null, null]
+  ] as const)("parses and classifies %s", async (text, parsed, supported) => {
+    const { parseGhVersion, supportsGhMultiAccount } = await import("./gh.js");
+    const version = parseGhVersion(text);
+    expect(version).toEqual(parsed);
+    if (version) expect(supportsGhMultiAccount(version)).toBe(supported);
+  });
+});
+
 describe.sequential("selected GitHub executor", () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();
@@ -794,6 +813,19 @@ describe.sequential("selected GitHub executor", () => {
     expect(options.env.GH_TOKEN).toBe("opaque-keyring-secret");
     expect(options.env.GITHUB_TOKEN).toBeUndefined();
     expect(executor.credentialSource).toBe("keyring");
+  });
+
+  it("reports an actionable error when GitHub CLI predates multi-account token lookup", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      ghVersion: "gh version 2.39.1"
+    });
+
+    await expect(gh.createSelectedGhExecutor("keyuser")).rejects.toThrow(
+      "GitHub CLI 2.40 or newer"
+    );
   });
 
   it("uses a stronger same-login keyring credential when the injected token lacks required access", async () => {
@@ -895,6 +927,20 @@ describe.sequential("selected GitHub executor", () => {
     await expect(
       executor.runOrThrow(["api", "repos/octo/app"], "Repository check failed")
     ).rejects.toThrow("Repository check failed: denied [REDACTED]");
+  });
+
+  it("keeps the selected credential out of serialized executor state", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      userTokens: { keyuser: "opaque-selected-credential" }
+    });
+    const executor = await gh.createSelectedGhExecutor("keyuser");
+
+    expect(JSON.stringify(executor)).not.toContain(
+      "opaque-selected-credential"
+    );
   });
 
   it("preserves bounded timeouts on selected-account repository reads", async () => {

@@ -137,6 +137,17 @@ export function getInjectedGhToken(
   return env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() || "";
 }
 
+export function parseGhVersion(
+  text: string
+): [major: number, minor: number] | null {
+  const match = text.match(/\bgh version (\d+)\.(\d+)\./i);
+  return match ? [Number(match[1]), Number(match[2])] : null;
+}
+
+export function supportsGhMultiAccount(version: [number, number]): boolean {
+  return version[0] > 2 || (version[0] === 2 && version[1] >= 40);
+}
+
 const MIN_OPAQUE_TOKEN_REDACTION_LENGTH = 12;
 
 // This module is the gh process boundary, so every diagnostic leaving it must
@@ -556,6 +567,19 @@ function ghKeyringTokenForUser(login: string): Promise<string> {
   });
 }
 
+function ghVersion(): Promise<[major: number, minor: number] | null> {
+  return new Promise((resolve) => {
+    execFile(
+      ghExecutable(),
+      ["--version"],
+      { timeout: 5000, windowsHide: true },
+      (error, stdout) => {
+        resolve(error ? null : parseGhVersion((stdout || "").toString()));
+      }
+    );
+  });
+}
+
 function selectedCredentialRedactor(token: string): (value: string) => string {
   return (value) => {
     const selectedRedacted =
@@ -655,6 +679,14 @@ export async function createSelectedGhExecutor(
     Number(account?.scopes.includes("workflow") === true) +
     Number(account?.scopes.includes("write:packages") === true);
   const keyringToken = keyringAccount ? await ghKeyringTokenForUser(login) : "";
+  if (keyringAccount && !keyringToken) {
+    const version = await ghVersion();
+    if (version && !supportsGhMultiAccount(version)) {
+      throw new Error(
+        `GitHub CLI 2.40 or newer is required to select @${login} without relying on the active account. Upgrade GitHub CLI and retry.`
+      );
+    }
+  }
   const useInjected =
     injectedToken !== "" &&
     snapshot.tokenAcct?.login === login &&

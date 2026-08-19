@@ -168,7 +168,16 @@ describe("GitHub account readiness", () => {
       }
     });
     expect(result.repair).toContain(
-      "gh auth refresh --hostname github.com --user octocat"
+      "gh auth switch --hostname github.com --user octocat"
+    );
+    expect(result.repair).toContain(
+      "gh auth refresh --hostname github.com --scopes workflow,read:packages,write:packages"
+    );
+    expect(result.repair).toContain(
+      "gh auth switch --hostname github.com --user original"
+    );
+    expect(result.repair).not.toContain(
+      "auth refresh --hostname github.com --user"
     );
   });
 

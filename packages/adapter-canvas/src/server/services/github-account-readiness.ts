@@ -216,15 +216,20 @@ function repairGuidance(
   login: string,
   needsWorkflow: boolean,
   needsPackages: boolean,
-  repositoryReady: boolean
+  repositoryReady: boolean,
+  originalLogin: string | null
 ): string | null {
   const scopes: string[] = [];
   if (needsWorkflow) scopes.push("workflow");
   if (needsPackages) scopes.push("read:packages", "write:packages");
   if (scopes.length > 0) {
-    return `Refresh @${login} with: gh auth refresh --hostname github.com --user ${login} ${scopes
-      .map((scope) => `--scopes ${scope}`)
-      .join(" ")}`;
+    const refresh = `gh auth refresh --hostname github.com --scopes ${scopes.join(
+      ","
+    )}`;
+    if (originalLogin && originalLogin !== login) {
+      return `GitHub CLI can refresh only the active account. This temporarily changes the machine-wide account: gh auth switch --hostname github.com --user ${login} && ${refresh} && gh auth switch --hostname github.com --user ${originalLogin}`;
+    }
+    return `Run "${refresh}" while @${login} is the active GitHub CLI account. GitHub CLI cannot refresh an inactive account.`;
   }
   if (!repositoryReady) {
     return `Grant @${login} repository administrator access, or select an account that can administer this repository.`;
@@ -328,12 +333,9 @@ export function createGitHubAccountReadinessService(
             return {
               ready,
               checks,
-              repair: repairGuidance(
-                executor.login,
-                !workflowReady,
-                !packagesReady,
-                repository.ready
-              )
+              needsWorkflow: !workflowReady,
+              needsPackages: !packagesReady,
+              repositoryReady: repository.ready
             };
           },
           3000
@@ -352,6 +354,16 @@ export function createGitHubAccountReadinessService(
               )
             };
         const ready = lease.value.ready && restorationReady;
+        const repair =
+          restorationReady ?
+            repairGuidance(
+              lease.selectedLogin,
+              lease.value.needsWorkflow,
+              lease.value.needsPackages,
+              lease.value.repositoryReady,
+              lease.restoration.originalLogin
+            )
+          : lease.restoration.guidance;
         return {
           ready,
           login: lease.selectedLogin,
@@ -361,8 +373,7 @@ export function createGitHubAccountReadinessService(
               "Ready to configure deployments"
             : "Additional GitHub access is required",
           checks,
-          repair:
-            restorationReady ? lease.value.repair : lease.restoration.guidance,
+          repair,
           restoration: lease.restoration
         };
       } catch (error) {
