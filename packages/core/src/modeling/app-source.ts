@@ -170,3 +170,161 @@ export function unsupportedAppSourceReport(repo?: string | null): string {
     "Report the statement above to the user as the outcome, and do not author, guess at, or hand-write an application model. The repository becomes modelable once it contains a Dockerfile for the application."
   ].join("\n");
 }
+
+// ---------------------------------------------------------------------------
+// Multiple candidates: the facts, not the verdict.
+//
+// `ambiguous` reports several Dockerfiles, which is NOT by itself a problem to
+// raise with the user. The product deliberately models a microservices
+// repository — many Dockerfiles, many services — into ONE application: the skill
+// requires exactly one `Radius.Core/applications`, names it after the
+// repository, and has explicit inter-service addressing rules. So a Dockerfile
+// count can never be the trigger for asking where the application lives.
+//
+// The real trigger is one of: the repository holds more than one INDEPENDENT
+// application, which a single definition cannot represent; or nothing in it
+// looks like an application at all, for example Dockerfiles that build only
+// tooling or CI images. Neither is decidable from a file listing. Any rule that
+// tried would be a heuristic that is wrong much of the time, and being wrong
+// here is expensive in both directions: a spurious question interrupts a
+// perfectly ordinary monorepo, and a missed one silently models two unrelated
+// applications as one.
+//
+// So the decision is split. This module owns the mechanical half — which
+// directories are candidates, which workspace manifests are present, and the
+// single copy of the user-facing question — and the agent, which has read the
+// source, owns the judgment. That split is a deliberate, agreed exception to
+// this package owning the whole rule.
+// ---------------------------------------------------------------------------
+
+// The single user-facing question asked when no application can be identified.
+// It lives beside UNSUPPORTED_NO_DOCKERFILE_MESSAGE so the two things we say
+// about an unmodelable repository cannot drift apart.
+export const UNIDENTIFIED_APPLICATION_MESSAGE =
+  "I looked through the repository but could not identify an application or " +
+  "application resources. Which directory contains your application source " +
+  "code and Dockerfile?";
+
+// Root-level files that declare a multi-project workspace. Their presence is
+// evidence FOR one coordinated repository, not against it — a pnpm workspace or
+// a Go workspace is the normal shape of a microservices application whose
+// services ship together. It is offered to the agent as a signal to weigh, never
+// as a rule that decides.
+//
+// Deliberately path-only. A Cargo workspace is declared by a `[workspace]` table
+// inside a root `Cargo.toml`, which cannot be established from a listing, so it
+// is not claimed here rather than being guessed at from the filename.
+export const WORKSPACE_MANIFEST_FILES: readonly string[] = [
+  "pnpm-workspace.yaml",
+  "go.work",
+  "lerna.json",
+  "nx.json",
+  "rush.json",
+  "turbo.json"
+];
+
+// Candidate directories come from repository filenames, and they are
+// interpolated into instructions the agent reads. A path is caller-controlled
+// data, not trusted prose: backticks would break out of the inline code span,
+// and newlines or control characters would let a crafted directory name forge
+// its own instruction lines. Reduce each to a single inert, bounded token, the
+// same way the skill intro treats its repo path.
+function sanitizeForPrompt(value: string): string {
+  return value
+    .replace(/[\u0000-\u001F\u007F]+/g, " ")
+    .replace(/`/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+}
+
+// A crafted or generated repository can hold an unbounded number of Dockerfile
+// directories, and the brief is appended to an already-large prompt. Listing
+// every one could crowd out the skill itself, so the list is bounded and the
+// remainder reported as a count.
+const MAX_LISTED_CANDIDATES = 25;
+
+// The directory that owns a Dockerfile, as a repo-relative path; the repository
+// root is reported as ".".
+function directoryOf(dockerfile: string): string {
+  const slash = normalizePath(dockerfile).lastIndexOf("/");
+  return slash === -1 ? "." : normalizePath(dockerfile).slice(0, slash);
+}
+
+// Candidate application-source directories, derived from Dockerfile paths and
+// deduplicated, preserving findDockerfiles' root-first order. Two Dockerfiles in
+// one directory describe one candidate location, not two.
+export function dockerfileDirectories(
+  dockerfiles: ReadonlyArray<unknown> | null | undefined
+): string[] {
+  if (!Array.isArray(dockerfiles)) return [];
+  const directories = dockerfiles
+    .filter((path): path is string => typeof path === "string")
+    .map(directoryOf);
+  return [...new Set(directories)];
+}
+
+// Root-level workspace manifests present in a listing, in WORKSPACE_MANIFEST_FILES
+// order. Root-level only: a manifest nested inside one package describes that
+// package, not the repository.
+export function findWorkspaceManifests(
+  paths: ReadonlyArray<unknown> | null | undefined
+): string[] {
+  if (!Array.isArray(paths)) return [];
+  const present = new Set(
+    paths
+      .filter((path): path is string => typeof path === "string")
+      .map(normalizePath)
+  );
+  return WORKSPACE_MANIFEST_FILES.filter((file) => present.has(file));
+}
+
+// The agent-facing brief for a repository with several Dockerfiles.
+//
+// Returns null for every other status, so a caller can hand the result straight
+// to the modeling instructions: there is nothing to say when the source location
+// is unambiguous, and 2.1 already owns the no-Dockerfile case.
+//
+// The text leads with the default — model this as ONE application — because that
+// is the correct outcome for the common case, and an agent handed a list of
+// candidates with no framing will read the list itself as a problem. Asking is
+// the exception, and the question is quoted verbatim so it reaches the user in
+// the words this product specified.
+export function ambiguousAppSourceBrief(
+  evaluation: AppSourceEvaluation | null | undefined,
+  paths?: ReadonlyArray<unknown> | null
+): string | null {
+  if (evaluation?.status !== "ambiguous") return null;
+  const directories = dockerfileDirectories(evaluation.dockerfiles);
+  const manifests = findWorkspaceManifests(paths);
+  const shown = directories.slice(0, MAX_LISTED_CANDIDATES);
+  const lines = [
+    "## Where the application lives",
+    "",
+    `This repository has ${evaluation.dockerfiles.length} Dockerfile candidate directories:`,
+    "",
+    ...shown.map((dir) => `- \`${sanitizeForPrompt(dir)}\``)
+  ];
+  if (directories.length > shown.length) {
+    lines.push(`- …and ${directories.length - shown.length} more`);
+  }
+  if (manifests.length > 0) {
+    lines.push(
+      "",
+      `It also declares a multi-project workspace (${manifests.map((file) => `\`${file}\``).join(", ")}). That describes how the repository is ORGANIZED, not that its projects form one application — independent applications share these tools too. Weigh it against the source, do not conclude from it.`
+    );
+  }
+  lines.push(
+    "",
+    "A Dockerfile count is never decisive. Several Dockerfiles are normal and are NOT by themselves a reason to ask the user anything: a microservices repository builds many images and is still ONE application. Nor does this list establish what to model — a Dockerfile may build a CI image, a migration or tooling image, an unused example, or an alternative to another one.",
+    "",
+    "So read the source and establish which of these directories hold application services that share a runtime and deploy together. Model every service you establish that way into a single `Radius.Core/applications` named after the repository, wired together with the skill's addressing rules. For an ordinary multi-service repository that is the expected outcome.",
+    "",
+    "Ask the user only if, after reading the source, you cannot identify an application at all — because the repository holds more than one INDEPENDENT application that a single definition cannot represent, or because nothing here is an application and the Dockerfiles only build tooling or CI images. In that case ask exactly:",
+    "",
+    `> ${UNIDENTIFIED_APPLICATION_MESSAGE}`,
+    "",
+    "Then stop: write no `.radius` files, author no model, and do not guess a directory on the user's behalf. They will answer with a directory and ask for analysis again, which scopes the next run to it. A directory you picked yourself is not an answer."
+  );
+  return lines.join("\n");
+}

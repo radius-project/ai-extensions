@@ -41,6 +41,14 @@ export interface GraphContextHelpers {
     branch: string,
     state: CanvasState
   ): Promise<AppSourceEvaluation>;
+  // The raw listing behind evaluateAppSourceForBranch, for a caller that needs
+  // more than the classification. Null means the listing could not be
+  // established — never that the repository holds no files.
+  listSourceTreeForBranch(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<string[] | null>;
   resolveAppModelStatus(
     repo: string,
     branch: string,
@@ -80,9 +88,9 @@ export function createGraphContextHelpers(
   }
 
   // Picks the lister that can actually see the branch — the local worktree for
-  // the workspace selection, the repository's git tree for any other branch —
-  // and hands the paths to core, which owns what counts as application source.
-  // This adapter's only job is producing the list; it holds no filename rule.
+  // the workspace selection, the repository's git tree for any other branch.
+  // Lister selection lives here, once, so no call site has to know which of the
+  // two can see a given branch.
   //
   // A lookup that did not happen must never read as a repository with no
   // Dockerfile, and the two listers fail differently: the local one rejects or
@@ -91,21 +99,35 @@ export function createGraphContextHelpers(
   // empty listing to `unknown` covers the second, so neither failure reaches a
   // verdict. An empty array here is therefore "could not establish", not "the
   // repository has nothing".
+  //
+  // A consumer of the raw listing must preserve that distinction: null or empty
+  // means the signal is unavailable, never that the repository lacks the files.
+  async function listSourceTreeForBranch(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<string[] | null> {
+    // Without a repository there is nothing to list. The worktree predicate is
+    // fail-closed on an empty repo, so this would otherwise fall through to the
+    // remote lister and spend a doomed `gh api /repos//git/trees/` call, and its
+    // timeout, to arrive at the same answer.
+    if (!repo) return null;
+    return await (
+      deps.workspace.isWorkspaceSelection(state, repo, branch) ?
+        deps.workspace.fetchWorkspaceTree(state, repo, branch)
+      : deps.github.treePaths(repo, branch)).catch(() => null);
+  }
+
+  // Classifies a branch's source listing, handing the paths to core, which owns
+  // what counts as application source. This adapter holds no filename rule.
   async function evaluateAppSourceForBranch(
     repo: string,
     branch: string,
     state: CanvasState
   ): Promise<AppSourceEvaluation> {
-    // Without a repository there is nothing to list. The worktree predicate is
-    // fail-closed on an empty repo, so this would otherwise fall through to the
-    // remote lister and spend a doomed `gh api /repos//git/trees/` call, and its
-    // timeout, to arrive at the same answer.
-    if (!repo) return evaluateAppSource(null);
-    const paths = await (
-      deps.workspace.isWorkspaceSelection(state, repo, branch) ?
-        deps.workspace.fetchWorkspaceTree(state, repo, branch)
-      : deps.github.treePaths(repo, branch)).catch(() => null);
-    return evaluateAppSource(paths);
+    return evaluateAppSource(
+      await listSourceTreeForBranch(repo, branch, state)
+    );
   }
 
   // The model itself is read from `.radius/app.bicep` or, for older layouts, a
@@ -199,6 +221,7 @@ export function createGraphContextHelpers(
     workspaceState,
     fetchBicepForBranch,
     evaluateAppSourceForBranch,
+    listSourceTreeForBranch,
     resolveAppModelStatus
   };
 }
