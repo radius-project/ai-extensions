@@ -3004,6 +3004,272 @@ describe("rollback lifecycle presentation", () => {
   });
 });
 
+// The landing banner says "Environment setup failed". Once the customer rolls
+// that setup back, the sentence is about a decision they already moved past,
+// and the environment rows behind it are being removed, so both the banner and
+// the listing have to follow the rollback rather than the failure.
+describe("rollback and the stale setup-failure banner", () => {
+  const ROLLING_BACK_HEADLINE = {
+    code: "rolling-back",
+    title: "Rolling back created resources…",
+    message: "Radius is removing the resources it created."
+  };
+  const ROLLBACK_ACTION = {
+    id: "rollback",
+    kind: "rollback",
+    label: "Roll back created resources",
+    description: "This cannot be undone.",
+    path: "/api/operations/op-1/rollback",
+    pending: false,
+    tone: "danger",
+    requiresConfirmation: true
+  };
+  const RETRY_CLEANUP_ACTION = {
+    id: "retry-cleanup",
+    kind: "retry_cleanup",
+    label: "Retry rollback",
+    description: "Radius tries again to remove what is still present.",
+    path: "/api/operations/op-1/rollback/retry",
+    pending: false,
+    tone: "danger"
+  };
+  const STOP_ACTION = {
+    id: "stop",
+    kind: "stop",
+    label: "Stop setup",
+    description: "Radius finishes the current step and stops.",
+    path: "/api/operations/op-1/stop",
+    pending: false
+  };
+
+  function failedSetup(browser: ReturnType<typeof setup>): void {
+    // The state a rollback is reached from: the setup failed, so the landing
+    // is already carrying its banner.
+    browser.els[ERROR_BANNER_ID].style.display = "flex";
+  }
+
+  function start(browser: ReturnType<typeof setup>, action: unknown) {
+    const harness = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: harness.deps
+    });
+    controller?.renderProgress(
+      record({
+        state: "failed",
+        terminalState: "failed",
+        failure: { message: "role assignment failed" },
+        actions: [action]
+      })
+    );
+    return { controller, harness };
+  }
+
+  it("takes the banner down and refreshes the listing as soon as the rollback is accepted", async () => {
+    const browser = setup();
+    failedSetup(browser);
+    browser.net.handle(ROLLBACK_ACTION.path, () =>
+      jsonResponse(
+        op({
+          state: "running",
+          terminalState: null,
+          activeCommandKind: "rollback",
+          headline: ROLLING_BACK_HEADLINE
+        })
+      )
+    );
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "running",
+          terminalState: null,
+          activeCommandKind: "rollback",
+          headline: ROLLING_BACK_HEADLINE
+        })
+      )
+    );
+    const { harness } = start(browser, ROLLBACK_ACTION);
+
+    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    browser.els[ROLLBACK_IDS.confirm].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
+      "Rollback started. Removing the resources Radius created…"
+    );
+    // The rows behind that failure are already being removed, so the picker is
+    // asked for the current listing rather than left on the failed one.
+    expect(harness.reloadCount).toBe(1);
+  });
+
+  it("takes the banner down when a rollback retry is accepted", async () => {
+    const browser = setup();
+    failedSetup(browser);
+    browser.net.handle(RETRY_CLEANUP_ACTION.path, () =>
+      jsonResponse({ operation: null })
+    );
+    browser.net.handle(operationsUrl(), () => jsonResponse(op()));
+    const { harness } = start(browser, RETRY_CLEANUP_ACTION);
+
+    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
+    expect(harness.reloadCount).toBe(1);
+  });
+
+  it("leaves the banner up when the server refuses the rollback", async () => {
+    const browser = setup();
+    failedSetup(browser);
+    browser.net.handle(ROLLBACK_ACTION.path, () =>
+      jsonResponse({ error: "operation-already-terminal" }, false, 409)
+    );
+    const { harness } = start(browser, ROLLBACK_ACTION);
+
+    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    browser.els[ROLLBACK_IDS.confirm].dispatch("click");
+    await flushPromises();
+
+    // Nothing was removed, so the failure the banner reports is still true.
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("flex");
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
+      "operation-already-terminal"
+    );
+    expect(harness.reloadCount).toBe(0);
+  });
+
+  it("leaves the banner up for a command that removes nothing", async () => {
+    const browser = setup();
+    failedSetup(browser);
+    browser.net.handle(STOP_ACTION.path, () =>
+      jsonResponse(op({ state: "stopping" }))
+    );
+    browser.net.handle(operationsUrl(), () => jsonResponse(op()));
+    const { harness } = start(browser, STOP_ACTION);
+
+    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("flex");
+    expect(harness.reloadCount).toBe(0);
+  });
+
+  it("keeps the banner down and reloads the listing when the rollback completes", () => {
+    const browser = setup();
+    failedSetup(browser);
+    const harness = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: harness.deps
+    });
+
+    controller?.applyTerminal(
+      record({
+        state: "cancelled",
+        terminalState: "cancelled",
+        headline: {
+          code: "rollback-complete",
+          title: "Rollback complete",
+          message: "Radius removed the resources it created."
+        }
+      })
+    );
+
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
+    expect(harness.errors).toEqual([]);
+    // The rolled-back environment is gone from GitHub, so the picker is asked
+    // again rather than left showing it.
+    expect(harness.reloadCount).toBe(1);
+  });
+
+  it("keeps the banner down when the rollback finishes with items still present", () => {
+    const browser = setup();
+    failedSetup(browser);
+    const harness = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: harness.deps
+    });
+
+    controller?.applyTerminal(
+      record({
+        state: "failed_partial",
+        terminalState: "failed_partial",
+        failure: { message: "Radius could not delete the role assignment." },
+        headline: {
+          code: "rollback-incomplete",
+          title: "Rollback finished with items still present",
+          message: "Two resources are still present."
+        }
+      })
+    );
+
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
+    // An incomplete rollback still reports itself as a rollback, not as a
+    // broken setup, and still refreshes the listing it changed.
+    expect(harness.errors).toEqual([]);
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Two resources are still present."
+    );
+    expect(
+      browser.els[PROGRESS_IDS.panel].classList.contains("env-progress--failed")
+    ).toBe(true);
+    expect(harness.reloadCount).toBe(1);
+  });
+
+  it("raises the banner again when the setup itself fails after a rollback", () => {
+    const browser = setup();
+    failedSetup(browser);
+    const harness = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: harness.deps
+    });
+
+    controller?.applyTerminal(
+      record({
+        state: "failed",
+        terminalState: "failed",
+        failure: { message: "role assignment failed" }
+      })
+    );
+
+    expect(harness.errors).toEqual([
+      "Environment setup failed: role assignment failed"
+    ]);
+  });
+
+  it("accepts a rollback on a page that has no banner element", async () => {
+    const browser = setupWithout([ERROR_BANNER_ID]);
+    browser.net.handle(RETRY_CLEANUP_ACTION.path, () =>
+      jsonResponse({ operation: null })
+    );
+    browser.net.handle(operationsUrl(), () => jsonResponse(op()));
+    const harness = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: harness.deps
+    });
+    controller?.renderProgress(
+      record({
+        state: "failed",
+        terminalState: "failed",
+        failure: { message: "role assignment failed" },
+        actions: [RETRY_CLEANUP_ACTION]
+      })
+    );
+
+    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    await flushPromises();
+
+    expect(
+      browser.net.calls.some((call) => call.url === RETRY_CLEANUP_ACTION.path)
+    ).toBe(true);
+    expect(harness.reloadCount).toBe(1);
+  });
+});
+
 describe("terminal handling", () => {
   it("marks a succeeded operation and reloads the table", () => {
     const browser = setup();

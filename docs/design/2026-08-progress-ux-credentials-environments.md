@@ -599,6 +599,12 @@ Once credential verification has succeeded, the environment is finished setup an
 
 Rollback removes environment setup artifacts. It never deploys an application, and deployment stays a separate action the customer starts.
 
+#### What the page shows once a rollback starts
+
+The landing's **Environment setup failed** banner describes the outcome the customer is rolling back, so it comes down the moment the server accepts a rollback or a rollback retry, and it stays down for both terminal shapes: a completed rollback (`cancelled` with `rollback-complete`) and one that finished with items still present (`failed_partial` with `rollback-incomplete`). A refused command leaves the banner up, because nothing was removed. An ordinary setup failure still raises it.
+
+The environment listing follows the same rule. The picker's listing is repo-scoped and cached with a short TTL on the server, so a browser reload alone would redisplay a rolled-back environment under the status its last verify run left behind. The deleting pass therefore invalidates that repo's cached listing as soon as it proves the GitHub environment is gone — the same invalidation the **Delete Environment** route performs — and the browser reloads the table when the rollback is accepted and again when it ends. A rollback that could not remove the environment invalidates nothing, because the listing that still shows it is correct.
+
 ### API design
 
 #### `POST /api/operations` — start an operation

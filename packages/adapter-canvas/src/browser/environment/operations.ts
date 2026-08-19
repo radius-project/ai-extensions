@@ -1099,6 +1099,19 @@ export function initializeEnvironmentOperations(
     if (el) el.textContent = message;
   }
 
+  /**
+   * Take down the landing's setup-failure banner.
+   *
+   * The banner states that environment setup failed. Once a rollback is under
+   * way that sentence is about a decision the customer has already moved past,
+   * and leaving it above a panel reporting a completed rollback tells them
+   * their environment is both broken and cleaned up.
+   */
+  function hideErrorBanner(): void {
+    const banner = dom.byId(ERROR_BANNER_ID);
+    if (banner) banner.style.display = "none";
+  }
+
   // ---------------- Rollback confirmation ----------------
   //
   // Removing cloud resources cannot be undone, so the destructive command is
@@ -1316,6 +1329,14 @@ export function initializeEnvironmentOperations(
           return;
         }
         if (updated) renderProgress(updated);
+        // A cleaning command that the server accepted supersedes the failure
+        // the page is still reporting: the banner comes down now rather than
+        // when the rollback ends, and the listing is refreshed because the
+        // resources behind those rows are already being removed.
+        if (CLEANING_COMMAND_KINDS.has(action.kind)) {
+          hideErrorBanner();
+          deps.reloadEnvironmentsTable();
+        }
         // Keep following the same operation. A command that reopened the
         // record rejoins the poller; one that closed it reports its terminal
         // result.
@@ -1564,8 +1585,7 @@ export function initializeEnvironmentOperations(
         ) {
           detailsEl.setAttribute("open", "");
         }
-        const errorBanner = dom.byId(ERROR_BANNER_ID);
-        if (errorBanner) errorBanner.style.display = "none";
+        hideErrorBanner();
         return true;
       })
       .catch(() => false);
@@ -1608,6 +1628,9 @@ export function initializeEnvironmentOperations(
         "env-progress--failed",
         "env-progress--cleaning"
       );
+      // A stop or a completed rollback is the outcome the page now reports, so
+      // any setup-failure banner that preceded it stays down.
+      hideErrorBanner();
       const cancelledActivity = dom.byId(PROGRESS_IDS.activity);
       // Stopped and rolled-back are different outcomes, and the server names
       // which one this is. Only fall back when it does not.
@@ -1623,9 +1646,11 @@ export function initializeEnvironmentOperations(
     ) {
       // A rollback that left something behind is not a failed setup, so it
       // does not get the failure banner that would tell the customer their
-      // environment creation broke.
+      // environment creation broke — and it takes down the one the failed
+      // setup already raised.
       panel.classList.remove("env-progress--done", "env-progress--cleaning");
       panel.classList.add("env-progress--failed");
+      hideErrorBanner();
       const partialActivity = dom.byId(PROGRESS_IDS.activity);
       if (partialActivity) partialActivity.textContent = op.headline.message;
       deps.showSetupWarnings(warnings);
