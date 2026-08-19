@@ -71,7 +71,9 @@ interface ProfilesPage {
   recheckBtn: ReturnType<typeof createFakeInput>;
 }
 
-function renderProfilesPage(): ProfilesPage {
+function renderProfilesPage(
+  options: { omit?: readonly string[] } = {}
+): ProfilesPage {
   const browser = createFakeBrowser();
   const button = createFakeElement(PROFILE_MENU_IDS.button);
   const menu = createFakeElement(PROFILE_MENU_IDS.menu);
@@ -125,6 +127,7 @@ function renderProfilesPage(): ProfilesPage {
     noteEl,
     recheckBtn
   ]) {
+    if (options.omit?.includes(element.id)) continue;
     browser.document.add(element);
   }
 
@@ -271,7 +274,12 @@ describe("parseGithubIdentity", () => {
       ]
     });
     expect(identity.accounts).toEqual([
-      { login: "alice", hasWorkflow: true, hasPackages: true, switchable: true }
+      {
+        login: "alice",
+        hasWorkflow: true,
+        hasPackages: true,
+        switchable: true
+      }
     ]);
   });
 
@@ -481,6 +489,26 @@ describe("profileDetailSpecs", () => {
     );
     expect(specs).toHaveLength(2);
   });
+
+  // Regression: the verified badge used --rad-primary, a fixed brand green
+  // meant for solid fills behind white text. As small text it failed WCAG AA
+  // contrast on the profile panel, which the Chromium accessibility gate
+  // caught. Both branches must use the theme-aware status token.
+  it.each([
+    ["with a signed-in user", AZURE_PROFILE],
+    ["without a signed-in user", { ...AZURE_PROFILE, user: undefined }]
+  ])(
+    "styles the verified badge with the status token %s",
+    (_label, profile) => {
+      const specs = profileDetailSpecs(profile, "azure");
+      const styles = specs
+        .flatMap((spec) => spec.children ?? [])
+        .map((child) => String(child.attrs?.style ?? ""))
+        .filter((style) => style.includes("font-weight:600"));
+      expect(styles).toContain("color:var(--rad-success);font-weight:600;");
+      expect(styles.join(" ")).not.toContain("--rad-primary");
+    }
+  );
 
   it("shows the signed-in user as a hostile-safe text node", () => {
     const specs = profileDetailSpecs(
@@ -889,6 +917,21 @@ describe("profile selection", () => {
     expect(page.providerInput.value).toBe("azure");
     expect(page.panelAzureEl.style.display).toBe("");
     expect(page.panelAwsEl.style.display).toBe("none");
+  });
+
+  it("returns focus to the profile combo after an option is chosen", async () => {
+    const page = renderProfilesPage();
+    const { deps } = makeDeps();
+    await loadAndSelect(page, deps);
+    const before = page.button.focusCount;
+
+    const azureOption = page.optionsEl.children.find(
+      (child) => child.getAttribute("data-name") === "azure-prod"
+    );
+    azureOption?.dispatch("click");
+
+    expect(page.button.focusCount).toBe(before + 1);
+    expect(page.menu.style.display).toBe("none");
   });
 
   it("invokes the injected discoverResources again from the refresh buttons", async () => {
@@ -1314,6 +1357,46 @@ describe("switching a github account", () => {
     );
     expect(() => bobRow?.dispatch("click")).not.toThrow();
     await flushPromises();
+  });
+
+  it("returns focus to the account combo after an option is chosen", async () => {
+    const page = renderProfilesPage();
+    const { deps } = makeDeps();
+    const handle = setupWithAccounts(page, deps);
+    await handle?.loadGithubIdentity();
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      jsonResponse({ ok: true })
+    );
+
+    const before = page.ghButton.focusCount;
+    const bobRow = page.ghOptionsEl.children.find((child) =>
+      fakeText(child).includes("@bob")
+    );
+    bobRow?.dispatch("click");
+    await flushPromises();
+
+    expect(page.ghButton.focusCount).toBe(before + 1);
+    expect(page.ghMenu.style.display).toBe("none");
+  });
+
+  it("still switches accounts when the combo button is absent", async () => {
+    const page = renderProfilesPage({ omit: [GITHUB_IDENTITY_IDS.button] });
+    const { deps } = makeDeps();
+    const handle = setupWithAccounts(page, deps);
+    await handle?.loadGithubIdentity();
+    let postedBody: unknown;
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, (init) => {
+      postedBody = init?.body;
+      return jsonResponse({ ok: true });
+    });
+
+    const bobRow = page.ghOptionsEl.children.find((child) =>
+      fakeText(child).includes("@bob")
+    );
+    expect(() => bobRow?.dispatch("click")).not.toThrow();
+    await flushPromises();
+
+    expect(postedBody).toBe(JSON.stringify({ login: "bob" }));
   });
 
   it("switches accounts and re-checks identity with the repo so repoAccess re-runs", async () => {

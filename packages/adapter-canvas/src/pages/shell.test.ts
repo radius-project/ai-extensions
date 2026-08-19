@@ -192,7 +192,9 @@ describe("pageShell document structure", () => {
   const html = pageShell("Application Graph", '<p id="body">hello</p>');
 
   it("renders one complete document with the head, nav, body content and widgets in order", () => {
-    expect(html.startsWith("<!doctype html>\n<html>\n<head>")).toBe(true);
+    expect(html.startsWith('<!doctype html>\n<html lang="en">\n<head>')).toBe(
+      true
+    );
     expect(html.trimEnd().endsWith("</body>\n</html>")).toBe(true);
     expect(html).toContain('<meta charset="utf-8" />');
     const order = [

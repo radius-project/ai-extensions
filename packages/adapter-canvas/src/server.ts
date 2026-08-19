@@ -3742,3 +3742,10 @@ export async function getOrCreateServer(
 ): Promise<CanvasServerEntry> {
   return await canvasServer.getOrCreate(instanceId, page);
 }
+
+export async function stopServer(
+  instanceId: string,
+  force = false
+): Promise<void> {
+  await canvasServer.stop(instanceId, force);
+}

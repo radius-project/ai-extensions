@@ -132,6 +132,17 @@ describe("createCanvasServer (SU-02)", () => {
     expect(container.instances.size).toBe(0);
   });
 
+  it("force-closes a single instance when requested", async () => {
+    const { container, fakeServers } = setup();
+    await container.getOrCreate("panel-a");
+
+    await container.stop("panel-a", true);
+
+    expect(fakeServers[0].forceCalls).toBe(1);
+    expect(fakeServers[0].closeCalls).toBe(1);
+    expect(container.instances.has("panel-a")).toBe(false);
+  });
+
   it("waits for a pending stop before reopening the same instance", async () => {
     const firstServer = new ManualServer();
     const secondServer = new FakeServer();
