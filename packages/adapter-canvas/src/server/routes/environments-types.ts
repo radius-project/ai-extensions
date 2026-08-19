@@ -134,6 +134,13 @@ export interface EnvironmentsDependencies {
 
   // --- list-environments ---
   cliExec: EnvironmentsCliExec;
+  // The environment name of the repo's in-progress (non-terminal) delete
+  // operation, or "" when none is running. `list-environments` overlays a
+  // synthetic "deleting" status onto that environment so the UI can fail closed
+  // — greying out its Delete and Deploy actions — while cleanup runs. Read live
+  // on every response (never cached) so the overlay clears the moment the
+  // operation reaches a terminal state.
+  activeDeleteEnvironment(repo: string): string;
   envListCacheGet(repo: string): { at: number; payload: unknown } | undefined;
   envListCacheSet(repo: string, entry: { at: number; payload: unknown }): void;
   envListCacheDelete(repo: string): void;

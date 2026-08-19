@@ -16,6 +16,7 @@ import {
   handleDeleteEnvironment,
   handleListEnvironments,
   handleVerifyStatus,
+  overlayDeletingStatus,
   type EnvironmentActiveDeployment,
   type EnvironmentRunDetail,
   type EnvironmentsDependencies,
@@ -118,6 +119,7 @@ function deps(
       "scheduleEnvironmentOperation"
     ) as never,
     cliExec: unset("cliExec") as never,
+    activeDeleteEnvironment: () => "",
     envListCacheGet: unset("envListCacheGet") as never,
     envListCacheSet: unset("envListCacheSet") as never,
     envListCacheDelete: unset("envListCacheDelete") as never,
@@ -944,6 +946,157 @@ describe("environments — list-environments", () => {
     expect(JSON.parse(recording.body)).toEqual({
       environments: [],
       error: "spawn failed"
+    });
+  });
+
+  it("overlays a live deleting status onto the matching environment on a cache hit", async () => {
+    const now = vi.fn(() => 1000);
+    const envListCacheGet = vi.fn(() => ({
+      at: 900,
+      payload: {
+        environments: [
+          { name: "dev", status: "success" },
+          { name: "prod", status: "success" }
+        ]
+      }
+    }));
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now,
+        envListCacheGet,
+        envListTtlMs: 15000,
+        activeDeleteEnvironment: (repo) => (repo === "o/r" ? "prod" : "")
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [
+        { name: "dev", status: "success" },
+        { name: "prod", status: "deleting" }
+      ]
+    });
+  });
+
+  it("caches the real status but serves the deleting overlay on a fresh list", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "42\tcompleted\tsuccess" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: { stdout: "RADIUS_MANAGED\ttrue" },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+      [ENV_PATH.statuses("o/r", "100")]: {
+        stdout: "https://github.com/o/r/actions/runs/42"
+      }
+    };
+    const envListCacheSet = vi.fn();
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheSet,
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn(),
+        activeDeleteEnvironment: () => "dev"
+      })
+    );
+    // The response is overlaid...
+    expect(JSON.parse(recording.body).environments[0]).toMatchObject({
+      name: "dev",
+      status: "deleting"
+    });
+    // ...but the cache keeps the real verify status so the marker clears once
+    // the deletion reaches a terminal state.
+    const cached = envListCacheSet.mock.calls[0][1] as {
+      payload: { environments: { name: string; status: string }[] };
+    };
+    expect(cached.payload.environments[0].status).toBe("success");
+  });
+
+  it("leaves the listing untouched when no deletion is in progress", async () => {
+    const now = vi.fn(() => 1000);
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now,
+        envListCacheGet: () => ({
+          at: 900,
+          payload: { environments: [{ name: "dev", status: "success" }] }
+        }),
+        envListTtlMs: 15000,
+        activeDeleteEnvironment: () => ""
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [{ name: "dev", status: "success" }]
+    });
+  });
+});
+
+describe("environments — overlayDeletingStatus", () => {
+  it("sets only the named environment to deleting", () => {
+    const payload = {
+      environments: [
+        { name: "dev", status: "success" },
+        { name: "prod", status: "pending" }
+      ]
+    };
+    expect(overlayDeletingStatus(payload, "prod")).toEqual({
+      environments: [
+        { name: "dev", status: "success" },
+        { name: "prod", status: "deleting" }
+      ]
+    });
+  });
+
+  it("returns the payload unchanged when the environment name is empty", () => {
+    const payload = { environments: [{ name: "dev", status: "success" }] };
+    expect(overlayDeletingStatus(payload, "")).toBe(payload);
+  });
+
+  it("preserves sibling fields on the payload and each environment", () => {
+    const payload = {
+      environments: [{ name: "dev", status: "success", provider: "azure" }],
+      error: undefined
+    };
+    const result = overlayDeletingStatus(payload, "dev") as {
+      environments: { provider: string; status: string }[];
+    };
+    expect(result.environments[0]).toEqual({
+      name: "dev",
+      status: "deleting",
+      provider: "azure"
+    });
+  });
+
+  it.each([
+    ["null", null],
+    ["a non-object", 42],
+    ["an object without environments", { error: "boom" }],
+    ["environments that is not an array", { environments: "nope" }]
+  ])("returns %s payloads unchanged", (_label, payload) => {
+    expect(overlayDeletingStatus(payload, "dev")).toBe(payload);
+  });
+
+  it("ignores non-object environment entries while overlaying the match", () => {
+    const payload = {
+      environments: [null, { name: "dev", status: "success" }]
+    };
+    expect(overlayDeletingStatus(payload, "dev")).toEqual({
+      environments: [null, { name: "dev", status: "deleting" }]
     });
   });
 });

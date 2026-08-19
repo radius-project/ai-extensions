@@ -268,6 +268,7 @@ const productionHandlers = {
     toClientView: () => ({}),
     scheduleEnvironmentOperation: () => true,
     cliExec: () => {},
+    activeDeleteEnvironment: () => "",
     envListCacheGet: () => undefined,
     envListCacheSet: () => {},
     envListCacheDelete: () => {},

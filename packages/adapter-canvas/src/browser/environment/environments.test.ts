@@ -182,6 +182,7 @@ describe("environment records and markup", () => {
     ["failed", "rad-dot--failed", "Failed"],
     ["pending", "rad-dot--pending", "Pending"],
     ["unverified", "rad-dot--pending", "Unverified"],
+    ["deleting", "rad-dot--pending", "Deleting…"],
     ["unknown", "rad-dot--success", "Available"],
     ["mystery", "rad-dot--pending", "Pending"]
   ])("renders %s status", (status, tone, label) => {
@@ -268,6 +269,44 @@ describe("environment records and markup", () => {
     // a button rather than an external link.
     expect(markup).not.toContain("href=");
     expect(markup).toContain("js-edit-env");
+  });
+
+  it("disables the Delete button for an environment being deleted", () => {
+    const markup = environmentRowsMarkup(
+      [
+        {
+          name: "dev",
+          status: "deleting",
+          provider: "azure",
+          credentialProfile: "profile",
+          webUrl: ""
+        }
+      ],
+      "octo/app"
+    );
+    const deleteButton =
+      /<button[^>]*js-delete-env[^>]*>Delete Env<\/button>/.exec(markup);
+    expect(deleteButton).not.toBeNull();
+    expect(deleteButton?.[0]).toContain("disabled");
+    expect(deleteButton?.[0]).toContain("This environment is being deleted.");
+  });
+
+  it("keeps the Delete button enabled for a normal environment", () => {
+    const markup = environmentRowsMarkup(
+      [
+        {
+          name: "dev",
+          status: "success",
+          provider: "azure",
+          credentialProfile: "profile",
+          webUrl: ""
+        }
+      ],
+      "octo/app"
+    );
+    const deleteButton =
+      /<button[^>]*js-delete-env[^>]*>Delete Env<\/button>/.exec(markup);
+    expect(deleteButton?.[0]).not.toContain("disabled");
   });
 });
 
@@ -718,6 +757,33 @@ describe("environment list behavior", () => {
     expect(rows.deploy.listenerCount("click")).toBe(1);
   });
 
+  it("keeps polling while an environment is being deleted", async () => {
+    const page = renderPage();
+    addRowButtons(page.browser);
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [
+          {
+            name: "dev",
+            status: "deleting",
+            provider: "azure",
+            credentialProfile: "profile"
+          }
+        ]
+      })
+    );
+
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    // A deleting environment schedules a refresh so the row clears once the
+    // teardown finishes and the environment disappears from GitHub.
+    expect(page.browser.clock.timeouts).toBe(1);
+    page.browser.clock.tick(ENVIRONMENT_POLL_MS);
+    await flushPromises();
+    expect(page.browser.net.calls).toHaveLength(2);
+  });
+
   it("navigates to the unqualified deploying page for an unnamed row", async () => {
     const page = renderPage();
     const rows = addRowButtons(page.browser, "");
@@ -1044,6 +1110,21 @@ describe("environment deletion", () => {
     pendingFailure.reject(new Error("late"));
     await flushPromises();
     expect(failure.page.decisions.notify).not.toHaveBeenCalled();
+  });
+
+  it("ignores clicks on a disabled Delete button", async () => {
+    const { page, rows } = await readyDelete();
+    // A row that is mid-deletion renders its Delete button disabled; a click on
+    // it must not start a second deletion.
+    rows.remove.disabled = true;
+    rows.remove.dispatch("click");
+    await flushPromises();
+    expect(page.confirmDialog.show).not.toHaveBeenCalled();
+    expect(
+      page.browser.net.calls.filter(
+        (entry) => entry.url === ENVIRONMENT_DELETE_PATH
+      )
+    ).toHaveLength(0);
   });
 });
 

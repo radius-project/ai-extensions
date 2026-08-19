@@ -109,6 +109,7 @@ import {
   createOperation,
   buildStages,
   buildDeleteStages,
+  OPERATION_KIND_DELETE,
   enterStage,
   setStageState,
   hasWarnings,
@@ -966,6 +967,18 @@ const environmentsRoutes = createEnvironmentsRoutes({
   scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
   cliExec: (command, args, options, callback) => {
     cliExec(command, args, options, callback);
+  },
+  activeDeleteEnvironment: (repo) => {
+    const op = operations.latest(repo);
+    if (
+      op &&
+      op.kind === OPERATION_KIND_DELETE &&
+      !isTerminalState(op.state) &&
+      typeof op.environment === "string"
+    ) {
+      return op.environment;
+    }
+    return "";
   },
   envListCacheGet: (repo) => envListCache.get(repo),
   envListCacheSet: (repo, entry) => {

@@ -21,4 +21,6 @@ Before deleting an unused app registration, the panel **re-lists its federated c
 
 An in-flight deletion is recovered and resumed if the extension restarts: the minimum typed inputs needed to resume (including the app-registration client id and your pending delete decision) are persisted, and a mid-stage or awaiting-decision deletion is rehydrated as resumable instead of being abandoned.
 
+While a deletion is in progress the environment is now reported with a live `deleting` status that greys out the actions that could collide with it: its **Delete Env** button on the Environments tab is disabled, and it can no longer be selected or deployed to on the Deployments tab. The marker is applied fresh on every environment listing (never cached) from the one active delete operation, so it appears the instant deletion starts and clears the instant the operation reaches a terminal state — the row then disappears on success or reverts to its real status on failure.
+
 The background workflow-template sync now authors the static `delete-environment-azure.yml` provider whenever the `delete-environment.yml` dispatcher is present, so a drift rewrite of the dispatcher can never leave a dangling `uses:` reference to an uncommitted reusable workflow.

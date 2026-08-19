@@ -1143,6 +1143,7 @@ describe("deploy flow", () => {
   it.each([
     ["pending", "still being created"],
     ["failed", "was not created successfully"],
+    ["deleting", "is being deleted"],
     ["mystery", "could not be determined"]
   ])(
     "blocks deploy when environment verification is %s",

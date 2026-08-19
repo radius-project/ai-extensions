@@ -311,23 +311,70 @@ const AWS_CONFIG_VARIABLES = {
   subnetIds: "RADIUS_SUBNET_IDS"
 } as const;
 
+// Overlays a synthetic "deleting" status onto the environment named by an
+// in-progress delete operation, leaving every other environment untouched.
+// Applied at response time (never cached) so the marker appears the instant a
+// deletion starts and clears the instant it reaches a terminal state. Returns a
+// shallow copy so the cached listing keeps the environments' real statuses for
+// when the deletion finishes or fails. `deleting` is not a status the
+// verify-credentials lookup can ever produce, so it never collides with a real
+// value.
+export function overlayDeletingStatus(
+  payload: unknown,
+  deletingEnvironment: string
+): unknown {
+  if (
+    deletingEnvironment === "" ||
+    payload === null ||
+    typeof payload !== "object" ||
+    !Array.isArray((payload as { environments?: unknown }).environments)
+  ) {
+    return payload;
+  }
+  const source = payload as {
+    environments: unknown[];
+    [key: string]: unknown;
+  };
+  return {
+    ...source,
+    environments: source.environments.map((environment) => {
+      if (
+        environment !== null &&
+        typeof environment === "object" &&
+        (environment as { name?: unknown }).name === deletingEnvironment
+      ) {
+        return {
+          ...(environment as Record<string, unknown>),
+          status: "deleting"
+        };
+      }
+      return environment;
+    })
+  };
+}
+
 // The environment picker's listing. Repo-scoped, short-TTL cached, and filtered
 // to environments this extension created (tagged RADIUS_MANAGED). Status comes
 // from the verify-credentials workflow only, not app deployments. Every response
 // carries `Content-Type` then `Cache-Control: no-store` (header order is
 // observable), and only successful listings are cached so a failure can recover
-// on retry.
+// on retry. An in-progress delete is overlaid live (never cached) so the UI
+// fails closed on the environment being torn down.
 export async function handleListEnvironments(
   context: CanvasRequestContext,
   dependencies: EnvironmentsDependencies
 ): Promise<void> {
   const { response, url } = context;
   const repo = url.searchParams.get("repo") || "";
+  const deletingEnvironment =
+    repo ? dependencies.activeDeleteEnvironment(repo) : "";
   const respond = (payload: unknown): void => {
     response.setHeader("Content-Type", "application/json");
     response.setHeader("Cache-Control", "no-store");
     response.writeHead(200);
-    response.end(JSON.stringify(payload));
+    response.end(
+      JSON.stringify(overlayDeletingStatus(payload, deletingEnvironment))
+    );
   };
   if (!repo) {
     respond({ environments: [] });

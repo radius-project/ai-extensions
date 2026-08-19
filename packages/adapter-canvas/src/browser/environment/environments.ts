@@ -105,6 +105,7 @@ export function environmentStatusMarkup(status: string): string {
     failed: ["failed", "Failed"],
     pending: ["pending", "Pending"],
     unverified: ["pending", "Unverified"],
+    deleting: ["pending", "Deleting…"],
     unknown: ["success", "Available"]
   };
   const [tone, label] = mapped[status] ?? mapped.pending;
@@ -163,6 +164,12 @@ export function environmentRowsMarkup(
       const provider = environment.provider || "—";
       const credentials = environment.credentialProfile || "—";
       const name = escapeBrowserHtml(environment.name);
+      // A delete already running for this environment fails closed: the Delete
+      // action is greyed out so a second deletion can't be started on top of
+      // the first while cleanup is in flight.
+      const deleting = environment.status === "deleting";
+      const deleteAttrs =
+        deleting ? ' disabled title="This environment is being deleted."' : "";
       return (
         "<tr>" +
         `<td class="rad-table__env">${name}</td>` +
@@ -172,7 +179,7 @@ export function environmentRowsMarkup(
         '<td class="rad-table__actions">' +
         `<button class="rad-link js-edit-env" data-env="${name}" style="background:none; border:none; padding:0; margin:0; font:inherit; cursor:pointer;">edit</button>` +
         `<button class="rad-btn rad-btn--neutral js-deploy-apps" data-env="${name}" style="margin:0;">Deploy Apps</button>` +
-        `<button class="rad-btn rad-btn--danger-outline js-delete-env" data-env="${name}" style="margin:0;">Delete Env</button>` +
+        `<button class="rad-btn rad-btn--danger-outline js-delete-env" data-env="${name}" style="margin:0;"${deleteAttrs}>Delete Env</button>` +
         "</td></tr>"
       );
     })
@@ -383,6 +390,9 @@ export function initializeEnvironmentPane(
       ".js-delete-env"
     )) {
       bind(rows, button, "click", () => {
+        // A disabled Delete button (an environment mid-deletion) is inert: never
+        // start a second deletion on top of one already running.
+        if (Reflect.get(button, "disabled") === true) return;
         const name = button.getAttribute("data-env") ?? "";
         if (!name) return;
         const environment = environmentRows.find((row) => row.name === name);
@@ -428,7 +438,11 @@ export function initializeEnvironmentPane(
           body.innerHTML = environmentRowsMarkup(environments);
           wireRows();
           if (
-            environments.some((environment) => environment.status === "pending")
+            environments.some(
+              (environment) =>
+                environment.status === "pending" ||
+                environment.status === "deleting"
+            )
           ) {
             pollTimer = context.clock.setTimeout(
               loadEnvironmentTable,
