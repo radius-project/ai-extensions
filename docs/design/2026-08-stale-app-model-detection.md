@@ -83,9 +83,7 @@ The second and third rows still open the view because the file on disk is the on
 
 Two places in the code handle this. `evaluateAppBicepHook` holds the graph back when regenerating is safe. `maybeHandoffAppBicep` covers everything else, including openings the first one never sees, such as a reload after source links are attached, or the user simply clicking the panel open. Without it, those openings would quietly show a stale app model, which is the original problem in a different place.
 
-We say a given thing once per target. What counts as "a given thing" includes the result and the record it came from, not just the repo and branch, so a model that goes from stale to hand-edited between two opens is reported again rather than swallowed. If regenerating does not settle a problem, the evidence is unchanged and the next open renders the app model rather than blocking the user again.
-
-When two branches are compared and both are stale, only the first is named. The second is not lost, since fixing the first reveals it on the next open, but the user sees them one at a time. If regenerating does not settle it, the next open renders the app model rather than blocking the user again.
+The same problem is only reported once, so opening a graph repeatedly does not repeat the message. A different problem on the same app model is reported when it appears.
 
 ### Deciding whether source changed
 
