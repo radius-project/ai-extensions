@@ -163,9 +163,22 @@ async function gotoVisual(
       body { font-family: "Phase 7 Inter", sans-serif !important; }
     `
   });
-  await page.waitForFunction(
-    "document.readyState === 'complete' && document.fonts.status === 'loaded'"
+  await page.waitForFunction("document.readyState === 'complete'");
+  await page.evaluate(`(async () => {
+    await Promise.all(
+      ["300", "400", "500", "600", "700"].map((weight) =>
+        document.fonts.load(weight + ' 16px "Phase 7 Inter"')
+      )
+    );
+    await document.fonts.ready;
+  })()`);
+  const fontApplied = await page.evaluate(
+    `document.fonts.check('400 16px "Phase 7 Inter"')`
   );
+  expect(
+    fontApplied,
+    "the bundled visual font must be loaded before capturing a baseline"
+  ).toBe(true);
 }
 
 async function screenshot(page: Page, name: string): Promise<void> {
