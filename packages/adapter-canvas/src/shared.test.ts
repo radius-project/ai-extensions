@@ -1,15 +1,34 @@
 // Tests for credential-profile persistence (Environments → Credentials tab).
+import path from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
   getPreferredGitHubLogin,
+  resolveCredentialsFilePath,
   setPreferredGitHubLogin,
   sharedCredentials
 } from "./shared.js";
 
 const REPO = "octo-test/creds-" + Math.random().toString(36).slice(2);
+
+describe("credential store path", () => {
+  it("uses the configured isolated path when one is supplied", () => {
+    expect(
+      resolveCredentialsFilePath(
+        { RADIUS_CREDENTIALS_FILE: "  fixture/credentials.json  " },
+        "package"
+      )
+    ).toBe("fixture/credentials.json");
+  });
+
+  it("falls back to the package-local compatibility path", () => {
+    expect(resolveCredentialsFilePath({}, "package")).toBe(
+      path.join("package", ".radius-credentials.json")
+    );
+  });
+});
 
 describe("credential profiles", () => {
   beforeEach(() => {

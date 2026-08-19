@@ -19,25 +19,25 @@ export function graphPage(state: CanvasState = {}): string {
     loaded ?
       `<input type="hidden" id="graph-repo" value="${escapeHtml(targetRepo)}">
   <div class="rad-field">
-    <label>Application</label>
+    <label for="graph-app">Application</label>
     <select id="graph-app" class="rad-select" style="min-width:180px; width:auto; max-width:400px;">
       <option value="">Loading applications...</option>
     </select>
   </div>
   <div class="rad-field">
-    <label>Branch</label>
+    <label for="graph-branch">Branch</label>
     <select id="graph-branch" class="rad-select" style="min-width:180px; width:auto; max-width:400px;">
       <option value="${escapeHtml(graphBranch)}" selected>${escapeHtml(graphBranch)}</option>
     </select>
   </div>`
     : `<div class="rad-field">
-    <label>Application</label>
+    <label for="graph-app">Application</label>
     <select id="graph-app" class="rad-select" style="min-width:280px;">
       <option value="">Loading applications...</option>
     </select>
   </div>
   <div class="rad-field">
-    <label>Branch</label>
+    <label for="graph-branch">Branch</label>
     <select id="graph-branch" class="rad-select" style="min-width:220px;">
       <option value="">Loading branches...</option>
     </select>

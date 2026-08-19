@@ -15,13 +15,16 @@ import {
 } from "./view.js";
 import { buildGraph, resolveGraphSettings } from "./build.js";
 import {
+  childComponent,
+  childrenOf,
   createFakeFlowInstance,
-  createFakeGraphVendor,
+  createGraphVendor,
   findAllByType,
   findByClass,
   flattenElements,
-  isFakeElement
-} from "../../../test/support/browser/graph-fakes.js";
+  isRenderedElement,
+  refOf
+} from "../../../test/support/browser/graph-vendor.js";
 import {
   createFakeClock,
   createFakeElement
@@ -29,7 +32,7 @@ import {
 import type { GraphNodeData, GraphOptions } from "./build.js";
 import type { UpdaterBinding } from "./view.js";
 import type { DomElement } from "../ports.js";
-import type { FakeReactElement } from "../../../test/support/browser/graph-fakes.js";
+import type { RenderedElement } from "../../../test/support/browser/graph-vendor.js";
 
 function node(overrides: Partial<GraphNodeData> = {}): GraphNodeData {
   return {
@@ -68,9 +71,9 @@ function renderCard(
 ): {
   tree: unknown;
   recorded: Recorded;
-  vendor: ReturnType<typeof createFakeGraphVendor>;
+  vendor: ReturnType<typeof createGraphVendor>;
 } {
-  const vendor = createFakeGraphVendor();
+  const vendor = createGraphVendor();
   const recorded: Recorded = { local: [], toggled: [], opened: [] };
   const component = createNodeComponent(vendor, resolveGraphSettings(options), {
     openLocalSource: (path, line, fallback) =>
@@ -81,13 +84,13 @@ function renderCard(
   return { tree: component({ data }), recorded, vendor };
 }
 
-function props(element: FakeReactElement | undefined): Record<string, unknown> {
+function props(element: RenderedElement | undefined): Record<string, unknown> {
   if (!element) throw new Error("expected an element");
   return element.props;
 }
 
 function callHandler(
-  element: FakeReactElement | undefined,
+  element: RenderedElement | undefined,
   name: string,
   event: Record<string, unknown> = {}
 ): void {
@@ -140,12 +143,13 @@ describe("type label fitting", () => {
 
 describe("node card", () => {
   it("renders the figma card with its handles, icon, title and type", () => {
-    const { tree } = renderCard(node());
-    const shell = tree as FakeReactElement;
+    const { tree, vendor } = renderCard(node());
+    const shell = tree as RenderedElement;
     expect(shell.props.className).toBe("rad-node-shell");
-    expect(findAllByType(tree, "Handle")).toHaveLength(2);
-    expect(props(findAllByType(tree, "Handle")[0]).position).toBe("top");
-    expect(props(findAllByType(tree, "Handle")[1]).position).toBe("bottom");
+    const handles = findAllByType(tree, vendor.reactFlow.Handle);
+    expect(handles).toHaveLength(2);
+    expect(props(handles[0]).position).toBe("top");
+    expect(props(handles[1]).position).toBe("bottom");
 
     const card = findByClass(tree, "rad-node");
     expect(props(card)["data-node-id"]).toBe("app/web");
@@ -159,7 +163,7 @@ describe("node card", () => {
     expect(props(findByClass(tree, "rad-node__icon")).src).toBe(
       "data:image/svg+xml,icon"
     );
-    expect(findByClass(tree, "rad-node__title")?.children).toEqual(["web"]);
+    expect(childrenOf(findByClass(tree, "rad-node__title"))).toEqual(["web"]);
     expect(props(findByClass(tree, "rad-node__type")).title).toBe(
       "Compute/containers"
     );
@@ -185,12 +189,17 @@ describe("node card", () => {
     expect(findByClass(tree, "rad-node__icon")).toBeUndefined();
   });
 
-  it("marks the interactive children nodrag/nopan so the pane cannot swallow them", () => {
+  it("opts the interactive children out of the pane's drag, pan and key handling", () => {
     const { tree } = renderCard(node());
-    expect(props(findByClass(tree, "rad-node__dots nodrag nopan")).type).toBe(
-      "button"
-    );
-    expect(findByClass(tree, "rad-node__source nodrag nopan")).toBeDefined();
+    // React Flow treats Space and Enter as node-selection keys and cancels the
+    // event before the browser can synthesise a click, so every interactive
+    // control inside a node carries `nokey` to stay keyboard-activatable.
+    expect(
+      props(findByClass(tree, "rad-node__dots nodrag nopan nokey")).type
+    ).toBe("button");
+    expect(
+      findByClass(tree, "rad-node__source nodrag nopan nokey")
+    ).toBeDefined();
   });
 
   it("opens the details panel from the card and toggles it from the dots", () => {
@@ -204,28 +213,40 @@ describe("node card", () => {
     const dots = createFakeElement("dots");
     const owner = createFakeElement("owner");
     dots.ancestors.set(".rad-node", owner);
-    callHandler(findByClass(tree, "rad-node__dots nodrag nopan"), "onClick", {
-      currentTarget: dots
-    });
+    callHandler(
+      findByClass(tree, "rad-node__dots nodrag nopan nokey"),
+      "onClick",
+      {
+        currentTarget: dots
+      }
+    );
     expect(recorded.toggled).toEqual([["app/web", owner]]);
   });
 
   it("falls back to the clicked element when there is no card ancestor", () => {
     const { tree, recorded } = renderCard(node());
     const dots = createFakeElement("dots");
-    callHandler(findByClass(tree, "rad-node__dots nodrag nopan"), "onClick", {
-      currentTarget: dots
-    });
+    callHandler(
+      findByClass(tree, "rad-node__dots nodrag nopan nokey"),
+      "onClick",
+      {
+        currentTarget: dots
+      }
+    );
     expect(recorded.toggled).toEqual([["app/web", dots]]);
-    callHandler(findByClass(tree, "rad-node__dots nodrag nopan"), "onClick", {
-      currentTarget: null
-    });
+    callHandler(
+      findByClass(tree, "rad-node__dots nodrag nopan nokey"),
+      "onClick",
+      {
+        currentTarget: null
+      }
+    );
     expect(recorded.toggled[1][1]).toBeNull();
   });
 
   it("opens the on-disk file for a local graph and keeps the remote URL as its href", () => {
     const { tree, recorded } = renderCard(node(), { localSource: true });
-    const row = findByClass(tree, "rad-node__source nodrag nopan");
+    const row = findByClass(tree, "rad-node__source nodrag nopan nokey");
     expect(props(row).href).toBe(
       "https://github.test/o/r/blob/main/src/web.ts#L4"
     );
@@ -260,7 +281,7 @@ describe("node card", () => {
 
   it("uses a native anchor for a remote graph and lets the card keep its own click", () => {
     const { tree, recorded } = renderCard(node());
-    const row = findByClass(tree, "rad-node__source nodrag nopan");
+    const row = findByClass(tree, "rad-node__source nodrag nopan nokey");
     expect(props(row).target).toBe("_blank");
     expect(props(row).rel).toBe("noopener noreferrer");
     let stopped = 0;
@@ -282,9 +303,9 @@ describe("node card", () => {
 
   it("uses '#' as the href for a local node whose remote URL is unknown", () => {
     const { tree } = renderCard(node({ sourceUrl: "" }), { localSource: true });
-    expect(props(findByClass(tree, "rad-node__source nodrag nopan")).href).toBe(
-      "#"
-    );
+    expect(
+      props(findByClass(tree, "rad-node__source nodrag nopan nokey")).href
+    ).toBe("#");
   });
 
   it.each([
@@ -326,15 +347,16 @@ describe("node card", () => {
     vendor.react.refs[0].current = typeElement;
     vendor.react.layoutEffects[0].effect();
     expect(typeElement.style.fontSize).toBe("7px");
-    expect(props(findByClass(tree, "rad-node__type")).ref).toBe(
-      vendor.react.refs[0]
-    );
+    // React keeps a ref out of props, so the card's type element carries the
+    // very ref the layout effect measures.
+    const typeNode = findByClass(tree, "rad-node__type");
+    expect(typeNode ? refOf(typeNode) : undefined).toBe(vendor.react.refs[0]);
   });
 });
 
 describe("flow application", () => {
   function renderApp() {
-    const vendor = createFakeGraphVendor();
+    const vendor = createGraphVendor();
     const clock = createFakeClock();
     const updater: UpdaterBinding = { fn: null };
     const built = buildGraph(resolveGraphSettings(), [
@@ -347,9 +369,9 @@ describe("flow application", () => {
   }
 
   it("configures React Flow the way the shipped graph does", () => {
-    const { tree } = renderApp();
-    const root = tree as FakeReactElement;
-    expect(root.type).toBe("ReactFlow");
+    const { tree, vendor } = renderApp();
+    const root = tree as RenderedElement;
+    expect(root.type).toBe(vendor.reactFlow.default);
     expect(root.props.nodeTypes).toEqual({ rad: "RadNode" });
     expect(root.props.fitView).toBe(true);
     expect(root.props.fitViewOptions).toEqual({ padding: 0.18 });
@@ -358,6 +380,10 @@ describe("flow application", () => {
     expect(root.props.nodesDraggable).toBe(true);
     expect(root.props.nodesConnectable).toBe(false);
     expect(root.props.elementsSelectable).toBe(true);
+    // The wrapper must not be a focusable button around the card's own
+    // controls, or every node becomes a nested interactive element.
+    expect(root.props.nodesFocusable).toBe(false);
+    expect(root.props.edgesFocusable).toBe(false);
     expect(root.props.proOptions).toEqual({ hideAttribution: true });
     // Plain figma edges: no arrowheads, and no minimap child.
     expect(root.props.edges).toEqual(
@@ -368,19 +394,21 @@ describe("flow application", () => {
         (edge) => "markerEnd" in edge
       )
     ).toBe(false);
-    expect(findAllByType(tree, "Background")).toHaveLength(1);
-    expect(props(findAllByType(tree, "Background")[0]).gap).toBe(16);
-    expect(props(findAllByType(tree, "Controls")[0]).showInteractive).toBe(
-      false
+    expect(findAllByType(tree, vendor.reactFlow.Background)).toHaveLength(1);
+    expect(props(findAllByType(tree, vendor.reactFlow.Background)[0]).gap).toBe(
+      16
     );
+    expect(
+      props(findAllByType(tree, vendor.reactFlow.Controls)[0]).showInteractive
+    ).toBe(false);
     expect(
       flattenElements(tree).some((element) => element.type === "MiniMap")
     ).toBe(false);
   });
 
   it("never passes a themed colour token into the Background SVG attribute", () => {
-    const { tree } = renderApp();
-    const background = findAllByType(tree, "Background")[0];
+    const { tree, vendor } = renderApp();
+    const background = findAllByType(tree, vendor.reactFlow.Background)[0];
     for (const value of Object.values(props(background))) {
       expect(String(value)).not.toContain("var(--");
     }
@@ -389,8 +417,8 @@ describe("flow application", () => {
   it("fits the viewport shortly after mounting", () => {
     const { tree, clock } = renderApp();
     const instance = createFakeFlowInstance();
-    callHandler(tree as FakeReactElement, "onInit", {});
-    const onInit = props(tree as FakeReactElement).onInit as (
+    callHandler(tree as RenderedElement, "onInit", {});
+    const onInit = props(tree as RenderedElement).onInit as (
       value: unknown
     ) => void;
     onInit(instance);
@@ -402,7 +430,7 @@ describe("flow application", () => {
   it("pushes an update into React state and re-fits, preserving the viewport", () => {
     const { tree, clock, vendor, updater } = renderApp();
     const instance = createFakeFlowInstance();
-    (props(tree as FakeReactElement).onInit as (value: unknown) => void)(
+    (props(tree as RenderedElement).onInit as (value: unknown) => void)(
       instance
     );
     vendor.react.runEffects();
@@ -423,7 +451,7 @@ describe("flow application", () => {
     const { tree, clock } = renderApp();
     const instance = createFakeFlowInstance();
     instance.failing = true;
-    (props(tree as FakeReactElement).onInit as (value: unknown) => void)(
+    (props(tree as RenderedElement).onInit as (value: unknown) => void)(
       instance
     );
     expect(() => clock.tick(30)).not.toThrow();
@@ -447,7 +475,7 @@ describe("flow application", () => {
 
 describe("error boundary", () => {
   it("renders its children until a render fails, then offers a reload", () => {
-    const vendor = createFakeGraphVendor();
+    const vendor = createGraphVendor();
     let reloads = 0;
     const Boundary = createErrorBoundary(vendor, () => {
       reloads += 1;
@@ -457,12 +485,12 @@ describe("error boundary", () => {
 
     instance.state = Boundary.getDerivedStateFromError();
     const fallback = instance.render();
-    expect(isFakeElement(fallback)).toBe(true);
-    expect(props(fallback as FakeReactElement).className).toBe("status error");
+    expect(isRenderedElement(fallback)).toBe(true);
+    expect(props(fallback as RenderedElement).className).toBe("status error");
     const button = flattenElements(fallback).find(
       (element) => element.type === "button"
     );
-    expect(button?.children).toEqual(["Reload graph"]);
+    expect(childrenOf(button)).toEqual(["Reload graph"]);
     callHandler(button, "onClick");
     expect(reloads).toBe(1);
   });
@@ -470,7 +498,7 @@ describe("error boundary", () => {
 
 describe("mountGraph", () => {
   function mount(options: { failUnmount?: boolean } = {}) {
-    const vendor = createFakeGraphVendor();
+    const vendor = createGraphVendor();
     const clock = createFakeClock();
     const host = createFakeElement("host");
     const built = buildGraph(resolveGraphSettings(), [{ id: "a", name: "a" }]);
@@ -496,10 +524,10 @@ describe("mountGraph", () => {
     const { vendor, host } = mount();
     expect(vendor.reactDom.roots).toHaveLength(1);
     expect(vendor.reactDom.hosts).toEqual([host]);
-    const rendered = vendor.reactDom.roots[0].rendered[0] as FakeReactElement;
-    expect(rendered.children).toHaveLength(1);
-    const app = rendered.children[0] as FakeReactElement;
-    expect(props(app).initialNodes).toHaveLength(1);
+    const rendered = vendor.reactDom.roots[0].rendered[0] as RenderedElement;
+    expect(childrenOf(rendered)).toHaveLength(1);
+    const app = childComponent(rendered);
+    expect(app.props.initialNodes).toHaveLength(1);
   });
 
   it("reports that an update could not be applied before the app bound", () => {
@@ -509,9 +537,10 @@ describe("mountGraph", () => {
 
   it("applies an update once the mounted application has bound", () => {
     const { vendor, mounted, built } = mount();
-    const rendered = vendor.reactDom.roots[0].rendered[0] as FakeReactElement;
-    const app = rendered.children[0] as FakeReactElement;
-    (app.type as (value: unknown) => unknown)({
+    const app = childComponent(
+      vendor.reactDom.roots[0].rendered[0] as RenderedElement
+    );
+    app.type({
       initialNodes: built.nodes,
       initialEdges: built.edges
     });

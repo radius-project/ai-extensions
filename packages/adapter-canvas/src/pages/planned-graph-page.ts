@@ -34,19 +34,19 @@ ${graphHeader("planned")}
 <p class="rad-lede" id="planned-subtitle" style="margin:0 0 20px;">The planned application graph previews the infrastructure that will be provisioned for each component of your application if deployed to a given environment.<span id="planned-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
   <div class="rad-field">
-    <label>Application</label>
+    <label for="planned-app">Application</label>
     <select id="planned-app" class="rad-select" style="min-width:280px;">
       <option value="">Loading applications...</option>
     </select>
   </div>
   <div class="rad-field">
-    <label>Branch</label>
+    <label for="planned-branch">Branch</label>
     <select id="planned-branch" class="rad-select" style="min-width:200px;">
       <option value="">Loading branches...</option>
     </select>
   </div>
   <div class="rad-field">
-    <label>Environment</label>
+    <label for="planned-env">Environment</label>
     <select id="planned-env" class="rad-select" style="min-width:180px;">
       <option value="">Loading environments...</option>
     </select>
@@ -78,19 +78,19 @@ ${graphHeader("planned")}
 <p class="rad-lede" id="planned-subtitle" style="margin:0 0 20px;">The planned application graph previews the infrastructure that will be provisioned for each component of your application if deployed to a given environment.<span id="planned-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
   <div class="rad-field">
-    <label>Application</label>
+    <label for="planned-app">Application</label>
     <select id="planned-app" class="rad-select" style="min-width:280px;">
       <option value="">Loading applications...</option>
     </select>
   </div>
   <div class="rad-field">
-    <label>Branch</label>
+    <label for="planned-branch">Branch</label>
     <select id="planned-branch" class="rad-select" style="min-width:200px;">
       <option value="">Loading branches...</option>
     </select>
   </div>
   <div class="rad-field">
-    <label>Environment</label>
+    <label for="planned-env">Environment</label>
     <select id="planned-env" class="rad-select" style="min-width:180px;">
       <option value="">Loading environments...</option>
     </select>

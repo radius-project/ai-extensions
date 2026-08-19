@@ -1,7 +1,20 @@
 import { describe, it, expect } from "vitest";
+import {
+  unlabelledSelectIds,
+  unlabelledTextInputIds
+} from "../../../test/support/pages/labelled-controls.js";
 import { credentialFormMarkup } from "./credential-form.js";
 
 describe("credentialFormMarkup", () => {
+  // Extracting this form out of the credentials pane dropped every
+  // <label for=...>, which left the whole credential form unnamed to assistive
+  // technology. Assert the empty set so the next relocation cannot repeat it.
+  it("gives every control in the credential form a programmatic name", () => {
+    const html = credentialFormMarkup();
+    expect(unlabelledTextInputIds(html)).toEqual([]);
+    expect(unlabelledSelectIds(html)).toEqual([]);
+  });
+
   it("renders a single relocatable card", () => {
     const html = credentialFormMarkup().trim();
     expect(html.startsWith('<div class="rad-card" id="cred-form-card">')).toBe(

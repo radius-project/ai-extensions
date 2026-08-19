@@ -124,7 +124,7 @@ export function createNodeComponent(
       sourceRow = h(
         "a",
         {
-          className: "rad-node__source nodrag nopan",
+          className: "rad-node__source nodrag nopan nokey",
           href: data.sourceUrl || "#",
           onClick: (event: {
             preventDefault(): void;
@@ -155,7 +155,7 @@ export function createNodeComponent(
       sourceRow = h(
         "a",
         {
-          className: "rad-node__source nodrag nopan",
+          className: "rad-node__source nodrag nopan nokey",
           href: data.sourceUrl,
           target: "_blank",
           rel: "noopener noreferrer",
@@ -179,7 +179,10 @@ export function createNodeComponent(
       "button",
       {
         type: "button",
-        className: "rad-node__dots nodrag nopan",
+        // "nokey" keeps React Flow's node keyboard handler off this control:
+        // it treats Space as "select the node" and cancels the key, which would
+        // otherwise stop the browser activating the button.
+        className: "rad-node__dots nodrag nopan nokey",
         "aria-label": "Show details",
         onClick: (event: {
           preventDefault(): void;
@@ -344,6 +347,12 @@ export function createGraphApp(
         maxZoom: 2,
         nodesDraggable: true,
         nodesConnectable: false,
+        // The card owns its own focusable controls (source link, details
+        // button). Leaving React Flow's wrapper focusable would make it an
+        // interactive element containing interactive elements, which fails
+        // WCAG 4.1.2 and adds an empty stop to the tab order.
+        nodesFocusable: false,
+        edgesFocusable: false,
         elementsSelectable: true,
         proOptions: { hideAttribution: true },
         onInit: (instance: ReactFlowInstance) => {
