@@ -15,8 +15,19 @@ import {
   DEPLOY_REPAIR_ATTEMPT_CAP,
   DEPLOY_ERROR_CHAR_CAP,
   graphTriggerTargets,
-  evaluateAppBicepHook
+  evaluateAppBicepHook,
+  appModelRefreshReminder,
+  appModelUnverifiedPrompt,
+  appModelUnverifiedDisplayPrompt,
+  appModelUnverifiedMessage,
+  appModelStaleNotice,
+  appModelRefreshPrompt,
+  appModelRefreshDisplayPrompt,
+  appModelRefreshMessage,
+  refreshRequestKey
 } from "./hooks.js";
+import type { AppModelStatus } from "./graph-context.js";
+import type { AppModelFreshnessStatus } from "@radius-project/core";
 
 describe("GRAPH_PAGES", () => {
   it("covers the graph-generating canvas pages", () => {
@@ -307,34 +318,88 @@ describe("graphTriggerTargets", () => {
   });
 });
 
-function makeDeps({
-  state = { contextRepo: "" },
-  fetchBicep = vi.fn(),
-  defaultBranch = "main"
-} = {}) {
+interface StatusOverrides {
+  status?: AppModelFreshnessStatus;
+  refreshable?: boolean;
+  requiresConfirmation?: boolean;
+  reason?: string;
+  sourceCommit?: string;
+}
+
+function modelStatus(
+  repo: string,
+  branch: string,
+  overrides: StatusOverrides = {}
+): AppModelStatus {
+  const status = overrides.status ?? "up-to-date";
   return {
-    workspaceState: vi.fn(async () => state),
-    fetchBicep,
-    defaultBranchForState: vi.fn(() => defaultBranch)
+    repo,
+    branch,
+    refreshable: overrides.refreshable ?? true,
+    freshness: {
+      status,
+      stale: status !== "up-to-date" && status !== "missing",
+      requiresConfirmation:
+        overrides.requiresConfirmation ??
+        (status === "unrecorded" || status === "edited"),
+      reason: overrides.reason ?? `because it is ${status}`,
+      origin:
+        overrides.sourceCommit === undefined ?
+          null
+        : {
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: overrides.sourceCommit,
+            skillVersion: "0.1.0-test",
+            appBicepHash: "sha256:abc"
+          }
+    }
   };
 }
+
+function makeDeps({
+  state = { contextRepo: "" },
+  appModelStatus = vi.fn(async (repo: string, branch: string) =>
+    modelStatus(repo, branch)
+  ),
+  defaultBranch = "main"
+} = {}) {
+  const requested = new Set<string>();
+  return {
+    workspaceState: vi.fn(async () => state),
+    appModelStatus,
+    defaultBranchForState: vi.fn(() => defaultBranch),
+    shouldRequestRefresh: vi.fn((key: string) => {
+      if (requested.has(key)) return false;
+      requested.add(key);
+      return true;
+    })
+  };
+}
+
+const OPEN_GRAPH = {
+  toolName: "open_canvas",
+  toolArgs: {
+    canvasId: "radius",
+    input: { page: "graph", repo: "a/b", branch: "feat" }
+  }
+};
 
 describe("evaluateAppBicepHook", () => {
   it("allows (undefined) when the tool is not a graph trigger", async () => {
     const deps = makeDeps();
+
     const out = await evaluateAppBicepHook(
       { toolName: "other", toolArgs: {} },
       deps
     );
+
     expect(out).toBeUndefined();
     expect(deps.workspaceState).not.toHaveBeenCalled();
   });
 
   it("fails open when no repo can be resolved", async () => {
-    const deps = makeDeps({
-      state: { contextRepo: "" },
-      fetchBicep: vi.fn(async () => "x")
-    });
+    const deps = makeDeps({ state: { contextRepo: "" } });
+
     const out = await evaluateAppBicepHook(
       {
         toolName: "open_canvas",
@@ -342,13 +407,14 @@ describe("evaluateAppBicepHook", () => {
       },
       deps
     );
+
     expect(out).toBeUndefined();
-    expect(deps.fetchBicep).not.toHaveBeenCalled();
+    expect(deps.appModelStatus).not.toHaveBeenCalled();
   });
 
   it("falls back to the workspace repo when the tool arg omits it", async () => {
-    const fetchBicep = vi.fn(async () => "content");
-    const deps = makeDeps({ state: { contextRepo: "ws/repo" }, fetchBicep });
+    const deps = makeDeps({ state: { contextRepo: "ws/repo" } });
+
     const out = await evaluateAppBicepHook(
       {
         toolName: "open_canvas",
@@ -359,19 +425,19 @@ describe("evaluateAppBicepHook", () => {
       },
       deps
     );
+
     expect(out).toBeUndefined();
-    expect(fetchBicep).toHaveBeenCalledWith("ws/repo", "feat", {
+    expect(deps.appModelStatus).toHaveBeenCalledWith("ws/repo", "feat", {
       contextRepo: "ws/repo"
     });
   });
 
   it("uses the default branch when the graph page omits the branch", async () => {
-    const fetchBicep = vi.fn(async () => "content");
     const deps = makeDeps({
       state: { contextRepo: "ws/repo" },
-      fetchBicep,
       defaultBranch: "trunk"
     });
+
     await evaluateAppBicepHook(
       {
         toolName: "open_canvas",
@@ -379,75 +445,142 @@ describe("evaluateAppBicepHook", () => {
       },
       deps
     );
-    expect(fetchBicep).toHaveBeenCalledWith("a/b", "trunk", {
+
+    expect(deps.appModelStatus).toHaveBeenCalledWith("a/b", "trunk", {
       contextRepo: "ws/repo"
     });
   });
 
-  it("allows when app.bicep exists on the branch", async () => {
-    const deps = makeDeps({
-      state: { contextRepo: "a/b" },
-      fetchBicep: vi.fn(async () => "resource ...")
-    });
-    const out = await evaluateAppBicepHook(
-      {
-        toolName: "open_canvas",
-        toolArgs: {
-          canvasId: "radius",
-          input: { page: "graph", repo: "a/b", branch: "feat" }
-        }
-      },
-      deps
-    );
-    expect(out).toBeUndefined();
+  it("allows when the model on the branch is current", async () => {
+    const deps = makeDeps({ state: { contextRepo: "a/b" } });
+
+    expect(await evaluateAppBicepHook(OPEN_GRAPH, deps)).toBeUndefined();
   });
 
   it("denies with skill guidance when app.bicep is missing", async () => {
     const deps = makeDeps({
       state: { contextRepo: "a/b" },
-      fetchBicep: vi.fn(async () => null)
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "missing" })
+      )
     });
-    const out = await evaluateAppBicepHook(
-      {
-        toolName: "open_canvas",
-        toolArgs: {
-          canvasId: "radius",
-          input: { page: "graph", repo: "a/b", branch: "feat" }
-        }
-      },
-      deps
-    );
+
+    const out = await evaluateAppBicepHook(OPEN_GRAPH, deps);
+
     expect(out?.permissionDecision).toBe("deny");
     expect(out?.permissionDecisionReason).toContain("radius-app-bicep");
     expect(out?.additionalContext).toContain(".radius/app.bicep");
     expect(out?.additionalContext).toContain("a/b");
   });
 
-  it("treats a fetch error as a missing file (deny)", async () => {
+  it("treats a status-resolution error as a missing file (deny)", async () => {
     const deps = makeDeps({
       state: { contextRepo: "a/b" },
-      fetchBicep: vi.fn(async () => {
+      appModelStatus: vi.fn(async () => {
         throw new Error("boom");
       })
     });
-    const out = await evaluateAppBicepHook(
-      {
-        toolName: "open_canvas",
-        toolArgs: {
-          canvasId: "radius",
-          input: { page: "graph", repo: "a/b", branch: "feat" }
-        }
-      },
-      deps
-    );
+
+    const out = await evaluateAppBicepHook(OPEN_GRAPH, deps);
+
     expect(out?.permissionDecision).toBe("deny");
+    expect(out?.additionalContext).toContain("No .radius/app.bicep exists");
+  });
+
+  it.each(["source-changed", "generator-changed"] as const)(
+    "denies and asks for a refresh when the workspace model is %s",
+    async (status) => {
+      const deps = makeDeps({
+        state: { contextRepo: "a/b" },
+        appModelStatus: vi.fn(async (repo: string, branch: string) =>
+          modelStatus(repo, branch, { status })
+        )
+      });
+
+      const out = await evaluateAppBicepHook(OPEN_GRAPH, deps);
+
+      expect(out?.permissionDecision).toBe("deny");
+      expect(out?.permissionDecisionReason).toContain("out of date");
+      expect(out?.permissionDecisionReason).toContain("feat");
+      expect(out?.additionalContext).toContain(`because it is ${status}`);
+      expect(out?.additionalContext).toContain("Refresh it now");
+    }
+  );
+
+  it.each(["unrecorded", "edited"] as const)(
+    "allows a %s model rather than overwriting content the user may own",
+    async (status) => {
+      const deps = makeDeps({
+        state: { contextRepo: "a/b" },
+        appModelStatus: vi.fn(async (repo: string, branch: string) =>
+          modelStatus(repo, branch, { status })
+        )
+      });
+
+      expect(await evaluateAppBicepHook(OPEN_GRAPH, deps)).toBeUndefined();
+    }
+  );
+
+  // A regeneration that does not clear the drift must not block every later
+  // open: the user would be stuck with a view they cannot reach at all.
+  it("asks for the same refresh only once, then renders rather than blocking", async () => {
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, {
+          status: "source-changed",
+          sourceCommit: "a".repeat(40)
+        })
+      )
+    });
+
+    expect(
+      (await evaluateAppBicepHook(OPEN_GRAPH, deps))?.permissionDecision
+    ).toBe("deny");
+    expect(await evaluateAppBicepHook(OPEN_GRAPH, deps)).toBeUndefined();
+  });
+
+  it("asks again when a regeneration produced new evidence", async () => {
+    let sourceCommit = "a".repeat(40);
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "source-changed", sourceCommit })
+      )
+    });
+
+    await evaluateAppBicepHook(OPEN_GRAPH, deps);
+    sourceCommit = "b".repeat(40);
+
+    expect(
+      (await evaluateAppBicepHook(OPEN_GRAPH, deps))?.permissionDecision
+    ).toBe("deny");
+  });
+
+  it("allows a stale model on a branch the skill cannot rewrite", async () => {
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, {
+          status: "source-changed",
+          refreshable: false
+        })
+      )
+    });
+
+    expect(await evaluateAppBicepHook(OPEN_GRAPH, deps)).toBeUndefined();
   });
 
   it("allows a graph-diff when only one branch has app.bicep", async () => {
-    const fetchBicep = vi.fn(async (_repo, branch) =>
-      branch === "main" ? "content" : null
-    );
-    const deps = makeDeps({ state: { contextRepo: "a/b" }, fetchBicep });
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, {
+          status: branch === "main" ? "up-to-date" : "missing"
+        })
+      )
+    });
+
     const out = await evaluateAppBicepHook(
       {
         toolName: "radius_generate_pr_diff_markdown",
@@ -455,14 +588,18 @@ describe("evaluateAppBicepHook", () => {
       },
       deps
     );
+
     expect(out).toBeUndefined();
   });
 
   it("denies a graph-diff when both branches are missing app.bicep", async () => {
     const deps = makeDeps({
       state: { contextRepo: "a/b" },
-      fetchBicep: vi.fn(async () => null)
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "missing" })
+      )
     });
+
     const out = await evaluateAppBicepHook(
       {
         toolName: "radius_generate_pr_diff_markdown",
@@ -470,7 +607,193 @@ describe("evaluateAppBicepHook", () => {
       },
       deps
     );
+
     expect(out?.permissionDecision).toBe("deny");
+  });
+
+  it("denies a graph-diff when a present branch is a stale workspace model", async () => {
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, {
+          status: branch === "main" ? "missing" : "source-changed"
+        })
+      )
+    });
+
+    const out = await evaluateAppBicepHook(
+      {
+        toolName: "radius_generate_pr_diff_markdown",
+        toolArgs: { repo: "a/b", baseBranch: "main", headBranch: "feat" }
+      },
+      deps
+    );
+
+    expect(out?.permissionDecisionReason).toContain("feat");
+  });
+});
+
+describe("appModelRefreshPrompt", () => {
+  const status = modelStatus("octo/app", "feat", {
+    status: "source-changed",
+    reason: "the source moved on."
+  });
+
+  it("names the drift, the fix, and that the rendered view is behind", () => {
+    const text = appModelRefreshPrompt(status);
+
+    expect(text).toContain("octo/app");
+    expect(text).toContain("`feat`");
+    expect(text).toContain("the source moved on.");
+    expect(text).toContain("radius_generate_app");
+    expect(text).toContain("predates the refresh");
+    expect(text).toContain("Do not commit or push");
+  });
+
+  it("omits the repo phrase when the repo is unknown", () => {
+    expect(
+      appModelRefreshPrompt(
+        modelStatus("", "feat", { status: "source-changed" })
+      )
+    ).toContain("The Radius graph on branch `feat`");
+  });
+
+  it("pairs the agent prompt with a timeline stand-in that hides the mechanics", () => {
+    expect(appModelRefreshMessage(status)).toEqual({
+      prompt: appModelRefreshPrompt(status),
+      displayPrompt: appModelRefreshDisplayPrompt(status)
+    });
+    expect(appModelRefreshDisplayPrompt(status)).not.toContain(
+      "radius_generate_app"
+    );
+    expect(appModelRefreshDisplayPrompt(modelStatus("", "feat"))).toContain(
+      "Refreshing the application model (branch `feat`)"
+    );
+  });
+});
+
+describe("refreshRequestKey", () => {
+  it("is stable for the same evidence and distinct for a new record", () => {
+    const first = modelStatus("a/b", "feat", {
+      status: "source-changed",
+      sourceCommit: "a".repeat(40)
+    });
+    const regenerated = modelStatus("a/b", "feat", {
+      status: "source-changed",
+      sourceCommit: "b".repeat(40)
+    });
+
+    expect(refreshRequestKey(first)).toBe(refreshRequestKey({ ...first }));
+    expect(refreshRequestKey(first)).not.toBe(refreshRequestKey(regenerated));
+  });
+
+  it("distinguishes branches and classifications from a model with no origin record", () => {
+    const base = modelStatus("a/b", "feat", { status: "source-changed" });
+
+    expect(refreshRequestKey(base)).not.toBe(
+      refreshRequestKey(
+        modelStatus("a/b", "main", { status: "source-changed" })
+      )
+    );
+    expect(refreshRequestKey(base)).not.toBe(
+      refreshRequestKey(
+        modelStatus("a/b", "feat", {
+          status: "generator-changed",
+          requiresConfirmation: false
+        })
+      )
+    );
+  });
+});
+
+describe("appModelRefreshReminder", () => {
+  const status = modelStatus("octo/app", "feat", {
+    status: "source-changed",
+    reason: "the branch moved to commit deadbeef"
+  });
+
+  it("states the evidence, the fix, and that no push is involved", () => {
+    const text = appModelRefreshReminder(status);
+
+    expect(text).toContain("octo/app");
+    expect(text).toContain("`feat`");
+    expect(text).toContain("the branch moved to commit deadbeef");
+    expect(text).toContain("radius_generate_app");
+    expect(text).toContain("Do not commit or push");
+    expect(text).toContain("retry the original action");
+  });
+
+  it("omits the repo phrase when the repo is unknown", () => {
+    expect(
+      appModelRefreshReminder(modelStatus("", "feat", { status: "edited" }))
+    ).toContain("The application model on branch `feat`");
+  });
+});
+
+describe("appModelUnverifiedPrompt", () => {
+  const status = modelStatus("octo/app", "feat", {
+    status: "edited",
+    reason: "the model no longer matches its origin record"
+  });
+
+  it("asks before overwriting and names what would be lost", () => {
+    const text = appModelUnverifiedPrompt(status);
+
+    expect(text).toContain("rendered from the existing .radius/app.bicep");
+    expect(text).toContain("the model no longer matches its origin record");
+    expect(text).toContain("ask whether they want the model regenerated");
+    expect(text).toContain("would be lost");
+    expect(text).toContain("Do not regenerate first");
+  });
+
+  it("omits the repo phrase when the repo is unknown", () => {
+    expect(
+      appModelUnverifiedPrompt(modelStatus("", "feat", { status: "edited" }))
+    ).toContain("The Radius graph rendered");
+  });
+
+  it("summarizes the same repo and branch for the timeline", () => {
+    const display = appModelUnverifiedDisplayPrompt(status);
+
+    expect(display).toContain("octo/app");
+    expect(display).toContain("`feat`");
+    expect(display).not.toContain("radius_generate_app");
+  });
+
+  it("pairs the agent prompt with its timeline stand-in", () => {
+    expect(appModelUnverifiedMessage(status)).toEqual({
+      prompt: appModelUnverifiedPrompt(status),
+      displayPrompt: appModelUnverifiedDisplayPrompt(status)
+    });
+  });
+
+  it("omits the repo phrase from the timeline when the repo is unknown", () => {
+    expect(appModelUnverifiedDisplayPrompt(modelStatus("", "feat"))).toContain(
+      "Checking whether the application model (branch `feat`)"
+    );
+  });
+});
+
+describe("appModelStaleNotice", () => {
+  it("reports drift on an unrewritable branch without proposing a push", () => {
+    const notice = appModelStaleNotice(
+      modelStatus("octo/app", "main", {
+        status: "source-changed",
+        refreshable: false,
+        reason: "the branch moved on."
+      })
+    );
+
+    expect(notice).toContain("octo/app");
+    expect(notice).toContain("`main`");
+    expect(notice).toContain("the branch moved on.");
+    expect(notice).toContain("would require regenerating and pushing");
+  });
+
+  it("omits the repo phrase when the repo is unknown", () => {
+    expect(
+      appModelStaleNotice(modelStatus("", "main", { status: "source-changed" }))
+    ).toContain("the application model on branch `main`");
   });
 });
 

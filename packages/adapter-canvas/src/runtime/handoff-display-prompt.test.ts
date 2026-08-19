@@ -36,9 +36,16 @@ const sources = {
 // a session-prompt handler) is exactly the #209 regression.
 const AGENT_PROMPT_BUILDERS = [
   "appBicepHandoffPrompt",
+  "appModelUnverifiedPrompt",
+  "appModelRefreshPrompt",
   "deployRepairHandoffPrompt",
   "buildAzureCliAssistPrompt"
 ];
+
+// Every helper that ultimately reaches session.send. A local wrapper is fine,
+// since it still has to be handed a paired *Message object, but it must be listed
+// here, or a prompt passed straight into it would slip past the scan below.
+const SEND_CALLS = ["send", "sendToSession", "invokeSessionPrompt"];
 
 describe("issue #209: automated turns never render as user-authored messages", () => {
   it("never passes an agent-facing prompt builder straight into a sent turn", () => {
@@ -50,7 +57,7 @@ describe("issue #209: automated turns never render as user-authored messages", (
           source,
           `${file} must send ${builder} through its paired *Message builder`
         ).not.toMatch(
-          new RegExp(`(?:send|invokeSessionPrompt)\\([^)]*\\b${builder}\\(`)
+          new RegExp(`(?:${SEND_CALLS.join("|")})\\([^)]*\\b${builder}\\(`)
         );
       }
     }
@@ -58,7 +65,13 @@ describe("issue #209: automated turns never render as user-authored messages", (
 
   it("routes every handoff through a builder that pairs prompt with displayPrompt", () => {
     expect(sources["create-radius-canvas.ts"]).toContain(
-      "send(appBicepHandoffMessage("
+      "sendToSession(appBicepHandoffMessage("
+    );
+    expect(sources["create-radius-canvas.ts"]).toContain(
+      "sendToSession(appModelUnverifiedMessage("
+    );
+    expect(sources["create-radius-canvas.ts"]).toContain(
+      "sendToSession(appModelRefreshMessage("
     );
     expect(sources["create-radius-extension.ts"]).toContain(
       "send(appBicepHandoffMessage("
