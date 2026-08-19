@@ -189,6 +189,7 @@ describe("GitHub account coordinator", () => {
       currentLogin: "external"
     });
     expect(events).not.toContain("switch:original");
+    expect(events.at(-1)).toBe("reset");
   });
 
   it("restores after selected work fails", async () => {

@@ -685,7 +685,7 @@ describe("GitHub selection handles", () => {
         environment: "dev",
         handle: first.handle
       })
-    ).toEqual({ ok: false, error: "stale" });
+    ).toEqual({ ok: false, error: "unknown" });
     expect(
       store.claim({
         instanceId: "other",
@@ -778,7 +778,46 @@ describe("GitHub selection handles", () => {
         environment: "dev",
         handle: invalidated.handle
       })
-    ).toEqual({ ok: false, error: "stale" });
+    ).toEqual({ ok: false, error: "unknown" });
+  });
+
+  it("prunes expired handles while minting new readiness results", () => {
+    let now = 0;
+    const store = createGitHubSelectionHandleStore({
+      now: () => now,
+      ttlMs: 10
+    });
+    const generation = store.begin("panel-a");
+    const expired = store.mint({
+      instanceId: "panel-a",
+      repo: "octo/app",
+      environment: "dev",
+      login: "octocat",
+      credentialSource: "keyring",
+      generation
+    });
+    if (!expired) throw new Error("selection mint failed");
+    now = 11;
+    const otherGeneration = store.begin("panel-b");
+    expect(
+      store.mint({
+        instanceId: "panel-b",
+        repo: "octo/app",
+        environment: "dev",
+        login: "hubot",
+        credentialSource: "keyring",
+        generation: otherGeneration
+      })
+    ).not.toBeNull();
+
+    expect(
+      store.claim({
+        instanceId: "panel-a",
+        repo: "octo/app",
+        environment: "dev",
+        handle: expired.handle
+      })
+    ).toEqual({ ok: false, error: "unknown" });
   });
 
   it("uses secure defaults and makes release idempotent", () => {

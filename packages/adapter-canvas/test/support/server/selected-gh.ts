@@ -21,6 +21,17 @@ export function successfulSelectedGhExecutor(
       stdout: "",
       stderr: ""
     }));
+  const runOrThrow: SelectedGhExecutor["runOrThrow"] = async (
+    args,
+    message
+  ) => {
+    const result = await run(args);
+    if (result.code !== 0) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw new Error(detail ? `${message}: ${detail}` : message);
+    }
+    return result;
+  };
   return {
     login,
     credentialSource: options.credentialSource || "keyring",
@@ -29,7 +40,7 @@ export function successfulSelectedGhExecutor(
       (options.credentialSource || "keyring") === "keyring",
     scopes: options.scopes || ["repo", "workflow", "write:packages"],
     run,
-    runOrThrow: run,
+    runOrThrow,
     verifyIdentity: async () => {},
     packageCredentials: () => ({
       username: login,

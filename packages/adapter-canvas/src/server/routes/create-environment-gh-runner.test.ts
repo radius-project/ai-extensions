@@ -100,6 +100,7 @@ describe("the workflow-scope gh runner", () => {
         return { code: 0, stdout: "ok", stderr: "" };
       }
     });
+
     const runner = createWorkflowScopeGhRunner(
       {
         cliExec: () => {
@@ -148,6 +149,28 @@ describe("the workflow-scope gh runner", () => {
 
     await expect(runner.runGh(["api", "/x"])).resolves.toMatchObject({
       code: 1
+    });
+  });
+
+  describe("the selected GitHub executor test helper", () => {
+    it("matches the production runOrThrow failure contract", async () => {
+      const executor = successfulSelectedGhExecutor({
+        run: async () => ({ code: 1, stdout: "", stderr: "denied" })
+      });
+
+      await expect(
+        executor.runOrThrow(["api", "user"], "Identity failed")
+      ).rejects.toThrow("Identity failed: denied");
+    });
+
+    it("uses the caller message when a failure has no detail", async () => {
+      const executor = successfulSelectedGhExecutor({
+        run: async () => ({ code: 1, stdout: "", stderr: "" })
+      });
+
+      await expect(
+        executor.runOrThrow(["api", "user"], "Identity failed")
+      ).rejects.toThrow(/^Identity failed$/);
     });
   });
 

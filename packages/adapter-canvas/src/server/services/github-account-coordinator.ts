@@ -118,6 +118,7 @@ export function createGitHubAccountCoordinator(
     try {
       currentLogin = await ports.getActiveKeyringLogin();
       if (currentLogin !== selectedLogin) {
+        ports.resetIdentityCache();
         return {
           state: "changed_externally",
           originalLogin,

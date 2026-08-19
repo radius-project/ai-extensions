@@ -460,7 +460,20 @@ export function createGitHubSelectionHandleStore(
   const handles = new Map<string, SelectionHandle>();
   const generations = new Map<string, number>();
 
+  const prune = (instanceId?: string): void => {
+    const timestamp = now();
+    for (const [handle, record] of handles) {
+      if (
+        record.expiresAt <= timestamp ||
+        (instanceId !== undefined && record.instanceId === instanceId)
+      ) {
+        handles.delete(handle);
+      }
+    }
+  };
+
   const mint: GitHubSelectionHandleStore["mint"] = (input) => {
+    prune();
     if (generations.get(input.instanceId) !== input.generation) return null;
     const handle = randomBytes(32).toString("base64url");
     const expiresAt = now() + ttlMs;
@@ -518,6 +531,7 @@ export function createGitHubSelectionHandleStore(
   };
 
   const begin = (instanceId: string): number => {
+    prune(instanceId);
     const generation = (generations.get(instanceId) || 0) + 1;
     generations.set(instanceId, generation);
     return generation;
