@@ -35,6 +35,12 @@ import type { CanvasState } from "../shared.js";
 interface GraphTriggerTarget {
   repo: string;
   branches: Array<string | undefined>;
+  // True for a trigger that compares two explicitly named committed branches
+  // (graph-diff). Those branches mean exactly what they say. Every other graph
+  // view renders the workspace repository from its checked-out worktree, so a
+  // branch named alongside the workspace repo is not the branch that will be
+  // rendered — see resolveTargetBranches.
+  comparesCommittedBranches: boolean;
 }
 
 interface AppBicepHookInput {
@@ -174,12 +180,14 @@ export function graphTriggerTargets(
       ].filter((branch): branch is string => Boolean(branch));
       return {
         repo: optionalString(input.repo) || "",
-        branches: branches.length ? branches : [undefined]
+        branches: branches.length ? branches : [undefined],
+        comparesCommittedBranches: true
       };
     }
     return {
       repo: optionalString(input.repo) || "",
-      branches: [optionalString(input.branch)]
+      branches: [optionalString(input.branch)],
+      comparesCommittedBranches: false
     };
   }
 
@@ -190,11 +198,41 @@ export function graphTriggerTargets(
     ].filter((branch): branch is string => Boolean(branch));
     return {
       repo: optionalString(args.repo) || "",
-      branches: branches.length ? branches : [undefined]
+      branches: branches.length ? branches : [undefined],
+      comparesCommittedBranches: true
     };
   }
 
   return null;
+}
+
+// The branches this trigger will actually be judged against.
+//
+// The canvas ignores a caller-supplied branch for the workspace repository and
+// renders the checked-out worktree instead (see createRadiusCanvas). This hook
+// has to resolve the target the same way, or it decides against a branch the
+// user will never see: asked for the workspace repo on `main` while a feature
+// branch is checked out, it would read `main` from GitHub and could deny — or
+// call the repository unsupported — on evidence from a branch the canvas was
+// never going to render. A graph diff is the exception, since its two branches
+// are explicitly named committed refs and mean exactly what they say.
+function resolveTargetBranches(
+  targets: GraphTriggerTarget,
+  repo: string,
+  state: CanvasState,
+  defaultBranchForState: (state: CanvasState) => string
+): string[] {
+  const workspaceBranch = optionalString(state?.workspaceBranch);
+  if (
+    !targets.comparesCommittedBranches &&
+    workspaceBranch &&
+    repo === optionalString(state?.workspaceRepo)
+  ) {
+    return [workspaceBranch];
+  }
+  return targets.branches.map(
+    (candidate) => candidate || defaultBranchForState(state)
+  );
 }
 
 // Core pre-tool-use decision. `deps` supplies the I/O so this stays pure:
@@ -227,8 +265,11 @@ export async function evaluateAppBicepHook(
   const repo = targets.repo || state?.contextRepo || "";
   if (!repo) return undefined; // no repo context to check against → fail open
 
-  const branches = targets.branches.map(
-    (candidate) => candidate || deps.defaultBranchForState(state)
+  const branches = resolveTargetBranches(
+    targets,
+    repo,
+    state,
+    deps.defaultBranchForState
   );
 
   const statuses = await Promise.all(
@@ -274,7 +315,7 @@ export async function evaluateAppBicepHook(
       permissionDecision: "deny",
       permissionDecisionReason:
         "No .radius/app.bicep found. It must be created and saved by the radius-app-bicep skill before the application graph can be generated.",
-      additionalContext: appBicepReminder(repo, targets.branches)
+      additionalContext: appBicepReminder(repo, branches)
     };
   }
 

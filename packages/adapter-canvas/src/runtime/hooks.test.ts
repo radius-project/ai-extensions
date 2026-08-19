@@ -228,7 +228,11 @@ describe("graphTriggerTargets", () => {
         canvasId: "radius",
         input: { page: "graph", repo: "a/b", branch: "feat" }
       })
-    ).toEqual({ repo: "a/b", branches: ["feat"] });
+    ).toEqual({
+      repo: "a/b",
+      branches: ["feat"],
+      comparesCommittedBranches: false
+    });
   });
 
   it("returns [undefined] branch when a graph page omits the branch", () => {
@@ -237,7 +241,11 @@ describe("graphTriggerTargets", () => {
         canvasId: "radius",
         input: { page: "planned", repo: "a/b" }
       })
-    ).toEqual({ repo: "a/b", branches: [undefined] });
+    ).toEqual({
+      repo: "a/b",
+      branches: [undefined],
+      comparesCommittedBranches: false
+    });
   });
 
   it("returns both branches for a graph-diff page", () => {
@@ -251,7 +259,11 @@ describe("graphTriggerTargets", () => {
           headBranch: "feat"
         }
       })
-    ).toEqual({ repo: "a/b", branches: ["main", "feat"] });
+    ).toEqual({
+      repo: "a/b",
+      branches: ["main", "feat"],
+      comparesCommittedBranches: true
+    });
   });
 
   it("falls back to [undefined] when a graph-diff page omits both branches", () => {
@@ -260,7 +272,11 @@ describe("graphTriggerTargets", () => {
         canvasId: "radius",
         input: { page: "graph-diff", repo: "a/b" }
       })
-    ).toEqual({ repo: "a/b", branches: [undefined] });
+    ).toEqual({
+      repo: "a/b",
+      branches: [undefined],
+      comparesCommittedBranches: true
+    });
   });
 
   it("defaults repo to empty string when a graph-diff page omits repo", () => {
@@ -269,7 +285,11 @@ describe("graphTriggerTargets", () => {
         canvasId: "radius",
         input: { page: "graph-diff", baseBranch: "main", headBranch: "feat" }
       })
-    ).toEqual({ repo: "", branches: ["main", "feat"] });
+    ).toEqual({
+      repo: "",
+      branches: ["main", "feat"],
+      comparesCommittedBranches: true
+    });
   });
 
   it("treats a page-less radius open as the default graph page", () => {
@@ -279,7 +299,8 @@ describe("graphTriggerTargets", () => {
       graphTriggerTargets("open_canvas", { canvasId: "radius", repo: "a/b" })
     ).toEqual({
       repo: "",
-      branches: [undefined]
+      branches: [undefined],
+      comparesCommittedBranches: false
     });
     expect(
       graphTriggerTargets("open_canvas", {
@@ -288,7 +309,8 @@ describe("graphTriggerTargets", () => {
       })
     ).toEqual({
       repo: "a/b",
-      branches: [undefined]
+      branches: [undefined],
+      comparesCommittedBranches: false
     });
   });
 
@@ -299,7 +321,11 @@ describe("graphTriggerTargets", () => {
         baseBranch: "main",
         headBranch: "feat"
       })
-    ).toEqual({ repo: "a/b", branches: ["main", "feat"] });
+    ).toEqual({
+      repo: "a/b",
+      branches: ["main", "feat"],
+      comparesCommittedBranches: true
+    });
   });
 
   it("falls back to [undefined] when the pr-diff tool omits branches", () => {
@@ -307,7 +333,8 @@ describe("graphTriggerTargets", () => {
       graphTriggerTargets("radius_generate_pr_diff_markdown", { repo: "a/b" })
     ).toEqual({
       repo: "a/b",
-      branches: [undefined]
+      branches: [undefined],
+      comparesCommittedBranches: true
     });
   });
 
@@ -317,7 +344,8 @@ describe("graphTriggerTargets", () => {
       graphTriggerTargets("radius_generate_pr_diff_markdown", null)
     ).toEqual({
       repo: "",
-      branches: [undefined]
+      branches: [undefined],
+      comparesCommittedBranches: true
     });
   });
 });
@@ -373,7 +401,11 @@ function makeDeps({
   ),
   defaultBranch = "main"
 }: {
-  state?: { contextRepo: string };
+  state?: {
+    contextRepo: string;
+    workspaceRepo?: string;
+    workspaceBranch?: string;
+  };
   appModelStatus?: (
     repo: string,
     branch: string,
@@ -598,6 +630,107 @@ describe("evaluateAppBicepHook", () => {
     expect(appSource.mock.calls.map((call) => call[1])).toEqual([
       "base",
       "head"
+    ]);
+  });
+
+  // The canvas ignores a caller-supplied branch for the workspace repository and
+  // renders the checked-out worktree. Deciding against the requested branch
+  // instead would judge a branch the user will never see.
+  it("judges the workspace repository on its checked-out branch, not the requested one", async () => {
+    const deps = makeDeps({
+      state: {
+        contextRepo: "a/b",
+        workspaceRepo: "a/b",
+        workspaceBranch: "feature"
+      },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "missing" })
+      ),
+      appSource: vi.fn(async (): Promise<AppSourceEvaluation> => ({
+        status: "single",
+        dockerfiles: ["Dockerfile"]
+      }))
+    });
+
+    await evaluateAppBicepHook(
+      {
+        toolName: "open_canvas",
+        toolArgs: {
+          canvasId: "radius",
+          input: { page: "graph", repo: "a/b", branch: "main" }
+        }
+      },
+      deps
+    );
+
+    expect(deps.appModelStatus).toHaveBeenCalledWith(
+      "a/b",
+      "feature",
+      expect.anything()
+    );
+    expect(deps.appSource).toHaveBeenCalledWith(
+      "a/b",
+      "feature",
+      expect.anything()
+    );
+  });
+
+  it("honors the requested branch for a repository that is not the workspace's", async () => {
+    const deps = makeDeps({
+      state: {
+        contextRepo: "a/b",
+        workspaceRepo: "other/repo",
+        workspaceBranch: "feature"
+      },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "missing" })
+      )
+    });
+
+    await evaluateAppBicepHook(
+      {
+        toolName: "open_canvas",
+        toolArgs: {
+          canvasId: "radius",
+          input: { page: "graph", repo: "a/b", branch: "main" }
+        }
+      },
+      deps
+    );
+
+    expect(deps.appModelStatus).toHaveBeenCalledWith(
+      "a/b",
+      "main",
+      expect.anything()
+    );
+  });
+
+  // A graph diff names two committed refs; those mean exactly what they say
+  // even when one of them is the workspace repository's own branch.
+  it("keeps both explicitly compared branches for a graph diff", async () => {
+    const appModelStatus = vi.fn(async (repo: string, branch: string) =>
+      modelStatus(repo, branch, { status: "missing" })
+    );
+    const deps = makeDeps({
+      state: {
+        contextRepo: "a/b",
+        workspaceRepo: "a/b",
+        workspaceBranch: "feature"
+      },
+      appModelStatus
+    });
+
+    await evaluateAppBicepHook(
+      {
+        toolName: "radius_generate_pr_diff_markdown",
+        toolArgs: { repo: "a/b", baseBranch: "main", headBranch: "topic" }
+      },
+      deps
+    );
+
+    expect(appModelStatus.mock.calls.map((call) => call[1])).toEqual([
+      "main",
+      "topic"
     ]);
   });
 

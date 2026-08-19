@@ -57,6 +57,29 @@ describe("isIgnoredSourcePath", () => {
     }
   );
 
+  // The local worktree walker has always hidden dot-directories while
+  // descending; the remote listing prunes nothing. Applying the rule here is
+  // what stops the two from reaching different verdicts on the same repository.
+  it.each([
+    ".devcontainer/Dockerfile",
+    ".config/docker/Dockerfile",
+    ".circleci/Dockerfile"
+  ])("ignores the dot-directory path %s", (path: string) => {
+    expect(isIgnoredSourcePath(path)).toBe(true);
+  });
+
+  it.each([".radius/Dockerfile", ".github/Dockerfile"])(
+    "keeps %s, which the worktree walker also descends into",
+    (path: string) => {
+      expect(isIgnoredSourcePath(path)).toBe(false);
+    }
+  );
+
+  it("keeps a dotfile that is not inside a dot-directory", () => {
+    expect(isIgnoredSourcePath(".env")).toBe(false);
+    expect(isIgnoredSourcePath("services/.dockerignore")).toBe(false);
+  });
+
   it("keeps application paths", () => {
     expect(isIgnoredSourcePath("services/api/Dockerfile")).toBe(false);
     expect(isIgnoredSourcePath("Dockerfile")).toBe(false);
@@ -143,6 +166,12 @@ describe("evaluateAppSource", () => {
   it("reports none when a real listing has no Dockerfile", () => {
     expect(
       evaluateAppSource(["src/index.ts", "package.json", "README.md"])
+    ).toEqual({ status: "none", dockerfiles: [] });
+  });
+
+  it("reports none when the only Dockerfile is in a dot-directory", () => {
+    expect(
+      evaluateAppSource(["src/index.ts", ".devcontainer/Dockerfile"])
     ).toEqual({ status: "none", dockerfiles: [] });
   });
 

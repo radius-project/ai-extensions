@@ -93,15 +93,30 @@ export function isDockerfilePath(path: unknown): boolean {
   return false;
 }
 
+// Dot-directories the local worktree walker descends into anyway, because they
+// carry repository configuration a listing is expected to include.
+const SOURCE_DOT_DIRS: ReadonlySet<string> = new Set([".radius", ".github"]);
+
 // True when any DIRECTORY segment of the path is one that never holds
 // application source. The basename is excluded, so a file that happens to be
 // named like an ignored directory is still considered.
+//
+// Dot-directories are excluded as a class, which is what the local worktree
+// walker has always done while descending. Applying it here too is what keeps a
+// remote listing — which prunes nothing of its own — from reaching a different
+// verdict than the worktree on the same repository. It also keeps a tooling
+// image such as `.devcontainer/Dockerfile` from being read as evidence that the
+// application itself is containerized.
 export function isIgnoredSourcePath(path: unknown): boolean {
   if (typeof path !== "string") return false;
   const segments = normalizePath(path).split("/");
   return segments
     .slice(0, -1)
-    .some((segment) => IGNORED_SOURCE_DIRS.has(segment));
+    .some(
+      (segment) =>
+        IGNORED_SOURCE_DIRS.has(segment) ||
+        (segment.startsWith(".") && !SOURCE_DOT_DIRS.has(segment))
+    );
 }
 
 // Dockerfiles in a listing, shallowest first so the repository root — the most

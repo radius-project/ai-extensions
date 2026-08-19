@@ -513,10 +513,10 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     await harness.extension.shutdown("test");
   });
 
-  it("denies a branch that is not the workspace's, skipping a vendored Dockerfile the tree listing does not prune", async () => {
+  it("denies a repository that is not the workspace's, skipping a vendored Dockerfile the tree listing does not prune", async () => {
     const harness = await createRuntimeSdkHarness({
       remoteTreeByRepoBranch: {
-        "acme/widgets@feat": [
+        "other/service@feat": [
           "src/index.ts",
           "node_modules/some-pkg/Dockerfile"
         ]
@@ -527,7 +527,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       toolName: "open_canvas",
       toolArgs: {
         canvasId: "radius",
-        input: { page: "graph", repo: "acme/widgets", branch: "feat" }
+        input: { page: "graph", repo: "other/service", branch: "feat" }
       }
     });
 
@@ -535,6 +535,33 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     expect(denied?.additionalContext).toContain(
       UNSUPPORTED_NO_DOCKERFILE_MESSAGE
     );
+
+    await harness.extension.shutdown("test");
+  });
+
+  // The canvas renders the workspace repository from its checked-out worktree
+  // regardless of the branch a caller names, so judging the named branch would
+  // deny on evidence from a branch the user will never see.
+  it("judges the workspace repository on its worktree, not a caller-named branch", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "Dockerfile"]
+      },
+      remoteTreeByRepoBranch: { "acme/widgets@legacy": ["src/index.ts"] }
+    });
+
+    const decision = await harness.extension.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        input: { page: "graph", repo: "acme/widgets", branch: "legacy" }
+      }
+    });
+
+    expect(decision?.additionalContext).not.toContain(
+      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+    );
+    expect(harness.deps.github.treePaths).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });
