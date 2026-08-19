@@ -1241,6 +1241,63 @@ describe("deploy flow", () => {
     expect(page.browser.clock.pending).toBe(0);
   });
 
+  it("keeps the started notification hidden until a poll confirms a workflow run URL", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+
+    let pollCount = 0;
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () => {
+      pollCount++;
+      return pollCount === 1 ?
+          jsonResponse({ status: "in_progress" })
+        : jsonResponse({
+            status: "in_progress",
+            deployRunUrl: "https://example.test/run/1"
+          });
+    });
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).not.toContain("has started");
+
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).toContain("has started");
+  });
+
+  it("does not re-show a dismissed started notification on later polls", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "in_progress",
+        deployRunUrl: "https://example.test/run/1"
+      })
+    );
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).toContain("has started");
+
+    const closeButton = page.inlineStatus.children[2];
+    closeButton.dispatch("click");
+    expect(page.inlineStatus.style.display).toBe("none");
+
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.inlineStatus.style.display).toBe("none");
+  });
+
   it("does not show a deployment-started notification when workflow startup fails", async () => {
     const page = fixture();
     init(page);
