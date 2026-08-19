@@ -95,6 +95,8 @@ The canvas asks for a refresh when an existing model is stale: its branch has mo
 - A model that is stale only because the source or generator moved on carries no unproven content, so refresh it without asking.
 - Refresh only the current workspace branch, where writing the working tree is enough. A model on a **different** branch cannot be refreshed by modeling: report the staleness to the user and let them decide, rather than committing or pushing a regenerated model to that branch.
 
+## Deterministic Naming Rules
+
 These rules eliminate ambiguity. Apply them exactly.
 
 Explicit profile-required resource, relationship, parameter, and app-native configuration names take precedence over the default naming rules below. Never normalize a name the selected runtime contract requires verbatim. Preserve a resource-name parameter when deployment documentation, the target Environment Recipe, or verification couples it to a provider resource name.
@@ -139,13 +141,15 @@ Explicit profile-required resource, relationship, parameter, and app-native conf
 
 ### Deterministic output
 
-Two runs of this skill over the same source, with the same generator version and the same schema/recipe contract, must produce byte-identical `.radius/app.bicep`. Determinism is what makes a refresh safe to perform: a regeneration that reshuffles equivalent content produces a large spurious diff, and the origin record's hand-edit check cannot tell that churn apart from a real user edit. Apply:
+Two runs of this skill over the same source, with the same generator version and the same schema/recipe contract, must produce byte-identical `.radius/app.bicep`. A regeneration that reshuffles equivalent content produces a large diff that says nothing, which makes real changes hard to review and adds noise to the repository's history. Apply:
 
 - **Canonical declaration order.** `extension` lines first, then `param` declarations, then the `Radius.Core/applications` resource, then the remaining resources. Never order resources by discovery order, file-walk order, or the order a tool happened to return them.
 - **Canonical ordering within each group.** Order `param` declarations, and resources of the same type, by their `name` value using plain ASCII ordering. Resource types themselves follow the order they appear in the allow-list table under [Resource Type Resolution](#resource-type-resolution). The one exception is a resource that must be declared after something it references.
 - **Canonical ordering inside a resource.** `name` first, then `properties`. Within a map whose keys you choose (`env`, `ports`, `containers`, `connections`), order keys ASCII-ascending.
 - **Stable values.** Nothing derived from the current time, a random value, a temporary path, an absolute path on this machine, or an environment variable of the machine running the skill may appear in the output. Values pinned to a revision use the modeled commit or an explicit immutable tag, which are properties of the source rather than of the run.
 - **Normalized formatting.** Two-space indentation, single quotes for strings, one trailing newline, no trailing whitespace, and no blank line runs longer than one.
+
+## Source-code reference metadata (`codeReference`)
 
 Each resource (except `applications`) may carry an optional `codeReference` in its `properties` — a repo-relative path, optionally with a `#L<line>` anchor, pointing at where that resource is defined/initialized in the source. It is metadata only: `rad app graph` preserves it and the application-graph canvas turns it into a clickable deep link on the node. It does not affect deployment.
 

@@ -334,7 +334,9 @@ export function createRadiusExtension(
 
   // Staleness signals already handed to the agent, so a refresh that does not
   // clear the drift cannot block every later graph open. Scoped to this
-  // extension instance rather than the module.
+  // extension instance rather than the module. It only grows when a new problem
+  // appears on a new repo or branch, so it stays small over a session; it is
+  // cleared when the extension process restarts.
   const requestedRefreshes = new Set<string>();
 
   return {

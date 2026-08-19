@@ -391,12 +391,14 @@ export async function workspaceHeadCommit(
   return await runGit(workspacePath, ["rev-parse", "HEAD"]);
 }
 
-// Directory the generated model and its origin record live in. Changes confined
-// to it are not application-source changes.
-const MODEL_DIR = ".radius";
+// Paths the generator owns: the `.radius` directory, and the root-level app
+// model and origin record that an older layout keeps beside it. Changes confined
+// to these are not application-source changes, so committing a regenerated model
+// does not read as a reason to regenerate it again.
+const GENERATED_PATHS = [".radius", "app.bicep", "app.origin.json"];
 
 // Whether application source changed between `sinceCommit` and HEAD, ignoring
-// the model's own directory. Resolves undefined when git cannot answer (no
+// the paths the generator owns. Resolves undefined when git cannot answer (no
 // workspace, unknown commit, shallow clone), so the caller can fall back rather
 // than read silence as "nothing changed".
 //
@@ -416,7 +418,7 @@ export async function workspaceSourceChangedSince(
     "HEAD",
     "--",
     ".",
-    `:(exclude)${MODEL_DIR}`
+    ...GENERATED_PATHS.map((path) => `:(exclude)${path}`)
   ]);
   if (!result.ok) return undefined;
   return result.stdout.length > 0;

@@ -720,6 +720,69 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     );
   });
 
+  // A branch we do not have checked out always looks source-changed, because
+  // committing the app model is itself a commit past the one it recorded.
+  // Saying so on every such branch forever is noise, not signal.
+  it("does not claim a branch it cannot diff is out of date", async () => {
+    const model = "resource db {}";
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "remote:other/repo@release": model },
+      filesByRepoBranch: {
+        [`remote:other/repo@release:${APP_ORIGIN_REPO_PATH}`]:
+          serializeAppOrigin({
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: "a".repeat(40),
+            skillVersion: "0.1.0-test",
+            appBicepHash: hashAppBicep(model)
+          })
+      },
+      headCommits: { "other/repo@release": "b".repeat(40) }
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "release"
+      })
+    );
+
+    expect(session.log).not.toHaveBeenCalled();
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
+  it("still reports a skill change on a branch it cannot diff", async () => {
+    const model = "resource db {}";
+    const { canvas, deps } = setup({
+      generatorVersion: "0.2.0",
+      bicepByRepoBranch: { "remote:other/repo@release": model },
+      filesByRepoBranch: {
+        [`remote:other/repo@release:${APP_ORIGIN_REPO_PATH}`]:
+          serializeAppOrigin({
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: "a".repeat(40),
+            skillVersion: "0.1.0-test",
+            appBicepHash: hashAppBicep(model)
+          })
+      },
+      headCommits: { "other/repo@release": "a".repeat(40) }
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "release"
+      })
+    );
+
+    expect(session.log).toHaveBeenCalledWith(
+      expect.stringContaining("may be out of date")
+    );
+  });
+
   it("stays silent when the workspace model is current", async () => {
     const model = "resource db {}";
     const { canvas, deps } = setup({

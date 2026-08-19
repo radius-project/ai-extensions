@@ -23,6 +23,7 @@ import {
 } from "./hooks.js";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
 import { createGraphContextHelpers } from "./graph-context.js";
+import type { AppModelStatus } from "./graph-context.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasServerEntry } from "../server.js";
 import type { CanvasState } from "../shared.js";
@@ -73,6 +74,18 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
     } catch {
       /* session.log unavailable → ignore */
     }
+  }
+
+  // A branch we do not have checked out cannot be diffed, so the source check
+  // there falls back to comparing the recorded commit against the branch head.
+  // Those never match: committing the app model is itself a commit, so the head
+  // has always moved past the commit the record names. Reporting it would put a
+  // "may be out of date" line on every such branch forever, so we keep only the
+  // results that still mean something there.
+  function isWorthReporting(status: AppModelStatus): boolean {
+    return (
+      status.freshness.stale && status.freshness.status !== "source-changed"
+    );
   }
 
   // When a graph canvas is opened, decide what the model on the target branch
@@ -169,7 +182,7 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
       }
 
       for (const status of present) {
-        if (!status.refreshable && status.freshness.stale) {
+        if (!status.refreshable && isWorthReporting(status)) {
           logToSession(appModelStaleNotice(status));
         }
       }

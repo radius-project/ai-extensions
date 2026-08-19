@@ -95,7 +95,7 @@ git diff --name-only <sourceCommit> HEAD -- . ':(exclude).radius'
 
 A commit that only touches the app model produces no output, so it does not count as a change. `workspaceSourceChangedSince` returns `undefined` when git cannot answer at all, such as an unknown commit or a shallow clone. We then compare the two commits instead, rather than read silence as "nothing changed".
 
-That command also only works on the branch the workspace has checked out, so any other branch uses that same commit comparison. It means a new commit there looks like a change even when it only touched `.radius/`. That is imprecise, but it costs little: those branches only ever get a note, and are never regenerated.
+That command only works on the branch the workspace has checked out. Any other branch would have to compare the two commits, and those never match: committing an app model is itself a commit past the one it recorded. So on those branches we do not claim the source changed at all. A skill change or an app model we cannot verify is still reported, since those we can still tell.
 
 ### Error handling
 
@@ -122,6 +122,8 @@ A graph is only ever held back once. If the app model is not regenerated, becaus
 - **Runtime tests**: a graph open held back by a stale app model, the same open succeeding once it is regenerated, and a stale app model on another branch not blocking the view.
 
 ## Open questions
+
+**Should uncommitted changes count?** The recorded commit is compared against `HEAD`, so edits that are saved but not yet committed are invisible and the app model reads as current. That is the inner loop, where a developer is most likely to change source and open a graph straight away.
 
 **Should the source check be narrower?** Any commit outside `.radius/` counts as a change, so editing a README regenerates the app model. A narrower version would fingerprint only the files the skill actually read. Worth doing if regenerating turns out to happen too often in practice.
 
