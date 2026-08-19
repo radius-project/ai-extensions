@@ -1244,6 +1244,10 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
         record("sync-workflows");
         return Promise.resolve({ created: [], failed: [] });
       },
+      latestWorkflowRunId: () => {
+        record("latest-run-id");
+        return Promise.resolve(76);
+      },
       classifyDeployDispatchFailure: () => "run-unconfirmed",
       invalidateDeployListCache: () => record("evict-deploy-listing"),
       errorMessage: (error) => String(error),
@@ -1342,6 +1346,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       "fetch-file:.radius/app.bicep",
       "publish-workflows",
       "sync-workflows",
+      "latest-run-id",
       "gh:workflow run run-rad-commands.yml",
       "evict-deploy-listing",
       "find-workflow-run",
