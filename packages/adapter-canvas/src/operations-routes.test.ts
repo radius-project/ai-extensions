@@ -49,7 +49,14 @@ afterAll(() => {
 async function postJson(path, body) {
   const res = await fetch(baseUrl + path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Origin: baseUrl,
+      "Sec-Fetch-Site": "same-origin",
+      "X-Radius-Mutation-Nonce": String(
+        entry?.state?.browserMutationNonce || ""
+      )
+    },
     body: JSON.stringify(body)
   });
   return { status: res.status, body: await res.json() };
@@ -84,7 +91,7 @@ describe("POST /api/operations server-owned execution", () => {
     stopFollowing();
   });
 
-  it("returns 202 before the scheduled task completes and finishes without polling", async () => {
+  it("rejects operation registration without a readiness handle", async () => {
     operations.clear();
     let release;
     const blocked = new Promise((resolve) => {
@@ -108,18 +115,15 @@ describe("POST /api/operations server-owned execution", () => {
       cluster: "aks-dev"
     });
 
-    expect(started.status).toBe(202);
-    expect(started.body.operationId).toMatch(/^op_/);
-    expect(started.body.statusUrl).toContain(started.body.operationId);
-    expect(operations.get(started.body.operationId)?.state).toBe("running");
-
-    release();
-    await vi.waitFor(() => {
-      expect(operations.get(started.body.operationId)?.state).toBe("succeeded");
+    expect(started).toMatchObject({
+      status: 409,
+      body: { code: "github-selection-missing" }
     });
+    expect(runner).not.toHaveBeenCalled();
+    release();
   });
 
-  it("returns the active operation id on a conflicting start", async () => {
+  it("checks the readiness handle before operation conflicts", async () => {
     operations.clear();
     setEnvironmentOperationTestRunner(async () => {});
     const first = await postJson("/api/operations", {
@@ -142,17 +146,17 @@ describe("POST /api/operations server-owned execution", () => {
       resourceGroup: "rg-dev",
       cluster: "aks-dev"
     });
-    expect(first.status).toBe(202);
+    expect(first).toMatchObject({
+      status: 409,
+      body: { code: "github-selection-missing" }
+    });
     expect(second).toMatchObject({
       status: 409,
-      body: {
-        code: "operation-in-progress",
-        operationId: first.body.operationId
-      }
+      body: { code: "github-selection-missing" }
     });
   });
 
-  it("normalizes the environment name before persisting the operation", async () => {
+  it("does not persist an environment before account readiness is claimed", async () => {
     operations.clear();
     setEnvironmentOperationTestRunner(async () => {});
     const started = await postJson("/api/operations", {
@@ -166,8 +170,11 @@ describe("POST /api/operations server-owned execution", () => {
       cluster: "aks-dev"
     });
 
-    expect(started.status).toBe(202);
-    expect(operations.get(started.body.operationId)?.environment).toBe("dev");
+    expect(started).toMatchObject({
+      status: 409,
+      body: { code: "github-selection-missing" }
+    });
+    expect(operations.all()).toEqual([]);
   });
 
   it.each(["/api/azure-auto-setup", "/api/create-environment"])(
@@ -275,7 +282,17 @@ describe("POST /api/operations server-owned execution", () => {
     });
     const malformedResponse = await fetch(
       `${baseUrl}/api/operations/${malformed.operationId}/resume/app-selection-required`,
-      { method: "POST", body: "{not json" }
+      {
+        method: "POST",
+        headers: {
+          Origin: baseUrl,
+          "Sec-Fetch-Site": "same-origin",
+          "X-Radius-Mutation-Nonce": String(
+            entry?.state?.browserMutationNonce || ""
+          )
+        },
+        body: "{not json"
+      }
     );
     expect(malformedResponse.status).toBe(409);
     expect(await malformedResponse.json()).toMatchObject({
@@ -611,9 +628,10 @@ describe("GET /api/operations/{id}", () => {
       });
     });
 
-    it("keeps the persisted workflow identity on an operation-bound lookup", async () => {
+    it("keeps an operation pending during selected-executor handoff", async () => {
       const op = seed("contoso/workflow-identity");
       enterStage(op, STAGE_VERIFY);
+      op.context = { githubLogin: "octocat" };
       op.verification = {
         dispatchedAt: Date.now(),
         workflow: "renamed-verify.yml",
@@ -629,10 +647,10 @@ describe("GET /api/operations/{id}", () => {
       );
 
       expect(status).toBe(200);
-      expect(body.runId).toBe("12345");
-      expect(body.runUrl).toBe(
-        "https://github.com/contoso/workflow-identity/actions/runs/12345"
-      );
+      expect(body).toEqual({
+        state: "pending",
+        runId: "12345"
+      });
     });
   });
 

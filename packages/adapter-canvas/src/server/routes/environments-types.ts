@@ -1,4 +1,5 @@
 import type { CanvasState } from "../../shared.js";
+import type { SelectedGhExecutor } from "../../gh.js";
 
 // Type surface for the `environments` route module (see `environments.ts`).
 // These are declarations only — erased at compile time — extracted so the
@@ -114,18 +115,27 @@ export interface EnvironmentsDependencies {
 
   // --- verify-status ---
   getOperation(operationId: string): unknown;
+  getSelectedGitHubExecutor(
+    operationId: string
+  ): SelectedGhExecutor | null | undefined;
   hasCompleteVerificationIdentity(operation: unknown): boolean;
   findWorkflowRun(
     repo: string,
     workflowFile: string,
     sinceMs: number,
-    knownId?: number | string | null
+    knownId?: number | string | null,
+    executor?: SelectedGhExecutor
   ): Promise<number | string | null>;
   getRunDetail(
     repo: string,
-    runId: number | string
+    runId: number | string,
+    executor?: SelectedGhExecutor
   ): Promise<EnvironmentRunDetail | null>;
-  fetchRunLog(repo: string, runId: number | string): Promise<string | null>;
+  fetchRunLog(
+    repo: string,
+    runId: number | string,
+    executor?: SelectedGhExecutor
+  ): Promise<string | null>;
   extractErrorLines(logText?: string | null, max?: number): string[];
   extractGitHubActionsStepLog(
     logText: string | null | undefined,

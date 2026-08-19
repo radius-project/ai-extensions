@@ -19,7 +19,6 @@ interface Harness {
   profiles: Map<string, CredentialProfile[]>;
   calls: string[];
   login: string;
-  switchResult: { ok: boolean; error?: string };
   preflight: string | Error;
   validSlugs: string[];
   identityThrows?: Error;
@@ -32,7 +31,6 @@ function identityFor(login: string): GitHubIdentity {
     mismatch: false,
     actingHasWorkflow: true,
     actingHasPackages: false,
-    preferredLogin: null,
     reason: `reason-${login}`,
     accounts: []
   };
@@ -43,7 +41,6 @@ function start(): Harness {
     profiles: new Map(),
     calls: [],
     login: "initial-login",
-    switchResult: { ok: true },
     preflight: "",
     validSlugs: []
   };
@@ -83,14 +80,25 @@ function start(): Harness {
       resetGhIdentityCache: () => {
         harness.calls.push("reset");
       },
-      switchGhAccount: (login) => {
-        harness.calls.push(`switch(${login})`);
-        return Promise.resolve(harness.switchResult);
-      },
-      setPreferredGitHubLogin: (login) => {
-        harness.calls.push(`prefer(${login})`);
-        harness.login = login;
-      },
+      prepareGitHubAccount: async ({ login }) => ({
+        readiness: {
+          ready: true,
+          login,
+          credentialSource: "keyring",
+          summary: "Ready to configure deployments",
+          checks: {
+            repository: { state: "ready", detail: "ready" },
+            workflow: { state: "ready", detail: "ready" },
+            environment: { state: "ready", detail: "ready" },
+            packages: { state: "ready", detail: "ready" },
+            identity: { state: "ready", detail: "ready" }
+          },
+          repair: null,
+          restoration: null
+        },
+        selectionHandle: "selection-handle",
+        expiresAt: 1
+      }),
       preflightRepoAdmin: (repo) => {
         harness.calls.push(`preflight(${repo})`);
         if (harness.preflight instanceof Error) {
@@ -112,6 +120,7 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
+        validateBrowserMutation: () => true,
         handleUnmatchedRequest: (_request, response) => {
           response.writeHead(404);
           response.end("unmatched");
@@ -272,36 +281,33 @@ describe("identity-profiles real-loopback HIT (RF-02)", () => {
     );
   });
 
-  it("switches the account, persisting before re-reading, and 400s a failure", async () => {
+  it("returns selected-account readiness and rejects invalid input", async () => {
     const harness = start();
+    harness.validSlugs = ["octo/app"];
     const entry = await container!.getOrCreate("panel-a");
 
     const switched = await post(
       entry.baseUrl,
       "/api/github-account",
-      '{"login":"  octocat  "}'
+      '{"login":"  octocat  ","repo":"octo/app","environment":"dev"}'
     );
     expect(switched.status).toBe(200);
-    expect(await switched.json()).toEqual({
+    expect(await switched.json()).toMatchObject({
       success: true,
-      identity: identityFor("octocat")
+      selectionHandle: "selection-handle",
+      readiness: { ready: true, login: "octocat" }
     });
-    expect(harness.calls).toEqual([
-      "switch(octocat)",
-      "prefer(octocat)",
-      "identity->octocat"
-    ]);
 
-    harness.switchResult = { ok: false, error: "no such account" };
     const failed = await post(
       entry.baseUrl,
       "/api/github-account",
-      '{"login":"ghost"}'
+      '{"login":"ghost","repo":"not-a-repo"}'
     );
-    // 400, not a 200 error payload.
     expect(failed.status).toBe(400);
     expect(failed.headers.get("content-type")).toBe("application/json");
-    expect(await failed.text()).toBe('{"error":"no such account"}');
+    expect(await failed.text()).toBe(
+      '{"error":"A GitHub login, environment, and valid repository are required."}'
+    );
 
     const malformed = await post(
       entry.baseUrl,
