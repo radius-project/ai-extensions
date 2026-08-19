@@ -91,18 +91,20 @@ jobs:
       - name: Run Chromium Canvas tests
         run: pnpm run test:chromium
 
-      # Failure-only diagnostics. These are traces for debugging a red run, not
-      # an approved visual baseline; golden screenshot review is Phase 7.
-      - name: Upload Chromium failure traces
-        if: failure()
+      - name: Run reviewed Canvas visual baselines
+        run: pnpm run test:visual
+
+      - name: Upload Chromium diagnostics and retry-only reports
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: canvas-chromium-traces
           path: |
             packages/adapter-canvas/test-results
             packages/adapter-canvas/playwright-report
+            packages/adapter-canvas/playwright-visual-report
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
 
   build:
     name: Build plugin dist
