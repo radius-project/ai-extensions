@@ -25,11 +25,9 @@ import {
   stateRegistryForEnvironment
 } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
-import { ensureVendorScripts } from "./vendor.js";
 import {
   sharedCredentials,
   cloudCredential,
-  saveCredentials,
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
@@ -139,9 +137,6 @@ import {
   setSourceRefResources
 } from "./source-refs.js";
 import {
-  generateAzureOIDC,
-  validateAzureCredentials,
-  generateAWSOIDC,
   generateVerifyWorkflow,
   generateDeployWorkflow,
   generateDeleteWorkflow,
@@ -159,6 +154,7 @@ import {
   extractGitHubActionsStepLog,
   extractRadDeployError,
   explainOidcEnterpriseClaim,
+  explainNoSubscriptions,
   explainRepoAccessForEnvSetup
 } from "./deploy.js";
 import {
@@ -169,14 +165,12 @@ import {
   createDeployStatusReader,
   settleDeployStatuses
 } from "./deploy-artifacts.js";
-import {
-  graphPage,
-  plannedGraphPage,
-  graphDiffPage,
-  deployedGraphPage,
-  environmentPage,
-  deployingPage
-} from "./pages.js";
+import { graphPage } from "./pages/graph-page.js";
+import { plannedGraphPage } from "./pages/planned-graph-page.js";
+import { graphDiffPage } from "./pages/graph-diff-page.js";
+import { deployedGraphPage } from "./pages/deployed-graph-page.js";
+import { environmentPage } from "./pages/environment-page.js";
+import { deployingPage } from "./pages/deploying-page.js";
 import { createCanvasServer } from "./server/create-canvas-server.js";
 import { createRequestHandler as createScaffoldRequestHandler } from "./server/create-request-handler.js";
 import {
@@ -323,6 +317,16 @@ export interface DeployRepairHandoffInput {
   instanceId: string;
 }
 
+// Payload for the informational failure notice. Carries no attemptId: a notice
+// never opens a repair loop, so there is no attempt for the agent to address.
+export interface DeployFailureNoticeInput {
+  repo: string;
+  branch: string;
+  error: string;
+  deployRunUrl: string;
+  instanceId: string;
+}
+
 interface OpenSourceInput {
   path: string;
   line: number;
@@ -332,6 +336,7 @@ interface OpenSourceInput {
 
 type AppBicepHandoff = (input: AppBicepHandoffInput) => Promise<unknown>;
 type DeployRepairHandoff = (input: DeployRepairHandoffInput) => unknown;
+type DeployFailureNotice = (input: DeployFailureNoticeInput) => unknown;
 type OpenSourceHandler = (input: OpenSourceInput) => Promise<unknown>;
 type SessionPromptHandler = (
   prompt: string | SessionPromptMessage
@@ -518,6 +523,7 @@ const repositoriesRoutes = createRepositoriesRoutes({
 const deploymentsRoutes = createDeploymentsRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   triggerDeployRepairHandoff,
+  triggerDeployFailureNotice,
   deployHandoffStatus,
   resolveRepoAppName,
   resolveEnvDeployment,
@@ -563,7 +569,7 @@ const deploymentsRoutes = createDeploymentsRoutes({
   }
 });
 
-// Composition root for the migrated `azure-discovery` routes. Four seams: the
+// Composition root for the `azure-discovery` routes. Four seams:
 // `az` runner (which carries the agent-session-stripped `cliExec` environment
 // the Azure setup routes run under), the general trimmed-stdout CLI runner the
 // discovery enumeration branches on, and the two pure `azure-oidc` helpers,
@@ -699,22 +705,11 @@ const identityProfilesRoutes = createIdentityProfilesRoutes({
 });
 
 // Composition root for the auth/verify half of the `identity-credentials`
-// family. Fourteen narrow function seams: the two OIDC generators and the Azure
-// credential validator from `infra.ts`, the CLI runner from `gh.ts`, the shared
-// credential writer and its save, an instance-state reader, and the GUID,
-// Azure-message, prompt-builder and error helpers that stay defined here. The
-// session-prompt hook is bound here too so the route module never reads the
+// family. Eight narrow function seams: the CLI runner from `gh.ts`, and the
+// GUID, Azure-message, prompt-builder and error helpers that stay defined here.
+// The session-prompt hook is bound here too so the route module never reads the
 // mutable module-level handler.
 const identityAuthRoutes = createIdentityAuthRoutes({
-  validateAzureCredentials,
-  generateAzureOIDC,
-  generateAWSOIDC,
-  readInstanceState: (instanceId) =>
-    canvasServer.instances.get(instanceId)?.state,
-  setSharedAzureCredentials: (credentials) => {
-    sharedCredentials.azure = credentials;
-  },
-  saveCredentials,
   azureCredentialIdValidationError,
   azureLoginRequiredResponse,
   isCliCommandMissing,
@@ -878,6 +873,9 @@ const environmentsRoutes = createEnvironmentsRoutes({
   extractErrorLines: (logText, max) => extractErrorLines(logText, max),
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,
+  explainNoSubscriptions,
+  addLegacyStep: (operation, text) => addLegacyStep(operation, text),
+  isTerminalState,
   finish,
   finishSucceeded,
   persistBestEffort,
@@ -1065,7 +1063,7 @@ const canvasServer = createCanvasServer(
   })
 );
 
-// Compatibility facade shared with the SDK runtime during the route migration.
+// Shared instance registry used by the runtime and request handler.
 export const servers = canvasServer.instances;
 
 let environmentOperationTestRunner:
@@ -1501,6 +1499,15 @@ export function setDeployRepairHandoff(fn: DeployRepairHandoff | null): void {
   deployRepairHandoff = fn;
 }
 
+// Registered by the SDK entry (extension.ts) to relay a canvas deploy failure
+// that must NOT be auto-repaired (its workflow run could not be confirmed) back
+// to the agent as an informational report. Separate from the repair handoff so
+// the two can never be confused: this one never opens a repair loop.
+let deployFailureNotice: DeployFailureNotice | null = null;
+export function setDeployFailureNotice(fn: DeployFailureNotice | null): void {
+  deployFailureNotice = fn;
+}
+
 // Handler registered by the SDK entry (extension.ts) that opens a repo file in
 // the Copilot app's built-in "editor" canvas (side pane). The server has no SDK
 // access, so the webview's "View source code" click (for local-workspace graphs)
@@ -1822,6 +1829,14 @@ export function beginDeployAttempt(
   // it on every redeploy would let an undeliverable handoff retry forever.
   state.deployHandoffAttempts =
     input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
+  // The informational failure notice has no repair loop to inherit a budget
+  // from, so every new deploy attempt resets it unconditionally. Without this
+  // reset a canvas panel — whose CanvasState is reused across deploys — would
+  // keep a "delivered" (or exhausted "failed") notice for its whole life, and
+  // every later run-unconfirmed failure would bail at the trigger's guard and
+  // never reach chat.
+  state.deployNoticeState = "idle";
+  state.deployNoticeAttempts = 0;
   // Same lifetime as the delivery budget, and counted the way
   // resolveDeployRepairLoop projected it, so the number the agent is told
   // matches the one the next call is checked against. A deploy that opens a
@@ -1947,6 +1962,85 @@ export function deployHandoffStatus(state: CanvasState): DeployHandoffSummary {
     maxAttempts: DEPLOY_HANDOFF_MAX_ATTEMPTS,
     pending: handoffState === "pending" || handoffState === "retryable"
   };
+}
+
+// Relay a failed canvas deploy whose workflow run could not be confirmed
+// (DEPLOY_RUN_UNCONFIRMED_KIND) to the agent as an informational report.
+//
+// Deliberately parallel to triggerDeployRepairHandoff but kept separate:
+//   * it fires ONLY for the run-unconfirmed kind — the one the repair path
+//     refuses, so a failure is handled by exactly one of the two triggers;
+//   * it never sets deployRepairing and never opens a repair loop, because a run
+//     may still be in flight and an automatic redeploy could race it;
+//   * it tracks delivery on its own deployNotice* fields so it can never be
+//     confused with, or suppress, a repair handoff.
+// Branch-not-pushed is intentionally NOT relayed here: the canvas already shows a
+// dedicated, actionable "push the branch" panel for it, so a chat report would be
+// redundant noise.
+export function triggerDeployFailureNotice(
+  entry: { state: CanvasState } | undefined,
+  instanceId = ""
+): boolean {
+  try {
+    if (typeof deployFailureNotice !== "function") return false;
+    const state = entry?.state;
+    if (!state || state.deployStatus !== "failed") return false;
+    if (state.deployErrorKind !== DEPLOY_RUN_UNCONFIRMED_KIND) return false;
+    if (
+      state.deployNoticeState === "pending" ||
+      state.deployNoticeState === "delivered" ||
+      state.deployNoticeState === "failed"
+    )
+      return false;
+    const repo =
+      state.deployingRepo || state.plannedRepo || state.contextRepo || "";
+    const branch = state.deployingBranch || "";
+    const error = state.deployError || "";
+    const deployRunUrl = state.deployRunUrl || "";
+    // Bind delivery to the attempt that opened this notice: a canvas panel is
+    // reused across deploys and these callbacks settle asynchronously, so a new
+    // deploy started in the meantime must revoke a stale settle rather than have
+    // it mark the wrong attempt reported. Compare both sides normalized so an
+    // attempt-less notice still settles against attempt-less state.
+    const attemptId = state.deployAttempt?.id || "";
+    state.deployNoticeState = "pending";
+    state.deployNoticeAttempts = (state.deployNoticeAttempts || 0) + 1;
+    const ownsAttempt = () => (state.deployAttempt?.id || "") === attemptId;
+    const delivered = () => {
+      if (!ownsAttempt()) return;
+      state.deployNoticeState = "delivered";
+    };
+    const failed = () => {
+      if (!ownsAttempt()) return;
+      const exhausted =
+        (state.deployNoticeAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS;
+      state.deployNoticeState = exhausted ? "failed" : "retryable";
+      if (exhausted) return;
+      const timer = setTimeout(() => {
+        if (!ownsAttempt()) return;
+        triggerDeployFailureNotice(entry, instanceId);
+      }, DEPLOY_HANDOFF_RETRY_DELAY_MS);
+      timer.unref?.();
+    };
+    try {
+      Promise.resolve(
+        deployFailureNotice({
+          repo,
+          branch,
+          error,
+          deployRunUrl,
+          instanceId
+        })
+      ).then(delivered, failed);
+    } catch {
+      failed();
+      return false;
+    }
+    return true;
+  } catch {
+    /* never let a notice failure break the response */
+  }
+  return false;
 }
 
 // Bare filename of the legacy monolithic deploy workflow that the composite-
@@ -2135,6 +2229,8 @@ const deployRequestService = createDeployRequestService({
   beginDeployAttempt,
   triggerDeployRepairHandoff: (entry, instanceId) =>
     triggerDeployRepairHandoff(entry, instanceId),
+  triggerDeployFailureNotice: (entry, instanceId) =>
+    triggerDeployFailureNotice(entry, instanceId),
   monitor: deployMonitorService,
   unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
   repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
@@ -3549,7 +3645,6 @@ function createInstanceRequestCoordinator(
     const requestedPage = url.searchParams.get("page");
 
     // Default: serve the page HTML based on state
-    await ensureVendorScripts();
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     const entry = servers.get(instanceId);
     let page = requestedPage || entry?.page || DEFAULT_CANVAS_PAGE;
@@ -3645,8 +3740,5 @@ export async function getOrCreateServer(
   instanceId: string,
   page?: string
 ): Promise<CanvasServerEntry> {
-  // Start warming the page assets only when a canvas is actually opened. The
-  // first HTML request awaits this same in-flight promise before rendering.
-  if (!servers.has(instanceId)) void ensureVendorScripts();
   return await canvasServer.getOrCreate(instanceId, page);
 }

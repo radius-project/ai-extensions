@@ -22,6 +22,11 @@ import {
 } from "./environments.js";
 import type { CanvasServerEntry } from "../types.js";
 import { getOrCreateServer, persistBestEffort } from "../../server.js";
+import {
+  addLegacyStep as recordLegacyStep,
+  finishSucceeded as finishSetupSucceeded,
+  isTerminalState as isSetupTerminalState
+} from "../../operations.js";
 import { createTestRouteTable } from "../../../test/support/server/route-table.js";
 
 interface Recording {
@@ -119,6 +124,9 @@ function deps(
     extractErrorLines: unset("extractErrorLines") as never,
     extractGitHubActionsStepLog: unset("extractGitHubActionsStepLog") as never,
     explainOidcEnterpriseClaim: unset("explainOidcEnterpriseClaim") as never,
+    explainNoSubscriptions: unset("explainNoSubscriptions") as never,
+    addLegacyStep: unset("addLegacyStep") as never,
+    isTerminalState: unset("isTerminalState") as never,
     finish: unset("finish") as never,
     finishSucceeded: unset("finishSucceeded") as never,
     persistBestEffort: unset("persistBestEffort") as never,
@@ -661,7 +669,8 @@ describe("environments — list-environments", () => {
         provider: "azure",
         status: "success",
         webUrl: "https://github.com/o/r/settings/environments/7/edit",
-        credentialProfile: "prod"
+        credentialProfile: "prod",
+        config: {}
       }
     ]);
     // A matched workspace branch is passed to the background sync.
@@ -671,6 +680,119 @@ describe("environments — list-environments", () => {
       "feat"
     );
     expect(envListCacheSet).toHaveBeenCalled();
+  });
+
+  it("reports unknown instead of pending when verification history is absent", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "42\tcompleted\tsuccess" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout: "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+      [ENV_PATH.statuses("o/r", "100")]: {
+        stdout: "https://github.com/o/r/actions/runs/99"
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+
+    await handleListEnvironments(
+      ctx,
+      deps({
+        envListCacheGet: () => undefined,
+        envListCacheSet: vi.fn(),
+        now: () => 0,
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+
+    expect(JSON.parse(recording.body).environments[0].status).toBe("unknown");
+  });
+
+  it.each([
+    [
+      "azure",
+      "AZURE_CLIENT_ID\tabc\nAZURE_RESOURCE_GROUP\tprod-rg\nAZURE_AKS_CLUSTER_NAME\tprod-aks\nRADIUS_NAMESPACE\tpayments\nAZURE_SUBSCRIPTION_ID\tsub-1",
+      { resourceGroup: "prod-rg", cluster: "prod-aks", namespace: "payments" }
+    ],
+    [
+      "aws",
+      "AWS_ROLE_ARN\tarn:aws:iam::1:role/r\nAWS_EKS_CLUSTER_NAME\teks-1\nRADIUS_NAMESPACE\tpayments\nRADIUS_VPC_ID\tvpc-1\nRADIUS_SUBNET_IDS\tsub-a,sub-b\nAWS_ACCOUNT_ID\t1",
+      {
+        cluster: "eks-1",
+        namespace: "payments",
+        vpcId: "vpc-1",
+        subnetIds: "sub-a,sub-b"
+      }
+    ]
+  ])(
+    "returns the %s environment's own configuration so Edit can reopen the form on it",
+    async (_provider, variables, expected) => {
+      const script: CliScript = {
+        [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+        [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+        [ENV_PATH.vars("o/r", "dev")]: {
+          stdout: `RADIUS_MANAGED\ttrue\n${variables}`
+        },
+        [ENV_PATH.deployments("o/r", "dev")]: { stdout: "" }
+      };
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+      await handleListEnvironments(
+        ctx,
+        deps({
+          now: () => 0,
+          envListCacheGet: () => undefined,
+          envListCacheSet: vi.fn(),
+          cliExec: cliFake(script),
+          readInstanceEntry: () => undefined,
+          repoMatchesWorkspace: () => false,
+          kickoffWorkflowSync: vi.fn()
+        })
+      );
+      expect(JSON.parse(recording.body).environments[0].config).toEqual(
+        expected
+      );
+    }
+  );
+
+  it("omits configuration the environment does not carry", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout:
+          "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc\nAZURE_RESOURCE_GROUP\t\nRADIUS_NAMESPACE\tpayments"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "" }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheSet: vi.fn(),
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+    expect(JSON.parse(recording.body).environments[0].config).toEqual({
+      namespace: "payments"
+    });
   });
 
   it("surfaces the top-level catch as an error payload", async () => {
@@ -832,19 +954,75 @@ describe("environments — verify-status", () => {
     });
   });
 
-  it("reports success and finishes a verify-stage operation", async () => {
-    const finishSucceeded = vi.fn();
+  it("records completion once when repeated polls observe verification success", async () => {
+    const addLegacyStep = vi.fn();
+    const finishSucceeded = vi.fn((operation: { state: string }) => {
+      operation.state = "succeeded";
+    });
     const persistBestEffort = vi.fn(() => Promise.resolve(true));
     const op = {
       repo: "o/r",
       environment: "dev",
+      state: "running",
       currentStage: "verify",
       verification: { dispatchedAt: 1, runId: 9 }
     };
+    const dependencies = deps({
+      readInstanceEntry: () => undefined,
+      getOperation: () => op,
+      hasCompleteVerificationIdentity: () => true,
+      getRunDetail: () => Promise.resolve(detail({})),
+      addLegacyStep,
+      isTerminalState: isSetupTerminalState,
+      finishSucceeded,
+      persistBestEffort,
+      persistOperations: () => Promise.resolve(),
+      reportOperationDiagnostic: () => {}
+    });
+    const first = context("GET", "/api/verify-status?repo=o/r&operationId=op1");
+    const second = context(
+      "GET",
+      "/api/verify-status?repo=o/r&operationId=op1"
+    );
+    await handleVerifyStatus(first.ctx, dependencies);
+    await handleVerifyStatus(second.ctx, dependencies);
+
+    expect(addLegacyStep).toHaveBeenCalledWith(
+      op,
+      "✅ Environment created. Deploy your application from the Environments list when ready."
+    );
+    expect(addLegacyStep).toHaveBeenCalledOnce();
+    expect(finishSucceeded).toHaveBeenCalledOnce();
+    expect(persistBestEffort).toHaveBeenCalledOnce();
+    expect(JSON.parse(first.recording.body)).toEqual({
+      state: "success",
+      runId: 9,
+      runUrl: "https://github.com/o/r/actions/runs/9"
+    });
+    expect(JSON.parse(second.recording.body)).toEqual({
+      state: "success",
+      runId: 9,
+      runUrl: "https://github.com/o/r/actions/runs/9"
+    });
+  });
+
+  it("finishes a non-terminal verification operation that is not running", async () => {
+    const op = {
+      repo: "o/r",
+      environment: "dev",
+      state: "input_required",
+      currentStage: "verify",
+      verification: { dispatchedAt: 1, runId: 9 }
+    };
+    const finishSucceeded = vi.fn((operation: { state: string }) => {
+      operation.state = "succeeded";
+    });
+    const persistBestEffort = vi.fn(() => Promise.resolve(true));
     const { recording, ctx } = context(
       "GET",
       "/api/verify-status?repo=o/r&operationId=op1"
     );
+
     await handleVerifyStatus(
       ctx,
       deps({
@@ -852,13 +1030,17 @@ describe("environments — verify-status", () => {
         getOperation: () => op,
         hasCompleteVerificationIdentity: () => true,
         getRunDetail: () => Promise.resolve(detail({})),
+        addLegacyStep: vi.fn(),
+        isTerminalState: isSetupTerminalState,
         finishSucceeded,
         persistBestEffort,
         persistOperations: () => Promise.resolve(),
         reportOperationDiagnostic: () => {}
       })
     );
-    expect(finishSucceeded).toHaveBeenCalledWith(op);
+
+    expect(finishSucceeded).toHaveBeenCalledOnce();
+    expect(persistBestEffort).toHaveBeenCalledOnce();
     expect(JSON.parse(recording.body)).toEqual({
       state: "success",
       runId: 9,
@@ -968,6 +1150,132 @@ describe("environments — real loopback", () => {
     expect(await res.json()).toEqual({ environments: [] });
   });
 
+  it("serves an aged-out verification status as unknown over controlled HTTP", async () => {
+    const script: CliScript = {
+      ["/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"]:
+        {
+          stdout: "42\tcompleted\tsuccess"
+        },
+      ["/repos/octo/app/environments?per_page=100"]: { stdout: "7\tdev" },
+      ["/repos/octo/app/environments/dev/variables?per_page=100"]: {
+        stdout: "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+      },
+      ["/repos/octo/app/deployments?environment=dev&per_page=10"]: {
+        stdout: "100"
+      },
+      ["/repos/octo/app/deployments/100/statuses?per_page=1"]: {
+        stdout: "https://github.com/octo/app/actions/runs/99"
+      }
+    };
+    const container = createControlledEnvironmentServer({
+      envListCacheGet: () => undefined,
+      envListCacheSet: vi.fn(),
+      now: () => 0,
+      cliExec: cliFake(script),
+      readInstanceEntry: () => undefined,
+      repoMatchesWorkspace: () => false,
+      kickoffWorkflowSync: vi.fn()
+    });
+
+    try {
+      const controlled = await container.getOrCreate("unknown-verification");
+      const res = await fetch(
+        controlled.baseUrl + "/api/list-environments?repo=octo/app"
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(await res.json()).toEqual({
+        environments: [
+          expect.objectContaining({ name: "dev", status: "unknown" })
+        ]
+      });
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("fails closed when verification history cannot be read", async () => {
+    const script: CliScript = {
+      ["/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"]:
+        { error: new Error("github unavailable") },
+      ["/repos/octo/app/environments?per_page=100"]: { stdout: "7\tdev" },
+      ["/repos/octo/app/environments/dev/variables?per_page=100"]: {
+        stdout: "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+      },
+      ["/repos/octo/app/deployments?environment=dev&per_page=10"]: {
+        stdout: "100"
+      }
+    };
+    const container = createControlledEnvironmentServer({
+      envListCacheGet: () => undefined,
+      envListCacheSet: vi.fn(),
+      now: () => 0,
+      cliExec: cliFake(script),
+      readInstanceEntry: () => undefined,
+      repoMatchesWorkspace: () => false,
+      kickoffWorkflowSync: vi.fn()
+    });
+    try {
+      const controlled = await container.getOrCreate(
+        "verification-lookup-failure"
+      );
+      const res = await fetch(
+        controlled.baseUrl + "/api/list-environments?repo=octo/app"
+      );
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        environments: [
+          expect.objectContaining({ name: "dev", status: "pending" })
+        ]
+      });
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("fails closed when a deployment status lookup cannot be read", async () => {
+    const script: CliScript = {
+      ["/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"]:
+        { stdout: "42\tcompleted\tsuccess" },
+      ["/repos/octo/app/environments?per_page=100"]: { stdout: "7\tdev" },
+      ["/repos/octo/app/environments/dev/variables?per_page=100"]: {
+        stdout: "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+      },
+      ["/repos/octo/app/deployments?environment=dev&per_page=10"]: {
+        stdout: "100"
+      },
+      ["/repos/octo/app/deployments/100/statuses?per_page=1"]: {
+        error: new Error("secondary rate limit")
+      }
+    };
+    const container = createControlledEnvironmentServer({
+      envListCacheGet: () => undefined,
+      envListCacheSet: vi.fn(),
+      now: () => 0,
+      cliExec: cliFake(script),
+      readInstanceEntry: () => undefined,
+      repoMatchesWorkspace: () => false,
+      kickoffWorkflowSync: vi.fn()
+    });
+    try {
+      const controlled = await container.getOrCreate("status-lookup-failure");
+      const res = await fetch(
+        controlled.baseUrl + "/api/list-environments?repo=octo/app"
+      );
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        environments: [
+          expect.objectContaining({ name: "dev", status: "pending" })
+        ]
+      });
+    } finally {
+      await container.stopAll();
+    }
+  });
+
   it("answers GET verify-status for a missing repo", async () => {
     const res = await fetch(baseUrl + "/api/verify-status");
     expect(res.status).toBe(200);
@@ -1037,7 +1345,10 @@ describe("environments — real loopback", () => {
     const operation = {
       repo: "octo/app",
       environment: "dev",
+      state: "running",
       currentStage: "verify",
+      stages: [{ id: "verify", state: "running" }],
+      steps: [],
       verification: {
         dispatchedAt: 123,
         workflow: "verify.yml",
@@ -1046,7 +1357,6 @@ describe("environments — real loopback", () => {
         runId: "55"
       }
     };
-    const finishSucceeded = vi.fn();
     const persistOperations = vi.fn(() => Promise.resolve());
     const container = createControlledEnvironmentServer({
       readInstanceEntry: () => undefined,
@@ -1058,7 +1368,9 @@ describe("environments — real loopback", () => {
           conclusion: "success",
           steps: []
         }),
-      finishSucceeded,
+      addLegacyStep: recordLegacyStep,
+      isTerminalState: isSetupTerminalState,
+      finishSucceeded: finishSetupSucceeded,
       persistBestEffort,
       persistOperations,
       reportOperationDiagnostic: () => {}
@@ -1075,7 +1387,16 @@ describe("environments — real loopback", () => {
         runId: "55",
         runUrl: "https://github.com/octo/app/actions/runs/55"
       });
-      expect(finishSucceeded).toHaveBeenCalledWith(operation);
+      expect(operation.state).toBe("succeeded");
+      expect(operation.steps).toEqual([
+        expect.objectContaining({
+          stage: "verify",
+          kind: "observation",
+          label:
+            "Environment created. Deploy your application from the Environments list when ready.",
+          state: "succeeded"
+        })
+      ]);
       expect(persistOperations).toHaveBeenCalledOnce();
     } finally {
       await container.stopAll();
@@ -1111,6 +1432,7 @@ describe("environments — real loopback", () => {
       extractErrorLines: () => ["boom"],
       extractGitHubActionsStepLog: () => "",
       explainOidcEnterpriseClaim: () => "",
+      explainNoSubscriptions: () => "",
       finish,
       persistBestEffort,
       persistOperations,

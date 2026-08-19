@@ -136,6 +136,15 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           instanceId: string;
         }) => unknown)
       | null;
+    deployFailureNotice?:
+      | ((input: {
+          repo: string;
+          branch: string;
+          error: string;
+          deployRunUrl: string;
+          instanceId: string;
+        }) => unknown)
+      | null;
     openSourceHandler?: (input: {
       path: string;
       line: number;
@@ -243,22 +252,15 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       resolveRadiusArtifactTarget: vi.fn(resolveRadiusArtifactTarget),
       validateGhcrTargetForRepo: vi.fn(validateGhcrTargetForRepo)
     },
-    infra: {
-      generateAzureOIDC: vi.fn((_data) => ({
-        message: "Azure OIDC configuration generated",
-        output: "# azure oidc script"
-      })),
-      generateAWSOIDC: vi.fn((_data) => ({
-        message: "AWS OIDC configuration generated",
-        output: "# aws oidc script"
-      }))
-    },
     hostCallbacks: {
       setAppBicepHandoff: vi.fn((fn) => {
         capturedHostCallbacks.appBicepHandoff = fn;
       }),
       setDeployRepairHandoff: vi.fn((fn) => {
         capturedHostCallbacks.deployRepairHandoff = fn;
+      }),
+      setDeployFailureNotice: vi.fn((fn) => {
+        capturedHostCallbacks.deployFailureNotice = fn;
       }),
       setOpenSourceHandler: vi.fn((fn) => {
         capturedHostCallbacks.openSourceHandler = fn;

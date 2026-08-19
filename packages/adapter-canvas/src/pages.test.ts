@@ -1,50 +1,19 @@
-// Tests for the page-renderer compatibility facade. The facade owns no
-// behaviour, so these cover the exported surface, its equivalence with the
-// owning modules, and the cross-page contracts every renderer shares.
+// Cross-page contracts shared by the server-rendered page modules.
 
 import { describe, it, expect } from "vitest";
-import {
-  CLIENT_REPO_BRANCH_JS,
-  CLIENT_GRAPH_JS,
-  CLIENT_DELETE_DIALOG_JS
-} from "./client.js";
-import {
-  pageShell,
-  oidcPage,
-  graphHeader,
-  graphHeaderClose,
-  graphPage,
-  plannedGraphPage,
-  graphDiffPage,
-  deployedGraphPage,
-  environmentPage,
-  deployingPage,
-  serializeBrowserFunction
-} from "./pages.js";
-import * as facade from "./pages.js";
-import { serializeBrowserFunction as serializeBrowserFunctionModule } from "./pages/browser-function.js";
-import { pageShell as pageShellModule } from "./pages/shell.js";
-import { oidcPage as oidcPageModule } from "./pages/oidc-page.js";
-import {
-  graphHeader as graphHeaderModule,
-  graphHeaderClose as graphHeaderCloseModule
-} from "./pages/graph-header.js";
-import { graphPage as graphPageModule } from "./pages/graph-page.js";
-import { plannedGraphPage as plannedGraphPageModule } from "./pages/planned-graph-page.js";
-import { graphDiffPage as graphDiffPageModule } from "./pages/graph-diff-page.js";
-import { deployedGraphPage as deployedGraphPageModule } from "./pages/deployed-graph-page.js";
-import { environmentPage as environmentPageModule } from "./pages/environment-page.js";
-import { deployingPage as deployingPageModule } from "./pages/deploying-page.js";
+import { browserScript } from "./browser/scripts.js";
+import { BROWSER_ENTRIES } from "./browser/build.js";
+import { pageShell } from "./pages/shell.js";
+import { graphPage } from "./pages/graph-page.js";
+import { plannedGraphPage } from "./pages/planned-graph-page.js";
+import { graphDiffPage } from "./pages/graph-diff-page.js";
+import { deployedGraphPage } from "./pages/deployed-graph-page.js";
+import { environmentPage } from "./pages/environment-page.js";
+import { deployingPage } from "./pages/deploying-page.js";
 import {
   HOSTILE_STATE,
   expectSafeInlineScripts
 } from "../test/support/pages/hostile-state.js";
-import { readFileSync } from "node:fs";
-import {
-  parsePageCompatibilityFixture,
-  projectPage
-} from "../test/support/pages/compatibility-projection.js";
-import type { CanvasState } from "./shared.js";
 
 const REMOVED_TOKENS = [
   "bicepGenerated",
@@ -61,9 +30,17 @@ const sampleResources = [
   }
 ];
 
+function compiledApiPaths(
+  entry: "deploy-result-page" | "deploying-page" | "environment-page"
+): string[] {
+  const observed = [
+    ...browserScript(entry).matchAll(/['"`(](\/api\/[a-z0-9-]+)/g)
+  ].map((match) => match[1]);
+  return [...new Set(observed)];
+}
+
 describe("remaining pages smoke-render without removed tokens", () => {
   const cases: Array<readonly [string, () => string, (() => string) | null]> = [
-    ["oidcPage", () => oidcPage({ provider: "azure" }), () => oidcPage({})],
     [
       "graphDiffPage",
       () =>
@@ -166,7 +143,7 @@ describe("remaining pages smoke-render without removed tokens", () => {
   });
 });
 
-// Inline <script> blocks in pages.ts are template-literal strings, so a syntax
+// Inline <script> blocks in the page modules are template-literal strings, so a syntax
 // error in one is invisible to tsc, eslint and prettier — it surfaces only at
 // runtime as a silently dead script (this has caused a real "perpetual
 // Loading…" bug). Parsing every emitted block is the only cheap guard.
@@ -177,8 +154,7 @@ describe("inline scripts", () => {
     ["graphDiffPage", () => graphDiffPage({})],
     ["deployedGraphPage", () => deployedGraphPage({})],
     ["environmentPage", () => environmentPage({})],
-    ["deployingPage", () => deployingPage({})],
-    ["oidcPage", () => oidcPage({})]
+    ["deployingPage", () => deployingPage({})]
   ];
 
   it.each(renderers)(
@@ -194,29 +170,64 @@ describe("inline scripts", () => {
   );
 });
 
+describe("compiled page entry API contracts", () => {
+  it.each([
+    ["deploy-result-page", ["/api/deploy-reset"]],
+    [
+      "deploying-page",
+      [
+        "/api/discover-branches",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/deploy",
+        "/api/list-deployments",
+        "/api/delete-deployment",
+        "/api/deploy-status"
+      ]
+    ],
+    [
+      "environment-page",
+      [
+        "/api/list-environments",
+        "/api/delete-environment",
+        "/api/credential-profiles",
+        "/api/delete-credential-profile",
+        "/api/save-credential-profile",
+        "/api/github-identity",
+        "/api/azure-cli-assist",
+        "/api/verify-azure-login",
+        "/api/verify-aws-login",
+        "/api/discover",
+        "/api/list-azure-app-registrations",
+        "/api/azure-app-serves-repos",
+        "/api/operations",
+        "/api/verify-status",
+        "/api/github-account"
+      ]
+    ]
+  ] as const)(
+    "%s exposes its exact ordered API path set",
+    (entry, expected) => {
+      expect(compiledApiPaths(entry)).toEqual(expected);
+    }
+  );
+});
+
 // Function declarations hoist within a <script> block but not across blocks, so
 // a page whose body script uses a shared helper injected *after* it dies with a
 // ReferenceError — taking every later statement with it, which surfaces as a
 // permanently stuck "Loading…". Each block parses fine alone, so only an
-// ordering check catches this. The shared libraries are exactly the code that
-// crosses block boundaries, so they are what this pins.
+// ordering check catches this. The shared behaviour is exactly the code that
+// crosses block boundaries, so it is what this pins.
+//
+// The compiled entries publish their helpers by assignment rather than by
+// declaration, so an entry's block must appear before any block that calls one
+// of its names — the same ordering rule, checked against the names the entry
+// declares it exports.
 describe("shared client helpers are injected before the page body uses them", () => {
-  const SHARED_LIBS = [
-    CLIENT_REPO_BRANCH_JS,
-    CLIENT_GRAPH_JS,
-    CLIENT_DELETE_DIALOG_JS
-  ];
-
-  // Top-level declarations of the shared libraries: the names pages may rely on.
-  const sharedHelpers = [
-    ...new Set(
-      SHARED_LIBS.flatMap((lib) =>
-        [...lib.matchAll(/^function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(
-          (m) => m[1]
-        )
-      )
-    )
-  ];
+  const entryHelpers = BROWSER_ENTRIES.flatMap((entry) =>
+    entry.globals.map((name) => [entry.name, name] as const)
+  );
 
   const renderers: Array<[string, () => string]> = [
     ["graphPage", () => graphPage({})],
@@ -224,36 +235,39 @@ describe("shared client helpers are injected before the page body uses them", ()
     ["graphDiffPage", () => graphDiffPage({})],
     ["deployedGraphPage", () => deployedGraphPage({})],
     ["environmentPage", () => environmentPage({})],
-    ["deployingPage", () => deployingPage({})],
-    ["oidcPage", () => oidcPage({})]
+    ["deployingPage", () => deployingPage({})]
   ];
 
   it("finds the shared helpers to check", () => {
-    expect(sharedHelpers).toContain("radiusCreateDeleteDeploymentDialog");
-    expect(sharedHelpers).toContain("radiusApplyDeployedEnvState");
+    const names = entryHelpers.map(([, name]) => name);
+    expect(names).toContain("radiusRenderGraph");
   });
 
   it.each(renderers)(
-    "%s uses no shared helper before it is defined",
+    "%s calls no compiled entry helper before that entry's block",
     (_name, render) => {
-      // Compare by block, not by character offset: within a single block a
-      // forward reference is fine, because declarations hoist to its top.
       const blocks = (
         render().match(/<script>([\s\S]*?)<\/script>/g) || []
       ).map((b) => b.slice("<script>".length, -"</script>".length));
+      const entryBlock = new Map<string, number>();
+      for (const entry of BROWSER_ENTRIES) {
+        const compiled = browserScript(entry.name);
+        entryBlock.set(
+          entry.name,
+          blocks.findIndex((src) => src.includes(compiled))
+        );
+      }
       const violations: string[] = [];
-      for (const name of sharedHelpers) {
-        const declaredIn = blocks.findIndex((src) =>
-          new RegExp(`^function\\s+${name}\\s*\\(`, "m").test(src)
-        );
-        if (declaredIn === -1) continue;
+      for (const [entryName, helper] of entryHelpers) {
+        const definedIn = entryBlock.get(entryName) ?? -1;
+        if (definedIn === -1) continue;
         const usedIn = blocks.findIndex(
-          (src, i) =>
-            i !== declaredIn && new RegExp(`\\b${name}\\s*\\(`).test(src)
+          (src, index) =>
+            index !== definedIn && new RegExp(`\\b${helper}\\b`).test(src)
         );
-        if (usedIn !== -1 && usedIn < declaredIn) {
+        if (usedIn !== -1 && usedIn < definedIn) {
           violations.push(
-            `${name} used in block ${usedIn} but defined in block ${declaredIn}`
+            `${helper} used in block ${usedIn} but published by ${entryName} in block ${definedIn}`
           );
         }
       }
@@ -304,9 +318,6 @@ describe("delete-deployment confirmation is uniform", () => {
   });
 });
 
-// The facade exists so `./pages.js` importers keep working while ownership
-// lives in ./pages/. These pin the exported surface and prove the facade adds
-// no behaviour of its own.
 // The recipe-pack model removed singleton-recipe and on-demand-bicep UI: app
 // models are authored by the Radius app-bicep skill, never generated by a
 // server route. Every renderer is checked here, so no page can quietly bring
@@ -319,7 +330,6 @@ describe("no page offers removed singleton-recipe or generated-bicep behaviour",
     "/api/recipes/generate"
   ];
   const guarded: Array<[string, () => string]> = [
-    ["oidcPage", () => oidcPage({ contextRepo: "octo/app" })],
     ["graphPage", () => graphPage({ contextRepo: "octo/app" })],
     [
       "graphPage with resources",
@@ -373,7 +383,6 @@ describe("no page offers removed singleton-recipe or generated-bicep behaviour",
 // counterpart to the encoding helpers' unit tests.
 describe("no page lets state escape its inline scripts", () => {
   const hostileRenders: Array<[string, () => string]> = [
-    ["oidcPage", () => oidcPage({ oidcAzure: { message: HOSTILE_STATE } })],
     [
       "graphPage",
       () =>
@@ -485,173 +494,56 @@ describe("no page lets state escape its inline scripts", () => {
   );
 });
 
-// Durable Phase 3 compatibility oracle. The expected projections were produced
-// from the pre-extraction renderers at f2282b7 and are never recomputed here:
-// this suite renders the current facade exports and compares the same
-// deterministic projection. See test/fixtures/page-renderer-compatibility.json
-// for provenance and the update policy.
-describe("legacy page renderer compatibility oracle", () => {
-  const fixture = parsePageCompatibilityFixture(
-    JSON.parse(
-      readFileSync(
-        new URL(
-          "../test/fixtures/page-renderer-compatibility.json",
-          import.meta.url
-        ),
-        "utf8"
-      )
-    )
-  );
-
-  // Mirrors the server's page dispatch, so the oracle exercises the pages the
-  // canvas actually routes to.
-  const renderers: Record<string, (state: CanvasState) => string> = {
-    graph: graphPage,
-    planned: plannedGraphPage,
-    "graph-diff": graphDiffPage,
-    deployed: deployedGraphPage,
-    credentials: environmentPage,
-    environment: environmentPage,
-    deploying: deployingPage
-  };
-
-  it("records the oracle's provenance and review policy", () => {
-    expect(fixture.schemaVersion).toBe(1);
-    expect(fixture.source.commit).toBe(
-      "f2282b7ea77887a834d67dad84c3a966f9c14f30"
-    );
-    expect(fixture.source.path).toBe("packages/adapter-canvas/src/pages.ts");
-    expect(fixture.source.hostileInputs).toContain("PU-02");
-    expect(fixture.source.updatePolicy).toContain("reviewed");
-    expect(fixture.source.excludedScriptPayloads.join(" ")).toContain("#367");
-    expect(fixture.source.excludedScriptPayloads.join(" ")).toContain("#379");
-  });
-
-  it("forwards exactly the legacy public export surface", () => {
-    expect(Object.keys(facade).sort()).toEqual([...fixture.exports].sort());
-  });
-
-  it("covers every routed page plus the shared shell", () => {
-    expect(
-      [...new Set(fixture.cases.map((entry) => entry.page))].sort()
-    ).toEqual([
-      "credentials",
-      "deployed",
-      "deploying",
-      "environment",
-      "graph",
-      "graph-diff",
-      "pageShell",
-      "planned"
-    ]);
-  });
-
-  it.each(fixture.cases.map((entry) => [entry.id, entry] as const))(
-    "%s still matches the legacy projection",
-    (_id, testCase) => {
-      const html =
-        testCase.page === "pageShell" ?
-          pageShell(
-            testCase.shellTitle ?? "",
-            testCase.shellBody ?? "",
-            testCase.shellActiveNav
+describe("compiled graph page network contracts", () => {
+  it.each([
+    [
+      "graph-page",
+      [
+        "/api/discover-branches",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/progress",
+        "/api/load-graph"
+      ]
+    ],
+    [
+      "planned-graph-page",
+      [
+        "/api/discover-branches",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/deploy",
+        "/api/progress",
+        "/api/plan-graph"
+      ]
+    ],
+    [
+      "graph-diff-page",
+      ["/api/discover-branches", "/api/list-applications", "/api/diff-branches"]
+    ],
+    [
+      "deployed-graph-page",
+      [
+        "/api/deploy",
+        "/api/list-deployments",
+        "/api/deployed-graph",
+        "/api/deploy-status",
+        "/api/list-applications",
+        "/api/list-environments",
+        "/api/delete-deployment"
+      ]
+    ]
+  ] as const)(
+    "%s exposes exactly its reviewed API path set",
+    (entry, expected) => {
+      const paths = [
+        ...new Set(
+          [...browserScript(entry).matchAll(/['"`(](\/api\/[a-z0-9-]+)/g)].map(
+            (match) => match[1]
           )
-        : renderers[testCase.page](testCase.state);
-
-      expect(
-        projectPage(html, {
-          markers: testCase.markers,
-          hashedScripts: testCase.hashedScripts,
-          scope: testCase.scope
-        })
-      ).toEqual({
-        ...testCase.expected,
-        // Shell payloads are recorded once for the whole fixture; asserting the
-        // merge keeps every case covering them.
-        scriptDigests: {
-          ...fixture.sharedScriptDigests,
-          ...testCase.expected.scriptDigests
-        }
-      });
+        )
+      ];
+      expect(paths).toEqual(expected);
     }
   );
-});
-
-describe("page renderer facade", () => {
-  const EXPECTED_EXPORTS = [
-    "deployedGraphPage",
-    "deployingPage",
-    "environmentPage",
-    "graphDiffPage",
-    "graphHeader",
-    "graphHeaderClose",
-    "graphPage",
-    "oidcPage",
-    "pageShell",
-    "plannedGraphPage",
-    "serializeBrowserFunction"
-  ];
-
-  it("exports exactly the renderers the server and tools import, and nothing else", () => {
-    expect(Object.keys(facade).sort()).toEqual(EXPECTED_EXPORTS);
-    for (const name of EXPECTED_EXPORTS) {
-      expect(typeof (facade as Record<string, unknown>)[name]).toBe("function");
-    }
-  });
-
-  it("forwards each renderer to the module that owns it", () => {
-    expect(facade.serializeBrowserFunction).toBe(
-      serializeBrowserFunctionModule
-    );
-    expect(facade.pageShell).toBe(pageShellModule);
-    expect(facade.oidcPage).toBe(oidcPageModule);
-    expect(facade.graphHeader).toBe(graphHeaderModule);
-    expect(facade.graphHeaderClose).toBe(graphHeaderCloseModule);
-    expect(facade.graphPage).toBe(graphPageModule);
-    expect(facade.plannedGraphPage).toBe(plannedGraphPageModule);
-    expect(facade.graphDiffPage).toBe(graphDiffPageModule);
-    expect(facade.deployedGraphPage).toBe(deployedGraphPageModule);
-    expect(facade.environmentPage).toBe(environmentPageModule);
-    expect(facade.deployingPage).toBe(deployingPageModule);
-  });
-
-  // Comparing the facade's output against the owning module's output would only
-  // re-invoke the same function binding, so the contract asserted here is the
-  // rendered output itself: every forwarded name still produces its page. The
-  // reviewed pre-extraction markers for all seven pages live in
-  // test/fixtures/runtime-compatibility.json and are asserted against these
-  // same exports by the runtime compatibility suite.
-  it("delivers a working renderer through every forwarded export", () => {
-    expect(pageShell("Deployments", "<p>body</p>", "deployments")).toContain(
-      "<title>Deployments — Radius</title>"
-    );
-    expect(graphHeader("planned")).toContain(
-      '<a href="?page=planned" data-page="planned" class="rad-subtab rad-subtab--active"'
-    );
-    expect(graphHeaderClose()).toBe("</div>");
-    expect(
-      serializeBrowserFunction("radiusEcho", (value: string) => value)
-    ).toMatch(/^var radiusEcho = /);
-    expect(oidcPage({})).toContain('id="panel-azure"');
-    expect(graphPage({ contextRepo: "octo/app" })).toContain('id="graph-app"');
-    expect(plannedGraphPage({ contextRepo: "octo/app" })).toContain(
-      'id="planned-subtitle"'
-    );
-    expect(graphDiffPage({ diffResources: sampleResources })).toContain(
-      'id="graph-diff-subtitle"'
-    );
-    expect(deployedGraphPage({})).toContain('id="deployed-subtitle"');
-    expect(environmentPage({})).toContain('id="pane-environments"');
-    expect(deployingPage({})).toContain('id="deploy-table-body"');
-  });
-
-  it("renders each page's default state identically to its explicit empty state", () => {
-    expect(facade.oidcPage()).toBe(facade.oidcPage({}));
-    expect(facade.graphPage()).toBe(facade.graphPage({}));
-    expect(facade.plannedGraphPage()).toBe(facade.plannedGraphPage({}));
-    expect(facade.graphDiffPage()).toBe(facade.graphDiffPage({}));
-    expect(facade.deployedGraphPage()).toBe(facade.deployedGraphPage({}));
-    expect(facade.environmentPage()).toBe(facade.environmentPage({}));
-    expect(facade.deployingPage()).toBe(facade.deployingPage({}));
-  });
 });

@@ -80,6 +80,7 @@ function dependencies(
     triggerDeployRepairHandoff: () => {
       throw new Error("triggerDeployRepairHandoff not stubbed");
     },
+    triggerDeployFailureNotice: () => false,
     deployHandoffStatus: () => {
       throw new Error("deployHandoffStatus not stubbed");
     },
@@ -443,6 +444,32 @@ describe("deployments routes (SU-06)", () => {
       expect(JSON.parse(recording.body).repairing).toBe(true);
       // The trigger receives the live entry, not the request context's `{}`
       // snapshot, because it has to mutate handoff bookkeeping on it.
+      expect(seen).toEqual([{ state }]);
+    });
+
+    it("relays a run-unconfirmed failure to chat without marking the poll as repairing", () => {
+      const state: CanvasState = {
+        deployStatus: "failed",
+        deployErrorKind: "run-unconfirmed"
+      };
+      const seen: (DeploymentsInstanceEntry | undefined)[] = [];
+      const { recording, context: ctx } = context("GET", "/api/deploy-status");
+      handleDeployStatus(
+        ctx,
+        statusDependencies(state, {
+          triggerDeployRepairHandoff: () => false,
+          triggerDeployFailureNotice: (entry, instanceId) => {
+            seen.push(entry);
+            expect(instanceId).toBe("panel-a");
+            return true;
+          },
+          deployHandoffStatus: () => IDLE_HANDOFF
+        })
+      );
+
+      // The notice is informational: it must not turn on the repairing note.
+      expect(JSON.parse(recording.body).repairing).toBe(false);
+      // It still receives the live entry so it can record its own bookkeeping.
       expect(seen).toEqual([{ state }]);
     });
 

@@ -17,7 +17,9 @@ export default defineConfig({
           coverageBaseline.packages["adapter-shared"],
         "packages/core/src/**": coverageBaseline.packages.core,
         "packages/adapter-canvas/src/runtime/**":
-          coverageBaseline.newlyExtracted.runtime
+          coverageBaseline.newlyExtracted.runtime,
+        "packages/adapter-canvas/src/browser/**":
+          coverageBaseline.newlyExtracted.browser
       }
     }
   }

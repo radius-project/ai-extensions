@@ -21,6 +21,7 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -64,6 +65,63 @@ const optionalPluginSources = ["CHANGELOG.md"];
 // the source manifests alone.
 const stampedVersion = process.env.PLUGIN_VERSION?.trim();
 
+function writeThirdPartyNotices(inputs) {
+  const packages = new Map();
+  for (const input of inputs) {
+    if (!/[\\/]node_modules[\\/]/.test(input)) continue;
+    let current = dirname(input);
+    while (!existsSync(join(current, "package.json"))) {
+      const parent = dirname(current);
+      if (parent === current) {
+        throw new Error(`Unable to locate package metadata for "${input}".`);
+      }
+      current = parent;
+    }
+    const manifest = JSON.parse(
+      readFileSync(join(current, "package.json"), "utf8")
+    );
+    const key = `${manifest.name}@${manifest.version}`;
+    if (packages.has(key)) continue;
+    packages.set(key, {
+      manifest,
+      root: current
+    });
+  }
+  if (packages.size === 0) {
+    throw new Error(
+      "The browser bundles contained no third-party package inputs."
+    );
+  }
+
+  const notices = [...packages.values()]
+    .sort(
+      (a, b) =>
+        String(a.manifest.name).localeCompare(String(b.manifest.name)) ||
+        String(a.manifest.version).localeCompare(String(b.manifest.version))
+    )
+    .map(({ manifest, root }) => {
+      const licensePath = [
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt",
+        "license",
+        "license.md"
+      ]
+        .map((name) => join(root, name))
+        .find(existsSync);
+      if (!licensePath) {
+        throw new Error(
+          `Missing license file for bundled dependency ${manifest.name}@${manifest.version} in ${root}.`
+        );
+      }
+      return `===== ${manifest.name}@${manifest.version} =====\n\n${readFileSync(licensePath, "utf8").trim()}`;
+    });
+  writeFileSync(
+    join(distDir, "THIRD-PARTY-NOTICES.txt"),
+    `${notices.join("\n\n")}\n`
+  );
+}
+
 function assembleDist() {
   for (const entry of pluginSources) {
     const from = join(pluginDir, entry);
@@ -78,6 +136,7 @@ function assembleDist() {
     cpSync(from, join(distDir, entry), { recursive: true });
   }
   resolveCatalogSpecifiers(join(distDir, "package.json"));
+  writeThirdPartyNotices(browserBundleInputs);
   for (const manifest of ["package.json", "plugin.json"]) {
     stampVersion(join(distDir, manifest));
   }
@@ -148,6 +207,11 @@ function installToLocal() {
       copyFileSync(from, tmp);
       renameSync(tmp, to);
     }
+    const noticesFrom = join(distDir, "THIRD-PARTY-NOTICES.txt");
+    const noticesTo = join(installDir, "THIRD-PARTY-NOTICES.txt");
+    const noticesTmp = `${noticesTo}.tmp-${process.pid}`;
+    copyFileSync(noticesFrom, noticesTmp);
+    renameSync(noticesTmp, noticesTo);
     const checkerFrom = join(
       distDir,
       "skills",
@@ -197,6 +261,76 @@ const finalizePlugin = {
   }
 };
 
+const browserDir = join(__dirname, "src", "browser");
+let browserCompilerRevision = 0;
+let browserBundleInputs = [];
+
+function browserSourceFiles(directory = browserDir) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const child = join(directory, entry.name);
+    if (entry.isDirectory()) return browserSourceFiles(child);
+    return entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts") ?
+        [child]
+      : [];
+  });
+}
+
+// Replace the development compiler-backed module with literal payloads. The
+// browser entries remain byte-identical, but the shipped Node artifact contains
+// neither esbuild nor a runtime import or request for extension-owned assets.
+const browserBundlePlugin = {
+  name: "inline-browser-bundles",
+  setup(build) {
+    build.onLoad(
+      { filter: /[\\/]src[\\/]browser[\\/]generated\.ts$/ },
+      async () => {
+        const compilerUrl = new URL("./src/browser/build.ts", import.meta.url);
+        compilerUrl.searchParams.set(
+          "revision",
+          String(browserCompilerRevision++)
+        );
+        const { BROWSER_ENTRY_NAMES, compileAllBrowserBundles } = await import(
+          compilerUrl.href
+        );
+        const bundles = compileAllBrowserBundles();
+        browserBundleInputs = [
+          ...new Set(Object.values(bundles).flatMap((bundle) => bundle.inputs))
+        ];
+        const payloads = Object.fromEntries(
+          Object.entries(bundles).map(([name, bundle]) => [
+            name,
+            { script: bundle.script, style: bundle.style }
+          ])
+        );
+        return {
+          contents: `// AUTO-GENERATED at build time from packages/adapter-canvas/src/browser/entries.
+export const BROWSER_ENTRY_NAMES = ${JSON.stringify(BROWSER_ENTRY_NAMES)};
+const BROWSER_BUNDLES = ${JSON.stringify(payloads)};
+export function loadBrowserScript(name) {
+  const bundle = BROWSER_BUNDLES[name];
+  if (bundle === undefined) {
+    throw new Error(\`Unknown browser entry "\${name}".\`);
+  }
+  return bundle.script;
+}
+export function loadBrowserStyle(name) {
+  const bundle = BROWSER_BUNDLES[name];
+  if (bundle === undefined) {
+    throw new Error(\`Unknown browser entry "\${name}".\`);
+  }
+  return bundle.style;
+}
+`,
+          loader: "js",
+          watchFiles: [
+            ...new Set([...browserSourceFiles(), ...browserBundleInputs])
+          ]
+        };
+      }
+    );
+  }
+};
+
 /** @type {import('esbuild').BuildOptions} */
 const options = {
   entryPoints: [
@@ -226,7 +360,7 @@ const options = {
   banner: {
     js: "// AUTO-GENERATED by packages/adapter-canvas/build.mjs — do not edit by hand.\n// Source: packages/adapter-canvas/src + packages/core. Run `pnpm run build:canvas`."
   },
-  plugins: [finalizePlugin]
+  plugins: [browserBundlePlugin, finalizePlugin]
 };
 
 rmSync(distDir, { recursive: true, force: true });

@@ -51,7 +51,6 @@ import {
   summarizeDeployStatus,
   describeDeployStarted
 } from "./deploy-tools.js";
-import { generateAzureOIDC, generateAWSOIDC } from "./infra.js";
 import {
   servers,
   getOrCreateServer,
@@ -61,6 +60,7 @@ import {
   getLastWebviewActivityAt,
   setAppBicepHandoff,
   setDeployRepairHandoff,
+  setDeployFailureNotice,
   setSessionPromptHandler,
   setOpenSourceHandler
 } from "./server.js";
@@ -152,10 +152,10 @@ const dependencies: RadiusExtensionDependencies = {
     resolveRadiusArtifactTarget,
     validateGhcrTargetForRepo
   },
-  infra: { generateAzureOIDC, generateAWSOIDC },
   hostCallbacks: {
     setAppBicepHandoff,
     setDeployRepairHandoff,
+    setDeployFailureNotice,
     setSessionPromptHandler,
     setOpenSourceHandler
   },

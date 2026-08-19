@@ -1447,7 +1447,6 @@ describe("the step-marker convention at the call sites", () => {
     "Resolving Ser",
     "Set ${setCount} environment value(s)",
     "Verify run: ",
-    "Credentials verification dispatched",
     "Looking up ex",
     "Verifying the"
   ];

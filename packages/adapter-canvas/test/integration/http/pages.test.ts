@@ -3,26 +3,18 @@
 // (RF-09), the unknown-page fallback, active graph view synchronisation, and the
 // in-progress deployment redirect.
 //
-// The vendored CDN assets are the only external boundary the HTML path touches,
-// so node:https is faked here; nothing else about the server is stubbed.
-import { EventEmitter } from "node:events";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-
-const https = vi.hoisted(() => ({ get: vi.fn() }));
-
-vi.mock("node:https", () => ({ default: https }));
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { getOrCreateServer } from "../../../src/server.js";
-import {
-  deployedGraphPage,
-  deployingPage,
-  environmentPage,
-  graphDiffPage,
-  graphPage,
-  plannedGraphPage
-} from "../../../src/pages.js";
+import { deployedGraphPage } from "../../../src/pages/deployed-graph-page.js";
+import { deployingPage } from "../../../src/pages/deploying-page.js";
+import { environmentPage } from "../../../src/pages/environment-page.js";
+import { graphDiffPage } from "../../../src/pages/graph-diff-page.js";
+import { graphPage } from "../../../src/pages/graph-page.js";
+import { plannedGraphPage } from "../../../src/pages/planned-graph-page.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { CanvasState } from "../../../src/shared.js";
+import { browserEntryMarker } from "../../../src/browser/scripts.js";
 import {
   HOSTILE_STATE,
   expectSafeInlineScripts
@@ -31,14 +23,6 @@ import {
 const INSTANCE_ID = "pages-http-test";
 
 let entry: CanvasServerEntry;
-
-// Offline vendor assets: the warm-up must resolve without reaching a CDN, so
-// every request fails fast exactly as it does on a disconnected machine.
-https.get.mockImplementation(() => {
-  const request = new EventEmitter();
-  queueMicrotask(() => request.emit("error", new Error("offline")));
-  return request;
-});
 
 async function get(path: string): Promise<{
   status: number;
@@ -85,7 +69,7 @@ describe("canvas pages over real loopback HTTP", () => {
     // rendering it rather than falling back to the environment page.
     expect(response.body).toBe(graphPage(entry.state));
     expect(response.body).toContain(
-      '<a href="?page=graph" data-page="graph" class="rad-subtab rad-subtab--active"'
+      '<a href="?page=graph" data-page="graph" data-radius-graph-page="graph" class="rad-subtab rad-subtab--active"'
     );
   });
 
@@ -129,6 +113,57 @@ describe("canvas pages over real loopback HTTP", () => {
       expect(response.body).toBe(render());
     }
   );
+
+  it.each([
+    ["graph", "graph-page"],
+    ["planned", "planned-graph-page"],
+    ["graph-diff", "graph-diff-page"],
+    ["deployed", "deployed-graph-page"],
+    ["credentials", "environment-page"],
+    ["environment", "environment-page"],
+    ["deploying", "deploying-page"]
+  ] as const)(
+    "serves ?page=%s with one page entry and one copy of each shared entry",
+    async (page, pageEntry) => {
+      resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
+      const response = await get(`/?page=${page}`);
+
+      for (const entry of [
+        "graph",
+        "delete-dialog",
+        "heartbeat",
+        "operation-chip",
+        pageEntry
+      ] as const) {
+        expect(
+          response.body.split(`\n${browserEntryMarker(entry)}\n`)
+        ).toHaveLength(2);
+      }
+    }
+  );
+
+  it("serves a deployment result with one result entry and shared entries", async () => {
+    resetState({
+      contextRepo: "octo/app",
+      contextBranch: "feature/x",
+      deployResult: { message: "Deployment started" },
+      deployAttempt: { id: "attempt-1" }
+    });
+
+    const response = await get("/?page=environment");
+
+    for (const entry of [
+      "graph",
+      "delete-dialog",
+      "heartbeat",
+      "operation-chip",
+      "deploy-result-page"
+    ] as const) {
+      expect(
+        response.body.split(`\n${browserEntryMarker(entry)}\n`)
+      ).toHaveLength(2);
+    }
+  });
 
   it("falls back to the environment page for a page value it does not know", async () => {
     resetState({ contextRepo: "octo/app" });
@@ -204,10 +239,7 @@ describe("canvas pages over real loopback HTTP", () => {
 
     expect(response.body).not.toMatch(/<script[^>]+src=/);
     expect(response.body).not.toContain('rel="stylesheet"');
-    // The only outbound requests are the faked vendor warm-up fetches.
-    for (const call of https.get.mock.calls) {
-      expect(String(call[0])).toContain("unpkg.com");
-    }
+    expect(response.body).not.toContain("unpkg.com");
   });
 
   it.each([

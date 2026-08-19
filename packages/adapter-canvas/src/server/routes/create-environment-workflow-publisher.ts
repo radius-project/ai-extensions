@@ -4,6 +4,7 @@ import type {
   CreateEnvironmentOperation,
   WorkflowCommitOutcome
 } from "./create-environment-types.js";
+import { cloudCredentialsComplete } from "../../deploy.js";
 
 // Seam 5 of the `POST /api/create-environment` slice: steps 2, 3, 4 and 4b —
 // writing the provider's configuration onto the GitHub environment, then
@@ -35,6 +36,44 @@ export interface ProviderConfigurationPorts {
   pushStep(message: string): void;
 }
 
+// Whether the identifying cloud credentials the verify-credentials workflow
+// needs to authenticate were actually configured. When they're absent the use
+// case skips dispatching verify (issue #219) and surfaces `missingCredNote`
+// instead; `missingCredNote` is "" when the credentials are complete.
+export interface ProviderCredentialStatus {
+  credentialsComplete: boolean;
+  missingCredNote: string;
+}
+
+// The RBAC scope at which to grant the environment identity a subscription-
+// visible role. A role assignment at resource-group scope still surfaces the
+// parent subscription to `az account list` / azure/login (fixing the
+// "No subscriptions found" credential-verification failure, issue #280), while
+// staying narrower than a subscription-wide grant, so prefer the resource group
+// when one is configured; fall back to the whole subscription otherwise. Pure.
+export function azureRoleScope(
+  subscriptionId: string,
+  resourceGroup?: string
+): string {
+  const rg = (resourceGroup || "").trim();
+  return rg ?
+      `/subscriptions/${subscriptionId}/resourceGroups/${rg}`
+    : `/subscriptions/${subscriptionId}`;
+}
+
+// The exact `az role assignment create` command a user can run to grant the
+// configured identity a subscription-visible role. Uses the app/client id as the
+// assignee (what the user has on hand); az resolves it to the service principal.
+// On the manual-credentials path the extension surfaces this command rather than
+// running it: the app registration may be shared or owned by another team, so we
+// don't silently grant Contributor to it using the operator's local az. Pure.
+export function buildManualRoleAssignmentGuidance(
+  assignee: string,
+  scope: string
+): string {
+  return `az role assignment create --assignee ${assignee} --role Contributor --scope ${scope}`;
+}
+
 // Step 2. Values from the request win; anything absent falls back to the
 // shared credential record. `||` rather than `??` throughout, so an empty
 // string is treated as absent exactly as it was inline.
@@ -42,7 +81,7 @@ export async function applyProviderConfiguration(
   provider: string,
   data: CreateEnvironmentRequestData,
   ports: ProviderConfigurationPorts
-): Promise<void> {
+): Promise<ProviderCredentialStatus> {
   ports.pushStep("Setting environment variables and secrets...");
   const azureCreds = ports.azureCredential();
   const awsCreds = ports.awsCredential();
@@ -61,7 +100,7 @@ export async function applyProviderConfiguration(
     await ports.setEnvironmentVariable("AZURE_RESOURCE_GROUP", rg);
     await ports.setEnvironmentVariable("AZURE_AKS_CLUSTER_NAME", k8s);
     await ports.setEnvironmentVariable("AZURE_LOCATION", data.location);
-    await ports.setEnvironmentVariable("RADIUS_NAMESPACE", data.namespace);
+    await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
 
     const setCount = [
       clientId,
@@ -73,12 +112,33 @@ export async function applyProviderConfiguration(
       data.namespace
     ].filter(Boolean).length;
     ports.pushStep(`Set ${setCount} environment value(s) for Azure.`);
-    if (!clientId || !tenantId || !subscriptionId) {
+    if (
+      !cloudCredentialsComplete("azure", {
+        clientId,
+        tenantId,
+        subscriptionId
+      })
+    ) {
       ports.pushStep(
         "⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually."
       );
+      return {
+        credentialsComplete: false,
+        missingCredNote:
+          "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
+      };
     }
-    return;
+    // Credentials are complete, but a manually-entered app registration may have
+    // no role assignment that surfaces the subscription — verify then fails at
+    // Azure Login with "No subscriptions found" (issue #280). Surface the exact
+    // grant command rather than running it, since the identity may be shared or
+    // owned by another team.
+    const roleScope = azureRoleScope(subscriptionId, rg);
+    ports.pushStep(
+      'ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: ' +
+        buildManualRoleAssignmentGuidance(clientId, roleScope)
+    );
+    return { credentialsComplete: true, missingCredNote: "" };
   }
 
   const roleArn = data.roleArn || "";
@@ -93,7 +153,18 @@ export async function applyProviderConfiguration(
   await ports.setEnvironmentVariable("AWS_EKS_CLUSTER_NAME", k8s);
   await ports.setEnvironmentVariable("RADIUS_VPC_ID", data.vpcId);
   await ports.setEnvironmentVariable("RADIUS_SUBNET_IDS", data.subnetIds);
-  await ports.setEnvironmentVariable("RADIUS_NAMESPACE", data.namespace);
+  await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
+  if (!cloudCredentialsComplete("aws", { roleArn })) {
+    ports.pushStep(
+      "⚠️ Missing AWS role ARN. Enter it or use auto-setup before verifying credentials."
+    );
+    return {
+      credentialsComplete: false,
+      missingCredNote:
+        "The AWS IAM role ARN is not configured for this environment. Enter it (or use auto-setup), then verify credentials from the Environments list."
+    };
+  }
+  return { credentialsComplete: true, missingCredNote: "" };
 }
 
 // The message a failed workflow commit is reported with. Pure, so the hint

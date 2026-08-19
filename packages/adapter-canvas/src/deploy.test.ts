@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   explainOidcEnterpriseClaim,
+  explainNoSubscriptions,
+  cloudCredentialsComplete,
   explainRepoAccessForEnvSetup,
   isRepoNotFoundError,
   extractErrorLines,
@@ -121,6 +123,82 @@ describe("explainOidcEnterpriseClaim", () => {
     expect(explainOidcEnterpriseClaim("")).toBe("");
     expect(explainOidcEnterpriseClaim(undefined)).toBe("");
     expect(explainOidcEnterpriseClaim(null)).toBe("");
+  });
+});
+
+describe("explainNoSubscriptions", () => {
+  // The exact failure azure/login prints when the identity has no visible
+  // subscription (issue #219).
+  const NO_SUBS_LOG =
+    "Running Azure CLI Login.\n" +
+    "Error: No subscriptions found for ***.\n" +
+    "Error: Login failed with Error: The process '/usr/bin/az' failed with exit code 1.";
+
+  it("explains the no-subscriptions Azure Login failure and points at a role assignment", () => {
+    const out = explainNoSubscriptions(NO_SUBS_LOG);
+    expect(out).not.toBe("");
+    expect(out.toLowerCase()).toContain("no subscriptions");
+    // Actionable: name the role and the subscription scope.
+    expect(out).toContain("Contributor");
+    expect(out.toLowerCase()).toContain("role");
+    expect(out.toLowerCase()).toContain("subscription");
+  });
+
+  it("returns '' for an unrelated error", () => {
+    expect(explainNoSubscriptions("some unrelated error: forbidden")).toBe("");
+  });
+
+  it("returns '' for empty / undefined / null input", () => {
+    expect(explainNoSubscriptions("")).toBe("");
+    expect(explainNoSubscriptions(undefined)).toBe("");
+    expect(explainNoSubscriptions(null)).toBe("");
+  });
+});
+
+describe("cloudCredentialsComplete", () => {
+  // Regression for #219: the create-environment handler must NOT dispatch the
+  // verify-credentials workflow when the identifying cloud credentials are
+  // absent, because the run would only fail at the cloud-login step.
+  it("requires clientId, tenantId, and subscriptionId for Azure", () => {
+    expect(
+      cloudCredentialsComplete("azure", {
+        clientId: "c",
+        tenantId: "t",
+        subscriptionId: "s"
+      })
+    ).toBe(true);
+    expect(
+      cloudCredentialsComplete("azure", { clientId: "c", tenantId: "t" })
+    ).toBe(false);
+    expect(
+      cloudCredentialsComplete("azure", {
+        clientId: "c",
+        tenantId: "t",
+        subscriptionId: ""
+      })
+    ).toBe(false);
+    expect(cloudCredentialsComplete("azure", {})).toBe(false);
+  });
+
+  it("ignores a role ARN when the provider is Azure", () => {
+    expect(
+      cloudCredentialsComplete("azure", { roleArn: "arn:aws:iam::x" })
+    ).toBe(false);
+  });
+
+  it("requires the role ARN for AWS (and ignores Azure fields)", () => {
+    expect(
+      cloudCredentialsComplete("aws", { roleArn: "arn:aws:iam::123:role/r" })
+    ).toBe(true);
+    expect(cloudCredentialsComplete("aws", { roleArn: "" })).toBe(false);
+    expect(cloudCredentialsComplete("aws", {})).toBe(false);
+    expect(
+      cloudCredentialsComplete("aws", {
+        clientId: "c",
+        tenantId: "t",
+        subscriptionId: "s"
+      })
+    ).toBe(false);
   });
 });
 

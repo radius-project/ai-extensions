@@ -213,6 +213,21 @@ export async function handleDeleteEnvironment(
   }
 }
 
+// The GitHub environment variables that hold what the creation form asks for,
+// mapped to the form's own field names. Everything else the environment stores
+// is either derived from the credential profile or internal Radius state.
+const AZURE_CONFIG_VARIABLES = {
+  resourceGroup: "AZURE_RESOURCE_GROUP",
+  cluster: "AZURE_AKS_CLUSTER_NAME",
+  namespace: "RADIUS_NAMESPACE"
+} as const;
+const AWS_CONFIG_VARIABLES = {
+  cluster: "AWS_EKS_CLUSTER_NAME",
+  namespace: "RADIUS_NAMESPACE",
+  vpcId: "RADIUS_VPC_ID",
+  subnetIds: "RADIUS_SUBNET_IDS"
+} as const;
+
 // The environment picker's listing. Repo-scoped, short-TTL cached, and filtered
 // to environments this extension created (tagged RADIUS_MANAGED). Status comes
 // from the verify-credentials workflow only, not app deployments. Every response
@@ -252,12 +267,24 @@ export async function handleListEnvironments(
         resolve((stdout || "").trim());
       });
     });
+  const ghResult = (
+    args: string[],
+    timeout = 12000
+  ): Promise<{ ok: boolean; stdout: string }> =>
+    new Promise((resolve) => {
+      dependencies.cliExec("gh", args, { timeout }, (err, stdout) => {
+        resolve({
+          ok: !err,
+          stdout: err ? "" : (stdout || "").trim()
+        });
+      });
+    });
 
   try {
     // 1) List environment names + ids for the repo. Kick off the
     //    verify-credentials workflow-runs fetch in parallel — it's independent
     //    of the names, so there's no reason to wait.
-    const verifyRunsPromise = gh([
+    const verifyRunsPromise = ghResult([
       "api",
       `/repos/${repo}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
       "--jq",
@@ -319,7 +346,8 @@ export async function handleListEnvironments(
     // Index the pre-fetched verify runs by run id. The environment status is
     // derived from these (not from app deployments): an environment is
     // "Success" only once it exists AND its verify-credentials workflow passed.
-    const verifyRunsRaw = await verifyRunsPromise;
+    const verifyRunsResult = await verifyRunsPromise;
+    const verifyRunsRaw = verifyRunsResult.stdout;
     const verifyRuns = new Map<string, EnvironmentVerifyRun>();
     if (verifyRunsRaw) {
       for (const line of verifyRunsRaw.split("\n").filter(Boolean)) {
@@ -353,16 +381,14 @@ export async function handleListEnvironments(
             "--jq",
             '.variables[] | .name + "\\t" + (.value // "")'
           ]),
-          verifyRuns.size > 0 ?
-            gh([
-              "api",
-              `/repos/${repo}/deployments?environment=${encodeURIComponent(
-                name
-              )}&per_page=10`,
-              "--jq",
-              ".[].id"
-            ])
-          : Promise.resolve("")
+          gh([
+            "api",
+            `/repos/${repo}/deployments?environment=${encodeURIComponent(
+              name
+            )}&per_page=10`,
+            "--jq",
+            ".[].id"
+          ])
         ]);
         // Parse the "name<TAB>value" variable lines into a map. Only surface
         // environments created by this extension (tagged with a RADIUS_MANAGED
@@ -386,19 +412,21 @@ export async function handleListEnvironments(
 
         const credentialProfile = vars.RADIUS_CREDENTIAL_PROFILE || "";
 
-        // Status reflects the verify-credentials workflow only: pending while it
-        // runs, success when it passes, failed if it fails. Default to "pending"
-        // until we find a matching run.
-        let status = "pending";
-        if (verifyRuns.size > 0) {
-          const depIds = depIdsRaw ? depIdsRaw.split("\n").filter(Boolean) : [];
+        // A successful verification lookup plus existing deployments proves
+        // this is an established environment even when the verification
+        // deployment itself has aged out of the bounded history. Lookup
+        // failures and environments with no deployments fail closed as pending.
+        const depIds = depIdsRaw ? depIdsRaw.split("\n").filter(Boolean) : [];
+        let status =
+          verifyRunsResult.ok && depIds.length > 0 ? "unknown" : "pending";
+        if (verifyRunsResult.ok && verifyRuns.size > 0) {
           // Resolve every deployment's originating-run URL in parallel
           // (deployments come back newest-first), then pick the newest one
           // created by a verify-credentials run. Doing this serially was the
           // main source of latency for this endpoint.
-          const logUrls = await Promise.all(
+          const logResults = await Promise.all(
             depIds.map((depId) =>
-              gh([
+              ghResult([
                 "api",
                 `/repos/${repo}/deployments/${depId}/statuses?per_page=1`,
                 "--jq",
@@ -406,13 +434,17 @@ export async function handleListEnvironments(
               ])
             )
           );
-          for (const logUrl of logUrls) {
-            const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
-            if (!m) continue;
-            const run = verifyRuns.get(m[1]);
-            if (run) {
-              status = verifyStatusOf(run) || status;
-              break;
+          if (logResults.some((result) => !result.ok)) {
+            status = "pending";
+          } else {
+            for (const { stdout: logUrl } of logResults) {
+              const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
+              if (!m) continue;
+              const run = verifyRuns.get(m[1]);
+              if (run) {
+                status = verifyStatusOf(run) || status;
+                break;
+              }
             }
           }
         }
@@ -421,7 +453,19 @@ export async function handleListEnvironments(
           id ?
             `https://github.com/${repo}/settings/environments/${id}/edit`
           : `https://github.com/${repo}/settings/environments`;
-        return { name, provider, status, webUrl, credentialProfile };
+        // The environment's own configuration, so Edit can reopen the creation
+        // form on what this environment actually holds instead of sending the
+        // user to GitHub's settings page. Only the fields the form asks for:
+        // identity and subscription come from the credential profile, and no
+        // secret is stored as a variable in the first place.
+        const config: Record<string, string> = {};
+        for (const [key, variable] of Object.entries(
+          provider === "aws" ? AWS_CONFIG_VARIABLES : AZURE_CONFIG_VARIABLES
+        )) {
+          const value = vars[variable];
+          if (value) config[key] = value;
+        }
+        return { name, provider, status, webUrl, credentialProfile, config };
       })
     );
 
@@ -562,7 +606,15 @@ export async function handleVerifyStatus(
       return;
     }
     if (detail.conclusion === "success") {
-      if (verifyOp && verifyOp.currentStage === dependencies.stageVerify) {
+      if (
+        verifyOp &&
+        verifyOp.currentStage === dependencies.stageVerify &&
+        !dependencies.isTerminalState(verifyOp.state)
+      ) {
+        dependencies.addLegacyStep(
+          verifyOp,
+          "✅ Environment created. Deploy your application from the Environments list when ready."
+        );
         dependencies.finishSucceeded(verifyOp);
         await dependencies.persistBestEffort({
           operation: verifyOp,
@@ -592,10 +644,14 @@ export async function handleVerifyStatus(
       log,
       "Azure Login (OIDC)"
     );
-    const oidcClaimHelp =
-      dependencies.explainOidcEnterpriseClaim(azureLoginLog);
-    if (oidcClaimHelp)
-      errMsg = oidcClaimHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
+    // Distinct failure stages (OIDC enterprise-claim rejection vs. a successful
+    // login with no visible subscription — issue #219), so at most one applies;
+    // take the first match so the raw-error separator is never emitted twice.
+    const failureHelp =
+      dependencies.explainOidcEnterpriseClaim(azureLoginLog) ||
+      dependencies.explainNoSubscriptions(log);
+    if (failureHelp)
+      errMsg = failureHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
     if (verifyOp && verifyOp.currentStage === dependencies.stageVerify) {
       // Everything before verification succeeded and still exists, so this is
       // partial rather than total failure.

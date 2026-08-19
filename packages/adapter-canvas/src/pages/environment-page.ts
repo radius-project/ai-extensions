@@ -4,15 +4,16 @@
 
 import { escapeHtml, type CanvasState } from "../shared.js";
 import { radiusMark } from "../ui.js";
+import { browserScriptTag } from "../browser/scripts.js";
+import {
+  DEPLOY_RESULT_STATE_ID,
+  ENVIRONMENT_PAGE_STATE_ID
+} from "./browser-state-ids.js";
 import { pageShell } from "./shell.js";
-import { inlineJson, inlineJsString, safeExternalHref } from "./encoding.js";
+import { inlineJson, safeExternalHref } from "./encoding.js";
 import { environmentsPaneMarkup } from "./environment/environments-pane.js";
 import { credentialsPaneMarkup } from "./environment/credentials-pane.js";
-import { ENVIRONMENT_TABLE_CLIENT_JS } from "./environment/client-environments.js";
-import { ENVIRONMENT_OPERATION_CLIENT_JS } from "./environment/client-operations.js";
-import { ENVIRONMENT_PROFILE_CLIENT_JS } from "./environment/client-profiles.js";
-import { ENVIRONMENT_DISCOVERY_CLIENT_JS } from "./environment/client-discovery.js";
-import { ENVIRONMENT_CREDENTIAL_CLIENT_JS } from "./environment/client-credentials.js";
+import { confirmDialogMarkup } from "./environment/confirm-dialog.js";
 
 export function environmentPage(state: CanvasState = {}): string {
   const envName = state?.envName || "dev";
@@ -52,17 +53,11 @@ ${
   : ""
 }
 <button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--rad-neutral-bg); color:var(--rad-neutral-text); border:1px solid var(--rad-neutral-border); border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
-<script>
-document.getElementById('back-btn').addEventListener('click', function() {
-    fetch('/api/deploy-reset', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({attemptId: ${inlineJson(
-          state?.deployAttempt?.id || ""
-        )}})
-    }).then(function() { window.location.reload(); });
-});
-<\/script>`
+<div id="deploy-reset-status" class="status error" role="alert" style="display:none; margin-top:12px;"></div>
+<div hidden id="${DEPLOY_RESULT_STATE_ID}">${escapeHtml(
+        inlineJson({ attemptId: state?.deployAttempt?.id || "" })
+      )}</div>
+${browserScriptTag("deploy-result-page")}`
     );
   }
 
@@ -98,6 +93,7 @@ ${environmentsPaneMarkup({
 })}
 ${credentialsPaneMarkup(activeSubtab)}
 
+${confirmDialogMarkup()}
 
 <div id="env-smr-modal" style="display:none; position:fixed; inset:0; z-index:1001; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
   <div style="background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:420px; width:90%;">
@@ -256,33 +252,43 @@ ${credentialsPaneMarkup(activeSubtab)}
   font-size: 14px; font-weight: 600; color: var(--rad-primary); cursor: pointer;
 }
 .rad-combo__action:hover { background: var(--rad-bg-subtle); }
-/* Custom credential-profile dropdown (Figma: open panel with options + "+ Create new profile"). */
-.rad-combo { position:relative; }
-.rad-combo__button { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; margin:0; padding:9px 12px; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:8px; font-size:14px; font-weight:400; font-family:var(--rad-font); cursor:pointer; }
-.rad-combo__button:hover { background:var(--rad-bg-subtle); }
-.rad-combo--open .rad-combo__button { border-color:var(--rad-brand); }
-.rad-combo__value { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.rad-combo__value--placeholder { color:var(--rad-text-tertiary); }
-.rad-combo__chevron { flex:0 0 auto; width:8px; height:8px; border-right:2px solid var(--rad-text-tertiary); border-bottom:2px solid var(--rad-text-tertiary); transform:translateY(-2px) rotate(45deg); transition:transform 0.15s; }
-.rad-combo--open .rad-combo__chevron { transform:translateY(1px) rotate(-135deg); }
-.rad-combo__menu { margin-top:6px; background:var(--rad-surface); border:1px solid var(--rad-stroke); border-radius:8px; overflow:hidden; box-shadow:0 6px 20px var(--rad-shadow); }
-.rad-combo__options:empty { display:none; }
-.rad-combo__option { display:block; width:100%; text-align:left; padding:11px 14px; background:none; border:none; margin:0; font-size:14px; color:var(--rad-text); font-family:var(--rad-font); cursor:pointer; }
-.rad-combo__option:hover, .rad-combo__option--active { background:var(--rad-bg-subtle); }
-.rad-combo__empty { padding:14px; font-size:13px; color:var(--rad-text-tertiary); }
-.rad-combo__action { display:block; width:100%; text-align:left; margin:0; padding:12px 14px; background:none; border:none; border-top:1px solid var(--rad-stroke); font-size:13px; font-weight:600; color:var(--rad-primary); font-family:var(--rad-font); cursor:pointer; }
-.rad-combo__action:hover { background:var(--rad-bg-subtle); }
+/* An option list that has not loaded yet must not draw an empty menu row. */
+.rad-combo__options:empty { display: none; }
+/* Two-step New Environment wizard: credentials, then the environment itself. */
+.rad-wizard-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 14px;
+}
+.rad-wizard { display: flex; align-items: center; gap: 10px; list-style: none; margin: 0; padding: 0; }
+.rad-wizard__step {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 500; color: var(--rad-text-tertiary);
+}
+.rad-wizard__num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 1px solid var(--rad-stroke); font-size: 12px; font-weight: 600;
+}
+.rad-wizard__step--active { color: var(--rad-text); }
+.rad-wizard__step--active .rad-wizard__num {
+  background: var(--rad-primary); border-color: var(--rad-primary); color: #fff;
+}
+.rad-wizard__step--done .rad-wizard__num { border-color: var(--rad-primary); color: var(--rad-primary); }
+.rad-wizard__sep { width: 28px; height: 1px; background: var(--rad-stroke); }
+/* Read-only echo of a choice made in an earlier step. */
+.rad-chosen {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 12px; background: var(--rad-bg-subtle);
+  border: 1px solid var(--rad-stroke); border-radius: 8px;
+}
+.rad-chosen__value {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 14px; color: var(--rad-text);
+}
 </style>
 
-<script>
-var CTX_REPO = '${inlineJsString(ctxRepo)}';
-var CTX_BRANCH = '${inlineJsString(ctxBranch)}';
-
-${ENVIRONMENT_TABLE_CLIENT_JS}
-${ENVIRONMENT_OPERATION_CLIENT_JS}
-${ENVIRONMENT_PROFILE_CLIENT_JS}
-${ENVIRONMENT_DISCOVERY_CLIENT_JS}
-${ENVIRONMENT_CREDENTIAL_CLIENT_JS}
-<\/script>`
+<div hidden id="${ENVIRONMENT_PAGE_STATE_ID}">${escapeHtml(
+      inlineJson({ repo: ctxRepo, branch: ctxBranch, activeSubtab })
+    )}</div>
+${browserScriptTag("environment-page")}`
   );
 }
