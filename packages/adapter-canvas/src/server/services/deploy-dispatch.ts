@@ -52,6 +52,9 @@ export interface DeployDispatchDependencies {
     stdin: string,
     options?: DeployCommandOptions
   ): Promise<DeployCommandResult>;
+  // Optional local Azure CLI runner used for pre-dispatch OIDC coverage checks.
+  // When absent, deploy dispatch keeps legacy behavior and skips the check.
+  runAz?: (args: string[]) => Promise<DeployCommandResult>;
   readProcessEnv(): NodeJS.ProcessEnv;
   fetchFileForSelection(
     entry: DeployDispatchInstanceEntry,
@@ -353,6 +356,81 @@ export function createDeployDispatchService(
     return !!repoDefault;
   };
 
+  const validateAzureFederatedCredential = async (
+    repo: string,
+    environment: string,
+    log: (message: string) => void
+  ): Promise<string | null> => {
+    if (!dependencies.runAz) return null;
+    const envPath = `/repos/${repo}/environments/${encodeURIComponent(environment)}`;
+    const clientIdResult = await dependencies.runGh([
+      "api",
+      `${envPath}/variables/AZURE_CLIENT_ID`,
+      "--jq",
+      ".value"
+    ]);
+    const clientId = (clientIdResult.stdout || "").trim();
+    if (!clientId) return null;
+    const fullNameResult = await dependencies.runGh([
+      "api",
+      `/repos/${repo}`,
+      "--jq",
+      ".full_name"
+    ]);
+    const fullName = (fullNameResult.stdout || "").trim() || repo;
+    const expectedSubject = `repo:${fullName}:environment:${environment}`;
+    const listResult = await dependencies.runAz([
+      "ad",
+      "app",
+      "federated-credential",
+      "list",
+      "--id",
+      clientId,
+      "--query",
+      "[].subject",
+      "-o",
+      "json"
+    ]);
+    if (listResult.code !== 0) {
+      log(
+        "⚠ Could not validate Azure federated credentials before deploy: " +
+          ((listResult.stderr || "").trim() || "unknown error")
+      );
+      return null;
+    }
+    let subjects: string[] = [];
+    try {
+      const parsed = JSON.parse(listResult.stdout || "[]");
+      if (Array.isArray(parsed)) {
+        subjects = parsed
+          .filter((value): value is string => typeof value === "string")
+          .map((value) => value.trim())
+          .filter(Boolean);
+      }
+    } catch {
+      log("⚠ Could not parse Azure federated credentials before deploy.");
+      return null;
+    }
+    if (subjects.includes(expectedSubject)) return null;
+    const nearMatchPrefix = `repo:${fullName}:environment:`;
+    const nearMatches = subjects.filter(
+      (value) =>
+        value.startsWith(nearMatchPrefix) && value !== expectedSubject
+    );
+    const nearMatchNote =
+      nearMatches.length > 0 ?
+        ` Existing credential subjects for this repo on the app: ${nearMatches
+          .slice(0, 3)
+          .join(", ")}${nearMatches.length > 3 ? " ..." : ""}.`
+      : "";
+    return (
+      `Azure deploy to environment "${environment}" is blocked because App Registration ${clientId} ` +
+      `does not have a federated credential with subject "${expectedSubject}".` +
+      nearMatchNote +
+      " Re-run Create Environment with Azure auto-setup (or create the credential manually) before deploying."
+    );
+  };
+
   return {
     async prepareAndDispatch(request) {
       const { entry, repo, branch, provider, requestedEnvironment, log } =
@@ -368,6 +446,19 @@ export function createDeployDispatchService(
       // artifact tag) can be rebuilt from state later.
       entry.state.deployEnvName = envForDeploy;
       const deployWorkflowFile = dependencies.deployWorkflowFile;
+      if (provider === "azure") {
+        const credentialError = await validateAzureFederatedCredential(
+          repo,
+          envForDeploy,
+          log
+        );
+        if (credentialError) {
+          log("❌ " + credentialError);
+          entry.state.deployError = credentialError;
+          entry.state.deployStatus = "failed";
+          return { dispatched: false };
+        }
+      }
       // Deploy the SELECTED branch's code (worktree-consistent): run the
       // workflow on `branch` so it checks out and `rad deploy`s that branch's
       // app.bicep — the same file the params below are computed from — instead

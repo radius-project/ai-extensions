@@ -2160,6 +2160,14 @@ const deployDispatchService = createDeployDispatchService({
   getDefaultBranch,
   runGh: runGhForDeploy,
   runGhWithStdin: runGhWithStdinForDeploy,
+  runAz: async (args) => {
+    const result = await runCliCommand("az", args);
+    return {
+      code: result.code ?? 1,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? ""
+    };
+  },
   readProcessEnv: () => process.env,
   fetchFileForSelection: (entry, repo, branch, repoPath) =>
     fetchFileForSelection(entry as CanvasServerEntry, repo, branch, repoPath),

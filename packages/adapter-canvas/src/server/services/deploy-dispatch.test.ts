@@ -268,6 +268,105 @@ describe("deploy dispatch environment and branch preflight", () => {
       "acme/widgets"
     ]);
   });
+
+  it("fails fast when Azure federated credentials do not cover the target environment", async () => {
+    const { input, state } = request();
+    const gh = recordingGh();
+    const calls: string[] = [];
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        runGh: (args, options) => {
+          const line = args.join(" ");
+          calls.push(line);
+          if (line.includes("/variables/AZURE_CLIENT_ID")) {
+            return Promise.resolve({ ...OK, stdout: "client-123\n" });
+          }
+          if (line === "api /repos/acme/widgets --jq .full_name") {
+            return Promise.resolve({ ...OK, stdout: "acme/widgets\n" });
+          }
+          return gh.runGh(args, options);
+        },
+        runAz: () =>
+          Promise.resolve({
+            ...OK,
+            stdout: JSON.stringify(["repo:acme/widgets:environment:dev"])
+          })
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({ dispatched: false });
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployError).toContain(
+      'does not have a federated credential with subject "repo:acme/widgets:environment:production"'
+    );
+    expect(calls.some((line) => line.startsWith("workflow run "))).toBe(false);
+  });
+
+  it("continues when Azure federated credentials already include the target environment", async () => {
+    const { input } = request();
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        runGh: (args, options) => {
+          const line = args.join(" ");
+          if (line.includes("/variables/AZURE_CLIENT_ID")) {
+            return Promise.resolve({ ...OK, stdout: "client-123\n" });
+          }
+          if (line === "api /repos/acme/widgets --jq .full_name") {
+            return Promise.resolve({ ...OK, stdout: "acme/widgets\n" });
+          }
+          return gh.runGh(args, options);
+        },
+        runAz: () =>
+          Promise.resolve({
+            ...OK,
+            stdout: JSON.stringify([
+              "repo:acme/widgets:environment:production",
+              "repo:acme/widgets:environment:dev"
+            ])
+          })
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+  });
+
+  it("logs and continues when pre-dispatch Azure credential validation cannot run", async () => {
+    const { input, logs } = request();
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        runGh: (args, options) => {
+          const line = args.join(" ");
+          if (line.includes("/variables/AZURE_CLIENT_ID")) {
+            return Promise.resolve({ ...OK, stdout: "client-123\n" });
+          }
+          if (line === "api /repos/acme/widgets --jq .full_name") {
+            return Promise.resolve({ ...OK, stdout: "acme/widgets\n" });
+          }
+          return gh.runGh(args, options);
+        },
+        runAz: () =>
+          Promise.resolve({
+            code: 1,
+            stdout: "",
+            stderr: "az login required"
+          })
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+    expect(logs).toContain(
+      "⚠ Could not validate Azure federated credentials before deploy: az login required"
+    );
+  });
 });
 
 describe("deploy dispatch rad commands and secrets", () => {
