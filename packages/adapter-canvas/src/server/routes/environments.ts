@@ -257,6 +257,19 @@ export async function handleListEnvironments(
     return;
   }
 
+  // The generation this listing is being assembled against. Anything that
+  // removes an environment — the delete route, or a rollback or exit that
+  // deletes the one this setup created — invalidates the repo's listing, and
+  // that invalidation must survive a listing that started before it. Caching
+  // such a payload would put the removed environment back in front of the
+  // customer for a whole TTL, which is exactly what a completed rollback
+  // promised it would not do.
+  const generation = dependencies.envListCacheGeneration(repo);
+  const cacheListing = (payload: unknown): void => {
+    if (dependencies.envListCacheGeneration(repo) !== generation) return;
+    dependencies.envListCacheSet(repo, { at: dependencies.now(), payload });
+  };
+
   const gh = (args: string[], timeout = 12000): Promise<string> =>
     new Promise<string>((resolve) => {
       dependencies.cliExec("gh", args, { timeout }, (err, stdout) => {
@@ -339,7 +352,7 @@ export async function handleListEnvironments(
     if (rows.length === 0) {
       const payload = { environments: [] };
       respond(payload);
-      dependencies.envListCacheSet(repo, { at: dependencies.now(), payload });
+      cacheListing(payload);
       return;
     }
 
@@ -474,10 +487,7 @@ export async function handleListEnvironments(
         environment !== null
     );
     respond({ environments: managedEnvironments });
-    dependencies.envListCacheSet(repo, {
-      at: dependencies.now(),
-      payload: { environments: managedEnvironments }
-    });
+    cacheListing({ environments: managedEnvironments });
     // Background self-heal: update any committed workflow files that have
     // drifted from the upstream Radius templates. Also target the session
     // worktree branch (when it's this repo's) so a worktree-consistent deploy

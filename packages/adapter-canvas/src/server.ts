@@ -212,7 +212,11 @@ import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { isSetupPullRequestMerged } from "./server/services/setup-pull-request.js";
-import { CLEANUP_COMMANDS } from "./server/services/cleanup-commands.js";
+import {
+  CLEANUP_COMMANDS,
+  cleanupRemovedGitHubEnvironment
+} from "./server/services/cleanup-commands.js";
+import { createEnvironmentListingCache } from "./server/services/environment-listing-cache.js";
 import type { CleanupCommandKind } from "./server/services/cleanup-commands.js";
 import { runWorkflowRollback } from "./server/services/workflow-rollback.js";
 import type { WorkflowRollbackPorts } from "./server/services/workflow-rollback.js";
@@ -666,7 +670,7 @@ const operationsControlRoutes = createOperationsControlRoutes({
   // after, and a cached payload would answer with the environment the abandoned
   // attempt left behind.
   invalidateEnvironmentListing: (repo) => {
-    envListCache.delete(repo);
+    envListCache.invalidate(repo);
   }
 });
 
@@ -1053,8 +1057,9 @@ const environmentsRoutes = createEnvironmentsRoutes({
     envListCache.set(repo, entry);
   },
   envListCacheDelete: (repo) => {
-    envListCache.delete(repo);
+    envListCache.invalidate(repo);
   },
+  envListCacheGeneration: (repo) => envListCache.generation(repo),
   envListTtlMs: ENV_LIST_TTL_MS,
   kickoffWorkflowSync: (repo, managedEnvironments, workingBranch) =>
     kickoffWorkflowSync(repo, managedEnvironments, workingBranch),
@@ -1176,7 +1181,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
     recordGitHubEnvironment(operation, patch);
   },
   envListCacheDelete: (repo) => {
-    envListCache.delete(repo);
+    envListCache.invalidate(repo);
   },
   ociStateBackend: OCI_STATE_BACKEND,
   defaultStateArchive: DEFAULT_STATE_ARCHIVE,
@@ -1470,8 +1475,12 @@ function cachedDeployStatusReader(
 }
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
-// and deploy pages snappy. Invalidated on environment creation.
-const envListCache = new Map<string, CachedPayload>();
+// and deploy pages snappy. Invalidated on environment creation, on an explicit
+// environment delete, and by the rollback and exit passes that remove the
+// environment a setup created. Eviction goes through `invalidate`, which also
+// makes any listing already in flight for that repository unable to cache what
+// it read — see `server/services/environment-listing-cache.ts`.
+const envListCache = createEnvironmentListingCache();
 
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
@@ -3258,7 +3267,7 @@ export async function finalizeSetupFailure(
         attempt,
         runDeleteEnvironment,
         invalidateEnvironmentListing: (repo) => {
-          envListCache.delete(repo);
+          envListCache.invalidate(repo);
         },
         steps
       });
@@ -4425,7 +4434,7 @@ function createInstanceRequestCoordinator(
         attempt,
         runDeleteEnvironment: (args) => ghOrThrow(args, 20000),
         invalidateEnvironmentListing: (repo) => {
-          envListCache.delete(repo);
+          envListCache.invalidate(repo);
         },
         steps
       });
@@ -4472,6 +4481,16 @@ function createInstanceRequestCoordinator(
     results = [...results, ...azureCleanup.results];
 
     for (const step of steps) addLegacyStep(op, step);
+    // The browser reloads the environment table the moment this record turns
+    // terminal, and that reload is answered from the repo-scoped listing cache.
+    // Invalidating here — before `finish`, not only where the deletion happened
+    // — means the reload cannot be answered from a listing assembled before the
+    // removal, so a completed rollback never hands the customer back the
+    // environment it just removed.
+    const cleanupRepo = String(op.repo || "");
+    if (cleanupRepo !== "" && cleanupRemovedGitHubEnvironment(results)) {
+      envListCache.invalidate(cleanupRepo);
+    }
     recordCleanupState(op, {
       attempts: azureCleanup.attempt,
       state: warnings.length ? "succeeded_with_warnings" : "succeeded",

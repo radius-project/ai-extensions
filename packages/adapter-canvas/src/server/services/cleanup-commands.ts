@@ -75,3 +75,23 @@ export function isCleanupCommandKind(
 ): value is CleanupCommandKind {
   return Object.hasOwn(CLEANUP_COMMANDS, value);
 }
+
+/**
+ * Whether a finished deletion pass changed what the environment picker shows.
+ *
+ * The picker reads a repo-scoped cached listing that a different request
+ * assembles, so a pass that removed the GitHub environment — or found it
+ * already gone — has to drop that cache before the browser reloads the table on
+ * the terminal record. A pass that could not remove it invalidates nothing: the
+ * environment is still there, so the listing that still reports it, pending
+ * verification or otherwise, is the truthful one.
+ */
+export function cleanupRemovedGitHubEnvironment(
+  results: readonly { artifactType: string; outcome: string }[]
+): boolean {
+  return results.some(
+    (entry) =>
+      entry.artifactType === "github_environment" &&
+      (entry.outcome === "deleted" || entry.outcome === "not_found")
+  );
+}

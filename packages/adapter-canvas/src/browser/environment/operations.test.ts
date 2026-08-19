@@ -5277,3 +5277,157 @@ describe("exiting a setup", () => {
     expect(browser.els[PROGRESS_IDS.bottomButtons].children).toHaveLength(0);
   });
 });
+
+// What the customer is left with once a deletion pass ends. The panel reports an
+// outcome and the picker reports the environments that still exist; the panel
+// never writes a row, and the acknowledgement never asks for one. A completed
+// rollback that still put its environment back on the page — Pending, as its
+// unfinished verify run left it — is the regression these cases hold closed.
+describe("acknowledging a finished deletion pass", () => {
+  const ROLLBACK_COMPLETE_HEADLINE = {
+    code: "rollback-complete",
+    title: "Rollback complete",
+    message: "Radius removed the resources it created during this attempt."
+  };
+  const STOPPED_HEADLINE = {
+    code: "stopped",
+    title: "Environment setup stopped",
+    message: "Radius stopped before the next setup step."
+  };
+
+  function completedRollback(): OperationRecord {
+    return record({
+      state: "cancelled",
+      terminalState: "cancelled",
+      actions: [],
+      headline: ROLLBACK_COMPLETE_HEADLINE
+    });
+  }
+
+  function controllerFor(browser: ReturnType<typeof setup>) {
+    const harness = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: harness.deps
+    });
+    return { controller, harness };
+  }
+
+  it("asks the picker once for a completed rollback and nothing more on OK", () => {
+    const browser = setup();
+    const { controller, harness } = controllerFor(browser);
+
+    // The sequence the poller drives: the terminal record is rendered, then
+    // applied.
+    const finished = completedRollback();
+    controller?.renderProgress(finished);
+    controller?.applyTerminal(finished);
+    expect(harness.reloadCount).toBe(1);
+    expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
+
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+
+    // OK acknowledges an outcome the server already reached: it closes the
+    // panel and asks for nothing, because the listing was refreshed when the
+    // rollback ended.
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(harness.reloadCount).toBe(1);
+    expect(browser.net.calls).toHaveLength(0);
+    expect(harness.errors).toEqual([]);
+  });
+
+  it("asks the picker once for an exited setup and closes the panel outright", () => {
+    const browser = setup();
+    browser.els[ERROR_BANNER_ID].style.display = "flex";
+    const { controller, harness } = controllerFor(browser);
+
+    const exited = record({
+      state: "failed_partial",
+      terminalState: "failed_partial",
+      actions: [],
+      headline: EXITED_HEADLINE
+    });
+    controller?.renderProgress(exited);
+    controller?.applyTerminal(exited);
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
+    expect(harness.reloadCount).toBe(1);
+    expect(harness.errors).toEqual([]);
+  });
+
+  it("re-renders a completed rollback on reload without reopening the setup", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "cancelled",
+          terminalState: "cancelled",
+          actions: [],
+          headline: ROLLBACK_COMPLETE_HEADLINE
+        })
+      )
+    );
+    const { controller, harness } = controllerFor(browser);
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
+      "Rollback complete"
+    );
+    expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
+    // A record that is already terminal is redisplayed, not re-applied: the
+    // page load owns the listing, and nothing here polls it again.
+    expect(harness.reloadCount).toBe(0);
+    expect(browser.clock.pending).toBe(0);
+  });
+
+  it("keeps an exited setup off the page on reload", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "failed_partial",
+          terminalState: "failed_partial",
+          actions: [],
+          headline: EXITED_HEADLINE
+        })
+      )
+    );
+    const { controller, harness } = controllerFor(browser);
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(harness.reloadCount).toBe(0);
+  });
+
+  it("still offers the way out of a stopped setup, and refreshes the listing", () => {
+    const browser = setup();
+    const { controller, harness } = controllerFor(browser);
+
+    const stopped = record({
+      state: "cancelled",
+      terminalState: "cancelled",
+      actions: [EXIT_ACTION],
+      headline: STOPPED_HEADLINE,
+      cleanup: { created: [{ target: "app radius-dev" }] }
+    });
+    controller?.renderProgress(stopped);
+    controller?.applyTerminal(stopped);
+
+    // A stop kept its resources, so the row that reports them stays, the
+    // inventory stays, and the customer still has the exit rather than a bare
+    // acknowledgement.
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
+    expect(
+      browser.els[PROGRESS_IDS.bottomButtons].children.map(
+        (child) => child.textContent
+      )
+    ).toEqual(["Exit setup"]);
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
+    expect(harness.reloadCount).toBe(1);
+  });
+});
