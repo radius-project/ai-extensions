@@ -43,7 +43,8 @@ function dependencies(
           dispatched: true,
           workflowFile: "run-rad-commands.yml",
           dispatchedAt: 10,
-          environment: "production"
+          environment: "production",
+          baselineRunId: null
         })
     },
     outcome: {
@@ -322,7 +323,8 @@ describe("deploy monitor stage sequencing", () => {
               dispatched: true,
               workflowFile: "run-rad-commands.yml",
               dispatchedAt: 10,
-              environment: "production"
+              environment: "production",
+              baselineRunId: null
             });
           }
         },
@@ -378,6 +380,36 @@ describe("deploy monitor run discovery", () => {
     expect(logs).toContain(
       "Tracking deploy run: https://github.com/acme/widgets/actions/runs/77"
     );
+  });
+
+  it("passes the dispatch baseline run id to run discovery", async () => {
+    const afterRunIds: (number | string | null | undefined)[] = [];
+    const settle = settleRecorder();
+    const { request: input } = request({ resources: [] });
+    const service = createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: () => Promise.resolve(null) },
+        dispatch: {
+          prepareAndDispatch: () =>
+            Promise.resolve({
+              dispatched: true,
+              workflowFile: "run-rad-commands.yml",
+              dispatchedAt: 10,
+              environment: "production",
+              baselineRunId: 101
+            })
+        },
+        findWorkflowRun: (_repo, _workflowFile, _sinceMs, _knownId, afterRunId) => {
+          afterRunIds.push(afterRunId);
+          return Promise.resolve(102);
+        },
+        outcome: settle.outcome
+      })
+    );
+
+    await service.run(input);
+
+    expect(afterRunIds).toEqual([101]);
   });
 
   it("marks a run it never found as unconfirmed rather than failed", async () => {

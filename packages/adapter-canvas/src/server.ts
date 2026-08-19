@@ -148,6 +148,7 @@ import {
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
   findWorkflowRun,
+  latestWorkflowRunId,
   getRunDetail,
   fetchRunLog,
   extractErrorLines,
@@ -2063,6 +2064,7 @@ const deployDispatchService = createDeployDispatchService({
   buildAppGraphRadCommand,
   ensureDeployWorkflowsOnBranch,
   ensureWorkflowsCurrent,
+  latestWorkflowRunId,
   classifyDeployDispatchFailure,
   invalidateDeployListCache: (repo) => {
     deployListCache.delete(repo);

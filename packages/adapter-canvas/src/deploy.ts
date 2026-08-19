@@ -112,11 +112,56 @@ export function ghJson(
   });
 }
 
+// Coerce a run id (which state may carry as a string) to a finite number for
+// the monotonic-id comparison, or null when it is absent or not numeric.
+function numericRunId(value: number | string | null | undefined): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+// Returns the id of the newest existing run for a workflow, so a dispatcher can
+// capture a baseline immediately before it starts a run and later identify the
+// run it created as the first one whose id exceeds that baseline. Run ids are
+// monotonically increasing on GitHub, which makes this immune to the clock skew
+// that a created-at time window has to tolerate.
+export async function latestWorkflowRunId(
+  repo: string,
+  workflowFile: string
+): Promise<number | null> {
+  const runs = await ghJson(
+    [
+      "run",
+      "list",
+      "--workflow=" + workflowFile,
+      "--limit",
+      "20",
+      "--json",
+      "databaseId,createdAt",
+      "--repo",
+      repo
+    ],
+    []
+  );
+  if (!Array.isArray(runs)) return null;
+  let max: number | null = null;
+  for (const value of runs) {
+    const r = parseWorkflowRun(value);
+    if (r?.databaseId === undefined) continue;
+    if (max === null || r.databaseId > max) max = r.databaseId;
+  }
+  return max;
+}
+
 export async function findWorkflowRun(
   repo: string,
   workflowFile: string,
   sinceMs: number,
-  knownId?: number | string | null
+  knownId?: number | string | null,
+  afterRunId?: number | string | null
 ): Promise<number | string | null> {
   if (knownId) return knownId;
   const runs = await ghJson(
@@ -134,8 +179,23 @@ export async function findWorkflowRun(
     []
   );
   if (!Array.isArray(runs)) return null;
-  // Newest first; accept the first run created within ~60s before dispatch
-  // (clock skew tolerance) to avoid picking up stale prior runs.
+  // Prefer a monotonic run-id baseline when the caller captured one just before
+  // dispatch: accept the newest run whose id exceeds it, which is always the run
+  // this dispatch created and never a prior (e.g. previously failed) run. This
+  // is what keeps a redeploy's "view run" link pointing at the new run instead
+  // of the last one. Runs are listed newest first, so the first match is it.
+  const baseline = numericRunId(afterRunId);
+  if (baseline !== null) {
+    for (const value of runs) {
+      const r = parseWorkflowRun(value);
+      if (r?.databaseId === undefined) continue;
+      if (r.databaseId > baseline) return r.databaseId;
+    }
+    return null;
+  }
+  // No baseline (e.g. it could not be captured): fall back to a created-at
+  // window, accepting the newest run created within ~60s before dispatch (clock
+  // skew tolerance) to avoid picking up clearly stale prior runs.
   const cutoff = (sinceMs || 0) - 60000;
   for (const value of runs) {
     const r = parseWorkflowRun(value);
