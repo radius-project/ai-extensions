@@ -683,10 +683,12 @@ describe("stop, then continue or roll back, over the socket", () => {
     expect(harness.scheduled).toEqual([]);
   });
 
-  it("fails closed on a post-commit, an empty-ledger, and an ambiguous-only record", async () => {
+  it("fails closed on an unprovable commit, an empty ledger, and an ambiguous-only record", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
 
+    // Committed before Radius saved workflow provenance: the file may or may
+    // not still be what Radius wrote, so nothing may be removed.
     const committed = stoppedSetup(harness);
     recordCommittedWorkflowFile(committed, {
       path: ".github/workflows/radius-deploy.yml",
@@ -706,7 +708,7 @@ describe("stop, then continue or roll back, over the socket", () => {
     });
 
     for (const [operation, code] of [
-      [committed, "rollback-after-commit"],
+      [committed, "rollback-provenance-incomplete"],
       [empty, "rollback-nothing-owned"],
       [ambiguous, "rollback-nothing-owned"]
     ] as const) {
@@ -718,5 +720,89 @@ describe("stop, then continue or roll back, over the socket", () => {
       expect(await response.json()).toMatchObject({ code });
     }
     expect(harness.scheduled).toEqual([]);
+  });
+
+  it("offers and accepts a post-commit rollback after verification failed", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    // The journey the product model names: workflows committed, verification
+    // dispatched, the run failed at Azure Login. The environment is unfinished,
+    // so both choices are on offer over the same socket.
+    const op = seed(harness, "contoso/store");
+    recordAzureApp(op, {
+      state: "created",
+      appId: "app-1",
+      displayName: "radius-store"
+    });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/radius-verify-credentials.yml",
+      mode: "default_branch",
+      branch: "main",
+      commitSha: "c".repeat(40),
+      blobSha: "b".repeat(40),
+      contentSha256: "d".repeat(64),
+      previousBlobSha: null
+    });
+    recordCommitState(op, { mode: "default_branch", branch: "main" });
+    op.verification = {
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "4242"
+    };
+    enterStage(op, STAGE_VERIFY);
+    finish(op, "failed_partial", {
+      failure: {
+        code: "verify-run-failed",
+        stage: STAGE_VERIFY,
+        message: "Credential verification failed.",
+        classification: "user-fixable",
+        evidence: "Azure Login (OIDC) failed."
+      }
+    });
+
+    const view = (await (
+      await fetch(`${entry.baseUrl}/api/operations/${op.operationId}`)
+    ).json()) as {
+      operation: {
+        actions: Array<{
+          id: string;
+          label: string;
+          scope?: string;
+          preview?: { removes: Array<{ kind: string; target: string }> };
+        }>;
+      };
+    };
+    expect(view.operation.actions.map((action) => action.id)).toEqual([
+      "retry-verification",
+      "rollback"
+    ]);
+    const rollback = view.operation.actions.find(
+      (action) => action.id === "rollback"
+    );
+    expect(rollback?.label).toBe("Roll back environment setup");
+    expect(rollback?.scope).toBe("post_commit");
+    expect(rollback?.preview?.removes[0]).toEqual({
+      kind: "workflow_file",
+      target: ".github/workflows/radius-verify-credentials.yml on main"
+    });
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/rollback`
+    );
+    expect(response.status).toBe(202);
+    expect(harness.scheduled.map((entry) => entry.kind)).toEqual(["rollback"]);
   });
 });

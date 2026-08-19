@@ -66,8 +66,10 @@ import {
   projectNextTransition,
   projectOperationActions,
   projectOperationHeadline,
+  pendingWorkflowCommits,
   provenOwnedCleanupTargets,
   readOperationControl,
+  readSetupArtifactLedger,
   recordAttemptOutcome,
   reconcileOperationLifecycle,
   rollbackRetryAttempt,
@@ -77,6 +79,9 @@ import {
   snapshotRetryState,
   stopAtBoundary,
   unresolvedCleanupTargets,
+  workflowProvenanceGap,
+  workflowRollbackCommitState,
+  workflowRollbackTargets,
   OPERATION_SCHEMA_VERSION,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
@@ -218,6 +223,22 @@ describe("canonical environment identity", () => {
   });
 });
 
+// A committed workflow file recorded with the provenance a post-commit rollback
+// requires: the branch, the commit, the blob GitHub produced, and the digest of
+// the bytes Radius sent.
+function provenWorkflowFile(overrides = {}) {
+  return {
+    path: ".github/workflows/radius-verify-credentials.yml",
+    mode: "default_branch",
+    branch: "main",
+    commitSha: "c".repeat(40),
+    blobSha: "b".repeat(40),
+    contentSha256: "d".repeat(64),
+    previousBlobSha: null,
+    ...overrides
+  };
+}
+
 describe("stage inventory", () => {
   it("omits a stage that will not run rather than showing it as skipped", () => {
     // A repo with working credentials never authorizes an identity, and a
@@ -313,6 +334,7 @@ describe("record shape", () => {
         branch: null,
         baseBranch: null,
         pullRequestUrl: null,
+        headSha: null,
         workflowFiles: []
       },
       cleanup: {
@@ -1620,9 +1642,11 @@ describe("the step-marker convention at the call sites", () => {
   // route module.
   const SERVER_SRC = [
     new URL("./server.ts", import.meta.url),
-    ...readdirSync(new URL("./server/routes/", import.meta.url))
-      .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))
-      .map((name) => new URL(`./server/routes/${name}`, import.meta.url))
+    ...["server/routes", "server/services"].flatMap((directory) =>
+      readdirSync(new URL(`./${directory}/`, import.meta.url))
+        .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))
+        .map((name) => new URL(`./${directory}/${name}`, import.meta.url))
+    )
   ]
     .map((url) => readFileSync(url, "utf8"))
     .join("\n");
@@ -1640,7 +1664,14 @@ describe("the step-marker convention at the call sites", () => {
     "Verifying the"
   ];
 
-  const FORWARDED_STEP_IDENTIFIERS = new Set(["message"]);
+  const FORWARDED_STEP_IDENTIFIERS = new Set([
+    "message",
+    // The workflow rollback service composes and marks its own narration; the
+    // executor only republishes it. Both sites are inside the scanned corpus,
+    // so nothing composed elsewhere is exempted by these two entries.
+    "...rollback.steps",
+    "outcome.step"
+  ]);
 
   function firstArgumentEnd(source: string, start: number): number {
     let parentheses = 1;
@@ -2469,9 +2500,11 @@ describe("retry eligibility", () => {
     expect(unresolvedCleanupTargets(null)).toEqual([]);
   });
 
-  it("never offers cleanup retry once the workflows were committed", () => {
+  it("never offers cleanup retry when the committed workflows cannot be proven unchanged", () => {
     const op = newOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });
+    // A file recorded without its blob and content digests — the shape every
+    // record written before provenance existed still has.
     recordCommittedWorkflowFile(op, {
       path: ".github/workflows/verify.yml",
       mode: "default_branch",
@@ -2493,7 +2526,91 @@ describe("retry eligibility", () => {
     finish(op, "failed_partial", { failure: { code: "x" } });
     expect(canRetryCleanup(op)).toMatchObject({
       ok: false,
-      code: "cleanup-retry-after-commit"
+      code: "cleanup-retry-provenance-incomplete"
+    });
+  });
+
+  it("offers the rollback retry for a workflow file a blocked pass could not read", () => {
+    const op = newOp();
+    recordCommittedWorkflowFile(op, provenWorkflowFile());
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "workflow_file",
+          target: ".github/workflows/radius-verify-credentials.yml on main",
+          identity: "main:.github/workflows/radius-verify-credentials.yml",
+          outcome: "warning",
+          detail: "Radius could not read the file from GitHub: HTTP 500"
+        }
+      ]
+    });
+    finish(op, "failed_partial", {
+      failure: { code: "setup-rollback-blocked" }
+    });
+
+    // A read that failed is retryable; the file is still in the ledger, so the
+    // retry can prove ownership of exactly that target again.
+    expect(unresolvedCleanupTargets(op)).toEqual([
+      {
+        artifactType: "workflow_file",
+        target: ".github/workflows/radius-verify-credentials.yml on main",
+        identity: "main:.github/workflows/radius-verify-credentials.yml",
+        key: "workflow_file#main:.github/workflows/radius-verify-credentials.yml",
+        detail: "Radius could not read the file from GitHub: HTTP 500"
+      }
+    ]);
+    expect(canRetryCleanup(op)).toMatchObject({ ok: true });
+  });
+
+  it("drops a workflow retry target the ledger no longer holds", () => {
+    const op = newOp();
+    recordCommittedWorkflowFile(op, provenWorkflowFile());
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "workflow_file",
+          target: ".github/workflows/radius-deploy.yml on main",
+          identity: "main:.github/workflows/radius-deploy.yml",
+          outcome: "warning",
+          detail: "HTTP 500"
+        }
+      ]
+    });
+    finish(op, "failed_partial", {
+      failure: { code: "setup-rollback-blocked" }
+    });
+
+    expect(unresolvedCleanupTargets(op)).toEqual([]);
+  });
+
+  it("offers cleanup retry after a post-commit rollback left a resource behind", () => {
+    const op = newOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordCommittedWorkflowFile(op, provenWorkflowFile());
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius (app-1)",
+          identity: "app-1",
+          outcome: "warning",
+          detail: "Azure CLI returned 429."
+        }
+      ]
+    });
+    finish(op, "failed_partial", { failure: { code: "x" } });
+    expect(canRetryCleanup(op)).toMatchObject({
+      ok: true,
+      code: "cleanup-retry-allowed"
     });
   });
 
@@ -3124,7 +3241,7 @@ describe("rollback eligibility", () => {
     ).toEqual(["contoso/store:dev"]);
   });
 
-  it("refuses rollback once setup crossed the workflow commit point", () => {
+  it("refuses rollback after the commit point when the workflow provenance is incomplete", () => {
     const op = stoppedWithCreatedResources();
     recordCommittedWorkflowFile(op, {
       path: ".github/workflows/radius-deploy.yml",
@@ -3134,30 +3251,73 @@ describe("rollback eligibility", () => {
     expect(provenOwnedCleanupTargets(op)).toEqual([]);
     expect(canStartRollback(op)).toMatchObject({
       ok: false,
-      code: "rollback-after-commit"
+      code: "rollback-provenance-incomplete"
     });
     expect(projectOperationActions(op).map((entry) => entry.id)).not.toContain(
       "rollback"
     );
     expect(projectActionGuidance(op)).toContainEqual({
-      code: "rollback-after-commit",
+      code: "rollback-provenance-incomplete",
       message:
-        "Setup committed workflow files, so Radius retained the environment resources instead of removing them."
+        "Radius cannot prove the committed workflow files are still exactly what it wrote, so it will not remove them or the resources they depend on. Review and remove them yourself."
     });
   });
 
-  it("refuses rollback for a running operation, a success, and a missing record", () => {
+  it("offers a post-commit rollback that reverts the workflows before the cloud resources", () => {
+    const op = stoppedWithCreatedResources();
+    recordCommittedWorkflowFile(op, provenWorkflowFile());
+    const verdict = canStartRollback(op);
+    expect(verdict).toMatchObject({ ok: true, scope: "post_commit" });
+    // Workflow files are removed first: the identity underneath an installed
+    // workflow must never disappear before the workflow does.
+    expect(verdict.targets.map((entry) => entry.artifactType)).toEqual([
+      "workflow_file",
+      "github_environment",
+      "role_assignment",
+      "federated_credential",
+      "service_principal",
+      "azure_app"
+    ]);
+    const action = projectOperationActions(op).find(
+      (entry) => entry.id === "rollback"
+    );
+    expect(action).toMatchObject({
+      label: "Roll back environment setup",
+      scope: "post_commit",
+      confirmLabel: "Roll back setup"
+    });
+    expect(action.preview.removes).toContainEqual({
+      kind: "workflow_file",
+      target: ".github/workflows/radius-verify-credentials.yml on main"
+    });
+    // The file it is about to revert is not also promised as retained.
+    expect(action.preview.keeps.map((entry) => entry.kind)).not.toContain(
+      "workflow_file"
+    );
+  });
+
+  it("refuses rollback for a running operation, a verified environment, and a missing record", () => {
     expect(canStartRollback(null)).toMatchObject({
       code: "unknown-operation"
     });
     expect(canStartRollback(newOp())).toMatchObject({
       code: "operation-active"
     });
+    // Successful verification is the completion boundary: a finished
+    // environment is removed with Delete Environment, never rolled back.
     const succeeded = addSafeResumeRequest(newOp());
     recordAzureApp(succeeded, { state: "created", appId: "app-1" });
     finishSucceeded(succeeded);
     expect(canStartRollback(succeeded)).toMatchObject({
-      code: "rollback-not-available"
+      code: "rollback-environment-verified"
+    });
+    expect(
+      projectOperationActions(succeeded).map((entry) => entry.id)
+    ).not.toContain("rollback");
+    expect(projectActionGuidance(succeeded)).toContainEqual({
+      code: "rollback-environment-verified",
+      message:
+        "Credential verification succeeded, so this environment is finished setup. Remove it from the environment list with Delete Environment."
     });
   });
 
@@ -3532,5 +3692,402 @@ describe("an interrupted rollback still offers a way out", () => {
     expect(
       projectCleanupSummary(op).cleaned.map((entry) => entry.target)
     ).toEqual(["contoso/store:dev"]);
+  });
+});
+
+// ─── Workflow provenance ─────────────────────────────────────────────────────
+// What the ledger has to save at write time, and what it must refuse to act on
+// when it did not.
+
+describe("committed workflow provenance", () => {
+  function committed(overrides = {}) {
+    const op = newOp();
+    recordCommittedWorkflowFile(op, provenWorkflowFile(overrides));
+    return op;
+  }
+
+  it("saves the branch, commit, blob and content identity of a write", () => {
+    const op = committed({ previousBlobSha: "old-blob" });
+
+    expect(op.setupArtifacts.commit.workflowFiles).toEqual([
+      {
+        path: ".github/workflows/radius-verify-credentials.yml",
+        branch: "main",
+        mode: "default_branch",
+        state: "committed",
+        commitSha: "c".repeat(40),
+        blobSha: "b".repeat(40),
+        contentSha256: "d".repeat(64),
+        previousBlobSha: "old-blob"
+      }
+    ]);
+    // The head moves with the newest write, which is what a branch deletion is
+    // later checked against.
+    expect(op.setupArtifacts.commit.headSha).toBe("c".repeat(40));
+  });
+
+  it("replaces the provenance of a re-commit rather than recording it twice", () => {
+    const op = committed();
+    recordCommittedWorkflowFile(
+      op,
+      provenWorkflowFile({
+        commitSha: "e".repeat(40),
+        blobSha: "f".repeat(40)
+      })
+    );
+
+    expect(op.setupArtifacts.commit.workflowFiles).toHaveLength(1);
+    expect(op.setupArtifacts.commit.workflowFiles[0]).toMatchObject({
+      commitSha: "e".repeat(40),
+      blobSha: "f".repeat(40)
+    });
+    expect(op.setupArtifacts.commit.headSha).toBe("e".repeat(40));
+  });
+
+  it("ignores an entry with no path or no recognised commit mode", () => {
+    const op = newOp();
+    recordCommittedWorkflowFile(op, provenWorkflowFile({ path: "" }));
+    recordCommittedWorkflowFile(op, provenWorkflowFile({ mode: "guess" }));
+    recordCommittedWorkflowFile(op, null);
+
+    expect(op.setupArtifacts.commit.workflowFiles).toEqual([]);
+  });
+
+  it("reports no gap when every file carries a full provenance", () => {
+    expect(workflowProvenanceGap(committed())).toBeNull();
+    // A record that committed nothing has nothing to prove.
+    expect(workflowProvenanceGap(newOp())).toBeNull();
+  });
+
+  it.each([
+    ["blobSha", { blobSha: null }, "cannot prove the file is unchanged"],
+    [
+      "contentSha256",
+      { contentSha256: null },
+      "cannot prove the file is unchanged"
+    ],
+    ["commitSha", { commitSha: null }, "did not save the commit it created"],
+    ["branch", { branch: null }, "did not save which branch"]
+  ])(
+    "names the missing %s rather than refusing silently",
+    (_field, overrides, expected) => {
+      expect(workflowProvenanceGap(committed(overrides))).toContain(expected);
+    }
+  );
+
+  it("requires the setup branch head before a pull-request rollback", () => {
+    const op = newOp();
+    recordCommittedWorkflowFile(
+      op,
+      provenWorkflowFile({
+        mode: "pull_request",
+        branch: "radius/setup",
+        commitSha: null
+      })
+    );
+    // No commit sha was saved, so the head could not be derived either.
+    op.setupArtifacts.commit.workflowFiles[0].commitSha = "c".repeat(40);
+    expect(workflowProvenanceGap(op)).toContain(
+      "head commit of the setup branch"
+    );
+  });
+
+  it("refuses a record that does not name its repository", () => {
+    const op = committed();
+    op.repo = "";
+    expect(workflowProvenanceGap(op)).toContain("does not name the repository");
+    expect(workflowProvenanceGap(null)).toBe(
+      "The setup artifact ledger is missing."
+    );
+  });
+
+  it("hands the rollback service the files, labels and identities it needs", () => {
+    const op = committed();
+
+    expect(workflowRollbackTargets(op)).toEqual([
+      {
+        path: ".github/workflows/radius-verify-credentials.yml",
+        branch: "main",
+        mode: "default_branch",
+        commitSha: "c".repeat(40),
+        blobSha: "b".repeat(40),
+        contentSha256: "d".repeat(64),
+        previousBlobSha: null,
+        target: ".github/workflows/radius-verify-credentials.yml on main",
+        identity: "main:.github/workflows/radius-verify-credentials.yml",
+        key: "workflow_file#main:.github/workflows/radius-verify-credentials.yml"
+      }
+    ]);
+    expect(workflowRollbackTargets(null)).toEqual([]);
+    expect(pendingWorkflowCommits(null)).toEqual([]);
+    expect(provenOwnedCleanupTargets(null)).toEqual([]);
+  });
+
+  it("hands over an empty branch rather than inventing one, and is refused downstream", () => {
+    // The ledger reports what it saved. A record with no branch anywhere is
+    // already refused by `workflowProvenanceGap`, and the rollback service
+    // refuses the same target again rather than guessing at a default.
+    const op = newOp();
+    recordCommittedWorkflowFile(op, provenWorkflowFile({ branch: null }));
+
+    expect(workflowRollbackTargets(op)[0]).toMatchObject({ branch: "" });
+    expect(workflowProvenanceGap(op)).toContain("did not save which branch");
+  });
+
+  it("falls back to the commit branch for a file that saved none", () => {
+    const op = newOp();
+    recordCommitState(op, { mode: "default_branch", branch: "trunk" });
+    recordCommittedWorkflowFile(op, provenWorkflowFile({ branch: null }));
+
+    // `recordCommitState` backfills the branch onto the files it already holds,
+    // so the target is named for the branch the commit actually used.
+    expect(workflowRollbackTargets(op)[0]).toMatchObject({ branch: "trunk" });
+  });
+
+  it("narrows the selection to the keys a retry asked for", () => {
+    const op = committed();
+    recordCommittedWorkflowFile(
+      op,
+      provenWorkflowFile({ path: ".github/workflows/radius-deploy.yml" })
+    );
+
+    const selected = workflowRollbackTargets(
+      op,
+      new Set(["workflow_file#main:.github/workflows/radius-deploy.yml"])
+    );
+    expect(selected.map((entry) => entry.path)).toEqual([
+      ".github/workflows/radius-deploy.yml"
+    ]);
+  });
+
+  it("describes the commit state a rollback locates files with", () => {
+    const op = committed();
+    recordCommitState(op, {
+      mode: "pull_request",
+      branch: "radius/setup",
+      baseBranch: "main",
+      pullRequestUrl: "https://github.com/contoso/store/pull/7"
+    });
+
+    expect(workflowRollbackCommitState(op)).toEqual({
+      mode: "pull_request",
+      branch: "radius/setup",
+      baseBranch: "main",
+      pullRequestUrl: "https://github.com/contoso/store/pull/7",
+      headSha: "c".repeat(40)
+    });
+    expect(workflowRollbackCommitState(null)).toEqual({
+      mode: "default_branch",
+      branch: null,
+      baseBranch: null,
+      pullRequestUrl: null,
+      headSha: null
+    });
+  });
+
+  it("marks a reverted file removed without forgetting that it was committed", () => {
+    const op = committed();
+
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType: "workflow_file",
+        identity: "main:.github/workflows/radius-verify-credentials.yml"
+      })
+    ).toBe(true);
+    expect(pendingWorkflowCommits(op)).toEqual([]);
+    // The record still proves the operation crossed the commit point, so the
+    // panel keeps telling the truth about what this attempt did.
+    expect(op.setupArtifacts.commit.workflowFiles[0].state).toBe("removed");
+    // A second removal of the same file is not a second deletion.
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType: "workflow_file",
+        identity: "main:.github/workflows/radius-verify-credentials.yml"
+      })
+    ).toBe(false);
+  });
+
+  it("stops offering a removed file as a rollback target", () => {
+    const op = stoppedWithCreatedResources();
+    recordCommittedWorkflowFile(op, provenWorkflowFile());
+    recordCleanupDeletion(op, {
+      artifactType: "workflow_file",
+      identity: "main:.github/workflows/radius-verify-credentials.yml"
+    });
+
+    expect(
+      provenOwnedCleanupTargets(op).map((entry) => entry.artifactType)
+    ).not.toContain("workflow_file");
+    expect(
+      projectCleanupSummary(op).retainedArtifacts.map((entry) => entry.kind)
+    ).not.toContain("workflow_file");
+  });
+});
+
+describe("restoring a ledger written before provenance existed", () => {
+  it("fills every provenance field with the honest null default", () => {
+    const restored = readSetupArtifactLedger({
+      azureApp: { state: "created", appId: "app-1" },
+      commit: {
+        mode: "default_branch",
+        branch: "main",
+        workflowFiles: [
+          { path: ".github/workflows/verify.yml", mode: "default_branch" }
+        ]
+      }
+    });
+
+    expect(restored.commit.headSha).toBeNull();
+    expect(restored.commit.workflowFiles).toEqual([
+      {
+        path: ".github/workflows/verify.yml",
+        branch: null,
+        mode: "default_branch",
+        state: "committed",
+        commitSha: null,
+        blobSha: null,
+        contentSha256: null,
+        previousBlobSha: null
+      }
+    ]);
+    // Fields the old record did carry survive untouched.
+    expect(restored.azureApp).toMatchObject({
+      state: "created",
+      appId: "app-1"
+    });
+  });
+
+  it("drops an unusable entry rather than carrying a nameless file forward", () => {
+    const restored = readSetupArtifactLedger({
+      commit: { workflowFiles: [{ mode: "default_branch" }, null] }
+    });
+
+    expect(restored.commit.workflowFiles).toEqual([]);
+  });
+
+  it("returns the empty ledger for a missing or non-object value", () => {
+    expect(readSetupArtifactLedger(null).commit.workflowFiles).toEqual([]);
+    expect(readSetupArtifactLedger("nope").cleanup.attempts).toBe(0);
+  });
+
+  it("fills a ledger that recorded nothing about its commit", () => {
+    const restored = readSetupArtifactLedger({});
+
+    expect(restored.commit).toEqual({
+      mode: "not_started",
+      branch: null,
+      baseBranch: null,
+      pullRequestUrl: null,
+      headSha: null,
+      workflowFiles: []
+    });
+    expect(
+      readSetupArtifactLedger({ commit: {} }).commit.workflowFiles
+    ).toEqual([]);
+  });
+
+  it("keeps a file an earlier rollback already reverted marked as removed", () => {
+    const restored = readSetupArtifactLedger({
+      commit: {
+        headSha: "head-1",
+        workflowFiles: [
+          {
+            path: ".github/workflows/verify.yml",
+            mode: "pull_request",
+            branch: "radius/setup",
+            state: "removed"
+          }
+        ]
+      }
+    });
+
+    expect(restored.commit.workflowFiles[0]).toMatchObject({
+      state: "removed",
+      mode: "pull_request"
+    });
+    expect(restored.commit.headSha).toBe("head-1");
+  });
+
+  it("survives a round trip through persistence with its provenance intact", () => {
+    const op = newOp();
+    recordCommittedWorkflowFile(op, provenWorkflowFile());
+    finish(op, "failed_partial", { failure: { code: "verify-run-failed" } });
+
+    const restored = fromPersistedOperation(
+      JSON.parse(JSON.stringify(toPersistedOperation(op)))
+    );
+
+    expect(restored.schemaVersion).toBe(OPERATION_SCHEMA_VERSION);
+    expect(restored.setupArtifacts.commit.workflowFiles[0]).toMatchObject({
+      blobSha: "b".repeat(40),
+      contentSha256: "d".repeat(64)
+    });
+    expect(workflowProvenanceGap(restored)).toBeNull();
+  });
+
+  it("loads a version 2 record and refuses to roll its workflows back", () => {
+    const op = newOp();
+    recordCommittedWorkflowFile(op, provenWorkflowFile());
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    finish(op, "failed_partial", { failure: { code: "verify-run-failed" } });
+    const persisted = JSON.parse(JSON.stringify(toPersistedOperation(op)));
+    // Exactly what a version 2 writer left behind: a file entry with no
+    // provenance at all.
+    persisted.schemaVersion = 2;
+    persisted.setupArtifacts.commit.workflowFiles = [
+      {
+        path: ".github/workflows/radius-verify-credentials.yml",
+        branch: "main",
+        mode: "default_branch"
+      }
+    ];
+    delete persisted.setupArtifacts.commit.headSha;
+
+    const restored = fromPersistedOperation(persisted);
+
+    expect(restored.schemaVersion).toBe(OPERATION_SCHEMA_VERSION);
+    expect(canStartRollback(restored)).toMatchObject({
+      ok: false,
+      code: "rollback-provenance-incomplete"
+    });
+  });
+});
+
+describe("a rollback that removed nothing", () => {
+  it("says so instead of reporting a partial removal", () => {
+    const op = stoppedWithCreatedResources();
+    recordCommittedWorkflowFile(op, provenWorkflowFile());
+    const rollback = canStartRollback(op);
+    beginRetryAttempt(op, "cleanup");
+    acceptCommand(op, {
+      kind: "rollback",
+      attempt: 1,
+      target: rollback.target
+    });
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "workflow_file",
+          target: ".github/workflows/radius-verify-credentials.yml on main",
+          identity: "main:.github/workflows/radius-verify-credentials.yml",
+          outcome: "skipped",
+          detail: "The file changed since Radius committed it."
+        }
+      ]
+    });
+    finish(op, "failed_partial", {
+      failure: {
+        code: "setup-rollback-blocked",
+        message: "Radius removed nothing."
+      }
+    });
+
+    expect(projectOperationHeadline(op)).toMatchObject({
+      code: "rollback-blocked",
+      title: "Rollback stopped before removing anything"
+    });
   });
 });

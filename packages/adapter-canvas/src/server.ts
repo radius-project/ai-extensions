@@ -55,6 +55,7 @@ import {
   ghApiJson,
   getGitHubIdentity,
   getGhPackageCredentials,
+  redactGhCredentials,
   resetGhIdentityCache,
   createSelectedGhExecutor,
   getActiveKeyringLogin,
@@ -149,6 +150,8 @@ import {
   setCommandState,
   provenOwnedCleanupTargets,
   unresolvedCleanupTargets,
+  workflowRollbackCommitState,
+  workflowRollbackTargets,
   INPUT_REQUIRED_STATE,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
@@ -216,6 +219,12 @@ import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { isSetupPullRequestMerged } from "./server/services/setup-pull-request.js";
+import { runWorkflowRollback } from "./server/services/workflow-rollback.js";
+import type { WorkflowRollbackPorts } from "./server/services/workflow-rollback.js";
+import {
+  createWorkflowRollbackPorts,
+  createWorkflowScopeApiCommand
+} from "./server/services/workflow-rollback-ports.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
@@ -246,7 +255,10 @@ import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
-import { toGhCommandResult } from "./server/services/gh-command-result.js";
+import {
+  parseGhHttpStatus,
+  toGhCommandResult
+} from "./server/services/gh-command-result.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
@@ -2586,6 +2598,50 @@ function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
   });
 }
 
+// The `gh api` seam a post-commit rollback runs on. The credential-fallback
+// decision lives in `createWorkflowScopeApiCommand`; what stays here is the one
+// thing only this module can do — spawn the CLI.
+const runRollbackGhCommand = createWorkflowScopeApiCommand({
+  attempt: ({ args, stdin, env }) =>
+    new Promise((resolve) => {
+      const options: CliOptions = { timeout: 20000 };
+      if (env) options.env = env;
+      const child = cliExec("gh", args, options, (err, stdout, stderr) => {
+        const result = toGhCommandResult(err, stdout, stderr, {
+          trimStdout: true
+        });
+        const detail = redactGhCredentials(
+          result.stderr.trim() || (err ? err.message : "")
+        );
+        resolve({
+          ok: !err,
+          status: err ? parseGhHttpStatus(detail) : 200,
+          stdout: result.stdout,
+          stderr: detail,
+          timedOut: Boolean(result.timedOut)
+        });
+      });
+      if (stdin === undefined) endChildInput(child);
+      else {
+        try {
+          child.stdin?.end(stdin);
+        } catch (_error: unknown) {
+          // Closing stdin is best-effort; the command callback is authoritative.
+        }
+      }
+    }),
+  readProcessEnv: () => process.env
+});
+
+export function resolveGitHubEnvironmentCreateState(
+  result: Partial<CommandResult> | null | undefined
+): "created_candidate" | "reused" | null {
+  if (!result) return null;
+  if (result.code === 0 || result.code === "0") return "reused";
+  const detail = `${result.stderr || ""}\n${result.stdout || ""}`;
+  return /HTTP 404|Not Found|404\b/i.test(detail) ? "created_candidate" : null;
+}
+
 export async function deleteNewlyCreatedGitHubEnvironment(
   artifact:
     | { state?: string | null; repo?: string | null; name?: string | null }
@@ -3053,6 +3109,66 @@ function sanitizeFailureExtra(extra: Record<string, unknown> = {}) {
  * would offer to remove a proven-owned environment and then quietly delete only
  * the Azure artifacts, reporting a clean rollback while the environment survived.
  */
+/**
+ * Revert the workflow files this operation committed, and say whether anything
+ * else may be removed.
+ *
+ * Extracted alongside `cleanupGitHubEnvironmentArtifact` for the same reason:
+ * the pass that decides whether a rollback may proceed is the one that most
+ * needs to be exercised directly, without a live instance or a real `gh`. The
+ * selection, the provenance proof, and the removal itself live in the workflow
+ * rollback service; this function is the ledger's half of the transaction —
+ * choosing the targets, recording what came back, and reporting the block.
+ */
+export async function rollbackCommittedWorkflowFiles(
+  op: any,
+  {
+    attempt,
+    ports,
+    only,
+    steps
+  }: {
+    attempt: number;
+    ports: WorkflowRollbackPorts;
+    only?: Set<string> | null;
+    steps?: string[];
+  }
+): Promise<{
+  results: SetupCleanupResult[];
+  warnings: string[];
+  blocked: boolean;
+  attempted: boolean;
+}> {
+  const files = workflowRollbackTargets(op, only ?? null);
+  if (files.length === 0) {
+    return { results: [], warnings: [], blocked: false, attempted: false };
+  }
+  const outcome = await runWorkflowRollback(
+    {
+      repo: String(op?.repo || ""),
+      attempt,
+      commit: workflowRollbackCommitState(op),
+      files
+    },
+    ports
+  );
+  for (const entry of outcome.results) {
+    if (entry.outcome === "deleted" || entry.outcome === "not_found") {
+      recordCleanupDeletion(op, {
+        artifactType: "workflow_file",
+        identity: entry.identity ?? undefined
+      });
+    }
+  }
+  steps?.push(...outcome.steps);
+  return {
+    results: outcome.results,
+    warnings: outcome.warnings,
+    blocked: outcome.blocked,
+    attempted: true
+  };
+}
+
 export async function cleanupGitHubEnvironmentArtifact(
   op: any,
   {
@@ -4273,6 +4389,53 @@ function createInstanceRequestCoordinator(
       ...priorResults.filter((entry) => entry.attempt < attempt),
       ...results
     ];
+
+    // The workflow files come first and gate everything after them. Removing
+    // the GitHub environment or the cloud identity while an installed workflow
+    // still references them would leave the repository with a job that fails at
+    // Azure Login rather than one that is simply gone, so a workflow pass that
+    // cannot finish stops the whole rollback here.
+    const workflowPass = await rollbackCommittedWorkflowFiles(op, {
+      attempt,
+      ports: createWorkflowRollbackPorts(runRollbackGhCommand),
+      only: new Set<string>(
+        selected
+          .filter(
+            (entry: { artifactType: string }) =>
+              entry.artifactType === "workflow_file"
+          )
+          .map((entry: { key: string }) => entry.key)
+      ),
+      steps
+    });
+    if (workflowPass.attempted) {
+      warnings.push(...workflowPass.warnings);
+      results = [...results, ...workflowPass.results];
+      recordCleanupState(op, { state: "running", results: carriedResults() });
+      await persist();
+      if (workflowPass.blocked) {
+        for (const step of steps) addLegacyStep(op, step);
+        recordCleanupState(op, {
+          attempts: attempt,
+          state: "succeeded_with_warnings",
+          results: carriedResults()
+        });
+        setCommandState(op, commandId, "finished", "blocked");
+        finish(op, "failed_partial", {
+          failure: {
+            code: "setup-rollback-blocked",
+            stage: op.currentStage,
+            stepSeq: null,
+            message:
+              "Radius could not prove every committed workflow file is still the file it wrote, so it removed nothing and kept the environment and credentials in place.",
+            classification: "user-fixable",
+            evidence: null
+          }
+        });
+        await persist();
+        return;
+      }
+    }
 
     // A GitHub environment can be one of the selected targets, and skipping it
     // here would report a clean removal while the environment survived.

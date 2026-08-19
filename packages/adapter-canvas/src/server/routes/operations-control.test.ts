@@ -22,6 +22,7 @@ import {
   createOperation,
   enterStage,
   finish,
+  finishSucceeded,
   onOperationTerminal,
   recordAzureApp,
   recordCleanupState,
@@ -840,8 +841,15 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
 
 describe("retryRefusalMessage", () => {
   it("explains every closed refusal code in the customer's terms", () => {
-    expect(retryRefusalMessage("cleanup", "cleanup-retry-after-commit")).toBe(
-      "The workflows were already committed, so these resources are retained on purpose rather than removed."
+    expect(
+      retryRefusalMessage("cleanup", "cleanup-retry-provenance-incomplete")
+    ).toBe(
+      "Radius did not save enough about the workflow files it committed to prove they are unchanged, so it will not remove them or anything they depend on."
+    );
+    expect(
+      retryRefusalMessage("rollback", "rollback-environment-verified")
+    ).toBe(
+      "Credential verification succeeded for this environment, so it is finished setup. Remove it with Delete Environment instead."
     );
     expect(retryRefusalMessage("setup", "operation-active")).toBe(
       "This setup is still running, so there is nothing to retry yet."
@@ -974,8 +982,10 @@ describe("POST /api/operations/{id}/rollback", () => {
     ]);
   });
 
-  it("refuses a rollback once the workflows were committed", async () => {
+  it("refuses a post-commit rollback the ledger cannot prove", async () => {
     const op = stoppedSetup();
+    // No blob or content digest: the shape every record written before
+    // provenance existed still has.
     recordCommittedWorkflowFile(op, {
       path: ".github/workflows/radius-deploy.yml",
       mode: "default_branch",
@@ -991,9 +1001,57 @@ describe("POST /api/operations/{id}/rollback", () => {
 
     expect(out.recording.status).toBe(409);
     expect(out.payload()).toMatchObject({
-      code: "rollback-after-commit",
+      code: "rollback-provenance-incomplete",
       error:
-        "The workflows were already committed, so these resources are retained on purpose rather than removed."
+        "Radius did not save enough about the workflow files it committed to prove they are unchanged, so it will not remove them or anything they depend on."
+    });
+    expect(deps.journal.scheduled).toEqual([]);
+  });
+
+  it("accepts a post-commit rollback whose workflow provenance is complete", async () => {
+    const op = stoppedSetup();
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/radius-deploy.yml",
+      mode: "default_branch",
+      branch: "main",
+      commitSha: "c".repeat(40),
+      blobSha: "b".repeat(40),
+      contentSha256: "d".repeat(64),
+      previousBlobSha: null
+    });
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleRollbackOperation(
+      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(202);
+    expect(deps.journal.scheduled).toEqual([
+      {
+        kind: "rollback",
+        instanceId: "panel-a",
+        commandId: out.payload().commandId
+      }
+    ]);
+  });
+
+  it("refuses a rollback for an environment whose verification succeeded", async () => {
+    const op = newOperation();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    finishSucceeded(op);
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleRollbackOperation(
+      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "rollback-environment-verified"
     });
     expect(deps.journal.scheduled).toEqual([]);
   });

@@ -163,7 +163,15 @@ export interface CreateEnvironmentDependencies
   generateDeleteWorkflow(environment: string): Promise<Record<string, string>>;
   recordCommittedWorkflowFile(
     operation: CreateEnvironmentOperation,
-    entry: { path: string; branch: string | null; mode: string }
+    entry: {
+      path: string;
+      branch: string | null;
+      mode: string;
+      commitSha: string | null;
+      blobSha: string | null;
+      contentSha256: string | null;
+      previousBlobSha: string | null;
+    }
   ): void;
   deleteLegacyDeployWorkflow(
     repo: string,

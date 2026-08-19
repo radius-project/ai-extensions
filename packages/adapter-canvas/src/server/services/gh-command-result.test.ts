@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toGhCommandResult } from "./gh-command-result.js";
+import { parseGhHttpStatus, toGhCommandResult } from "./gh-command-result.js";
 
 describe("toGhCommandResult", () => {
   it("reports a successful command with exit code 0 and no timeout flag", () => {
@@ -53,5 +53,24 @@ describe("toGhCommandResult", () => {
       stdout: "",
       stderr: ""
     });
+  });
+});
+
+describe("parseGhHttpStatus", () => {
+  it.each([
+    ["gh: Not Found (HTTP 404)", 404],
+    ["HTTP 403: Resource not accessible", 403],
+    ["gh: Server Error (HTTP 500)", 500]
+  ])("reads the status out of %s", (detail, expected) => {
+    expect(parseGhHttpStatus(detail)).toBe(expected);
+  });
+
+  it.each([
+    ["a message with no status", "connection reset by peer"],
+    ["an empty message", ""],
+    ["no message at all", undefined],
+    ["a number that is not an HTTP status", "exited with code 404"]
+  ])("reports %s as unknown rather than as a success", (_label, detail) => {
+    expect(parseGhHttpStatus(detail)).toBeNull();
   });
 });

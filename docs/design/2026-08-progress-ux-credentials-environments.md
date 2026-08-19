@@ -544,14 +544,14 @@ Today, the repository-admin check can fail before the server records the request
 
 ### Stop and cancellation
 
-The product must not terminate a cloud command halfway through or promise automatic rollback. It can stop safely between commands. Cleanup is bounded to the current operation only: before the commit point, Radius rolls back Azure artifacts from the current attempt, retains committed workflow files as reusable artifacts, and leaves a GitHub Environment in place when GitHub's API cannot prove this request created it; after the commit point, it keeps the committed workflows and GHCR package and only reports the later verification failure. It never reclaims an unowned app just because Radius tagged it. A cooperative stop limits further changes and then reports what exists.
+The product must not terminate a cloud command halfway through or promise automatic rollback. It can stop safely between commands. Cleanup is bounded to the current operation only, and it is bounded by what the record can prove. Before the workflow commit point, Radius rolls back the Azure artifacts the current attempt created and leaves a GitHub Environment in place when GitHub's API cannot prove this request created it. After the commit point, the completion boundary is a **successful credential verification**: until it passes, the environment is an unfinished attempt the customer may abandon, so a rollback additionally reverts the workflow files this operation committed — but only after proving every one of them is still byte-for-byte the artifact Radius wrote. It never reclaims an unowned app just because Radius tagged it. A cooperative stop limits further changes and then reports what exists.
 
 What ships:
 
 - **Leave running** — collapse the panel or navigate away without cancelling. Depends on the keepalive fix.
 - **Stop after the current action** — cooperative cancellation checked between mutations, never mid-call.
 - **A partial-state summary** — what exists, what did not happen, what to clean up.
-- **Current-operation rollback** — on a fatal failure before verification dispatch or PR handoff, delete only Azure artifacts that the ledger proves this attempt created. Retain pre-existing resources, committed workflow files, the GHCR package, and any GitHub Environment whose creator cannot be proven atomically.
+- **Current-operation rollback** — delete only artifacts the ledger proves this attempt created. Before the commit point that is the Azure and GitHub resources; after it, and while verification has not yet succeeded, it also includes the committed workflow files, each verified against the commit, blob, and content digest saved at write time. Retain pre-existing resources, the GHCR package, and any GitHub Environment whose creator cannot be proven atomically.
 
 Idempotent re-run is _recovery_, not _control_, and it is not a substitute for one. Much of the operation is already idempotent — it detects and reuses an existing App Registration and skips existing federated credentials — which is what makes the panel's retry button viable.
 
@@ -561,22 +561,41 @@ Stopping and undoing are two decisions, and collapsing them into one control is 
 
 They are now separate steps with separate words:
 
-| Term                            | Meaning                                                                                                  |
-|---------------------------------|----------------------------------------------------------------------------------------------------------|
-| **Stop setup**                  | Stop creating or changing more resources after the current safe boundary.                                |
-| **Continue setup**              | Resume a stopped operation from the first unfinished safe step, reusing the retained ledger.             |
-| **Retry setup**                 | Repeat a continuation attempt that started and then failed. Never the first forward action after a stop. |
-| **Roll back created resources** | Remove the resources this operation proved it created before the workflow commit point.                  |
-| **Retry rollback**              | Repeat cleanup for the proven-owned resources a previous rollback could not delete.                      |
+| Term                            | Meaning                                                                                                        |
+|---------------------------------|----------------------------------------------------------------------------------------------------------------|
+| **Stop setup**                  | Stop creating or changing more resources after the current safe boundary.                                      |
+| **Continue setup**              | Resume a stopped operation from the first unfinished safe step, reusing the retained ledger.                   |
+| **Retry setup**                 | Repeat a continuation attempt that started and then failed. Never the first forward action after a stop.       |
+| **Roll back created resources** | Remove the resources this operation proved it created, before it committed any workflow file.                  |
+| **Roll back environment setup** | The same command after the commit point: revert the committed workflow files, then remove what they depend on. |
+| **Retry rollback**              | Repeat cleanup for the proven-owned resources a previous rollback could not delete.                            |
+| **Delete Environment**          | Remove a _verified_ environment. A finished environment is never rolled back through its setup record.         |
 
 A stopped record therefore projects both paths, forward first, and neither is a default:
 
 1. **Continue setup** — `POST /api/operations/{operationId}/continue`, tone `primary`, no confirmation, carrying the resume step and the resources a continuation will reuse.
 2. **Roll back created resources** — `POST /api/operations/{operationId}/rollback`, tone `danger`, `requiresConfirmation: true`, carrying the server's own preview of what it will remove, what it will keep, and what still needs the customer.
 
-When only one path is safe, the panel says why the other is not: Radius created nothing it can prove it owns, the workflows were already committed, or ownership of a remaining resource cannot be proven. When neither is safe, the manual action stands alone and the repository lock is released.
+When only one path is safe, the panel says why the other is not: Radius created nothing it can prove it owns, it cannot prove the committed workflow files are unchanged, credential verification already succeeded, or ownership of a remaining resource cannot be proven. When neither is safe, the manual action stands alone and the repository lock is released.
 
-The first rollback selects **every** present proven-owned pre-commit artifact and deletes in reverse dependency order — GitHub environment, Azure role assignments, federated credentials, Service Principal, App Registration — recording each result before the next deletion starts. **Retry rollback** selects only the unresolved warning targets from the latest attempt and preserves the earlier results in the summary. Reused resources, committed workflow files, `created_candidate` resources, and anything identified only by name are never deletion targets. A confirmed rollback is one cooperative server-owned command: cleanup has no pause control, so the panel offers no **Stop setup** while it runs.
+The first rollback selects **every** present proven-owned artifact and deletes in reverse dependency order — committed workflow files, GitHub environment, Azure role assignments, federated credentials, Service Principal, App Registration — recording each result before the next deletion starts. **Retry rollback** selects only the unresolved warning targets from the latest attempt and preserves the earlier results in the summary. Reused resources, `created_candidate` resources, and anything identified only by name are never deletion targets. A confirmed rollback is one cooperative server-owned command: cleanup has no pause control, so the panel offers no **Stop setup** while it runs.
+
+##### Reverting committed workflow files
+
+Workflow files are the only rollback target that lives in the customer's repository, so they come first and they gate everything after them. Removing the GitHub environment or the cloud identity while an installed workflow still references them leaves the repository with a job that fails at Azure Login instead of one that is simply gone.
+
+The ledger therefore saves, at the moment of each write: the branch, the commit the write created, the blob SHA GitHub returned, the sha256 of the exact bytes Radius sent, and the blob the path held beforehand. A record written before those fields existed loads with them set to `null`, which refuses a post-commit rollback rather than acting on an assumption.
+
+A confirmed post-commit rollback then:
+
+1. Resolves where each file is now. A file committed to a setup branch that has since merged is looked for on the base branch, because a git blob id is content-addressed and still identifies it there.
+2. Verifies every file against both saved identities. Anything changed, unreadable, or unprovable stops the whole pass before a single write.
+3. Removes what it verified. An unmerged setup branch is closed and deleted whole — only while its head is still the commit Radius left. Otherwise each file is reverted through a new explicit commit: restored to the blob it replaced, or deleted when Radius created it.
+4. Only then continues to the GitHub environment and the Azure resources, in reverse dependency order.
+
+If any file changed, provenance is incomplete, the branch head moved, or ownership is ambiguous, the rollback fails closed: nothing is removed, the record ends as `failed_partial` with `setup-rollback-blocked`, and the panel names the files to review by hand. A file that is already absent is not a failure — there is nothing left to revert. A read that failed is recorded as a retryable warning; a file that genuinely changed is recorded as a manual action, because repeating it would produce the same refusal.
+
+Once credential verification has succeeded, the environment is finished setup and the rollback is withdrawn (`rollback-environment-verified`). Removing it is the ordinary **Delete Environment** action.
 
 Rollback removes environment setup artifacts. It never deploys an application, and deployment stays a separate action the customer starts.
 
@@ -627,7 +646,7 @@ The first forward action after a deliberate stop. It continues from the first st
 
 #### `POST /api/operations/{operationId}/rollback` — remove what this attempt created
 
-Removes every present, proven-owned, pre-commit artifact after the customer confirms in the browser. Answers `202` once the command is saved and the repository lock is held, `404` for an unknown operation, and `409` when the operation is still running (`operation-active`), crossed the workflow commit point (`rollback-after-commit`), has no proven-owned resources (`rollback-nothing-owned`), already ran a cleanup attempt (`rollback-already-attempted`), or another operation owns the repository (`operation-in-progress`). A duplicate request returns the accepted command instead of deleting twice. A persistence failure restores the terminal stopped state and reports that no cleanup began; a scheduling failure restores the same decision with `503 operation-command-unscheduled` rather than leaving the record running. The command identity is derived from the operation id, the command kind, the cleanup attempt, and a digest of the exact artifact set, so a reload or an extension restart rebuilds the same command. Confirmation is not authorisation: the deletion set is re-derived from the saved ledger server-side. This route is implemented.
+Removes every present, proven-owned artifact after the customer confirms in the browser. Answers `202` once the command is saved and the repository lock is held, `404` for an unknown operation, and `409` when the operation is still running (`operation-active`), already passed credential verification (`rollback-environment-verified`), cannot prove what it committed (`rollback-provenance-incomplete`), has no proven-owned resources (`rollback-nothing-owned`), already ran a cleanup attempt (`rollback-already-attempted`), or another operation owns the repository (`operation-in-progress`). A duplicate request returns the accepted command instead of deleting twice. A persistence failure restores the terminal stopped state and reports that no cleanup began; a scheduling failure restores the same decision with `503 operation-command-unscheduled` rather than leaving the record running. The command identity is derived from the operation id, the command kind, the cleanup attempt, and a digest of the exact artifact set, so a reload or an extension restart rebuilds the same command. Confirmation is not authorisation: the deletion set is re-derived from the saved ledger server-side. This route is implemented.
 
 #### `POST /api/operations/{operationId}/retry/{setup|verification|cleanup}` — retry
 
@@ -860,7 +879,9 @@ No new runtime dependency or packaging format. The new modules are included in t
 - Reused apps, service principals, federated credentials, role assignments, and pre-existing GitHub Environments are never deleted by rollback.
 - Cleanup continues after not-found and individual cleanup failures, preserves the original setup error, and renders cleanup warnings separately.
 - A pre-PUT GitHub Environment `404` records only a created candidate. Because GitHub's idempotent `PUT` cannot prove which actor created the environment, rollback retains it and provides manual cleanup guidance.
-- Successful verification dispatch and PR-path `action_required` commit the ledger. A later failed verification run retains resources and preserves its Actions URL.
+- Successful verification dispatch and PR-path `action_required` commit the ledger. A later failed verification run preserves its Actions URL and offers **Retry verification** beside **Roll back environment setup**, because verification has not yet succeeded.
+- A post-commit rollback reverts only workflow files whose saved commit, blob, and content digests still match GitHub. A changed file, an unreadable read, a moved setup-branch head, missing provenance, or ambiguous ownership stops the pass before any cloud resource is deleted.
+- Once verification has succeeded the setup record no longer offers a rollback; the environment is removed with **Delete Environment**.
 - Enterprise-claim diagnosis reads only the **Azure Login (OIDC)** step. Advisory workflow text that mentions `AADSTS7002381` cannot manufacture that diagnosis for an unrelated failure.
 - A first verification run that reports `No subscriptions found` can succeed unchanged after the new role assignments propagate. The retained run URL provides the rerun path.
 - Serialized browser helpers keep explicit client-side variable names after server-bundle minification.

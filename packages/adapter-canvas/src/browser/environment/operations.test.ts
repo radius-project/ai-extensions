@@ -2094,6 +2094,67 @@ describe("rollback confirmation", () => {
     ).toBe("dialog");
   });
 
+  it("renders the post-commit rollback in the server's own words", () => {
+    // After the workflow commit point the destructive command promises more —
+    // a revert commit in the customer's repository — so the dialog must show
+    // the server's wording and the workflow files it names, never a local
+    // rebuild of either.
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+    controller?.renderProgress(
+      record({
+        actions: [
+          {
+            ...rollbackAction,
+            label: "Roll back environment setup",
+            confirmTitle: "Roll back this environment setup?",
+            confirmLabel: "Roll back setup",
+            description:
+              "Radius reverts the workflow files it committed with a new commit.",
+            preview: {
+              removes: [
+                {
+                  kind: "workflow_file",
+                  target:
+                    ".github/workflows/radius-verify-credentials.yml on main"
+                },
+                { kind: "github_environment", target: "contoso/store:dev" },
+                { kind: "azure_app", target: "radius-dev" }
+              ],
+              keeps: [],
+              manualActionRequired: []
+            }
+          }
+        ]
+      })
+    );
+    const trigger = browser.els[PROGRESS_IDS.commandButtons].children[0];
+    expect(trigger.textContent).toBe("Roll back environment setup");
+    trigger.dispatch("click");
+
+    expect(browser.els[ROLLBACK_IDS.title].textContent).toBe(
+      "Roll back this environment setup?"
+    );
+    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe(
+      "Roll back setup"
+    );
+    // The workflow files are listed first, in the order the server will act.
+    expect(
+      browser.els[ROLLBACK_IDS.removeList].children.map(
+        (child) => child.textContent
+      )
+    ).toEqual([
+      "Workflow file: .github/workflows/radius-verify-credentials.yml on main",
+      "GitHub environment: contoso/store:dev",
+      "App Registration: radius-dev"
+    ]);
+    expect(browser.els[ROLLBACK_IDS.keepBlock].style.display).toBe("none");
+    expect(browser.net.calls).toHaveLength(0);
+  });
+
   it("names its own defaults when the server left the wording out", () => {
     const browser = setup();
     const controller = initializeEnvironmentOperations(browser.context, {
@@ -2510,6 +2571,32 @@ describe("headline and rollback outcomes", () => {
 
     expect(browser.els[PROGRESS_IDS.failureTitle].textContent).toBe(
       "Rollback incomplete"
+    );
+  });
+
+  it("titles a blocked rollback as one that removed nothing", () => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(
+      record({
+        terminalState: "failed_partial",
+        failure: {
+          message:
+            "Radius could not prove every committed workflow file is still the file it wrote."
+        },
+        headline: {
+          code: "rollback-blocked",
+          title: "Rollback stopped before removing anything",
+          message:
+            "The committed workflow files are no longer exactly what Radius wrote."
+        }
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.failureTitle].textContent).toBe(
+      "Rollback stopped before removing anything"
+    );
+    expect(browser.els[PROGRESS_IDS.headlineNote].textContent).toBe(
+      "The committed workflow files are no longer exactly what Radius wrote."
     );
   });
 

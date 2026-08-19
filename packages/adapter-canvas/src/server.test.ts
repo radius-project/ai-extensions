@@ -11,6 +11,7 @@ import {
   azureCliAssistMessage,
   cleanupAzureSetupArtifacts,
   cleanupGitHubEnvironmentArtifact,
+  rollbackCommittedWorkflowFiles,
   guardStopBoundary,
   canReuseModeledGraph,
   DEPLOY_RAD_COMMANDS_STEP,
@@ -393,6 +394,158 @@ describe("ensureServicePrincipal", () => {
       ok: false,
       stderr: "The Service Principal lookup returned an empty object id."
     });
+  });
+});
+
+describe("rollbackCommittedWorkflowFiles", () => {
+  // The ledger half of a post-commit rollback: which files are selected, what
+  // the ledger records afterwards, and whether the rest of the rollback is
+  // allowed to run. GitHub is a scripted fake that throws on anything
+  // unmodelled.
+  const BLOB = "b".repeat(40);
+  const DIGEST = "d".repeat(64);
+  const VERIFY_PATH = ".github/workflows/radius-verify-credentials.yml";
+
+  function committedOp() {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordCommittedWorkflowFile(op, {
+      path: VERIFY_PATH,
+      mode: "default_branch",
+      branch: "main",
+      commitSha: "c".repeat(40),
+      blobSha: BLOB,
+      contentSha256: DIGEST,
+      previousBlobSha: null
+    });
+    return op;
+  }
+
+  function rollbackPorts(script: { blobSha?: string; deleteOk?: boolean }) {
+    const deleted: string[] = [];
+    const ports = {
+      readFile: async () => ({
+        status: "present" as const,
+        blobSha: script.blobSha ?? BLOB,
+        contentSha256: script.blobSha ? "other" : DIGEST
+      }),
+      readBranchHead: () => {
+        throw new Error("unscripted readBranchHead");
+      },
+      readPullRequest: () => {
+        throw new Error("unscripted readPullRequest");
+      },
+      readBlob: () => {
+        throw new Error("unscripted readBlob");
+      },
+      deleteFile: async ({ path }: { path: string }) => {
+        if (script.deleteOk === false)
+          return { ok: false as const, detail: "HTTP 409" };
+        deleted.push(path);
+        return { ok: true as const };
+      },
+      restoreFile: () => {
+        throw new Error("unscripted restoreFile");
+      },
+      closePullRequest: () => {
+        throw new Error("unscripted closePullRequest");
+      },
+      deleteBranch: () => {
+        throw new Error("unscripted deleteBranch");
+      }
+    };
+    return { ports, deleted };
+  }
+
+  it("does nothing when the operation committed no workflow file", async () => {
+    const op = newAzureOp();
+    const { ports, deleted } = rollbackPorts({});
+
+    await expect(
+      rollbackCommittedWorkflowFiles(op, { attempt: 1, ports })
+    ).resolves.toEqual({
+      results: [],
+      warnings: [],
+      blocked: false,
+      attempted: false
+    });
+    expect(deleted).toEqual([]);
+  });
+
+  it("reverts a verified file and marks it removed in the ledger", async () => {
+    const op = committedOp();
+    const { ports, deleted } = rollbackPorts({});
+    const steps: string[] = [];
+
+    const outcome = await rollbackCommittedWorkflowFiles(op, {
+      attempt: 1,
+      ports,
+      steps
+    });
+
+    expect(outcome).toMatchObject({ blocked: false, attempted: true });
+    expect(deleted).toEqual([VERIFY_PATH]);
+    expect(op.setupArtifacts.commit.workflowFiles[0].state).toBe("removed");
+    expect(steps[0]).toContain("Removed workflow");
+  });
+
+  it("blocks and keeps the file when it is no longer what Radius wrote", async () => {
+    const op = committedOp();
+    const { ports, deleted } = rollbackPorts({ blobSha: "e".repeat(40) });
+
+    const outcome = await rollbackCommittedWorkflowFiles(op, {
+      attempt: 1,
+      ports
+    });
+
+    // Blocked means the caller must not touch the GitHub environment or the
+    // Azure identity the workflow still authenticates with.
+    expect(outcome.blocked).toBe(true);
+    expect(deleted).toEqual([]);
+    expect(op.setupArtifacts.commit.workflowFiles[0].state).toBe("committed");
+    expect(outcome.results[0]).toMatchObject({
+      artifactType: "workflow_file",
+      outcome: "skipped"
+    });
+  });
+
+  it("blocks when GitHub refuses the removal", async () => {
+    const op = committedOp();
+    const { ports } = rollbackPorts({ deleteOk: false });
+
+    const outcome = await rollbackCommittedWorkflowFiles(op, {
+      attempt: 2,
+      ports
+    });
+
+    expect(outcome.blocked).toBe(true);
+    expect(outcome.warnings[0]).toContain("HTTP 409");
+    expect(outcome.results[0]).toMatchObject({
+      attempt: 2,
+      outcome: "warning"
+    });
+  });
+
+  it("acts only on the files a retry selected", async () => {
+    const op = committedOp();
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/radius-deploy.yml",
+      mode: "default_branch",
+      branch: "main",
+      commitSha: "c".repeat(40),
+      blobSha: BLOB,
+      contentSha256: DIGEST,
+      previousBlobSha: null
+    });
+    const { ports, deleted } = rollbackPorts({});
+
+    await rollbackCommittedWorkflowFiles(op, {
+      attempt: 2,
+      ports,
+      only: new Set([`workflow_file#main:${VERIFY_PATH}`])
+    });
+
+    expect(deleted).toEqual([VERIFY_PATH]);
   });
 });
 
