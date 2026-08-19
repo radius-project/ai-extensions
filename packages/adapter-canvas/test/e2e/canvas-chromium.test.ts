@@ -503,9 +503,13 @@ test.describe("Radius Canvas in Chromium", () => {
 
     await gotoCanvas(page, canvas, "environment");
     await openEnvironmentWizard(page);
+    const githubReadiness = page.locator("#env-gh-identity-note");
+    await expect(githubReadiness).toContainText(
+      "Ready to configure deployments"
+    );
     await page.getByLabel("Environment name").fill("fixture-environment");
     await page.getByRole("button", { name: "Re-check" }).click();
-    await expect(page.locator("#env-gh-identity-note")).toContainText(
+    await expect(githubReadiness).toContainText(
       "Ready to configure deployments"
     );
     await page
