@@ -25,7 +25,7 @@ The delivered Phase 6 scope is the browser-component suite plus the Playwright c
 
 Phase 7 visual and Phase 8 host suites are not delivered. Do not create them speculatively or claim their evidence; add them only when their phase is approved and implemented, then refresh this skill.
 
-After each remaining automation phase completes, refresh this skill in a separate signed and signed-off pull request so its available suites and required gates never lag implementation. Base the refresh on the phase branch when the delivery is still stacked and unmerged, or on the newly updated `main` after merge.
+After each remaining automation phase completes, refresh this skill in a separate signed-off pull request so its available suites and required gates never lag implementation. Base the refresh on the phase branch when the delivery is still stacked and unmerged, or on the newly updated `main` after merge.
 
 ## Required workflow
 
