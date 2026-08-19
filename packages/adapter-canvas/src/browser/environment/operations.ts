@@ -1340,13 +1340,29 @@ export function initializeEnvironmentOperations(
     releaseCommandButtons();
     buttons.replaceChildren();
     const hasGuidance = renderCommandGuidance(op);
+    const appendDismiss = (): void => {
+      if (op?.terminalState === null || op === null) return;
+      const dismiss = dom.createElement("button") as DomInputElement;
+      dismiss.setAttribute("type", "button");
+      dismiss.id = "env-progress-command-dismiss";
+      dismiss.className = COMMAND_BUTTON_CLASS;
+      dismiss.textContent = "Keep resources and dismiss";
+      const listener = (): void => hideProgress();
+      dismiss.addEventListener("click", listener);
+      commandButtons.push({ element: dismiss, listener });
+      buttons.appendChild(dismiss);
+    };
     if (op === null || actions.length === 0) {
+      appendDismiss();
       // A record with no actions still has something to say: cleanup running
       // under its own command, or a state whose next move is automatic.
       const transitionMessage = op?.nextTransition?.message ?? "";
       if (op?.nextTransition) note.textContent = transitionMessage;
       else if (!hasGuidance) note.textContent = "";
-      container.style.display = hasGuidance || op?.nextTransition ? "" : "none";
+      container.style.display =
+        hasGuidance || op?.nextTransition || op?.terminalState !== null ?
+          ""
+        : "none";
       return;
     }
     const record = op;
@@ -1366,6 +1382,7 @@ export function initializeEnvironmentOperations(
       commandButtons.push({ element, listener });
       buttons.appendChild(element);
     }
+    appendDismiss();
     const descriptions = actions
       .map((action) => action.description)
       .filter((description) => description !== "");
@@ -1475,10 +1492,8 @@ export function initializeEnvironmentOperations(
       resumeEl.textContent = op.journey?.resumeReason || "View planned graph";
     }
     if (resumeEl) resumeEl.style.display = canResume ? "" : "none";
-    if (dismissEl)
-      dismissEl.style.display = op.terminalState !== null ? "" : "none";
-    if (actionsEl)
-      actionsEl.style.display = op.terminalState !== null ? "flex" : "none";
+    if (dismissEl) dismissEl.style.display = "none";
+    if (actionsEl) actionsEl.style.display = canResume ? "flex" : "none";
   }
 
   function focusPanel(): void {
