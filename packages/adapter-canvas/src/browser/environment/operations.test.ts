@@ -137,7 +137,6 @@ function op(overrides: Record<string, unknown> = {}): {
       steps: [],
       failure: null,
       cleanup: null,
-      journey: null,
       verification: null,
       inputRequired: null,
       startedAt: new Date(0).toISOString(),
@@ -250,7 +249,6 @@ describe("parseOperationResponse", () => {
         steps: { not: "an array" },
         failure: "not-an-object",
         cleanup: "not-an-object",
-        journey: "not-an-object",
         verification: "not-an-object",
         inputRequired: "not-an-object",
         endedAt: ""
@@ -261,7 +259,6 @@ describe("parseOperationResponse", () => {
       stages: [],
       steps: [],
       failure: null,
-      journey: null,
       verification: null,
       inputRequired: null,
       endedAt: null
@@ -456,37 +453,6 @@ describe("parseOperationResponse", () => {
   ])("reads %s as absent", (_name, overrides) => {
     const parsed = parseOperationResponse(op(overrides));
     expect(parsed?.headline ?? parsed?.nextTransition).toBeNull();
-  });
-
-  it("discards a malformed journey resume target", () => {
-    const parsed = parseOperationResponse(
-      op({
-        journey: { resumeTarget: "not-an-object", resumeReason: "go back" }
-      })
-    );
-    expect(parsed?.journey).toEqual({
-      resumeTarget: null,
-      resumeReason: "go back"
-    });
-  });
-
-  it("reads a well-formed journey resume target", () => {
-    const parsed = parseOperationResponse(
-      op({
-        journey: {
-          resumeTarget: {
-            page: "planned",
-            repo: "octo/widgets",
-            branch: "main"
-          },
-          resumeReason: "Continue the deploy"
-        }
-      })
-    );
-    expect(parsed?.journey).toEqual({
-      resumeTarget: { page: "planned", repo: "octo/widgets", branch: "main" },
-      resumeReason: "Continue the deploy"
-    });
   });
 
   it("ignores a non-finite verification.dispatchedAt", () => {
@@ -774,68 +740,45 @@ describe("trackProgress rendering", () => {
     );
   });
 
-  it("shows the resume link only for a terminal operation with a planned-page target", () => {
+  it("never drives planned-graph navigation in any operation state", () => {
     const browser = setup();
+    // A host page that still carries the retired link must not be revived by
+    // the panel: the progress dialog narrates one operation and never sends
+    // the customer to a different page mid-outcome.
+    const retiredLink = createFakeElement("env-progress-resume");
+    browser.document.add(retiredLink);
     const controller = initializeEnvironmentOperations(browser.context, {
       repo: REPO,
       deps: createDeps().deps
     });
 
-    controller?.renderProgress(
-      record({
-        terminalState: "failed",
-        journey: {
-          resumeTarget: {
-            page: "planned",
-            repo: "octo/widgets",
-            branch: "feature/x"
-          },
-          resumeReason: "Back to the graph"
-        }
-      })
-    );
-    const resume = browser.els[PROGRESS_IDS.resume];
-    expect(resume.style.display).toBe("");
-    expect(resume.getAttribute("href")).toBe(
-      "/?page=planned&repo=octo%2Fwidgets&branch=feature%2Fx"
-    );
-    expect(resume.textContent).toBe("Back to the graph");
+    for (const terminalState of [
+      null,
+      "succeeded",
+      "succeeded_with_warnings",
+      "action_required",
+      "failed",
+      "failed_partial",
+      "cancelled"
+    ]) {
+      controller?.renderProgress(
+        record({
+          terminalState,
+          journey: {
+            resumeTarget: {
+              page: "planned",
+              repo: "octo/widgets",
+              branch: "feature/x"
+            },
+            resumeReason: "Back to the graph"
+          }
+        })
+      );
 
-    controller?.renderProgress(
-      record({ terminalState: "failed", journey: null })
-    );
-    expect(browser.els[PROGRESS_IDS.resume].style.display).toBe("none");
-
-    controller?.renderProgress(
-      record({
-        terminalState: null,
-        journey: {
-          resumeTarget: { page: "planned", repo: "octo/widgets", branch: "" },
-          resumeReason: ""
-        }
-      })
-    );
-    expect(browser.els[PROGRESS_IDS.resume].style.display).toBe("none");
-
-    // Terminal with a planned target but no branch: canResume is true, so the
-    // href is built without a trailing `&branch=` segment, and the reason
-    // falls back to the default text.
-    controller?.renderProgress(
-      record({
-        terminalState: "action_required",
-        journey: {
-          resumeTarget: { page: "planned", repo: "octo/widgets", branch: "" },
-          resumeReason: ""
-        }
-      })
-    );
-    expect(browser.els[PROGRESS_IDS.resume].style.display).toBe("");
-    expect(browser.els[PROGRESS_IDS.resume].getAttribute("href")).toBe(
-      "/?page=planned&repo=octo%2Fwidgets"
-    );
-    expect(browser.els[PROGRESS_IDS.resume].textContent).toBe(
-      "View planned graph"
-    );
+      expect(retiredLink.getAttribute("href")).toBeNull();
+      expect(retiredLink.textContent).toBe("");
+      expect(retiredLink.style.display).toBe("");
+    }
   });
 
   it("renders successful completion as a simple OK action", () => {
@@ -857,7 +800,7 @@ describe("trackProgress rendering", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
   });
 
-  it("hides planned-graph navigation and stale terminal copy after success", () => {
+  it("hides stale terminal copy after success", () => {
     const browser = setup();
     const controller = initializeEnvironmentOperations(browser.context, {
       repo: REPO,
@@ -873,19 +816,10 @@ describe("trackProgress rendering", () => {
         nextTransition: {
           code: "monitoring-verification",
           message: "Still monitoring."
-        },
-        journey: {
-          resumeTarget: {
-            page: "planned",
-            repo: "octo/widgets",
-            branch: "main"
-          },
-          resumeReason: "View planned graph"
         }
       })
     );
 
-    expect(browser.els[PROGRESS_IDS.resume].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
     expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe("");
     expect(browser.els[PROGRESS_IDS.commandGuidance].style.display).toBe(
@@ -2759,6 +2693,302 @@ describe("headline and rollback outcomes", () => {
   });
 });
 
+describe("rollback lifecycle presentation", () => {
+  const ROLLING_BACK_HEADLINE = {
+    code: "rolling-back",
+    title: "Rolling back created resources…",
+    message:
+      "Radius is removing the resources it proved it created during this attempt."
+  };
+  const ROLLBACK_COMPLETE_HEADLINE = {
+    code: "rollback-complete",
+    title: "Rollback complete",
+    message:
+      "Radius removed the resources it created during this attempt. Anything it reused was left alone."
+  };
+  const ROLLBACK_INCOMPLETE_HEADLINE = {
+    code: "rollback-incomplete",
+    title: "Rollback finished with items still present",
+    message: "The resources below are still present."
+  };
+  const RETRY_CLEANUP_ACTION = {
+    id: "retry-cleanup",
+    kind: "retry_cleanup",
+    label: "Retry rollback",
+    description: "Radius tries again to remove what is still present.",
+    path: "/api/operations/op-1/rollback/retry",
+    pending: false,
+    tone: "danger"
+  };
+
+  function controllerFor(browser: ReturnType<typeof setup>) {
+    return initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+  }
+
+  // A rollback that is still deleting: the server closes the command list
+  // because cleanup has no pause control, and the record is non-terminal.
+  function rollbackRunning(): OperationRecord {
+    return record({
+      state: "running",
+      terminalState: null,
+      actions: [],
+      activeCommandKind: "rollback",
+      headline: ROLLING_BACK_HEADLINE,
+      cleanup: {
+        state: "running",
+        created: [{ target: "app radius-dev" }],
+        retainedArtifacts: [{ target: "workflow file" }]
+      }
+    });
+  }
+
+  function rollbackComplete(): OperationRecord {
+    return record({
+      state: "cancelled",
+      terminalState: "cancelled",
+      actions: [],
+      activeCommandKind: "",
+      headline: ROLLBACK_COMPLETE_HEADLINE,
+      cleanup: {
+        state: "succeeded",
+        cleaned: [{ target: "app radius-dev" }],
+        reused: [{ target: "existing service principal" }]
+      }
+    });
+  }
+
+  function rollbackIncomplete(): OperationRecord {
+    return record({
+      state: "failed_partial",
+      terminalState: "failed_partial",
+      failure: { message: "Radius could not delete the role assignment." },
+      actions: [RETRY_CLEANUP_ACTION],
+      headline: ROLLBACK_INCOMPLETE_HEADLINE,
+      cleanup: {
+        state: "succeeded_with_warnings",
+        created: [{ target: "role assignment" }]
+      }
+    });
+  }
+
+  function buttonLabels(browser: ReturnType<typeof setup>): string[] {
+    return browser.els[PROGRESS_IDS.commandButtons].children.map(
+      (child) => child.textContent ?? ""
+    );
+  }
+
+  it("takes the resource inventory away as soon as the rollback starts deleting", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    // The stopped decision state is where the inventory belongs; confirming the
+    // rollback answers that decision, so the list goes with it.
+    controller?.renderProgress(
+      record({
+        state: "cancelled",
+        terminalState: "cancelled",
+        headline: {
+          code: "stopped",
+          title: "Environment setup stopped",
+          message: "Radius stopped before the next setup step."
+        },
+        cleanup: { created: [{ target: "app radius-dev" }] }
+      })
+    );
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
+
+    controller?.renderProgress(rollbackRunning());
+
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
+      "Rolling back created resources…"
+    );
+  });
+
+  it("keeps the resource inventory out of sight once the rollback completes", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    controller?.renderProgress(rollbackRunning());
+    controller?.renderProgress(rollbackComplete());
+
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
+  });
+
+  it("closes a completed rollback with the panel's OK button, not a keep-and-dismiss command", () => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(rollbackComplete());
+
+    expect(buttonLabels(browser)).toEqual([]);
+    expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
+  });
+
+  it("dismisses the panel from the completed rollback's OK button", () => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(rollbackComplete());
+
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+  });
+
+  it("offers no acknowledgement while the rollback is still deleting", () => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(rollbackRunning());
+
+    expect(buttonLabels(browser)).toEqual([]);
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
+  });
+
+  it("keeps the retry and keep-and-dismiss controls when the rollback left resources behind", () => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(rollbackIncomplete());
+
+    expect(buttonLabels(browser)).toEqual([
+      "Retry rollback",
+      "Keep resources and dismiss"
+    ]);
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
+    // The customer still has a decision to make here, so the inventory that
+    // names what survived stays available.
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("");
+  });
+
+  it("keeps the keep-and-dismiss choice for a stop that was never rolled back", () => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(
+      record({
+        state: "cancelled",
+        terminalState: "cancelled",
+        actions: [],
+        headline: {
+          code: "stopped",
+          title: "Environment setup stopped",
+          message: "Radius stopped before the next setup step."
+        },
+        cleanup: { created: [{ target: "app radius-dev" }] }
+      })
+    );
+
+    expect(buttonLabels(browser)).toEqual(["Keep resources and dismiss"]);
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
+  });
+
+  it("animates the panel while the rollback runs and settles it when the rollback completes", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    const panel = browser.els[PROGRESS_IDS.panel];
+
+    controller?.renderProgress(rollbackRunning());
+    expect(panel.classList.contains("env-progress--active")).toBe(true);
+    expect(panel.classList.contains("env-progress--cleaning")).toBe(true);
+
+    controller?.renderProgress(rollbackComplete());
+    expect(panel.classList.contains("env-progress--active")).toBe(false);
+    expect(panel.classList.contains("env-progress--cleaning")).toBe(false);
+    expect(panel.classList.contains("env-progress--done")).toBe(false);
+    expect(panel.classList.contains("env-progress--failed")).toBe(false);
+  });
+
+  it.each([
+    ["succeeded"],
+    ["succeeded_with_warnings"],
+    ["action_required"],
+    ["failed"],
+    ["failed_partial"],
+    ["cancelled"]
+  ])("stops the animation for a %s outcome", (terminalState) => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    const panel = browser.els[PROGRESS_IDS.panel];
+
+    controller?.renderProgress(record({ terminalState: null }));
+    expect(panel.classList.contains("env-progress--active")).toBe(true);
+
+    controller?.renderProgress(record({ terminalState }));
+
+    expect(panel.classList.contains("env-progress--active")).toBe(false);
+  });
+
+  it("stops the animation when progress stops without another record", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    const panel = browser.els[PROGRESS_IDS.panel];
+
+    controller?.renderProgress(rollbackRunning());
+    controller?.stopProgress();
+
+    expect(panel.classList.contains("env-progress--active")).toBe(false);
+  });
+
+  it("stops the animation when a terminal record arrives without a re-render", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    const panel = browser.els[PROGRESS_IDS.panel];
+
+    controller?.renderProgress(rollbackRunning());
+    controller?.applyTerminal(rollbackComplete());
+
+    expect(panel.classList.contains("env-progress--active")).toBe(false);
+  });
+
+  it("stops the animation when the panel is cleared", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    const panel = browser.els[PROGRESS_IDS.panel];
+
+    controller?.renderProgress(rollbackRunning());
+    controller?.renderProgress(null);
+
+    expect(panel.classList.contains("env-progress--active")).toBe(false);
+  });
+
+  it("settles the panel when a tracked rollback reaches its terminal record", async () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    const panel = browser.els[PROGRESS_IDS.panel];
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "running",
+          terminalState: null,
+          activeCommandKind: "rollback",
+          headline: ROLLING_BACK_HEADLINE
+        })
+      )
+    );
+
+    controller?.trackProgress("dev", "azure");
+    await flushPromises();
+    expect(panel.classList.contains("env-progress--active")).toBe(true);
+
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          state: "cancelled",
+          terminalState: "cancelled",
+          headline: ROLLBACK_COMPLETE_HEADLINE,
+          endedAt: new Date(60000).toISOString()
+        })
+      )
+    );
+    await tickClock(browser.clock, 1500);
+    await flushPromises();
+
+    expect(panel.classList.contains("env-progress--active")).toBe(false);
+    expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
+    expect(browser.els[PROGRESS_IDS.commandButtons].children).toHaveLength(0);
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
+  });
+});
+
 describe("terminal handling", () => {
   it("marks a succeeded operation and reloads the table", () => {
     const browser = setup();
@@ -4136,7 +4366,6 @@ describe("graceful degradation when optional DOM elements are missing", () => {
     PROGRESS_IDS.stages,
     PROGRESS_IDS.steps,
     PROGRESS_IDS.details,
-    PROGRESS_IDS.resume,
     PROGRESS_IDS.dismiss,
     PROGRESS_IDS.actions,
     PROGRESS_IDS.failureCard,
@@ -4163,14 +4392,6 @@ describe("graceful degradation when optional DOM elements are missing", () => {
           terminalState: "failed",
           stages: [{ state: "running", label: "Provision" }],
           steps: [{ state: "running", label: "Create resource group" }],
-          journey: {
-            resumeTarget: {
-              page: "planned",
-              repo: "octo/widgets",
-              branch: "feature/x"
-            },
-            resumeReason: "Back to the graph"
-          },
           cleanup: {
             state: "succeeded",
             rollbackBeforeCommit: true,
@@ -4387,29 +4608,6 @@ describe("hostile values", () => {
     // The failure message wins the activity line and must still be plain text.
     expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(secretShaped);
     expect(browser.els[PROGRESS_IDS.activity].innerHTML).toBe("");
-  });
-
-  it("carries a hostile resume-target repo/branch through encodeURIComponent, not string concatenation", () => {
-    const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
-    controller?.renderProgress(
-      record({
-        terminalState: "failed",
-        journey: {
-          resumeTarget: {
-            page: "planned",
-            repo: "octo/<script>",
-            branch: "a&b"
-          },
-          resumeReason: ""
-        }
-      })
-    );
-    const href = browser.els[PROGRESS_IDS.resume].getAttribute("href");
-    expect(href).toBe("/?page=planned&repo=octo%2F%3Cscript%3E&branch=a%26b");
   });
 });
 

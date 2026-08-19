@@ -104,8 +104,10 @@ export function environmentsPaneMarkup(
       <summary>Show details</summary>
       <ol id="env-progress-steps" class="env-progress__steps"></ol>
       <!-- Resource inventory stays inside Details while work is active. The
-           renderer exposes it only for a terminal decision state, where the
-           customer must choose whether to continue or roll back. -->
+           renderer exposes it only for a terminal decision state — a stopped or
+           partially failed attempt the customer must continue or roll back. A
+           running rollback, a finished rollback, and a successful setup have no
+           such decision left, so it stays hidden for all three. -->
       <div id="env-progress-state" class="env-progress__state" style="display:none;">
         <div class="env-progress__failure-title">What exists right now</div>
         <div id="env-progress-state-created-block" class="env-progress__failure-block" style="display:none;">
@@ -131,7 +133,6 @@ export function environmentsPaneMarkup(
       </div>
     </details>
     <div id="env-progress-actions" class="env-progress__actions" style="display:none;">
-      <a id="env-progress-resume" class="rad-btn rad-btn--secondary" href="#">View planned graph</a>
       <button type="button" id="env-progress-dismiss" class="rad-btn rad-btn--secondary" aria-label="Dismiss completed environment setup progress">Dismiss</button>
     </div>
   </div>

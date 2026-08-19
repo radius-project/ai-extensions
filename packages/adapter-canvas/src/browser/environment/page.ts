@@ -88,7 +88,6 @@ function optimisticOperation(
     headline: null,
     activeCommandKind: "",
     nextTransition: null,
-    journey: null,
     verification: null,
     inputRequired: null,
     startedAt: new Date(now).toISOString(),
