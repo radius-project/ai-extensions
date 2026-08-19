@@ -1,8 +1,9 @@
-import { promises as fs } from "node:fs";
+import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import {
   baseCanvasState,
+  CREDENTIAL_SENTINEL,
   defaultFakeCliScenario,
   expect,
   PLACEHOLDER_SECRET,
@@ -18,6 +19,32 @@ const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const VALID_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
 const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
+
+async function filesContainingText(
+  directory: string,
+  text: string
+): Promise<string[]> {
+  const matches: string[] = [];
+  let entries: Dirent<string>[];
+  try {
+    entries = await fs.readdir(directory, {
+      recursive: true,
+      withFileTypes: true,
+      encoding: "utf8"
+    });
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT")
+      return matches;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const filePath = path.join(entry.parentPath, entry.name);
+    const content = await fs.readFile(filePath);
+    if (content.includes(Buffer.from(text))) matches.push(filePath);
+  }
+  return matches;
+}
 
 async function seed(canvas: CanvasHarness): Promise<void> {
   await fs.mkdir(path.join(canvas.workspacePath, "src", "web"), {
@@ -105,6 +132,31 @@ async function openEnvironmentWizard(page: Page): Promise<void> {
 test.describe("Radius Canvas in Chromium", () => {
   test.beforeEach(async ({ canvas }) => {
     await seed(canvas);
+  });
+
+  test("does not expose a pre-existing credential cache in browser state, requests, logs, or artifacts @safety", async ({
+    page,
+    canvas
+  }, testInfo) => {
+    await gotoCanvas(page, canvas, "credentials");
+
+    await expect(page.locator("body")).not.toContainText(CREDENTIAL_SENTINEL);
+    await expect(
+      page.locator("#cred-table-body").getByText(PROFILE_NAME)
+    ).toBeVisible();
+    await expect(page.locator("#cred-table-body")).not.toContainText(
+      CREDENTIAL_SENTINEL
+    );
+    expect(JSON.stringify(canvas.requests)).not.toContain(CREDENTIAL_SENTINEL);
+    expect(JSON.stringify(await canvas.cliCalls())).not.toContain(
+      CREDENTIAL_SENTINEL
+    );
+    expect(
+      await filesContainingText(canvas.rootDir, CREDENTIAL_SENTINEL)
+    ).toEqual([]);
+    expect(
+      await filesContainingText(testInfo.outputDir, CREDENTIAL_SENTINEL)
+    ).toEqual([]);
   });
 
   test("loads graph data through the real route table and keeps the worktree branch in the request body @safety", async ({

@@ -6,6 +6,7 @@ import { defineConfig } from "@playwright/test";
 // diagnostic retry the test plan allows, and the original failure is retained.
 export default defineConfig({
   testDir: "./test/e2e",
+  testMatch: "canvas-chromium.test.ts",
   globalSetup: "./test/e2e/global-setup.ts",
   globalTeardown: "./test/e2e/global-teardown.ts",
   timeout: 30_000,

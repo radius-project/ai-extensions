@@ -4,7 +4,7 @@ import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test as base, expect, type Page } from "@playwright/test";
-import type { CanvasState } from "../../../src/shared.js";
+import type { CanvasState, SharedCredentials } from "../../../src/shared.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 
 // Resolved from this module rather than the process directory so the suite
@@ -16,6 +16,11 @@ export const E2E_TMP_ROOT = path.resolve(
   ".tmp"
 );
 const WINDOWS_SHIM_ROOT = path.join(E2E_TMP_ROOT, ".windows-shim");
+export const CREDENTIAL_STORE_PATH = path.join(
+  E2E_TMP_ROOT,
+  "credential-cache.json"
+);
+export const CREDENTIAL_SENTINEL = "personal-cache-must-not-leak";
 const PLACEHOLDER_SECRET = "ghp_PLACEHOLDER_DO_NOT_USE_000000000000";
 export const REPOSITORY = "fixture/radius-app";
 export const WORKTREE_BRANCH = "feature/phase-6";
@@ -27,6 +32,34 @@ export const OPERATION_ID = "operation-fixture-1";
 
 type ServerModule = typeof import("../../../src/server.js");
 type GhModule = typeof import("../../../src/gh.js");
+type SharedModule = typeof import("../../../src/shared.js");
+
+interface RetryRemovalOptions {
+  attempts?: number;
+  remove?: (directory: string) => Promise<void>;
+  delay?: (milliseconds: number) => Promise<void>;
+}
+
+interface ConstructionCleanup {
+  rootDir: string;
+  originalEnv: Record<string, string | undefined>;
+  resetState?: () => void;
+  stopServer?: () => Promise<void>;
+  removeDirectory?: (directory: string) => Promise<void>;
+}
+
+interface HarnessServerEntry {
+  server: {
+    close(callback?: (error?: Error) => void): unknown;
+    closeAllConnections?(): void;
+    readonly listening: boolean;
+  };
+}
+
+interface HarnessServerStopPort {
+  servers: { has(instanceId: string): boolean };
+  stopServer(instanceId: string, force?: boolean): Promise<void>;
+}
 
 export interface FakeCliCommand {
   tool: string;
@@ -57,6 +90,7 @@ interface CanvasHarnessOptions {
 }
 
 let serverModulePromise: Promise<ServerModule> | null = null;
+let credentialIsolationVerified = false;
 
 async function loadServerModule(): Promise<ServerModule> {
   serverModulePromise ??= import("../../../src/server.js");
@@ -141,7 +175,11 @@ async function createWindowsShim(fakeBin: string): Promise<void> {
 }
 
 async function writeFakeCli(fakeBin: string): Promise<string> {
-  const script = path.join(fakeBin, "fake-cli.mjs");
+  // Keep the script at suite scope rather than inside an individual workspace.
+  // A background server task may already have spawned a shim when teardown
+  // removes that workspace; the shared script survives until global teardown
+  // and can then observe the missing per-test scenario and exit quietly.
+  const script = path.join(E2E_TMP_ROOT, "fake-cli.mjs");
   await fs.writeFile(
     script,
     `
@@ -232,14 +270,14 @@ process.exit(command.exitCode || 0);
     for (const tool of ["gh", "rad", "az", "aws"]) {
       await writeExecutable(
         path.join(fakeBin, `${tool}.cmd`),
-        `@echo off\r\nnode "%~dp0fake-cli.mjs" ${tool} %*\r\n`
+        `@echo off\r\nnode "%RADIUS_FAKE_CLI_SCRIPT%" ${tool} %*\r\n`
       );
     }
   } else {
     for (const tool of ["gh", "rad", "az", "aws"]) {
       await writeExecutable(
         path.join(fakeBin, tool),
-        `#!/usr/bin/env sh\nexec node "$(dirname "$0")/fake-cli.mjs" ${tool} "$@"\n`
+        `#!/usr/bin/env sh\nexec node "$RADIUS_FAKE_CLI_SCRIPT" ${tool} "$@"\n`
       );
     }
   }
@@ -533,13 +571,71 @@ export function defaultFakeCliScenario(): FakeCliScenario {
   };
 }
 
-async function closeServer(entry: CanvasServerEntry): Promise<void> {
-  await Promise.race([
-    new Promise<void>((resolve, reject) => {
-      entry.server.close((error) => (error ? reject(error) : resolve()));
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export function replaceSharedCredentials(
+  target: SharedCredentials,
+  replacement: SharedCredentials = {}
+): void {
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, replacement);
+}
+
+export async function prepareCredentialStoreIsolation(): Promise<void> {
+  await fs.mkdir(E2E_TMP_ROOT, { recursive: true });
+  process.env.RADIUS_CREDENTIALS_FILE = CREDENTIAL_STORE_PATH;
+  await fs.writeFile(
+    CREDENTIAL_STORE_PATH,
+    JSON.stringify({
+      azure: { clientSecret: CREDENTIAL_SENTINEL },
+      aws: { secretAccessKey: CREDENTIAL_SENTINEL },
+      preferredGitHubLogin: CREDENTIAL_SENTINEL,
+      profiles: {
+        [REPOSITORY]: [
+          {
+            name: CREDENTIAL_SENTINEL,
+            provider: "azure",
+            user: CREDENTIAL_SENTINEL
+          }
+        ]
+      },
+      unknownPersistedField: CREDENTIAL_SENTINEL
     }),
-    new Promise<void>((resolve) => setTimeout(resolve, 500))
-  ]).catch(() => {});
+    "utf8"
+  );
+}
+
+export async function stopHarnessServer(
+  entry: HarnessServerEntry,
+  instanceId: string,
+  serverModule: HarnessServerStopPort,
+  timeoutMs = 500,
+  wait: (milliseconds: number) => Promise<void> = delay
+): Promise<void> {
+  let closeError: unknown;
+  const gracefulClose = new Promise<"closed">((resolve, reject) => {
+    entry.server.close((error) => (error ? reject(error) : resolve("closed")));
+  }).catch((error: unknown) => {
+    closeError = error;
+    return "failed" as const;
+  });
+  const outcome = await Promise.race([
+    gracefulClose,
+    wait(timeoutMs).then(() => "timeout" as const)
+  ]);
+
+  await serverModule.stopServer(
+    instanceId,
+    outcome === "timeout" || outcome === "failed"
+  );
+
+  if (serverModule.servers.has(instanceId))
+    throw new Error(`Canvas server ${instanceId} remained registered.`);
+  if (entry.server.listening)
+    throw new Error(`Canvas server ${instanceId} remained listening.`);
+  if (closeError) throw closeError;
 }
 
 // Windows keeps a brief lock on the fake CLI executables after the last child
@@ -547,18 +643,26 @@ async function closeServer(entry: CanvasServerEntry): Promise<void> {
 // is still locked after the last attempt is left for the global teardown to
 // sweep: a transient file lock must never be reported as a journey failure.
 export async function removeDirectoryWithRetries(
-  directory: string
+  directory: string,
+  options: RetryRemovalOptions = {}
 ): Promise<void> {
-  for (let attempt = 0; attempt < 12; attempt += 1) {
+  const attempts = options.attempts ?? 12;
+  const remove =
+    options.remove ??
+    ((target: string) => fs.rm(target, { recursive: true, force: true }));
+  const wait = options.delay ?? delay;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      await fs.rm(directory, { recursive: true, force: true });
+      await remove(directory);
       return;
-    } catch {
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(100 * (attempt + 1), 500))
-      );
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < attempts)
+        await wait(Math.min(100 * (attempt + 1), 500));
     }
   }
+  throw lastError;
 }
 
 function missingGhContent(pathname: string): FakeCliCommand {
@@ -571,11 +675,41 @@ function missingGhContent(pathname: string): FakeCliCommand {
 }
 
 async function closePage(page: Page): Promise<void> {
-  try {
-    if (!page.isClosed()) await page.close();
-  } catch {
-    /* best-effort */
+  if (!page.isClosed()) await page.close();
+}
+
+function restoreEnvironment(
+  originalEnv: Record<string, string | undefined>
+): void {
+  for (const [key, value] of Object.entries(originalEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
   }
+}
+
+async function captureCleanupError(
+  errors: unknown[],
+  action: () => void | Promise<void>
+): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    errors.push(error);
+  }
+}
+
+export async function unwindHarnessConstruction(
+  cleanup: ConstructionCleanup
+): Promise<void> {
+  const errors: unknown[] = [];
+  await captureCleanupError(errors, () => cleanup.stopServer?.());
+  await captureCleanupError(errors, () => cleanup.resetState?.());
+  restoreEnvironment(cleanup.originalEnv);
+  await captureCleanupError(errors, () =>
+    (cleanup.removeDirectory ?? removeDirectoryWithRetries)(cleanup.rootDir)
+  );
+  if (errors.length > 0)
+    throw new AggregateError(errors, "Failed to unwind Canvas harness.");
 }
 
 export class CanvasHarness {
@@ -621,22 +755,10 @@ export class CanvasHarness {
   }
 
   static async create(options: CanvasHarnessOptions): Promise<CanvasHarness> {
-    const serverModule = await loadServerModule();
     await fs.mkdir(E2E_TMP_ROOT, { recursive: true });
     const rootParent = await fs.mkdtemp(
       path.join(E2E_TMP_ROOT, `${sanitizeTitle(options.title)}-`)
     );
-    const fakeBin = path.join(rootParent, "bin");
-    const ghConfig = path.join(rootParent, "gh-config");
-    const workspacePath = path.join(rootParent, "workspace");
-    await fs.mkdir(fakeBin, { recursive: true });
-    await fs.mkdir(ghConfig, { recursive: true });
-    await fs.mkdir(path.join(workspacePath, ".radius"), { recursive: true });
-    const fakeScript = await writeFakeCli(fakeBin);
-    const scenarioPath = path.join(rootParent, "scenario.json");
-    const cliLogPath = path.join(rootParent, "cli.log");
-    await fs.writeFile(scenarioPath, JSON.stringify({ commands: [] }), "utf8");
-
     const envKeys = [
       "PATH",
       "Path",
@@ -647,80 +769,147 @@ export class CanvasHarness {
       "RADIUS_FAKE_CLI_SCENARIO",
       "RADIUS_FAKE_CLI_LOG",
       "RADIUS_RAD_BINARY",
-      "RADIUS_RAD_SKIP_VERSION_CHECK"
+      "RADIUS_RAD_SKIP_VERSION_CHECK",
+      "RADIUS_CREDENTIALS_FILE"
     ];
     const originalEnv = Object.fromEntries(
       envKeys.map((key) => [key, process.env[key]])
     );
-    const pathKey = process.platform === "win32" ? "Path" : "PATH";
-    process.env[pathKey] =
-      `${fakeBin}${path.delimiter}${process.env[pathKey] || process.env.PATH || ""}`;
-    process.env.PATH = process.env[pathKey];
-    process.env.GH_CONFIG_DIR = ghConfig;
-    process.env.GH_TOKEN = PLACEHOLDER_SECRET;
-    process.env.GITHUB_TOKEN = PLACEHOLDER_SECRET;
-    process.env.RADIUS_FAKE_CLI_SCRIPT = fakeScript;
-    process.env.RADIUS_FAKE_CLI_SCENARIO = scenarioPath;
-    process.env.RADIUS_FAKE_CLI_LOG = cliLogPath;
-    process.env.RADIUS_RAD_BINARY =
-      process.platform === "win32" ?
-        path.join(fakeBin, "rad.exe")
-      : path.join(fakeBin, "rad");
-    process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
-    const ghModule = await import("../../../src/gh.js");
-    ghModule.setPreferredGhLogin("");
-    ghModule.resetGhIdentityCache(); // Resolve this test's identity before the server starts so the page never
-    // observes a probe that a previous test left in flight.
-    await ghModule.primeGhIdentity().catch(() => undefined);
-    // Environment creation opens on a credential-profile step, so the wizard
-    // only reaches the details step when a profile exists. Profiles live in
-    // module-scoped state whose backing file sits next to the server module
-    // rather than in this test's temp directory, so seed the store in memory:
-    // saving through the route would write `.radius-credentials.json` into the
-    // package source tree and leak the fixture between tests and into the repo.
-    const sharedModule = await import("../../../src/shared.js");
-    sharedModule.sharedCredentials.profiles = {
-      [REPOSITORY]: [
-        {
-          name: PROFILE_NAME,
-          provider: "azure",
-          status: "verified",
-          user: PROFILE_USER,
-          tenantId: PROFILE_TENANT_ID,
-          tenantName: "Fixture tenant",
-          subscriptionId: PROFILE_SUBSCRIPTION_ID,
-          subscriptionName: "Fixture subscription"
+    let serverModule: ServerModule | undefined;
+    let ghModule: GhModule | undefined;
+    let sharedModule: SharedModule | undefined;
+    let entry: CanvasServerEntry | undefined;
+    let instanceId: string | undefined;
+
+    try {
+      const fakeBin = path.join(rootParent, "bin");
+      const ghConfig = path.join(rootParent, "gh-config");
+      const workspacePath = path.join(rootParent, "workspace");
+      await fs.mkdir(fakeBin, { recursive: true });
+      await fs.mkdir(ghConfig, { recursive: true });
+      await fs.mkdir(path.join(workspacePath, ".radius"), { recursive: true });
+      const fakeScript = await writeFakeCli(fakeBin);
+      const scenarioPath = path.join(rootParent, "scenario.json");
+      const cliLogPath = path.join(rootParent, "cli.log");
+      await fs.writeFile(
+        scenarioPath,
+        JSON.stringify({ commands: [] }),
+        "utf8"
+      );
+
+      const pathKey = process.platform === "win32" ? "Path" : "PATH";
+      process.env[pathKey] =
+        `${fakeBin}${path.delimiter}${process.env[pathKey] || process.env.PATH || ""}`;
+      process.env.PATH = process.env[pathKey];
+      process.env.GH_CONFIG_DIR = ghConfig;
+      process.env.GH_TOKEN = PLACEHOLDER_SECRET;
+      process.env.GITHUB_TOKEN = PLACEHOLDER_SECRET;
+      process.env.RADIUS_FAKE_CLI_SCRIPT = fakeScript;
+      process.env.RADIUS_FAKE_CLI_SCENARIO = scenarioPath;
+      process.env.RADIUS_FAKE_CLI_LOG = cliLogPath;
+      process.env.RADIUS_RAD_BINARY =
+        process.platform === "win32" ?
+          path.join(fakeBin, "rad.exe")
+        : path.join(fakeBin, "rad");
+      process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
+      process.env.RADIUS_CREDENTIALS_FILE ??= CREDENTIAL_STORE_PATH;
+
+      // All process and credential-store isolation is in place before the first
+      // production import. shared.ts reads its store at module initialization.
+      serverModule = await loadServerModule();
+      ghModule = await import("../../../src/gh.js");
+      sharedModule = await import("../../../src/shared.js");
+      if (
+        !credentialIsolationVerified &&
+        sharedModule.sharedCredentials.unknownPersistedField !==
+          CREDENTIAL_SENTINEL
+      ) {
+        throw new Error(
+          "The isolated credential sentinel was not loaded before production imports."
+        );
+      }
+      credentialIsolationVerified = true;
+      ghModule.setPreferredGhLogin("");
+      ghModule.resetGhIdentityCache();
+      await ghModule.primeGhIdentity().catch(() => undefined);
+      replaceSharedCredentials(sharedModule.sharedCredentials, {
+        profiles: {
+          [REPOSITORY]: [
+            {
+              name: PROFILE_NAME,
+              provider: "azure",
+              status: "verified",
+              user: PROFILE_USER,
+              tenantId: PROFILE_TENANT_ID,
+              tenantName: "Fixture tenant",
+              subscriptionId: PROFILE_SUBSCRIPTION_ID,
+              subscriptionName: "Fixture subscription"
+            }
+          ]
         }
-      ]
-    };
-    // The production SDK entry registers this hook to open a worktree file in
-    // the editor canvas. The Chromium harness has no host SDK, so provide the
-    // successful local boundary explicitly; otherwise the browser correctly
-    // falls back to the public GitHub URL and violates offline isolation.
-    serverModule.setOpenSourceHandler(async () => undefined);
+      });
 
-    const instanceId = `chromium-${sanitizeTitle(options.title)}-${randomUUID()}`;
-    const entry = await serverModule.getOrCreateServer(
-      instanceId,
-      options.initialPage || "environment"
-    );
-    Object.assign(entry.state, options.initialState || {});
+      // The production SDK entry registers this hook to open a worktree file in
+      // the editor canvas. The Chromium harness has no host SDK, so provide the
+      // successful local boundary explicitly; otherwise the browser correctly
+      // falls back to the public GitHub URL and violates offline isolation.
+      serverModule.setOpenSourceHandler(async () => undefined);
 
-    const harness = new CanvasHarness({
-      page: options.page,
-      entry,
-      instanceId,
-      rootDir: rootParent,
-      fakeBin,
-      scenarioPath,
-      cliLogPath,
-      workspacePath,
-      originalEnv,
-      serverModule,
-      ghModule
-    });
-    await harness.installNetworkGuard();
-    return harness;
+      instanceId = `chromium-${sanitizeTitle(options.title)}-${randomUUID()}`;
+      entry = await serverModule.getOrCreateServer(
+        instanceId,
+        options.initialPage || "environment"
+      );
+      Object.assign(entry.state, options.initialState || {});
+
+      const harness = new CanvasHarness({
+        page: options.page,
+        entry,
+        instanceId,
+        rootDir: rootParent,
+        fakeBin,
+        scenarioPath,
+        cliLogPath,
+        workspacePath,
+        originalEnv,
+        serverModule,
+        ghModule
+      });
+      await harness.installNetworkGuard();
+      return harness;
+    } catch (error) {
+      const cleanupEntry = entry;
+      const cleanupInstanceId = instanceId;
+      const cleanupServerModule = serverModule;
+      try {
+        await unwindHarnessConstruction({
+          rootDir: rootParent,
+          originalEnv,
+          stopServer:
+            cleanupServerModule && cleanupEntry && cleanupInstanceId ?
+              () =>
+                stopHarnessServer(
+                  cleanupEntry,
+                  cleanupInstanceId,
+                  cleanupServerModule
+                )
+            : undefined,
+          resetState: () => {
+            ghModule?.setPreferredGhLogin("");
+            ghModule?.resetGhIdentityCache();
+            if (sharedModule)
+              replaceSharedCredentials(sharedModule.sharedCredentials);
+          }
+        });
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Canvas harness construction and cleanup failed.",
+          { cause: cleanupError }
+        );
+      }
+      throw error;
+    }
   }
 
   get baseUrl(): string {
@@ -834,6 +1023,7 @@ export class CanvasHarness {
   }
 
   async cleanup(): Promise<void> {
+    const errors: unknown[] = [];
     this.serverModule.setEnvironmentOperationTestRunner(null);
     this.serverModule.markEnvironmentInstanceShuttingDown(this.instanceId);
     if (this.serverModule.hasActiveEnvironmentTasks(this.instanceId)) {
@@ -851,24 +1041,32 @@ export class CanvasHarness {
         }, 1000).unref?.();
       });
     }
-    await closePage(this.page);
-    await closeServer(this.entry);
+    await captureCleanupError(errors, () => closePage(this.page));
+    await captureCleanupError(errors, () =>
+      stopHarnessServer(this.entry, this.instanceId, this.serverModule)
+    );
     // Drain any identity probe this test started before restoring the
     // environment: a probe that settled after the next test reset the cache
     // would publish this test's identity into that test's page.
-    await this.ghModule.primeGhIdentity().catch(() => undefined);
+    await captureCleanupError(errors, async () => {
+      await this.ghModule.primeGhIdentity();
+    });
     this.ghModule.setPreferredGhLogin("");
     this.ghModule.resetGhIdentityCache();
-    // The profile store is module-scoped and outlives this server, so drop the
-    // fixture rather than let it satisfy the next test's preconditions.
     const sharedModule = await import("../../../src/shared.js");
-    delete sharedModule.sharedCredentials.profiles;
-    for (const [key, value] of Object.entries(this.originalEnv)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    await removeDirectoryWithRetries(this.rootDir);
-    expect(this.externalRequests).toEqual([]);
+    replaceSharedCredentials(sharedModule.sharedCredentials);
+    restoreEnvironment(this.originalEnv);
+    await captureCleanupError(errors, () =>
+      removeDirectoryWithRetries(this.rootDir)
+    );
+    if (this.externalRequests.length > 0)
+      errors.push(
+        new Error(
+          `Unexpected external requests: ${this.externalRequests.join(", ")}`
+        )
+      );
+    if (errors.length > 0)
+      throw new AggregateError(errors, "Canvas harness cleanup failed.");
   }
 
   private async installNetworkGuard(): Promise<void> {

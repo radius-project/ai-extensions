@@ -231,7 +231,16 @@ const __dirname_ext =
   typeof import.meta.url !== "undefined" ?
     dirname(fileURLToPath(import.meta.url))
   : ".";
-const CREDS_FILE = join(__dirname_ext, ".radius-credentials.json");
+
+export function resolveCredentialsFilePath(
+  environment: NodeJS.ProcessEnv = process.env,
+  moduleDirectory = __dirname_ext
+): string {
+  const configured = environment.RADIUS_CREDENTIALS_FILE?.trim();
+  return configured || join(moduleDirectory, ".radius-credentials.json");
+}
+
+const CREDS_FILE = resolveCredentialsFilePath();
 
 export let sharedCredentials: SharedCredentials = {};
 try {

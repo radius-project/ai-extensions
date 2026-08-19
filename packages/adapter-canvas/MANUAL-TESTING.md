@@ -24,10 +24,12 @@ Prerequisites:
 - Workspace dependencies installed with `pnpm install --frozen-lockfile`.
 - On Windows, a Go toolchain on `PATH`. The harness compiles a tiny shim to produce `gh.exe` and `rad.exe` because Node cannot execute a `.cmd` shim without a shell. POSIX hosts use shell shims and need no extra tooling.
 
-Safety, destructive, branch-selection, path-confinement, and redaction cases run in the `canvas-safety` Playwright project with retries disabled; the remaining cases allow one diagnostic retry. Failure traces, screenshots, and the HTML report are retained under `packages/adapter-canvas/test-results/` and `packages/adapter-canvas/playwright-report/` on failure only; those artifacts are diagnostics and are not visual baselines. `packages/adapter-canvas/test/e2e/phase-6-traceability.md` maps each supported workflow to the test that covers it.
+Safety, destructive, branch-selection, path-confinement, and redaction cases run in the `canvas-safety` Playwright project with retries disabled; the remaining cases allow one diagnostic retry. Failure traces, screenshots, and the HTML report are retained under `packages/adapter-canvas/test-results/` and `packages/adapter-canvas/playwright-report/` on failure only; those artifacts are diagnostics and are not visual baselines. `packages/adapter-canvas/test/e2e/phase-6-traceability.md` maps the evidence delivered here and the remaining Phase 6 gaps. The browser-functional layer and the two real-form submission journeys are not complete.
 
 ## Browser component checks
 
 Run `pnpm run test:component` after the same one-time `pnpm exec playwright install chromium`. The suite is Vitest Browser Mode with the Playwright Chromium provider, and it mounts the production `src/browser/graph/` modules into a real DOM through the real ReactDOM concurrent root. It uses the same real React, React DOM, React Flow, and dagre packages the build bundles into the graph browser entry, so the packaged libraries are exercised offline with no stand-ins. Its ports for source opening and details toggling are injected, so it makes no network requests at all.
 
 This layer covers real browser behavior that the journey suite does not reach at node-card granularity: keyboard activation of the card's details control with `Enter` and `Space`, focus retention, sequential tab order across cards, real dagre coordinates, disabled source rows, and mount/update/unmount lifecycle. It needs no Go toolchain and no fake CLI executables.
+
+The separate P1-A browser-functional suite specified by the test architecture has not been added. The component suite should not be described as covering that layer, and the Playwright critical journeys should not be counted twice as browser-functional evidence.
