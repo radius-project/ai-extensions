@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createEnvironmentsRoutes } from "../../../src/server/routes/environments.js";
+import { createEnvironmentListingCache } from "../../../src/server/services/environment-listing-cache.js";
 import { cleanupGitHubEnvironmentArtifact } from "../../../src/server.js";
 import {
   createOperation,
@@ -11,6 +12,7 @@ import {
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { EnvironmentsDependencies } from "../../../src/server/routes/environments.js";
+import type { EnvironmentListingCache } from "../../../src/server/services/environment-listing-cache.js";
 
 // The environment picker reads a repo-scoped, short-TTL cached listing. A
 // rollback deletes the GitHub environment behind that listing outside the
@@ -61,10 +63,22 @@ interface ListResult {
   body: unknown;
 }
 
+/**
+ * A `gh` call held open at one API path, so a listing can be observed
+ * mid-assembly: `reached` settles once the listing has got that far, and
+ * `release` lets it finish.
+ */
+interface HeldCall {
+  reached: Promise<void>;
+  release(): void;
+}
+
 interface Harness {
-  cache: Map<string, { at: number; payload: unknown }>;
+  /** The production listing cache this server was composed with. */
+  cache: EnvironmentListingCache;
   commands: string[][];
   setScript(script: CliScript): void;
+  holdPath(path: string): HeldCall;
   invalidate(repo: string): void;
   list(): Promise<ListResult>;
   deleteEnvironment(
@@ -73,7 +87,11 @@ interface Harness {
 }
 
 async function start(initialScript: CliScript): Promise<Harness> {
-  const cache = new Map<string, { at: number; payload: unknown }>();
+  // The real cache the composition root owns, wired exactly as `src/server.ts`
+  // wires it, so the eviction and generation behavior under test is production
+  // behavior rather than a restatement of it.
+  const cache = createEnvironmentListingCache();
+  const held = new Map<string, { gate: Promise<void>; markReached(): void }>();
   const commands: string[][] = [];
   let script = initialScript;
   const dependencies: Partial<EnvironmentsDependencies> = {
@@ -91,24 +109,34 @@ async function start(initialScript: CliScript): Promise<Harness> {
     },
     cliExec: (_command, args, _options, callback) => {
       const path = args.find((arg) => arg.startsWith("/repos/")) ?? "";
-      const scripted = script[path];
-      if (!scripted) {
-        callback(new Error(`unscripted cliExec path: ${path}`), "", "");
+      const answer = (): void => {
+        const scripted = script[path];
+        if (!scripted) {
+          callback(new Error(`unscripted cliExec path: ${path}`), "", "");
+          return;
+        }
+        callback(
+          scripted.error ?? null,
+          scripted.stdout ?? "",
+          scripted.stderr ?? ""
+        );
+      };
+      const gate = held.get(path);
+      if (!gate) {
+        answer();
         return;
       }
-      callback(
-        scripted.error ?? null,
-        scripted.stdout ?? "",
-        scripted.stderr ?? ""
-      );
+      gate.markReached();
+      void gate.gate.then(answer);
     },
     envListCacheGet: (repo) => cache.get(repo),
     envListCacheSet: (repo, entry) => {
       cache.set(repo, entry);
     },
     envListCacheDelete: (repo) => {
-      cache.delete(repo);
+      cache.invalidate(repo);
     },
+    envListCacheGeneration: (repo) => cache.generation(repo),
     envListTtlMs: TTL_MS,
     // A frozen clock keeps the TTL from expiring on its own, so a listing that
     // refreshes proves invalidation rather than the passage of time.
@@ -144,8 +172,26 @@ async function start(initialScript: CliScript): Promise<Harness> {
     setScript(next) {
       script = next;
     },
+    holdPath(path) {
+      let release = (): void => {};
+      let markReached = (): void => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const reached = new Promise<void>((resolve) => {
+        markReached = resolve;
+      });
+      held.set(path, { gate, markReached });
+      return {
+        reached,
+        release() {
+          held.delete(path);
+          release();
+        }
+      };
+    },
     invalidate(repo) {
-      cache.delete(repo);
+      cache.invalidate(repo);
     },
     async list() {
       const response = await fetch(
@@ -268,7 +314,7 @@ describe("environment listing cache after a rollback", () => {
     // The environment is still there, so the listing that still reports it is
     // correct and the cached payload stands.
     expect(names(after.body)).toEqual(["dev"]);
-    expect(harness.cache.has(REPO)).toBe(true);
+    expect(harness.cache.get(REPO)).toBeDefined();
   });
 
   it("refreshes the listing when the delete route removes an environment", async () => {
@@ -290,5 +336,93 @@ describe("environment listing cache after a rollback", () => {
       "/repos/octo/app/environments/dev"
     ]);
     expect(names(after.body)).toEqual([]);
+  });
+});
+
+// The listing is assembled from many `gh` calls, and the browser asks for it the
+// moment a rollback is accepted — while the setup's verify run is still
+// incomplete, so the row reads **Pending**. The rollback then deletes the
+// environment underneath that in-flight request. Without a guard, the listing
+// finishes afterwards and writes the environment it read back into the cache it
+// just invalidated, and the picker hands the customer the rolled-back
+// environment for a full TTL, exactly when the panel says the rollback is done.
+describe("a listing already in flight when the environment is removed", () => {
+  const STATUSES_PATH = "/repos/octo/app/deployments/100/statuses?per_page=1";
+
+  /** The listing while the setup's verify run has not completed: a Pending row. */
+  function pendingListingScript(environments: string): CliScript {
+    return {
+      ...listingScript(environments),
+      ["/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"]:
+        { stdout: "42\tin_progress\t" }
+    };
+  }
+
+  it("is never cached when the rollback removed the environment meanwhile", async () => {
+    const harness = await start(pendingListingScript("7\tdev"));
+    const held = harness.holdPath(STATUSES_PATH);
+    const inFlight = harness.list();
+    // The listing has read the repository's environments and is part-way
+    // through resolving their statuses when the rollback deletes one.
+    await held.reached;
+
+    const cleanup = await cleanupGitHubEnvironmentArtifact(
+      rolledBackOperation(),
+      {
+        attempt: 1,
+        runDeleteEnvironment: async () => {},
+        invalidateEnvironmentListing: (repo) => {
+          harness.invalidate(repo);
+        }
+      }
+    );
+    held.release();
+    const stale = await inFlight;
+
+    expect(cleanup.results).toMatchObject([
+      { artifactType: "github_environment", outcome: "deleted" }
+    ]);
+    // The in-flight request still answers with what it actually read — it is
+    // not rewritten after the fact — but that reading is already history.
+    expect(statuses(stale.body)).toEqual(["pending"]);
+    expect(harness.cache.get(REPO)).toBeUndefined();
+
+    harness.setScript(pendingListingScript(""));
+    const after = await harness.list();
+    expect(names(after.body)).toEqual([]);
+  });
+
+  it("is never cached when the delete route removed the environment meanwhile", async () => {
+    const harness = await start(pendingListingScript("7\tdev"));
+    const held = harness.holdPath(STATUSES_PATH);
+    const inFlight = harness.list();
+    await held.reached;
+
+    const deletion = await harness.deleteEnvironment("dev");
+    held.release();
+    await inFlight;
+
+    expect(deletion.status).toBe(200);
+    expect(harness.cache.get(REPO)).toBeUndefined();
+
+    harness.setScript(pendingListingScript(""));
+    expect(names((await harness.list()).body)).toEqual([]);
+  });
+
+  it("is cached as usual when nothing removed the environment meanwhile", async () => {
+    const harness = await start(pendingListingScript("7\tdev"));
+    const held = harness.holdPath(STATUSES_PATH);
+    const inFlight = harness.list();
+    await held.reached;
+
+    held.release();
+    const listed = await inFlight;
+
+    expect(statuses(listed.body)).toEqual(["pending"]);
+    expect(harness.cache.get(REPO)).toMatchObject({ at: 0 });
+    // A repeat request inside the TTL is still served from that cache: the
+    // guard refuses a stale write, it does not disable caching.
+    harness.setScript(pendingListingScript(""));
+    expect(names((await harness.list()).body)).toEqual(["dev"]);
   });
 });

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { CLEANUP_COMMANDS, isCleanupCommandKind } from "./cleanup-commands.js";
+import {
+  CLEANUP_COMMANDS,
+  cleanupRemovedGitHubEnvironment,
+  isCleanupCommandKind
+} from "./cleanup-commands.js";
 import {
   acceptCommand,
   beginRetryAttempt,
@@ -157,5 +161,63 @@ describe("cleanup command table", () => {
       expect(command.cleanedMessage).not.toBe("");
       expect(command.incompleteMessage).not.toBe("");
     }
+  });
+});
+
+// The environment picker reads a repo-scoped cached listing that a different
+// request assembles, so what a finished deletion pass removed decides whether
+// that cache may stand. Getting this wrong in either direction is visible: keep
+// it and a rolled-back environment stays on the page as Pending; drop it after
+// a pass that removed nothing and the picker re-lists for no reason.
+describe("cleanupRemovedGitHubEnvironment", () => {
+  it.each([
+    ["deleted", true],
+    ["not_found", true],
+    ["warning", false],
+    ["skipped", false]
+  ])("reports %s as %s", (outcome, expected) => {
+    expect(
+      cleanupRemovedGitHubEnvironment([
+        { artifactType: "github_environment", outcome }
+      ])
+    ).toBe(expected);
+  });
+
+  it("ignores removals of everything that is not the environment", () => {
+    expect(
+      cleanupRemovedGitHubEnvironment([
+        { artifactType: "azure_app", outcome: "deleted" },
+        { artifactType: "workflow_file", outcome: "deleted" }
+      ])
+    ).toBe(false);
+  });
+
+  it("reports an empty pass as changing nothing", () => {
+    expect(cleanupRemovedGitHubEnvironment([])).toBe(false);
+  });
+
+  it("reports a removal recorded alongside other outcomes", () => {
+    expect(
+      cleanupRemovedGitHubEnvironment([
+        { artifactType: "azure_app", outcome: "warning" },
+        { artifactType: "github_environment", outcome: "deleted" }
+      ])
+    ).toBe(true);
+  });
+
+  it("matches the results a real rollback pass records", () => {
+    const op = partialFailure();
+    const selected = CLEANUP_COMMANDS.rollback
+      .selectTargets(op)
+      .map((entry) => entry.artifactType);
+    expect(selected).toContain("github_environment");
+    expect(
+      cleanupRemovedGitHubEnvironment(
+        selected.map((artifactType) => ({
+          artifactType,
+          outcome: artifactType === "github_environment" ? "deleted" : "warning"
+        }))
+      )
+    ).toBe(true);
   });
 });

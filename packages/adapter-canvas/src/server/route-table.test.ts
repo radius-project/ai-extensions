@@ -307,6 +307,7 @@ const productionHandlers = {
     envListCacheGet: () => undefined,
     envListCacheSet: () => {},
     envListCacheDelete: () => {},
+    envListCacheGeneration: () => 0,
     envListTtlMs: 0,
     kickoffWorkflowSync: () => {},
     now: () => 0,
