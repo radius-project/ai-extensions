@@ -1197,7 +1197,10 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
         record(`az:${args.slice(0, 4).join(" ")}`);
         return Promise.resolve({
           code: 0,
-          stdout: JSON.stringify(["repo:acme/widgets:environment:production"]),
+          stdout: JSON.stringify([
+            "repo:acme/widgets:environment:production",
+            "repo:acme@101/widgets@202:environment:production"
+          ]),
           stderr: ""
         });
       },

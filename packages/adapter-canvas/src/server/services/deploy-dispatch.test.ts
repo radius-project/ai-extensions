@@ -169,7 +169,10 @@ function azurePreflight(options: AzurePreflightOptions = {}) {
         return Promise.resolve({
           ...OK,
           stdout: JSON.stringify(
-            options.subjects ?? ["repo:acme/widgets:environment:production"]
+            options.subjects ?? [
+              "repo:acme/widgets:environment:production",
+              "repo:acme@101/widgets@202:environment:production"
+            ]
           )
         });
       })
@@ -381,7 +384,7 @@ describe("deploy dispatch environment and branch preflight", () => {
     });
     expect(state.deployStatus).toBe("failed");
     expect(state.deployError).toContain(
-      '"repo:acme/widgets:environment:production"'
+      '"repo:acme/widgets:environment:production" and "repo:acme@101/widgets@202:environment:production"'
     );
     expect(state.deployError).toContain(
       "repo:acme/widgets:environment:dev, repo:acme/widgets:environment:test, repo:acme/widgets:environment:staging ..."
@@ -408,16 +411,13 @@ describe("deploy dispatch environment and branch preflight", () => {
 
   it.each([
     {
-      name: "default mutable subject",
+      name: "default compatibility pair",
       environment: "production",
       customization: DEFAULT_OIDC_CUSTOMIZATION,
-      subject: "repo:acme/widgets:environment:production"
-    },
-    {
-      name: "default immutable subject from the compatibility pair",
-      environment: "production",
-      customization: DEFAULT_OIDC_CUSTOMIZATION,
-      subject: "repo:acme@101/widgets@202:environment:production"
+      subjects: [
+        "repo:acme/widgets:environment:production",
+        "repo:acme@101/widgets@202:environment:production"
+      ]
     },
     {
       name: "immutable-only subject",
@@ -427,7 +427,7 @@ describe("deploy dispatch environment and branch preflight", () => {
         status: 200,
         json: { use_default: true, use_immutable_subject: true }
       },
-      subject: "repo:acme@101/widgets@202:environment:production"
+      subjects: ["repo:acme@101/widgets@202:environment:production"]
     },
     {
       name: "custom subject",
@@ -441,14 +441,18 @@ describe("deploy dispatch environment and branch preflight", () => {
           use_immutable_subject: false
         }
       },
-      subject:
+      subjects: [
         "repository_owner:acme:repository:acme/widgets:environment:production"
+      ]
     },
     {
-      name: "colon-escaped environment subject",
+      name: "colon-escaped environment subjects",
       environment: "prod:west",
       customization: DEFAULT_OIDC_CUSTOMIZATION,
-      subject: "repo:acme/widgets:environment:prod%3Awest"
+      subjects: [
+        "repo:acme/widgets:environment:prod%3Awest",
+        "repo:acme@101/widgets@202:environment:prod%3Awest"
+      ]
     }
   ])("continues with a covered $name", async (scenario) => {
     const { input } = request();
@@ -457,7 +461,7 @@ describe("deploy dispatch environment and branch preflight", () => {
     const gh = recordingGh();
     const preflight = azurePreflight({
       customization: scenario.customization,
-      subjects: [`  ${scenario.subject}  `]
+      subjects: scenario.subjects.map((subject) => `  ${subject}  `)
     });
     const service = createDeployDispatchService(
       dependencies({ ...gh, ...preflight })
@@ -467,6 +471,62 @@ describe("deploy dispatch environment and branch preflight", () => {
       dispatched: true
     });
     expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(true);
+  });
+
+  it.each([
+    {
+      name: "only the mutable form",
+      present: "repo:acme/widgets:environment:production",
+      missing: "repo:acme@101/widgets@202:environment:production"
+    },
+    {
+      name: "only the immutable form",
+      present: "repo:acme@101/widgets@202:environment:production",
+      missing: "repo:acme/widgets:environment:production"
+    }
+  ])(
+    "fails closed when the default compatibility pair has $name",
+    async (scenario) => {
+      const { input, state } = request();
+      input.provider = "azure";
+      const gh = recordingGh();
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          ...azurePreflight({ subjects: [scenario.present] })
+        })
+      );
+
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(state.deployStatus).toBe("failed");
+      expect(state.deployError).toContain(`"${scenario.missing}"`);
+      expect(state.deployError).not.toContain(`"${scenario.present}"`);
+      expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(false);
+    }
+  );
+
+  it("lists near matches without an ellipsis when three or fewer exist", async () => {
+    const { input, state } = request();
+    input.provider = "azure";
+    const service = createDeployDispatchService(
+      dependencies({
+        ...recordingGh(),
+        ...azurePreflight({
+          subjects: ["dev", "test"].map(
+            (environment) => `repo:acme/widgets:environment:${environment}`
+          )
+        })
+      })
+    );
+
+    await service.prepareAndDispatch(input);
+
+    expect(state.deployError).toContain(
+      "Existing credential subjects for this repo on the app: repo:acme/widgets:environment:dev, repo:acme/widgets:environment:test."
+    );
+    expect(state.deployError).not.toContain("...");
   });
 
   it("reports a missing subject without inventing near matches", async () => {

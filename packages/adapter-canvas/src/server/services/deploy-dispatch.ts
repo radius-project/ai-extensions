@@ -504,7 +504,14 @@ export function createDeployDispatchService(
       );
     }
     const subjects = parsed.map((value) => value.trim());
-    if (expectedSubjects.some((subject) => subjects.includes(subject))) {
+    // Every resolved subject must be present. When GitHub's effective default
+    // subject format is indeterminate the resolver returns both the mutable and
+    // immutable forms, and Azure auto-setup creates both, so partial coverage
+    // still permits the AADSTS700213 failure this preflight exists to prevent.
+    const missingSubjects = expectedSubjects.filter(
+      (subject) => !subjects.includes(subject)
+    );
+    if (missingSubjects.length === 0) {
       return { status: "covered" };
     }
     const nearMatchPrefix = `repo:${resolved.fullName}:environment:`;
@@ -518,14 +525,14 @@ export function createDeployDispatchService(
           .slice(0, 3)
           .join(", ")}${nearMatches.length > 3 ? " ..." : ""}.`
       : "";
-    const expectedSubjectText = expectedSubjects
+    const missingSubjectText = missingSubjects
       .map((subject) => `"${subject}"`)
-      .join(" or ");
+      .join(" and ");
     return {
       status: "missing",
       message:
         `Azure deploy to environment "${environment}" is blocked because App Registration ${clientId} ` +
-        `does not have a federated credential with subject ${expectedSubjectText}.` +
+        `is missing a federated credential with subject ${missingSubjectText}.` +
         nearMatchNote +
         " Re-run Create Environment with Azure auto-setup (or create the credential manually) before deploying."
     };
