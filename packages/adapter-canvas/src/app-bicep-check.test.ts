@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, test } from "vitest";
+import { afterEach, it, test } from "vitest";
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -238,7 +238,7 @@ test("fails closed when compiled output is not valid JSON", () => {
   assert.match(result.stderr, /Bicep did not return valid compiled JSON/u);
 });
 
-for (const { name, source, ref } of [
+it.each([
   {
     name: "an abbreviated SHA",
     source: "git::https://github.com/example/app.git?ref=eb33f12",
@@ -254,20 +254,18 @@ for (const { name, source, ref } of [
     source: `git::https://github.com/example/app.git?ref=${"a".repeat(39)}`,
     ref: "a".repeat(39)
   }
-]) {
-  test(`rejects a container image build source with ${name}`, () => {
-    const directory = temporaryDirectory();
-    const compiledOutput = template({ image: imageResource(source) });
-    const result = runChecker(
-      directory,
-      fakeBicep(directory, sarif([]), 0, compiledOutput)
-    );
+])("rejects a container image build source with $name", ({ source, ref }) => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({ image: imageResource(source) });
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
 
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /container-image-build-source/u);
-    assert.ok(result.stderr.includes(ref));
-  });
-}
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /container-image-build-source/u);
+  assert.ok(result.stderr.includes(ref));
+});
 
 test("accepts refs that do not look like abbreviated commit SHAs", () => {
   const directory = temporaryDirectory();
