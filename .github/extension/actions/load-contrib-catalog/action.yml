@@ -4,19 +4,55 @@ description: >-
   Expose the Radius resource type and recipe pack catalog to later workflow
   steps.
 
+inputs:
+  catalog-repo:
+    description: >-
+      Repository hosting the Radius resource-type and recipe-pack catalog
+      (deploy/manifest/defaults.yaml). The catalog is a Radius-owned artifact,
+      kept in sync and validated by Radius CI, so it is fetched by ref at
+      runtime rather than vendored into this repository.
+    required: false
+    default: radius-project/radius
+  catalog-ref:
+    description: Git ref of catalog-repo to fetch the catalog from.
+    required: false
+    default: main
+  yq-version:
+    description: Pinned yq version installed to read the catalog.
+    required: false
+    default: v4.53.3
+
 runs:
   using: composite
   steps:
     - name: Configure Radius contrib catalog
       shell: bash
+      env:
+        CATALOG_REPO: ${{ inputs.catalog-repo }}
+        CATALOG_REF: ${{ inputs.catalog-ref }}
+        YQ_VERSION: ${{ inputs.yq-version }}
       run: |
-        RADIUS_REPO_ROOT="$(cd "${GITHUB_ACTION_PATH}/../../../.." && pwd)"
-        DEFAULTS_YAML="${RADIUS_REPO_ROOT}/deploy/manifest/defaults.yaml"
-        CATALOG_HELPER="${RADIUS_REPO_ROOT}/.github/extension/scripts/contrib-catalog.sh"
+        set -euo pipefail
 
-        test -f "$DEFAULTS_YAML"
+        # Install the pinned yq used by later steps to read the catalog. The
+        # installer adds its bin dir to GITHUB_PATH so subsequent steps can run
+        # yq. install-yq.sh is generic tool-install logic co-located with this
+        # action -- not Radius data -- so the action stays self-contained here.
+        bash "${GITHUB_ACTION_PATH}/install-yq.sh"
+
+        # The contrib catalog (deploy/manifest/defaults.yaml) is a Radius-owned
+        # artifact: a set of pinned resource-type and recipe-pack refs kept in
+        # sync and validated by Radius CI. Rather than vendor a copy here, fetch
+        # the single file from the Radius repository at the requested ref.
+        DEFAULTS_YAML="${RUNNER_TEMP:-/tmp}/radius-defaults.yaml"
+        CATALOG_URL="https://raw.githubusercontent.com/${CATALOG_REPO}/${CATALOG_REF}/deploy/manifest/defaults.yaml"
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
+          "$CATALOG_URL" -o "$DEFAULTS_YAML"
+        test -s "$DEFAULTS_YAML"
+
+        CATALOG_HELPER="$(cd "${GITHUB_ACTION_PATH}/../../scripts" && pwd)/contrib-catalog.sh"
         test -f "$CATALOG_HELPER"
-        make -C "$RADIUS_REPO_ROOT" install-yq
+
         {
           echo "RADIUS_DEFAULTS_YAML=$DEFAULTS_YAML"
           echo "RADIUS_CONTRIB_CATALOG_HELPER=$CATALOG_HELPER"
