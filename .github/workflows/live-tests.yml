@@ -4,20 +4,32 @@ name: Live upstream tests
 
 # Runs the opt-in `*.live.test.ts` suites that fetch the real workflow templates
 # from radius-project/radius at runtime and assert the extension still renders
-# them into valid, correctly-shaped output.
+# them into valid, correctly-shaped output. A failure means an upstream template
+# change broke what the extension generates (e.g. the invalid-YAML deploy
+# regression in #407).
 #
-# These are deliberately NOT part of the per-pull-request Build suite: they are
-# non-hermetic (they depend on an external repo's moving `main` ref and on
-# network access to raw.githubusercontent.com), so a regression pushed to
-# radius-project/radius would otherwise turn unrelated ai-extensions PRs red.
-# Instead they run on a nightly schedule (and on demand) as an upstream-contract
-# canary: a failure here means an upstream template change broke what the
-# extension generates (e.g. the invalid-YAML deploy regression in #407), so it
-# should be triaged rather than blocking contributors mid-PR.
+# This is a SEPARATE workflow from the hermetic Build suite (build.yml), which
+# stays fully offline and deterministic. These live suites are intentionally
+# excluded from that suite and from the publish/release pipeline because they are
+# non-hermetic: they depend on an external repo's moving `main` ref and on
+# network access to raw.githubusercontent.com.
+#
+# They run on every pull request and every push to `main` so an upstream
+# template regression is flagged immediately as a failed check, plus nightly as a
+# catch-all in case no PR lands between an upstream change and the next run.
+#
+# Tradeoff to be aware of: because they fetch from radius-project/radius@main, a
+# regression pushed upstream can turn an otherwise-good ai-extensions PR red until
+# upstream is fixed. That is intentional here — surfacing the break early is the
+# point — but a failure in this job should be triaged against the current
+# upstream templates, not assumed to be caused by the PR's own changes.
 
 on:
+  pull_request:
+  push:
+    branches: [main]
   schedule:
-    # 07:00 UTC daily (~midnight US Pacific).
+    # 07:00 UTC daily (~midnight US Pacific), as a catch-all between pushes.
     - cron: "0 7 * * *"
   workflow_dispatch:
 
