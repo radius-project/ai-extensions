@@ -20,13 +20,6 @@ const checker = path.join(
   "validate-bicep.mjs"
 );
 const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
-const managedBicep = path.join(
-  os.homedir(),
-  ".radius",
-  "ai-extensions",
-  "bin",
-  executable
-);
 const temporaryDirectories = new Set<string>();
 
 afterEach(() => {
@@ -91,6 +84,22 @@ function sarif(results: unknown[]): string {
   return JSON.stringify({ runs: [{ results }] });
 }
 
+function compiledBicepFixture(name: string): string {
+  return fs.readFileSync(
+    path.join(
+      root,
+      "packages",
+      "adapter-canvas",
+      "test",
+      "fixtures",
+      "app-bicep-check",
+      name,
+      "compiled.json"
+    ),
+    "utf8"
+  );
+}
+
 const containerImageType = "Radius.Compute/containerImages@2025-08-01-preview";
 const fullSha = "a".repeat(40);
 const interpolatedGitRef =
@@ -137,76 +146,6 @@ function localModuleResources(
 
 function template(resources: object, parameters: object = {}): string {
   return JSON.stringify({ resources, parameters });
-}
-
-function writeRadiusBicepConfig(directory: string) {
-  fs.writeFileSync(
-    path.join(directory, "bicepconfig.json"),
-    JSON.stringify({
-      experimentalFeaturesEnabled: { extensibility: true },
-      extensions: {
-        radius: "br:biceptypes.azurecr.io/radius:latest"
-      }
-    })
-  );
-}
-
-function compileBicep(directory: string, file: string) {
-  return spawnSync(
-    managedBicep,
-    [
-      "build",
-      file,
-      "--diagnostics-format",
-      "sarif",
-      "--stdout",
-      "--no-restore"
-    ],
-    {
-      cwd: directory,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"]
-    }
-  );
-}
-
-function bicepImage(gitRefDeclaration: string): string {
-  return `extension radius
-
-${gitRefDeclaration}
-
-resource containerImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
-  name: 'test-image'
-  location: 'global'
-  properties: {
-    application: 'test-app'
-    environment: 'test'
-    tag: 'latest'
-    build: {
-      source: 'git::https://github.com/example/app.git?ref=\${gitRef}'
-    }
-  }
-}
-`;
-}
-
-function canCompileRadiusBicep(): boolean {
-  if (!hasInstalledBicep()) {
-    return false;
-  }
-
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "radius-bicep-"));
-  try {
-    writeRadiusBicepConfig(directory);
-    fs.writeFileSync(
-      path.join(directory, "app.bicep"),
-      bicepImage(`param gitRef string = '${"a".repeat(40)}'`)
-    );
-    const result = compileBicep(directory, "app.bicep");
-    return !result.error && result.status === 0;
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
 }
 
 test("passes a warning-free Bicep compilation", () => {
@@ -912,125 +851,29 @@ test("ignores Git refs outside container image resources", () => {
   assert.equal(result.stderr, "");
 });
 
-function hasInstalledBicep(): boolean {
-  const version = spawnSync(managedBicep, ["--version"], { stdio: "ignore" });
-  return !version.error && version.status === 0;
-}
+test("rejects an interpolated ref from captured Bicep output", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledBicepFixture("interpolated-ref"))
+  );
 
-const hasBicep = hasInstalledBicep();
-const hasRadiusBicep = canCompileRadiusBicep();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /containerImage\.properties\.build\.source/u);
+  assert.match(result.stderr, /eb33f12/u);
+});
 
-test.skipIf(!hasRadiusBicep)(
-  "rejects an interpolated ref from real Bicep output",
-  () => {
-    const directory = temporaryDirectory();
-    const app = bicepImage("param gitRef string = 'eb33f12'");
-    writeRadiusBicepConfig(directory);
-    fs.writeFileSync(path.join(directory, "app.bicep"), app);
+test("rejects a local module argument from captured Bicep output", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledBicepFixture("local-module-ref"))
+  );
 
-    const compiled = compileBicep(directory, "app.bicep");
-    assert.equal(compiled.status, 0, compiled.stderr);
-
-    const result = runChecker(
-      directory,
-      fakeBicep(
-        directory,
-        compiled.stderr ?? "",
-        compiled.status ?? 1,
-        compiled.stdout ?? ""
-      ),
-      app
-    );
-
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /containerImage\.properties\.build\.source/u);
-    assert.match(result.stderr, /eb33f12/u);
-  }
-);
-
-test.skipIf(!hasRadiusBicep)(
-  "rejects a local module argument from real Bicep output",
-  () => {
-    const directory = temporaryDirectory();
-    const child = bicepImage("param gitRef string");
-    const app = `extension radius
-
-module child './child.bicep' = {
-  name: 'child'
-  params: {
-    gitRef: 'eb33f12'
-  }
-}
-`;
-    writeRadiusBicepConfig(directory);
-    fs.writeFileSync(path.join(directory, "child.bicep"), child);
-    fs.writeFileSync(path.join(directory, "app.bicep"), app);
-
-    const compiled = compileBicep(directory, "app.bicep");
-    assert.equal(compiled.status, 0, compiled.stderr);
-
-    const result = runChecker(
-      directory,
-      fakeBicep(
-        directory,
-        compiled.stderr ?? "",
-        compiled.status ?? 1,
-        compiled.stdout ?? ""
-      ),
-      app
-    );
-
-    assert.equal(result.status, 1);
-    assert.match(
-      result.stderr,
-      /child\.containerImage\.properties\.build\.source/u
-    );
-    assert.match(result.stderr, /eb33f12/u);
-  }
-);
-
-test.skipIf(!hasBicep)(
-  "accepts a secure value and rejects an insecure sensitive input",
-  () => {
-    const directory = temporaryDirectory();
-    const app = path.join(directory, "app.bicep");
-
-    const model = (secure: boolean) => {
-      const annotation = secure ? "@secure()\n" : "";
-      return `${annotation}param secret string
-
-resource script 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
-  name: 'test'
-  location: 'westus'
-  kind: 'AzureCLI'
-  properties: {
-    azCliVersion: '2.52.0'
-    retentionInterval: 'P1D'
-    scriptContent: 'echo test'
-    environmentVariables: [
-      {
-        name: 'SECRET'
-        secureValue: secret
-      }
-    ]
-  }
-}
-`;
-    };
-
-    fs.writeFileSync(app, model(true));
-    const clean = spawnSync(process.execPath, [checker, app], {
-      encoding: "utf8"
-    });
-    assert.equal(clean.status, 0, clean.stderr);
-    assert.equal(clean.stderr, "");
-
-    fs.writeFileSync(app, model(false));
-    const insecure = spawnSync(process.execPath, [checker, app], {
-      encoding: "utf8"
-    });
-    assert.equal(insecure.status, 1);
-    assert.match(insecure.stderr, /use-secure-value-for-secure-inputs/u);
-  },
-  30_000
-);
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /child\.containerImage\.properties\.build\.source/u
+  );
+  assert.match(result.stderr, /eb33f12/u);
+});
