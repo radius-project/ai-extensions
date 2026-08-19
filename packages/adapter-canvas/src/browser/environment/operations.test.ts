@@ -798,7 +798,7 @@ describe("trackProgress rendering", () => {
 
     controller?.renderProgress(
       record({
-        terminalState: "succeeded",
+        terminalState: "failed",
         journey: {
           resumeTarget: {
             page: "planned",
@@ -817,7 +817,7 @@ describe("trackProgress rendering", () => {
     expect(resume.textContent).toBe("Back to the graph");
 
     controller?.renderProgress(
-      record({ terminalState: "succeeded", journey: null })
+      record({ terminalState: "failed", journey: null })
     );
     expect(browser.els[PROGRESS_IDS.resume].style.display).toBe("none");
 
@@ -837,7 +837,7 @@ describe("trackProgress rendering", () => {
     // falls back to the default text.
     controller?.renderProgress(
       record({
-        terminalState: "succeeded",
+        terminalState: "action_required",
         journey: {
           resumeTarget: { page: "planned", repo: "octo/widgets", branch: "" },
           resumeReason: ""
@@ -853,7 +853,7 @@ describe("trackProgress rendering", () => {
     );
   });
 
-  it("moves terminal dismissal into the command row", () => {
+  it("renders successful completion as a simple OK action", () => {
     const browser = setup();
     const controller = initializeEnvironmentOperations(browser.context, {
       repo: REPO,
@@ -871,7 +871,43 @@ describe("trackProgress rendering", () => {
       browser.els[PROGRESS_IDS.commandButtons].children.map(
         (button) => button.textContent
       )
-    ).toEqual(["Keep resources and dismiss"]);
+    ).toEqual(["OK"]);
+  });
+
+  it("hides planned-graph navigation and stale terminal copy after success", () => {
+    const browser = setup();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+
+    controller?.renderProgress(
+      record({
+        terminalState: "succeeded",
+        guidance: [
+          { code: "stale", message: "This should not appear after success." }
+        ],
+        nextTransition: {
+          code: "monitoring-verification",
+          message: "Still monitoring."
+        },
+        journey: {
+          resumeTarget: {
+            page: "planned",
+            repo: "octo/widgets",
+            branch: "main"
+          },
+          resumeReason: "View planned graph"
+        }
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.resume].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe("");
+    expect(browser.els[PROGRESS_IDS.commandGuidance].style.display).toBe(
+      "none"
+    );
   });
 
   it("renders nothing and hides the panel for a null operation", () => {
@@ -4378,7 +4414,7 @@ describe("hostile values", () => {
     });
     controller?.renderProgress(
       record({
-        terminalState: "succeeded",
+        terminalState: "failed",
         journey: {
           resumeTarget: {
             page: "planned",
