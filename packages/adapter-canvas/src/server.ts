@@ -3174,10 +3174,17 @@ export async function cleanupGitHubEnvironmentArtifact(
   {
     attempt,
     runDeleteEnvironment,
+    invalidateEnvironmentListing,
     steps
   }: {
     attempt: number;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
+    // Called with the repository whose environment was proven removed, so the
+    // listing the picker reads stops answering from a cache that still holds
+    // it. The server owns this: the browser cannot invalidate a server cache,
+    // and a reload that hits the cached payload would redisplay the
+    // rolled-back environment under its last known status.
+    invalidateEnvironmentListing?: ((repo: string) => void) | null;
     steps?: string[];
   }
 ): Promise<{
@@ -3245,6 +3252,9 @@ export async function cleanupGitHubEnvironmentArtifact(
     if (deleted) {
       steps?.push(`✅ Deleted GitHub environment "${envName}"`);
       recordOutcome("deleted", null);
+      // `deleted` is only true for an artifact carrying both a repository and
+      // a name, so the repo the listing is cached under is known here.
+      invalidateEnvironmentListing?.(envRepo);
     } else {
       const detail =
         "Missing the GitHub environment name or repository needed to target the newly created environment precisely.";
@@ -3337,6 +3347,9 @@ export async function finalizeSetupFailure(
       const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
         attempt,
         runDeleteEnvironment,
+        invalidateEnvironmentListing: (repo) => {
+          envListCache.delete(repo);
+        },
         steps
       });
       warnings.push(...environmentCleanup.warnings);
@@ -4448,6 +4461,9 @@ function createInstanceRequestCoordinator(
       const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
         attempt,
         runDeleteEnvironment: (args) => ghOrThrow(args, 20000),
+        invalidateEnvironmentListing: (repo) => {
+          envListCache.delete(repo);
+        },
         steps
       });
       warnings.push(...environmentCleanup.warnings);

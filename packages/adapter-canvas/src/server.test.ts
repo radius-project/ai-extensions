@@ -1019,6 +1019,64 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
     expect(steps).toEqual(['✅ Deleted GitHub environment "dev"']);
   });
 
+  it("invalidates the listing cache for the repository it removed the environment from", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev"
+    });
+    const invalidated: string[] = [];
+
+    await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 1,
+      runDeleteEnvironment: async () => {},
+      invalidateEnvironmentListing: (repo) => {
+        invalidated.push(repo);
+      }
+    });
+
+    // Without this the picker keeps serving the rolled-back environment from
+    // the short-TTL listing cache, still labelled from its last verify run.
+    expect(invalidated).toEqual(["octo/app"]);
+  });
+
+  it.each([
+    [
+      "the delete failed",
+      "created",
+      async () => {
+        throw new Error("GitHub API request failed.");
+      }
+    ],
+    [
+      "the environment could not be claimed",
+      "created_candidate",
+      async () => {
+        throw new Error("must not delete an environment it cannot claim");
+      }
+    ]
+  ])(
+    "leaves the listing cache alone when %s",
+    async (_name, state, runDeleteEnvironment) => {
+      const op = newAzureOp();
+      recordGitHubEnvironment(op, { state, repo: "octo/app", name: "dev" });
+      const invalidated: string[] = [];
+
+      await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: 1,
+        runDeleteEnvironment,
+        invalidateEnvironmentListing: (repo) => {
+          invalidated.push(repo);
+        }
+      });
+
+      // The environment is still there, so a listing that still shows it is
+      // correct and must not be thrown away.
+      expect(invalidated).toEqual([]);
+    }
+  );
+
   it("leaves an unprovable environment in place and says so", async () => {
     const op = newAzureOp();
     recordGitHubEnvironment(op, {
