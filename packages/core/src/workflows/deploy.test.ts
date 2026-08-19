@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 import {
   DEFAULT_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS,
   DEFAULT_TARGET_CLUSTER_ARCH_MODE,
@@ -180,5 +181,126 @@ describe("generateDeployWorkflow", () => {
     expect(DEFAULT_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS).toBe(
       "linux/amd64,linux/arm64"
     );
+  });
+});
+
+// Fixtures that FAITHFULLY MIRROR the quoting of the real radius-project/radius
+// deploy templates (`.github/extension/run-rad-commands*.yml`), unlike the
+// inline fixtures above which use double quotes throughout. Reproducing the real
+// mix is what lets these tests catch the issue #407 class of bug:
+//   - plain values are injected into SINGLE-quoted scalars (`APP_FILE`, `ENV`)
+//     and into unquoted GHA expressions (`APP_IMAGE`, dispatcher `environment`);
+//   - the arch placeholders are injected into DOUBLE-quoted scalars, because the
+//     value core injects is itself a GHA expression whose default is
+//     single-quoted (`${{ vars.X || 'detect' }}`). A single-quoted scalar there
+//     nests the quotes and produces invalid YAML (the #407 regression).
+const REALISTIC_TEMPLATES = {
+  [DEPLOY_DISPATCHER_FILE]: `name: deploy
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        default: '{{ENV}}'
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    environment: \${{ inputs.environment || '{{ENV}}' }}
+    env:
+      TARGET_CLUSTER_ARCH_MODE: "{{TARGET_CLUSTER_ARCH_MODE}}"
+      TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: "{{TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS}}"
+    steps:
+      - run: echo \${{ github.sha }}
+`,
+  [DEPLOY_AZURE_FILE]: `name: deploy-azure
+env:
+  APP_FILE: '{{APP_FILE}}'
+  APP_IMAGE: \${{ inputs.image || github.sha || 'latest' }}
+  TARGET_CLUSTER_ARCH_MODE: "{{TARGET_CLUSTER_ARCH_MODE}}"
+  TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: "{{TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS}}"
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
+`,
+  [DEPLOY_AWS_FILE]: `name: deploy-aws
+env:
+  APP_FILE: '{{APP_FILE}}'
+  APP_IMAGE: \${{ inputs.image || github.sha || 'latest' }}
+  TARGET_CLUSTER_ARCH_MODE: "{{TARGET_CLUSTER_ARCH_MODE}}"
+  TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: "{{TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS}}"
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
+`
+};
+
+describe("generateDeployWorkflow YAML validity", () => {
+  // Positive guard: with the real templates' quoting and the default arch vars
+  // (single-quoted GHA expressions), every rendered file must parse as valid
+  // YAML. Prior tests only did `.toContain(...)` substring checks and never
+  // parsed the output, so they stayed green against invalid YAML.
+  it("renders valid YAML for every file when arch scalars are double-quoted", () => {
+    const files = generateDeployWorkflow(
+      "prod",
+      ".radius/app.bicep",
+      REALISTIC_TEMPLATES
+    );
+
+    for (const [name, body] of Object.entries(files)) {
+      expect(
+        () => parseYaml(body),
+        `${name} should parse as valid YAML`
+      ).not.toThrow();
+    }
+  });
+
+  // The injected GHA expression (with its single-quoted default) must survive
+  // substitution intact inside the double-quoted scalar.
+  it("preserves the injected GHA arch expressions as YAML string values", () => {
+    const files = generateDeployWorkflow(
+      "prod",
+      ".radius/app.bicep",
+      REALISTIC_TEMPLATES
+    );
+    const azure = parseYaml(files[DEPLOY_AZURE_FILE]) as {
+      env: Record<string, string>;
+    };
+
+    expect(azure.env.TARGET_CLUSTER_ARCH_MODE).toBe(
+      `\${{ vars.${RADIUS_BUILD_ARCH_MODE_VAR} || '${DEFAULT_TARGET_CLUSTER_ARCH_MODE}' }}`
+    );
+    expect(azure.env.TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS).toBe(
+      `\${{ vars.${RADIUS_BUILD_PLATFORMS_VAR} || '${DEFAULT_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS}' }}`
+    );
+    // The plain single-quoted scalars stay intact too.
+    expect(azure.env.APP_FILE).toBe(".radius/app.bicep");
+  });
+
+  // Negative regression guard: this is exactly the #407 bug. When the arch
+  // scalar is SINGLE-quoted (as the radius templates were before #12721), the
+  // single-quoted default inside the injected GHA expression nests and YAML
+  // terminates the scalar early, so the rendered file is invalid YAML. This test
+  // locks in WHY the scalar must be double-quoted: if someone reintroduces the
+  // single-quoted scalar (or an injected value that nests quotes), it fails.
+  it("produces invalid YAML when an arch scalar is single-quoted (issue #407)", () => {
+    const broken = {
+      ...REALISTIC_TEMPLATES,
+      [DEPLOY_AZURE_FILE]: REALISTIC_TEMPLATES[DEPLOY_AZURE_FILE].replace(
+        'TARGET_CLUSTER_ARCH_MODE: "{{TARGET_CLUSTER_ARCH_MODE}}"',
+        "TARGET_CLUSTER_ARCH_MODE: '{{TARGET_CLUSTER_ARCH_MODE}}'"
+      )
+    };
+    // Substitution still succeeds (no unresolved placeholder), so generation
+    // does not throw — the breakage only surfaces when the YAML is parsed.
+    const files = generateDeployWorkflow(
+      "prod",
+      ".radius/app.bicep",
+      broken
+    );
+
+    expect(() => parseYaml(files[DEPLOY_AZURE_FILE])).toThrow();
   });
 });
