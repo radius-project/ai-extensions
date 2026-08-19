@@ -695,7 +695,7 @@ export async function createSelectedGhExecutor(
   const token = useInjected ? injectedToken : keyringToken;
   if (!token) {
     throw new Error(
-      `Could not obtain a GitHub credential for @${login}. Sign in with: gh auth login`
+      `Could not obtain a GitHub credential for @${login}. Authenticate that account with GitHub CLI, then re-check. Note: gh auth login changes the machine-wide active account for github.com.`
     );
   }
   const credentialSource: SelectedGhCredentialSource =
@@ -994,7 +994,7 @@ export async function getGhPackageCredentials(): Promise<{
   const login = id.actingLogin;
   if (!login) {
     throw new Error(
-      "No GitHub account is available for package setup. Sign in with: gh auth login"
+      "No GitHub account is available for package setup. Authenticate with GitHub CLI, then re-check. Note: gh auth login changes the machine-wide active account for github.com."
     );
   }
   const acct = (id.accounts || []).find((a) => a.login === login) || null;
@@ -1005,7 +1005,7 @@ export async function getGhPackageCredentials(): Promise<{
   const injected = getInjectedGhToken();
   if (injected) return { token: injected, username: login };
   throw new Error(
-    `Could not obtain a GitHub token for @${login}. Sign in with: gh auth login`
+    `Could not obtain a GitHub token for @${login}. Authenticate that account with GitHub CLI, then re-check. Note: gh auth login changes the machine-wide active account for github.com.`
   );
 }
 

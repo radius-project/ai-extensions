@@ -116,7 +116,7 @@ export const BOOTSTRAP_CONTENT =
 const OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
 const OCI_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json";
 const PACKAGE_AUTH_GUIDANCE =
-  "Refresh the stored GitHub CLI credential with: gh auth refresh -s read:packages -s write:packages";
+  "GitHub CLI can refresh only the active account. Temporarily make the selected account active, run: gh auth refresh --hostname github.com --scopes read:packages,write:packages, then restore the previous active account.";
 
 async function defaultRunKeyringCommand(args: string[]): Promise<string> {
   const { runGhKeyringCommand } = await import("./gh.js");

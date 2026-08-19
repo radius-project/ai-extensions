@@ -467,7 +467,7 @@ describe("GHCR package access probe", () => {
       }
     ]
   ] as const)(
-    "fails readiness when upload cleanup %s",
+    "keeps readiness after push authorization when upload cleanup %s",
     async (_label, cleanup) => {
       let call = 0;
       const result = await probeGhcrPackageWriteAccess(
@@ -493,12 +493,43 @@ describe("GHCR package access probe", () => {
         }
       );
       expect(result).toEqual({
-        ok: false,
+        ok: true,
         detail:
-          "GitHub Packages push access was verified, but the temporary upload session could not be removed."
+          "GitHub Packages accepted push authorization. The empty upload session could not be cancelled and will expire without creating a package artifact."
       });
     }
   );
+
+  it("accepts GHCR's unsupported upload cancellation response", async () => {
+    let call = 0;
+    const result = await probeGhcrPackageWriteAccess(
+      selectedExecutor({}),
+      "octo/app",
+      "dev",
+      async () => {
+        call += 1;
+        if (call === 1) {
+          return { ok: true, json: async () => ({ token: "opaque" }) };
+        }
+        if (call === 2) {
+          return {
+            ok: true,
+            status: 202,
+            headers: {
+              get: () => "/v2/octo/app/blobs/uploads/upload-1"
+            },
+            json: async () => ({})
+          };
+        }
+        return { ok: false, status: 405, json: async () => ({}) };
+      }
+    );
+    expect(result).toEqual({
+      ok: true,
+      detail:
+        "GitHub Packages accepted push authorization for the state package."
+    });
+  });
 
   it("fails safely when the upload authorization check cannot run", async () => {
     let call = 0;

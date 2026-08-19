@@ -3123,7 +3123,7 @@ export async function preflightGhcrPackageWriteAccess(
       ok: false,
       status: 403,
       code: "ghcr-scope-required",
-      error: `The GitHub account @${ghPkgLogin} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR. Run "gh auth switch -h github.com -u ${ghPkgLogin} && gh auth refresh -h github.com -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`
+      error: `The GitHub account @${ghPkgLogin} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR. GitHub CLI can refresh only the active account. Temporarily switch to @${ghPkgLogin}, run "gh auth refresh --hostname github.com --scopes read:packages,write:packages", then restore the previous account with "gh auth switch --hostname github.com --user <previous-login>" before retrying.`
     };
   }
 

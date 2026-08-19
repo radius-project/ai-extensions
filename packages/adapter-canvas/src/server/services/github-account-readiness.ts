@@ -176,18 +176,18 @@ export async function probeGhcrPackageWriteAccess(
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` }
     });
-    if (!cleanup.ok && cleanup.status !== 204) {
+    if (!cleanup.ok && cleanup.status !== 404 && cleanup.status !== 405) {
       return {
-        ok: false,
+        ok: true,
         detail:
-          "GitHub Packages push access was verified, but the temporary upload session could not be removed."
+          "GitHub Packages accepted push authorization. The empty upload session could not be cancelled and will expire without creating a package artifact."
       };
     }
   } catch {
     return {
-      ok: false,
+      ok: true,
       detail:
-        "GitHub Packages push access was verified, but the temporary upload session could not be removed."
+        "GitHub Packages accepted push authorization. The empty upload session could not be cancelled and will expire without creating a package artifact."
     };
   }
   return {
