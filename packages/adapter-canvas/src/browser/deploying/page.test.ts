@@ -1195,11 +1195,17 @@ describe("deploy flow", () => {
       deployBody = deployInit?.body;
       return jsonResponse({ ok: true });
     });
+    const deployStatuses = [
+      { status: "in_progress" },
+      { status: "in_progress", deployRunUrl: "https://example.test/run/1" }
+    ];
     page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-      jsonResponse({
-        status: "in_progress",
-        deployRunUrl: "https://example.test/run/1"
-      })
+      jsonResponse(
+        deployStatuses.shift() ?? {
+          status: "in_progress",
+          deployRunUrl: "https://example.test/run/1"
+        }
+      )
     );
 
     page.deployBtn.dispatch("click");
@@ -1213,6 +1219,9 @@ describe("deploy flow", () => {
       branch: "feature",
       appFile: ".radius/app.bicep"
     });
+    expect(inlineMessage(page.inlineStatus)).toBe("");
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toBe("");
     page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
     await flushPromises();
