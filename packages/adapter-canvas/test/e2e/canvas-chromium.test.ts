@@ -180,12 +180,13 @@ test.describe("Radius Canvas in Chromium", () => {
       repo: REPOSITORY,
       branch: WORKTREE_BRANCH
     });
-    await canvas.expectCliInvoked("rad");
-    expect(
-      (await canvas.cliCalls()).some(
-        (call) => call.tool === "rad" && call.args[0] === "app"
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) => call.tool === "rad" && call.args[0] === "app"
+        )
       )
-    ).toBe(true);
+      .toBe(true);
     await expect(page.locator(".rad-node")).toHaveCount(3);
     await expect(page.locator(".rad-node__title")).toHaveText([
       "web",
