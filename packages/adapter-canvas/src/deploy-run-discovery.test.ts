@@ -9,7 +9,9 @@ const { ghMock } = vi.hoisted(() => {
   return {
     ghMock: {
       calls: [] as string[][],
-      handler: (_args: string[]): {
+      handler: (
+        _args: string[]
+      ): {
         error?: ExecFileException | null;
         stdout?: string;
       } => ({ stdout: "[]" })
@@ -190,10 +192,17 @@ describe("findWorkflowRun time-window fallback", () => {
 
   it("accepts a run created within the ~60s skew tolerance before dispatch", async () => {
     replyWith([
-      { databaseId: 301, createdAt: new Date(DISPATCH_AT - 30_000).toISOString() }
+      {
+        databaseId: 301,
+        createdAt: new Date(DISPATCH_AT - 30_000).toISOString()
+      }
     ]);
 
-    const result = await findWorkflowRun("acme/widgets", "run.yml", DISPATCH_AT);
+    const result = await findWorkflowRun(
+      "acme/widgets",
+      "run.yml",
+      DISPATCH_AT
+    );
 
     expect(result).toBe(301);
   });
@@ -206,7 +215,11 @@ describe("findWorkflowRun time-window fallback", () => {
       }
     ]);
 
-    const result = await findWorkflowRun("acme/widgets", "run.yml", DISPATCH_AT);
+    const result = await findWorkflowRun(
+      "acme/widgets",
+      "run.yml",
+      DISPATCH_AT
+    );
 
     expect(result).toBeNull();
   });
@@ -225,7 +238,11 @@ describe("findWorkflowRun time-window fallback", () => {
       { databaseId: 304, createdAt: new Date(DISPATCH_AT).toISOString() }
     ]);
 
-    const result = await findWorkflowRun("acme/widgets", "run.yml", DISPATCH_AT);
+    const result = await findWorkflowRun(
+      "acme/widgets",
+      "run.yml",
+      DISPATCH_AT
+    );
 
     expect(result).toBe(304);
   });
@@ -233,7 +250,11 @@ describe("findWorkflowRun time-window fallback", () => {
   it("returns null when the run list is not an array", async () => {
     replyWith("not json");
 
-    const result = await findWorkflowRun("acme/widgets", "run.yml", DISPATCH_AT);
+    const result = await findWorkflowRun(
+      "acme/widgets",
+      "run.yml",
+      DISPATCH_AT
+    );
 
     expect(result).toBeNull();
   });

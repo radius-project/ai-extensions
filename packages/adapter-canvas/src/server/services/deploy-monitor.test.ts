@@ -399,7 +399,13 @@ describe("deploy monitor run discovery", () => {
               baselineRunId: 101
             })
         },
-        findWorkflowRun: (_repo, _workflowFile, _sinceMs, _knownId, afterRunId) => {
+        findWorkflowRun: (
+          _repo,
+          _workflowFile,
+          _sinceMs,
+          _knownId,
+          afterRunId
+        ) => {
           afterRunIds.push(afterRunId);
           return Promise.resolve(102);
         },

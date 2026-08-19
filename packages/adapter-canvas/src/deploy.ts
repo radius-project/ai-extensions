@@ -114,7 +114,9 @@ export function ghJson(
 
 // Coerce a run id (which state may carry as a string) to a finite number for
 // the monotonic-id comparison, or null when it is absent or not numeric.
-function numericRunId(value: number | string | null | undefined): number | null {
+function numericRunId(
+  value: number | string | null | undefined
+): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value === "string" && value.trim() !== "") {
     const parsed = Number(value);
