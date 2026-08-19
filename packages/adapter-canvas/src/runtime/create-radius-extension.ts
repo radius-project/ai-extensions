@@ -334,9 +334,15 @@ export function createRadiusExtension(
 
   // Staleness signals already handed to the agent, so a refresh that does not
   // clear the drift cannot block every later graph open. Scoped to this
-  // extension instance rather than the module. It only grows when a new problem
-  // appears on a new repo or branch, so it stays small over a session; it is
-  // cleared when the extension process restarts.
+  // extension instance rather than the module.
+  //
+  // Bounded because the key includes the commit the record names, so every
+  // regeneration produces a new one and the set would otherwise grow for as
+  // long as the process runs. Set preserves insertion order, so dropping the
+  // oldest evicts the least recently seen problem. Re-asking about a signal
+  // that fell out is harmless: the point is to stop a tight loop, not to
+  // remember forever.
+  const REFRESH_MEMO_LIMIT = 100;
   const requestedRefreshes = new Set<string>();
 
   return {
@@ -357,6 +363,10 @@ export function createRadiusExtension(
               shouldRequestRefresh: (key: string) => {
                 if (requestedRefreshes.has(key)) return false;
                 requestedRefreshes.add(key);
+                if (requestedRefreshes.size > REFRESH_MEMO_LIMIT) {
+                  const oldest = requestedRefreshes.values().next().value;
+                  if (oldest !== undefined) requestedRefreshes.delete(oldest);
+                }
                 return true;
               }
             }

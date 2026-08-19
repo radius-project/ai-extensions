@@ -381,6 +381,51 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     await harness.extension.shutdown("test");
   });
 
+  // The memo key includes the commit the record names, so a long session with
+  // many regenerations would otherwise grow it without limit.
+  it("keeps asking about new problems without growing the memo forever", async () => {
+    const model =
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
+    let commit = 0;
+    const harness = await createRuntimeSdkHarness({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": model },
+      headCommits: { "workspace:/workspace": "f".repeat(40) },
+      sourceChangedSince: true
+    });
+    // Each look presents a record naming a different commit, which is what a
+    // fresh regeneration produces.
+    harness.deps.appModel.fetchWorkspaceFile = async () =>
+      serializeAppOrigin({
+        generatedAt: "2026-08-11T05:32:32.000Z",
+        sourceCommit: String(commit).padStart(40, "0"),
+        skillVersion: "0.1.0-test",
+        appBicepHash: hashAppBicep(model)
+      });
+    const open = {
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        input: { page: "graph", repo: "acme/widgets", branch: "main" }
+      }
+    };
+
+    // Every distinct problem is still reported, well past the memo's limit.
+    for (const attempt of [1, 150, 300]) {
+      commit = attempt;
+      const decision = await harness.extension.hooks.onPreToolUse(open);
+      expect(decision?.permissionDecision).toBe("deny");
+    }
+
+    // And the same problem twice running is still only reported once.
+    commit = 999;
+    expect(
+      (await harness.extension.hooks.onPreToolUse(open))?.permissionDecision
+    ).toBe("deny");
+    expect(await harness.extension.hooks.onPreToolUse(open)).toBeUndefined();
+
+    await harness.extension.shutdown("test");
+  });
+
   it("does not block a graph open on a stale model that lives on another branch", async () => {
     const harness = await createRuntimeSdkHarness({
       bicepByRepoBranch: { "remote:other/repo@release": "resource db {}" },
