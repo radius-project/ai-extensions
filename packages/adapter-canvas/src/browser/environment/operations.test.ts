@@ -853,7 +853,7 @@ describe("trackProgress rendering", () => {
     );
   });
 
-  it("shows dismiss and actions only once the operation is terminal", () => {
+  it("moves terminal dismissal into the command row", () => {
     const browser = setup();
     const controller = initializeEnvironmentOperations(browser.context, {
       repo: REPO,
@@ -865,8 +865,13 @@ describe("trackProgress rendering", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
 
     controller?.renderProgress(record({ terminalState: "succeeded" }));
-    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("");
-    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
+    expect(
+      browser.els[PROGRESS_IDS.commandButtons].children.map(
+        (button) => button.textContent
+      )
+    ).toEqual(["Keep resources and dismiss"]);
   });
 
   it("renders nothing and hides the panel for a null operation", () => {
@@ -1476,6 +1481,37 @@ describe("operation commands", () => {
     expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
       "Radius finishes the current step and stops."
     );
+  });
+
+  it("places keep-and-dismiss beside retry verification for a terminal failure", () => {
+    const browser = setup();
+    commandsController(browser)?.renderProgress(
+      record({
+        state: "failed_partial",
+        terminalState: "failed_partial",
+        actions: [
+          {
+            id: "retry-verification",
+            kind: "retry_verification",
+            label: "Retry verification",
+            description: "Check the same workflow again.",
+            path: "/api/operations/op-1/retry/verification",
+            pending: false
+          }
+        ]
+      })
+    );
+
+    const rendered = buttons(browser);
+    expect(rendered.map((button) => button.textContent)).toEqual([
+      "Retry verification",
+      "Keep resources and dismiss"
+    ]);
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
+
+    rendered[1].dispatch("click");
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
   });
 
   it("drops an action with no path rather than rendering a button that can only fail", () => {
