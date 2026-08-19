@@ -194,6 +194,17 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   .status.success, .rad-status--success { background: var(--rad-success-bg); border: 1px solid var(--rad-success); color: var(--rad-text); }
   .status.error, .rad-status--error { background: var(--rad-danger-bg); border: 1px solid var(--rad-danger); color: var(--rad-text); }
 
+  /* ─── Graph build progress ────────────────────────────────────────────── */
+  /* Shared by every graph page's progress panel. Lives here rather than in the
+     graph loading fragment because the diff page renders progress without
+     mounting a graph surface. */
+  .rad-graph-progress__steps li { list-style: none; }
+  .step-done::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--rad-success); margin-right: 8px; vertical-align: 1px; }
+  .step-active::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--rad-brand); box-sizing: border-box; margin-right: 8px; vertical-align: 1px; }
+  .step-active { color: var(--rad-text); font-weight: 500; }
+  .step-error::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--rad-danger); margin-right: 8px; vertical-align: 1px; }
+  .step-error { color: var(--rad-text); }
+
   /* ─── Legacy tabs (kept for pages not yet migrated) ───────────────────── */
   .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--rad-stroke); margin-bottom: 16px; }
   .tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-weight: 500; user-select: none; }

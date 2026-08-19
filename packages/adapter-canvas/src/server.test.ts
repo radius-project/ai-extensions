@@ -1040,11 +1040,46 @@ describe("resolveDeployStatus", () => {
 
 describe("addGraphProgress", () => {
   it("accepts progress only from the current graph generation", () => {
-    const state = { graphBuildGeneration: 2, progressMessages: ["current"] };
+    const state: CanvasState = {
+      graphBuildGeneration: 2,
+      graphBuildEvents: [
+        {
+          sequence: 1,
+          stage: "checking_model",
+          state: "running",
+          detail: "current"
+        }
+      ]
+    };
 
-    expect(addGraphProgress(state, 1, "stale")).toBe(false);
-    expect(addGraphProgress(state, 2, "latest")).toBe(true);
-    expect(state.progressMessages).toEqual(["current", "latest"]);
+    expect(
+      addGraphProgress(state, 1, {
+        stage: "building_graph",
+        state: "running",
+        detail: "stale"
+      })
+    ).toBe(false);
+    expect(
+      addGraphProgress(state, 2, {
+        stage: "building_graph",
+        state: "running",
+        detail: "latest"
+      })
+    ).toBe(true);
+    expect(state.graphBuildEvents).toEqual([
+      {
+        sequence: 1,
+        stage: "checking_model",
+        state: "running",
+        detail: "current"
+      },
+      {
+        sequence: 2,
+        stage: "building_graph",
+        state: "running",
+        detail: "latest"
+      }
+    ]);
   });
 });
 

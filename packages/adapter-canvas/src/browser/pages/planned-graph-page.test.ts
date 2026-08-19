@@ -5,10 +5,13 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
+import type { FakeElement } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 import {
   initializePlannedGraphPage,
@@ -70,7 +73,8 @@ function fixture(options: FixtureOptions = {}) {
   const status = createFakeElement("plan-status");
   const container = createFakeElement("graph-container");
   const wrapper = createFakeElement("graph-container-wrapper");
-  const elements = [state];
+  const progressHost = createFakeElement("progress-steps");
+  const elements = [state, progressHost];
   if (withContainer) elements.push(container);
   if (withApp) elements.push(app);
   if (withBranch) elements.push(branch);
@@ -113,7 +117,8 @@ function fixture(options: FixtureOptions = {}) {
     button,
     status,
     container,
-    wrapper
+    wrapper,
+    progressHost
   };
 }
 
@@ -760,5 +765,107 @@ describe("initializePlannedGraphPage", () => {
     await flushPromises();
 
     expect(browser.clock.pending).toBe(0);
+  });
+  describe("graph build progress", () => {
+    const stageText = (host: FakeElement): string[] => {
+      const list = host.children.find(
+        (child) => child.className === "rad-graph-progress__steps"
+      );
+      return (list?.children ?? []).map(
+        (row) => `${fakeText(row)}:${row.className}`
+      );
+    };
+
+    it("renders typed planning stages instead of prose", async () => {
+      const { browser, progressHost } = fixture();
+      const plan = createDeferred<HttpResponse>();
+      browser.net.handle("/api/plan-graph", () => plan.promise);
+      browser.net.handle("/api/progress", () =>
+        jsonResponse({
+          generation: 3,
+          events: [
+            {
+              sequence: 1,
+              stage: "building_graph",
+              state: "succeeded",
+              detail: "Built a graph with 4 resource(s)."
+            },
+            {
+              sequence: 2,
+              stage: "resolving_recipes",
+              state: "running",
+              detail: "Resolving recipes for dev."
+            }
+          ]
+        })
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      browser.clock.tick(PLAN_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_graph}:step-done`,
+        `${GRAPH_STAGE_LABELS.resolving_recipes}:step-active`
+      ]);
+      expect(fakeText(progressHost)).toContain("Elapsed ");
+      expect(fakeText(progressHost)).not.toMatch(/%/);
+    });
+
+    it("shows a starting stage before the first poll returns", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/plan-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:step-active`
+      ]);
+    });
+  });
+  describe("planned graph progress defaults", () => {
+    it("accepts typed events from a payload that omits the generation", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/plan-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress", () =>
+        jsonResponse({
+          events: [
+            {
+              sequence: 5,
+              stage: "resolving_recipes",
+              state: "running",
+              detail: "Resolving recipes."
+            }
+          ]
+        })
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+      browser.clock.tick(PLAN_PROGRESS_MS);
+      await flushPromises();
+
+      const list = progressHost.children.find(
+        (child) => child.className === "rad-graph-progress__steps"
+      );
+      expect((list?.children ?? []).map((row) => row.className)).toEqual([
+        "step-active"
+      ]);
+      expect(fakeText(progressHost)).toContain(
+        GRAPH_STAGE_LABELS.resolving_recipes
+      );
+    });
   });
 });

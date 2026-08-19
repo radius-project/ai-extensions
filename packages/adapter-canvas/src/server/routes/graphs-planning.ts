@@ -78,18 +78,30 @@ export interface GraphsPlanningReadsDependencies {
   repoMatchesWorkspace(state: CanvasState, repo: string): boolean;
 }
 
-// The progress log the deploying page polls. Read-only and synchronous: the
-// messages are appended elsewhere, including by `/api/deployed-graph` below.
+// Graph workflows publish typed events. Keep legacy messages for deployed-graph
+// diagnostics until that independent status-read path is migrated.
+//
+// `generation` identifies which workflow owns the event stream. Polling is
+// concurrent with the workflow request itself, so a reader that only saw
+// `events` could apply an older in-flight response over a newer snapshot and
+// visibly regress the reported stage.
 export function handleProgress(
   context: CanvasRequestContext,
   dependencies: GraphsPlanningReadsDependencies
 ): void {
   const { response } = context;
   const entry = dependencies.readInstanceEntry(context.instanceId);
-  const messages = entry?.state?.progressMessages || [];
+  const state = entry?.state;
+  const payload: Record<string, unknown> = {
+    messages: state?.progressMessages || []
+  };
+  if (state?.graphBuildEvents) {
+    payload.events = state.graphBuildEvents;
+    payload.generation = state.graphProgressGeneration || 0;
+  }
   response.setHeader("Content-Type", "application/json");
   response.writeHead(200);
-  response.end(JSON.stringify({ messages }));
+  response.end(JSON.stringify(payload));
 }
 
 // The Deployed view is a projection: a fixed topology (the modeled application)

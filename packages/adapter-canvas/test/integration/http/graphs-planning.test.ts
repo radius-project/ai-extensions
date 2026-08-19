@@ -147,6 +147,31 @@ function start(): Harness {
 }
 
 describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
+  it("serves typed graph progress events over a real socket", async () => {
+    const harness = start();
+    harness.state.progressMessages = ["deployed diagnostic"];
+    harness.state.graphProgressGeneration = 7;
+    harness.state.graphBuildEvents = [
+      {
+        sequence: 1,
+        stage: "building_graph",
+        state: "running",
+        detail: "Building graph."
+      }
+    ];
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/progress`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.json()).toEqual({
+      messages: ["deployed diagnostic"],
+      generation: 7,
+      events: harness.state.graphBuildEvents
+    });
+  });
+
   it("greys out an unresolvable repo without constructing a reader", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");

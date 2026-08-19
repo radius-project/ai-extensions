@@ -149,6 +149,8 @@ const KNOWN_STATE_FIELDS: readonly (keyof CanvasState)[] = [
   "deployedGraph",
   "plannedResources",
   "graphResources",
+  "graphBuildEvents",
+  "graphProgressGeneration",
   "progressMessages"
 ];
 
@@ -410,6 +412,55 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(recording.headerSteps).toEqual(SET_THEN_WRITE);
     expect(recording.body).toBe('{"messages":["first","second"]}');
     expect(calls.log).toEqual(["readInstanceEntry(panel-a)"]);
+  });
+
+  it("serves typed graph events without dropping deployed diagnostics", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        progressMessages: ["diagnostic"],
+        graphBuildEvents: [
+          {
+            sequence: 1,
+            stage: "building_graph",
+            state: "running",
+            detail: "Building graph."
+          }
+        ]
+      }
+    });
+    const recording = await run("/api/progress", handleProgress, deps);
+    expect(JSON.parse(recording.body)).toEqual({
+      messages: ["diagnostic"],
+      generation: 0,
+      events: [
+        {
+          sequence: 1,
+          stage: "building_graph",
+          state: "running",
+          detail: "Building graph."
+        }
+      ]
+    });
+  });
+
+  it("identifies the owning stream so a reader can reject a stale snapshot", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        graphProgressGeneration: 4,
+        graphBuildEvents: [
+          {
+            sequence: 1,
+            stage: "checking_model",
+            state: "running",
+            detail: "Checking for an application model."
+          }
+        ]
+      }
+    });
+    const recording = await run("/api/progress", handleProgress, deps);
+    expect(JSON.parse(recording.body).generation).toBe(4);
   });
 
   it("answers an empty list for a state that has never logged", async () => {

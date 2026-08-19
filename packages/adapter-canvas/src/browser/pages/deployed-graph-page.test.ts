@@ -5,10 +5,13 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
+import type { FakeElement } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 import {
   DEPLOYED_GRAPH_POLL_MS,
@@ -95,6 +98,8 @@ function fixture(options: FixtureOptions = {}) {
   const modalText = createFakeElement("deployed-deleting-text");
 
   const elements = [state];
+  const progressHost = createFakeElement("deployed-progress-steps");
+  elements.push(progressHost);
   if (withAppSelect) elements.push(appSelect);
   if (withEnvSelect) elements.push(envSelect);
   if (withAction) elements.push(action);
@@ -160,7 +165,8 @@ function fixture(options: FixtureOptions = {}) {
     logOutput,
     container,
     modal,
-    modalText
+    modalText,
+    progressHost
   };
 }
 
@@ -2118,5 +2124,59 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.net.calls.filter((call) => call.url === url).length).toBe(
       before + 1
     );
+  });
+  describe("graph build progress", () => {
+    const stageText = (host: FakeElement): string[] => {
+      const list = host.children.find(
+        (child) => child.className === "rad-graph-progress__steps"
+      );
+      return (list?.children ?? []).map(
+        (row) => `${fakeText(row)}:${row.className}`
+      );
+    };
+
+    it("shows the loading stage while the first request is in flight", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => createDeferred<HttpResponse>().promise
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.loading_deployment}:step-active`
+      ]);
+      expect(fakeText(progressHost)).toContain("Elapsed ");
+      expect(fakeText(progressHost)).not.toMatch(/%/);
+    });
+
+    it("clears the panel once the deployed graph arrives", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => jsonResponse({ resources: [{ id: "app/web" }], mode: "greyed" })
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([]);
+      expect(fakeText(progressHost)).toBe("");
+    });
+
+    it("leaves a failed stage on screen when the request fails", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => Promise.reject(new Error("graph service down"))
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.loading_deployment}:step-error`
+      ]);
+      expect(fakeText(progressHost)).not.toContain("graph service down");
+    });
   });
 });

@@ -119,6 +119,26 @@ export interface CanvasDeployResult {
   workflow?: string;
 }
 
+export type GraphBuildStage =
+  | "checking_model"
+  | "creating_model"
+  | "building_graph"
+  | "building_base_graph"
+  | "building_head_graph"
+  | "resolving_recipes"
+  | "loading_deployment"
+  | "comparing_graphs"
+  | "rendering_graph";
+
+export type GraphBuildEventState = "running" | "succeeded" | "failed";
+
+export interface GraphBuildEvent {
+  sequence: number;
+  stage: GraphBuildStage;
+  state: GraphBuildEventState;
+  detail: string;
+}
+
 export interface CanvasState {
   [key: string]: unknown;
   graphResources?: CanvasGraphResource[] | null;
@@ -126,6 +146,8 @@ export interface CanvasState {
   graphBranch?: string;
   graphFromWorkspace?: boolean;
   graphLoaded?: boolean;
+  graphBuildEvents?: GraphBuildEvent[];
+  graphProgressGeneration?: number;
   plannedRepo?: string;
   plannedProvider?: string;
   plannedResources?: CanvasGraphResource[] | null;

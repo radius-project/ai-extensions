@@ -1,5 +1,6 @@
 import { optionalBrowserFunction, requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
+import { createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";
@@ -21,6 +22,7 @@ import {
 } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
+import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
@@ -28,6 +30,7 @@ import { readPageState } from "./state.js";
 const ENTRY_KEY = "deployed-graph-page";
 export const DEPLOYED_GRAPH_STATE_ID = "radius-deployed-graph-state";
 export const DEPLOYED_GRAPH_POLL_MS = 15_000;
+export const DEPLOYED_PROGRESS_STEPS_ID = "deployed-progress-steps";
 export const DEPLOYED_STATE_POLL_MS = 4_000;
 export const DEPLOYED_LOG_POLL_MS = 1_500;
 export const DEPLOYED_STATE_POLL_LIMIT = 45;
@@ -149,6 +152,22 @@ export function initializeDeployedGraphPage(
   let renderedBranch = "";
   let resumeGraphOnVisible = false;
   let graphRequestInFlight = false;
+  let progressView: GraphProgressView | null = null;
+
+  const stopProgress = (): void => {
+    progressView?.stop();
+    progressView = null;
+    const host = context.dom.byId(DEPLOYED_PROGRESS_STEPS_ID);
+    if (host) host.replaceChildren();
+  };
+
+  // Leave the panel on screen showing which stage failed, rather than clearing
+  // it and leaving only the status banner to explain the outcome.
+  const failProgress = (detail: string): void => {
+    progressView?.append("loading_deployment", "failed", detail);
+    progressView?.stop();
+    progressView = null;
+  };
 
   const selectedApplication = (): string => appSelect?.value ?? "";
   const selectedEnvironment = (): string => envSelect?.value ?? "";
@@ -312,6 +331,20 @@ export function initializeDeployedGraphPage(
       status.style.display = "";
       status.textContent = "Loading deployed application graph…";
     }
+    // Only the first load makes the user wait. Background refreshes of an
+    // already-rendered graph must not flash a progress panel over it.
+    if (!controller) {
+      stopProgress();
+      progressView = createGraphProgress(context, entry, {
+        hostId: DEPLOYED_PROGRESS_STEPS_ID,
+        initial: {
+          sequence: 0,
+          stage: "loading_deployment",
+          state: "running",
+          detail: "Reading the resources deployed to this environment."
+        }
+      });
+    }
     graphAbort?.abort();
     graphAbort = context.net.createAbort();
     const requestGeneration = ++graphGeneration;
@@ -328,6 +361,7 @@ export function initializeDeployedGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== graphGeneration) return;
+        stopProgress();
         const resources = parseGraphResources(readArray(payload, "resources"));
         lastMode = readString(payload, "mode") || "greyed";
         if (resources.length === 0) {
@@ -363,6 +397,7 @@ export function initializeDeployedGraphPage(
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== graphGeneration) return;
+        failProgress("The deployed application graph could not be loaded.");
         context.logger.error("Radius deployed graph request failed.", error);
         if (!controller && status) {
           status.style.display = "";

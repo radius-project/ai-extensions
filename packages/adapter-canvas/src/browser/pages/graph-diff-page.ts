@@ -1,11 +1,13 @@
 import { requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
+import { createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
-import { readArray, readBoolean, readString } from "../json.js";
+import { readArray, readBoolean, readNumber, readString } from "../json.js";
 import { populateApplications, populateDiffBranches } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
+import type { GraphProgressView } from "../graph/progress.js";
 import type {
   AbortHandle,
   BrowserContext,
@@ -16,6 +18,8 @@ import { readPageState } from "./state.js";
 const ENTRY_KEY = "graph-diff-page";
 export const GRAPH_DIFF_STATE_ID = "radius-graph-diff-state";
 export const DIFF_DEBOUNCE_MS = 500;
+export const DIFF_PROGRESS_MS = 800;
+export const DIFF_PROGRESS_STEPS_ID = "diff-progress-steps";
 
 interface DiffState {
   repo: string;
@@ -66,6 +70,35 @@ export function initializeGraphDiffPage(
   let pending: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
+  let progress: ScopeTimer | null = null;
+  let progressView: GraphProgressView | null = null;
+
+  const stopProgress = (): void => {
+    if (progress !== null) entry.cancel(progress);
+    progress = null;
+    progressView?.stop();
+    progressView = null;
+  };
+
+  const pollProgress = (
+    requestGeneration: number,
+    view: GraphProgressView
+  ): void => {
+    void context.net
+      .fetch("/api/progress")
+      .then((response) => response.json())
+      .then((payload) => {
+        if (!entry.active || requestGeneration !== generation) return;
+        const events = readArray(payload, "events");
+        if (events.length > 0) {
+          view.sync(events, readNumber(payload, "generation") ?? 0);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!entry.active || requestGeneration !== generation) return;
+        context.logger.error("Radius graph diff progress failed.", error);
+      });
+  };
 
   const compare = (headElement: DomSelectElement): void => {
     pending = null;
@@ -76,6 +109,20 @@ export function initializeGraphDiffPage(
     const requestGeneration = ++generation;
     requestAbort = context.net.createAbort();
     showStatus(context, `Comparing ${base} → ${head}…`, "info");
+    stopProgress();
+    const view = createGraphProgress(context, entry, {
+      hostId: DIFF_PROGRESS_STEPS_ID,
+      initial: {
+        sequence: 0,
+        stage: "building_base_graph",
+        state: "running",
+        detail: `Comparing ${base} → ${head}…`
+      }
+    });
+    progressView = view;
+    progress = entry.every(DIFF_PROGRESS_MS, () =>
+      pollProgress(requestGeneration, view)
+    );
     void context.net
       .fetch("/api/diff-branches", {
         method: "POST",
@@ -86,6 +133,7 @@ export function initializeGraphDiffPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== generation) return;
+        stopProgress();
         if (readBoolean(payload, "needsAppBicep")) {
           showStatus(
             context,
@@ -110,6 +158,7 @@ export function initializeGraphDiffPage(
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
+        stopProgress();
         context.logger.error("Radius graph diff request failed.", error);
         showStatus(
           context,
@@ -126,6 +175,7 @@ export function initializeGraphDiffPage(
     generation++;
     requestAbort?.abort();
     requestAbort = null;
+    stopProgress();
     if (pending !== null) entry.cancel(pending);
     pending = entry.after(DIFF_DEBOUNCE_MS, () => compare(headElement));
   };

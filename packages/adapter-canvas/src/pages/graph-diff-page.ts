@@ -66,6 +66,7 @@ ${GRAPH_DIFF_SUBTITLE}
 <div id="diff-status" class="status ${state?.diffError ? "error" : "info"}">${
         state?.diffError ? escapeHtml(state.diffError) : "Loading branches…"
       }</div>
+<div id="diff-progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>
 <div hidden id="radius-graph-diff-state">${escapeHtml(
         inlineJson({
           repo: targetRepo,
@@ -117,6 +118,7 @@ ${GRAPH_DIFF_SUBTITLE}
     }" style="${state?.diffError ? "" : "display:none;"}">${
       state?.diffError ? escapeHtml(state.diffError) : ""
     }</div>
+<div id="diff-progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>
 <div id="graph-container"></div>
 <div style="margin-top:12px; font-size:13px;">
   <strong>Changes:</strong>

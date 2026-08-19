@@ -1,8 +1,16 @@
 import { requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
+import { createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
-import { isRecord, readArray, readBoolean, readString } from "../json.js";
+import {
+  isRecord,
+  readArray,
+  readBoolean,
+  readNumber,
+  readString
+} from "../json.js";
+import type { GraphProgressView } from "../graph/progress.js";
 import {
   loadModeledEnvState,
   modeledPrimaryAction,
@@ -77,10 +85,31 @@ export function initializeGraphPage(
   let progress: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
+  let progressView: GraphProgressView | null = null;
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
     progress = null;
+    progressView?.stop();
+    progressView = null;
+  };
+
+  // Start a fresh progress panel for one build. The loading surface must
+  // already be mounted so the panel has its host element.
+  const startProgress = (requestGeneration: number, detail: string): void => {
+    stopProgress();
+    const view = createGraphProgress(context, entry, {
+      initial: {
+        sequence: 0,
+        stage: "checking_model",
+        state: "running",
+        detail
+      }
+    });
+    progressView = view;
+    progress = entry.every(GRAPH_PROGRESS_MS, () =>
+      pollProgress(requestGeneration, view)
+    );
   };
 
   const stopRequest = (): void => {
@@ -110,12 +139,22 @@ export function initializeGraphPage(
     );
   };
 
-  const pollProgress = (requestGeneration: number): void => {
+  const pollProgress = (
+    requestGeneration: number,
+    view: GraphProgressView
+  ): void => {
     void context.net
       .fetch("/api/progress")
       .then((response) => response.json())
       .then((payload) => {
         if (!entry.active || requestGeneration !== generation) return;
+        const events = readArray(payload, "events");
+        if (events.length > 0) {
+          view.sync(events, readNumber(payload, "generation") ?? 0);
+          return;
+        }
+        // Workflows that report no typed stages still append diagnostic prose,
+        // so that path stays readable instead of showing an empty panel.
         const messages = readArray(payload, "messages").filter(
           (message): message is string => typeof message === "string"
         );
@@ -154,9 +193,9 @@ export function initializeGraphPage(
       "Checking the selected branch for .radius/app.bicep…",
       "info"
     );
-    stopProgress();
-    progress = entry.every(GRAPH_PROGRESS_MS, () =>
-      pollProgress(requestGeneration)
+    startProgress(
+      requestGeneration,
+      "Checking the selected branch for .radius/app.bicep…"
     );
     void context.net
       .fetch("/api/load-graph", {
@@ -232,6 +271,14 @@ export function initializeGraphPage(
     requestActive = true;
     requestAbort = context.net.createAbort();
     showStatus(context, `Regenerating graph for ${branch}…`, "info");
+    const wrapper = context.dom.byId("graph-container-wrapper");
+    if (wrapper) {
+      controller?.destroy();
+      controller = null;
+      wrapper.innerHTML = '<div id="graph-container"></div>';
+    }
+    setLoading("graph-container");
+    startProgress(requestGeneration, `Regenerating graph for ${branch}…`);
     void context.net
       .fetch("/api/load-graph", {
         method: "POST",
@@ -242,15 +289,21 @@ export function initializeGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== generation) return;
+        stopProgress();
         if (readBoolean(payload, "reload")) context.nav.reload();
         else {
           const error = readString(payload, "error");
-          if (error) showStatus(context, `Error: ${error}`, "error");
+          if (error) {
+            setError("graph-container", error);
+            showStatus(context, `Error: ${error}`, "error");
+          }
         }
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
+        stopProgress();
         context.logger.error("Radius graph regeneration failed.", error);
+        setError("graph-container", "Failed to regenerate graph.");
         showStatus(context, "Failed to regenerate graph.", "error");
       })
       .then(() => {

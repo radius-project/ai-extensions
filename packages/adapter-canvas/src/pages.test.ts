@@ -519,7 +519,12 @@ describe("compiled graph page network contracts", () => {
     ],
     [
       "graph-diff-page",
-      ["/api/discover-branches", "/api/list-applications", "/api/diff-branches"]
+      [
+        "/api/discover-branches",
+        "/api/list-applications",
+        "/api/progress",
+        "/api/diff-branches"
+      ]
     ],
     [
       "deployed-graph-page",

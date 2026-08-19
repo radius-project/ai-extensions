@@ -1,8 +1,9 @@
 import { requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
+import { createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
-import { readArray, readBoolean, readString } from "../json.js";
+import { readArray, readBoolean, readNumber, readString } from "../json.js";
 import {
   applyPlanEnvState,
   createPlanScheduler,
@@ -12,6 +13,7 @@ import {
 } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
+import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
@@ -84,10 +86,13 @@ export function initializePlannedGraphPage(
   let progress: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
+  let progressView: GraphProgressView | null = null;
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
     progress = null;
+    progressView?.stop();
+    progressView = null;
   };
 
   const run = (isCurrent: () => boolean): Promise<void> => {
@@ -139,12 +144,26 @@ export function initializePlannedGraphPage(
     stopProgress();
     const abort = context.net.createAbort();
     requestAbort = abort;
+    const view = createGraphProgress(context, entry, {
+      initial: {
+        sequence: 0,
+        stage: "checking_model",
+        state: "running",
+        detail: `Preparing the planned deployment for ${selectedEnvironment}…`
+      }
+    });
+    progressView = view;
     progress = entry.every(PLAN_PROGRESS_MS, () => {
       void context.net
         .fetch("/api/progress")
         .then((response) => response.json())
         .then((payload) => {
           if (!current()) return;
+          const events = readArray(payload, "events");
+          if (events.length > 0) {
+            view.sync(events, readNumber(payload, "generation") ?? 0);
+            return;
+          }
           const messages = readArray(payload, "messages").filter(
             (message): message is string => typeof message === "string"
           );

@@ -5,10 +5,13 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
+import type { FakeElement } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 import {
   GRAPH_PAGE_STATE_ID,
@@ -55,7 +58,10 @@ function fixture(options: FixtureOptions = {}) {
   const button = createFakeInput("deploy-app-btn");
   const container = createFakeElement("graph-container");
   const wrapper = createFakeElement("graph-container-wrapper");
-  const elements = [state, app, container];
+  // The real loading surface mounts this host; the fake render globals do not,
+  // so the fixture provides it for the shared progress panel to render into.
+  const progressHost = createFakeElement("progress-steps");
+  const elements = [state, app, container, progressHost];
   if (withBranchSelect) elements.push(branch);
   if (withButton) elements.push(button);
   if (withWrapper) elements.push(wrapper);
@@ -79,7 +85,17 @@ function fixture(options: FixtureOptions = {}) {
     `/api/list-environments?repo=${encodeURIComponent(repo)}`,
     () => jsonResponse({ environments: [] })
   );
-  return { browser, state, app, branch, button, container, wrapper, status };
+  return {
+    browser,
+    state,
+    app,
+    branch,
+    button,
+    container,
+    wrapper,
+    status,
+    progressHost
+  };
 }
 
 function globals(overrides: Record<string, unknown> = {}) {
@@ -797,5 +813,197 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(browser.logger.errors).toHaveLength(0);
+  });
+
+  describe("graph build progress", () => {
+    const stageText = (host: FakeElement): string[] => {
+      const list = host.children.find(
+        (child) => child.className === "rad-graph-progress__steps"
+      );
+      return (list?.children ?? []).map(
+        (row) => `${fakeText(row)}:${row.className}`
+      );
+    };
+
+    it("renders typed build stages instead of prose", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      const load = createDeferred<HttpResponse>();
+      browser.net.handle("/api/load-graph", () => load.promise);
+      browser.net.handle("/api/progress", () =>
+        jsonResponse({
+          generation: 1,
+          events: [
+            {
+              sequence: 1,
+              stage: "checking_model",
+              state: "succeeded",
+              detail: "Found .radius/app.bicep."
+            },
+            {
+              sequence: 2,
+              stage: "building_graph",
+              state: "running",
+              detail: "Compiling the application model."
+            }
+          ]
+        })
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      browser.clock.tick(GRAPH_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:step-done`,
+        `${GRAPH_STAGE_LABELS.building_graph}:step-active`
+      ]);
+      expect(fakeText(progressHost)).toContain("Elapsed ");
+      expect(fakeText(progressHost)).not.toMatch(/%/);
+    });
+
+    it("shows a starting stage before the first poll returns", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      browser.net.handle(
+        "/api/load-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:step-active`
+      ]);
+    });
+
+    it("clears the panel once the request settles", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      browser.net.handle("/api/load-graph", () => jsonResponse({}));
+      browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      const before = fakeText(progressHost);
+      browser.clock.tick(GRAPH_PROGRESS_MS * 4);
+      await flushPromises();
+
+      // The request already resolved, so the frozen panel never advances.
+      expect(fakeText(progressHost)).toBe(before);
+    });
+
+    it("reports branch regeneration through the same panel", async () => {
+      const { browser, branch, progressHost } = fixture({ loaded: true });
+      browser.net.handle(
+        "/api/load-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress", () =>
+        jsonResponse({
+          generation: 1,
+          events: [
+            {
+              sequence: 1,
+              stage: "building_graph",
+              state: "running",
+              detail: "Compiling for release."
+            }
+          ]
+        })
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      branch.value = "release";
+      branch.dispatch("change");
+      await flushPromises();
+      browser.clock.tick(GRAPH_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_graph}:step-active`
+      ]);
+    });
+
+    it("surfaces a regeneration failure on the graph surface", async () => {
+      const { browser, branch, status } = fixture({ loaded: true });
+      const setError = vi.fn();
+      browser.net.handle("/api/load-graph", () =>
+        jsonResponse({ error: "branch missing" })
+      );
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      branch.value = "release";
+      branch.dispatch("change");
+      await flushPromises();
+
+      expect(setError).toHaveBeenCalledWith(
+        "graph-container",
+        "branch missing"
+      );
+      expect(status?.textContent).toBe("Error: branch missing");
+    });
+  });
+  describe("graph build progress defaults", () => {
+    const stageText = (host: FakeElement): string[] => {
+      const list = host.children.find(
+        (child) => child.className === "rad-graph-progress__steps"
+      );
+      return (list?.children ?? []).map(
+        (row) => `${fakeText(row)}:${row.className}`
+      );
+    };
+
+    it("accepts typed events from a payload that omits the generation", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      browser.net.handle(
+        "/api/load-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress", () =>
+        jsonResponse({
+          events: [
+            {
+              sequence: 3,
+              stage: "building_graph",
+              state: "running",
+              detail: "Compiling the application model."
+            }
+          ]
+        })
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(GRAPH_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_graph}:step-active`
+      ]);
+    });
+
+    it("regenerates for a branch when the page has no graph wrapper", async () => {
+      const { browser, branch, progressHost } = fixture({
+        loaded: true,
+        withWrapper: false
+      });
+      browser.net.handle(
+        "/api/load-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      branch.value = "other";
+      branch.dispatch("change");
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:step-active`
+      ]);
+    });
   });
 });

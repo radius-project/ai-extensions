@@ -5,13 +5,18 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
+import type { FakeElement } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 import {
   DIFF_DEBOUNCE_MS,
+  DIFF_PROGRESS_MS,
+  DIFF_PROGRESS_STEPS_ID,
   GRAPH_DIFF_STATE_ID,
   initializeGraphDiffPage
 } from "./graph-diff-page.js";
@@ -48,7 +53,8 @@ function fixture(options: FixtureOptions = {}) {
   const headSelect = createFakeSelect("head-branch");
   headSelect.value = head;
   const status = createFakeElement("diff-status");
-  const elements = [state, app];
+  const progressHost = createFakeElement(DIFF_PROGRESS_STEPS_ID);
+  const elements = [state, app, progressHost];
   if (withRepoInput) elements.push(repoInput);
   if (withBaseSelect) elements.push(baseSelect);
   if (withHeadSelect) elements.push(headSelect);
@@ -75,7 +81,8 @@ function fixture(options: FixtureOptions = {}) {
     app,
     base: baseSelect,
     head: headSelect,
-    status
+    status,
+    progressHost
   };
 }
 
@@ -379,5 +386,272 @@ describe("initializeGraphDiffPage", () => {
     first.resolve(jsonResponse({ reload: true }));
     await flushPromises();
     expect(browser.nav.reloads).toBe(0);
+  });
+  describe("graph build progress", () => {
+    const stageText = (host: FakeElement): string[] => {
+      const list = host.children.find(
+        (child) => child.className === "rad-graph-progress__steps"
+      );
+      return (list?.children ?? []).map(
+        (row) => `${fakeText(row)}:${row.className}`
+      );
+    };
+
+    it("renders typed comparison stages while the diff runs", async () => {
+      const { browser, head, progressHost } = fixture();
+      browser.net.handle(
+        "/api/diff-branches",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress", () =>
+        jsonResponse({
+          generation: 2,
+          events: [
+            {
+              sequence: 1,
+              stage: "building_base_graph",
+              state: "succeeded",
+              detail: "Built the base graph."
+            },
+            {
+              sequence: 2,
+              stage: "comparing_graphs",
+              state: "running",
+              detail: "Comparing main to feature."
+            }
+          ]
+        })
+      );
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_base_graph}:step-done`,
+        `${GRAPH_STAGE_LABELS.comparing_graphs}:step-active`
+      ]);
+      expect(fakeText(progressHost)).toContain("Elapsed ");
+      expect(fakeText(progressHost)).not.toMatch(/%/);
+    });
+
+    it("keeps the panel steady until typed events arrive", async () => {
+      const { browser, head, progressHost } = fixture();
+      browser.net.handle(
+        "/api/diff-branches",
+        () => createDeferred<HttpResponse>().promise
+      );
+      const payloads: Array<Record<string, unknown>> = [
+        { events: [] },
+        {
+          events: [
+            {
+              sequence: 2,
+              stage: "comparing_graphs",
+              state: "running",
+              detail: "Comparing the two graphs."
+            }
+          ]
+        }
+      ];
+      browser.net.handle("/api/progress", () =>
+        jsonResponse(payloads.shift() ?? { events: [] })
+      );
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_base_graph}:step-active`
+      ]);
+
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.comparing_graphs}:step-active`
+      ]);
+    });
+    it("stops polling progress once the diff settles", async () => {
+      const { browser, head } = fixture();
+      browser.net.handle("/api/diff-branches", () => jsonResponse({}));
+      browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
+      const teardown = initializeGraphDiffPage(browser.context, {
+        radiusRenderGraph: vi.fn()
+      });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      const polls = browser.net.calls.filter(
+        (call) => call.url === "/api/progress"
+      ).length;
+
+      browser.clock.tick(DIFF_PROGRESS_MS * 5);
+      await flushPromises();
+
+      expect(
+        browser.net.calls.filter((call) => call.url === "/api/progress")
+      ).toHaveLength(polls);
+      teardown();
+      expect(browser.clock.pending).toBe(0);
+    });
+
+    it("logs a failing progress request without breaking the diff", async () => {
+      const { browser, head } = fixture();
+      browser.net.handle(
+        "/api/diff-branches",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress", () =>
+        Promise.reject(new Error("progress unavailable"))
+      );
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+
+      expect(
+        browser.logger.errors.some(
+          (entry) => entry.message === "Radius graph diff progress failed."
+        )
+      ).toBe(true);
+    });
+  });
+  describe("graph build progress guards", () => {
+    const stageText = (host: FakeElement): string[] => {
+      const list = host.children.find(
+        (child) => child.className === "rad-graph-progress__steps"
+      );
+      return (list?.children ?? []).map(
+        (row) => `${fakeText(row)}:${row.className}`
+      );
+    };
+
+    const startCompare = async (progress: Promise<HttpResponse>) => {
+      const { browser, head, progressHost } = fixture();
+      browser.net.handle(
+        "/api/diff-branches",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress", () => progress);
+      const teardown = initializeGraphDiffPage(browser.context, {
+        radiusRenderGraph: vi.fn()
+      });
+      await flushPromises();
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      return { browser, head, progressHost, teardown };
+    };
+
+    it("ignores a progress reply that belongs to a superseded comparison", async () => {
+      const progress = createDeferred<HttpResponse>();
+      const { browser, head, progressHost } = await startCompare(
+        progress.promise
+      );
+
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      progress.resolve(
+        jsonResponse({
+          generation: 9,
+          events: [
+            {
+              sequence: 4,
+              stage: "comparing_graphs",
+              state: "running",
+              detail: "Stale reply."
+            }
+          ]
+        })
+      );
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_base_graph}:step-active`
+      ]);
+    });
+
+    it("stays silent when a superseded progress request fails", async () => {
+      const progress = createDeferred<HttpResponse>();
+      const { browser, head } = await startCompare(progress.promise);
+
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      progress.reject(new Error("stale progress"));
+      await flushPromises();
+
+      expect(
+        browser.logger.errors.some(
+          (entry) => entry.message === "Radius graph diff progress failed."
+        )
+      ).toBe(false);
+    });
+
+    it("ignores a progress reply that lands after teardown", async () => {
+      const progress = createDeferred<HttpResponse>();
+      const { browser, progressHost, teardown } = await startCompare(
+        progress.promise
+      );
+
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+      const before = stageText(progressHost);
+      teardown();
+      progress.resolve(
+        jsonResponse({
+          generation: 3,
+          events: [
+            {
+              sequence: 2,
+              stage: "comparing_graphs",
+              state: "running",
+              detail: "After teardown."
+            }
+          ]
+        })
+      );
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual(before);
+    });
+
+    it("stays silent when a progress request fails after teardown", async () => {
+      const progress = createDeferred<HttpResponse>();
+      const { browser, teardown } = await startCompare(progress.promise);
+
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+      teardown();
+      progress.reject(new Error("torn down"));
+      await flushPromises();
+
+      expect(
+        browser.logger.errors.some(
+          (entry) => entry.message === "Radius graph diff progress failed."
+        )
+      ).toBe(false);
+    });
   });
 });
