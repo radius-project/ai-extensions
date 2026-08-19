@@ -97,7 +97,7 @@ A commit that only touches the app model produces no output, so it does not coun
 
 That command also only works on the branch the workspace has checked out, so any other branch uses that same commit comparison. It means a new commit there looks like a change even when it only touched `.radius/`. That is imprecise, but it costs little: those branches only ever get a note, and are never regenerated.
 
-### When something goes wrong
+### Error handling
 
 | If we cannot                                               | What happens                                                                             |
 |------------------------------------------------------------|------------------------------------------------------------------------------------------|
