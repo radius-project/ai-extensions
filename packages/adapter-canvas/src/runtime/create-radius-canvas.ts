@@ -118,11 +118,10 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
         )
       );
 
-      // Say a given thing about a given target once. The key has to describe
-      // what we are about to say, not just where: a model can go from stale to
-      // hand-edited between two opens, and keying on repo and branch alone
-      // would swallow the second, more serious message because the first had
-      // already been sent.
+      // Only send a message when there is something new to say. The key
+      // includes what is wrong, not just which repo and branch, so an app model
+      // that changes from stale to hand-edited between two opens is still
+      // reported the second time.
       const key = [
         repo,
         branches.join(","),

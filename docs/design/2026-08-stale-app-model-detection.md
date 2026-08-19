@@ -83,8 +83,6 @@ The second and third rows still open the view because the file on disk is the on
 
 Two places in the code handle this. `evaluateAppBicepHook` holds the graph back when regenerating is safe. `maybeHandoffAppBicep` covers everything else, including openings the first one never sees, such as a reload after source links are attached, or the user simply clicking the panel open. Without it, those openings would quietly show a stale app model, which is the original problem in a different place.
 
-The same problem is only reported once, so opening a graph repeatedly does not repeat the message. A different problem on the same app model is reported when it appears.
-
 ### Deciding whether source changed
 
 Comparing `sourceCommit` to `HEAD` does not work. Committing a freshly generated app model moves `HEAD` past the commit it recorded, so every committed app model would immediately look stale, regenerate, and look stale again on the next commit.
