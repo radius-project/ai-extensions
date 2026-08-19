@@ -1029,7 +1029,12 @@ export function initializeEnvironmentOperations(
     if (!statePanel) return;
     // The inventory is for a terminal decision — continue or roll back. While
     // work is still running it is a moving list the customer cannot act on.
-    if (op === null || op.terminalState === null) {
+    if (
+      op === null ||
+      op.terminalState === null ||
+      op.terminalState === "succeeded" ||
+      op.terminalState === "succeeded_with_warnings"
+    ) {
       statePanel.style.display = "none";
       return;
     }
@@ -1354,17 +1359,16 @@ export function initializeEnvironmentOperations(
     const hasGuidance = renderCommandGuidance(op);
     const appendDismiss = (): void => {
       if (op?.terminalState === null || op === null) return;
+      if (
+        op.terminalState === "succeeded" ||
+        op.terminalState === "succeeded_with_warnings"
+      )
+        return;
       const dismiss = dom.createElement("button") as DomInputElement;
       dismiss.setAttribute("type", "button");
       dismiss.id = "env-progress-command-dismiss";
       dismiss.className = COMMAND_BUTTON_CLASS;
-      dismiss.textContent =
-        (
-          op.terminalState === "succeeded" ||
-          op.terminalState === "succeeded_with_warnings"
-        ) ?
-          "OK"
-        : "Keep resources and dismiss";
+      dismiss.textContent = "Keep resources and dismiss";
       const listener = (): void => hideProgress();
       dismiss.addEventListener("click", listener);
       commandButtons.push({ element: dismiss, listener });
@@ -1513,8 +1517,15 @@ export function initializeEnvironmentOperations(
       resumeEl.textContent = op.journey?.resumeReason || "View planned graph";
     }
     if (resumeEl) resumeEl.style.display = canResume ? "" : "none";
-    if (dismissEl) dismissEl.style.display = "none";
-    if (actionsEl) actionsEl.style.display = canResume ? "flex" : "none";
+    const success =
+      op.terminalState === "succeeded" ||
+      op.terminalState === "succeeded_with_warnings";
+    if (dismissEl) {
+      dismissEl.textContent = success ? "OK" : "Dismiss";
+      dismissEl.style.display = success ? "" : "none";
+    }
+    if (actionsEl)
+      actionsEl.style.display = canResume || success ? "flex" : "none";
   }
 
   function focusPanel(): void {
