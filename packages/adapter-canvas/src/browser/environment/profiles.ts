@@ -718,8 +718,12 @@ export function initializeCredentialProfilesPanel(
   };
 
   const autoRecheckGithubIdentity = (): void => {
+    const packageCheck = githubReadiness?.checks.packages;
+    const packageDenied =
+      packageCheck?.state === "missing" || packageCheck?.state === "error";
     if (
       (!githubReadiness || !githubReadiness.ready) &&
+      !packageDenied &&
       !checking &&
       fieldEl &&
       fieldEl.style.display !== "none"

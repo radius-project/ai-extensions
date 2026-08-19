@@ -628,9 +628,10 @@ describe("GET /api/operations/{id}", () => {
       });
     });
 
-    it("fails closed when an operation-bound lookup has no selected executor", async () => {
+    it("keeps an operation pending during selected-executor handoff", async () => {
       const op = seed("contoso/workflow-identity");
       enterStage(op, STAGE_VERIFY);
+      op.context = { githubLogin: "octocat" };
       op.verification = {
         dispatchedAt: Date.now(),
         workflow: "renamed-verify.yml",
@@ -647,9 +648,8 @@ describe("GET /api/operations/{id}", () => {
 
       expect(status).toBe(200);
       expect(body).toEqual({
-        state: "expired",
-        terminal: true,
-        error: "The selected GitHub account executor is unavailable."
+        state: "pending",
+        runId: "12345"
       });
     });
   });

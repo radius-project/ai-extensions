@@ -14,7 +14,6 @@ interface LoadGhOptions {
   keyring?: string;
   token?: string | null;
   userTokens?: Record<string, string>;
-  switchError?: string | null;
   apiLogin?: string;
   commandResult?: {
     error?: string;
@@ -97,7 +96,6 @@ function setPlatform(platform: NodeJS.Platform): void {
 // `gh auth status` texts returned for the injected-token vs token-stripped
 // probes; `token` sets the ambient injected GH_TOKEN the strategy evaluates.
 // `userTokens` maps a login to the token `gh auth token --user <login>` yields.
-// `switchError`, when set, makes `gh auth switch` fail with that message.
 // `prime: true` awaits the async identity probe (so the token-stripping strategy
 // is resolved) and clears the recorded probe calls, leaving the next spawn as
 // mock.calls[0] — mirroring gh commands that run after identity resolution.
@@ -107,7 +105,6 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
     keyring = "",
     token = null,
     userTokens = {},
-    switchError = null,
     apiLogin = "",
     commandResult,
     ghVersion = "gh version 2.96.0",
@@ -120,9 +117,9 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
   } else {
     process.env.GH_TOKEN = token;
   }
-  // The identity layer now drives `gh auth status`, `gh auth token`, and
-  // `gh auth switch` through async execFile (the read-only probes used to be
-  // synchronous execFileSync), so one router serves them all.
+  // The identity layer now drives `gh auth status` and `gh auth token` through
+  // async execFile (the read-only probes used to be synchronous execFileSync),
+  // so one router serves them all.
   childProcess.execFile.mockImplementation((_file, args, options, cb) => {
     const a = args || [];
     const done = (err: Error | null, out: string, errOut = "") => {
@@ -133,9 +130,6 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
       );
       return { stdin: { end() {} } };
     };
-    if (a[0] === "auth" && a[1] === "switch") {
-      return done(switchError ? new Error(switchError) : null, "");
-    }
     if (a[0] === "auth" && a[1] === "token") {
       const ui = a.indexOf("--user");
       if (ui !== -1) {
@@ -628,7 +622,6 @@ describe("decideGhTokenStrategy", () => {
     expect(
       decide({
         hasToken: true,
-        tokenLogin: "a",
         tokenHasWorkflow: true,
         keyringLogin: "b",
         keyringHasWorkflow: true
@@ -640,7 +633,6 @@ describe("decideGhTokenStrategy", () => {
     expect(
       decide({
         hasToken: true,
-        tokenLogin: "a",
         tokenHasWorkflow: false,
         keyringLogin: "b",
         keyringHasWorkflow: true
@@ -652,7 +644,6 @@ describe("decideGhTokenStrategy", () => {
     expect(
       decide({
         hasToken: true,
-        tokenLogin: "a",
         tokenHasWorkflow: false,
         keyringLogin: "",
         keyringHasWorkflow: false
@@ -664,32 +655,6 @@ describe("decideGhTokenStrategy", () => {
     expect(
       decide({ hasToken: false, keyringLogin: "b", keyringHasWorkflow: true })
     ).toEqual({ useKeyring: true, reason: "no-injected-token" });
-  });
-
-  it("honors an explicit preference for the token account", () => {
-    expect(
-      decide({
-        hasToken: true,
-        tokenLogin: "a",
-        tokenHasWorkflow: false,
-        keyringLogin: "b",
-        keyringHasWorkflow: true,
-        preferredLogin: "a"
-      })
-    ).toEqual({ useKeyring: false, reason: "user-selected-token-account" });
-  });
-
-  it("honors an explicit preference for a keyring account over the token", () => {
-    expect(
-      decide({
-        hasToken: true,
-        tokenLogin: "a",
-        tokenHasWorkflow: true,
-        keyringLogin: "b",
-        keyringHasWorkflow: true,
-        preferredLogin: "b"
-      })
-    ).toEqual({ useKeyring: true, reason: "user-selected-keyring-account" });
   });
 });
 
@@ -968,7 +933,7 @@ describe.sequential("selected GitHub executor", () => {
   });
 });
 
-describe.sequential("getGitHubIdentity / switchGhAccount", () => {
+describe.sequential("getGitHubIdentity", () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();
     childProcess.execFileSync.mockReset();
@@ -1085,67 +1050,6 @@ describe.sequential("getGitHubIdentity / switchGhAccount", () => {
     expect(id.actingLogin).toBe("keyuser");
     expect(id.mismatch).toBe(true);
   });
-
-  it("switches the active account, records the preference, and re-resolves acting identity", async () => {
-    const gh = await loadGh("linux", {
-      token: "tok",
-      withToken: STATUS.tokenWithWorkflow,
-      keyring: STATUS.keyringWithWorkflow
-    });
-    expect((await gh.getGitHubIdentity()).actingLogin).toBe("tokuser");
-
-    // loadGh's router already answers `gh auth switch` (plus the re-primed
-    // status probes after the cache reset). Clear the prime's recorded calls
-    // so the switch spawn is calls[0].
-    childProcess.execFile.mockClear();
-    const res = await gh.switchGhAccount("keyuser");
-    expect(res).toEqual({ ok: true });
-    const [, args] = childProcess.execFile.mock.calls[0];
-    expect(args).toEqual(["auth", "switch", "--user", "keyuser"]);
-
-    const id = await gh.getGitHubIdentity();
-    expect(id.preferredLogin).toBe("keyuser");
-    expect(id.actingLogin).toBe("keyuser");
-  });
-
-  it("redacts injected credentials when gh auth switch fails", async () => {
-    const gh = await loadGh("linux", {
-      token: "placeholder-token",
-      withToken: STATUS.tokenWithWorkflow,
-      keyring: STATUS.keyringWithWorkflow,
-      switchError: "no such account for placeholder-token"
-    });
-    const res = await gh.switchGhAccount("ghost");
-    expect(res).toEqual({
-      ok: false,
-      error: "no such account for [REDACTED]"
-    });
-  });
-
-  it("restores a persisted account choice via setPreferredGhLogin so it survives a restart", async () => {
-    // Simulate a fresh process (post-restart): the injected token has the
-    // workflow scope, so with no preference the strategy would act as the
-    // token account (tokuser). Restoring the persisted choice must override
-    // that and make setup act as the chosen keyring account instead — the
-    // fix for the silent revert on restart.
-    const gh = await loadGh("linux", {
-      token: "tok",
-      withToken: STATUS.tokenWithWorkflow,
-      keyring: STATUS.keyringWithWorkflow
-    });
-    expect((await gh.getGitHubIdentity()).actingLogin).toBe("tokuser");
-
-    gh.setPreferredGhLogin("keyuser");
-    const id = await gh.getGitHubIdentity();
-    expect(id.preferredLogin).toBe("keyuser");
-    expect(id.actingLogin).toBe("keyuser");
-
-    // A blank login clears the preference back to automatic resolution.
-    gh.setPreferredGhLogin("");
-    const cleared = await gh.getGitHubIdentity();
-    expect(cleared.preferredLogin).toBe(null);
-    expect(cleared.actingLogin).toBe("tokuser");
-  });
 });
 
 describe.sequential("getGhPackageCredentials", () => {
@@ -1175,23 +1079,6 @@ describe.sequential("getGhPackageCredentials", () => {
     expect(await getGhPackageCredentials()).toEqual({
       token: "keyring-pub-token",
       username: "pubuser"
-    });
-  });
-
-  it("honors an explicit switch to a keyring account for package auth", async () => {
-    const gh = await loadGh("linux", {
-      token: "injected-pub",
-      withToken: STATUS.tokenPubActive,
-      keyring: STATUS.keyringPubAndEmu,
-      userTokens: {
-        pubuser: "keyring-pub-token",
-        emuuser: "keyring-emu-token"
-      }
-    });
-    await gh.switchGhAccount("emuuser");
-    expect(await gh.getGhPackageCredentials()).toEqual({
-      token: "keyring-emu-token",
-      username: "emuuser"
     });
   });
 

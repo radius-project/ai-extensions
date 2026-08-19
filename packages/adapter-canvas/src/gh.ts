@@ -28,11 +28,9 @@ interface GhSnapshot {
 
 export interface GhTokenStrategyInput {
   hasToken: boolean;
-  tokenLogin?: string;
   tokenHasWorkflow?: boolean;
   keyringLogin?: string;
   keyringHasWorkflow?: boolean;
-  preferredLogin?: string | null;
 }
 
 export interface GhTokenStrategy {
@@ -54,7 +52,6 @@ export interface GitHubIdentity {
   mismatch: boolean;
   actingHasWorkflow: boolean;
   actingHasPackages: boolean;
-  preferredLogin: string | null;
   reason: string;
   accounts: GitHubIdentityAccount[];
   repoAccess?: string;
@@ -180,16 +177,11 @@ function errorMessage(error: unknown): string {
 // was rejected with a 403. We therefore resolve a per-process token strategy
 // (see decideGhTokenStrategy): keep the injected token when it already carries
 // `workflow` (so setup acts as the identity the user sees), and fall back to a
-// stored keyring login only when we must for scope — or when the user explicitly
-// picks an account. The snapshot of `gh auth status` is memoized.
+// stored keyring login only when we must for scope. The snapshot of `gh auth
+// status` is memoized.
 function ghExecutable() {
   return process.platform === "win32" ? "gh.exe" : "gh";
 }
-
-// The login the user explicitly chose in the UI (via switchGhAccount). Sticky
-// for the process lifetime and always wins over the scope-based default. null
-// means "no explicit choice — decide automatically".
-let _preferredLogin: string | null = null;
 
 // Memoized snapshot of `gh auth status` (default env + token-stripped env) and
 // the derived token strategy. `_ghSnapshotPromise` is the in-flight/settled
@@ -241,34 +233,22 @@ export function parseGhAuthStatus(text: unknown): GhAccount[] {
 // over-corrected: when the injected token DID have `workflow`, stripping it
 // silently switched the acting identity to whatever keyring account happened to
 // be active (e.g. an enterprise/EMU account that may lack access to the target
-// repo or cloud tenant). We now strip only when we actually must, and an
-// explicit user selection always wins.
+// repo or cloud tenant). We now strip only when we actually must.
 export function decideGhTokenStrategy({
   hasToken,
-  tokenLogin,
   tokenHasWorkflow,
   keyringLogin,
-  keyringHasWorkflow,
-  preferredLogin
+  keyringHasWorkflow
 }: GhTokenStrategyInput): GhTokenStrategy {
-  // 1. An explicit user choice is authoritative. Keep the injected token only
-  //    when the chosen login IS the token account; otherwise strip so gh uses
-  //    the (already switched-to) keyring account.
-  if (preferredLogin) {
-    if (tokenLogin && preferredLogin === tokenLogin) {
-      return { useKeyring: false, reason: "user-selected-token-account" };
-    }
-    return { useKeyring: true, reason: "user-selected-keyring-account" };
-  }
-  // 2. No injected token → the keyring account is all we have.
+  // 1. No injected token → the keyring account is all we have.
   if (!hasToken) return { useKeyring: true, reason: "no-injected-token" };
-  // 3. Injected token already carries `workflow` → keep it (and its identity).
+  // 2. Injected token already carries `workflow` → keep it (and its identity).
   if (tokenHasWorkflow)
     return { useKeyring: false, reason: "token-has-workflow" };
-  // 4. Token lacks `workflow` but a keyring login has it → fall back for scope.
+  // 3. Token lacks `workflow` but a keyring login has it → fall back for scope.
   if (keyringLogin && keyringHasWorkflow)
     return { useKeyring: true, reason: "token-missing-workflow" };
-  // 5. Nothing better available → keep the token; a later 403 explains the gap.
+  // 4. Nothing better available → keep the token; a later 403 explains the gap.
   return { useKeyring: false, reason: "no-workflow-scope-available" };
 }
 
@@ -338,15 +318,13 @@ async function ensureGhStrategy(): Promise<GhTokenStrategy> {
   const s = await ensureGhSnapshot();
   _ghStrategy = decideGhTokenStrategy({
     hasToken: s.hasToken,
-    tokenLogin: s.tokenAcct ? s.tokenAcct.login : "",
     tokenHasWorkflow: !!(
       s.tokenAcct && s.tokenAcct.scopes.includes("workflow")
     ),
     keyringLogin: s.keyringActive ? s.keyringActive.login : "",
     keyringHasWorkflow: !!(
       s.keyringActive && s.keyringActive.scopes.includes("workflow")
-    ),
-    preferredLogin: _preferredLogin
+    )
   });
   return _ghStrategy;
 }
@@ -371,21 +349,8 @@ export function primeGhIdentity(): Promise<GhTokenStrategy> {
   return ensureGhStrategy();
 }
 
-// Restore a previously chosen account (see server startup). Sets the sticky
-// preference in memory only — persistence is owned by the server/shared layer,
-// so this module stays free of disk I/O. Resets the identity cache so the next
-// resolution honors the restored choice. A blank login clears the preference
-// (back to "decide automatically").
-export function setPreferredGhLogin(login: string): void {
-  const next = (login || "").trim() || null;
-  if (next === _preferredLogin) return;
-  _preferredLogin = next;
-  resetGhIdentityCache();
-}
-
 // Drop the memoized snapshot/strategy so the next gh call re-reads `gh auth
-// status`. Call after anything that changes the active account (a switch). The
-// sticky user preference is intentionally preserved across resets.
+// status`. Call after anything that changes the active account.
 export function resetGhIdentityCache(): void {
   _ghSnapshot = null;
   _ghSnapshotPromise = null;
@@ -499,50 +464,9 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
     mismatch: !!(actingLogin && displayLogin && actingLogin !== displayLogin),
     actingHasWorkflow: !!(actingAcct && actingAcct.hasWorkflow),
     actingHasPackages: !!(actingAcct && actingAcct.hasPackages),
-    preferredLogin: _preferredLogin,
     reason: strat.reason,
     accounts
   };
-}
-
-// Switch the active gh account to `login`. gh auth switch changes the keyring
-// active account; because a present GH_TOKEN would still override it at call
-// time, we also record the preference (so ghChildEnv strips the token when the
-// chosen account is not the token account) and reset the identity cache.
-// Resolves { ok, error } and never rejects.
-export function switchGhAccount(
-  login: string
-): Promise<{ ok: boolean; error?: string }> {
-  return new Promise((resolve) => {
-    if (!login) {
-      resolve({ ok: false, error: "A GitHub account login is required." });
-      return;
-    }
-    const env = { ...process.env };
-    execFile(
-      ghExecutable(),
-      ["auth", "switch", "--user", login],
-      { env, timeout: 15000, windowsHide: true },
-      (err, _stdout, stderr) => {
-        if (err) {
-          resolve({
-            ok: false,
-            error: redactGhCredentials(
-              (
-                (stderr || "").trim() ||
-                err.message ||
-                "gh auth switch failed"
-              ).trim()
-            )
-          });
-          return;
-        }
-        _preferredLogin = login;
-        resetGhIdentityCache();
-        resolve({ ok: true });
-      }
-    );
-  });
 }
 
 // Read the keyring token for a SPECIFIC login without changing the active

@@ -550,11 +550,14 @@ export async function handleVerifyStatus(
       operationId ?
         dependencies.getSelectedGitHubExecutor(operationId) || undefined
       : undefined;
-    if (operationId && !selectedExecutor) {
+    const pinnedLogin =
+      typeof verifyOp?.context?.githubLogin === "string" ?
+        verifyOp.context.githubLogin.trim()
+      : "";
+    if (operationId && pinnedLogin && !selectedExecutor) {
       respond({
-        state: "expired",
-        terminal: true,
-        error: "The selected GitHub account executor is unavailable."
+        state: "pending",
+        runId: verifyOp?.verification?.runId || null
       });
       return;
     }

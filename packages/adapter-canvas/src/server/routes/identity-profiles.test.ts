@@ -81,7 +81,6 @@ function identityFor(login: string): GitHubIdentity {
     mismatch: login !== "",
     actingHasWorkflow: true,
     actingHasPackages: false,
-    preferredLogin: null,
     reason: `reason-${login}`,
     accounts: [
       {
@@ -134,12 +133,6 @@ function dependencies(
       selectionHandle: "selection-handle",
       expiresAt: 1
     }),
-    switchGhAccount: () => {
-      throw new Error("switchGhAccount not stubbed");
-    },
-    setPreferredGitHubLogin: () => {
-      throw new Error("setPreferredGitHubLogin not stubbed");
-    },
     preflightRepoAdmin: () => {
       throw new Error("preflightRepoAdmin not stubbed");
     },
@@ -153,22 +146,17 @@ function dependencies(
 }
 
 const INITIAL_LOGIN = "initial-login";
-// The identity ports, wired as one discriminating group. `getGitHubIdentity`
-// answers with whatever `setPreferredGitHubLogin` last recorded, so a handler
-// that re-reads the identity *before* persisting the choice returns a
-// different, detectably-stale payload.
+// The identity ports, wired as one discriminating group.
 function identityPorts(
   calls: Calls,
   options: {
     initialLogin?: string;
-    switchResult?: { ok: boolean; error?: string };
-    switchThrows?: Error;
     identityThrows?: Error;
     preflight?: string | Error;
     validSlugs?: string[];
   } = {}
 ): Partial<IdentityProfilesDependencies> {
-  let currentLogin = options.initialLogin ?? INITIAL_LOGIN;
+  const currentLogin = options.initialLogin ?? INITIAL_LOGIN;
   return {
     resetGhIdentityCache: () => {
       calls.log.push("resetGhIdentityCache");
@@ -177,15 +165,6 @@ function identityPorts(
       calls.log.push(`getGitHubIdentity->${currentLogin}`);
       if (options.identityThrows) return Promise.reject(options.identityThrows);
       return Promise.resolve(identityFor(currentLogin));
-    },
-    switchGhAccount: (login) => {
-      calls.log.push(`switchGhAccount(${login})`);
-      if (options.switchThrows) return Promise.reject(options.switchThrows);
-      return Promise.resolve(options.switchResult ?? { ok: true });
-    },
-    setPreferredGitHubLogin: (login) => {
-      calls.log.push(`setPreferredGitHubLogin(${login})`);
-      currentLogin = login;
     },
     isValidRepoSlug: (value) => {
       calls.log.push(`isValidRepoSlug(${String(value)})`);
@@ -802,21 +781,17 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     ["boolean login", '{"login":true}'],
     ["array login", '{"login":["octocat"]}'],
     ["object login", '{"login":{"name":"octocat"}}']
-  ])("rejects a %s without switching accounts", async (_label, body) => {
-    const switches: unknown[] = [];
-    const preferred: unknown[] = [];
+  ])("rejects a %s without preparing an account", async (_label, body) => {
+    const preparations: unknown[] = [];
     const recording = await run(
       "POST",
       "/api/github-account",
       body,
       handleGitHubAccount,
       dependencies({
-        switchGhAccount: (login) => {
-          switches.push(login);
-          return Promise.resolve({ ok: true });
-        },
-        setPreferredGitHubLogin: (login) => {
-          preferred.push(login);
+        prepareGitHubAccount: async (input) => {
+          preparations.push(input);
+          throw new Error("unexpected account preparation");
         },
         getGitHubIdentity: () => Promise.resolve(identityFor("octocat"))
       })
@@ -824,8 +799,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     expect(recording.status).toBe(400);
     expect(recording.headerSteps).toEqual(SET_THEN_WRITE(400));
     expect(JSON.parse(recording.body)).toHaveProperty("error");
-    expect(switches).toEqual([]);
-    expect(preferred).toEqual([]);
+    expect(preparations).toEqual([]);
   });
 
   it.each([

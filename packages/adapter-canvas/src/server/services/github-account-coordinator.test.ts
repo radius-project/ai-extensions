@@ -354,7 +354,9 @@ describe("GitHub account coordinator", () => {
     await Promise.resolve();
     callbacks[0]?.();
 
-    await expect(second).rejects.toThrow("temporarily using");
+    await expect(second).rejects.toThrow(
+      "Another Environment Creation is using the GitHub CLI account. Re-check after it finishes."
+    );
     releaseFirst();
     await first;
   });

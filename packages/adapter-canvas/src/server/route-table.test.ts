@@ -141,7 +141,6 @@ const productionHandlers = {
         mismatch: false,
         actingHasWorkflow: false,
         actingHasPackages: false,
-        preferredLogin: null,
         reason: "",
         accounts: []
       }),
@@ -164,8 +163,6 @@ const productionHandlers = {
         restoration: null
       }
     }),
-    switchGhAccount: () => Promise.resolve({ ok: true }),
-    setPreferredGitHubLogin: () => {},
     preflightRepoAdmin: () => Promise.resolve(""),
     isValidRepoSlug: () => false,
     errorMessage: (error) => String(error)

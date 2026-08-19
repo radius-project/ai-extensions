@@ -19,7 +19,6 @@ interface Harness {
   profiles: Map<string, CredentialProfile[]>;
   calls: string[];
   login: string;
-  switchResult: { ok: boolean; error?: string };
   preflight: string | Error;
   validSlugs: string[];
   identityThrows?: Error;
@@ -32,7 +31,6 @@ function identityFor(login: string): GitHubIdentity {
     mismatch: false,
     actingHasWorkflow: true,
     actingHasPackages: false,
-    preferredLogin: null,
     reason: `reason-${login}`,
     accounts: []
   };
@@ -43,7 +41,6 @@ function start(): Harness {
     profiles: new Map(),
     calls: [],
     login: "initial-login",
-    switchResult: { ok: true },
     preflight: "",
     validSlugs: []
   };
@@ -103,14 +100,6 @@ function start(): Harness {
         selectionHandle: "selection-handle",
         expiresAt: 1
       }),
-      switchGhAccount: (login) => {
-        harness.calls.push(`switch(${login})`);
-        return Promise.resolve(harness.switchResult);
-      },
-      setPreferredGitHubLogin: (login) => {
-        harness.calls.push(`prefer(${login})`);
-        harness.login = login;
-      },
       preflightRepoAdmin: (repo) => {
         harness.calls.push(`preflight(${repo})`);
         if (harness.preflight instanceof Error) {

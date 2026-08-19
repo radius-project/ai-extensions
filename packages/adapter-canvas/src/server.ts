@@ -3082,7 +3082,6 @@ export async function preflightGhcrPackageWriteAccess(
           mismatch: false,
           actingHasWorkflow: selectedExecutor.scopes.includes("workflow"),
           actingHasPackages: selectedExecutor.scopes.includes("write:packages"),
-          preferredLogin: null,
           reason: "selected-account-executor",
           accounts: [
             {
@@ -3765,12 +3764,14 @@ function createInstanceRequestCoordinator(
         "The environment operation does not have a pinned GitHub account."
       );
     }
-    const setup = await githubAccountCoordinator.withSelectedAccount(
-      selectedLogin,
-      { instanceId, operationId },
-      async (executor) => {
-        selectedGitHubExecutorsByOperation.set(operationId, executor);
-        try {
+    let executorRegistered = false;
+    try {
+      const setup = await githubAccountCoordinator.withSelectedAccount(
+        selectedLogin,
+        { instanceId, operationId },
+        async (executor) => {
+          selectedGitHubExecutorsByOperation.set(operationId, executor);
+          executorRegistered = true;
           let setupResult: any = null;
           if (op.provider === "azure" && request.needsAzureCredentials) {
             setupResult = await postInternal("/api/azure-auto-setup", {
@@ -3801,36 +3802,38 @@ function createInstanceRequestCoordinator(
               setupResult?.clientId || request.environment?.clientId || ""
           });
           return { shouldMonitor: true };
-        } finally {
-          selectedGitHubExecutorsByOperation.delete(operationId);
-        }
-      },
-      30000
-    );
-    setContext(op, {
-      githubLogin: setup.selectedLogin,
-      githubCredentialSource: setup.credentialSource,
-      githubAccountSwitched: setup.switched,
-      githubAccountRestoration: setup.restoration
-    });
-    if (
-      setup.restoration.state === "failed" ||
-      setup.restoration.state === "changed_externally"
-    ) {
-      addLegacyStep(
-        op,
-        `⚠️ GitHub CLI account restoration needs attention. ${
-          setup.restoration.guidance || ""
-        }`.trim()
+        },
+        30000
       );
+      setContext(op, {
+        githubLogin: setup.selectedLogin,
+        githubCredentialSource: setup.credentialSource,
+        githubAccountSwitched: setup.switched,
+        githubAccountRestoration: setup.restoration
+      });
+      if (
+        setup.restoration.state === "failed" ||
+        setup.restoration.state === "changed_externally"
+      ) {
+        addLegacyStep(
+          op,
+          `⚠️ GitHub CLI account restoration needs attention. ${
+            setup.restoration.guidance || ""
+          }`.trim()
+        );
+      }
+      await persistBestEffort({
+        operation: op,
+        persist: () => operations.persist(),
+        report: (diagnostic) => operations.report?.(diagnostic)
+      });
+      if (!setup.value.shouldMonitor) return;
+      await monitorVerification(operationId);
+    } finally {
+      if (executorRegistered) {
+        selectedGitHubExecutorsByOperation.delete(operationId);
+      }
     }
-    await persistBestEffort({
-      operation: op,
-      persist: () => operations.persist(),
-      report: (diagnostic) => operations.report?.(diagnostic)
-    });
-    if (!setup.value.shouldMonitor) return;
-    await monitorVerificationAsSelectedAccount(operationId, selectedLogin);
   }
 
   function startRecoveredVerificationTasks(): void {

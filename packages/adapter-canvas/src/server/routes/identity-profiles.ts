@@ -36,16 +36,9 @@ export interface IdentityProfilesDependencies {
     selectionHandle?: string;
     expiresAt?: number;
   }>;
-  switchGhAccount?(login: string): Promise<SwitchAccountResult>;
-  setPreferredGitHubLogin?(login: string): void;
   preflightRepoAdmin(repo: string): Promise<string>;
   isValidRepoSlug(value: unknown): boolean;
   errorMessage(error: unknown): string;
-}
-
-export interface SwitchAccountResult {
-  ok: boolean;
-  error?: string;
 }
 
 // NOTE: there is deliberately no shared `trimmed()` helper for the
@@ -132,10 +125,7 @@ export async function handleGitHubIdentity(
   }
 }
 
-// Switch the active GitHub account setup acts as.
-//
-// A failed switch is a 400, not a 200 with an error payload, and so is a
-// malformed body. Both differ from `github-identity` above and are preserved.
+// Check the selected GitHub account and mint an operation-selection handle.
 export async function handleGitHubAccount(
   context: CanvasRequestContext,
   dependencies: IdentityProfilesDependencies
@@ -158,8 +148,7 @@ export async function handleGitHubAccount(
   response.setHeader("Content-Type", "application/json");
   try {
     // `body || "{}"` means an empty body yields `{}` and `login` becomes ""
-    // rather than throwing, so the empty-login rejection comes from
-    // `switchGhAccount`, not from the parse.
+    // rather than throwing.
     const data = JSON.parse(body || "{}") as {
       login?: string;
       repo?: string;

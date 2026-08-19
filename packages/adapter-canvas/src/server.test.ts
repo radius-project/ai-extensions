@@ -94,7 +94,6 @@ describe("preflightGhcrPackageWriteAccess", () => {
         mismatch: false,
         actingHasWorkflow: true,
         actingHasPackages: true,
-        preferredLogin: null,
         reason: "user-selected-keyring-account",
         accounts: []
       })
@@ -115,7 +114,6 @@ describe("preflightGhcrPackageWriteAccess", () => {
         mismatch: false,
         actingHasWorkflow: true,
         actingHasPackages: true,
-        preferredLogin: null,
         reason: "user-selected-keyring-account",
         accounts: [
           {

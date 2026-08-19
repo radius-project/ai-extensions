@@ -245,6 +245,7 @@ function readinessResponse(
     summary?: string;
     repair?: string | null;
     login?: string;
+    packageState?: "ready" | "missing" | "error";
   } = {}
 ) {
   const ready = input.ready ?? true;
@@ -263,7 +264,15 @@ function readinessResponse(
         repository: {
           state: ready ? "ready" : "missing",
           detail: ready ? "ready" : "missing access"
-        }
+        },
+        ...(input.packageState ?
+          {
+            packages: {
+              state: input.packageState,
+              detail: "package access"
+            }
+          }
+        : {})
       }
     },
     selectionHandle: ready ? "selection-handle" : ""
@@ -1968,6 +1977,30 @@ describe("auto-recheck on focus and visibility", () => {
     page.browser.page.dispatch("focus");
     await flushPromises();
     expect(rechecks).toBe(0);
+  });
+
+  it("requires an explicit re-check after package access is denied", async () => {
+    const page = renderProfilesPage();
+    const { deps } = makeDeps();
+    const handle = setupWarning(page, deps);
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      readinessResponse({ ready: false, packageState: "missing" })
+    );
+    await handle?.loadGithubIdentity();
+    let rechecks = 0;
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+      rechecks += 1;
+      return readinessResponse();
+    });
+
+    page.browser.page.dispatch("focus");
+    page.browser.document.dispatch("visibilitychange");
+    await flushPromises();
+    expect(rechecks).toBe(0);
+
+    page.recheckBtn.dispatch("click");
+    await flushPromises();
+    expect(rechecks).toBe(1);
   });
 });
 

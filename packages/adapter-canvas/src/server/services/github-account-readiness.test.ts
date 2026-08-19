@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createGitHubAccountReadinessService,
   createGitHubSelectionHandleStore,
@@ -185,9 +185,15 @@ describe("GitHub account readiness", () => {
   });
 
   it("reports missing workflow and package access without using another account", async () => {
-    const service = readinessService(
+    const probePackageAccess = vi.fn(() =>
+      Promise.resolve({
+        ok: false,
+        detail: "GitHub Packages push access is missing."
+      })
+    );
+    const service = createGitHubAccountReadinessService(
       coordinator(selectedExecutor({ scopes: ["repo"] })),
-      { ok: false, detail: "GitHub Packages push access is missing." }
+      { probePackageAccess }
     );
 
     const result = await service.check({
@@ -217,6 +223,71 @@ describe("GitHub account readiness", () => {
     expect(result.repair).not.toContain(
       "auth refresh --hostname github.com --user"
     );
+    expect(probePackageAccess).not.toHaveBeenCalled();
+  });
+
+  it("skips package probing until repository administration is ready", async () => {
+    const probePackageAccess = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        detail: "GitHub Packages push access is available."
+      })
+    );
+    const service = createGitHubAccountReadinessService(
+      coordinator(
+        selectedExecutor({
+          command: {
+            code: 0,
+            stdout: JSON.stringify({ permissions: { push: true } }),
+            stderr: ""
+          }
+        })
+      ),
+      { probePackageAccess }
+    );
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login: "octocat"
+    });
+
+    expect(result.checks.packages).toEqual({
+      state: "missing",
+      detail:
+        "GitHub Packages access was not checked because repository administration is not ready."
+    });
+    expect(probePackageAccess).not.toHaveBeenCalled();
+  });
+
+  it("skips package probing until workflow access is ready", async () => {
+    const probePackageAccess = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        detail: "GitHub Packages push access is available."
+      })
+    );
+    const service = createGitHubAccountReadinessService(
+      coordinator(selectedExecutor({ scopes: ["write:packages"] })),
+      { probePackageAccess }
+    );
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login: "octocat"
+    });
+
+    expect(result.checks.packages).toEqual({
+      state: "missing",
+      detail:
+        "GitHub Packages access was not checked because workflow access is not ready."
+    });
+    expect(result.repair).toContain("--scopes workflow");
+    expect(result.repair).not.toContain("write:packages");
+    expect(probePackageAccess).not.toHaveBeenCalled();
   });
 
   it("requires repository administration for environment configuration", async () => {

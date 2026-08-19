@@ -99,7 +99,7 @@ export function createGitHubAccountCoordinator(
           waiter.settled = true;
           reject(
             new Error(
-              "Another Radius operation is temporarily using the GitHub CLI account. Retry in a moment."
+              "Another Environment Creation is using the GitHub CLI account. Re-check after it finishes."
             )
           );
         }, timeoutMs),

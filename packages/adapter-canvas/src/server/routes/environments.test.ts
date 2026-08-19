@@ -906,6 +906,78 @@ describe("environments — verify-status", () => {
     });
   });
 
+  it("keeps a pinned operation pending while its executor is being installed", async () => {
+    const operation = {
+      repo: "o/r",
+      environment: "dev",
+      context: { githubLogin: "octocat" },
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "main",
+        environment: "dev",
+        runId: "55"
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
+    );
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => operation,
+        hasCompleteVerificationIdentity: () => true,
+        getSelectedGitHubExecutor: () => undefined
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      state: "pending",
+      runId: "55"
+    });
+  });
+
+  it("uses legacy ambient verification for pre-pinning operations", async () => {
+    const operation = {
+      repo: "o/r",
+      environment: "dev",
+      context: {},
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "main",
+        environment: "dev",
+        runId: null
+      }
+    };
+    const findWorkflowRun = vi.fn(() => Promise.resolve(null));
+    const { recording, ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
+    );
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => operation,
+        hasCompleteVerificationIdentity: () => true,
+        getSelectedGitHubExecutor: () => undefined,
+        findWorkflowRun
+      })
+    );
+    expect(findWorkflowRun).toHaveBeenCalledWith(
+      "o/r",
+      "verify.yml",
+      123,
+      null
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      state: "pending",
+      runId: null
+    });
+  });
+
   it("caches a discovered run id onto instance state when there is no operation", async () => {
     const state: Record<string, unknown> = { deployDispatchedAt: 123 };
     const findWorkflowRun = vi.fn(() => Promise.resolve(555));

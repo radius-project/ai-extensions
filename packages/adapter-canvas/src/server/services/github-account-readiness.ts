@@ -310,13 +310,12 @@ export function createGitHubAccountReadinessService(
           async (executor) => {
             const repository = await inspectRepository(executor, repo);
             const workflowReady = hasScope(executor, "workflow");
-            const packageAccess = await ports.probePackageAccess(
-              executor,
-              repo,
-              environment
-            );
-            const packagesReady =
-              hasScope(executor, "write:packages") && packageAccess.ok;
+            const hasPackagesScope = hasScope(executor, "write:packages");
+            const packageAccess =
+              repository.ready && workflowReady && hasPackagesScope ?
+                await ports.probePackageAccess(executor, repo, environment)
+              : null;
+            const packagesReady = packageAccess?.ok === true;
             const checks: GitHubAccountReadiness["checks"] = {
               identity: readyCheck(
                 `Pinned GitHub commands resolve exactly to @${executor.login}.`
@@ -331,11 +330,19 @@ export function createGitHubAccountReadinessService(
               environment: repository.environment,
               packages:
                 packagesReady ?
-                  readyCheck(packageAccess.detail)
+                  readyCheck(
+                    packageAccess?.detail ||
+                      "GitHub Packages granted pull and push access."
+                  )
                 : failedCheck(
-                    !hasScope(executor, "write:packages") ?
+                    !hasPackagesScope ?
                       `@${executor.login} is missing GitHub Packages write access.`
-                    : packageAccess.detail
+                    : !repository.ready ?
+                      "GitHub Packages access was not checked because repository administration is not ready."
+                    : !workflowReady ?
+                      "GitHub Packages access was not checked because workflow access is not ready."
+                    : packageAccess?.detail ||
+                      "GitHub Packages push access is missing."
                   )
             };
             const ready = repository.ready && workflowReady && packagesReady;
@@ -343,7 +350,8 @@ export function createGitHubAccountReadinessService(
               ready,
               checks,
               needsWorkflow: !workflowReady,
-              needsPackages: !packagesReady,
+              needsPackages:
+                !hasPackagesScope || (packageAccess !== null && !packagesReady),
               repositoryReady: repository.ready
             };
           },
