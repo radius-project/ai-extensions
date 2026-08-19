@@ -5,6 +5,7 @@ import {
   type ServerResponse
 } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 import { createCanvasServer } from "../create-canvas-server.js";
 import { createRequestContext } from "../request-context.js";
 import { createRequestHandler } from "../create-request-handler.js";
@@ -115,6 +116,7 @@ function deps(
     kickoffWorkflowSync: unset("kickoffWorkflowSync") as never,
     now: unset("now") as never,
     getOperation: unset("getOperation") as never,
+    getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
     hasCompleteVerificationIdentity: unset(
       "hasCompleteVerificationIdentity"
     ) as never,
@@ -1325,7 +1327,8 @@ describe("environments — real loopback", () => {
         "octo/app",
         "verify.yml",
         123,
-        null
+        null,
+        expect.objectContaining({ login: "octocat" })
       );
       expect(operation.verification).toEqual({
         dispatchedAt: 123,

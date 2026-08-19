@@ -3,6 +3,7 @@ import type {
   CreateEnvironmentCliOptions,
   CreateEnvironmentCommandResult
 } from "./create-environment-types.js";
+import type { SelectedGhExecutor } from "../../gh.js";
 
 // Seam 2 of the `POST /api/create-environment` slice: every `gh` invocation the
 // route makes, including the workflow-scope retry.
@@ -66,13 +67,21 @@ export function needsWorkflowScope(stderr?: string): boolean {
 
 export function createWorkflowScopeGhRunner(
   ports: WorkflowScopeGhRunnerPorts,
-  target: WorkflowScopeGhRunnerTarget
+  target: WorkflowScopeGhRunnerTarget,
+  selectedExecutor?: SelectedGhExecutor
 ): WorkflowScopeGhRunner {
   const runGh = (
     args: string[],
     stdin?: string,
     extraOpts: CreateEnvironmentCliOptions = {}
   ): Promise<CreateEnvironmentCommandResult> => {
+    if (selectedExecutor) {
+      return selectedExecutor.run(args, {
+        timeout: 30000,
+        ...extraOpts,
+        ...(stdin === undefined ? {} : { stdin })
+      });
+    }
     return new Promise((resolve) => {
       const child = ports.cliExec(
         "gh",
@@ -130,21 +139,7 @@ export function createWorkflowScopeGhRunner(
   const runGhWorkflow = async (
     args: string[],
     stdin?: string
-  ): Promise<CreateEnvironmentCommandResult> => {
-    const first = await runGh(args, stdin);
-    if (first.code === 0) return first;
-    // Read at call time, never snapshotted at construction.
-    const env = ports.readProcessEnv();
-    const hasInjectedToken = !!(env.GH_TOKEN || env.GITHUB_TOKEN);
-    if (!hasInjectedToken) return first;
-    const fallbackEnv = { ...env };
-    delete fallbackEnv.GH_TOKEN;
-    delete fallbackEnv.GITHUB_TOKEN;
-    const retry = await runGh(args, stdin, { env: fallbackEnv });
-    // Prefer the retry only if it actually succeeded; otherwise keep the
-    // original error, which is usually the more meaningful one.
-    return retry.code === 0 ? retry : first;
-  };
+  ): Promise<CreateEnvironmentCommandResult> => runGh(args, stdin);
 
   return { runGh, runGhOrThrow, setEnvironmentVariable, runGhWorkflow };
 }

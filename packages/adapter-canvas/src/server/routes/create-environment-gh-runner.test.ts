@@ -7,6 +7,7 @@ import type {
   CreateEnvironmentCliExec,
   CreateEnvironmentCliOptions
 } from "./create-environment-types.js";
+import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 
 interface Invocation {
   command: string;
@@ -90,6 +91,34 @@ describe("needsWorkflowScope", () => {
 });
 
 describe("the workflow-scope gh runner", () => {
+  it("routes selected-account commands through the pinned executor", async () => {
+    const calls: string[][] = [];
+    const pinned = successfulSelectedGhExecutor({
+      login: "selected",
+      run: async (args) => {
+        calls.push(args);
+        return { code: 0, stdout: "ok", stderr: "" };
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({ GH_TOKEN: "ambient" })
+      },
+      target,
+      pinned
+    );
+
+    await expect(runner.runGhWorkflow(["workflow", "run"])).resolves.toEqual({
+      code: 0,
+      stdout: "ok",
+      stderr: ""
+    });
+    expect(calls).toEqual([["workflow", "run"]]);
+  });
+
   it("resolves the exit code, stdout and stderr of a failing command instead of rejecting", async () => {
     const { cliExec, calls } = fakeCli([
       { code: 3, stdout: "out", stderr: "boom" }
@@ -236,7 +265,7 @@ describe("the workflow-scope gh runner", () => {
       expect(calls).toHaveLength(1);
     });
 
-    it("retries with both injected tokens stripped and keeps the rest of the environment", async () => {
+    it("does not retry a failed mutation under a different credential", async () => {
       const { cliExec, calls } = fakeCli([
         { code: 1, stderr: "HTTP 404" },
         { stdout: "dispatched" }
@@ -253,14 +282,14 @@ describe("the workflow-scope gh runner", () => {
         target
       );
 
-      await expect(runner.runGhWorkflow(["workflow", "run"])).resolves.toEqual({
-        code: 0,
-        stdout: "dispatched",
-        stderr: ""
+      await expect(
+        runner.runGhWorkflow(["workflow", "run"])
+      ).resolves.toMatchObject({
+        code: 1,
+        stderr: "HTTP 404"
       });
-      expect(calls).toHaveLength(2);
+      expect(calls).toHaveLength(1);
       expect(calls[0]?.options.env).toBeUndefined();
-      expect(calls[1]?.options.env).toEqual({ PATH: "/usr/bin" });
     });
 
     it("keeps the original failure when the retry also fails", async () => {
@@ -276,7 +305,7 @@ describe("the workflow-scope gh runner", () => {
       await expect(
         runner.runGhWorkflow(["workflow", "run"])
       ).resolves.toMatchObject({ stderr: "the meaningful one" });
-      expect(calls).toHaveLength(2);
+      expect(calls).toHaveLength(1);
     });
 
     it("forwards stdin on the retry as well as the first attempt", async () => {
@@ -290,13 +319,10 @@ describe("the workflow-scope gh runner", () => {
       );
 
       await runner.runGhWorkflow(["api", "--input", "-"], "payload");
-      expect(calls.map((call) => call.stdin)).toEqual(["payload", "payload"]);
+      expect(calls.map((call) => call.stdin)).toEqual(["payload"]);
     });
 
-    it("reads process.env when invoked, not when the runner is constructed", async () => {
-      // The legacy arm spread the live global on the retry path, so a token the
-      // host injects after construction must still be observed. A runner that
-      // snapshotted its environment would take the no-retry path here.
+    it("does not inspect a newly injected token to choose a retry credential", async () => {
       const env: NodeJS.ProcessEnv = {};
       const { cliExec, calls } = fakeCli([
         { code: 1, stderr: "HTTP 404" },
@@ -309,13 +335,13 @@ describe("the workflow-scope gh runner", () => {
 
       env.GH_TOKEN = "injected-after-construction";
 
-      await expect(runner.runGhWorkflow(["workflow", "run"])).resolves.toEqual({
-        code: 0,
-        stdout: "ok",
-        stderr: ""
+      await expect(
+        runner.runGhWorkflow(["workflow", "run"])
+      ).resolves.toMatchObject({
+        code: 1,
+        stderr: "HTTP 404"
       });
-      expect(calls).toHaveLength(2);
-      expect(calls[1]?.options.env).toEqual({});
+      expect(calls).toHaveLength(1);
     });
 
     it("stops retrying once the injected token is removed mid-session", async () => {

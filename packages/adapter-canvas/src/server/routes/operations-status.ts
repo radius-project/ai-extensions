@@ -1,4 +1,6 @@
 import type { CanvasRequestContext } from "../request-context.js";
+import type { IncomingMessage } from "node:http";
+import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
 import {
   templatePathParameters,
   type RouteHandlerRegistry
@@ -66,6 +68,16 @@ export interface CreateOperationDependencies {
   isUuid(value: unknown): boolean;
   buildStages(options: { includeIdentity: boolean }): unknown;
   createOperation(input: unknown): OperationRecord;
+  validateBrowserMutation(
+    instanceId: string,
+    request: IncomingMessage
+  ): boolean;
+  claimSelectionHandle(input: {
+    instanceId: string;
+    repo: string;
+    environment: string;
+    handle: string;
+  }): SelectionHandleClaim;
   // Registry writes. `start` refuses a second operation for a repo already in
   // flight; `persist` durably records the registration before any work runs.
   startOperation(op: OperationRecord): StartOperationResult;
@@ -287,6 +299,15 @@ export async function handleCreateOperation(
   context: CanvasRequestContext,
   dependencies: CreateOperationDependencies
 ): Promise<void> {
+  if (
+    !dependencies.validateBrowserMutation(context.instanceId, context.request)
+  ) {
+    jsonError(context, 403, {
+      error: "This operation registration request is not trusted.",
+      code: "browser-mutation-validation-failed"
+    });
+    return;
+  }
   const body = await context.readTextBody();
   let data: any;
   try {
@@ -341,6 +362,20 @@ export async function handleCreateOperation(
     });
     return;
   }
+  const selection = dependencies.claimSelectionHandle({
+    instanceId: context.instanceId,
+    repo,
+    environment,
+    handle: String(data.selectionHandle || "")
+  });
+  if (!selection.ok) {
+    jsonError(context, 409, {
+      error:
+        "The selected GitHub account is no longer ready. Re-check the account and try again.",
+      code: `github-selection-${selection.error}`
+    });
+    return;
+  }
   const needsAzureCredentials =
     provider === "azure" && !String(data.clientId || "").trim();
   const op = dependencies.createOperation({
@@ -357,8 +392,44 @@ export async function handleCreateOperation(
       resumeReason: data.resumeReason || null
     }
   });
+  op.context = {
+    githubLogin: selection.login,
+    githubCredentialSource: selection.credentialSource
+  };
+  const environmentRequest = {
+    repo,
+    environment,
+    provider,
+    cluster: data.cluster || "",
+    namespace: data.namespace || "",
+    profileName: data.profileName || "",
+    branch: data.branch || "",
+    clientId: data.clientId || "",
+    tenantId: data.tenantId || "",
+    subscriptionId: data.subscriptionId || "",
+    resourceGroup: data.resourceGroup || "",
+    clusterResourceGroup: data.clusterResourceGroup || "",
+    appName: data.appName,
+    appId: data.appId || "",
+    createNew: data.createNew === true,
+    serviceManagementReference: data.serviceManagementReference || "",
+    roleArn: data.roleArn || "",
+    accountId: data.accountId || "",
+    region: data.region || "",
+    vpcId: data.vpcId || "",
+    subnetIds: data.subnetIds || "",
+    origin: data.origin || null,
+    resumeTarget: data.resumeTarget || null,
+    resumeBranch: data.resumeBranch || null,
+    resumeReason: data.resumeReason || null,
+    githubLogin: selection.login
+  };
   op.request = {
     needsAzureCredentials,
+    github: {
+      login: selection.login,
+      credentialSource: selection.credentialSource
+    },
     azure: {
       resourceGroup: data.resourceGroup || "",
       cluster: data.cluster || "",
@@ -370,11 +441,15 @@ export async function handleCreateOperation(
       createNew: data.createNew === true,
       serviceManagementReference: data.serviceManagementReference || ""
     },
-    environment: { ...data, environment, provider }
+    environment: environmentRequest
   };
   if (provider === "azure") {
     op.resumeRequest = {
       needsAzureCredentials,
+      github: {
+        login: selection.login,
+        credentialSource: selection.credentialSource
+      },
       azure: structuredClone((op.request as { azure: unknown }).azure),
       environment: {
         repo,
@@ -387,6 +462,7 @@ export async function handleCreateOperation(
         tenantId: data.tenantId || "",
         subscriptionId: data.subscriptionId || "",
         resourceGroup: data.resourceGroup || "",
+        githubLogin: selection.login,
         origin: data.origin || null,
         resumeTarget: data.resumeTarget || null,
         resumeBranch: data.resumeBranch || null,
@@ -396,6 +472,7 @@ export async function handleCreateOperation(
   }
   const started = dependencies.startOperation(op);
   if (!started.ok) {
+    selection.release();
     jsonError(context, 409, {
       error: `Setup is already running for ${repo}.`,
       code: "operation-in-progress",
@@ -406,6 +483,7 @@ export async function handleCreateOperation(
   try {
     await dependencies.persistOperations();
   } catch (error) {
+    selection.release();
     dependencies.finish(op, "failed", {
       failure: {
         code: "operation-registration-persist-failed",
@@ -423,6 +501,7 @@ export async function handleCreateOperation(
     });
     return;
   }
+  selection.commit();
   const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
   context.response.setHeader("Content-Type", "application/json");
   context.response.setHeader("Location", statusUrl);

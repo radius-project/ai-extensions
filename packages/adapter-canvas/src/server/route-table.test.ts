@@ -27,6 +27,7 @@ import { createGraphPlanningWorkflows } from "./routes/graph-workflows.js";
 import { createEnvironmentsRoutes } from "./routes/environments.js";
 import { createCreateEnvironmentRoutes } from "./routes/create-environment.js";
 import { createAzureAutoSetupTestDependencies } from "../../test/support/server/azure-auto-setup.js";
+import { successfulSelectedGhExecutor } from "../../test/support/server/selected-gh.js";
 
 const productionHandlers = {
   ...createLivenessSourceRoutes({
@@ -48,6 +49,14 @@ const productionHandlers = {
       isUuid: () => false,
       buildStages: () => [],
       createOperation: () => ({ operationId: "", currentStage: null }),
+      validateBrowserMutation: () => true,
+      claimSelectionHandle: () => ({
+        ok: true,
+        login: "octocat",
+        credentialSource: "keyring",
+        commit() {},
+        release() {}
+      }),
       startOperation: () => ({
         ok: true,
         operation: { operationId: "", currentStage: null }
@@ -136,6 +145,24 @@ const productionHandlers = {
         accounts: []
       }),
     resetGhIdentityCache: () => {},
+    validateBrowserMutation: () => true,
+    prepareGitHubAccount: async () => ({
+      readiness: {
+        ready: false,
+        login: "",
+        credentialSource: null,
+        summary: "Additional GitHub access is required",
+        checks: {
+          repository: { state: "error", detail: "" },
+          workflow: { state: "error", detail: "" },
+          environment: { state: "error", detail: "" },
+          packages: { state: "error", detail: "" },
+          identity: { state: "error", detail: "" }
+        },
+        repair: null,
+        restoration: null
+      }
+    }),
     switchGhAccount: () => Promise.resolve({ ok: true }),
     setPreferredGitHubLogin: () => {},
     preflightRepoAdmin: () => Promise.resolve(""),
@@ -243,6 +270,7 @@ const productionHandlers = {
     kickoffWorkflowSync: () => {},
     now: () => 0,
     getOperation: () => null,
+    getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
     hasCompleteVerificationIdentity: () => false,
     findWorkflowRun: () => Promise.resolve(null),
     getRunDetail: () => Promise.resolve(null),
@@ -267,6 +295,7 @@ const productionHandlers = {
   ...createCreateEnvironmentRoutes({
     isServerOwnedRequest: () => false,
     readInstanceEntry: () => undefined,
+    getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
     cliExec: () => ({ stdin: null }),
     readProcessEnv: () => ({}),
     isValidRepoSlug: () => false,

@@ -15,6 +15,12 @@ interface LoadGhOptions {
   token?: string | null;
   userTokens?: Record<string, string>;
   switchError?: string | null;
+  apiLogin?: string;
+  commandResult?: {
+    error?: string;
+    stdout?: string;
+    stderr?: string;
+  };
   prime?: boolean;
 }
 
@@ -101,6 +107,8 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
     token = null,
     userTokens = {},
     switchError = null,
+    apiLogin = "",
+    commandResult,
     prime = false
   } = opts;
   setPlatform(platform);
@@ -115,8 +123,12 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
   // synchronous execFileSync), so one router serves them all.
   childProcess.execFile.mockImplementation((_file, args, options, cb) => {
     const a = args || [];
-    const done = (err: Error | null, out: string) => {
-      cb(err, out || "", err ? String((err && err.message) || err) : "");
+    const done = (err: Error | null, out: string, errOut = "") => {
+      cb(
+        err,
+        out || "",
+        errOut || (err ? String((err && err.message) || err) : "")
+      );
       return { stdin: { end() {} } };
     };
     if (a[0] === "auth" && a[1] === "switch") {
@@ -135,6 +147,16 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
       const env = (options && options.env) || {};
       const hasTok = !!(env.GH_TOKEN || env.GITHUB_TOKEN);
       return done(null, hasTok ? withToken : keyring);
+    }
+    if (a[0] === "api" && a[1] === "user" && a[2] === "--jq") {
+      return done(null, apiLogin);
+    }
+    if (commandResult) {
+      return done(
+        commandResult.error ? new Error(commandResult.error) : null,
+        commandResult.stdout || "",
+        commandResult.stderr || ""
+      );
     }
     return done(null, "");
   });
@@ -704,6 +726,202 @@ describe("GitHub diagnostic redaction", () => {
   });
 });
 
+describe.sequential("selected GitHub executor", () => {
+  beforeEach(() => {
+    childProcess.execFile.mockReset();
+    childProcess.execFileSync.mockReset();
+  });
+
+  afterEach(() => {
+    restorePlatform();
+    delete process.env.GH_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_HOST;
+  });
+
+  it("pins the injected credential after removing ambient alternatives", async () => {
+    process.env.GITHUB_TOKEN = "lower-priority-token";
+    process.env.GH_HOST = "example.test";
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      apiLogin: "tokuser"
+    });
+
+    const executor = await gh.createSelectedGhExecutor("tokuser");
+    childProcess.execFile.mockClear();
+    await executor.verifyIdentity();
+
+    const [, args, options] = childProcess.execFile.mock.calls[0];
+    expect(args).toEqual(["api", "user", "--jq", ".login"]);
+    expect(options.env.GH_TOKEN).toBe("selected-injected-token");
+    expect(options.env.GITHUB_TOKEN).toBeUndefined();
+    expect(options.env.GH_HOST).toBeUndefined();
+    expect(executor.credentialSource).toBe("injected");
+  });
+
+  it("uses an account-qualified keyring token without falling through to ambient credentials", async () => {
+    process.env.GITHUB_TOKEN = "lower-priority-token";
+    process.env.GH_HOST = "example.test";
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      userTokens: { keyuser: "opaque-keyring-secret" },
+      apiLogin: "keyuser"
+    });
+
+    const executor = await gh.createSelectedGhExecutor("keyuser");
+    const tokenLookup = childProcess.execFile.mock.calls.find(
+      ([, args]) => args[0] === "auth" && args[1] === "token"
+    );
+    expect(tokenLookup?.[1]).toEqual([
+      "auth",
+      "token",
+      "--hostname",
+      "github.com",
+      "--user",
+      "keyuser"
+    ]);
+    expect(tokenLookup?.[2].env.GH_TOKEN).toBeUndefined();
+    expect(tokenLookup?.[2].env.GITHUB_TOKEN).toBeUndefined();
+    expect(tokenLookup?.[2].env.GH_HOST).toBeUndefined();
+
+    childProcess.execFile.mockClear();
+    await executor.verifyIdentity();
+    const [, , options] = childProcess.execFile.mock.calls[0];
+    expect(options.env.GH_TOKEN).toBe("opaque-keyring-secret");
+    expect(options.env.GITHUB_TOKEN).toBeUndefined();
+    expect(executor.credentialSource).toBe("keyring");
+  });
+
+  it("uses a stronger same-login keyring credential when the injected token lacks required access", async () => {
+    const gh = await loadGh("linux", {
+      token: "limited-injected-token",
+      withToken: STATUS.tokenPubNoWorkflow,
+      keyring: STATUS.keyringPubWithWorkflow,
+      userTokens: { pubuser: "full-keyring-token" },
+      apiLogin: "pubuser"
+    });
+
+    const executor = await gh.createSelectedGhExecutor("pubuser");
+    childProcess.execFile.mockClear();
+    await executor.verifyIdentity();
+
+    expect(executor.credentialSource).toBe("keyring");
+    expect(childProcess.execFile.mock.calls[0]?.[2].env.GH_TOKEN).toBe(
+      "full-keyring-token"
+    );
+  });
+
+  it("prefers a same-login keyring credential when scope metadata ties", async () => {
+    const gh = await loadGh("linux", {
+      token: "injected-token",
+      withToken: STATUS.tokenPubNoWorkflow,
+      keyring: STATUS.keyringPubNoWorkflow,
+      userTokens: { pubuser: "sso-authorized-keyring-token" },
+      apiLogin: "pubuser"
+    });
+
+    const executor = await gh.createSelectedGhExecutor("pubuser");
+    childProcess.execFile.mockClear();
+    await executor.verifyIdentity();
+
+    expect(executor.credentialSource).toBe("keyring");
+    expect(executor.requiresKeyringSwitch).toBe(false);
+    expect(childProcess.execFile.mock.calls[0]?.[2].env.GH_TOKEN).toBe(
+      "sso-authorized-keyring-token"
+    );
+  });
+
+  it("fails closed when the pinned command resolves to another login", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      apiLogin: "someone-else"
+    });
+
+    const executor = await gh.createSelectedGhExecutor("tokuser");
+
+    await expect(executor.verifyIdentity()).rejects.toThrow(
+      "expected @tokuser, received @someone-else"
+    );
+  });
+
+  it("re-verifies the selected identity immediately before a mutation", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      apiLogin: "tokuser",
+      commandResult: { stdout: "{}" }
+    });
+    const executor = await gh.createSelectedGhExecutor("tokuser");
+    childProcess.execFile.mockClear();
+
+    await executor.run([
+      "api",
+      "--method",
+      "PUT",
+      "repos/octo/app/environments/dev"
+    ]);
+
+    expect(childProcess.execFile.mock.calls.map(([, args]) => args)).toEqual([
+      ["api", "user", "--jq", ".login"],
+      ["api", "--method", "PUT", "repos/octo/app/environments/dev"]
+    ]);
+  });
+
+  it("redacts a materialized non-prefixed keyring token from results and errors", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      userTokens: { keyuser: "opaque-keyring-secret" },
+      commandResult: {
+        error: "failed with opaque-keyring-secret",
+        stderr: "denied opaque-keyring-secret"
+      }
+    });
+    const executor = await gh.createSelectedGhExecutor("keyuser");
+
+    await expect(executor.run(["api", "repos/octo/app"])).resolves.toEqual({
+      code: 1,
+      stdout: "",
+      stderr: "denied [REDACTED]"
+    });
+    await expect(
+      executor.runOrThrow(["api", "repos/octo/app"], "Repository check failed")
+    ).rejects.toThrow("Repository check failed: denied [REDACTED]");
+  });
+
+  it("preserves bounded timeouts on selected-account repository reads", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      commandResult: { stdout: "bWFpbg==" }
+    });
+    const executor = await gh.createSelectedGhExecutor("tokuser");
+    childProcess.execFile.mockClear();
+
+    await gh.selectedFetchFileFromRepo(
+      executor,
+      "octo/app",
+      "app.bicep",
+      "main"
+    );
+    await gh.selectedGetDefaultBranch(executor, "octo/app");
+    await gh.selectedGetBranchHeadSha(executor, "octo/app", "main");
+
+    expect(
+      childProcess.execFile.mock.calls.map(([, , options]) => options.timeout)
+    ).toEqual([15000, 15000, 15000]);
+  });
+});
+
 describe.sequential("getGitHubIdentity / switchGhAccount", () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();
@@ -901,7 +1119,10 @@ describe.sequential("getGhPackageCredentials", () => {
       token: "injected-pub",
       withToken: STATUS.tokenPubActive,
       keyring: STATUS.keyringPubAndEmu,
-      userTokens: { pubuser: "keyring-pub-token", emuuser: "keyring-emu-token" }
+      userTokens: {
+        pubuser: "keyring-pub-token",
+        emuuser: "keyring-emu-token"
+      }
     });
     // Acting identity is pubuser (token has workflow → token kept). GHCR
     // creds must pin to pubuser's keyring token, never the active EMU one.
@@ -916,7 +1137,10 @@ describe.sequential("getGhPackageCredentials", () => {
       token: "injected-pub",
       withToken: STATUS.tokenPubActive,
       keyring: STATUS.keyringPubAndEmu,
-      userTokens: { pubuser: "keyring-pub-token", emuuser: "keyring-emu-token" }
+      userTokens: {
+        pubuser: "keyring-pub-token",
+        emuuser: "keyring-emu-token"
+      }
     });
     await gh.switchGhAccount("emuuser");
     expect(await gh.getGhPackageCredentials()).toEqual({

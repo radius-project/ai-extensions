@@ -131,6 +131,14 @@ function createDependencies(
   overrides: Partial<CreateOperationDependencies> = {}
 ): CreateOperationDependencies {
   return {
+    validateBrowserMutation: () => true,
+    claimSelectionHandle: () => ({
+      ok: true,
+      login: "octocat",
+      credentialSource: "keyring",
+      commit() {},
+      release() {}
+    }),
     isValidRepoSlug: () => {
       throw new Error("isValidRepoSlug not stubbed");
     },
@@ -567,6 +575,18 @@ async function runCreate(
 }
 
 describe("handleCreateOperation (POST /api/operations)", () => {
+  it("rejects an untrusted browser mutation before parsing operation data", async () => {
+    const recording = await runCreate(
+      "{}",
+      createDependencies({ validateBrowserMutation: () => false })
+    );
+    expect(recording.status).toBe(403);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "This operation registration request is not trusted.",
+      code: "browser-mutation-validation-failed"
+    });
+  });
+
   it("rejects a malformed JSON body with 400 invalid-json and never touches a guard", () => {
     return runCreate("{not json", createDependencies()).then((recording) => {
       expect(recording.status).toBe(400);
@@ -702,6 +722,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       "Content-Type": "application/json",
       Location: "/api/operations/op-42"
     });
+
     expect(JSON.parse(recording.body)).toEqual({
       operationId: "op-42",
       statusUrl: "/api/operations/op-42"
@@ -711,6 +732,66 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     // Scheduling happens after the response is written and carries the request's
     // instance id and the same record.
     expect(capture.scheduled).toEqual([{ instanceId: "panel-z", op }]);
+  });
+
+  it("rejects a stale account selection before registering setup work", async () => {
+    const capture = emptyCapture();
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        clientId: "cid",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "t",
+        subscriptionId: "s",
+        selectionHandle: "stale"
+      }),
+      happyPathCreate(capture, newOperationRecord(), {
+        claimSelectionHandle: () => ({ ok: false, error: "stale" })
+      })
+    );
+
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body)).toMatchObject({
+      code: "github-selection-stale"
+    });
+    expect(capture.started).toEqual([]);
+  });
+
+  it("persists only allowlisted browser fields and the server-owned login", async () => {
+    const capture = emptyCapture();
+    const op = newOperationRecord();
+    await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        clientId: "cid",
+        resourceGroup: "rg",
+        cluster: "aks",
+        tenantId: "t",
+        subscriptionId: "s",
+        selectionHandle: "handle",
+        attackerControlled: "must-not-persist"
+      }),
+      happyPathCreate(capture, op, {
+        claimSelectionHandle: () => ({
+          ok: true,
+          login: "selected-login",
+          credentialSource: "keyring",
+          commit() {},
+          release() {}
+        })
+      })
+    );
+
+    expect(op.context).toEqual({
+      githubLogin: "selected-login",
+      githubCredentialSource: "keyring"
+    });
+    expect(op.request).not.toHaveProperty("attackerControlled");
+    expect(op.request).not.toHaveProperty("selectionHandle");
+    expect(
+      (op.request as { environment: Record<string, unknown> }).environment
+    ).not.toHaveProperty("attackerControlled");
   });
 
   it("percent-encodes the operation id in the status URL", async () => {

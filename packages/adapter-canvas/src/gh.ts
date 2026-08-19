@@ -74,6 +74,34 @@ export interface CommandOptions extends CliOptions {
   stdin?: string;
 }
 
+export interface SelectedGhCommandResult {
+  code: string | number;
+  stdout: string;
+  stderr: string;
+}
+
+export type SelectedGhCredentialSource = "injected" | "keyring";
+
+export interface SelectedGhExecutor {
+  readonly login: string;
+  readonly credentialSource: SelectedGhCredentialSource;
+  readonly requiresKeyringSwitch: boolean;
+  readonly scopes: readonly string[];
+  run(
+    args: string[],
+    options?: CommandOptions
+  ): Promise<SelectedGhCommandResult>;
+  runOrThrow(
+    args: string[],
+    message: string,
+    options?: CommandOptions
+  ): Promise<SelectedGhCommandResult>;
+  verifyIdentity(): Promise<void>;
+  packageCredentials(): { username: string; token: string };
+  redact(value: string): string;
+  errorMessage(error: unknown): string;
+}
+
 export interface ContentResult {
   content: string | null;
   error: string | null;
@@ -243,7 +271,7 @@ function ghAuthStatusText(env: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve) => {
     execFile(
       ghExecutable(),
-      ["auth", "status"],
+      ["auth", "status", "--hostname", "github.com"],
       {
         env,
         timeout: 8000,
@@ -523,6 +551,387 @@ function ghKeyringTokenForUser(login: string): Promise<string> {
       { env, timeout: 8000, windowsHide: true },
       (e, stdout) => {
         resolve(e ? "" : (stdout || "").toString().trim());
+      }
+    );
+  });
+}
+
+function selectedCredentialRedactor(token: string): (value: string) => string {
+  return (value) => {
+    const selectedRedacted =
+      token === "" ? value : value.replaceAll(token, "[REDACTED]");
+    return redactGhCredentials(selectedRedacted);
+  };
+}
+
+function selectedErrorMessage(
+  error: unknown,
+  redact: (value: string) => string
+): string {
+  return redact(error instanceof Error ? error.message : String(error));
+}
+
+function selectedExecError(
+  error: ExecFileException,
+  redact: (value: string) => string
+): ExecFileException {
+  const safe = Object.assign(new Error(redact(error.message)), {
+    code: error.code,
+    killed: error.killed,
+    signal: error.signal,
+    cmd: redact(error.cmd || "")
+  });
+  safe.name = error.name;
+  if (error.stack) safe.stack = redact(error.stack);
+  if (error.cause !== undefined) {
+    safe.cause =
+      error.cause instanceof Error ?
+        new Error(selectedErrorMessage(error.cause, redact))
+      : redact(String(error.cause));
+  }
+  return safe;
+}
+
+function pinnedGhExec(
+  token: string,
+  args: string[],
+  options: CliOptions,
+  callback: CliCallback,
+  redact: (value: string) => string
+): ChildProcess {
+  const env = withoutAgentSession(options.env);
+  delete env.GITHUB_TOKEN;
+  delete env.GH_HOST;
+  env.GH_TOKEN = token;
+  const execOptions: ExecFileOptionsWithStringEncoding = {
+    maxBuffer: 10 * 1024 * 1024,
+    windowsHide: true,
+    ...options,
+    env,
+    encoding: "utf8"
+  };
+  return execFile(
+    ghExecutable(),
+    args,
+    execOptions,
+    (error, stdout, stderr) => {
+      callback(
+        error ? selectedExecError(error, redact) : null,
+        redact((stdout || "").toString()),
+        redact((stderr || "").toString())
+      );
+    }
+  );
+}
+
+function isSelectedGhMutation(args: readonly string[]): boolean {
+  const methodIndex = args.indexOf("--method");
+  const method =
+    methodIndex >= 0 ? (args[methodIndex + 1] || "").toUpperCase() : "";
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) return true;
+  return (
+    (args[0] === "workflow" && args[1] === "run") ||
+    (args[0] === "variable" && args[1] === "set") ||
+    (args[0] === "secret" && args[1] === "set")
+  );
+}
+
+export async function createSelectedGhExecutor(
+  selectedLogin: string,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<SelectedGhExecutor> {
+  const login = selectedLogin.trim();
+  if (!login) throw new Error("A GitHub account login is required.");
+
+  const snapshot = await ensureGhSnapshot();
+  const injectedToken = getInjectedGhToken(env);
+  const injectedAccount = snapshot.withTokenAccts.find(
+    (account) => account.login === login && /TOKEN/i.test(account.source)
+  );
+  const keyringAccount = snapshot.keyringAccts.find(
+    (account) => account.login === login
+  );
+  const requiredScopeScore = (account: GhAccount | undefined): number =>
+    Number(account?.scopes.includes("workflow") === true) +
+    Number(account?.scopes.includes("write:packages") === true);
+  const keyringToken = keyringAccount ? await ghKeyringTokenForUser(login) : "";
+  const useInjected =
+    injectedToken !== "" &&
+    snapshot.tokenAcct?.login === login &&
+    (!keyringToken ||
+      requiredScopeScore(injectedAccount) > requiredScopeScore(keyringAccount));
+  const token = useInjected ? injectedToken : keyringToken;
+  if (!token) {
+    throw new Error(
+      `Could not obtain a GitHub credential for @${login}. Sign in with: gh auth login`
+    );
+  }
+  const credentialSource: SelectedGhCredentialSource =
+    useInjected ? "injected" : "keyring";
+  const scopes =
+    credentialSource === "injected" ?
+      snapshot.withTokenAccts.find((account) => account.login === login)
+        ?.scopes || []
+    : snapshot.keyringAccts.find((account) => account.login === login)
+        ?.scopes || [];
+  const redact = selectedCredentialRedactor(token);
+
+  const runRaw = (
+    args: string[],
+    options: CommandOptions = {}
+  ): Promise<SelectedGhCommandResult> => {
+    const { stdin, ...execOptions } = options;
+    return new Promise((resolve) => {
+      const child = pinnedGhExec(
+        token,
+        args,
+        execOptions,
+        (error, stdout, stderr) => {
+          resolve({
+            code: error ? error.code || 1 : 0,
+            stdout,
+            stderr
+          });
+        },
+        redact
+      );
+      if (stdin !== undefined) child.stdin?.end(stdin);
+    });
+  };
+  let verifyIdentity: () => Promise<void>;
+  const run = async (
+    args: string[],
+    options: CommandOptions = {}
+  ): Promise<SelectedGhCommandResult> => {
+    if (isSelectedGhMutation(args)) await verifyIdentity();
+    return await runRaw(args, options);
+  };
+
+  const runOrThrow = async (
+    args: string[],
+    message: string,
+    options: CommandOptions = {}
+  ): Promise<SelectedGhCommandResult> => {
+    const result = await run(args, options);
+    if (result.code !== 0) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw new Error(detail ? `${message}: ${detail}` : message);
+    }
+    return result;
+  };
+
+  verifyIdentity = async (): Promise<void> => {
+    const result = await runRaw(["api", "user", "--jq", ".login"], {
+      timeout: 15000
+    });
+    const actingLogin = result.stdout.trim();
+    if (result.code !== 0) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw new Error(
+        detail ?
+          `GitHub identity verification failed for @${login}: ${detail}`
+        : `GitHub identity verification failed for @${login}.`
+      );
+    }
+    if (actingLogin !== login) {
+      throw new Error(
+        `GitHub identity verification failed: expected @${login}, received @${
+          actingLogin || "unknown"
+        }.`
+      );
+    }
+  };
+
+  return {
+    login,
+    credentialSource,
+    requiresKeyringSwitch:
+      credentialSource === "keyring" && snapshot.tokenAcct?.login !== login,
+    scopes: [...scopes],
+    run,
+    runOrThrow,
+    verifyIdentity,
+    packageCredentials: () => ({ username: login, token }),
+    redact,
+    errorMessage: (error) => selectedErrorMessage(error, redact)
+  };
+}
+
+export async function selectedGhApiJson(
+  executor: SelectedGhExecutor,
+  apiPath: string
+): Promise<GhApiResult> {
+  const result = await executor.run(["api", apiPath], { timeout: 15000 });
+  let json: unknown = null;
+  if (result.stdout.trim()) {
+    try {
+      json = JSON.parse(result.stdout);
+    } catch {
+      return {
+        ok: false,
+        status: null,
+        json: null,
+        stderr: "GitHub returned an invalid JSON response."
+      };
+    }
+  }
+  const statusMatch = result.stderr.match(/\bHTTP\s+(\d{3})\b/i);
+  return {
+    ok: result.code === 0,
+    status:
+      result.code === 0 ? 200
+      : statusMatch ? Number(statusMatch[1])
+      : null,
+    json,
+    stderr: result.stderr
+  };
+}
+
+export async function selectedFetchFileFromRepo(
+  executor: SelectedGhExecutor,
+  repo: string,
+  path: string,
+  branch = "main"
+): Promise<string | null> {
+  const result = await executor.run(
+    [
+      "api",
+      `/repos/${repo}/contents/${path}?ref=${branch}`,
+      "--jq",
+      ".content"
+    ],
+    { timeout: 15000 }
+  );
+  if (result.code !== 0 || !result.stdout.trim()) return null;
+  return Buffer.from(result.stdout.trim(), "base64").toString("utf8");
+}
+
+export async function selectedGetDefaultBranch(
+  executor: SelectedGhExecutor,
+  repo: string
+): Promise<string> {
+  const result = await executor.run(
+    ["api", `/repos/${repo}`, "--jq", ".default_branch"],
+    { timeout: 15000 }
+  );
+  return result.code === 0 ? result.stdout.trim() : "";
+}
+
+export async function selectedGetBranchHeadSha(
+  executor: SelectedGhExecutor,
+  repo: string,
+  branch: string
+): Promise<string> {
+  const result = await executor.run(
+    [
+      "api",
+      `/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`,
+      "--jq",
+      ".object.sha"
+    ],
+    { timeout: 15000 }
+  );
+  return result.code === 0 ? result.stdout.trim() : "";
+}
+
+export async function selectedCreateBranchRef(
+  executor: SelectedGhExecutor,
+  repo: string,
+  newBranch: string,
+  fromSha: string
+): Promise<BranchRefResult> {
+  const result = await executor.run(
+    ["api", "--method", "POST", `/repos/${repo}/git/refs`, "--input", "-"],
+    {
+      timeout: 20000,
+      stdin: JSON.stringify({
+        ref: `refs/heads/${newBranch}`,
+        sha: fromSha
+      })
+    }
+  );
+  return {
+    ok: result.code === 0,
+    stderr: (result.stderr || result.stdout).trim()
+  };
+}
+
+export async function selectedCreatePullRequest(
+  executor: SelectedGhExecutor,
+  repo: string,
+  head: string,
+  base: string,
+  title: string,
+  prBody: string
+): Promise<PullRequestResult> {
+  const result = await executor.run(
+    ["api", "--method", "POST", `/repos/${repo}/pulls`, "--input", "-"],
+    {
+      timeout: 20000,
+      stdin: JSON.stringify({ title, head, base, body: prBody || "" })
+    }
+  );
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      stderr: (result.stderr || result.stdout).trim()
+    };
+  }
+  try {
+    const parsed = JSON.parse(result.stdout) as {
+      html_url?: unknown;
+      number?: unknown;
+    };
+    return {
+      ok: true,
+      url: typeof parsed.html_url === "string" ? parsed.html_url : undefined,
+      number: typeof parsed.number === "number" ? parsed.number : undefined
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      stderr: `Could not parse PR response: ${executor.errorMessage(error)}`
+    };
+  }
+}
+
+export async function getActiveKeyringLogin(): Promise<string> {
+  resetGhIdentityCache();
+  const snapshot = await ensureGhSnapshot();
+  return snapshot.keyringActive?.login || "";
+}
+
+export function switchGhKeyringAccount(
+  login: string
+): Promise<{ ok: boolean; error?: string }> {
+  const selectedLogin = login.trim();
+  if (!selectedLogin) {
+    return Promise.resolve({
+      ok: false,
+      error: "A GitHub account login is required."
+    });
+  }
+  const env = withoutAgentSession(process.env);
+  delete env.GH_TOKEN;
+  delete env.GITHUB_TOKEN;
+  delete env.GH_HOST;
+  return new Promise((resolve) => {
+    execFile(
+      ghExecutable(),
+      ["auth", "switch", "--hostname", "github.com", "--user", selectedLogin],
+      { env, timeout: 15000, windowsHide: true },
+      (error, _stdout, stderr) => {
+        if (error) {
+          resolve({
+            ok: false,
+            error: redactGhCredentials(
+              (stderr || error.message || "gh auth switch failed").trim()
+            )
+          });
+          return;
+        }
+        resetGhIdentityCache();
+        resolve({ ok: true });
       }
     );
   });

@@ -114,6 +114,26 @@ function dependencies(
     resetGhIdentityCache: () => {
       throw new Error("resetGhIdentityCache not stubbed");
     },
+    validateBrowserMutation: () => true,
+    prepareGitHubAccount: async ({ login }) => ({
+      readiness: {
+        ready: true,
+        login,
+        credentialSource: "keyring",
+        summary: "Ready to configure deployments",
+        checks: {
+          repository: { state: "ready", detail: "ready" },
+          workflow: { state: "ready", detail: "ready" },
+          environment: { state: "ready", detail: "ready" },
+          packages: { state: "ready", detail: "ready" },
+          identity: { state: "ready", detail: "ready" }
+        },
+        repair: null,
+        restoration: null
+      },
+      selectionHandle: "selection-handle",
+      expiresAt: 1
+    }),
     switchGhAccount: () => {
       throw new Error("switchGhAccount not stubbed");
     },
@@ -474,83 +494,86 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
 
   // ── POST /api/github-account (SU-06) ───────────────────────────────────────
 
-  it("persists the chosen login before re-reading the identity", async () => {
-    const calls: Calls = { log: [] };
+  it("returns readiness and a server-minted handle without persisting a preferred login", async () => {
+    const prepared: Array<{
+      instanceId: string;
+      repo: string;
+      login: string;
+    }> = [];
     const recording = await run(
       "POST",
       "/api/github-account",
-      '{"login":"  octocat  "}',
+      '{"login":"  octocat  ","repo":"octo/app","environment":"dev"}',
       handleGitHubAccount,
-      dependencies(identityPorts(calls))
+      dependencies({
+        resetGhIdentityCache: () => {},
+        isValidRepoSlug: (value) => value === "octo/app",
+        prepareGitHubAccount: async (input) => {
+          prepared.push(input);
+          return {
+            readiness: {
+              ready: true,
+              login: "octocat",
+              credentialSource: "keyring",
+              summary: "Ready to configure deployments",
+              checks: {
+                repository: { state: "ready", detail: "ready" },
+                workflow: { state: "ready", detail: "ready" },
+                environment: { state: "ready", detail: "ready" },
+                packages: { state: "ready", detail: "ready" },
+                identity: { state: "ready", detail: "ready" }
+              },
+              repair: null,
+              restoration: null
+            },
+            selectionHandle: "handle",
+            expiresAt: 123
+          };
+        }
+      })
     );
     expect(recording.status).toBe(200);
     expect(recording.headerSteps).toEqual(SET_THEN_WRITE(200));
-    expect(JSON.parse(recording.body)).toEqual({
+    expect(JSON.parse(recording.body)).toMatchObject({
       success: true,
-      identity: identityFor("octocat")
+      selectionHandle: "handle",
+      readiness: { ready: true, login: "octocat" }
     });
-    // The identity read reports `octocat`, which is only possible if the
-    // preference was persisted first.
-    expect(calls.log).toEqual([
-      "switchGhAccount(octocat)",
-      "setPreferredGitHubLogin(octocat)",
-      "getGitHubIdentity->octocat"
+    expect(prepared).toEqual([
+      {
+        instanceId: "panel-a",
+        repo: "octo/app",
+        environment: "dev",
+        login: "octocat"
+      }
     ]);
   });
 
-  it("answers a failed switch with 400 and the reported reason", async () => {
-    const calls: Calls = { log: [] };
+  it("rejects an untrusted browser mutation before reading account state", async () => {
     const recording = await run(
       "POST",
       "/api/github-account",
-      '{"login":"ghost"}',
+      '{"login":"ghost","repo":"octo/app"}',
       handleGitHubAccount,
-      dependencies(
-        identityPorts(calls, {
-          switchResult: { ok: false, error: "no such account" }
-        })
-      )
+      dependencies({ validateBrowserMutation: () => false })
     );
-    // 400, not a 200 error payload — and nothing is persisted.
-    expect(recording.status).toBe(400);
-    expect(recording.body).toBe('{"error":"no such account"}');
-    expect(calls.log).toEqual(["switchGhAccount(ghost)"]);
+    expect(recording.status).toBe(403);
+    expect(JSON.parse(recording.body)).toMatchObject({
+      code: "browser-mutation-validation-failed"
+    });
   });
 
-  it("supplies a default message when the failed switch reports none", async () => {
-    const calls: Calls = { log: [] };
-    const recording = await run(
-      "POST",
-      "/api/github-account",
-      '{"login":"ghost"}',
-      handleGitHubAccount,
-      dependencies(identityPorts(calls, { switchResult: { ok: false } }))
-    );
-    expect(recording.status).toBe(400);
-    expect(recording.body).toBe('{"error":"Failed to switch account."}');
-  });
-
-  it("treats an empty body as an empty login rather than a parse failure", async () => {
-    const calls: Calls = { log: [] };
+  it("requires both a login and a valid repository", async () => {
     const recording = await run(
       "POST",
       "/api/github-account",
       "",
       handleGitHubAccount,
-      dependencies(
-        identityPorts(calls, {
-          switchResult: {
-            ok: false,
-            error: "A GitHub account login is required."
-          }
-        })
-      )
+      dependencies({ isValidRepoSlug: () => false })
     );
-    // The rejection comes from the switch port, not from JSON.parse.
-    expect(calls.log).toEqual(["switchGhAccount()"]);
     expect(recording.status).toBe(400);
     expect(recording.body).toBe(
-      '{"error":"A GitHub account login is required."}'
+      '{"error":"A GitHub login, environment, and valid repository are required."}'
     );
   });
 
@@ -567,14 +590,19 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     expect(JSON.parse(recording.body)).toHaveProperty("error");
   });
 
-  it("answers a throwing switch with 400", async () => {
-    const calls: Calls = { log: [] };
+  it("answers a throwing readiness check with 400", async () => {
     const recording = await run(
       "POST",
       "/api/github-account",
-      '{"login":"octocat"}',
+      '{"login":"octocat","repo":"octo/app","environment":"dev"}',
       handleGitHubAccount,
-      dependencies(identityPorts(calls, { switchThrows: new Error("spawn") }))
+      dependencies({
+        resetGhIdentityCache: () => {},
+        isValidRepoSlug: () => true,
+        prepareGitHubAccount: async () => {
+          throw new Error("spawn");
+        }
+      })
     );
     expect(recording.status).toBe(400);
     expect(recording.body).toBe('{"error":"spawn"}');

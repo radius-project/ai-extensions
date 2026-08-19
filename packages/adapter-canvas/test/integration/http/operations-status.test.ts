@@ -117,6 +117,14 @@ function start(): Harness {
         toClientView
       },
       {
+        validateBrowserMutation: () => true,
+        claimSelectionHandle: () => ({
+          ok: true,
+          login: "octocat",
+          credentialSource: "keyring",
+          commit() {},
+          release() {}
+        }),
         isValidRepoSlug,
         isResourceGroupName,
         isAksClusterName,

@@ -12,6 +12,7 @@ import {
   initializeCredentialProfilesPanel,
   parseCredentialProfiles,
   parseGithubIdentity,
+  parseGithubReadiness,
   profileDetailSpecs,
   providerLabel
 } from "./profiles.js";
@@ -69,12 +70,33 @@ interface ProfilesPage {
   ghEmptyEl: ReturnType<typeof createFakeElement>;
   noteEl: ReturnType<typeof createFakeElement>;
   recheckBtn: ReturnType<typeof createFakeInput>;
+  detailsEl: ReturnType<typeof createFakeElement>;
+  fixAccessBtn: ReturnType<typeof createFakeElement>;
 }
 
 function renderProfilesPage(
   options: { omit?: readonly string[] } = {}
 ): ProfilesPage {
   const browser = createFakeBrowser();
+  browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+    jsonResponse({
+      readiness: {
+        ready: true,
+        login: "alice",
+        credentialSource: "keyring",
+        summary: "Ready to configure deployments",
+        repair: null,
+        checks: {
+          repository: { state: "ready", detail: "ready" },
+          workflow: { state: "ready", detail: "ready" },
+          environment: { state: "ready", detail: "ready" },
+          packages: { state: "ready", detail: "ready" },
+          identity: { state: "ready", detail: "ready" }
+        }
+      },
+      selectionHandle: "selection-handle"
+    })
+  );
   const button = createFakeElement(PROFILE_MENU_IDS.button);
   const menu = createFakeElement(PROFILE_MENU_IDS.menu);
   menu.style.display = "none";
@@ -101,6 +123,10 @@ function renderProfilesPage(
   const ghEmptyEl = createFakeElement(GITHUB_IDENTITY_IDS.empty);
   const noteEl = createFakeElement(GITHUB_IDENTITY_IDS.note);
   const recheckBtn = createFakeInput(GITHUB_IDENTITY_IDS.recheck);
+  const detailsPanel = createFakeElement("env-gh-details-panel");
+  const detailsEl = createFakeElement(GITHUB_IDENTITY_IDS.details);
+  const repairEl = createFakeElement(GITHUB_IDENTITY_IDS.repair);
+  const fixAccessBtn = createFakeElement(GITHUB_IDENTITY_IDS.fix);
 
   for (const element of [
     button,
@@ -125,7 +151,11 @@ function renderProfilesPage(
     ghOptionsEl,
     ghEmptyEl,
     noteEl,
-    recheckBtn
+    recheckBtn,
+    detailsPanel,
+    detailsEl,
+    repairEl,
+    fixAccessBtn
   ]) {
     if (options.omit?.includes(element.id)) continue;
     browser.document.add(element);
@@ -155,7 +185,9 @@ function renderProfilesPage(
     ghOptionsEl,
     ghEmptyEl,
     noteEl,
-    recheckBtn
+    recheckBtn,
+    detailsEl,
+    fixAccessBtn
   };
 }
 
@@ -176,7 +208,10 @@ function makeDeps(overrides: Partial<CredentialProfilesPanelDeps> = {}): {
   }> = [];
   const deps: CredentialProfilesPanelDeps = {
     repo: "octo/cat",
+    mutationNonce: "browser-nonce",
+    environmentName: () => "dev",
     onProfileChange: (profile) => profileChanges.push(profile),
+    onReadinessChange: () => {},
     discoverResources: (provider, subscriptionId, tenantId) =>
       discoverCalls.push({ provider, subscriptionId, tenantId }),
     ...overrides
@@ -202,6 +237,37 @@ const AWS_PROFILE: CredentialProfile = {
 
 function profilesResponse(profiles: readonly CredentialProfile[]) {
   return jsonResponse({ profiles });
+}
+
+function readinessResponse(
+  input: {
+    ready?: boolean;
+    summary?: string;
+    repair?: string | null;
+    login?: string;
+  } = {}
+) {
+  const ready = input.ready ?? true;
+  return jsonResponse({
+    readiness: {
+      ready,
+      login: input.login || "alice",
+      credentialSource: "keyring",
+      summary:
+        input.summary ||
+        (ready ?
+          "Ready to configure deployments"
+        : "Additional GitHub access is required"),
+      repair: input.repair ?? null,
+      checks: {
+        repository: {
+          state: ready ? "ready" : "missing",
+          detail: ready ? "ready" : "missing access"
+        }
+      }
+    },
+    selectionHandle: ready ? "selection-handle" : ""
+  });
 }
 
 describe("parseCredentialProfiles", () => {
@@ -273,6 +339,7 @@ describe("parseGithubIdentity", () => {
         "not-an-object"
       ]
     });
+
     expect(identity.accounts).toEqual([
       {
         login: "alice",
@@ -294,6 +361,27 @@ describe("parseGithubIdentity", () => {
       actingHasWorkflow: false,
       actingHasPackages: false,
       accounts: []
+    });
+  });
+});
+
+describe("parseGithubReadiness", () => {
+  it("fails closed for a missing readiness object and skips malformed checks", () => {
+    expect(parseGithubReadiness({})).toEqual({
+      ready: false,
+      login: "",
+      credentialSource: "",
+      summary: "",
+      repair: "",
+      selectionHandle: "",
+      checks: {}
+    });
+    expect(
+      parseGithubReadiness({
+        readiness: { checks: { malformed: "no", repository: {} } }
+      }).checks
+    ).toEqual({
+      repository: { state: "", detail: "" }
     });
   });
 });
@@ -333,24 +421,24 @@ describe("githubAccountLabel", () => {
     expect(githubAccountLabel(base, "bob")).toBe("@bob ✓");
   });
 
-  it("lists every missing scope", () => {
+  it("keeps permission diagnostics out of the account label", () => {
     expect(
       githubAccountLabel(
         { ...base, hasWorkflow: false, hasPackages: false },
         "someone-else"
       )
-    ).toBe("@bob — missing workflow + packages scopes");
+    ).toBe("@bob");
   });
 
-  it("lists a single missing scope without the plural", () => {
+  it("keeps a single missing permission out of the account label", () => {
     expect(
       githubAccountLabel({ ...base, hasPackages: false }, "someone-else")
-    ).toBe("@bob — missing packages scope");
+    ).toBe("@bob");
   });
 
-  it("marks a non-switchable account instead of a checkmark", () => {
+  it("marks the selected account even when it is backed by an injected token", () => {
     expect(githubAccountLabel({ ...base, switchable: false }, "bob")).toBe(
-      "@bob (not switchable)"
+      "@bob ✓"
     );
   });
 
@@ -430,6 +518,12 @@ describe("githubIdentityNote", () => {
     const note = githubIdentityNote({ ...base, actingHasPackages: false });
     expect(note.specs[0].text).toContain("missing the write:packages scope ");
     expect(note.specs[0].text).not.toContain("scopes ");
+  });
+
+  it("reports workflow as the only missing scope", () => {
+    const note = githubIdentityNote({ ...base, actingHasWorkflow: false });
+    expect(note.specs[0].text).toContain("missing the workflow scope ");
+    expect(note.specs[0].text).toContain("-s workflow");
   });
 
   it("falls back to the muted acts-as note, rendering the login as a text node only", () => {
@@ -1000,13 +1094,15 @@ describe("github identity loading and rendering", () => {
     const optionsEl = createFakeElement(PROFILE_MENU_IDS.options);
     const hiddenInput = createFakeInput(PROFILE_MENU_IDS.select);
     const fieldEl = createFakeElement(GITHUB_IDENTITY_IDS.field);
+    const fixAccess = createFakeElement(GITHUB_IDENTITY_IDS.fix);
     for (const element of [
       button,
       menu,
       valueEl,
       optionsEl,
       hiddenInput,
-      fieldEl
+      fieldEl,
+      fixAccess
     ]) {
       browser.document.add(element);
     }
@@ -1026,6 +1122,8 @@ describe("github identity loading and rendering", () => {
 
     await expect(handle?.loadGithubIdentity(true)).resolves.toBeUndefined();
     expect(fieldEl.style.display).toBe("");
+    expect(() => handle?.invalidateReadiness()).not.toThrow();
+    expect(() => fixAccess.dispatch("click")).not.toThrow();
   });
 
   it("hides the field without a recheck button to toggle when identity has an error", async () => {
@@ -1128,9 +1226,12 @@ describe("github identity loading and rendering", () => {
     expect(page.ghValueEl.textContent).toBe("@alice");
     expect(page.ghOptionsEl.children).toHaveLength(1);
     expect(page.ghEmptyEl.style.display).toBe("none");
-    expect(page.noteEl.style.color).toBe("var(--rad-text-tertiary)");
-    expect(fakeText(page.noteEl)).toContain("Acts as");
-    expect(page.recheckBtn.style.display).toBe("none");
+    expect(page.noteEl.style.color).toBe("var(--rad-success, #1a7f37)");
+    expect(fakeText(page.noteEl)).toBe("Ready to configure deployments");
+    expect(page.recheckBtn.style.display).toBe("");
+
+    await handle?.loadGithubIdentity();
+    expect(page.ghValueEl.textContent).toBe("@alice");
   });
 
   it("hides the field entirely when the identity has an error or no acting login", async () => {
@@ -1147,6 +1248,55 @@ describe("github identity loading and rendering", () => {
     expect(page.recheckBtn.style.display).toBe("none");
   });
 
+  it.each([
+    [true, "Ready to configure deployments", "var(--rad-success, #1a7f37)"],
+    [
+      false,
+      "Additional GitHub access is required",
+      "var(--rad-warning, #9a6700)"
+    ]
+  ] as const)(
+    "uses a safe fallback summary when readiness=%s omits display metadata",
+    async (ready, summary, color) => {
+      const page = renderProfilesPage();
+      const { deps } = makeDeps();
+      page.browser.net.handle(IDENTITY_URL(), () =>
+        jsonResponse({
+          actingLogin: "alice",
+          displayLogin: "alice",
+          accounts: [
+            {
+              login: "alice",
+              hasWorkflow: true,
+              hasPackages: true,
+              switchable: true
+            }
+          ]
+        })
+      );
+      page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+        jsonResponse({
+          readiness: {
+            ready,
+            login: "alice",
+            credentialSource: "",
+            summary: "",
+            repair: null,
+            checks: {}
+          },
+          selectionHandle: ready ? "selection" : ""
+        })
+      );
+      const handle = setupIdentity(page, deps);
+
+      await handle?.loadGithubIdentity();
+
+      expect(fakeText(page.noteEl)).toBe(summary);
+      expect(page.noteEl.style.color).toBe(color);
+      expect(fakeText(page.detailsEl)).toContain("credential source: unknown");
+    }
+  );
+
   it("hides the field on a network error", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps();
@@ -1159,9 +1309,97 @@ describe("github identity loading and rendering", () => {
     expect(page.fieldEl.style.display).toBe("none");
   });
 
+  it("sends an empty nonce when an older page has no nonce state", async () => {
+    const page = renderProfilesPage();
+    const { deps } = makeDeps({
+      mutationNonce: undefined,
+      environmentName: () => "   "
+    });
+    page.browser.net.handle(IDENTITY_URL(), () =>
+      jsonResponse({
+        actingLogin: "alice",
+        displayLogin: "alice",
+        accounts: [
+          {
+            login: "alice",
+            hasWorkflow: true,
+            hasPackages: true,
+            switchable: true
+          }
+        ]
+      })
+    );
+    let nonce = "not-called";
+    let environment = "";
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, (init) => {
+      nonce =
+        (init?.headers as Record<string, string> | undefined)?.[
+          "X-Radius-Mutation-Nonce"
+        ] ?? "missing";
+      environment = JSON.parse(String(init?.body)).environment;
+      return readinessResponse();
+    });
+    const handle = setupIdentity(page, deps);
+
+    await handle?.loadGithubIdentity();
+
+    expect(nonce).toBe("");
+    expect(environment).toBe("dev");
+  });
+
+  it("does not recheck before an account has been selected", () => {
+    const page = renderProfilesPage();
+    const { deps } = makeDeps();
+    let checks = 0;
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+      checks += 1;
+      return readinessResponse();
+    });
+    setupIdentity(page, deps);
+
+    page.recheckBtn.dispatch("click");
+
+    expect(checks).toBe(0);
+  });
+
+  it("invalidates readiness when the environment package target changes", async () => {
+    const page = renderProfilesPage();
+    const changes: Array<boolean | null> = [];
+    const { deps } = makeDeps({
+      onReadinessChange: (readiness) => changes.push(readiness?.ready ?? null)
+    });
+    page.browser.net.handle(IDENTITY_URL(), () =>
+      jsonResponse({
+        actingLogin: "alice",
+        displayLogin: "alice",
+        accounts: [
+          {
+            login: "alice",
+            hasWorkflow: true,
+            hasPackages: true,
+            switchable: true
+          }
+        ]
+      })
+    );
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+
+    handle?.invalidateReadiness();
+
+    expect(changes.at(-1)).toBeNull();
+    expect(fakeText(page.noteEl)).toBe(
+      "Re-check GitHub access for this environment."
+    );
+    expect(page.recheckBtn.disabled).toBe(false);
+  });
+
   it("shows the recheck button and warning tone when a scope is missing", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps();
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      readinessResponse({ ready: false })
+    );
     page.browser.net.handle(IDENTITY_URL(), () =>
       jsonResponse({
         actingLogin: "alice",
@@ -1181,6 +1419,12 @@ describe("github identity loading and rendering", () => {
   it("shows a repo-access warning note", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps();
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      readinessResponse({
+        ready: false,
+        repair: "Grant repository administrator access."
+      })
+    );
     page.browser.net.handle(IDENTITY_URL(), () =>
       jsonResponse({
         actingLogin: "alice",
@@ -1193,7 +1437,8 @@ describe("github identity loading and rendering", () => {
     );
     const handle = setupIdentity(page, deps);
     await handle?.loadGithubIdentity();
-    expect(fakeText(page.noteEl)).toBe("alice cannot push here");
+    expect(fakeText(page.noteEl)).toBe("Additional GitHub access is required");
+    expect(fakeText(page.detailsEl)).toContain("missing access");
   });
 
   it("marks non-actionable rows as disabled and does not bind a switch handler", async () => {
@@ -1231,7 +1476,7 @@ describe("github identity loading and rendering", () => {
     expect(bobRow?.listenerCount("click")).toBe(0);
   });
 
-  it("skips fetching identity again while one is already in flight", async () => {
+  it("allows a newer identity request to supersede one already in flight", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps();
     let calls = 0;
@@ -1243,24 +1488,76 @@ describe("github identity loading and rendering", () => {
     const first = handle?.loadGithubIdentity();
     const second = handle?.loadGithubIdentity();
     await Promise.all([first, second]);
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
   });
 
-  it("recheck button requests a fresh identity and toggles its label", async () => {
+  it("ignores an identity failure superseded by a newer successful request", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps();
-    let receivedFresh = false;
-    page.browser.net.handle(IDENTITY_URL(true), () => {
-      receivedFresh = true;
-      return jsonResponse({ actingLogin: "alice", displayLogin: "alice" });
+    let rejectFirst: (reason: Error) => void = () => {};
+    const firstResponse = new Promise<HttpResponse>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    let calls = 0;
+    page.browser.net.handle(IDENTITY_URL(), () => {
+      calls += 1;
+      return calls === 1 ? firstResponse : (
+          jsonResponse({
+            actingLogin: "alice",
+            displayLogin: "alice",
+            accounts: [
+              {
+                login: "alice",
+                hasWorkflow: true,
+                hasPackages: true,
+                switchable: true
+              }
+            ]
+          })
+        );
     });
     const handle = setupIdentity(page, deps);
+
+    const stale = handle?.loadGithubIdentity();
+    const current = handle?.loadGithubIdentity();
+    await current;
+    rejectFirst(new Error("stale identity failure"));
+    await stale;
+
+    expect(page.fieldEl.style.display).toBe("");
+    expect(page.ghValueEl.textContent).toBe("@alice");
+  });
+
+  it("recheck button reruns readiness for the selected login", async () => {
+    const page = renderProfilesPage();
+    const { deps } = makeDeps();
+    page.browser.net.handle(IDENTITY_URL(), () =>
+      jsonResponse({
+        actingLogin: "alice",
+        displayLogin: "alice",
+        accounts: [
+          {
+            login: "alice",
+            hasWorkflow: true,
+            hasPackages: true,
+            switchable: true
+          }
+        ]
+      })
+    );
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+    let readinessChecks = 0;
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+      readinessChecks += 1;
+      return readinessResponse();
+    });
     page.recheckBtn.dispatch("click");
     expect(page.recheckBtn.disabled).toBe(true);
     expect(page.recheckBtn.textContent).toBe("Checking…");
     await flushPromises();
 
-    expect(receivedFresh).toBe(true);
+    expect(readinessChecks).toBe(1);
     expect(page.recheckBtn.disabled).toBe(false);
     expect(page.recheckBtn.textContent).toBe("Re-check");
     void handle;
@@ -1268,8 +1565,6 @@ describe("github identity loading and rendering", () => {
 });
 
 describe("switching a github account", () => {
-  const IDENTITY_URL_FRESH = `${GITHUB_IDENTITY_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}&fresh=1`;
-
   function setupWithAccounts(
     page: ProfilesPage,
     deps: CredentialProfilesPanelDeps
@@ -1379,7 +1674,7 @@ describe("switching a github account", () => {
     expect(page.ghMenu.style.display).toBe("none");
   });
 
-  it("still switches accounts when the combo button is absent", async () => {
+  it("still checks accounts when the combo button is absent", async () => {
     const page = renderProfilesPage({ omit: [GITHUB_IDENTITY_IDS.button] });
     const { deps } = makeDeps();
     const handle = setupWithAccounts(page, deps);
@@ -1396,10 +1691,12 @@ describe("switching a github account", () => {
     expect(() => bobRow?.dispatch("click")).not.toThrow();
     await flushPromises();
 
-    expect(postedBody).toBe(JSON.stringify({ login: "bob" }));
+    expect(postedBody).toBe(
+      JSON.stringify({ login: "bob", repo: "octo/cat", environment: "dev" })
+    );
   });
 
-  it("switches accounts and re-checks identity with the repo so repoAccess re-runs", async () => {
+  it("checks the selected account and binds readiness to the repository", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps();
     const handle = setupWithAccounts(page, deps);
@@ -1408,26 +1705,19 @@ describe("switching a github account", () => {
     let postedBody: unknown;
     page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, (init) => {
       postedBody = init?.body;
-      return jsonResponse({ ok: true });
+      return readinessResponse({ login: "bob" });
     });
-    page.browser.net.handle(IDENTITY_URL_FRESH, () =>
-      jsonResponse({
-        actingLogin: "bob",
-        displayLogin: "bob",
-        actingHasWorkflow: true,
-        actingHasPackages: true,
-        accounts: []
-      })
-    );
 
     const bobRow = page.ghOptionsEl.children.find((child) =>
       fakeText(child).includes("@bob")
     );
     bobRow?.dispatch("click");
-    expect(page.ghValueEl.textContent).toBe("Switching…");
+    expect(page.ghValueEl.textContent).toBe("@bob");
     await flushPromises();
 
-    expect(postedBody).toBe(JSON.stringify({ login: "bob" }));
+    expect(postedBody).toBe(
+      JSON.stringify({ login: "bob", repo: "octo/cat", environment: "dev" })
+    );
     expect(page.ghValueEl.textContent).toBe("@bob");
   });
 
@@ -1467,10 +1757,10 @@ describe("switching a github account", () => {
     bobRow?.dispatch("click");
     await flushPromises();
 
-    expect(fakeText(page.noteEl)).toBe("Could not switch account.");
+    expect(fakeText(page.noteEl)).toBe("Could not check GitHub access.");
   });
 
-  it("re-renders the existing identity without a note change on a network error", async () => {
+  it("keeps the selected login visible when its readiness request fails", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps();
     const handle = setupWithAccounts(page, deps);
@@ -1486,7 +1776,7 @@ describe("switching a github account", () => {
     bobRow?.dispatch("click");
     await flushPromises();
 
-    expect(page.ghValueEl.textContent).toBe("@alice");
+    expect(page.ghValueEl.textContent).toBe("@bob");
   });
 
   it("renders the active account's own row as disabled with no switch handler", async () => {
@@ -1507,10 +1797,96 @@ describe("switching a github account", () => {
     expect(aliceRow?.getAttribute("disabled")).toBe("disabled");
     expect(called).toBe(false);
   });
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores a selected-account response that becomes stale before it %ss",
+    async (outcome) => {
+      const page = renderProfilesPage();
+      const readinessChanges: Array<string | null> = [];
+      const { deps } = makeDeps({
+        onReadinessChange: (readiness) =>
+          readinessChanges.push(readiness?.login ?? null)
+      });
+      const handle = setupWithAccounts(page, deps);
+      await handle?.loadGithubIdentity();
+
+      let settle:
+        ((value: HttpResponse) => void) | ((reason: Error) => void) = () => {};
+      const first = new Promise<HttpResponse>((resolve, reject) => {
+        settle = outcome === "resolve" ? resolve : reject;
+      });
+      let calls = 0;
+      page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+        calls += 1;
+        return calls === 1 ? first : readinessResponse({ login: "alice" });
+      });
+
+      const bobRow = page.ghOptionsEl.children.find((child) =>
+        fakeText(child).includes("@bob")
+      );
+      bobRow?.dispatch("click");
+      const aliceRow = page.ghOptionsEl.children.find((child) =>
+        fakeText(child).includes("@alice")
+      );
+      aliceRow?.dispatch("click");
+      await flushPromises();
+      if (outcome === "resolve") {
+        (settle as (value: HttpResponse) => void)(
+          readinessResponse({ login: "bob" })
+        );
+      } else {
+        (settle as (reason: Error) => void)(new Error("stale failure"));
+      }
+      await flushPromises();
+
+      expect(page.ghValueEl.textContent).toBe("@alice");
+      expect(readinessChanges.at(-1)).toBe("alice");
+      expect(readinessChanges).not.toContain("bob");
+    }
+  );
+
+  it("uses a generic readiness error for a non-Error rejection", async () => {
+    const page = renderProfilesPage();
+    const { deps } = makeDeps();
+    const handle = setupWithAccounts(page, deps);
+    await handle?.loadGithubIdentity();
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      Promise.reject("offline")
+    );
+
+    page.ghOptionsEl.children
+      .find((child) => fakeText(child).includes("@bob"))
+      ?.dispatch("click");
+    await flushPromises();
+
+    expect(fakeText(page.noteEl)).toBe("Could not check GitHub access.");
+  });
+
+  it("opens technical details from Fix access", async () => {
+    const page = renderProfilesPage();
+    const { deps } = makeDeps();
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      readinessResponse({
+        ready: false,
+        repair: "Run a safe repair command."
+      })
+    );
+    const handle = setupWithAccounts(page, deps);
+    await handle?.loadGithubIdentity();
+
+    page.fixAccessBtn.dispatch("click");
+
+    const detailsPanel = page.browser.context.dom.byId("env-gh-details-panel");
+    if (!detailsPanel) throw new Error("details panel missing");
+    expect(Reflect.get(detailsPanel, "open")).toBe(true);
+  });
 });
 
 describe("auto-recheck on focus and visibility", () => {
   function setupWarning(page: ProfilesPage, deps: CredentialProfilesPanelDeps) {
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      readinessResponse({ ready: false })
+    );
     page.browser.net.handle(
       `${GITHUB_IDENTITY_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}`,
       () =>
@@ -1532,19 +1908,10 @@ describe("auto-recheck on focus and visibility", () => {
     await handle?.loadGithubIdentity();
 
     let rechecks = 0;
-    page.browser.net.handle(
-      `${GITHUB_IDENTITY_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}&fresh=1`,
-      () => {
-        rechecks += 1;
-        return jsonResponse({
-          actingLogin: "alice",
-          displayLogin: "alice",
-          actingHasWorkflow: true,
-          actingHasPackages: true,
-          accounts: []
-        });
-      }
-    );
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+      rechecks += 1;
+      return readinessResponse();
+    });
 
     page.browser.page.dispatch("focus");
     await flushPromises();
@@ -1562,13 +1929,10 @@ describe("auto-recheck on focus and visibility", () => {
     const handle = setupWarning(page, deps);
     await handle?.loadGithubIdentity();
     let rechecks = 0;
-    page.browser.net.handle(
-      `${GITHUB_IDENTITY_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}&fresh=1`,
-      () => {
-        rechecks += 1;
-        return jsonResponse({ actingLogin: "alice", displayLogin: "alice" });
-      }
-    );
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+      rechecks += 1;
+      return readinessResponse();
+    });
 
     page.browser.document.visibilityState = "hidden";
     page.browser.document.dispatch("visibilitychange");
@@ -1641,6 +2005,6 @@ describe("hostile input handling end to end", () => {
     for (const node of fakeTree(page.noteEl)) {
       expect(node.innerHTML).toBe("");
     }
-    expect(fakeText(page.noteEl)).toContain(HOSTILE);
+    expect(page.ghValueEl.textContent).toBe(`@${HOSTILE}`);
   });
 });

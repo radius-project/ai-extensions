@@ -20,7 +20,8 @@ import {
 } from "./operations.js";
 import {
   initializeCredentialProfilesPanel,
-  type CredentialProfile
+  type CredentialProfile,
+  type GithubReadiness
 } from "./profiles.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
@@ -33,6 +34,7 @@ interface EnvironmentPageState {
   readonly repo: string;
   readonly branch: string;
   readonly activeSubtab: "credentials" | "environments";
+  readonly mutationNonce: string;
 }
 
 function parsePageState(context: BrowserContext): EnvironmentPageState {
@@ -40,6 +42,7 @@ function parsePageState(context: BrowserContext): EnvironmentPageState {
   return {
     repo: readString(state, "repo"),
     branch: readString(state, "branch"),
+    mutationNonce: readString(state, "mutationNonce"),
     activeSubtab:
       readString(state, "activeSubtab") === "credentials" ? "credentials" : (
         "environments"
@@ -126,8 +129,13 @@ export function initializeEnvironmentPage(
 
   const discovery = initializeDiscoveryPanel(context);
   let selectedProfile: CredentialProfile | null = null;
+  let githubReadiness: GithubReadiness | null = null;
   let creating = false;
   let createAbort: AbortHandle | null = null;
+  const refreshCreateEligibility = (): void => {
+    createButton.disabled =
+      creating || !selectedProfile || githubReadiness?.ready !== true;
+  };
 
   if (!discovery) {
     scope.teardown();
@@ -137,8 +145,15 @@ export function initializeEnvironmentPage(
 
   const profiles = initializeCredentialProfilesPanel(context, {
     repo: state.repo,
+    mutationNonce: state.mutationNonce,
+    environmentName: () => environmentInput.value,
+    onReadinessChange(readiness) {
+      githubReadiness = readiness;
+      refreshCreateEligibility();
+    },
     onProfileChange(profile) {
       selectedProfile = profile;
+      refreshCreateEligibility();
       const summary = context.dom.byId("env-profile-summary");
       if (summary) {
         summary.textContent =
@@ -167,6 +182,7 @@ export function initializeEnvironmentPage(
     scope.teardown();
     return NOOP_TEARDOWN;
   }
+  scope.on(environmentInput, "input", profiles.invalidateReadiness);
 
   // Credential actions call into the environment controller only after user
   // interaction, so construct credentials first and close over the controller
@@ -228,6 +244,13 @@ export function initializeEnvironmentPage(
       },
       currentInfraSelection(provider) {
         return discovery.currentInfraSelection(provider);
+      },
+      canSubmit() {
+        return (
+          !creating &&
+          selectedProfile !== null &&
+          githubReadiness?.ready === true
+        );
       }
     }
   );
@@ -288,6 +311,15 @@ export function initializeEnvironmentPage(
     if (creating) return;
     if (!selectedProfile) {
       showFormError("Please select a credential profile.");
+      return;
+    }
+    if (
+      githubReadiness?.ready !== true ||
+      githubReadiness.selectionHandle === ""
+    ) {
+      showFormError(
+        "Re-check the selected GitHub account before creating the environment."
+      );
       return;
     }
     const environment = environmentInput.value.trim();
@@ -358,6 +390,7 @@ export function initializeEnvironmentPage(
       resumeReason: "View planned graph",
       branch
     };
+    body.selectionHandle = githubReadiness.selectionHandle;
     if (provider === "azure") {
       body.clientId = clientIdInput.value.trim();
       body.tenantId = tenantId;
@@ -395,7 +428,10 @@ export function initializeEnvironmentPage(
     void context.net
       .fetch(CREATE_ENVIRONMENT_OPERATION_PATH, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": state.mutationNonce
+        },
         body: JSON.stringify(body),
         ...(createAbort ? { signal: createAbort.signal } : {})
       })

@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import type { SelectedGhExecutor } from "../../gh.js";
 import type {
   GitHubJsonResponse,
   RadiusAppProvenanceInput,
@@ -109,16 +110,27 @@ export type AzureAutoSetupOperationPort = AzureAutoSetupOperationLifecyclePort &
   AzureAutoSetupOperationArtifactPort;
 
 export interface AzureAutoSetupExternalPort {
+  getSelectedGitHubExecutor(
+    operationId: string
+  ): SelectedGhExecutor | null | undefined;
   getGitHubIdentity(): Promise<{
     actingLogin?: string;
     displayLogin?: string;
     mismatch?: boolean;
   } | null>;
-  preflightRepoAdmin(repo: string): Promise<string>;
-  preflightGhcrPackageWriteAccess(): Promise<
+  preflightRepoAdmin(
+    repo: string,
+    executor?: SelectedGhExecutor
+  ): Promise<string>;
+  preflightGhcrPackageWriteAccess(
+    executor?: SelectedGhExecutor
+  ): Promise<
     { ok: true } | { ok: false; status: number; error: string; code: string }
   >;
-  runGitHubJson(apiPath: string): Promise<GitHubJsonResponse>;
+  runGitHubJson(
+    apiPath: string,
+    executor?: SelectedGhExecutor
+  ): Promise<GitHubJsonResponse>;
   runAz(args: string[]): Promise<AzureAutoSetupCommandResult>;
 }
 
