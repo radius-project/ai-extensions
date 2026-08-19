@@ -108,10 +108,6 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
         (b) => b || deps.workspace.defaultBranchForState(state)
       );
 
-      const key = `${repo}::${branches.join(",")}`;
-      if (state.appBicepHandoffKey === key) return;
-      state.appBicepHandoffKey = key;
-
       // resolveAppModelStatus already absorbs every read failure into a
       // "missing" classification, so a rejection here means the runtime itself
       // is broken; the outer guard abandons the handoff rather than acting on a
@@ -121,6 +117,28 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
           resolveAppModelStatus(repo, branch as string, entry.state)
         )
       );
+
+      // Say a given thing about a given target once. The key has to describe
+      // what we are about to say, not just where: a model can go from stale to
+      // hand-edited between two opens, and keying on repo and branch alone
+      // would swallow the second, more serious message because the first had
+      // already been sent.
+      const key = [
+        repo,
+        branches.join(","),
+        ...statuses.map((status) => {
+          const origin = status.freshness.origin;
+          return [
+            status.branch,
+            status.freshness.status,
+            status.refreshable ? "local" : "remote",
+            origin?.sourceCommit ?? "",
+            origin?.skillVersion ?? ""
+          ].join("/");
+        })
+      ].join("::");
+      if (state.appBicepHandoffKey === key) return;
+      state.appBicepHandoffKey = key;
       const present = statuses.filter(
         (status) => status.freshness.status !== "missing"
       );

@@ -83,7 +83,9 @@ The second and third rows still open the view because the file on disk is the on
 
 Two places in the code handle this. `evaluateAppBicepHook` holds the graph back when regenerating is safe. `maybeHandoffAppBicep` covers everything else, including openings the first one never sees, such as a reload after source links are attached, or the user simply clicking the panel open. Without it, those openings would quietly show a stale app model, which is the original problem in a different place.
 
-We ask once per distinct problem, tracked by repo, branch, result, and the commit and skill version the record names. If regenerating does not settle it, the next open renders the app model rather than blocking the user again.
+We say a given thing once per target. What counts as "a given thing" includes the result and the record it came from, not just the repo and branch, so a model that goes from stale to hand-edited between two opens is reported again rather than swallowed. If regenerating does not settle a problem, the evidence is unchanged and the next open renders the app model rather than blocking the user again.
+
+When two branches are compared and both are stale, only the first is named. The second is not lost, since fixing the first reveals it on the next open, but the user sees them one at a time. If regenerating does not settle it, the next open renders the app model rather than blocking the user again.
 
 ### Deciding whether source changed
 
@@ -130,7 +132,3 @@ The skill is told to fix the cause and run the script again rather than write th
 - **Compile the app model every time a graph opens.** This tells us whether the app model is valid, but says nothing about whether it matches the current source, and adds a compile to every open. The origin record answers both questions.
 - **Treat the app model as ours and always overwrite it.** The simplest rule, and it removes the need to ask the user anything. Rejected because people do edit these files, for custom types and recipe packs and tuned settings, and losing that work silently is worse than an occasional prompt.
 - **Only regenerate when the installed skill is newer.** Rejected because comparing versions like `0.1.0-edge-20260811053232` is easy to get wrong, and a downgrade is also a reason to distrust the app model.
-
-## Design review notes
-
-To be completed during review.

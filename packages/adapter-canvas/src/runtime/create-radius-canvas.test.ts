@@ -769,6 +769,72 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     ).resolves.toMatchObject({ title: "Radius" });
   });
 
+  // The dedupe key has to describe the message, not just the target. A model
+  // can go from stale to hand-edited between two opens, and the second is the
+  // more serious of the two: it is the one that needs the user's agreement.
+  it("speaks again when the same target develops a different problem", async () => {
+    const model = "resource db {}";
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": model },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
+          serializeAppOrigin({
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: "a".repeat(40),
+            skillVersion: "0.1.0-test",
+            appBicepHash: hashAppBicep(model)
+          })
+      },
+      headCommits: { "workspace:/workspace": "b".repeat(40) },
+      sourceChangedSince: true
+    });
+    const session = deps.session.get();
+    const open = () =>
+      canvas.open(
+        ctx("radius-panel", {
+          page: "graph",
+          repo: "acme/widgets",
+          branch: "main"
+        })
+      );
+
+    await open();
+    expect(session.send).toHaveBeenCalledTimes(1);
+    expect(
+      (session.send as ReturnType<typeof vi.fn>).mock.calls[0][0].prompt
+    ).toContain("no longer describes the current source");
+
+    // The user edits the model by hand between opens.
+    deps.workspace.fetchWorkspaceBicep = (async () =>
+      `${model}\n// hand edit`) as never;
+
+    await open();
+    expect(session.send).toHaveBeenCalledTimes(2);
+    expect(
+      (session.send as ReturnType<typeof vi.fn>).mock.calls[1][0].prompt
+    ).toContain("could not be verified");
+  });
+
+  it("stays quiet when the same problem is seen again", async () => {
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" }
+    });
+    const session = deps.session.get();
+    const open = () =>
+      canvas.open(
+        ctx("radius-panel", {
+          page: "graph",
+          repo: "acme/widgets",
+          branch: "main"
+        })
+      );
+
+    await open();
+    await open();
+
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
   it("does not hand off on non-graph pages", async () => {
     const { canvas, deps } = setup();
     const session = deps.session.get();
