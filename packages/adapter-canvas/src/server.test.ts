@@ -142,8 +142,9 @@ describe("preflightGhcrPackageWriteAccess", () => {
       "gh auth refresh --hostname github.com --scopes read:packages,write:packages"
     );
     expect(result.error).toContain(
-      "gh auth switch --hostname github.com --user <previous-login>"
+      "gh auth switch --hostname github.com --user pubuser"
     );
+    expect(result.error).not.toContain("previous-login");
   });
 });
 

@@ -211,19 +211,28 @@ describe("GitHub account readiness", () => {
         packages: { state: "missing" }
       }
     });
-    expect(result.repair).toContain(
-      "gh auth switch --hostname github.com --user octocat"
-    );
-    expect(result.repair).toContain(
-      "gh auth refresh --hostname github.com --scopes workflow,read:packages,write:packages"
-    );
-    expect(result.repair).toContain(
-      "gh auth switch --hostname github.com --user original"
-    );
-    expect(result.repair).not.toContain(
-      "auth refresh --hostname github.com --user"
+    expect(result.repair).toBe(
+      "The account @octocat needs the workflow and write:packages permissions to proceed. In the terminal, run: gh auth switch --hostname github.com --user octocat. Then run: gh auth refresh --hostname github.com --scopes workflow,read:packages,write:packages. This will make @octocat the active GitHub CLI account if it is not already active."
     );
     expect(probePackageAccess).not.toHaveBeenCalled();
+  });
+
+  it("names only the selected account when package permission is missing", async () => {
+    const service = readinessService(
+      coordinator(selectedExecutor({ scopes: ["workflow"] }))
+    );
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login: "octocat"
+    });
+
+    expect(result.repair).toBe(
+      "The account @octocat needs the write:packages permission to proceed. In the terminal, run: gh auth switch --hostname github.com --user octocat. Then run: gh auth refresh --hostname github.com --scopes read:packages,write:packages. This will make @octocat the active GitHub CLI account if it is not already active."
+    );
+    expect(result.repair).not.toContain("original");
   });
 
   it("skips package probing until repository administration is ready", async () => {
@@ -287,6 +296,7 @@ describe("GitHub account readiness", () => {
     });
     expect(result.repair).toContain("--scopes workflow");
     expect(result.repair).not.toContain("write:packages");
+    expect(result.repair).not.toContain("original");
     expect(probePackageAccess).not.toHaveBeenCalled();
   });
 

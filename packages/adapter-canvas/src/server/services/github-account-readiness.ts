@@ -225,20 +225,27 @@ function repairGuidance(
   login: string,
   needsWorkflow: boolean,
   needsPackages: boolean,
-  repositoryReady: boolean,
-  originalLogin: string | null
+  repositoryReady: boolean
 ): string | null {
-  const scopes: string[] = [];
-  if (needsWorkflow) scopes.push("workflow");
-  if (needsPackages) scopes.push("read:packages", "write:packages");
-  if (scopes.length > 0) {
-    const refresh = `gh auth refresh --hostname github.com --scopes ${scopes.join(
+  const requiredPermissions: string[] = [];
+  const refreshScopes: string[] = [];
+  if (needsWorkflow) {
+    requiredPermissions.push("workflow");
+    refreshScopes.push("workflow");
+  }
+  if (needsPackages) {
+    requiredPermissions.push("write:packages");
+    refreshScopes.push("read:packages", "write:packages");
+  }
+  if (refreshScopes.length > 0) {
+    const permissions =
+      requiredPermissions.length === 1 ?
+        `the ${requiredPermissions[0]} permission`
+      : `the ${requiredPermissions.join(" and ")} permissions`;
+    const refresh = `gh auth refresh --hostname github.com --scopes ${refreshScopes.join(
       ","
     )}`;
-    if (originalLogin && originalLogin !== login) {
-      return `GitHub CLI can refresh only the active account. This temporarily changes the machine-wide account: gh auth switch --hostname github.com --user ${login} && ${refresh} && gh auth switch --hostname github.com --user ${originalLogin}`;
-    }
-    return `Run "${refresh}" while @${login} is the active GitHub CLI account. GitHub CLI cannot refresh an inactive account.`;
+    return `The account @${login} needs ${permissions} to proceed. In the terminal, run: gh auth switch --hostname github.com --user ${login}. Then run: ${refresh}. This will make @${login} the active GitHub CLI account if it is not already active.`;
   }
   if (!repositoryReady) {
     return `Grant @${login} repository administrator access, or select an account that can administer this repository.`;
@@ -377,8 +384,7 @@ export function createGitHubAccountReadinessService(
               lease.selectedLogin,
               lease.value.needsWorkflow,
               lease.value.needsPackages,
-              lease.value.repositoryReady,
-              lease.restoration.originalLogin
+              lease.value.repositoryReady
             )
           : lease.restoration.guidance;
         return {
