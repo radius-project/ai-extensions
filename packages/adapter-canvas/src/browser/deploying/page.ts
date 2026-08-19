@@ -1004,11 +1004,6 @@ export function initializeDeployingPage(
         "Track progress in the deployments list below.";
     }
     if (progressModal) progressModal.style.display = "flex";
-    showInline(
-      "success",
-      `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> to environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`,
-      true
-    );
     // Auto-dismiss the transient dialog; the deploy keeps running (tracked in
     // the list below), so the button returns to normal.
     const autoHide = entry.after(DEPLOY_AUTO_HIDE_MS, () => {
@@ -1035,6 +1030,7 @@ export function initializeDeployingPage(
     // run that was still starting — and `sameAttempt` cannot catch it, because
     // repo and environment are exactly what a redeploy repeats.
     let dispatchAccepted = false;
+    let startNotified = false;
     const wfPoll = entry.every(DEPLOY_WORKFLOW_POLL_MS, () => {
       wfTicks++;
       if (wfTicks > DEPLOY_WORKFLOW_POLL_LIMIT) {
@@ -1062,6 +1058,14 @@ export function initializeDeployingPage(
             overrides.delete(key);
             void loadDeployments(true);
             return;
+          }
+          if (status.deployRunUrl && !startNotified) {
+            startNotified = true;
+            showInline(
+              "success",
+              `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> to environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`,
+              true
+            );
           }
           if (status.status === "failed") {
             // Delivery of the repair handoff is asynchronous; keep polling

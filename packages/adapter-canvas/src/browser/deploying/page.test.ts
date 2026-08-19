@@ -1196,7 +1196,10 @@ describe("deploy flow", () => {
       return jsonResponse({ ok: true });
     });
     page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-      jsonResponse({ status: "in_progress" })
+      jsonResponse({
+        status: "in_progress",
+        deployRunUrl: "https://example.test/run/1"
+      })
     );
 
     page.deployBtn.dispatch("click");
@@ -1210,6 +1213,9 @@ describe("deploy flow", () => {
       branch: "feature",
       appFile: ".radius/app.bicep"
     });
+    expect(inlineMessage(page.inlineStatus)).toBe("");
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain("has started");
 
     page.browser.clock.tick(DEPLOY_AUTO_HIDE_MS);
@@ -1226,15 +1232,43 @@ describe("deploy flow", () => {
     expect(page.browser.clock.pending).toBe(0);
   });
 
+  it("does not show a deployment-started notification when workflow startup fails", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({ status: "failed", error: "workflow startup failed" })
+    );
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).toBe("");
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).not.toContain("has started");
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "workflow startup failed"
+    );
+  });
+
   it("dismisses the inline status banner when its close button is clicked", async () => {
     const page = fixture();
     init(page);
     await flushPromises();
     page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
     page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-      jsonResponse({ status: "in_progress" })
+      jsonResponse({
+        status: "in_progress",
+        deployRunUrl: "https://example.test/run/1"
+      })
     );
     page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
     expect(page.inlineStatus.style.display).toBe("flex");
     const closeButton = page.inlineStatus.children[2];
     closeButton.dispatch("click");
