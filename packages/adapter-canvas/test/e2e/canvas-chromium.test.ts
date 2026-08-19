@@ -575,6 +575,86 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).toContainText(/could not verify/i);
   });
 
+  test("shows deployment-started notification only after workflow confirmation in Chromium", async ({
+    page,
+    canvas
+  }) => {
+    let workflowConfirmed = false;
+    let statusPolls = 0;
+    await page.route("**/api/deploy", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    await page.route("**/api/deploy-status", async (route) => {
+      statusPolls++;
+      const payload = workflowConfirmed ?
+          {
+            status: "in_progress",
+            deployRunUrl: "https://example.test/run/1"
+          }
+        : { status: "in_progress" };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(payload)
+      });
+    });
+
+    await gotoCanvas(page, canvas, "deploying");
+    const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+    await expect(deployNow).toHaveText("Deploy");
+    await deployNow.click();
+
+    await expect.poll(() => statusPolls > 0).toBe(true);
+    const inlineStatus = page.locator("#deploy-inline-status");
+    await expect(inlineStatus).not.toContainText("has started");
+
+    workflowConfirmed = true;
+    await expect.poll(() => statusPolls > 1).toBe(true);
+    await expect(inlineStatus).toContainText("has started");
+  });
+
+  test("does not show deployment-started notification when workflow startup fails in Chromium", async ({
+    page,
+    canvas
+  }) => {
+    let statusPolls = 0;
+    await page.route("**/api/deploy", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    await page.route("**/api/deploy-status", async (route) => {
+      statusPolls++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          error: "workflow startup failed"
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "deploying");
+    const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+    await expect(deployNow).toHaveText("Deploy");
+    await deployNow.click();
+
+    await expect.poll(() => statusPolls > 0).toBe(true);
+    await expect(page.locator("#deploy-inline-status")).not.toContainText(
+      "has started"
+    );
+    await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+      "workflow startup failed"
+    );
+  });
+
   test("opens destructive deployment confirmation with keyboard focus and returns focus on Escape @safety", async ({
     page,
     canvas
