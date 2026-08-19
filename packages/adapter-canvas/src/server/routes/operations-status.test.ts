@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
   ABANDON_OPERATION_ROUTE,
@@ -131,7 +131,6 @@ function createDependencies(
   overrides: Partial<CreateOperationDependencies> = {}
 ): CreateOperationDependencies {
   return {
-    validateBrowserMutation: () => true,
     claimSelectionHandle: () => ({
       ok: true,
       login: "octocat",
@@ -180,7 +179,6 @@ function actionDependencies(
   overrides: Partial<OperationActionDependencies> = {}
 ): OperationActionDependencies {
   return {
-    validateBrowserMutation: () => true,
     getOperation: () => {
       throw new Error("getOperation not stubbed");
     },
@@ -577,18 +575,6 @@ async function runCreate(
 }
 
 describe("handleCreateOperation (POST /api/operations)", () => {
-  it("rejects an untrusted browser mutation before parsing operation data", async () => {
-    const recording = await runCreate(
-      "{}",
-      createDependencies({ validateBrowserMutation: () => false })
-    );
-    expect(recording.status).toBe(403);
-    expect(JSON.parse(recording.body)).toEqual({
-      error: "This operation registration request is not trusted.",
-      code: "browser-mutation-validation-failed"
-    });
-  });
-
   it("rejects a malformed JSON body with 400 invalid-json and never touches a guard", () => {
     return runCreate("{not json", createDependencies()).then((recording) => {
       expect(recording.status).toBe(400);
@@ -758,6 +744,42 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       code: "github-selection-stale"
     });
     expect(capture.started).toEqual([]);
+  });
+
+  it("releases a claimed selection when operation construction throws", async () => {
+    const capture = emptyCapture();
+    const release = vi.fn();
+    const commit = vi.fn();
+    const failure = new Error("operation construction failed");
+
+    await expect(
+      runCreate(
+        JSON.stringify({
+          repo: "octo/app",
+          clientId: "cid",
+          resourceGroup: "rg",
+          cluster: "aks",
+          tenantId: "t",
+          subscriptionId: "s",
+          selectionHandle: "handle"
+        }),
+        happyPathCreate(capture, newOperationRecord(), {
+          claimSelectionHandle: () => ({
+            ok: true,
+            login: "selected-login",
+            credentialSource: "keyring",
+            commit,
+            release
+          }),
+          createOperation: () => {
+            throw failure;
+          }
+        })
+      )
+    ).rejects.toBe(failure);
+
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(commit).not.toHaveBeenCalled();
   });
 
   it("persists only allowlisted browser fields and the server-owned login", async () => {
@@ -1144,7 +1166,6 @@ async function runAction(
 
 describe("operation resume and abandon actions", () => {
   it.each([
-    "validateBrowserMutation",
     "getOperation",
     "canResumeInput",
     "resumeAfterInput",
@@ -1180,30 +1201,6 @@ describe("operation resume and abandon actions", () => {
       })
     ).toThrow("Missing operations action dependency: inputRequiredState");
   });
-
-  it.each([
-    [
-      "resume",
-      "/api/operations/op-action/resume/service-management-reference-required",
-      handleResumeOperation
-    ],
-    ["abandon", "/api/operations/op-action/abandon", handleAbandonOperation]
-  ] as const)(
-    "rejects an untrusted %s request",
-    async (_label, path, handler) => {
-      const recording = await runAction(
-        path,
-        "{}",
-        handler,
-        actionDependencies({ validateBrowserMutation: () => false })
-      );
-      expect(recording.status).toBe(403);
-      expect(JSON.parse(recording.body)).toEqual({
-        error: "This operation action request is not trusted.",
-        code: "browser-mutation-validation-failed"
-      });
-    }
-  );
 
   it("rejects a direct action call whose path does not match its template", async () => {
     await expect(

@@ -70,17 +70,6 @@ function ports(input: {
 }
 
 describe("GitHub account coordinator", () => {
-  it("has no startup recovery work", async () => {
-    const coordinator = createGitHubAccountCoordinator(
-      ports({ activeLogin: "original", events: [] })
-    );
-
-    await expect(coordinator.prepare()).resolves.toEqual({
-      state: "none",
-      guidance: null
-    });
-  });
-
   it("verifies a read-only selected executor", async () => {
     const events: string[] = [];
     const coordinator = createGitHubAccountCoordinator(
@@ -237,6 +226,96 @@ describe("GitHub account coordinator", () => {
     );
   });
 
+  it("blocks later leases until the original account is active after restoration fails", async () => {
+    let activeLogin = "original";
+    let denyRestore = true;
+    const coordinator = createGitHubAccountCoordinator({
+      createExecutor: async (login) => executor(login, "keyring", true, []),
+      getActiveKeyringLogin: async () => activeLogin,
+      switchKeyringAccount: async (login) => {
+        if (login === "original" && denyRestore) {
+          return { ok: false, error: "restore denied" };
+        }
+        activeLogin = login;
+        return { ok: true };
+      },
+      resetIdentityCache: () => {}
+    });
+
+    const first = await coordinator.withSelectedAccount(
+      "selected",
+      { instanceId: "one" },
+      async () => "done"
+    );
+    expect(first.restoration.state).toBe("failed");
+    await expect(
+      coordinator.withSelectedAccount(
+        "selected",
+        { instanceId: "two" },
+        async () => "never"
+      )
+    ).rejects.toThrow("cannot safely change GitHub CLI accounts");
+
+    denyRestore = false;
+    activeLogin = "original";
+    await expect(
+      coordinator.withSelectedAccount(
+        "selected",
+        { instanceId: "three" },
+        async () => "recovered"
+      )
+    ).resolves.toMatchObject({ value: "recovered" });
+  });
+
+  it("blocks a queued lease when the active lease fails to restore", async () => {
+    let activeLogin = "original";
+    let releaseWork: () => void = () => {};
+    const workGate = new Promise<void>((resolve) => {
+      releaseWork = resolve;
+    });
+    let enteredWork: () => void = () => {};
+    const workEntered = new Promise<void>((resolve) => {
+      enteredWork = resolve;
+    });
+    const coordinator = createGitHubAccountCoordinator({
+      createExecutor: async (login) => executor(login, "keyring", true, []),
+      getActiveKeyringLogin: async () => activeLogin,
+      switchKeyringAccount: async (login) => {
+        if (login === "original") {
+          return { ok: false, error: "restore denied" };
+        }
+        activeLogin = login;
+        return { ok: true };
+      },
+      resetIdentityCache: () => {}
+    });
+    const first = coordinator.withSelectedAccount(
+      "selected",
+      { instanceId: "one" },
+      async () => {
+        enteredWork();
+        await workGate;
+        return "first";
+      }
+    );
+    await workEntered;
+    const second = coordinator.withSelectedAccount(
+      "selected",
+      { instanceId: "two" },
+      async () => "second"
+    );
+
+    releaseWork();
+
+    await expect(first).resolves.toMatchObject({
+      value: "first",
+      restoration: { state: "failed" }
+    });
+    await expect(second).rejects.toThrow(
+      "cannot safely change GitHub CLI accounts"
+    );
+  });
+
   it("fails closed when the original account cannot be established", async () => {
     const coordinator = createGitHubAccountCoordinator(
       ports({ activeLogin: "", events: [] })
@@ -351,7 +430,7 @@ describe("GitHub account coordinator", () => {
       async () => "never",
       100
     );
-    await Promise.resolve();
+    while (callbacks.length === 0) await Promise.resolve();
     callbacks[0]?.();
 
     await expect(second).rejects.toThrow(

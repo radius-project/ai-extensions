@@ -49,7 +49,6 @@ const productionHandlers = {
       isUuid: () => false,
       buildStages: () => [],
       createOperation: () => ({ operationId: "", currentStage: null }),
-      validateBrowserMutation: () => true,
       claimSelectionHandle: () => ({
         ok: true,
         login: "octocat",
@@ -67,7 +66,6 @@ const productionHandlers = {
       errorMessage: (error) => String(error)
     },
     {
-      validateBrowserMutation: () => true,
       getOperation: () => undefined,
       canResumeInput: () => false,
       resumeAfterInput: () => {},
@@ -145,7 +143,6 @@ const productionHandlers = {
         accounts: []
       }),
     resetGhIdentityCache: () => {},
-    validateBrowserMutation: () => true,
     prepareGitHubAccount: async () => ({
       readiness: {
         ready: false,
@@ -373,6 +370,24 @@ describe("server route ownership boundary", () => {
     expect(
       SERVER_ROUTE_DECLARATIONS.every((route) => route.owner.length > 0)
     ).toBe(true);
+    expect(
+      SERVER_ROUTE_DECLARATIONS.every((route) =>
+        route.method === "POST" ?
+          route.mutationPolicy === "nonce-required" ||
+          route.mutationPolicy === "legacy-exempt"
+        : route.mutationPolicy === "none"
+      )
+    ).toBe(true);
+    expect(
+      SERVER_ROUTE_DECLARATIONS.filter(
+        (route) => route.mutationPolicy === "nonce-required"
+      ).map(routeKey)
+    ).toEqual([
+      "POST /api/github-account",
+      "POST /api/operations",
+      "POST /api/operations/:operationId/resume/:code",
+      "POST /api/operations/:operationId/abandon"
+    ]);
     expect(() => assertRouteTable(table)).not.toThrow();
   });
 
@@ -518,6 +533,20 @@ describe("server route ownership boundary", () => {
     ).toThrow("Server route has no handler: ANY /api/ping");
   });
 
+  it("requires every POST route to declare protection or a legacy exemption", () => {
+    const post = table.find((route) => route.method === "POST") as ServerRoute;
+    const get = table.find((route) => route.method === "GET") as ServerRoute;
+
+    expect(() =>
+      assertRouteTable([{ ...post, mutationPolicy: "none" }])
+    ).toThrow(`POST server route has no mutation policy: ${routeKey(post)}`);
+    expect(() =>
+      assertRouteTable([{ ...get, mutationPolicy: "nonce-required" }])
+    ).toThrow(
+      `Non-POST server route declares a mutation policy: ${routeKey(get)}`
+    );
+  });
+
   it("fails when a prefix route makes a later route unreachable", () => {
     const prefix = table.find((route) => route.path === "/api/operations/");
     expect(prefix?.method).toBe("GET");
@@ -562,7 +591,8 @@ describe("server route ownership boundary", () => {
           ...prefix,
           path: "/api/operations/abandon",
           match: "exact",
-          method: "POST"
+          method: "POST",
+          mutationPolicy: "legacy-exempt"
         } as ServerRoute
       ])
     ).not.toThrow();

@@ -27,11 +27,6 @@ export interface GitHubAccountLeaseResult<T> {
   restoration: GitHubAccountRestoration;
 }
 
-export interface GitHubAccountRecoveryResult {
-  state: "none";
-  guidance: null;
-}
-
 export interface GitHubAccountCoordinatorOptions {
   setTimer?(
     callback: () => void,
@@ -41,7 +36,6 @@ export interface GitHubAccountCoordinatorOptions {
 }
 
 export interface GitHubAccountCoordinator {
-  prepare(): Promise<GitHubAccountRecoveryResult>;
   createReadOnlyExecutor(login: string): Promise<SelectedGhExecutor>;
   withSelectedAccount<T>(
     login: string,
@@ -70,20 +64,18 @@ export function createGitHubAccountCoordinator(
   const clearTimer = options.clearTimer || clearTimeout;
   const waiters: Waiter[] = [];
   let held = false;
+  let blockedRestoration: GitHubAccountRestoration | null = null;
 
   const releaseNext = (): void => {
-    const waiter = waiters.shift();
-    if (!waiter) {
-      held = false;
+    while (waiters.length > 0) {
+      const waiter = waiters.shift();
+      if (!waiter || waiter.settled) continue;
+      waiter.settled = true;
+      clearTimer(waiter.timer);
+      waiter.resolve(releaseNext);
       return;
     }
-    if (waiter.settled) {
-      releaseNext();
-      return;
-    }
-    waiter.settled = true;
-    clearTimer(waiter.timer);
-    waiter.resolve(releaseNext);
+    held = false;
   };
 
   const acquire = (timeoutMs: number): Promise<() => void> => {
@@ -97,6 +89,8 @@ export function createGitHubAccountCoordinator(
         timer: setTimer(() => {
           if (waiter.settled) return;
           waiter.settled = true;
+          const index = waiters.indexOf(waiter);
+          if (index >= 0) waiters.splice(index, 1);
           reject(
             new Error(
               "Another Environment Creation is using the GitHub CLI account. Re-check after it finishes."
@@ -108,6 +102,21 @@ export function createGitHubAccountCoordinator(
       };
       waiters.push(waiter);
     });
+  };
+
+  const assertRestorationReady = async (): Promise<void> => {
+    if (!blockedRestoration) return;
+    const currentLogin = await ports.getActiveKeyringLogin();
+    if (currentLogin === blockedRestoration.originalLogin) {
+      ports.resetIdentityCache();
+      blockedRestoration = null;
+      return;
+    }
+    throw new Error(
+      `Radius cannot safely change GitHub CLI accounts because the previous account restoration failed. ${
+        blockedRestoration.guidance || "Restore the original account and retry."
+      }`
+    );
   };
 
   const restore = async (
@@ -165,9 +174,6 @@ export function createGitHubAccountCoordinator(
     }
   };
 
-  const prepare = (): Promise<GitHubAccountRecoveryResult> =>
-    Promise.resolve({ state: "none", guidance: null });
-
   const createReadOnlyExecutor = async (
     login: string
   ): Promise<SelectedGhExecutor> => {
@@ -182,6 +188,7 @@ export function createGitHubAccountCoordinator(
     work: (executor: SelectedGhExecutor) => Promise<T>,
     timeoutMs = 5000
   ): Promise<GitHubAccountLeaseResult<T>> => {
+    await assertRestorationReady();
     const executor = await ports.createExecutor(login);
     if (!executor.requiresKeyringSwitch) {
       const activeLogin = await ports.getActiveKeyringLogin();
@@ -201,6 +208,7 @@ export function createGitHubAccountCoordinator(
     }
     const release = await acquire(timeoutMs);
     try {
+      await assertRestorationReady();
       const originalLogin = await ports.getActiveKeyringLogin();
       if (!originalLogin) {
         throw new Error(
@@ -249,6 +257,7 @@ export function createGitHubAccountCoordinator(
       }
 
       const restoration = await restore(executor.login, originalLogin);
+      if (restoration.state === "failed") blockedRestoration = restoration;
       if (!outcome.ok) {
         if (restoration.state === "restored") throw outcome.error;
         throw new Error(
@@ -270,5 +279,5 @@ export function createGitHubAccountCoordinator(
     }
   };
 
-  return { prepare, createReadOnlyExecutor, withSelectedAccount };
+  return { createReadOnlyExecutor, withSelectedAccount };
 }

@@ -314,6 +314,16 @@ test.describe("Radius Canvas in Chromium", () => {
       "@acting-user"
     );
     await expectNoWcagViolations(page);
+    const showHowToFix = page.getByRole("button", {
+      name: "Show how to fix"
+    });
+    await expect(showHowToFix).toBeVisible();
+    await showHowToFix.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#env-gh-details-panel")).toHaveAttribute(
+      "open",
+      ""
+    );
     await canvas.expectCliInvoked("gh");
   });
 

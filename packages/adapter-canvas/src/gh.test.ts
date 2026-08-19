@@ -847,7 +847,7 @@ describe.sequential("selected GitHub executor", () => {
     );
   });
 
-  it("re-verifies the selected identity immediately before a mutation", async () => {
+  it("verifies the selected identity once before all executor commands", async () => {
     const gh = await loadGh("linux", {
       token: "selected-injected-token",
       withToken: STATUS.tokenWithWorkflow,
@@ -864,10 +864,12 @@ describe.sequential("selected GitHub executor", () => {
       "PUT",
       "repos/octo/app/environments/dev"
     ]);
+    await executor.run(["api", "repos/octo/app"]);
 
     expect(childProcess.execFile.mock.calls.map(([, args]) => args)).toEqual([
       ["api", "user", "--jq", ".login"],
-      ["api", "--method", "PUT", "repos/octo/app/environments/dev"]
+      ["api", "--method", "PUT", "repos/octo/app/environments/dev"],
+      ["api", "repos/octo/app"]
     ]);
   });
 
@@ -877,6 +879,7 @@ describe.sequential("selected GitHub executor", () => {
       withToken: STATUS.tokenWithWorkflow,
       keyring: STATUS.keyringWithWorkflow,
       userTokens: { keyuser: "opaque-keyring-secret" },
+      apiLogin: "keyuser",
       commandResult: {
         error: "failed with opaque-keyring-secret",
         stderr: "denied opaque-keyring-secret"
@@ -913,6 +916,7 @@ describe.sequential("selected GitHub executor", () => {
       token: "selected-injected-token",
       withToken: STATUS.tokenWithWorkflow,
       keyring: STATUS.keyringWithWorkflow,
+      apiLogin: "tokuser",
       commandResult: { stdout: "bWFpbg==" }
     });
     const executor = await gh.createSelectedGhExecutor("tokuser");
@@ -929,7 +933,7 @@ describe.sequential("selected GitHub executor", () => {
 
     expect(
       childProcess.execFile.mock.calls.map(([, , options]) => options.timeout)
-    ).toEqual([15000, 15000, 15000]);
+    ).toEqual([15000, 15000, 15000, 15000]);
   });
 });
 

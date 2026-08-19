@@ -1871,7 +1871,7 @@ describe("switching a github account", () => {
     expect(fakeText(page.noteEl)).toBe("Could not check GitHub access.");
   });
 
-  it("opens technical details from Fix access", async () => {
+  it("opens technical details from Show how to fix", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps();
     page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>

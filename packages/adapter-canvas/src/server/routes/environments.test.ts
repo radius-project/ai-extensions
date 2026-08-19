@@ -1763,6 +1763,7 @@ function createServerRouteTableForTest(): readonly ServerRoute[] {
     path,
     match: "exact",
     bodyPolicy: method === "POST" ? "json" : "none",
+    mutationPolicy: method === "POST" ? "legacy-exempt" : "none",
     owner: "environments",
     handler: registry[`${method} ${path}`]
   });

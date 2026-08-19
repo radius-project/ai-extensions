@@ -113,7 +113,6 @@ function dependencies(
     resetGhIdentityCache: () => {
       throw new Error("resetGhIdentityCache not stubbed");
     },
-    validateBrowserMutation: () => true,
     prepareGitHubAccount: async ({ login }) => ({
       readiness: {
         ready: true,
@@ -526,20 +525,6 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
         login: "octocat"
       }
     ]);
-  });
-
-  it("rejects an untrusted browser mutation before reading account state", async () => {
-    const recording = await run(
-      "POST",
-      "/api/github-account",
-      '{"login":"ghost","repo":"octo/app"}',
-      handleGitHubAccount,
-      dependencies({ validateBrowserMutation: () => false })
-    );
-    expect(recording.status).toBe(403);
-    expect(JSON.parse(recording.body)).toMatchObject({
-      code: "browser-mutation-validation-failed"
-    });
   });
 
   it("requires both a login and a valid repository", async () => {

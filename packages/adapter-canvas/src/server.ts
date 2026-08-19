@@ -492,10 +492,6 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     isUuid,
     buildStages,
     createOperation,
-    validateBrowserMutation: (instanceId, request) =>
-      instanceRequestCoordinators
-        .get(instanceId)
-        ?.validateBrowserMutation(request) ?? false,
     claimSelectionHandle: (input) => githubSelectionHandles.claim(input),
     startOperation: (op) => operations.start(op),
     persistOperations: () => operations.persist(),
@@ -504,10 +500,6 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     errorMessage
   },
   {
-    validateBrowserMutation: (instanceId, request) =>
-      instanceRequestCoordinators
-        .get(instanceId)
-        ?.validateBrowserMutation(request) ?? false,
     getOperation: (operationId) => operations.get(operationId),
     canResumeInput,
     resumeAfterInput,
@@ -745,10 +737,6 @@ const identityProfilesRoutes = createIdentityProfilesRoutes({
   deleteCredentialProfile,
   getGitHubIdentity,
   resetGhIdentityCache,
-  validateBrowserMutation: (instanceId, request) =>
-    instanceRequestCoordinators
-      .get(instanceId)
-      ?.validateBrowserMutation(request) ?? false,
   prepareGitHubAccount: async ({ instanceId, repo, environment, login }) => {
     const generation = githubSelectionHandles.begin(instanceId);
     const readiness = await githubAccountReadiness.check({
@@ -1143,6 +1131,8 @@ const canvasServer = createCanvasServer(
         markActivity: (request) => {
           if (!coordinator.isServerOwned(request)) markActivity();
         },
+        validateBrowserMutation: (context) =>
+          coordinator.validateBrowserMutation(context.request),
         preRoute: preRouteCanvasRequest
       });
     },

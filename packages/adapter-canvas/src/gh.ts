@@ -572,18 +572,6 @@ function pinnedGhExec(
   );
 }
 
-function isSelectedGhMutation(args: readonly string[]): boolean {
-  const methodIndex = args.indexOf("--method");
-  const method =
-    methodIndex >= 0 ? (args[methodIndex + 1] || "").toUpperCase() : "";
-  if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) return true;
-  return (
-    (args[0] === "workflow" && args[1] === "run") ||
-    (args[0] === "variable" && args[1] === "set") ||
-    (args[0] === "secret" && args[1] === "set")
-  );
-}
-
 export async function createSelectedGhExecutor(
   selectedLogin: string,
   env: NodeJS.ProcessEnv = process.env
@@ -654,29 +642,7 @@ export async function createSelectedGhExecutor(
       if (stdin !== undefined) child.stdin?.end(stdin);
     });
   };
-  let verifyIdentity: () => Promise<void>;
-  const run = async (
-    args: string[],
-    options: CommandOptions = {}
-  ): Promise<SelectedGhCommandResult> => {
-    if (isSelectedGhMutation(args)) await verifyIdentity();
-    return await runRaw(args, options);
-  };
-
-  const runOrThrow = async (
-    args: string[],
-    message: string,
-    options: CommandOptions = {}
-  ): Promise<SelectedGhCommandResult> => {
-    const result = await run(args, options);
-    if (result.code !== 0) {
-      const detail = (result.stderr || result.stdout).trim();
-      throw new Error(detail ? `${message}: ${detail}` : message);
-    }
-    return result;
-  };
-
-  verifyIdentity = async (): Promise<void> => {
+  const verifyIdentityRaw = async (): Promise<void> => {
     const result = await runRaw(["api", "user", "--jq", ".login"], {
       timeout: 15000
     });
@@ -696,6 +662,36 @@ export async function createSelectedGhExecutor(
         }.`
       );
     }
+  };
+  let identityVerification: Promise<void> | null = null;
+  const verifyIdentity = (): Promise<void> => {
+    if (!identityVerification) {
+      identityVerification = verifyIdentityRaw().catch((error) => {
+        identityVerification = null;
+        throw error;
+      });
+    }
+    return identityVerification;
+  };
+  const run = async (
+    args: string[],
+    options: CommandOptions = {}
+  ): Promise<SelectedGhCommandResult> => {
+    await verifyIdentity();
+    return await runRaw(args, options);
+  };
+
+  const runOrThrow = async (
+    args: string[],
+    message: string,
+    options: CommandOptions = {}
+  ): Promise<SelectedGhCommandResult> => {
+    const result = await run(args, options);
+    if (result.code !== 0) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw new Error(detail ? `${message}: ${detail}` : message);
+    }
+    return result;
   };
 
   return {

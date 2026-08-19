@@ -80,7 +80,6 @@ function start(): Harness {
       resetGhIdentityCache: () => {
         harness.calls.push("reset");
       },
-      validateBrowserMutation: () => true,
       prepareGitHubAccount: async ({ login }) => ({
         readiness: {
           ready: true,
@@ -121,6 +120,7 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
+        validateBrowserMutation: () => true,
         handleUnmatchedRequest: (_request, response) => {
           response.writeHead(404);
           response.end("unmatched");

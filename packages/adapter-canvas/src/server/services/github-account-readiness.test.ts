@@ -46,7 +46,6 @@ function coordinator(
   restorationState: "not_required" | "restored" = "not_required"
 ): GitHubAccountCoordinator {
   return {
-    prepare: async () => ({ state: "none", guidance: null }),
     createReadOnlyExecutor: async () => executor,
     async withSelectedAccount(_login, _metadata, work) {
       const result: GitHubAccountLeaseResult<Awaited<ReturnType<typeof work>>> =
@@ -145,7 +144,6 @@ describe("GitHub account readiness", () => {
   it("refuses readiness when the original keyring account was not restored", async () => {
     const selected = selectedExecutor({});
     const failedRestoreCoordinator: GitHubAccountCoordinator = {
-      prepare: async () => ({ state: "none", guidance: null }),
       createReadOnlyExecutor: async () => selected,
       async withSelectedAccount(_login, _metadata, work) {
         return {
@@ -372,7 +370,6 @@ describe("GitHub account readiness", () => {
 
   it("surfaces selected-account execution failures as a failed readiness result", async () => {
     const failingCoordinator: GitHubAccountCoordinator = {
-      prepare: async () => ({ state: "none", guidance: null }),
       createReadOnlyExecutor: async () => {
         throw new Error("not used");
       },
@@ -398,7 +395,6 @@ describe("GitHub account readiness", () => {
 
   it("normalizes a non-Error coordinator rejection", async () => {
     const failingCoordinator: GitHubAccountCoordinator = {
-      prepare: async () => ({ state: "none", guidance: null }),
       createReadOnlyExecutor: async () => {
         throw new Error("not used");
       },

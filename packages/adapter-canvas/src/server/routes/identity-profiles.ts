@@ -1,5 +1,4 @@
 import type { GitHubIdentity } from "../../gh.js";
-import type { IncomingMessage } from "node:http";
 import type { GitHubAccountReadiness } from "../services/github-account-readiness.js";
 import type {
   CredentialProfile,
@@ -22,10 +21,6 @@ export interface IdentityProfilesDependencies {
   deleteCredentialProfile(repo: string, name: string): boolean;
   getGitHubIdentity(): Promise<GitHubIdentity>;
   resetGhIdentityCache(): void;
-  validateBrowserMutation(
-    instanceId: string,
-    request: IncomingMessage
-  ): boolean;
   prepareGitHubAccount(input: {
     instanceId: string;
     repo: string;
@@ -131,19 +126,6 @@ export async function handleGitHubAccount(
   dependencies: IdentityProfilesDependencies
 ): Promise<void> {
   const { response } = context;
-  if (
-    !dependencies.validateBrowserMutation(context.instanceId, context.request)
-  ) {
-    response.setHeader("Content-Type", "application/json");
-    response.writeHead(403);
-    response.end(
-      JSON.stringify({
-        error: "This account selection request is not trusted.",
-        code: "browser-mutation-validation-failed"
-      })
-    );
-    return;
-  }
   const body = await context.readTextBody();
   response.setHeader("Content-Type", "application/json");
   try {

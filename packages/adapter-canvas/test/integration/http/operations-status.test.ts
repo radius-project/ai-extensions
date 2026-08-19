@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { validateBrowserMutationRequest } from "../../../src/server/browser-mutation.js";
+import type { CanvasRequestContext } from "../../../src/server/request-context.js";
 import {
   createOperationsStatusRoutes,
   type OperationActionRecord
@@ -102,14 +103,11 @@ function start(strictBrowserMutations = false): Harness {
     scheduled.push({ instanceId, operationId: operation.operationId });
     return true;
   };
-  const validateBrowserMutation = (
-    _instanceId: string,
-    request: Parameters<typeof validateBrowserMutationRequest>[0]["request"]
-  ): boolean =>
+  const validateBrowserMutation = (context: CanvasRequestContext): boolean =>
     !strictBrowserMutations ||
     validateBrowserMutationRequest({
-      request,
-      baseUrl: `http://${request.headers.host || ""}`,
+      request: context.request,
+      baseUrl: `http://${context.request.headers.host || ""}`,
       nonce: "browser-nonce"
     });
 
@@ -128,7 +126,6 @@ function start(strictBrowserMutations = false): Harness {
         toClientView
       },
       {
-        validateBrowserMutation,
         claimSelectionHandle: () => ({
           ok: true,
           login: "octocat",
@@ -156,7 +153,6 @@ function start(strictBrowserMutations = false): Harness {
           error instanceof Error ? error.message : String(error)
       },
       {
-        validateBrowserMutation,
         getOperation: (operationId) => records.get(operationId),
         canResumeInput,
         resumeAfterInput,
@@ -181,6 +177,7 @@ function start(strictBrowserMutations = false): Harness {
         instances,
         routes,
         markActivity,
+        validateBrowserMutation,
         handleUnmatchedRequest: (_request, response) => {
           response.writeHead(404);
           response.end("unmatched");
