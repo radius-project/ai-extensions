@@ -173,7 +173,7 @@ Safety, branch-selection, path-confinement, external-error, redaction, and destr
 
 Run focused commands while iterating. `pnpm run coverage` already executes the collocated Canvas tests, harness unit tests, runtime integration, and HTTP integration through `packages/adapter-canvas/vitest.config.ts`; use the dedicated runtime and HTTP commands for faster targeted work and to make affected-boundary evidence explicit.
 
-The current pull-request workflow requires these Linux build-job commands from the workspace root, in this order:
+The current pull-request workflow's Linux build job runs the following primary package scripts from the workspace root (see `.github/workflows/build.yml` for the full step list and ordering):
 
 ```text
 pnpm install --frozen-lockfile
