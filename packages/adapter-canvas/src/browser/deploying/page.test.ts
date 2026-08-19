@@ -1304,7 +1304,11 @@ describe("deploy flow", () => {
     await flushPromises();
     page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
     page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-      jsonResponse({ status: "failed", error: "workflow startup failed" })
+      jsonResponse({
+        status: "failed",
+        error: "workflow startup failed",
+        deployRunUrl: "https://example.test/run/1"
+      })
     );
 
     page.deployBtn.dispatch("click");

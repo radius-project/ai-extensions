@@ -590,7 +590,8 @@ test.describe("Radius Canvas in Chromium", () => {
     });
     await page.route("**/api/deploy-status", async (route) => {
       statusPolls++;
-      const payload = workflowConfirmed ?
+      const payload =
+        workflowConfirmed ?
           {
             status: "in_progress",
             deployRunUrl: "https://example.test/run/1"
@@ -636,7 +637,8 @@ test.describe("Radius Canvas in Chromium", () => {
         contentType: "application/json",
         body: JSON.stringify({
           status: "failed",
-          error: "workflow startup failed"
+          error: "workflow startup failed",
+          deployRunUrl: "https://example.test/run/1"
         })
       });
     });
