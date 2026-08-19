@@ -84,8 +84,13 @@ export function createGraphContextHelpers(
   // and hands the paths to core, which owns what counts as application source.
   // This adapter's only job is producing the list; it holds no filename rule.
   //
-  // Every failure resolves to null rather than an empty list, so a lookup that
-  // did not happen can never be classified as a repository with no Dockerfile.
+  // A lookup that did not happen must never read as a repository with no
+  // Dockerfile, and the two listers fail differently: the local one rejects or
+  // resolves null, while the remote one resolves an empty array on any error
+  // rather than throwing. Catching to null covers the first, and core mapping an
+  // empty listing to `unknown` covers the second, so neither failure reaches a
+  // verdict. An empty array here is therefore "could not establish", not "the
+  // repository has nothing".
   async function evaluateAppSourceForBranch(
     repo: string,
     branch: string,

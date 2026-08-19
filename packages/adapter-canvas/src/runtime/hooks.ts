@@ -27,7 +27,10 @@ import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
 } from "../deploy-diagnostics.js";
-import { unsupportedAppSourceReport } from "@radius-project/core";
+import {
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+  unsupportedAppSourceReport
+} from "@radius-project/core";
 import type { AppSourceEvaluation } from "@radius-project/core";
 import type { AppModelStatus } from "./graph-context.js";
 import type { CanvasState } from "../shared.js";
@@ -304,11 +307,13 @@ export async function evaluateAppBicepHook(
       })
     );
     if (sources.every((source) => source?.status === "none")) {
-      const report = unsupportedAppSourceReport(repo);
       return {
         permissionDecision: "deny",
-        permissionDecisionReason: report,
-        additionalContext: report
+        // The reason is what the user is shown, so it carries only the
+        // statement about their repository. The agent-facing half — what not to
+        // author, and that nothing was written — belongs in additionalContext.
+        permissionDecisionReason: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+        additionalContext: unsupportedAppSourceReport(repo)
       };
     }
     return {

@@ -547,10 +547,14 @@ describe("evaluateAppBicepHook", () => {
     const out = await evaluateAppBicepHook(OPEN_GRAPH, deps);
 
     expect(out?.permissionDecision).toBe("deny");
-    expect(out?.permissionDecisionReason).toContain(
+    // The reason is user-facing, so it is the statement about their repository
+    // and nothing else; the agent-facing half stays in additionalContext.
+    expect(out?.permissionDecisionReason).toBe(
       UNSUPPORTED_NO_DOCKERFILE_MESSAGE
     );
+    expect(out?.permissionDecisionReason).not.toMatch(/do not author/i);
     expect(out?.additionalContext).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(out?.additionalContext).toMatch(/do not author/i);
     expect(out?.additionalContext).not.toContain("Create it now");
     expect(out?.additionalContext).not.toContain("radius_generate_app");
   });
