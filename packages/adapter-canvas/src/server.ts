@@ -504,6 +504,10 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     errorMessage
   },
   {
+    validateBrowserMutation: (instanceId, request) =>
+      instanceRequestCoordinators
+        .get(instanceId)
+        ?.validateBrowserMutation(request) ?? false,
     getOperation: (operationId) => operations.get(operationId),
     canResumeInput,
     resumeAfterInput,

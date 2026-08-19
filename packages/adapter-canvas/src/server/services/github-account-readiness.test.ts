@@ -4,6 +4,7 @@ import {
   createGitHubSelectionHandleStore,
   probeGhcrPackageWriteAccess
 } from "./github-account-readiness.js";
+import { createGitHubAccountCoordinator } from "./github-account-coordinator.js";
 import type {
   GitHubAccountCoordinator,
   GitHubAccountLeaseResult
@@ -102,6 +103,43 @@ describe("GitHub account readiness", () => {
         packages: { state: "ready" }
       }
     });
+  });
+
+  it("verifies and restores a mocked inactive keyring account", async () => {
+    let activeLogin = "original";
+    const switches: string[] = [];
+    const selected = selectedExecutor({ login: "selected" });
+    const service = readinessService(
+      createGitHubAccountCoordinator({
+        createExecutor: async () => selected,
+        getActiveKeyringLogin: async () => activeLogin,
+        switchKeyringAccount: async (login) => {
+          switches.push(login);
+          activeLogin = login;
+          return { ok: true };
+        },
+        resetIdentityCache: () => {}
+      })
+    );
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login: "selected"
+    });
+
+    expect(result).toMatchObject({
+      ready: true,
+      login: "selected",
+      restoration: {
+        state: "restored",
+        originalLogin: "original",
+        currentLogin: "original"
+      }
+    });
+    expect(switches).toEqual(["selected", "original"]);
+    expect(activeLogin).toBe("original");
   });
 
   it("refuses readiness when the original keyring account was not restored", async () => {
@@ -304,6 +342,7 @@ describe("GHCR package access probe", () => {
       url: string;
       method: string;
       authorization: string;
+      signal?: AbortSignal;
     }> = [];
 
     const result = await probeGhcrPackageWriteAccess(
@@ -314,7 +353,8 @@ describe("GHCR package access probe", () => {
         requests.push({
           url,
           method: init.method || "GET",
-          authorization: init.headers.Authorization
+          authorization: init.headers.Authorization,
+          signal: init.signal
         });
         if (requests.length === 1) {
           return {
@@ -358,6 +398,7 @@ describe("GHCR package access probe", () => {
     expect(requests[0]?.authorization).toMatch(/^Basic /);
     expect(requests[1]?.authorization).toMatch(/^Bearer /);
     expect(requests[2]?.authorization).toMatch(/^Bearer /);
+    expect(new Set(requests.map((request) => request.signal)).size).toBe(1);
     expect(JSON.stringify(result)).not.toContain(
       "synthetic-package-credential"
     );
@@ -547,6 +588,34 @@ describe("GHCR package access probe", () => {
         }
         throw new Error("registry offline");
       }
+    );
+    expect(result).toEqual({
+      ok: false,
+      detail: "GitHub Packages authorization could not be verified."
+    });
+  });
+
+  it("bounds the complete GHCR probe with one abort signal", async () => {
+    const result = await probeGhcrPackageWriteAccess(
+      selectedExecutor({}),
+      "octo/app",
+      "dev",
+      async (_url, init) =>
+        await new Promise((_resolve, reject) => {
+          const signal = init.signal;
+          if (!signal) {
+            reject(new Error("missing abort signal"));
+            return;
+          }
+          if (signal.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true
+          });
+        }),
+      1
     );
     expect(result).toEqual({
       ok: false,

@@ -67,6 +67,7 @@ const productionHandlers = {
       errorMessage: (error) => String(error)
     },
     {
+      validateBrowserMutation: () => true,
       getOperation: () => undefined,
       canResumeInput: () => false,
       resumeAfterInput: () => {},

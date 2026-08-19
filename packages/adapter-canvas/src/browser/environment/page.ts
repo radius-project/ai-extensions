@@ -267,6 +267,7 @@ export function initializeEnvironmentPage(
 
   const operations = initializeEnvironmentOperations(context, {
     repo: state.repo,
+    mutationNonce: state.mutationNonce,
     deps: {
       showSuccessBanner: environments.showSuccess,
       showActionRequired: environments.showActionRequired,

@@ -123,6 +123,10 @@ export interface OperationActionRecord extends OperationRecord {
 }
 
 export interface OperationActionDependencies {
+  validateBrowserMutation(
+    instanceId: string,
+    request: IncomingMessage
+  ): boolean;
   getOperation(operationId: string): OperationActionRecord | null | undefined;
   canResumeInput(
     operation: OperationActionRecord,
@@ -153,6 +157,7 @@ export interface OperationActionDependencies {
 }
 
 const ACTION_FUNCTION_DEPENDENCIES = [
+  "validateBrowserMutation",
   "getOperation",
   "canResumeInput",
   "resumeAfterInput",
@@ -549,6 +554,15 @@ export async function handleResumeOperation(
   context: CanvasRequestContext,
   dependencies: OperationActionDependencies
 ): Promise<void> {
+  if (
+    !dependencies.validateBrowserMutation(context.instanceId, context.request)
+  ) {
+    jsonError(context, 403, {
+      error: "This operation action request is not trusted.",
+      code: "browser-mutation-validation-failed"
+    });
+    return;
+  }
   const parameters = requiredTemplateParameters(
     RESUME_OPERATION_ROUTE,
     context.pathname
@@ -682,6 +696,15 @@ export async function handleAbandonOperation(
   context: CanvasRequestContext,
   dependencies: OperationActionDependencies
 ): Promise<void> {
+  if (
+    !dependencies.validateBrowserMutation(context.instanceId, context.request)
+  ) {
+    jsonError(context, 403, {
+      error: "This operation action request is not trusted.",
+      code: "browser-mutation-validation-failed"
+    });
+    return;
+  }
   const parameters = requiredTemplateParameters(
     ABANDON_OPERATION_ROUTE,
     context.pathname

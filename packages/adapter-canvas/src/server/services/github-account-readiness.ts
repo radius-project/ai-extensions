@@ -64,7 +64,11 @@ interface PackageTokenResponse {
 
 type PackageTokenFetch = (
   url: string,
-  init: { method?: string; headers: Record<string, string> }
+  init: {
+    method?: string;
+    headers: Record<string, string>;
+    signal?: AbortSignal;
+  }
 ) => Promise<PackageTokenResponse>;
 
 interface RepositoryResponse {
@@ -77,8 +81,10 @@ export async function probeGhcrPackageWriteAccess(
   executor: SelectedGhExecutor,
   repo: string,
   environment: string,
-  fetchToken: PackageTokenFetch = fetch
+  fetchToken: PackageTokenFetch = fetch,
+  timeoutMs = 15000
 ): Promise<GitHubPackageAccessProbeResult> {
+  const signal = AbortSignal.timeout(timeoutMs);
   let packagePath: string;
   try {
     packagePath = stateRegistryForEnvironment(repo, environment).replace(
@@ -102,7 +108,8 @@ export async function probeGhcrPackageWriteAccess(
             `${credentials.username}:${credentials.token}`,
             "utf8"
           ).toString("base64")}`
-        }
+        },
+        signal
       }
     );
   } catch {
@@ -141,7 +148,8 @@ export async function probeGhcrPackageWriteAccess(
         headers: {
           Accept: "application/json",
           Authorization: `Bearer ${token}`
-        }
+        },
+        signal
       }
     );
     if (!uploadResponse.ok && uploadResponse.status !== 202) {
@@ -174,7 +182,8 @@ export async function probeGhcrPackageWriteAccess(
   try {
     const cleanup = await fetchToken(uploadLocation, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` }
+      headers: { Authorization: `Bearer ${token}` },
+      signal
     });
     if (!cleanup.ok && cleanup.status !== 404 && cleanup.status !== 405) {
       return {

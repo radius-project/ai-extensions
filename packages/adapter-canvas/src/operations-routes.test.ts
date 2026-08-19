@@ -282,7 +282,17 @@ describe("POST /api/operations server-owned execution", () => {
     });
     const malformedResponse = await fetch(
       `${baseUrl}/api/operations/${malformed.operationId}/resume/app-selection-required`,
-      { method: "POST", body: "{not json" }
+      {
+        method: "POST",
+        headers: {
+          Origin: baseUrl,
+          "Sec-Fetch-Site": "same-origin",
+          "X-Radius-Mutation-Nonce": String(
+            entry?.state?.browserMutationNonce || ""
+          )
+        },
+        body: "{not json"
+      }
     );
     expect(malformedResponse.status).toBe(409);
     expect(await malformedResponse.json()).toMatchObject({

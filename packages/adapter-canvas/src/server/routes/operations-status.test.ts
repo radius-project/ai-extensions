@@ -180,6 +180,7 @@ function actionDependencies(
   overrides: Partial<OperationActionDependencies> = {}
 ): OperationActionDependencies {
   return {
+    validateBrowserMutation: () => true,
     getOperation: () => {
       throw new Error("getOperation not stubbed");
     },
@@ -1143,6 +1144,7 @@ async function runAction(
 
 describe("operation resume and abandon actions", () => {
   it.each([
+    "validateBrowserMutation",
     "getOperation",
     "canResumeInput",
     "resumeAfterInput",
@@ -1178,6 +1180,30 @@ describe("operation resume and abandon actions", () => {
       })
     ).toThrow("Missing operations action dependency: inputRequiredState");
   });
+
+  it.each([
+    [
+      "resume",
+      "/api/operations/op-action/resume/service-management-reference-required",
+      handleResumeOperation
+    ],
+    ["abandon", "/api/operations/op-action/abandon", handleAbandonOperation]
+  ] as const)(
+    "rejects an untrusted %s request",
+    async (_label, path, handler) => {
+      const recording = await runAction(
+        path,
+        "{}",
+        handler,
+        actionDependencies({ validateBrowserMutation: () => false })
+      );
+      expect(recording.status).toBe(403);
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "This operation action request is not trusted.",
+        code: "browser-mutation-validation-failed"
+      });
+    }
+  );
 
   it("rejects a direct action call whose path does not match its template", async () => {
     await expect(
