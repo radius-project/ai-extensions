@@ -12,7 +12,8 @@ import {
 import {
   appBicepHandoffPrompt,
   appBicepHandoffDisplayPrompt,
-  deployRepairHandoffDisplayPrompt
+  deployRepairHandoffDisplayPrompt,
+  deployFailureNoticeDisplayPrompt
 } from "./hooks.js";
 
 // RU-20: the composition factory never calls joinSession — only the
@@ -255,6 +256,30 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     // The raw deploy diagnostic must never reach the timeline half.
     expect(sent.displayPrompt).not.toContain("BCP037");
     expect(sent.displayPrompt).not.toContain("radius_deploy_status");
+  });
+
+  it("registers a deploy-failure notice that reports a run-unconfirmed failure without a repair prompt", async () => {
+    const { ext, capturedHostCallbacks } = setup();
+    const session = createFakeSession();
+    ext.attachSession(session);
+    await capturedHostCallbacks.deployFailureNotice!({
+      repo: "acme/widgets",
+      branch: "main",
+      error: "dispatch rejected: missing workflow scope",
+      deployRunUrl: "https://github.com/acme/widgets/actions/runs/1",
+      instanceId: "radius-panel"
+    });
+    expect(session.send).toHaveBeenCalledOnce();
+    const sent = (session.send as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as { prompt: string; displayPrompt: string };
+    expect(sent.prompt).toContain("missing workflow scope");
+    expect(sent.prompt).toMatch(/do not automatically redeploy/i);
+    // A run-unconfirmed failure must not push the agent into the repair loop.
+    expect(sent.prompt).not.toContain("radius_generate_app");
+    expect(sent.displayPrompt).toBe(
+      deployFailureNoticeDisplayPrompt("acme/widgets", "main")
+    );
+    expect(sent.displayPrompt).not.toContain("missing workflow scope");
   });
 
   it("registers a session-prompt handler that forwards a bare prompt string", async () => {

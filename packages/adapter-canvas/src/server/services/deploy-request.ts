@@ -103,6 +103,13 @@ export interface DeployRequestDependencies {
     entry: DeployRequestInstanceEntry,
     instanceId: string
   ): boolean;
+  // Informational sibling of triggerDeployRepairHandoff for run-unconfirmed
+  // failures. Called from the same monitor-owned `.finally()` so the relay is
+  // independent of the webview polling the status route.
+  triggerDeployFailureNotice(
+    entry: DeployRequestInstanceEntry,
+    instanceId: string
+  ): boolean;
   monitor: DeployMonitorService;
   unconfirmedRunKind: CanvasState["deployErrorKind"];
   repairAttemptCap: number;
@@ -135,6 +142,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployRequestDependencies)[] = [
   "canvasGraphResources",
   "beginDeployAttempt",
   "triggerDeployRepairHandoff",
+  "triggerDeployFailureNotice",
   "errorMessage"
 ];
 
@@ -405,6 +413,10 @@ export function createDeployRequestService(
             // The /api/deploy-status route keeps its own call as a fallback,
             // and triggerDeployRepairHandoff is idempotent per repair loop.
             dependencies.triggerDeployRepairHandoff(entry, instanceId);
+            // Same reasoning for the informational notice: a run-unconfirmed
+            // failure is relayed once from here regardless of whether the panel
+            // is still polling. Idempotent per attempt, like the handoff.
+            dependencies.triggerDeployFailureNotice(entry, instanceId);
             // Hold the repo/environment reservation for the whole deploy, not
             // merely until the background monitor starts.
             releaseReservation();
