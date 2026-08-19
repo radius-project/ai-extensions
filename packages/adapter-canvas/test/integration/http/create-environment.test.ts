@@ -73,7 +73,15 @@ interface Harness {
   state: CanvasState;
   finished: Array<{ state: string; options: Record<string, unknown> }>;
   commitStates: Record<string, unknown>[];
-  committedFiles: Array<{ path: string; branch: string | null; mode: string }>;
+  committedFiles: Array<{
+    path: string;
+    branch: string | null;
+    mode: string;
+    commitSha: string | null;
+    blobSha: string | null;
+    contentSha256: string | null;
+    previousBlobSha: string | null;
+  }>;
   failures: Array<Record<string, unknown>>;
 }
 
@@ -86,6 +94,10 @@ const TEMP_BODY_PATH = "/tmp/create-environment-body.json";
 // helpers (`isValidRepoSlug`, `planCredentialVerification`,
 // `buildVerifyWorkflowDispatchArgs`, `resolveGitHubEnvironmentCreateState`) are
 // the real production functions, injected exactly as `server.ts` injects them.
+// sha256 of the exact workflow bytes the generators in this harness produce.
+const WORKFLOW_CONTENT_DIGEST =
+  "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7";
+
 const DEFAULT_GH_RULES: GhRule[] = [
   {
     match: /^api \/repos\/octo\/app\/environments\/dev$/,
@@ -102,7 +114,15 @@ const DEFAULT_GH_RULES: GhRule[] = [
   },
   {
     match: /^api --method PUT \/repos\/octo\/app\/contents\//,
-    result: { code: 0 }
+    // The real contents API answers a write with the commit it created and the
+    // blob it stored; the committer reads its provenance back out of this.
+    result: {
+      code: 0,
+      stdout: JSON.stringify({
+        content: { sha: "blob-sha" },
+        commit: { sha: "commit-sha" }
+      })
+    }
   },
   { match: /^workflow run /, result: { code: 0 } },
   {
@@ -833,21 +853,36 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
 
     await post({ repo: "octo/app" });
 
+    // Every file carries the provenance a later rollback verifies against:
+    // the commit it created, the blob GitHub stored, the digest of the bytes
+    // Radius sent, and (here) no previous blob, because Radius created them.
     expect(harness.committedFiles).toEqual([
       {
         path: ".github/workflows/radius-verify-credentials.yml",
         branch: "main",
-        mode: "default_branch"
+        mode: "default_branch",
+        commitSha: "commit-sha",
+        blobSha: "blob-sha",
+        contentSha256: WORKFLOW_CONTENT_DIGEST,
+        previousBlobSha: null
       },
       {
         path: ".github/workflows/run-rad-commands.yml",
         branch: "main",
-        mode: "default_branch"
+        mode: "default_branch",
+        commitSha: "commit-sha",
+        blobSha: "blob-sha",
+        contentSha256: WORKFLOW_CONTENT_DIGEST,
+        previousBlobSha: null
       },
       {
         path: ".github/workflows/radius-delete.yml",
         branch: "main",
-        mode: "default_branch"
+        mode: "default_branch",
+        commitSha: "commit-sha",
+        blobSha: "blob-sha",
+        contentSha256: WORKFLOW_CONTENT_DIGEST,
+        previousBlobSha: null
       }
     ]);
     expect(harness.journal).toContain("deleteLegacyDeployWorkflow");

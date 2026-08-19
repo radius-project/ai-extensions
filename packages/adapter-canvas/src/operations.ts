@@ -32,11 +32,15 @@ import {
 } from "./operation-store.js";
 
 // Version 2 adds the cooperative control record (stop, attempts, commands,
-// outcome history). Version 1 records written by the durable store and the
-// server-owned executor still load: `readOperationControl` fills the new fields
-// with safe defaults rather than discarding the operation.
-export const OPERATION_SCHEMA_VERSION = 2;
-export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([1, 2]);
+// outcome history). Version 3 adds workflow provenance to the artifact ledger
+// (commit, blob and content digests) so a rollback after the workflow commit
+// point can prove the files it would revert are still exactly what Radius
+// wrote. Version 1 and 2 records still load: `readOperationControl` and
+// `readSetupArtifactLedger` fill the new fields with safe defaults rather than
+// discarding the operation, and a default of "no provenance" fails a
+// post-commit rollback closed instead of guessing.
+export const OPERATION_SCHEMA_VERSION = 3;
+export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([1, 2, 3]);
 
 // `deleted` is written only after a cleanup attempt proved the resource is gone
 // (removed by Radius, or already absent). It keeps a rolled-back artifact out of
@@ -82,10 +86,25 @@ export type GitHubEnvironmentArtifact = {
   name: string | null;
 };
 
+// `state` keeps a reverted file in the ledger instead of deleting the entry:
+// the record still has to prove this operation crossed the commit point, and a
+// cleanup retry still needs the provenance of the write it is repeating.
+//
+// The three hashes are what makes a post-commit rollback safe. `blobSha` is the
+// git blob id GitHub returned for the write, `contentSha256` is the digest of
+// the exact bytes Radius sent, and `previousBlobSha` is the blob the path held
+// beforehand — null when Radius created the file, so a revert deletes it rather
+// than restoring something that never existed. All four are null on a record
+// written before this field existed, which fails the rollback closed.
 export type WorkflowCommitArtifact = {
   path: string;
   branch: string | null;
   mode: Exclude<SetupCommitMode, "not_started">;
+  state: "committed" | "removed";
+  commitSha: string | null;
+  blobSha: string | null;
+  contentSha256: string | null;
+  previousBlobSha: string | null;
 };
 
 export type SetupArtifactCommitState = {
@@ -93,10 +112,15 @@ export type SetupArtifactCommitState = {
   branch: string | null;
   baseBranch: string | null;
   pullRequestUrl: string | null;
+  // The commit the last workflow write left at the head of `branch`. A branch
+  // whose head has moved since carries someone else's work, so a rollback that
+  // would delete the branch refuses instead.
+  headSha: string | null;
   workflowFiles: WorkflowCommitArtifact[];
 };
 
 export type SetupCleanupArtifactType =
+  | "workflow_file"
   | "github_environment"
   | "role_assignment"
   | "federated_credential"
@@ -415,6 +439,7 @@ export function createSetupArtifactLedger(): SetupArtifactLedger {
       branch: null,
       baseBranch: null,
       pullRequestUrl: null,
+      headSha: null,
       workflowFiles: []
     },
     cleanup: {
@@ -430,6 +455,79 @@ export function getSetupArtifactLedger(op: any): SetupArtifactLedger | null {
   if (!op) return null;
   if (!op.setupArtifacts) op.setupArtifacts = createSetupArtifactLedger();
   return op.setupArtifacts;
+}
+
+function optionalShaString(value: any): string | null {
+  const text = String(value == null ? "" : value).trim();
+  return text ? text : null;
+}
+
+/**
+ * Read one saved workflow-commit entry, filling the provenance a version 1 or
+ * version 2 record never carried.
+ *
+ * The defaults are deliberately null rather than invented: a record written
+ * before Radius saved the commit, blob and content digests cannot prove the
+ * file on GitHub is still the artifact it wrote, and a post-commit rollback
+ * must refuse that record rather than delete against an assumption.
+ */
+export function readWorkflowCommitArtifact(value: any): WorkflowCommitArtifact {
+  const path = String((value && value.path) || "");
+  const mode =
+    value && value.mode === "pull_request" ? "pull_request" : "default_branch";
+  return {
+    path,
+    branch: optionalShaString(value && value.branch),
+    mode,
+    state: value && value.state === "removed" ? "removed" : "committed",
+    commitSha: optionalShaString(value && value.commitSha),
+    blobSha: optionalShaString(value && value.blobSha),
+    contentSha256: optionalShaString(value && value.contentSha256),
+    previousBlobSha: optionalShaString(value && value.previousBlobSha)
+  };
+}
+
+/**
+ * Restore a saved artifact ledger onto the current shape.
+ *
+ * Every field the current model reads exists afterwards, so no consumer has to
+ * branch on which schema version wrote the record. Unknown keys are dropped
+ * rather than carried forward, and anything unreadable degrades to the
+ * "nothing proven" default that fails destructive work closed.
+ */
+export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
+  const ledger = createSetupArtifactLedger();
+  if (!value || typeof value !== "object") return ledger;
+  const source = value as Record<string, any>;
+  return {
+    azureApp: { ...ledger.azureApp, ...(source.azureApp || {}) },
+    servicePrincipal: {
+      ...ledger.servicePrincipal,
+      ...(source.servicePrincipal || {})
+    },
+    federatedCredentials:
+      Array.isArray(source.federatedCredentials) ?
+        source.federatedCredentials
+      : [],
+    roleAssignments:
+      Array.isArray(source.roleAssignments) ? source.roleAssignments : [],
+    githubEnvironment: {
+      ...ledger.githubEnvironment,
+      ...(source.githubEnvironment || {})
+    },
+    commit: {
+      ...ledger.commit,
+      ...(source.commit || {}),
+      headSha: optionalShaString(source.commit && source.commit.headSha),
+      workflowFiles:
+        Array.isArray(source.commit && source.commit.workflowFiles) ?
+          source.commit.workflowFiles
+            .map((entry: any) => readWorkflowCommitArtifact(entry))
+            .filter((entry: WorkflowCommitArtifact) => entry.path !== "")
+        : []
+    },
+    cleanup: { ...ledger.cleanup, ...(source.cleanup || {}) }
+  };
 }
 
 /**
@@ -799,6 +897,15 @@ export function recordCommitState(op: any, patch: any): any {
   return op;
 }
 
+/**
+ * Save one committed workflow file together with the provenance a rollback
+ * needs to prove it is still the artifact Radius wrote.
+ *
+ * A re-commit of the same path on the same branch replaces the earlier
+ * provenance rather than appending a second entry: the newest write is the one
+ * a revert has to match, and two entries for one path would let a rollback
+ * verify the stale digest and delete the newer file.
+ */
 export function recordCommittedWorkflowFile(op: any, entry: any): any {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger || !entry) return op;
@@ -809,14 +916,14 @@ export function recordCommittedWorkflowFile(op: any, entry: any): any {
   if (!path || (mode !== "default_branch" && mode !== "pull_request")) {
     return op;
   }
-  if (
-    !ledger.commit.workflowFiles.some(
-      (file) =>
-        file.path === path && file.mode === mode && file.branch === branch
-    )
-  ) {
-    ledger.commit.workflowFiles.push({ path, mode, branch });
-  }
+  const record = readWorkflowCommitArtifact({ ...entry, path, mode, branch });
+  const existing = ledger.commit.workflowFiles.findIndex(
+    (file: WorkflowCommitArtifact) =>
+      file.path === path && file.mode === mode && file.branch === branch
+  );
+  if (existing === -1) ledger.commit.workflowFiles.push(record);
+  else ledger.commit.workflowFiles[existing] = record;
+  if (record.commitSha) ledger.commit.headSha = record.commitSha;
   if (ledger.commit.mode === "not_started") {
     ledger.commit.mode = mode;
     ledger.commit.branch = branch;
@@ -888,6 +995,18 @@ export function recordCleanupDeletion(
       );
       if (remaining.length === ledger.roleAssignments.length) return false;
       ledger.roleAssignments = remaining;
+      return true;
+    }
+    // The entry stays, marked reverted: the record still has to prove this
+    // operation crossed the commit point, and a cleanup retry still needs the
+    // provenance of the write that was reverted.
+    case "workflow_file": {
+      const file = ledger.commit.workflowFiles.find(
+        (entry: WorkflowCommitArtifact) =>
+          entry.state === "committed" && matches(entry)
+      );
+      if (!file) return false;
+      file.state = "removed";
       return true;
     }
     default:
@@ -996,6 +1115,12 @@ export function cleanupArtifactIdentity(
     case "github_environment":
       return `${normalizeIdentityPart(artifact.repo)}:${normalizeIdentityPart(
         artifact.name
+      )}`;
+    // Path plus branch, because the same workflow path on a setup branch and on
+    // the default branch are two different files with two different provenances.
+    case "workflow_file":
+      return `${normalizeIdentityPart(artifact.branch)}:${normalizeIdentityPart(
+        artifact.path
       )}`;
     default:
       return "";
@@ -1155,6 +1280,7 @@ export function projectCleanupSummary(op: any): any {
     });
   }
   ledger.commit.workflowFiles.forEach((entry: any) => {
+    if (entry.state === "removed") return;
     pushRetainedArtifact(retained, {
       kind: "workflow_file",
       reason: "retained",
@@ -1374,6 +1500,10 @@ function projectPartialState(
       formatGitHubEnvironmentLabel(ledger.githubEnvironment)
     );
   ledger.commit.workflowFiles.forEach((entry: any) => {
+    // A reverted file is no longer surviving. `keepAlways` exists because a
+    // committed workflow is never removed by the pre-commit cleanup path, not
+    // because the entry outlives its own removal.
+    if (entry.state === "removed") return;
     const target = formatWorkflowFileLabel(entry);
     if (target)
       surviving.push({
@@ -1740,12 +1870,25 @@ export function canRetrySetup(op: any): any {
 // Stop and rollback are two decisions, not one. Stop ends the attempt; rollback
 // is the separate, confirmed request to remove what the attempt created. The
 // selection below is the whole safety boundary: only resources the ledger
-// proves this attempt created, only before the workflow commit point, never a
-// reused resource and never one identified by display name alone.
+// proves this attempt created, never a reused resource, and never one
+// identified by display name alone.
+//
+// Successful credential verification is the completion boundary. Up to that
+// point the environment is an unfinished attempt the customer may abandon, so a
+// rollback stays on offer even after the workflow files were committed; once
+// verification has succeeded the environment is one the customer relies on and
+// only the ordinary Delete Environment path removes it.
+//
+// A post-commit rollback has one extra obligation, because the artifacts are in
+// the customer's repository rather than in Radius's own cloud footprint: every
+// workflow file has to be provably the exact artifact Radius wrote before
+// anything is removed, and a record that cannot prove it selects nothing at
+// all.
 
 /** The order deletions must run in so nothing is removed before its dependents. */
 const ROLLBACK_ARTIFACT_ORDER: readonly SetupCleanupArtifactType[] =
   Object.freeze([
+    "workflow_file",
     "github_environment",
     "role_assignment",
     "federated_credential",
@@ -1774,17 +1917,68 @@ function rollbackTarget(
   };
 }
 
+/** The workflow files this operation committed and has not yet reverted. */
+export function pendingWorkflowCommits(op: any): WorkflowCommitArtifact[] {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return [];
+  return ledger.commit.workflowFiles.filter(
+    (file: WorkflowCommitArtifact) => file.state !== "removed"
+  );
+}
+
 /**
- * Every proven-owned pre-commit artifact the ledger still claims, in the order
- * a rollback must delete them.
+ * Why the saved record cannot prove what it committed, or null when it can.
  *
- * `created_candidate` is deliberately absent: GitHub's idempotent PUT cannot
- * prove this request created that environment, so it stays a manual action.
+ * Every sentence names the missing fact rather than "provenance", because the
+ * customer reading it has to decide what to do by hand. The gate covers the
+ * whole selection: one unprovable file blocks the rollback, since removing the
+ * environment and the identity behind a workflow that is still installed would
+ * leave the repository with a workflow that can no longer authenticate.
+ */
+export function workflowProvenanceGap(op: any): string | null {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return "The setup artifact ledger is missing.";
+  if (!op?.repo) return "The record does not name the repository it wrote to.";
+  const files = pendingWorkflowCommits(op);
+  if (files.length === 0) return null;
+  for (const file of files) {
+    const branch = file.branch || ledger.commit.branch;
+    if (!branch)
+      return `Radius did not save which branch "${file.path}" was committed to.`;
+    if (!file.blobSha || !file.contentSha256)
+      return `Radius did not save the content it committed for "${file.path}", so it cannot prove the file is unchanged.`;
+    if (!file.commitSha)
+      return `Radius did not save the commit it created for "${file.path}".`;
+  }
+  if (ledger.commit.mode === "pull_request" && !ledger.commit.headSha)
+    return "Radius did not save the head commit of the setup branch, so it cannot prove the branch still holds only its own work.";
+  return null;
+}
+
+/**
+ * Every proven-owned artifact the ledger still claims, in the order a rollback
+ * must remove them.
+ *
+ * Workflow files come first: they are what makes the environment usable, and
+ * removing the identity underneath a workflow that is still installed would
+ * leave the repository with a job that fails at Azure Login instead of one that
+ * is simply gone. `created_candidate` is deliberately absent throughout, since
+ * GitHub's idempotent PUT cannot prove this request created that environment.
  */
 export function provenOwnedCleanupTargets(op: any): RollbackTarget[] {
   const ledger = getSetupArtifactLedger(op);
-  if (!ledger || hasReachedSetupCommitPoint(op)) return [];
+  if (!ledger) return [];
   const targets: RollbackTarget[] = [];
+  if (hasReachedSetupCommitPoint(op)) {
+    // Selecting nothing is how an unprovable record refuses: the caller sees an
+    // empty set and reports it, instead of deleting on an assumption.
+    if (workflowProvenanceGap(op)) return [];
+    for (const file of pendingWorkflowCommits(op)) {
+      targets.push(
+        rollbackTarget("workflow_file", file, formatWorkflowFileLabel(file))
+      );
+    }
+  }
   if (ledger.githubEnvironment.state === "created") {
     targets.push(
       rollbackTarget(
@@ -1880,22 +2074,40 @@ export function rollbackArtifactIdentity(targets: RollbackTarget[]): string {
   return `cleanup#${digest}`;
 }
 
+/**
+ * Whether a rollback is on offer, and what it would remove.
+ *
+ * The scope says which safety story applies. `pre_commit` removes only Azure
+ * and GitHub resources this attempt created. `post_commit` additionally reverts
+ * the workflow files it committed, and is offered only while the environment is
+ * still unverified — a verified environment is finished work, and removing it
+ * is the ordinary Delete Environment action rather than a rollback of a setup
+ * that never completed.
+ */
 export function canStartRollback(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
-  // A rollback answers a stopped or partially failed attempt. A succeeded or
-  // action_required record describes resources the customer is relying on.
+  // Successful verification is the completion boundary, so a verified
+  // environment is never rolled back through the setup record.
+  if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
+    return { ok: false, code: "rollback-environment-verified" };
+  // A rollback answers a stopped, partially failed, or handed-off attempt.
   if (
     op.state !== "cancelled" &&
     op.state !== "failed_partial" &&
-    op.state !== "failed"
+    op.state !== "failed" &&
+    op.state !== "action_required"
   )
     return { ok: false, code: "rollback-not-available" };
-  if (hasReachedSetupCommitPoint(op))
-    return { ok: false, code: "rollback-after-commit" };
   if (hasAttemptedCleanup(op))
     return { ok: false, code: "rollback-already-attempted" };
+  const postCommit = hasReachedSetupCommitPoint(op);
+  if (postCommit) {
+    const gap = workflowProvenanceGap(op);
+    if (gap)
+      return { ok: false, code: "rollback-provenance-incomplete", detail: gap };
+  }
   // A record with no ledger proves nothing, so it selects nothing and refuses
   // here rather than needing a guard of its own.
   const targets = provenOwnedCleanupTargets(op);
@@ -1904,8 +2116,60 @@ export function canStartRollback(op: any): any {
   return {
     ok: true,
     code: "rollback-allowed",
+    scope: postCommit ? "post_commit" : "pre_commit",
     targets,
     target: rollbackArtifactIdentity(targets)
+  };
+}
+
+/**
+ * The committed workflow files a cleanup selection covers, in the shape the
+ * rollback service consumes.
+ *
+ * Built here because the ledger owns both the provenance and the identity a
+ * result is matched back to; the service takes them as data and never reads the
+ * operation record.
+ */
+export function workflowRollbackTargets(
+  op: any,
+  keys?: Set<string> | null
+): any[] {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return [];
+  return pendingWorkflowCommits(op)
+    .map((file: WorkflowCommitArtifact) => {
+      const identity = cleanupArtifactIdentity("workflow_file", file);
+      const target = formatWorkflowFileLabel(file);
+      return {
+        path: file.path,
+        branch: String(file.branch || ledger.commit.branch || ""),
+        mode: file.mode,
+        commitSha: file.commitSha,
+        blobSha: file.blobSha,
+        contentSha256: file.contentSha256,
+        previousBlobSha: file.previousBlobSha,
+        target,
+        identity,
+        key: cleanupTargetKey({
+          artifactType: "workflow_file",
+          identity,
+          target
+        })
+      };
+    })
+    .filter((entry: any) => !keys || keys.has(entry.key));
+}
+
+/** The commit state a rollback needs to locate what it would revert. */
+export function workflowRollbackCommitState(op: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  const commit = ledger?.commit;
+  return {
+    mode: commit?.mode === "pull_request" ? "pull_request" : "default_branch",
+    branch: commit?.branch ?? null,
+    baseBranch: commit?.baseBranch ?? null,
+    pullRequestUrl: commit?.pullRequestUrl ?? null,
+    headSha: commit?.headSha ?? null
   };
 }
 
@@ -1921,6 +2185,16 @@ function isProvenOwnedCleanupTarget(ledger: any, result: any): boolean {
       return ledger.roleAssignments.length > 0;
     case "github_environment":
       return ledger.githubEnvironment.state === "created";
+    case "workflow_file":
+      return ledger.commit.workflowFiles.some(
+        (file: WorkflowCommitArtifact) =>
+          file.state !== "removed" &&
+          cleanupTargetKey({
+            artifactType: "workflow_file",
+            identity: cleanupArtifactIdentity("workflow_file", file),
+            target: formatWorkflowFileLabel(file)
+          }) === cleanupTargetKey(result)
+      );
     default:
       return false;
   }
@@ -1961,8 +2235,15 @@ export function canRetryCleanup(op: any): any {
     return { ok: false, code: "operation-active" };
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return { ok: false, code: "cleanup-retry-ledger-missing" };
-  if (hasReachedSetupCommitPoint(op))
-    return { ok: false, code: "cleanup-retry-after-commit" };
+  if (hasReachedSetupCommitPoint(op)) {
+    const gap = workflowProvenanceGap(op);
+    if (gap)
+      return {
+        ok: false,
+        code: "cleanup-retry-provenance-incomplete",
+        detail: gap
+      };
+  }
   if (ledger.cleanup.state !== "succeeded_with_warnings")
     return { ok: false, code: "cleanup-retry-not-retryable" };
   const targets = unresolvedCleanupTargets(op);
@@ -2102,8 +2383,10 @@ function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
 const ROLLBACK_UNAVAILABLE_MESSAGES: Record<string, string> = {
   "rollback-nothing-owned":
     "Radius did not create any resources in this attempt, so there is nothing to roll back.",
-  "rollback-after-commit":
-    "Setup committed workflow files, so Radius retained the environment resources instead of removing them.",
+  "rollback-environment-verified":
+    "Credential verification succeeded, so this environment is finished setup. Remove it from the environment list with Delete Environment.",
+  "rollback-provenance-incomplete":
+    "Radius cannot prove the committed workflow files are still exactly what it wrote, so it will not remove them or the resources they depend on. Review and remove them yourself.",
   "rollback-already-attempted":
     "Radius already ran a rollback for this attempt. Anything still listed needs the retry above or a manual removal."
 };
@@ -2195,6 +2478,18 @@ export function projectOperationHeadline(op: any): any {
     };
   }
   if (op.state === "failed_partial" && cleanupCommand) {
+    // A rollback that never started because the repository no longer matches
+    // what Radius wrote is a different message from one that ran and left
+    // resources behind: nothing was removed, and the next move is a review
+    // rather than another attempt.
+    if (op.failure?.code === "setup-rollback-blocked") {
+      return {
+        code: "rollback-blocked",
+        title: "Rollback stopped before removing anything",
+        message:
+          "The committed workflow files are no longer exactly what Radius wrote, so it removed nothing and left every resource in place. Review the files below, then remove what you want by hand."
+      };
+    }
     return {
       code: "rollback-incomplete",
       title: "Rollback finished with items still present",
@@ -2304,20 +2599,34 @@ export function projectOperationActions(op: any): any[] {
   }
   const rollback = canStartRollback(op);
   if (rollback.ok) {
+    // The two scopes are different promises, so they are written as different
+    // sentences. Pre-commit removes cloud resources only; post-commit also
+    // reverts the workflow files it committed, and says so before the customer
+    // confirms.
+    const postCommit = rollback.scope === "post_commit";
     actions.push({
       id: "rollback",
       kind: "rollback",
-      label: "Roll back created resources",
+      label:
+        postCommit ?
+          "Roll back environment setup"
+        : "Roll back created resources",
       tone: "danger",
       requiresConfirmation: true,
-      confirmTitle: "Roll back resources created by this setup?",
-      confirmLabel: "Roll back resources",
+      confirmTitle:
+        postCommit ?
+          "Roll back this environment setup?"
+        : "Roll back resources created by this setup?",
+      confirmLabel: postCommit ? "Roll back setup" : "Roll back resources",
       cancelLabel: "Keep resources",
       description:
-        "Radius removes only the resources it proved it created before the workflows were committed. This cannot be undone.",
+        postCommit ?
+          "Radius reverts the workflow files it committed with a new commit, then removes the GitHub environment and cloud identity it created. It checks first that every file is still exactly what it wrote and stops without removing anything if it is not. This cannot be undone."
+        : "Radius removes only the resources it proved it created before the workflows were committed. This cannot be undone.",
       method: "POST",
       path: `${base}/rollback`,
       pending: false,
+      scope: rollback.scope,
       preview: projectRollbackPreview(op, rollback.targets)
     });
   }
@@ -3133,6 +3442,9 @@ export function toPersistedOperation(op: any): any {
   }
   record.failure = persistedFailure(op.failure);
   record.control = readOperationControl(op.control);
+  // Written through the same normalizer the restore path uses, so a saved
+  // ledger always carries the current provenance shape.
+  record.setupArtifacts = readSetupArtifactLedger(op.setupArtifacts);
   if (
     typeof record.operationId !== "string" ||
     !record.operationId.startsWith("op_") ||
@@ -3175,6 +3487,10 @@ export function fromPersistedOperation(value: any): any {
     throw new Error("Invalid persisted operation stages or steps.");
   }
   record.control = readOperationControl(value.control);
+  // A version 1 or 2 ledger has no workflow provenance. Normalizing it here
+  // means every later reader sees the current shape, and the null provenance
+  // that results is what refuses a post-commit rollback on an old record.
+  record.setupArtifacts = readSetupArtifactLedger(value.setupArtifacts);
   record.stopRequested = Boolean(record.control.stop.requestedAt);
   record.schemaVersion = OPERATION_SCHEMA_VERSION;
   if (record.verification?.runId != null) {

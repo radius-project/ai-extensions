@@ -23,6 +23,7 @@ import {
   requireInput,
   shouldStop,
   sanitizeResumeTarget,
+  OPERATION_SCHEMA_VERSION,
   STAGE_VERIFY,
   toClientView
 } from "./operations.js";
@@ -691,7 +692,7 @@ describe("cooperative control functional coverage", () => {
 
     const restored = await restart();
     const recovered = restored.get(op.operationId);
-    expect(recovered.schemaVersion).toBe(2);
+    expect(recovered.schemaVersion).toBe(OPERATION_SCHEMA_VERSION);
     expect(recovered.state).toBe("input_required");
     expect(recovered.control.attempts).toEqual({
       setup: 1,
@@ -699,6 +700,12 @@ describe("cooperative control functional coverage", () => {
       cleanup: 0
     });
     expect(recovered.control.commands).toEqual([]);
+    // The version 1 ledger had no workflow provenance, so the restored record
+    // carries the "nothing proven" defaults rather than a missing field.
+    expect(recovered.setupArtifacts.commit).toMatchObject({
+      headSha: null,
+      workflowFiles: []
+    });
   });
 
   it("keeps the browser view free of secrets, evidence, and the private ledger", async () => {

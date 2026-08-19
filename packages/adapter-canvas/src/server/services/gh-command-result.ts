@@ -39,3 +39,17 @@ export function toGhCommandResult(
     ...(timedOut ? { timedOut: true } : {})
   };
 }
+
+/**
+ * The HTTP status `gh api` reported, or null when it named none.
+ *
+ * `gh` exits non-zero on an HTTP error and prints the status into its message
+ * ("gh: Not Found (HTTP 404)"), which is the only way a caller can tell a
+ * genuinely absent resource from a credential, permission, or transport
+ * failure. Null means "unknown", never "fine".
+ */
+export function parseGhHttpStatus(detail: string | undefined): number | null {
+  const text = detail || "";
+  const match = /\(HTTP (\d{3})\)/.exec(text) || /\bHTTP (\d{3})\b/.exec(text);
+  return match ? Number(match[1]) : null;
+}

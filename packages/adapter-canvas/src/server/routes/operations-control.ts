@@ -216,17 +216,19 @@ export function retryRefusalMessage(kind: string, code: string): string {
     "setup-continue-rolled-back":
       "Radius rolled back what this attempt created, so there is nothing left to continue from. Start a new environment setup.",
     "rollback-not-available":
-      "Only a stopped or partially failed setup can be rolled back.",
-    "rollback-after-commit":
-      "The workflows were already committed, so these resources are retained on purpose rather than removed.",
+      "Only a stopped, partially failed, or unfinished setup can be rolled back.",
+    "rollback-environment-verified":
+      "Credential verification succeeded for this environment, so it is finished setup. Remove it with Delete Environment instead.",
+    "rollback-provenance-incomplete":
+      "Radius did not save enough about the workflow files it committed to prove they are unchanged, so it will not remove them or anything they depend on.",
     "rollback-nothing-owned":
       "Radius did not create any resources it can prove it owns in this attempt.",
     "rollback-already-attempted":
       "Radius already ran a rollback for this attempt. Use the rollback retry for anything still present.",
     "cleanup-retry-not-retryable":
       "The last cleanup attempt did not leave anything Radius can safely retry.",
-    "cleanup-retry-after-commit":
-      "The workflows were already committed, so these resources are retained on purpose rather than removed.",
+    "cleanup-retry-provenance-incomplete":
+      "Radius did not save enough about the workflow files it committed to prove they are unchanged, so it will not remove them or anything they depend on.",
     "cleanup-retry-nothing-unresolved":
       "Every resource Radius proved it created has already been removed.",
     "cleanup-retry-ledger-missing":
