@@ -1566,9 +1566,11 @@ describe("resume flow", () => {
       Promise.resolve("11111111-1111-1111-1111-111111111111");
     const controller = initializeEnvironmentOperations(browser.context, {
       repo: REPO,
+      mutationNonce: "browser-nonce",
       deps: deps.deps
     });
     let resumeBody: unknown;
+    let resumeHeaders: unknown;
     browser.net.handle(operationsUrl(), () =>
       jsonResponse(
         op({
@@ -1585,6 +1587,7 @@ describe("resume flow", () => {
       resumeUrl("op-1", "service-management-reference-required"),
       (init) => {
         resumeBody = init && init.body ? JSON.parse(init.body) : undefined;
+        resumeHeaders = init?.headers;
         return jsonResponse({ ok: true });
       }
     );
@@ -1599,6 +1602,10 @@ describe("resume flow", () => {
       repo: REPO,
       environment: "dev",
       provider: "azure"
+    });
+    expect(resumeHeaders).toEqual({
+      "Content-Type": "application/json",
+      "X-Radius-Mutation-Nonce": "browser-nonce"
     });
   });
 
@@ -1983,9 +1990,11 @@ describe("resume flow", () => {
     };
     const controller = initializeEnvironmentOperations(browser.context, {
       repo: REPO,
+      mutationNonce: "browser-nonce",
       deps: deps.deps
     });
     let abandonCalled = false;
+    let abandonHeaders: unknown;
     browser.net.handle(operationsUrl(), () =>
       jsonResponse(
         op({
@@ -1998,8 +2007,9 @@ describe("resume flow", () => {
         })
       )
     );
-    browser.net.handle(abandonUrl("op-1"), () => {
+    browser.net.handle(abandonUrl("op-1"), (init) => {
       abandonCalled = true;
+      abandonHeaders = init?.headers;
       return jsonResponse({ ok: true });
     });
 
@@ -2008,6 +2018,9 @@ describe("resume flow", () => {
     await flushPromises();
 
     expect(abandonCalled).toBe(true);
+    expect(abandonHeaders).toEqual({
+      "X-Radius-Mutation-Nonce": "browser-nonce"
+    });
   });
 
   it("retries after the abandon request itself fails", async () => {

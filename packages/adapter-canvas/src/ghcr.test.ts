@@ -330,7 +330,15 @@ test("reports package-scope guidance when GHCR rejects token exchange", async ()
 
   await assert.rejects(
     bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl: harness.fetchImpl }),
-    /gh auth refresh -s read:packages -s write:packages/
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(
+        error.message,
+        /gh auth refresh --hostname github\.com --scopes read:packages,write:packages/
+      );
+      assert.doesNotMatch(error.message, /restore the previous/i);
+      return true;
+    }
   );
 });
 
