@@ -91,7 +91,7 @@ jobs:
       - name: Run Chromium Canvas tests
         run: pnpm run test:chromium
 
-      - name: Run reviewed Canvas visual baselines
+      - name: Run Canvas visual baselines
         run: pnpm run test:visual
 
       - name: Upload Chromium diagnostics and retry-only reports

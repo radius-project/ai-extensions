@@ -16,6 +16,18 @@ import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 
 type Theme = "dark" | "light";
 
+type GraphRequestBody = { branch: string; repo: string };
+
+type GraphRequests = { loadGraph: GraphRequestBody[] };
+
+function isGraphRequestBody(value: unknown): value is GraphRequestBody {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.branch === "string" && typeof candidate.repo === "string"
+  );
+}
+
 const require = createRequire(import.meta.url);
 const VISUAL_FONT_PATH =
   require.resolve("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2");
@@ -194,8 +206,11 @@ async function routeDeployments(
   });
 }
 
-async function routeGraphControls(page: Page): Promise<void> {
+async function routeGraphControls(page: Page): Promise<GraphRequests> {
+  const loadGraph: GraphRequestBody[] = [];
   await page.route("**/api/load-graph", async (route) => {
+    const body: unknown = route.request().postDataJSON();
+    if (isGraphRequestBody(body)) loadGraph.push(body);
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({ resources: GRAPH_RESOURCES })
@@ -233,9 +248,21 @@ async function routeGraphControls(page: Page): Promise<void> {
       })
     });
   });
+  return { loadGraph };
 }
 
-test.describe("Radius Canvas reviewed visual baselines", () => {
+async function expectWorktreeBranchRequests(
+  requests: GraphRequests
+): Promise<void> {
+  await expect
+    .poll(() => requests.loadGraph.map((request) => request.branch))
+    .toContain(WORKTREE_BRANCH);
+  expect(
+    requests.loadGraph.every((request) => request.branch === WORKTREE_BRANCH)
+  ).toBe(true);
+}
+
+test.describe("Radius Canvas visual baselines", () => {
   test("VI-01 modeled graph details closed in light", async ({
     page,
     canvas
@@ -245,10 +272,12 @@ test.describe("Radius Canvas reviewed visual baselines", () => {
       graphLoaded: true,
       graphFromWorkspace: true
     });
-    await routeGraphControls(page);
+    const requests = await routeGraphControls(page);
     await gotoVisual(page, canvas, "graph", "light");
     await expect(page.locator(".rad-node")).toHaveCount(4);
     await expect(page.locator("#graph-app")).toHaveValue("radius-app");
+    await expect(page.locator("#graph-branch")).toHaveValue(WORKTREE_BRANCH);
+    await expectWorktreeBranchRequests(requests);
     await expect(page.locator("#node-popup")).toBeHidden();
     await screenshot(page, "vi-01-modeled-graph-light.png");
   });
@@ -314,6 +343,9 @@ test.describe("Radius Canvas reviewed visual baselines", () => {
       await gotoVisual(page, canvas, "planned", theme);
       await expect(page.locator(".rad-node")).toHaveCount(2);
       await expect(page.locator("#planned-app")).toHaveValue("radius-app");
+      await expect(page.locator("#planned-branch")).toHaveValue(
+        WORKTREE_BRANCH
+      );
       await page
         .locator(".rad-node")
         .filter({ hasText: "cache" })
