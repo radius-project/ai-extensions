@@ -92,6 +92,12 @@ export interface FakeDependenciesOptions {
   // Answer for workspaceSourceChangedSince; undefined means "git cannot say".
   sourceChangedSince?: boolean;
   generatorVersion?: string;
+  // Worktree file listings keyed `<repo>@<branch>`. A missing key resolves to
+  // null, matching fetchWorkspaceTree's "could not list" answer.
+  workspaceTreeByRepoBranch?: Record<string, string[] | null>;
+  // Remote git-tree listings keyed `<repo>@<branch>`. A missing key resolves to
+  // an empty array, matching what the real lister returns on failure.
+  remoteTreeByRepoBranch?: Record<string, string[]>;
 }
 
 // Builds a complete RadiusExtensionDependencies fake. `servers` is a real Map
@@ -110,6 +116,8 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   const bicepByRepoBranch = options.bicepByRepoBranch ?? {};
   const filesByRepoBranch = options.filesByRepoBranch ?? {};
   const headCommits = options.headCommits ?? {};
+  const workspaceTreeByRepoBranch = options.workspaceTreeByRepoBranch ?? {};
+  const remoteTreeByRepoBranch = options.remoteTreeByRepoBranch ?? {};
 
   const getOrCreateServer = vi.fn(
     async (instanceId: string, page?: string): Promise<CanvasServerEntry> => {
@@ -185,6 +193,13 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         async (_state, repo: string, branch: string) =>
           bicepByRepoBranch[`workspace:${repo}@${branch}`] ?? null
       ),
+      fetchWorkspaceTree: vi.fn(
+        async (
+          _state,
+          repo: string | null | undefined,
+          branch: string | null | undefined
+        ) => workspaceTreeByRepoBranch[`${repo}@${branch}`] ?? null
+      ),
       parseRepoFromRemote: vi.fn((url: unknown) => {
         const match = String(url || "").match(
           /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/
@@ -202,7 +217,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       getContent: vi.fn(async () => null),
       getContentBytes: vi.fn(async () => null),
       listNames: vi.fn(async () => []),
-      treePaths: vi.fn(async () => [])
+      treePaths: vi.fn(
+        async (requestedRepo: string, branch = "main") =>
+          remoteTreeByRepoBranch[`${requestedRepo}@${branch}`] ?? []
+      )
     },
     core: {
       computeGraphDiff: vi.fn(

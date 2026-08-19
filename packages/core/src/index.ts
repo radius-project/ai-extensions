@@ -38,11 +38,22 @@ export {
   normalizeRecipeSource,
   deriveConcreteResource,
   parseRecipePack,
+  IGNORED_SOURCE_DIRS,
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+  evaluateAppSource,
+  findDockerfiles,
+  isDockerfilePath,
+  isIgnoredSourcePath,
+  unsupportedAppSourceReport,
   fetchBicepFromRepo,
   fetchRecipePack,
   resolveRecipeOutputs
 } from "./modeling/index.js";
 export type { ConcreteResource, RecipePackEntry } from "./modeling/index.js";
+export type {
+  AppSourceEvaluation,
+  AppSourceStatus
+} from "./modeling/index.js";
 export type {
   AppModelFreshness,
   AppModelFreshnessInput,

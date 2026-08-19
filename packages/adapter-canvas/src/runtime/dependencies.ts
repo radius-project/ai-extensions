@@ -41,6 +41,15 @@ export interface WorkspaceDependencies {
     repo: string,
     branch: string
   ): Promise<string | null>;
+  // Repo-relative paths in the local worktree, or null when the selection is not
+  // the workspace or the tree could not be walked. Null is distinct from an
+  // empty list on purpose: a listing that failed proves nothing about the
+  // repository's contents.
+  fetchWorkspaceTree(
+    state: CanvasState,
+    repo: string | null | undefined,
+    branch: string | null | undefined
+  ): Promise<string[] | null>;
   parseRepoFromRemote(remoteUrl: unknown): string;
   toSafeRepoRelPath(input: unknown): string;
   workspaceFileExists(worktree: string, relPath: string): Promise<boolean>;

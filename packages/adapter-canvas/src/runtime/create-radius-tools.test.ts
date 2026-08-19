@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { UNSUPPORTED_NO_DOCKERFILE_MESSAGE } from "@radius-project/core";
 import { createRadiusTools } from "./create-radius-tools.js";
 import {
   createFakeDependencies,
@@ -46,6 +47,65 @@ describe("RU-07: radius_generate_app", () => {
     const result = await findTool(tools, "radius_generate_app").handler({});
     expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(undefined);
     expect(result).toBe("SKILL.md content for .");
+  });
+
+  it("withholds the skill and reports the unsupported repository when it has no Dockerfile", async () => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/some/repo"
+    });
+
+    expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(result).toContain("acme/widgets");
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+  });
+
+  it("hands over the skill when the repository has a Dockerfile", async () => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/some/repo"
+    });
+
+    expect(result).toBe("SKILL.md content for /some/repo");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/some/repo");
+  });
+
+  it("hands over the skill when the repository cannot be listed", async () => {
+    const { tools, deps } = setup();
+    deps.workspace.fetchWorkspaceTree.mockRejectedValueOnce(
+      new Error("permission denied")
+    );
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/some/repo"
+    });
+
+    expect(result).toBe("SKILL.md content for /some/repo");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/some/repo");
+  });
+
+  it("hands over the skill when the workspace context cannot be resolved", async () => {
+    const { tools, deps } = setup();
+    deps.workspace.detectWorkspaceContext.mockRejectedValueOnce(
+      new Error("no session")
+    );
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/some/repo"
+    });
+
+    expect(result).toBe("SKILL.md content for /some/repo");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/some/repo");
   });
 });
 

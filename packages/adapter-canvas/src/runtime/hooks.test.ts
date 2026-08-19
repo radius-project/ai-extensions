@@ -27,7 +27,11 @@ import {
   refreshRequestKey
 } from "./hooks.js";
 import type { AppModelStatus } from "./graph-context.js";
-import type { AppModelFreshnessStatus } from "@radius-project/core";
+import type {
+  AppModelFreshnessStatus,
+  AppSourceEvaluation
+} from "@radius-project/core";
+import { UNSUPPORTED_NO_DOCKERFILE_MESSAGE } from "@radius-project/core";
 
 describe("GRAPH_PAGES", () => {
   it("covers the graph-generating canvas pages", () => {
@@ -361,12 +365,17 @@ function makeDeps({
   appModelStatus = vi.fn(async (repo: string, branch: string) =>
     modelStatus(repo, branch)
   ),
+  appSource = vi.fn(async (): Promise<AppSourceEvaluation> => ({
+    status: "single",
+    dockerfiles: ["Dockerfile"]
+  })),
   defaultBranch = "main"
 } = {}) {
   const requested = new Set<string>();
   return {
     workspaceState: vi.fn(async () => state),
     appModelStatus,
+    appSource,
     defaultBranchForState: vi.fn(() => defaultBranch),
     shouldRequestRefresh: vi.fn((key: string) => {
       if (requested.has(key)) return false;
@@ -471,6 +480,118 @@ describe("evaluateAppBicepHook", () => {
     expect(out?.permissionDecisionReason).toContain("radius-app-bicep");
     expect(out?.additionalContext).toContain(".radius/app.bicep");
     expect(out?.additionalContext).toContain("a/b");
+    expect(deps.appSource).toHaveBeenCalledWith("a/b", "feat", {
+      contextRepo: "a/b"
+    });
+  });
+
+  it("denies with the unsupported message, and no create-it-now instruction, when the repository has no Dockerfile", async () => {
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "missing" })
+      ),
+      appSource: vi.fn(async (): Promise<AppSourceEvaluation> => ({
+        status: "none",
+        dockerfiles: []
+      }))
+    });
+
+    const out = await evaluateAppBicepHook(OPEN_GRAPH, deps);
+
+    expect(out?.permissionDecision).toBe("deny");
+    expect(out?.permissionDecisionReason).toContain(
+      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+    );
+    expect(out?.additionalContext).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(out?.additionalContext).not.toContain("Create it now");
+    expect(out?.additionalContext).not.toContain("radius_generate_app");
+  });
+
+  it.each([
+    ["unknown", { status: "unknown" as const, dockerfiles: [] }],
+    ["single", { status: "single" as const, dockerfiles: ["Dockerfile"] }],
+    [
+      "ambiguous",
+      {
+        status: "ambiguous" as const,
+        dockerfiles: ["api/Dockerfile", "web/Dockerfile"]
+      }
+    ]
+  ])(
+    "keeps the ordinary skill handoff when the source evaluation is %s",
+    async (_label, evaluation) => {
+      const deps = makeDeps({
+        state: { contextRepo: "a/b" },
+        appModelStatus: vi.fn(async (repo: string, branch: string) =>
+          modelStatus(repo, branch, { status: "missing" })
+        ),
+        appSource: vi.fn(async (): Promise<AppSourceEvaluation> => evaluation)
+      });
+
+      const out = await evaluateAppBicepHook(OPEN_GRAPH, deps);
+
+      expect(out?.permissionDecision).toBe("deny");
+      expect(out?.additionalContext).toContain("Create it now");
+      expect(out?.additionalContext).not.toContain(
+        UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+      );
+    }
+  );
+
+  it("keeps the ordinary skill handoff when the source evaluation throws", async () => {
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "missing" })
+      ),
+      appSource: vi.fn(async () => {
+        throw new Error("listing unavailable");
+      })
+    });
+
+    const out = await evaluateAppBicepHook(OPEN_GRAPH, deps);
+
+    expect(out?.permissionDecision).toBe("deny");
+    expect(out?.additionalContext).toContain("Create it now");
+  });
+
+  it("keeps the skill handoff when only one compared branch lacks a Dockerfile", async () => {
+    const appSource = vi.fn(
+      async (_repo: string, branch: string): Promise<AppSourceEvaluation> =>
+        branch === "base" ?
+          { status: "none", dockerfiles: [] }
+        : { status: "single", dockerfiles: ["Dockerfile"] }
+    );
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "missing" })
+      ),
+      appSource
+    });
+
+    const out = await evaluateAppBicepHook(
+      {
+        toolName: "radius_generate_pr_diff_markdown",
+        toolArgs: { repo: "a/b", baseBranch: "base", headBranch: "head" }
+      },
+      deps
+    );
+
+    expect(out?.additionalContext).toContain("Create it now");
+    expect(appSource.mock.calls.map((call) => call[1])).toEqual([
+      "base",
+      "head"
+    ]);
+  });
+
+  it("does not consult the source listing when a model already exists", async () => {
+    const deps = makeDeps({ state: { contextRepo: "a/b" } });
+
+    await evaluateAppBicepHook(OPEN_GRAPH, deps);
+
+    expect(deps.appSource).not.toHaveBeenCalled();
   });
 
   it("treats a status-resolution error as a missing file (deny)", async () => {

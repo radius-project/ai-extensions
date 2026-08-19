@@ -27,6 +27,8 @@ import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
 } from "../deploy-diagnostics.js";
+import { unsupportedAppSourceReport } from "@radius-project/core";
+import type { AppSourceEvaluation } from "@radius-project/core";
 import type { AppModelStatus } from "./graph-context.js";
 import type { CanvasState } from "../shared.js";
 
@@ -48,6 +50,14 @@ interface AppBicepHookDependencies {
     branch: string,
     state: CanvasState
   ): Promise<AppModelStatus>;
+  // What a branch's source listing says about whether the repository can be
+  // modeled at all. Consulted only when no model exists, since a model that is
+  // already there answers the question by existing.
+  appSource(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<AppSourceEvaluation>;
   // True the first time this exact staleness evidence is seen, false afterwards.
   // Owned by the caller so the memo lives with the extension instance.
   shouldRequestRefresh(key: string): boolean;
@@ -217,9 +227,12 @@ export async function evaluateAppBicepHook(
   const repo = targets.repo || state?.contextRepo || "";
   if (!repo) return undefined; // no repo context to check against → fail open
 
+  const branches = targets.branches.map(
+    (candidate) => candidate || deps.defaultBranchForState(state)
+  );
+
   const statuses = await Promise.all(
-    targets.branches.map(async (candidate) => {
-      const branch = candidate || deps.defaultBranchForState(state);
+    branches.map(async (branch) => {
       try {
         return await deps.appModelStatus(repo, branch, state);
       } catch {
@@ -234,6 +247,29 @@ export async function evaluateAppBicepHook(
   );
 
   if (!present.length) {
+    // This is the path most users reach modeling through, so it is also where an
+    // unmodelable repository has to be caught: telling the agent to create a
+    // model it cannot create is what turned this exception into a late,
+    // ambiguous failure. Only a branch whose listing was actually established
+    // and actually lacks a Dockerfile counts, and every candidate branch has to
+    // agree — one modelable branch means there is still real work to hand off.
+    const sources = await Promise.all(
+      branches.map(async (branch) => {
+        try {
+          return await deps.appSource(repo, branch, state);
+        } catch {
+          return null;
+        }
+      })
+    );
+    if (sources.every((source) => source?.status === "none")) {
+      const report = unsupportedAppSourceReport(repo);
+      return {
+        permissionDecision: "deny",
+        permissionDecisionReason: report,
+        additionalContext: report
+      };
+    }
     return {
       permissionDecision: "deny",
       permissionDecisionReason:

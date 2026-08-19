@@ -443,3 +443,89 @@ describe("fetchBicepForBranch", () => {
     ).toBe("// committed");
   });
 });
+
+describe("evaluateAppSourceForBranch", () => {
+  it("classifies the workspace branch from the worktree listing", async () => {
+    const { evaluateAppSourceForBranch, deps } = helpers({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "Dockerfile"]
+      }
+    });
+
+    expect(
+      await evaluateAppSourceForBranch("acme/widgets", "main", WORKSPACE_STATE)
+    ).toEqual({ status: "single", dockerfiles: ["Dockerfile"] });
+    expect(deps.github.treePaths).not.toHaveBeenCalled();
+  });
+
+  it("reports none when the worktree listing holds no Dockerfile", async () => {
+    const { evaluateAppSourceForBranch } = helpers({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    expect(
+      await evaluateAppSourceForBranch("acme/widgets", "main", WORKSPACE_STATE)
+    ).toEqual({ status: "none", dockerfiles: [] });
+  });
+
+  it("classifies another branch from the repository tree listing", async () => {
+    const { evaluateAppSourceForBranch, deps } = helpers({
+      remoteTreeByRepoBranch: {
+        "acme/widgets@feat": ["services/api/Dockerfile", "src/index.ts"]
+      }
+    });
+
+    expect(
+      await evaluateAppSourceForBranch("acme/widgets", "feat", WORKSPACE_STATE)
+    ).toEqual({ status: "single", dockerfiles: ["services/api/Dockerfile"] });
+    expect(deps.github.treePaths).toHaveBeenCalledWith("acme/widgets", "feat");
+  });
+
+  it("skips a vendored Dockerfile on the remote path, which prunes nothing itself", async () => {
+    const { evaluateAppSourceForBranch } = helpers({
+      remoteTreeByRepoBranch: {
+        "acme/widgets@feat": [
+          "node_modules/some-pkg/Dockerfile",
+          "src/index.ts"
+        ]
+      }
+    });
+
+    expect(
+      await evaluateAppSourceForBranch("acme/widgets", "feat", WORKSPACE_STATE)
+    ).toEqual({ status: "none", dockerfiles: [] });
+  });
+
+  it("reports unknown when the worktree listing fails", async () => {
+    const { evaluateAppSourceForBranch, deps } = helpers();
+    deps.workspace.fetchWorkspaceTree.mockRejectedValueOnce(
+      new Error("permission denied")
+    );
+
+    expect(
+      await evaluateAppSourceForBranch("acme/widgets", "main", WORKSPACE_STATE)
+    ).toEqual({ status: "unknown", dockerfiles: [] });
+  });
+
+  it("reports unknown when the worktree cannot be listed at all", async () => {
+    const { evaluateAppSourceForBranch } = helpers();
+
+    expect(
+      await evaluateAppSourceForBranch("acme/widgets", "main", WORKSPACE_STATE)
+    ).toEqual({ status: "unknown", dockerfiles: [] });
+  });
+
+  it("reports unknown when the repository tree listing fails or is empty", async () => {
+    const { evaluateAppSourceForBranch, deps } = helpers();
+    deps.github.treePaths.mockRejectedValueOnce(new Error("gh unavailable"));
+
+    expect(
+      await evaluateAppSourceForBranch("acme/widgets", "feat", WORKSPACE_STATE)
+    ).toEqual({ status: "unknown", dockerfiles: [] });
+    expect(
+      await evaluateAppSourceForBranch("acme/widgets", "feat", WORKSPACE_STATE)
+    ).toEqual({ status: "unknown", dockerfiles: [] });
+  });
+});

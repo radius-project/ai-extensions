@@ -29,5 +29,16 @@ export type {
   AppOrigin
 } from "./app-origin.js";
 
+export {
+  IGNORED_SOURCE_DIRS,
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+  evaluateAppSource,
+  findDockerfiles,
+  isDockerfilePath,
+  isIgnoredSourcePath,
+  unsupportedAppSourceReport
+} from "./app-source.js";
+export type { AppSourceEvaluation, AppSourceStatus } from "./app-source.js";
+
 export { fetchBicepFromRepo } from "./repo.js";
 export { fetchRecipePack, resolveRecipeOutputs } from "./recipe-resolver.js";
