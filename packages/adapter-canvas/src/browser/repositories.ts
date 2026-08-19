@@ -25,6 +25,7 @@ export const REPOS_PATH = "/api/user-repos";
 export const BRANCHES_PATH = "/api/discover-branches";
 export const APPLICATIONS_PATH = "/api/list-applications";
 export const ENVIRONMENTS_PATH = "/api/list-environments";
+export const DEPLOYMENTS_PATH = "/api/list-deployments";
 export const DEPLOY_PATH = "/api/deploy";
 export const REPO_RETRY_MS = 1000;
 export const DIFF_BRANCH_TIMEOUT_MS = 8000;
@@ -63,6 +64,26 @@ export interface EnvironmentListing {
   error: string;
 }
 
+export interface DeploymentInfo {
+  app: string;
+  environment: string;
+  status: string;
+  runUrl: string;
+}
+
+export function deploymentKey(
+  application: string,
+  environment: string
+): string {
+  return `${application}\u0000${environment}`;
+}
+
+export function deploymentStatusBlocksMutation(status: string): boolean {
+  return (
+    status === "pending" || status === "in_progress" || status === "deleting"
+  );
+}
+
 // A page hands this object in and only this module writes to it, so values are
 // read back defensively rather than assumed to be provider strings.
 export type EnvironmentProviders = Record<string, unknown>;
@@ -70,16 +91,20 @@ export type EnvironmentProviders = Record<string, unknown>;
 export interface PlanState {
   hasEnv: boolean;
   envsStale: boolean;
+  deploymentsStale: boolean;
   requestFailed: boolean;
   environmentStatuses: Record<string, string>;
+  deploymentStatuses: Record<string, string>;
 }
 
 export function createPlanState(): PlanState {
   return {
     hasEnv: false,
     envsStale: false,
+    deploymentsStale: false,
     requestFailed: false,
-    environmentStatuses: {}
+    environmentStatuses: {},
+    deploymentStatuses: {}
   };
 }
 
@@ -114,6 +139,17 @@ export function parseEnvironmentListing(payload: unknown): EnvironmentListing {
       .filter((environment) => environment.name !== ""),
     error: readString(payload, "error")
   };
+}
+
+export function parseDeploymentListing(payload: unknown): DeploymentInfo[] {
+  return readArray(payload, "deployments")
+    .map((entry) => ({
+      app: readString(entry, "app"),
+      environment: readString(entry, "environment"),
+      status: readString(entry, "status"),
+      runUrl: readString(entry, "runUrl")
+    }))
+    .filter((entry) => entry.app !== "" && entry.environment !== "");
 }
 
 // A worktree branch has no pushed commit, so it is labelled as such instead of
@@ -587,7 +623,33 @@ export function populatePlannedSelectors(
         })
     : Promise.resolve();
 
-  return Promise.all([appPromise, branchPromise, envPromise]).then(() => {
+  const deploymentsPromise =
+    appSelect && envSelect ?
+      getJson(context, `${DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}`)
+        .then((payload) => {
+          if (readString(payload, "error") !== "") {
+            state.deploymentsStale = true;
+            return;
+          }
+          state.deploymentsStale = false;
+          state.deploymentStatuses = {};
+          for (const deployment of parseDeploymentListing(payload)) {
+            state.deploymentStatuses[
+              deploymentKey(deployment.app, deployment.environment)
+            ] = deployment.status;
+          }
+        })
+        .catch(() => {
+          state.deploymentsStale = true;
+        })
+    : Promise.resolve();
+
+  return Promise.all([
+    appPromise,
+    branchPromise,
+    envPromise,
+    deploymentsPromise
+  ]).then(() => {
     applyPlanEnvState(context, state, hasEnvironments, environmentsUnavailable);
   });
 }
@@ -626,7 +688,11 @@ export function applyPlanEnvState(
   const envSelect = dom.selectById("planned-env");
   const branch = selectValue(branchSelect).trim();
   const environment = selectValue(envSelect);
+  const application = selectValue(appSelect);
   const environmentStatus = state.environmentStatuses[environment] ?? "";
+  const deploymentStatus =
+    state.deploymentStatuses[deploymentKey(application, environment)] ?? "";
+  const deploymentBlocked = deploymentStatusBlocksMutation(deploymentStatus);
 
   if (button) {
     button.removeAttribute("title");
@@ -643,7 +709,11 @@ export function applyPlanEnvState(
       button.textContent = "Deploy Application";
       const environmentReady =
         environment === "" || environmentAllowsDeploy(environmentStatus);
-      button.disabled = !(branch && environment) || !environmentReady;
+      button.disabled =
+        !(branch && environment) ||
+        !environmentReady ||
+        state.deploymentsStale ||
+        deploymentBlocked;
       if (!branch && !environment) {
         button.setAttribute(
           "title",
@@ -657,6 +727,16 @@ export function applyPlanEnvState(
         button.setAttribute(
           "title",
           environmentNotReadyReason(environment, environmentStatus)
+        );
+      } else if (state.deploymentsStale) {
+        button.setAttribute(
+          "title",
+          "Deployment states could not be loaded. Try again before deploying."
+        );
+      } else if (deploymentBlocked) {
+        button.setAttribute(
+          "title",
+          `A deployment of application "${application}" to environment "${environment}" is already in progress. Wait for it to finish before deploying again.`
         );
       } else if (state.requestFailed) {
         button.disabled = true;
@@ -677,11 +757,15 @@ export function applyPlanEnvState(
       hint.textContent =
         " Environments could not be loaded, so deployment planning is temporarily unavailable.";
     } else if (hasEnv) {
-      const appName = selectValue(appSelect) || "this application";
+      const appName = application || "this application";
       const envName = environment || "the selected environment";
       hint.innerHTML =
         environment !== "" && !environmentAllowsDeploy(environmentStatus) ?
           ` The environment (<strong>${escapeBrowserHtml(envName)}</strong>) ${environmentNotReadyPhrase(environmentStatus)}, so it cannot be deployed to yet.`
+        : state.deploymentsStale ?
+          " Deployment states could not be loaded, so deployment is temporarily unavailable."
+        : deploymentBlocked ?
+          ` A deployment of this application (<strong>${escapeBrowserHtml(appName)}</strong>) to the environment (<strong>${escapeBrowserHtml(envName)}</strong>) is already in progress. Watch its progress on the Deployments tab.`
         : ` To deploy this application (<strong>${escapeBrowserHtml(appName)}</strong>) to the environment (<strong>${escapeBrowserHtml(envName)}</strong>), click "Deploy Application".`;
     } else {
       hint.textContent =
