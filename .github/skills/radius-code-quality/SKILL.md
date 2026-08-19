@@ -13,15 +13,17 @@ The proposed [Radius Canvas test architecture and plan](https://github.com/radiu
 
 ## Current delivery state
 
-| Phase | Current state | Delivered evidence                                                                                                                                   |
-|-------|---------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 0–4   | Complete      | Compatibility and coverage records; runtime, server, page, and browser seams; 40 owned routes with no legacy fallback; importable browser TypeScript |
-| 5     | Complete      | Permanent runtime integration, HTTP integration, and built-extension artifact suites run in the pull-request gates                                   |
-| 6     | Complete      | PR #411 added the real Chromium browser-component, critical-journey, accessibility, and keyboard gates plus the production loopback-server harness   |
-| 7     | Complete      | PR #431 added 15 reviewed Ubuntu Playwright PNG baselines, pull-request visual gating, retry-only JSON reporting, and the weekly/manual P2-B matrix  |
-| 8     | Not delivered | No supported-host installation, discovery, panel-lifecycle, reopen, or reconnect qualification                                                       |
+| Phase | Current state | Delivered evidence                                                                                                                                                     |
+|-------|---------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 0–4   | Complete      | Compatibility and coverage records; runtime, server, page, and browser seams; every declared route singly owned with no legacy fallback; importable browser TypeScript |
+| 5     | Complete      | Permanent runtime integration, HTTP integration, and built-extension artifact suites run in the pull-request gates                                                     |
+| 6     | Complete      | PR #411 added the real Chromium browser-component, critical-journey, accessibility, and keyboard gates plus the production loopback-server harness                     |
+| 7     | Complete      | PR #431 added 15 reviewed Ubuntu Playwright PNG baselines, pull-request visual gating, retry-only JSON reporting, and the weekly/manual P2-B matrix                    |
+| 8     | Not delivered | No supported-host installation, discovery, panel-lifecycle, reopen, or reconnect qualification                                                                         |
 
-The delivered Phase 6 scope is the browser-component suite plus the Playwright critical-journey, accessibility, and keyboard gates. Phase 7 adds reviewed visual coverage and scheduled reliability without changing the Phase 6 loopback harness into real-host coverage. A separate browser-functional directory is not a current required gate. Only Phase 8 real-host qualification remains pending; do not claim installation, discovery, panel-lifecycle, reopen, or reconnect automation exists.
+The delivered Phase 6 scope is the browser-component suite plus the Playwright critical-journey, accessibility, and keyboard gates. A separate browser-functional directory is not a current required gate; the remaining real-form-submission journeys are tracked as follow-up work in issue #412. `packages/adapter-canvas/test/e2e/phase-6-traceability.md` and `packages/adapter-canvas/MANUAL-TESTING.md` were written against the narrower foundations scope and still describe that layer as outstanding; this skill records the gates CI actually enforces today. Phase 7 adds reviewed visual coverage and scheduled reliability without changing the Phase 6 loopback harness into real-host coverage. Do not treat the absent browser-functional layer as evidence that already ran, and do not describe loopback HTTP as real-host coverage.
+
+Only Phase 8 real-host qualification remains pending. Do not create it speculatively or claim installation, discovery, panel-lifecycle, reopen, or reconnect evidence; add it only when the phase is approved and implemented, then refresh this skill.
 
 After Phase 8 completes, refresh this skill in another separate signed and signed-off pull request so its available suites and required gates never lag implementation. Base the refresh on the Phase 8 branch when the delivery is still stacked and unmerged, or on the newly updated `main` after merge.
 
@@ -161,7 +163,17 @@ Failure traces use `retain-on-failure`, diagnostic screenshots use `only-on-fail
 | State represented in the Phase 7 visual inventory                                                 | Reviewed `toHaveScreenshot` baseline in the visual suite, with a stated product reason and human PNG review                              |
 | Real host installation, discovery, or panel lifecycle                                             | No automated gate exists yet; loopback and emulated contracts must not be reported as host coverage                                      |
 
-Choose the cheapest faithful layer, but do not stop at unit tests when the changed contract crosses a delivered boundary. Higher layers complement unit tests and never excuse missing focused unit coverage. If the only faithful layer is not delivered, add the strongest honest evidence available and state the residual gap without inventing a suite.
+Choose the cheapest faithful layer, but do not stop at unit tests when the changed contract crosses a delivered boundary. Higher layers complement unit tests and never excuse missing focused unit coverage.
+
+Build scripts, configuration, and workflow generators are verified by artifact, configuration, or command-level checks rather than a forced unit test. Generated output such as `plugins/radius/dist/` is never hand-edited or tested directly; rebuild it from source and confirm it is in sync.
+
+When the only faithful layer is not delivered, add the strongest honest evidence available and name the residual gap explicitly. Never close the gap by:
+
+- Claiming an absent suite or layer ran, or renaming an existing suite to look like the missing one.
+- Counting one layer's evidence as another's, such as reporting Playwright journeys as browser-functional coverage or loopback HTTP as real-host coverage.
+- Manufacturing testability with broad module mocks, import-time side-effect juggling, source-substring assertions, private reach-through, or test-only production hooks.
+
+Safety, branch-selection, path-confinement, external-error, redaction, and destructive-operation behavior is never deferred on these grounds.
 
 ## Coverage policy
 
@@ -170,7 +182,7 @@ Choose the cheapest faithful layer, but do not stop at unit tests when the chang
 - Root V8 coverage includes `packages/*/src/**/*.ts`, excludes collocated test files, and emits text, JSON summary, and LCOV reports.
 - `coverage-baseline.json` supplies the enforced aggregate, per-package, runtime, and browser thresholds in root `vitest.config.ts`. Do not hardcode drifting coverage counts in policy or pull-request prose.
 - Aggregate and per-package coverage must not decrease. Raise the checked-in baseline alongside measured improvements; never lower it without explicit justification and review approval.
-- The runtime scope retains its migration floor. `packages/adapter-canvas/src/browser/**` is pinned at 100% statements, branches, functions, and lines.
+- The runtime scope retains configured branch, function, and line migration floors and intentionally sets no statement threshold. `packages/adapter-canvas/src/browser/**` is pinned at 100% statements, branches, functions, and lines.
 - When a path in a 100%-pinned scope is genuinely unreachable, ignore only that exact path with the accepted V8 directive and an adjacent explanation of why it is unreachable and what would make it testable. Call it out in the pull request. Awkwardness is not a justification.
 - Coverage percentages never replace named branch-selection, stale-token, path-confinement, external-error, cancellation, resumability, redaction, destructive fail-closed, lifecycle, route, or artifact scenarios.
 - Never game coverage with broad ignores, uncovered allowlists, trivial assertions, or tests coupled to implementation details.
