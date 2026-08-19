@@ -32,7 +32,7 @@ The projection design, the greyed-at-open behavior, the status legend, and the p
 ### Non-goals
 
 1. **Rendering output resources on the Deployed view.** The Modeled view continues to expand them; the Deployed view does not.
-2. **Live per-resource progress in this change.** It is designed for and the code path exists, but no producer emits it yet (see [Live progress](#live-progress)).
+2. **Persisting the live snapshot history.** The view renders the greatest valid sequence; older ring slots are transport history, not a deployment timeline.
 3. **Persisting deployment history across canvas sessions.** Status is per-session; the newest published artifact is re-read on open.
 
 ## Design
@@ -76,9 +76,9 @@ Both predate this design and are fixed alongside it.
 
 ## Live progress
 
-Live per-resource progress is designed for but not produced. `publish-deploy-status` runs as a step after `rad deploy` returns, and `actions/upload-artifact` is a `uses:` step, so a composite step cannot invoke it mid-execution. Uploading during the deploy requires writing directly to the artifact REST service with `ACTIONS_RUNTIME_TOKEN` and `ACTIONS_RESULTS_URL`, which exist only inside the job. That is producer-side work in `radius-project/radius`.
+The Radius deploy action publishes changed per-resource snapshots through an eight-slot run-scoped artifact ring while `rad deploy` executes. Each successful upload increments the payload `sequence`; the fixed-name terminal artifact uses the next sequence and adds the deployed graph and diagnostics.
 
-The consumer polls on a timer while a run is in progress and merges by `sequence` regardless, so when the producer begins uploading mid-run, live progress appears with no canvas change.
+The consumer polls on a timer while a run is in progress, downloads only newly observed artifact IDs, rejects explicit run mismatches, and selects the greatest valid sequence independent of artifact list order or ring slot. Existing final-only artifacts remain supported.
 
 The refresh interval is 15 seconds and is stated in the UI. An artifact upload takes several seconds, so a faster poll returns identical bytes; saying so means a graph that has not changed reads as "no new data yet" rather than "broken". The deploy log below the graph keeps its 1.5-second stream and carries the moment-to-moment liveness.
 

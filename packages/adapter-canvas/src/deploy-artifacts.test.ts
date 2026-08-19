@@ -872,6 +872,131 @@ describe("createDeployStatusReader", () => {
     expect(await reader.status()).toBe("ok");
   });
 
+  it("selects the greatest valid sequence independent of artifact order", async () => {
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-1", {
+          id: 31,
+          created_at: "2026-08-06T00:00:03Z"
+        }),
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-7", {
+          id: 32,
+          created_at: "2026-08-06T00:00:01Z"
+        }),
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-4", {
+          id: 33,
+          created_at: "2026-08-06T00:00:02Z"
+        })
+      ],
+      downloadArtifact: async (_repo, candidate) =>
+        okFiles({ sequence: candidate.id === 32 ? 8 : candidate.id - 29 })
+    });
+
+    expect((await reader.progress())?.sequence).toBe(8);
+  });
+
+  it("hands off from live slots to the higher-sequence terminal artifact", async () => {
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-7", {
+          id: 51,
+          created_at: "2026-08-06T00:00:03Z"
+        }),
+        artifact("radius-deploy-status-dev-todolist", {
+          id: 52,
+          created_at: "2026-08-06T00:00:02Z"
+        })
+      ],
+      downloadArtifact: async (_repo, candidate) =>
+        okFiles({
+          sequence: candidate.id === 52 ? 9 : 8,
+          state: candidate.id === 52 ? "succeeded" : "in_progress"
+        })
+    });
+
+    const progress = await reader.progress();
+    expect(progress?.sequence).toBe(9);
+    expect(progress?.state).toBe("succeeded");
+  });
+
+  it("rejects a payload whose runId differs from the active run", async () => {
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-0")
+      ],
+      downloadArtifact: async () => okFiles({ runId: 999, sequence: 9 })
+    });
+
+    expect(await reader.status()).toBe("missing");
+    expect(await reader.progress()).toBeNull();
+  });
+
+  it("selects the greatest sequence from environment-only fallbacks", async () => {
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      application: "guessed-name",
+      runId: 100,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-other-live-100-slot-1", {
+          id: 41
+        }),
+        artifact("radius-deploy-status-dev-other-live-100-slot-2", {
+          id: 42
+        })
+      ],
+      downloadArtifact: async (_repo, candidate) =>
+        okFiles({ application: "other", sequence: candidate.id - 38 })
+    });
+
+    expect((await reader.progress())?.sequence).toBe(4);
+  });
+
+  it("downloads an immutable artifact ID only once across polls", async () => {
+    let downloads = 0;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      ttlMs: 0,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-0")
+      ],
+      downloadArtifact: async () => {
+        downloads++;
+        return okFiles();
+      }
+    });
+
+    await reader.read();
+    await reader.read();
+    expect(downloads).toBe(1);
+  });
+
+  it("does not redownload a malformed artifact ID during an active run", async () => {
+    let downloads = 0;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      ttlMs: 0,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-0")
+      ],
+      downloadArtifact: async () => {
+        downloads++;
+        return { [DEPLOY_STATUS_FILES.progress]: "{not json" };
+      }
+    });
+
+    expect(await reader.status()).toBe("malformed");
+    expect(await reader.status()).toBe("malformed");
+    expect(downloads).toBe(1);
+  });
+
   it("caches within the TTL and refetches after it expires", async () => {
     let calls = 0;
     let clock = 1000;

@@ -13,13 +13,10 @@
 // a run is still in progress, which makes them the only transport that can
 // carry live per-resource detail.
 //
-// Live progress is not yet produced. `publish-deploy-status` runs as a step
-// after `rad deploy` returns, and `actions/upload-artifact` is a `uses:` step,
-// so a composite step cannot invoke it mid-execution — mid-run uploads have to
-// go straight to the artifact REST service with ACTIONS_RUNTIME_TOKEN. That is
-// producer-side work. This reader polls on a timer and merges by `sequence`
-// regardless, so when the producer starts uploading during the deploy, live
-// progress lights up with no change here.
+// During `rad deploy`, the producer rotates changed snapshots through eight
+// run-scoped live artifacts. The fixed-name terminal artifact is uploaded after
+// the deploy step and carries a greater sequence, so this reader treats payload
+// sequence and identity as authoritative rather than artifact list order.
 //
 // Reads GitHub via the gh CLI (see ./gh.ts). Every I/O call is injectable so
 // the whole module is testable without network, Docker, or gh.
@@ -56,7 +53,7 @@ export const DEPLOY_PROGRESS_SCHEMA_VERSION = 1;
 // How many artifacts a single read will download before giving up. Each one
 // costs a `gh run download` subprocess, so an uncapped candidate list turns one
 // HTTP request into a long serial fan-out.
-export const MAX_ARTIFACT_CANDIDATES = 5;
+export const MAX_ARTIFACT_CANDIDATES = 9;
 
 // Repo-wide artifact listing: page size, and how many pages a single read will
 // walk before giving up. One page covers the newest 100 artifacts in the whole
@@ -729,6 +726,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
   let acceptedRunId: number | null = null;
   let acceptedSequence = -1;
   let lastGood: ReadResult | null = null;
+  const inspectedArtifacts = new Map<number, ReadResult>();
 
   const empty = (status: ReaderStatus, error: unknown = null): ReadResult => ({
     status,
@@ -757,53 +755,87 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     if (candidates.length === 0) return empty("missing");
 
     let sawMalformed = false;
+    let exactMatch: ReadResult | null = null;
     let envOnlyMatch: ReadResult | null = null;
+    const expectedRunId = Number(runId);
+    const hasExpectedRunId =
+      Number.isFinite(expectedRunId) && expectedRunId > 0;
     for (const artifact of candidates) {
-      let files: ArtifactFiles | null;
-      try {
-        files = await downloadArtifact(repo, artifact);
-      } catch (e) {
-        if (errorCode(e) === "GH_ARTIFACT_AUTH") return empty("auth", e);
-        // A single unreadable artifact should not hide an older readable one.
-        continue;
+      let result =
+        hasExpectedRunId ? inspectedArtifacts.get(artifact.id) : undefined;
+      if (!result) {
+        let files: ArtifactFiles | null;
+        try {
+          files = await downloadArtifact(repo, artifact);
+        } catch (e) {
+          if (errorCode(e) === "GH_ARTIFACT_AUTH") return empty("auth", e);
+          // A single unreadable artifact should not hide an older readable one.
+          continue;
+        }
+        if (!files) continue;
+        const progress = parseDeployProgressArtifact(
+          files[DEPLOY_STATUS_FILES.progress]
+        );
+        if (!progress) {
+          sawMalformed = true;
+          if (hasExpectedRunId)
+            inspectedArtifacts.set(artifact.id, empty("malformed"));
+          continue;
+        }
+        let graph: unknown | null = null;
+        const graphText = files[DEPLOY_STATUS_FILES.graph];
+        if (graphText) {
+          try {
+            graph = JSON.parse(graphText);
+          } catch {
+            sawMalformed = true;
+          }
+        }
+        result = {
+          status: "ok",
+          progress,
+          graph,
+          files,
+          artifact,
+          error: null
+        };
+        if (hasExpectedRunId) inspectedArtifacts.set(artifact.id, result);
       }
-      if (!files) continue;
-      const progress = parseDeployProgressArtifact(
-        files[DEPLOY_STATUS_FILES.progress]
-      );
+      const progress = result.progress;
       if (!progress) {
         sawMalformed = true;
         continue;
       }
       // Confirm identity from the payload rather than from the derived name.
       if (!confirmArtifactIdentity(progress, { environment })) continue;
-      let graph: unknown | null = null;
-      const graphText = files[DEPLOY_STATUS_FILES.graph];
-      if (graphText) {
-        try {
-          graph = JSON.parse(graphText);
-        } catch {
-          sawMalformed = true;
-        }
+      if (
+        hasExpectedRunId &&
+        progress.runId !== undefined &&
+        progress.runId !== expectedRunId
+      )
+        continue;
+      if (confirmArtifactIdentity(progress, { environment, application })) {
+        if (
+          !exactMatch ||
+          progress.sequence > (exactMatch.progress?.sequence ?? -1)
+        )
+          exactMatch = result;
+        continue;
       }
-      const result: ReadResult = {
-        status: "ok",
-        progress,
-        graph,
-        files,
-        artifact,
-        error: null
-      };
-      if (confirmArtifactIdentity(progress, { environment, application }))
-        return result;
       // Right environment, different application. Hold it as a fallback rather
-      // than returning it: an exact application match, if one exists, must win.
+      // than selecting it immediately: an exact application match, if one
+      // exists, must win.
       // But the caller's application name can itself be a guess (it falls back
       // to the repository's short name when app.bicep cannot be read), so
       // treating a mismatch as fatal would blank the tab over a name this side
       // never actually knew.
-      if (!envOnlyMatch) envOnlyMatch = result;
+      if (
+        !envOnlyMatch ||
+        progress.sequence > (envOnlyMatch.progress?.sequence ?? -1)
+      )
+        envOnlyMatch = result;
     }
+    if (exactMatch) return exactMatch;
     if (envOnlyMatch) return envOnlyMatch;
     return empty(sawMalformed ? "malformed" : "missing");
   }

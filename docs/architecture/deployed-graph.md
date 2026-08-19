@@ -18,7 +18,10 @@ This replaces an earlier GHCR OCI-artifact transport, and an earlier `radius-dep
 
 ```text
 radius-deploy-status-<environment>-<app>
+radius-deploy-status-<environment>-<app>-live-<run-id>-slot-<0..7>
 ```
+
+The fixed name is the terminal artifact. During an application deploy, changed resource snapshots rotate through the eight run-scoped live slots. Slot names bound artifact count; they do not define ordering. The payload's `runId` and `sequence` are authoritative.
 
 The producer builds this as the literal prefix `radius-deploy-status-` followed by `printf '%s-%s' "$ENVIRONMENT" "$APP_NAME"` sanitized with:
 
@@ -47,7 +50,7 @@ The two sanitizer implementations agree on multi-byte input even though `sed` co
 | `deploy-controlplane.log` | Best effort  | Control-plane / recipe output                          |
 | `deploy-activity.log`     | Best effort  | `rad` command result envelope. Not read by the canvas. |
 
-Today there is exactly one upload, at the end of the run, so all files arrive together and `state` is always terminal (`succeeded` or `failed`). The "every upload" / "final upload" split is the forward-compatible contract for when mid-run uploads become possible (see [Live progress](#live-progress)).
+Live uploads carry `deploy-progress.json` with state `in_progress`. The fixed-name terminal upload carries the complete file set and a sequence one greater than the last successful live upload, or sequence 1 when no live upload succeeded.
 
 `application` and `environment` inside the payload are the **raw** values, not sanitized: a run in environment `My Env/Prod` emits `"environment": "My Env/Prod"` while the artifact name carries `my-env-prod`. Confirmation sanitizes both sides, so the asymmetry is not a mismatch.
 
@@ -118,13 +121,14 @@ The one exception is `schemaVersion`. An unrecognized version is rejected outrig
 `createDeployStatusReader` in [`packages/adapter-canvas/src/deploy-artifacts.ts`](../../packages/adapter-canvas/src/deploy-artifacts.ts):
 
 1. List artifacts — scoped to the run being monitored when there is one, else newest-first repo-wide.
-2. Select candidates by the two-tier prefix match, newest first.
-3. Download each candidate with `gh run download` (which handles the redirect to blob storage, authentication, and unzipping) until one yields a payload whose application and environment confirm.
-4. Classify the outcome as `ok`, `missing`, `malformed`, `auth`, `error`, or `stale`.
+2. Select up to nine candidates by the two-tier prefix match: eight live slots plus the fixed terminal artifact.
+3. Download uninspected artifact IDs with `gh run download`, validate application and environment identity, and reject an explicit `runId` that differs from the active run.
+4. Select the numerically greatest valid `sequence`, independent of artifact list order or slot number.
+5. Classify the outcome as `ok`, `missing`, `malformed`, `auth`, `error`, or `stale`.
 
 The repo-wide listing is paginated, which matters more than it appears. One page covers the newest 100 artifacts in the **entire repository**, and a repository whose CI uploads test reports or build output on every push can produce that many between two deploys. Reading only the first page would push the deploy-status artifact off the end and render "Nothing deployed yet" for an application that is in fact deployed — the exact symptom this transport exists to eliminate. Paging stops as soon as a page yields a match (the listing is newest-first, so nothing better appears later), at a short page, or at a five-page budget, so a repository with no deploy-status artifact costs a bounded number of calls rather than a walk of its whole history.
 
-Reads are cached for a short TTL and de-duplicated with single-flight, so the deploy monitor and a concurrent `/api/deployed-graph` request share one fetch. Payloads are accepted in monotonic `sequence` order per run, so a stale read — one served just after an overwrite, or arriving out of order — is reported as `stale` and can never roll the graph backwards.
+Reads are cached for a short TTL and de-duplicated with single-flight, so the deploy monitor and a concurrent `/api/deployed-graph` request share one fetch. Active-run readers also cache inspected immutable artifact IDs, so each poll downloads only newly published slots. Payloads are accepted in monotonic `sequence` order per run, so a stale read — one served just after an overwrite, or arriving out of order — is reported as `stale` and can never roll the graph backwards.
 
 ## Rendering
 
@@ -151,13 +155,13 @@ Merging successive snapshots is deliberately conservative, because each payload 
 - A resource missing from a payload keeps its current status. A payload that does not mention a resource carries no information about it and must not reset a node that has already advanced. This holds for the projection too: projecting against an empty status map leaves a deployed application deployed rather than repainting it pending.
 - On the run's terminal conclusion, success forces every node green; any other conclusion fails whatever is still pending or in progress while leaving already-terminal values alone.
 
-A single read downloads at most five candidate artifacts. Each candidate costs a `gh run download` subprocess, a temporary directory and an unzip, so an uncapped tier-2 match in a repository with many environments would turn one request into a long serial fan-out inside a handler that a 15-second poll re-enters.
+A single read inspects at most nine candidate artifacts, enough for the eight live slots and terminal artifact. Each candidate costs a `gh run download` subprocess, a temporary directory and an unzip, so the bounded ring and immutable-ID cache prevent a 15-second poll from repeatedly downloading the same payloads.
 
 ## Live progress
 
-Live per-resource progress is **not** produced yet. The `publish-deploy-status` step runs after `rad deploy` returns, and `actions/upload-artifact` is a `uses:` step, so a composite step cannot invoke it mid-execution. Uploading during the deploy requires writing directly to the artifact REST service with `ACTIONS_RUNTIME_TOKEN` and `ACTIONS_RESULTS_URL`, which are available only inside the job. That is producer-side work.
+The deploy action publishes changed resource snapshots every five seconds through a checked-in bundle of the official `@actions/artifact` client. Reporting is best-effort: poll and upload failures do not change the deploy result, and sequences advance only after successful uploads.
 
-The consumer is built so this is the same code path either way: it polls on a timer while the run is in progress and merges by `sequence`, so when the producer begins uploading mid-run, live progress appears with no canvas change.
+The consumer polls while the run is in progress, validates each payload against the active run, and applies only increasing sequences. After the run completes, the higher-sequence fixed-name terminal artifact wins naturally and provides `deploy-graph.json` plus diagnostics.
 
 ## Cadence
 
