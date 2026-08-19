@@ -159,6 +159,33 @@ describe("environmentsPaneMarkup", () => {
     expect(html).toContain("Needs an action from you");
   });
 
+  it("closes the progress panel with a single acknowledgement below the details", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    // The acknowledgement is the last thing in the panel, under "Show details",
+    // and it is the only control in that row.
+    expect(html.indexOf('id="env-progress-details"')).toBeLessThan(
+      html.indexOf('id="env-progress-actions"')
+    );
+    expect(html.indexOf('id="env-progress-actions"')).toBeLessThan(
+      html.indexOf('id="env-progress-dismiss"')
+    );
+    const actions = html.slice(
+      html.indexOf('id="env-progress-actions"'),
+      html.indexOf('id="env-rollback-modal"')
+    );
+    expect(actions).toContain(
+      'aria-label="Dismiss completed environment setup progress"'
+    );
+    expect(actions.match(/<button/g) ?? []).toHaveLength(1);
+    expect(actions).not.toContain("<a ");
+  });
+
+  it("never offers planned-graph navigation from the progress panel", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).not.toContain('id="env-progress-resume"');
+    expect(html).not.toContain("View planned graph");
+  });
+
   it("splits creation into a credentials step followed by an environment step", () => {
     const html = environmentsPaneMarkup(baseOptions);
     expect(html).toContain('id="env-wizard-steps"');

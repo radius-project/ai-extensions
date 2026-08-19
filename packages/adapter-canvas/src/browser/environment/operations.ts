@@ -52,7 +52,6 @@ export const PROGRESS_IDS = {
   steps: "env-progress-steps",
   details: "env-progress-details",
   actions: "env-progress-actions",
-  resume: "env-progress-resume",
   dismiss: "env-progress-dismiss",
   failureCard: "env-progress-failure",
   failureTitle: "env-progress-failure-title",
@@ -176,6 +175,16 @@ const TERMINAL_STATES: ReadonlySet<string> = new Set([
   "cancelled"
 ]);
 
+// The server's own name for a rollback that ran to completion. The record is
+// `cancelled` like a plain stop, but the customer already got the outcome they
+// asked for, so it is acknowledged rather than decided on again.
+const ROLLBACK_COMPLETE_CODE = "rollback-complete";
+
+// Only a non-terminal record is doing work, and only work in progress may
+// animate. A finished operation that keeps spinning claims Radius is still
+// acting on the customer's cloud account when it is not.
+const PANEL_ACTIVE_CLASS = "env-progress--active";
+
 const VERIFY_TRACKING_WINDOW_MS = 45 * 60 * 1000;
 const POLL_RETRY_MS = 1500;
 const POLL_ERROR_RETRY_MS = 3000;
@@ -280,17 +289,6 @@ export interface OperationNextTransition {
   readonly message: string;
 }
 
-export interface OperationResumeTarget {
-  readonly page: string;
-  readonly repo: string;
-  readonly branch: string;
-}
-
-export interface OperationJourney {
-  readonly resumeTarget: OperationResumeTarget | null;
-  readonly resumeReason: string;
-}
-
 export interface AppPickerCandidate {
   readonly appId: string;
   readonly displayName?: string;
@@ -338,7 +336,6 @@ export interface OperationRecord {
   readonly headline: OperationHeadline | null;
   readonly activeCommandKind: string;
   readonly nextTransition: OperationNextTransition | null;
-  readonly journey: OperationJourney | null;
   readonly verification: { readonly dispatchedAt: number | null } | null;
   readonly inputRequired: OperationInputPrompt | null;
   readonly startedAt: string;
@@ -563,20 +560,6 @@ function parseNextTransition(value: unknown): OperationNextTransition | null {
   };
 }
 
-function parseJourney(value: unknown): OperationJourney | null {
-  if (!isRecord(value)) return null;
-  const targetRaw = readRecord(value, "resumeTarget");
-  const resumeTarget: OperationResumeTarget | null =
-    targetRaw === null ? null : (
-      {
-        page: readString(targetRaw, "page"),
-        repo: readString(targetRaw, "repo"),
-        branch: readString(targetRaw, "branch")
-      }
-    );
-  return { resumeTarget, resumeReason: readString(value, "resumeReason") };
-}
-
 function parseVerification(
   value: unknown
 ): { dispatchedAt: number | null } | null {
@@ -647,7 +630,6 @@ function parseOperationRecord(
     headline: parseHeadline(raw["headline"]),
     activeCommandKind: readString(raw, "activeCommandKind"),
     nextTransition: parseNextTransition(raw["nextTransition"]),
-    journey: parseJourney(raw["journey"]),
     verification: parseVerification(raw["verification"]),
     inputRequired: parseInputPrompt(raw["inputRequired"]),
     startedAt: readString(raw, "startedAt"),
@@ -779,6 +761,39 @@ function commandStatusText(action: OperationAction): string {
   return COMMAND_STATUS_TEXT[action.kind] ?? COMMAND_ACCEPTED_MESSAGE;
 }
 
+/** A setup that reached the environment the customer asked for. */
+function isSuccessfulSetup(op: OperationRecord | null): boolean {
+  return (
+    op !== null &&
+    (op.terminalState === "succeeded" ||
+      op.terminalState === "succeeded_with_warnings")
+  );
+}
+
+/**
+ * A rollback that ran to completion. The record is `cancelled`, the same
+ * terminal state a plain stop reaches, so the server's headline is what tells
+ * the two apart: a stop leaves resources to decide about, a completed rollback
+ * already removed them.
+ */
+function isCompletedRollback(op: OperationRecord | null): boolean {
+  return (
+    op !== null &&
+    op.terminalState === "cancelled" &&
+    op.headline !== null &&
+    op.headline.code === ROLLBACK_COMPLETE_CODE
+  );
+}
+
+/**
+ * An outcome the customer only has to acknowledge. There is no resource
+ * decision left, so the panel closes on a single OK instead of offering the
+ * keep-or-dismiss choice a stopped or failed attempt still needs.
+ */
+function isAcknowledgedOutcome(op: OperationRecord | null): boolean {
+  return isSuccessfulSetup(op) || isCompletedRollback(op);
+}
+
 function operationsByRepoUrl(repo: string): string {
   return `${OPERATIONS_PATH}?repo=${encodeURIComponent(repo)}`;
 }
@@ -867,9 +882,19 @@ export function initializeEnvironmentOperations(
       });
   }
 
+  /**
+   * Drive the spinner from one fact: whether Radius is still working. Nothing
+   * is polling once progress stops, so the animation stops with it rather than
+   * outliving the work it describes.
+   */
+  function setPanelActive(active: boolean): void {
+    panel.classList.toggle(PANEL_ACTIVE_CLASS, active);
+  }
+
   function stopProgress(): void {
     verifyActivity = "";
     abortInFlight();
+    setPanelActive(false);
     if (progressTimer !== null) {
       scope.cancel(progressTimer);
       progressTimer = null;
@@ -1028,13 +1053,10 @@ export function initializeEnvironmentOperations(
     const statePanel = dom.byId(PROGRESS_IDS.partialState);
     if (!statePanel) return;
     // The inventory is for a terminal decision — continue or roll back. While
-    // work is still running it is a moving list the customer cannot act on.
-    if (
-      op === null ||
-      op.terminalState === null ||
-      op.terminalState === "succeeded" ||
-      op.terminalState === "succeeded_with_warnings"
-    ) {
+    // work is still running (including a rollback that is still deleting) it
+    // is a moving list the customer cannot act on, and once the attempt
+    // succeeded or the rollback finished there is no decision left to make.
+    if (op === null || op.terminalState === null || isAcknowledgedOutcome(op)) {
       statePanel.style.display = "none";
       return;
     }
@@ -1358,12 +1380,11 @@ export function initializeEnvironmentOperations(
     buttons.replaceChildren();
     const hasGuidance = renderCommandGuidance(op);
     const appendDismiss = (): void => {
-      if (op?.terminalState === null || op === null) return;
-      if (
-        op.terminalState === "succeeded" ||
-        op.terminalState === "succeeded_with_warnings"
-      )
-        return;
+      if (op === null || op.terminalState === null) return;
+      // An acknowledged outcome closes on the panel's own OK button, so it
+      // never also offers a keep-or-dismiss choice about resources that are
+      // either wanted or already gone.
+      if (isAcknowledgedOutcome(op)) return;
       const dismiss = dom.createElement("button") as DomInputElement;
       dismiss.setAttribute("type", "button");
       dismiss.id = "env-progress-command-dismiss";
@@ -1437,6 +1458,7 @@ export function initializeEnvironmentOperations(
   function renderProgress(op: OperationRecord | null): void {
     if (op === null) {
       panel.style.display = "none";
+      setPanelActive(false);
       renderFailureCard(null);
       renderPartialState(null);
       renderCommands(null);
@@ -1444,6 +1466,7 @@ export function initializeEnvironmentOperations(
       return;
     }
     panel.style.display = "";
+    setPanelActive(op.terminalState === null);
     const done =
       op.terminalState === "succeeded" ||
       op.terminalState === "succeeded_with_warnings" ||
@@ -1498,34 +1521,17 @@ export function initializeEnvironmentOperations(
       detailsEl.style.display = op.steps.length > 0 ? "" : "none";
     }
 
+    // The panel narrates one operation; it never navigates away from it. The
+    // planned-graph link used to sit here and sent the customer to a different
+    // page mid-outcome, so the action row now holds the acknowledgement alone.
     const actionsEl = dom.byId(PROGRESS_IDS.actions);
-    const resumeEl = dom.byId(PROGRESS_IDS.resume);
     const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
-    const target = op.journey?.resumeTarget ?? null;
-    const canResume =
-      op.terminalState !== "succeeded" &&
-      op.terminalState !== "succeeded_with_warnings" &&
-      op.terminalState !== null &&
-      target !== null &&
-      target.page === "planned" &&
-      target.repo !== "";
-    if (resumeEl && canResume && target) {
-      let href = `/?page=planned&repo=${encodeURIComponent(target.repo)}`;
-      if (target.branch !== "")
-        href += `&branch=${encodeURIComponent(target.branch)}`;
-      resumeEl.setAttribute("href", href);
-      resumeEl.textContent = op.journey?.resumeReason || "View planned graph";
-    }
-    if (resumeEl) resumeEl.style.display = canResume ? "" : "none";
-    const success =
-      op.terminalState === "succeeded" ||
-      op.terminalState === "succeeded_with_warnings";
+    const acknowledged = isAcknowledgedOutcome(op);
     if (dismissEl) {
-      dismissEl.textContent = success ? "OK" : "Dismiss";
-      dismissEl.style.display = success ? "" : "none";
+      dismissEl.textContent = acknowledged ? "OK" : "Dismiss";
+      dismissEl.style.display = acknowledged ? "" : "none";
     }
-    if (actionsEl)
-      actionsEl.style.display = canResume || success ? "flex" : "none";
+    if (actionsEl) actionsEl.style.display = acknowledged ? "flex" : "none";
   }
 
   function focusPanel(): void {
@@ -1566,6 +1572,10 @@ export function initializeEnvironmentOperations(
   }
 
   function applyTerminal(op: OperationRecord): void {
+    // Every branch below describes a finished operation, so the spinner stops
+    // here too — applyTerminal is reachable without a preceding render (an
+    // expired input prompt resolves straight to its terminal record).
+    setPanelActive(false);
     if (deps.resetSubmitButton) deps.resetSubmitButton();
     else {
       const btn = dom.inputById(DEPLOY_BUTTON_ID);

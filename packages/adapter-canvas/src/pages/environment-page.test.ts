@@ -69,7 +69,6 @@ describe("environmentPage", () => {
       "env-progress-stages",
       "env-progress-steps",
       "env-progress-failure",
-      "env-progress-resume",
       "env-progress-dismiss",
       "env-progress-state",
       "env-progress-commands",
@@ -242,9 +241,28 @@ describe("environmentPage — stop, continue and rollback styling", () => {
 
   it("distinguishes a running rollback from a running setup without colour alone", () => {
     const markup = html();
-    expect(markup).toContain(".env-progress--cleaning .env-progress__spinner");
+    expect(markup).toContain(
+      ".env-progress--active.env-progress--cleaning .env-progress__spinner"
+    );
     expect(markup).toContain(".env-progress__headline-note {");
     expect(markup).toContain(".env-progress__command-guidance {");
+  });
+
+  it("animates the progress spinner only while an operation is still working", () => {
+    const markup = html();
+    // The base rule carries no animation, so a panel that reached any terminal
+    // state — including a completed rollback — settles instead of spinning on.
+    const base = markup.slice(
+      markup.indexOf(".env-progress__spinner {"),
+      markup.indexOf(".env-progress--active .env-progress__spinner {")
+    );
+    expect(base).not.toContain("animation:spin");
+    expect(markup).toContain(
+      ".env-progress--active .env-progress__spinner { background:conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite; }"
+    );
+    expect(markup).toContain(
+      "@media (prefers-reduced-motion: reduce) { .env-progress--active .env-progress__spinner { animation:none; } }"
+    );
   });
 
   it("keeps the whole rollback confirmation inside one parseable script page", () => {

@@ -182,11 +182,15 @@ ${confirmDialogMarkup()}
 /* Progress panel — inline, non-blocking, and deliberately not a progress bar. */
 #env-progress-panel { margin:0 0 16px; padding:14px 16px; border:1px solid var(--rad-stroke); border-radius:10px; background:var(--rad-surface); box-shadow:0 1px 2px var(--rad-shadow); }
 .env-progress__head { display:flex; align-items:flex-start; gap:12px; }
-.env-progress__spinner { flex:0 0 auto; width:22px; height:22px; margin-top:1px; border-radius:50%; background:conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite; }
+/* Motion belongs to work in progress only: the spinner animates while the
+   operation is still running and settles the moment it reaches any terminal
+   state, including a completed rollback. */
+.env-progress__spinner { flex:0 0 auto; width:22px; height:22px; margin-top:1px; border-radius:50%; background:var(--rad-stroke); }
+.env-progress--active .env-progress__spinner { background:conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite; }
 .env-progress--done .env-progress__spinner { animation:none; background:var(--rad-success-solid, var(--rad-info)); }
 .env-progress--failed .env-progress__spinner { animation:none; background:var(--rad-danger); }
 /* State is never carried by motion or color alone. */
-@media (prefers-reduced-motion: reduce) { .env-progress__spinner { animation:none; } }
+@media (prefers-reduced-motion: reduce) { .env-progress--active .env-progress__spinner { animation:none; } }
 .env-progress__headtext { flex:1 1 auto; min-width:0; }
 .env-progress__title { font-size:14px; font-weight:600; color:var(--rad-text); line-height:1.4; }
 .env-progress__activity { font-size:12px; color:var(--rad-text-tertiary); margin-top:2px; line-height:1.4; }
@@ -220,7 +224,7 @@ ${confirmDialogMarkup()}
    a success nor a failure, and a rollback that left something behind is not a
    failed setup. */
 .env-progress__headline-note { font-size:12px; color:var(--rad-text-tertiary); margin-top:4px; line-height:1.5; }
-.env-progress--cleaning .env-progress__spinner { background:conic-gradient(var(--rad-danger) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); }
+.env-progress--active.env-progress--cleaning .env-progress__spinner { background:conic-gradient(var(--rad-danger) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); }
 /* Rollback confirmation dialog. Destructive cloud deletions are confirmed
    against the server's own preview before anything is sent. */
 .env-rollback__panel { background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:520px; width:92%; max-height:80vh; overflow:auto; display:flex; flex-direction:column; gap:10px; }
