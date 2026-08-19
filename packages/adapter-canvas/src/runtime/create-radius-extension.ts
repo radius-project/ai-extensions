@@ -66,7 +66,7 @@ export interface RadiusExtension {
 export function createRadiusExtension(
   deps: RadiusExtensionDependencies
 ): RadiusExtension {
-  const { workspaceState, fetchBicepForBranch } =
+  const { workspaceState, resolveAppModelStatus } =
     createGraphContextHelpers(deps);
 
   // ─── Host-channel callbacks ────────────────────────────────────────────────
@@ -332,6 +332,19 @@ export function createRadiusExtension(
     startKeepalive();
   }
 
+  // Staleness signals already handed to the agent, so a refresh that does not
+  // clear the drift cannot block every later graph open. Scoped to this
+  // extension instance rather than the module.
+  //
+  // Bounded because the key includes the commit the record names, so every
+  // regeneration produces a new one and the set would otherwise grow for as
+  // long as the process runs. Set preserves insertion order, so dropping the
+  // oldest evicts the least recently seen problem. Re-asking about a signal
+  // that fell out is harmless: the point is to stop a tight loop, not to
+  // remember forever.
+  const REFRESH_MEMO_LIMIT = 100;
+  const requestedRefreshes = new Set<string>();
+
   return {
     canvases: [createRadiusCanvas(deps)],
     tools: createRadiusTools(deps),
@@ -345,8 +358,17 @@ export function createRadiusExtension(
             { toolName: input.toolName, toolArgs: input.toolArgs },
             {
               workspaceState,
-              fetchBicep: fetchBicepForBranch,
-              defaultBranchForState: deps.workspace.defaultBranchForState
+              defaultBranchForState: deps.workspace.defaultBranchForState,
+              appModelStatus: resolveAppModelStatus,
+              shouldRequestRefresh: (key: string) => {
+                if (requestedRefreshes.has(key)) return false;
+                requestedRefreshes.add(key);
+                if (requestedRefreshes.size > REFRESH_MEMO_LIMIT) {
+                  const oldest = requestedRefreshes.values().next().value;
+                  if (oldest !== undefined) requestedRefreshes.delete(oldest);
+                }
+                return true;
+              }
             }
           );
         } catch {

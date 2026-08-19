@@ -85,6 +85,13 @@ export function createFakeSession(
 export interface FakeDependenciesOptions {
   workspaceContext?: WorkspaceContext;
   bicepByRepoBranch?: Record<string, string | null>;
+  // Keyed `workspace:<repo>@<branch>:<repoPath>` / `remote:<repo>@<branch>:<repoPath>`.
+  filesByRepoBranch?: Record<string, string | null>;
+  // Keyed `workspace:<workspacePath>` / `<repo>@<branch>`.
+  headCommits?: Record<string, string>;
+  // Answer for workspaceSourceChangedSince; undefined means "git cannot say".
+  sourceChangedSince?: boolean;
+  generatorVersion?: string;
 }
 
 // Builds a complete RadiusExtensionDependencies fake. `servers` is a real Map
@@ -101,6 +108,8 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   };
 
   const bicepByRepoBranch = options.bicepByRepoBranch ?? {};
+  const filesByRepoBranch = options.filesByRepoBranch ?? {};
+  const headCommits = options.headCommits ?? {};
 
   const getOrCreateServer = vi.fn(
     async (instanceId: string, page?: string): Promise<CanvasServerEntry> => {
@@ -288,6 +297,28 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       markEnvironmentInstanceShuttingDown: vi.fn(),
       onEnvironmentTasksSettled: vi.fn(
         (_instanceId: string, _listener: () => void) => () => {}
+      )
+    },
+    appModel: {
+      generatorVersion: vi.fn(() => options.generatorVersion ?? "0.1.0-test"),
+      workspaceHeadCommit: vi.fn(
+        async (workspacePath: string | null | undefined) =>
+          headCommits[`workspace:${workspacePath}`] ?? ""
+      ),
+      workspaceSourceChangedSince: vi.fn(
+        async () => options.sourceChangedSince
+      ),
+      branchHeadCommit: vi.fn(
+        async (repo: string, branch: string) =>
+          headCommits[`${repo}@${branch}`] ?? ""
+      ),
+      fetchWorkspaceFile: vi.fn(
+        async (_state, repo: string, branch: string, repoPath: string) =>
+          filesByRepoBranch[`workspace:${repo}@${branch}:${repoPath}`] ?? null
+      ),
+      fetchRepoFile: vi.fn(
+        async (repo: string, branch: string, repoPath: string) =>
+          filesByRepoBranch[`remote:${repo}@${branch}:${repoPath}`] ?? null
       )
     },
     radiusAppBicepSkill: vi.fn(
