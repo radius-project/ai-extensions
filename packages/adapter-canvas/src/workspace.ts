@@ -60,6 +60,29 @@ function runGit(
   });
 }
 
+// runGit collapses "git failed" and "git printed nothing" into the same empty
+// string, which is fine for a value read but not for a question whose honest
+// answer can be "nothing". This variant keeps the two apart.
+function runGitResult(
+  workspacePath: string | null | undefined,
+  args: readonly string[]
+): Promise<{ ok: boolean; stdout: string }> {
+  return new Promise((resolve) => {
+    if (!workspacePath) {
+      resolve({ ok: false, stdout: "" });
+      return;
+    }
+    execFile(
+      "git",
+      ["-C", workspacePath, ...args],
+      { timeout: 5000, encoding: "utf8" },
+      (err, stdout) => {
+        resolve({ ok: !err, stdout: err ? "" : stdout.trim() });
+      }
+    );
+  });
+}
+
 export function parseRepoFromRemote(remoteUrl: unknown): string {
   if (typeof remoteUrl !== "string" || !remoteUrl) return "";
   const match = remoteUrl.match(/github\.com[/:]([^/]+\/[^/]+)(?:\.git)?$/i);
@@ -356,6 +379,49 @@ export async function fetchWorkspaceFile(
 ): Promise<string | null> {
   if (!isWorkspaceSelection(state, repo, branch)) return null;
   return await readWorkspaceFile(state.workspacePath, repoPath);
+}
+
+// Commit the working tree is currently on. Used to tell whether a generated
+// application model still describes the branch's source. Resolves "" when there
+// is no workspace, no git, or no commit yet. Callers must treat that as "the
+// source revision is unknown" rather than as drift.
+export async function workspaceHeadCommit(
+  workspacePath: string | null | undefined
+): Promise<string> {
+  return await runGit(workspacePath, ["rev-parse", "HEAD"]);
+}
+
+// Paths the generator owns: the `.radius` directory, and the root-level app
+// model and origin record that an older layout keeps beside it. Changes confined
+// to these are not application-source changes, so committing a regenerated model
+// does not read as a reason to regenerate it again.
+const GENERATED_PATHS = [".radius", "app.bicep", "app.origin.json"];
+
+// Whether application source changed between `sinceCommit` and HEAD, ignoring
+// the paths the generator owns. Resolves undefined when git cannot answer (no
+// workspace, unknown commit, shallow clone), so the caller can fall back rather
+// than read silence as "nothing changed".
+//
+// The exclusion is the point: committing a freshly generated model advances HEAD
+// past the commit that model recorded, so a plain commit comparison would make
+// every committed model instantly stale, regenerate it, and stale it again on
+// the next commit. Only .radius/ changed in that commit, so this reports false.
+export async function workspaceSourceChangedSince(
+  workspacePath: string | null | undefined,
+  sinceCommit: string | null | undefined
+): Promise<boolean | undefined> {
+  if (!workspacePath || !sinceCommit) return undefined;
+  const result = await runGitResult(workspacePath, [
+    "diff",
+    "--name-only",
+    sinceCommit,
+    "HEAD",
+    "--",
+    ".",
+    ...GENERATED_PATHS.map((path) => `:(exclude)${path}`)
+  ]);
+  if (!result.ok) return undefined;
+  return result.stdout.length > 0;
 }
 
 // Absolute path to the app-graph.json that should sit next to the given

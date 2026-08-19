@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.42.1.51946",
+      "templateHash": "5161112204928922704"
+    }
+  },
+  "parameters": {
+    "gitRef": {
+      "type": "string",
+      "defaultValue": "eb33f12"
+    }
+  },
+  "imports": {
+    "radius": {
+      "provider": "Radius",
+      "version": "latest"
+    }
+  },
+  "resources": {
+    "containerImage": {
+      "import": "radius",
+      "type": "Radius.Compute/containerImages@2025-08-01-preview",
+      "properties": {
+        "name": "test-image",
+        "location": "global",
+        "properties": {
+          "application": "test-app",
+          "environment": "test",
+          "tag": "latest",
+          "build": {
+            "source": "[format('git::https://github.com/example/app.git?ref={0}', parameters('gitRef'))]"
+          }
+        }
+      }
+    }
+  }
+}

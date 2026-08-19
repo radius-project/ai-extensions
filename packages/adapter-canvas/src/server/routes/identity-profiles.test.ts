@@ -81,7 +81,6 @@ function identityFor(login: string): GitHubIdentity {
     mismatch: login !== "",
     actingHasWorkflow: true,
     actingHasPackages: false,
-    preferredLogin: null,
     reason: `reason-${login}`,
     accounts: [
       {
@@ -114,12 +113,25 @@ function dependencies(
     resetGhIdentityCache: () => {
       throw new Error("resetGhIdentityCache not stubbed");
     },
-    switchGhAccount: () => {
-      throw new Error("switchGhAccount not stubbed");
-    },
-    setPreferredGitHubLogin: () => {
-      throw new Error("setPreferredGitHubLogin not stubbed");
-    },
+    prepareGitHubAccount: async ({ login }) => ({
+      readiness: {
+        ready: true,
+        login,
+        credentialSource: "keyring",
+        summary: "Ready to configure deployments",
+        checks: {
+          repository: { state: "ready", detail: "ready" },
+          workflow: { state: "ready", detail: "ready" },
+          environment: { state: "ready", detail: "ready" },
+          packages: { state: "ready", detail: "ready" },
+          identity: { state: "ready", detail: "ready" }
+        },
+        repair: null,
+        restoration: null
+      },
+      selectionHandle: "selection-handle",
+      expiresAt: 1
+    }),
     preflightRepoAdmin: () => {
       throw new Error("preflightRepoAdmin not stubbed");
     },
@@ -133,22 +145,17 @@ function dependencies(
 }
 
 const INITIAL_LOGIN = "initial-login";
-// The identity ports, wired as one discriminating group. `getGitHubIdentity`
-// answers with whatever `setPreferredGitHubLogin` last recorded, so a handler
-// that re-reads the identity *before* persisting the choice returns a
-// different, detectably-stale payload.
+// The identity ports, wired as one discriminating group.
 function identityPorts(
   calls: Calls,
   options: {
     initialLogin?: string;
-    switchResult?: { ok: boolean; error?: string };
-    switchThrows?: Error;
     identityThrows?: Error;
     preflight?: string | Error;
     validSlugs?: string[];
   } = {}
 ): Partial<IdentityProfilesDependencies> {
-  let currentLogin = options.initialLogin ?? INITIAL_LOGIN;
+  const currentLogin = options.initialLogin ?? INITIAL_LOGIN;
   return {
     resetGhIdentityCache: () => {
       calls.log.push("resetGhIdentityCache");
@@ -157,15 +164,6 @@ function identityPorts(
       calls.log.push(`getGitHubIdentity->${currentLogin}`);
       if (options.identityThrows) return Promise.reject(options.identityThrows);
       return Promise.resolve(identityFor(currentLogin));
-    },
-    switchGhAccount: (login) => {
-      calls.log.push(`switchGhAccount(${login})`);
-      if (options.switchThrows) return Promise.reject(options.switchThrows);
-      return Promise.resolve(options.switchResult ?? { ok: true });
-    },
-    setPreferredGitHubLogin: (login) => {
-      calls.log.push(`setPreferredGitHubLogin(${login})`);
-      currentLogin = login;
     },
     isValidRepoSlug: (value) => {
       calls.log.push(`isValidRepoSlug(${String(value)})`);
@@ -474,83 +472,72 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
 
   // ── POST /api/github-account (SU-06) ───────────────────────────────────────
 
-  it("persists the chosen login before re-reading the identity", async () => {
-    const calls: Calls = { log: [] };
+  it("returns readiness and a server-minted handle without persisting a preferred login", async () => {
+    const prepared: Array<{
+      instanceId: string;
+      repo: string;
+      login: string;
+    }> = [];
     const recording = await run(
       "POST",
       "/api/github-account",
-      '{"login":"  octocat  "}',
+      '{"login":"  octocat  ","repo":"octo/app","environment":"dev"}',
       handleGitHubAccount,
-      dependencies(identityPorts(calls))
+      dependencies({
+        resetGhIdentityCache: () => {},
+        isValidRepoSlug: (value) => value === "octo/app",
+        prepareGitHubAccount: async (input) => {
+          prepared.push(input);
+          return {
+            readiness: {
+              ready: true,
+              login: "octocat",
+              credentialSource: "keyring",
+              summary: "Ready to configure deployments",
+              checks: {
+                repository: { state: "ready", detail: "ready" },
+                workflow: { state: "ready", detail: "ready" },
+                environment: { state: "ready", detail: "ready" },
+                packages: { state: "ready", detail: "ready" },
+                identity: { state: "ready", detail: "ready" }
+              },
+              repair: null,
+              restoration: null
+            },
+            selectionHandle: "handle",
+            expiresAt: 123
+          };
+        }
+      })
     );
     expect(recording.status).toBe(200);
     expect(recording.headerSteps).toEqual(SET_THEN_WRITE(200));
-    expect(JSON.parse(recording.body)).toEqual({
+    expect(JSON.parse(recording.body)).toMatchObject({
       success: true,
-      identity: identityFor("octocat")
+      selectionHandle: "handle",
+      readiness: { ready: true, login: "octocat" }
     });
-    // The identity read reports `octocat`, which is only possible if the
-    // preference was persisted first.
-    expect(calls.log).toEqual([
-      "switchGhAccount(octocat)",
-      "setPreferredGitHubLogin(octocat)",
-      "getGitHubIdentity->octocat"
+    expect(prepared).toEqual([
+      {
+        instanceId: "panel-a",
+        repo: "octo/app",
+        environment: "dev",
+        login: "octocat"
+      }
     ]);
   });
 
-  it("answers a failed switch with 400 and the reported reason", async () => {
-    const calls: Calls = { log: [] };
-    const recording = await run(
-      "POST",
-      "/api/github-account",
-      '{"login":"ghost"}',
-      handleGitHubAccount,
-      dependencies(
-        identityPorts(calls, {
-          switchResult: { ok: false, error: "no such account" }
-        })
-      )
-    );
-    // 400, not a 200 error payload — and nothing is persisted.
-    expect(recording.status).toBe(400);
-    expect(recording.body).toBe('{"error":"no such account"}');
-    expect(calls.log).toEqual(["switchGhAccount(ghost)"]);
-  });
-
-  it("supplies a default message when the failed switch reports none", async () => {
-    const calls: Calls = { log: [] };
-    const recording = await run(
-      "POST",
-      "/api/github-account",
-      '{"login":"ghost"}',
-      handleGitHubAccount,
-      dependencies(identityPorts(calls, { switchResult: { ok: false } }))
-    );
-    expect(recording.status).toBe(400);
-    expect(recording.body).toBe('{"error":"Failed to switch account."}');
-  });
-
-  it("treats an empty body as an empty login rather than a parse failure", async () => {
-    const calls: Calls = { log: [] };
+  it("requires both a login and a valid repository", async () => {
     const recording = await run(
       "POST",
       "/api/github-account",
       "",
       handleGitHubAccount,
-      dependencies(
-        identityPorts(calls, {
-          switchResult: {
-            ok: false,
-            error: "A GitHub account login is required."
-          }
-        })
-      )
+      dependencies({ isValidRepoSlug: () => false })
     );
-    // The rejection comes from the switch port, not from JSON.parse.
-    expect(calls.log).toEqual(["switchGhAccount()"]);
     expect(recording.status).toBe(400);
     expect(recording.body).toBe(
-      '{"error":"A GitHub account login is required."}'
+      '{"error":"A GitHub login, environment, and valid repository are required."}'
     );
   });
 
@@ -567,14 +554,19 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     expect(JSON.parse(recording.body)).toHaveProperty("error");
   });
 
-  it("answers a throwing switch with 400", async () => {
-    const calls: Calls = { log: [] };
+  it("answers a throwing readiness check with 400", async () => {
     const recording = await run(
       "POST",
       "/api/github-account",
-      '{"login":"octocat"}',
+      '{"login":"octocat","repo":"octo/app","environment":"dev"}',
       handleGitHubAccount,
-      dependencies(identityPorts(calls, { switchThrows: new Error("spawn") }))
+      dependencies({
+        resetGhIdentityCache: () => {},
+        isValidRepoSlug: () => true,
+        prepareGitHubAccount: async () => {
+          throw new Error("spawn");
+        }
+      })
     );
     expect(recording.status).toBe(400);
     expect(recording.body).toBe('{"error":"spawn"}');
@@ -774,21 +766,17 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     ["boolean login", '{"login":true}'],
     ["array login", '{"login":["octocat"]}'],
     ["object login", '{"login":{"name":"octocat"}}']
-  ])("rejects a %s without switching accounts", async (_label, body) => {
-    const switches: unknown[] = [];
-    const preferred: unknown[] = [];
+  ])("rejects a %s without preparing an account", async (_label, body) => {
+    const preparations: unknown[] = [];
     const recording = await run(
       "POST",
       "/api/github-account",
       body,
       handleGitHubAccount,
       dependencies({
-        switchGhAccount: (login) => {
-          switches.push(login);
-          return Promise.resolve({ ok: true });
-        },
-        setPreferredGitHubLogin: (login) => {
-          preferred.push(login);
+        prepareGitHubAccount: async (input) => {
+          preparations.push(input);
+          throw new Error("unexpected account preparation");
         },
         getGitHubIdentity: () => Promise.resolve(identityFor("octocat"))
       })
@@ -796,8 +784,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
     expect(recording.status).toBe(400);
     expect(recording.headerSteps).toEqual(SET_THEN_WRITE(400));
     expect(JSON.parse(recording.body)).toHaveProperty("error");
-    expect(switches).toEqual([]);
-    expect(preferred).toEqual([]);
+    expect(preparations).toEqual([]);
   });
 
   it.each([

@@ -94,7 +94,6 @@ describe("preflightGhcrPackageWriteAccess", () => {
         mismatch: false,
         actingHasWorkflow: true,
         actingHasPackages: true,
-        preferredLogin: null,
         reason: "user-selected-keyring-account",
         accounts: []
       })
@@ -115,7 +114,6 @@ describe("preflightGhcrPackageWriteAccess", () => {
         mismatch: false,
         actingHasWorkflow: true,
         actingHasPackages: true,
-        preferredLogin: null,
         reason: "user-selected-keyring-account",
         accounts: [
           {
@@ -141,8 +139,12 @@ describe("preflightGhcrPackageWriteAccess", () => {
     expect(result.code).toBe("ghcr-scope-required");
     expect(result.error).toContain("@pubuser");
     expect(result.error).toContain(
-      "gh auth switch -h github.com -u pubuser && gh auth refresh -h github.com -s read:packages -s write:packages"
+      "gh auth refresh --hostname github.com --scopes read:packages,write:packages"
     );
+    expect(result.error).toContain(
+      "gh auth switch --hostname github.com --user pubuser"
+    );
+    expect(result.error).not.toContain("previous-login");
   });
 });
 
