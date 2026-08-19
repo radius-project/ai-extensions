@@ -88,7 +88,8 @@ const productionHandlers = {
     acquireForRetry: () => ({ ok: true }),
     persistOperations: () => Promise.resolve(),
     isPullRequestMerged: () => Promise.resolve(false),
-    schedule: () => true
+    schedule: () => true,
+    invalidateEnvironmentListing: () => {}
   }),
   ...createRepositoriesRoutes({
     cliExec: () => {},
@@ -440,6 +441,7 @@ describe("server route ownership boundary", () => {
       "POST /api/operations/:operationId/stop",
       "POST /api/operations/:operationId/continue",
       "POST /api/operations/:operationId/rollback",
+      "POST /api/operations/:operationId/exit",
       "POST /api/operations/:operationId/retry/:retryKind"
     ]);
     expect(() => assertRouteTable(table)).not.toThrow();

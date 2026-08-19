@@ -242,6 +242,16 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "json",
     "operations-status"
   ),
+  // Leaving a setup behind is its own command, not a rollback with different
+  // copy: it closes the record the panel is reporting, and it removes the
+  // disposable artifacts this attempt created only as a consequence of that.
+  declare(
+    "POST",
+    "/api/operations/:operationId/exit",
+    "template",
+    "json",
+    "operations-status"
+  ),
   declare(
     "POST",
     "/api/operations/:operationId/retry/:retryKind",

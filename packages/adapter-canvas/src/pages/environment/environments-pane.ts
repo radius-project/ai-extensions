@@ -132,7 +132,13 @@ export function environmentsPaneMarkup(
         </div>
       </div>
     </details>
+    <!-- Bottom action row, below the details disclosure. The way out of the
+         panel lives here rather than beside the setup decisions: Exit setup is
+         a server command that closes the record and removes what this attempt
+         created, and the acknowledgement an already-settled outcome closes on
+         sits next to it. -->
     <div id="env-progress-actions" class="env-progress__actions" style="display:none;">
+      <div id="env-progress-bottom-buttons" class="env-progress__bottom-buttons"></div>
       <button type="button" id="env-progress-dismiss" class="rad-btn rad-btn--secondary" aria-label="Dismiss completed environment setup progress">Dismiss</button>
     </div>
   </div>

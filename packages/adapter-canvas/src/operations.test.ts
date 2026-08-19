@@ -82,6 +82,12 @@ import {
   workflowProvenanceGap,
   workflowRollbackCommitState,
   workflowRollbackTargets,
+  canExitSetup,
+  hasSurvivingCreatedArtifacts,
+  isSetupExited,
+  setupExitState,
+  EXIT_COMMAND_KIND,
+  EXIT_COMMAND_OUTCOME,
   OPERATION_SCHEMA_VERSION,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
@@ -2721,7 +2727,10 @@ describe("action projection", () => {
       terminal: { reason: "pr-merge-required" }
     });
     const actions = projectOperationActions(op);
-    expect(actions.map((action) => action.id)).toEqual(["retry-verification"]);
+    expect(actions.map((action) => action.id)).toEqual([
+      "retry-verification",
+      "exit-setup"
+    ]);
     expect(actions[0]).toMatchObject({
       path: `/api/operations/${encodeURIComponent(op.operationId)}/retry/verification`,
       requiresMergedPullRequest: true
@@ -2750,7 +2759,8 @@ describe("action projection", () => {
     finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
     expect(projectOperationActions(op).map((action) => action.id)).toEqual([
       "retry-setup",
-      "retry-cleanup"
+      "retry-cleanup",
+      "exit-setup"
     ]);
     expect(projectOperationActions(null)).toEqual([]);
   });
@@ -3065,7 +3075,8 @@ describe("stopped operations offer continuing and rolling back", () => {
     const actions = projectOperationActions(op);
     expect(actions.map((entry) => [entry.id, entry.label])).toEqual([
       ["continue-setup", "Continue setup"],
-      ["rollback", "Roll back created resources"]
+      ["rollback", "Roll back created resources"],
+      ["exit-setup", "Exit setup"]
     ]);
     expect(actions[0]).toMatchObject({
       kind: "continue_setup",
@@ -3132,7 +3143,8 @@ describe("stopped operations offer continuing and rolling back", () => {
     const actions = projectOperationActions(stopped);
     expect(actions.map((entry) => entry.label)).toEqual([
       "Retry setup",
-      "Roll back created resources"
+      "Roll back created resources",
+      "Exit setup"
     ]);
     expect(projectOperationHeadline(stopped)).toMatchObject({
       code: "continue-failed",
@@ -3166,7 +3178,8 @@ describe("stopped operations offer continuing and rolling back", () => {
     const actions = projectOperationActions(op);
     expect(actions.map((entry) => entry.label)).toEqual([
       "Continue setup",
-      "Retry rollback"
+      "Retry rollback",
+      "Exit setup"
     ]);
     expect(actions[1]).toMatchObject({
       kind: "retry_cleanup",
@@ -3357,7 +3370,11 @@ describe("rollback eligibility", () => {
       ok: false,
       code: "setup-continue-rolled-back"
     });
-    expect(projectOperationActions(op)).toEqual([]);
+    // Exit remains: the record is still on the page, and closing it is how the
+    // customer stops being shown a setup that has nothing left to remove.
+    expect(projectOperationActions(op).map((entry) => entry.id)).toEqual([
+      "exit-setup"
+    ]);
     expect(projectActionGuidance(op)).toContainEqual({
       code: "setup-continue-rolled-back",
       message:
@@ -4085,5 +4102,299 @@ describe("a rollback that removed nothing", () => {
       code: "rollback-blocked",
       title: "Rollback stopped before removing anything"
     });
+  });
+});
+
+// The two halves of the reported defect: a partial failure that reused
+// everything must not claim resources exist, and leaving the setup has to be a
+// command Radius acts on rather than a dismissal the next reload undoes.
+describe("exiting a setup", () => {
+  // Setup found an App Registration and a Service Principal that already
+  // existed, reused both, and then failed before it created anything.
+  function reusedOnlyFailure(overrides = {}) {
+    const op = addSafeResumeRequest(newOp(overrides));
+    recordAzureApp(op, {
+      state: "reused",
+      appId: "app-1",
+      displayName: "radius-deploy"
+    });
+    recordServicePrincipal(op, {
+      state: "reused",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    finish(op, "failed_partial", {
+      failure: { code: "github-environment-failed" }
+    });
+    return op;
+  }
+
+  function exit(op) {
+    const eligibility = canExitSetup(op);
+    const command = acceptCommand(op, {
+      kind: EXIT_COMMAND_KIND,
+      attempt: 0,
+      target: eligibility.target
+    });
+    setCommandState(
+      op,
+      command.command.commandId,
+      "finished",
+      EXIT_COMMAND_OUTCOME
+    );
+    return op;
+  }
+
+  it("drops the resources-exist claim when this attempt created nothing", () => {
+    const op = reusedOnlyFailure();
+
+    expect(hasSurvivingCreatedArtifacts(op)).toBe(false);
+    expect(summarize(op)).toBe(
+      'Creating environment "dev" failed partway through.'
+    );
+    // The reused pair is still reported, because the customer may want to know
+    // what the attempt touched — it is just not theirs to clean up.
+    expect(projectCleanupSummary(op).reused.map((entry) => entry.kind)).toEqual(
+      ["azure_app", "service_principal"]
+    );
+    expect(projectCleanupSummary(op).created).toEqual([]);
+  });
+
+  it("keeps the resources-exist claim while something it created survives", () => {
+    const op = reusedOnlyFailure();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "contoso/store",
+      name: "dev"
+    });
+
+    expect(hasSurvivingCreatedArtifacts(op)).toBe(true);
+    expect(summarize(op)).toBe(
+      'Creating environment "dev" failed partway through — some resources exist.'
+    );
+  });
+
+  it("counts an unprovable GitHub environment as a resource that exists", () => {
+    const op = reusedOnlyFailure();
+    // Radius cannot prove it created this one, so it never deletes it — which
+    // is exactly why the customer has to be told it is there.
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+
+    expect(hasSurvivingCreatedArtifacts(op)).toBe(true);
+    expect(summarize(op)).toBe(
+      'Creating environment "dev" failed partway through — some resources exist.'
+    );
+  });
+
+  it("drops the claim again once the rollback removed what it created", () => {
+    const op = addSafeResumeRequest(newOp());
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
+    expect(summarize(op)).toBe(
+      'Creating environment "dev" failed partway through — some resources exist.'
+    );
+
+    recordCleanupDeletion(op, { artifactType: "azure_app" });
+
+    expect(hasSurvivingCreatedArtifacts(op)).toBe(false);
+    expect(summarize(op)).toBe(
+      'Creating environment "dev" failed partway through.'
+    );
+  });
+
+  it("counts a committed workflow file the ledger has not reverted", () => {
+    const op = addSafeResumeRequest(newOp());
+    recordCommittedWorkflowFile(op, provenWorkflowFile());
+    finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
+
+    expect(hasSurvivingCreatedArtifacts(op)).toBe(true);
+
+    recordCleanupDeletion(op, {
+      artifactType: "workflow_file",
+      identity: "main:.github/workflows/radius-verify-credentials.yml"
+    });
+
+    expect(hasSurvivingCreatedArtifacts(op)).toBe(false);
+    expect(hasSurvivingCreatedArtifacts(null)).toBe(false);
+  });
+
+  it("offers the exit as a bottom action that removes nothing it does not own", () => {
+    const op = reusedOnlyFailure();
+    const eligibility = canExitSetup(op);
+    expect(eligibility).toMatchObject({ ok: true, code: "exit-allowed" });
+    expect(eligibility.targets).toEqual([]);
+
+    const [action] = projectOperationActions(op).filter(
+      (entry) => entry.id === "exit-setup"
+    );
+    expect(action).toMatchObject({
+      kind: "exit_setup",
+      label: "Exit setup",
+      placement: "bottom",
+      tone: "neutral",
+      requiresConfirmation: false,
+      removesResources: false,
+      method: "POST",
+      path: `/api/operations/${op.operationId}/exit`,
+      description:
+        "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed."
+    });
+    expect(action.preview.removes).toEqual([]);
+    expect(action.preview.keeps.map((entry) => entry.target)).toEqual([
+      "radius-deploy (app-1)",
+      "Service Principal for radius-deploy (app-1)"
+    ]);
+    // Nothing to confirm means no confirmation copy is projected at all.
+    expect(action.confirmTitle).toBeUndefined();
+  });
+
+  it("confirms the exit against the same proven-owned set a rollback would remove", () => {
+    const op = stoppedWithCreatedResources();
+    const eligibility = canExitSetup(op);
+    expect(eligibility.targets.map((entry) => entry.artifactType)).toEqual(
+      provenOwnedCleanupTargets(op).map((entry) => entry.artifactType)
+    );
+    // The identity keys on the artifact set, so a repeated request for the same
+    // set resolves to the command already recorded.
+    expect(eligibility.target).toBe(
+      rollbackArtifactIdentity(provenOwnedCleanupTargets(op))
+    );
+
+    const [action] = projectOperationActions(op).filter(
+      (entry) => entry.id === "exit-setup"
+    );
+    expect(action).toMatchObject({
+      placement: "bottom",
+      requiresConfirmation: true,
+      removesResources: true,
+      confirmTitle: "Exit setup and remove what Radius created?",
+      confirmLabel: "Exit setup",
+      cancelLabel: "Keep this setup"
+    });
+    expect(action.preview.removes).toContainEqual({
+      kind: "github_environment",
+      target: "contoso/store:dev"
+    });
+  });
+
+  it("never offers to exit a finished environment or an operation that is still running", () => {
+    const running = newOp();
+    expect(canExitSetup(running)).toMatchObject({ code: "operation-active" });
+    expect(
+      projectOperationActions(running).map((entry) => entry.id)
+    ).not.toContain("exit-setup");
+
+    const succeeded = newOp();
+    recordAzureApp(succeeded, { state: "created", appId: "app-1" });
+    finishSucceeded(succeeded);
+    expect(canExitSetup(succeeded)).toMatchObject({
+      code: "exit-environment-ready"
+    });
+    expect(
+      projectOperationActions(succeeded).map((entry) => entry.id)
+    ).not.toContain("exit-setup");
+
+    expect(canExitSetup(null)).toMatchObject({ code: "unknown-operation" });
+  });
+
+  it("stops offering anything once the customer has exited", () => {
+    const op = exit(reusedOnlyFailure());
+
+    expect(setupExitState(op)).toBe("exited");
+    expect(isSetupExited(op)).toBe(true);
+    expect(canExitSetup(op)).toMatchObject({ code: "setup-already-exited" });
+    expect(projectOperationActions(op)).toEqual([]);
+    expect(projectActionGuidance(op)).toEqual([]);
+    expect(projectOperationHeadline(op)).toEqual({
+      code: "setup-exited",
+      title: "Environment setup closed",
+      message:
+        "Radius closed this setup and removed the resources it proved it created. Anything it reused was left alone."
+    });
+    expect(summarize(op)).toBe('Exited the setup for "dev".');
+    // The record keeps the verdict it ended with; exiting is a separate fact.
+    expect(op.state).toBe("failed_partial");
+  });
+
+  it("keeps the setup open when the disposal ended with resources still present", () => {
+    const op = stoppedWithCreatedResources();
+    beginRetryAttempt(op, "cleanup");
+    const accepted = acceptCommand(op, {
+      kind: EXIT_COMMAND_KIND,
+      attempt: 1,
+      target: "cleanup#abc"
+    });
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius-deploy (app-1)",
+          identity: "app-1",
+          outcome: "warning",
+          detail: "Azure CLI returned 429."
+        }
+      ]
+    });
+    setCommandState(op, accepted.command.commandId, "finished", "warnings");
+    finish(op, "failed_partial", {
+      failure: { code: "setup-cleanup-incomplete" }
+    });
+
+    // The outcome is not `exited`, so the setup is still open and says so in
+    // its own words rather than borrowing the rollback's.
+    expect(setupExitState(op)).toBe("none");
+    expect(projectOperationHeadline(op)).toMatchObject({
+      code: "exit-incomplete",
+      title: "Exit finished with items still present"
+    });
+    expect(projectOperationActions(op).map((entry) => entry.id)).toContain(
+      "exit-setup"
+    );
+  });
+
+  it("names the disposal while it is running and offers nothing to press", () => {
+    const op = stoppedWithCreatedResources();
+    beginRetryAttempt(op, "cleanup");
+    acceptCommand(op, {
+      kind: EXIT_COMMAND_KIND,
+      attempt: 1,
+      target: "cleanup#abc"
+    });
+
+    expect(setupExitState(op)).toBe("requested");
+    expect(isSetupExited(op)).toBe(false);
+    expect(projectOperationActions(op)).toEqual([]);
+    expect(projectOperationHeadline(op)).toEqual({
+      code: "exiting",
+      title: "Exiting setup…",
+      message:
+        "Radius is removing the resources it proved it created during this attempt and closing this setup."
+    });
+    expect(projectNextTransition(op)).toEqual({
+      code: "exiting",
+      message: "Closing this setup and removing the resources Radius created…"
+    });
+    expect(summarize(op)).toBe(
+      "Closing the setup for dev and removing what it created…"
+    );
+  });
+
+  it("reads the exit decision back after a restart", () => {
+    const op = exit(reusedOnlyFailure());
+
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(op))
+    );
+
+    expect(isSetupExited(restored)).toBe(true);
+    expect(projectOperationActions(restored)).toEqual([]);
+    expect(setupExitState({})).toBe("none");
   });
 });

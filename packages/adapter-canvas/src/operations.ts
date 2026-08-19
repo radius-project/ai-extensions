@@ -179,7 +179,8 @@ export type OperationCommandKind =
   | "retry_setup"
   | "retry_verification"
   | "rollback"
-  | "retry_cleanup";
+  | "retry_cleanup"
+  | "exit_setup";
 
 export type OperationCommandState = "accepted" | "running" | "finished";
 
@@ -251,11 +252,25 @@ const COMMAND_KINDS = Object.freeze([
   "retry_setup",
   "retry_verification",
   "rollback",
-  "retry_cleanup"
+  "retry_cleanup",
+  "exit_setup"
 ]);
 
 const FORWARD_COMMAND_KINDS = Object.freeze(["continue_setup", "retry_setup"]);
 const CLEANUP_COMMAND_KINDS = Object.freeze(["rollback", "retry_cleanup"]);
+// Exit is a cleanup command by mechanism and a different promise by intent: it
+// deletes through the same proven-owned selection, but the customer asked to be
+// done with the setup rather than to undo it, so it carries its own copy and
+// closes the panel instead of reporting a rollback.
+export const EXIT_COMMAND_KIND = "exit_setup";
+// The outcome an exit command records when it closed the setup. Anything else —
+// a disposal that ended with warnings, or a command still in flight — leaves the
+// setup open, so the panel keeps reporting what is still present.
+export const EXIT_COMMAND_OUTCOME = "exited";
+const DISPOSAL_COMMAND_KINDS = Object.freeze([
+  ...CLEANUP_COMMAND_KINDS,
+  EXIT_COMMAND_KIND
+]);
 const COMMAND_STATES = Object.freeze(["accepted", "running", "finished"]);
 const ATTEMPT_KINDS = Object.freeze(["setup", "verification", "cleanup"]);
 
@@ -1419,6 +1434,104 @@ export function projectCleanupSummary(op: any): any {
 }
 
 /**
+ * Every artifact this attempt created that the ledger still says is present.
+ *
+ * Read from the ledger rather than from a cleanup result list: a deletion that
+ * Radius proved took the artifact out of the ledger, so a record left here is
+ * one the customer would still find in Azure or GitHub. Reused resources are
+ * absent by construction — this attempt did not create them — which is what
+ * lets a caller tell "Radius left something behind" apart from "everything that
+ * exists was already yours".
+ */
+interface SurvivingArtifact {
+  kind: string;
+  target: string;
+  keys: Set<string>;
+  keepAlways?: boolean;
+}
+
+function survivingCreatedArtifacts(ledger: any): SurvivingArtifact[] {
+  const surviving: SurvivingArtifact[] = [];
+  const push = (
+    kind: string,
+    artifact: any,
+    target: string,
+    extra: Partial<SurvivingArtifact> = {}
+  ) => {
+    surviving.push({
+      kind,
+      target,
+      keys: artifactMatchKeys(kind, cleanupArtifactIdentity(kind, artifact), [
+        target
+      ]),
+      ...extra
+    });
+  };
+  if (ledger.azureApp.state === "created")
+    push("azure_app", ledger.azureApp, formatAzureAppLabel(ledger.azureApp));
+  if (ledger.servicePrincipal.state === "created")
+    push(
+      "service_principal",
+      ledger.servicePrincipal,
+      formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
+    );
+  ledger.federatedCredentials.forEach((entry: any) => {
+    push(
+      "federated_credential",
+      entry,
+      `${String(entry.name || "")} @ ${String(entry.subject || "")}`
+    );
+  });
+  ledger.roleAssignments.forEach((entry: any) => {
+    push(
+      "role_assignment",
+      entry,
+      `${String(entry.role || "")} @ ${String(entry.scope || "")}`
+    );
+  });
+  if (ledger.githubEnvironment.state === "created")
+    push(
+      "github_environment",
+      ledger.githubEnvironment,
+      formatGitHubEnvironmentLabel(ledger.githubEnvironment)
+    );
+  ledger.commit.workflowFiles.forEach((entry: any) => {
+    // A reverted file is no longer surviving. `keepAlways` exists because a
+    // committed workflow is never removed by the pre-commit cleanup path, not
+    // because the entry outlives its own removal.
+    if (entry.state === "removed") return;
+    const target = formatWorkflowFileLabel(entry);
+    if (target)
+      surviving.push({
+        kind: "workflow_file",
+        target,
+        keys: new Set<string>(),
+        keepAlways: true
+      });
+  });
+  return surviving;
+}
+
+/**
+ * Whether anything this attempt created is still present.
+ *
+ * A setup that reused an existing App Registration and Service Principal and
+ * then failed created nothing, so telling the customer "some resources exist"
+ * would send them looking for resources that are not this attempt's to clean
+ * up. The unprovable GitHub environment counts: Radius cannot delete it, and it
+ * is exactly the resource the customer has to decide about by hand.
+ */
+export function hasSurvivingCreatedArtifacts(op: any): boolean {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return false;
+  if (ledger.githubEnvironment.state === "created_candidate") return true;
+  const removedKeys = removedArtifactKeys(cleanupAttemptResults(ledger));
+  return survivingCreatedArtifacts(ledger).some(
+    (entry) => ![...entry.keys].some((key: string) => removedKeys.has(key))
+  );
+}
+
+/**
  * Name what exists after a stop, a failure, or a retry.
  *
  * The groups are disjoint on purpose. A customer reading "created" and
@@ -1495,68 +1608,7 @@ function projectPartialState(
       target: formatGitHubEnvironmentLabel(ledger.githubEnvironment)
     });
 
-  const surviving: any[] = [];
-  const pushSurviving = (
-    kind: string,
-    artifact: any,
-    target: string,
-    extra: any = {}
-  ) => {
-    surviving.push({
-      kind,
-      target,
-      keys: artifactMatchKeys(kind, cleanupArtifactIdentity(kind, artifact), [
-        target
-      ]),
-      ...extra
-    });
-  };
-  if (ledger.azureApp.state === "created")
-    pushSurviving(
-      "azure_app",
-      ledger.azureApp,
-      formatAzureAppLabel(ledger.azureApp)
-    );
-  if (ledger.servicePrincipal.state === "created")
-    pushSurviving(
-      "service_principal",
-      ledger.servicePrincipal,
-      formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
-    );
-  ledger.federatedCredentials.forEach((entry: any) => {
-    pushSurviving(
-      "federated_credential",
-      entry,
-      `${String(entry.name || "")} @ ${String(entry.subject || "")}`
-    );
-  });
-  ledger.roleAssignments.forEach((entry: any) => {
-    pushSurviving(
-      "role_assignment",
-      entry,
-      `${String(entry.role || "")} @ ${String(entry.scope || "")}`
-    );
-  });
-  if (ledger.githubEnvironment.state === "created")
-    pushSurviving(
-      "github_environment",
-      ledger.githubEnvironment,
-      formatGitHubEnvironmentLabel(ledger.githubEnvironment)
-    );
-  ledger.commit.workflowFiles.forEach((entry: any) => {
-    // A reverted file is no longer surviving. `keepAlways` exists because a
-    // committed workflow is never removed by the pre-commit cleanup path, not
-    // because the entry outlives its own removal.
-    if (entry.state === "removed") return;
-    const target = formatWorkflowFileLabel(entry);
-    if (target)
-      surviving.push({
-        kind: "workflow_file",
-        target,
-        keys: new Set<string>(),
-        keepAlways: true
-      });
-  });
+  const surviving = survivingCreatedArtifacts(ledger);
 
   // "Reusable" means a forward continuation would reuse it, whichever label
   // that continuation carries: a deliberate stop is continued and a failed
@@ -2217,6 +2269,65 @@ export function workflowRollbackCommitState(op: any): any {
   };
 }
 
+/**
+ * How far the customer's request to leave this setup has got.
+ *
+ * Derived from the saved command history rather than a parallel flag, so a
+ * reload, a restart, and a duplicate submission all read the same durable fact.
+ * A disposal that ended with warnings deliberately reads as `none`: resources it
+ * created are still present, the setup is not closed, and the panel has to keep
+ * saying so.
+ */
+export function setupExitState(op: any): "none" | "requested" | "exited" {
+  const commands = op?.control?.commands;
+  if (!Array.isArray(commands)) return "none";
+  for (let index = commands.length - 1; index >= 0; index--) {
+    const command = commands[index];
+    if (command.kind !== EXIT_COMMAND_KIND) continue;
+    if (command.state !== "finished") return "requested";
+    return command.outcome === EXIT_COMMAND_OUTCOME ? "exited" : "none";
+  }
+  return "none";
+}
+
+/** Whether the customer closed this setup and it should stop being offered. */
+export function isSetupExited(op: any): boolean {
+  return setupExitState(op) === "exited";
+}
+
+/**
+ * Whether the customer may leave this setup, and what leaving would remove.
+ *
+ * Exit is offered wherever a setup ended without producing the environment the
+ * customer asked for, including the states that own nothing: leaving is how an
+ * abandoned attempt stops being reported, and the deletion is a consequence
+ * rather than the point. The set it would remove is the rollback's proven-owned
+ * selection, so a reused App Registration, a reused Service Principal, and the
+ * GitHub environment Radius cannot prove it created are all excluded by
+ * construction.
+ */
+export function canExitSetup(op: any): any {
+  if (!op) return { ok: false, code: "unknown-operation" };
+  if (!isTerminalState(op.state))
+    return { ok: false, code: "operation-active" };
+  // A verified environment is finished work, not an abandoned attempt. It is
+  // removed with Delete Environment, exactly as a rollback is refused for it.
+  if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
+    return { ok: false, code: "exit-environment-ready" };
+  if (setupExitState(op) !== "none")
+    return { ok: false, code: "setup-already-exited" };
+  const targets = provenOwnedCleanupTargets(op);
+  return {
+    ok: true,
+    code: "exit-allowed",
+    targets,
+    // Keyed on the artifact set exactly as a rollback is, so a repeated request
+    // for the same set resolves to the command already recorded. The command
+    // kind is part of the derived id, so an exit never collides with a rollback.
+    target: rollbackArtifactIdentity(targets)
+  };
+}
+
 function isProvenOwnedCleanupTarget(ledger: any, result: any): boolean {
   switch (result.artifactType) {
     case "azure_app":
@@ -2448,6 +2559,9 @@ export function projectActionGuidance(op: any): any[] {
   if (!op || !isTerminalState(op.state)) return [];
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
     return [];
+  // A closed setup has no path left to explain. Listing why a rollback is
+  // unavailable would argue with the decision the customer already made.
+  if (isSetupExited(op)) return [];
   const notes: Array<{ code: string; message: string }> = [];
   const rollback = canStartRollback(op);
   const forward = canContinueSetup(op).ok || canRetrySetup(op).ok;
@@ -2502,11 +2616,39 @@ export function projectOperationHeadline(op: any): any {
         message: `Radius restarted from ${setupStepLabel(op.resumeFrom)} and is reusing the resources it already recorded.`
       };
     }
+    if (activeCleanup === EXIT_COMMAND_KIND) {
+      return {
+        code: "exiting",
+        title: "Exiting setup…",
+        message:
+          "Radius is removing the resources it proved it created during this attempt and closing this setup."
+      };
+    }
     return null;
   }
   const lastCommand = latestCommand(op);
   const cleanupCommand =
     lastCommand && CLEANUP_COMMAND_KINDS.includes(lastCommand.kind);
+  const exitCommand = lastCommand && lastCommand.kind === EXIT_COMMAND_KIND;
+  // Reported before the state-specific verdicts below: the customer asked to
+  // leave, Radius did, and repeating the failure that led there would be the
+  // panel arguing with the decision it just carried out.
+  if (isSetupExited(op)) {
+    return {
+      code: "setup-exited",
+      title: "Environment setup closed",
+      message:
+        "Radius closed this setup and removed the resources it proved it created. Anything it reused was left alone."
+    };
+  }
+  if (op.state === "failed_partial" && exitCommand) {
+    return {
+      code: "exit-incomplete",
+      title: "Exit finished with items still present",
+      message:
+        "Radius removed what it could while closing this setup. The resources below are still present and need another attempt or a manual removal."
+    };
+  }
   if (op.state === "cancelled") {
     if (cleanupCommand) {
       return {
@@ -2564,15 +2706,17 @@ export function projectOperationActions(op: any): any[] {
   if (!isTerminalState(op.state)) {
     // A confirmed rollback is one cooperative server-owned command: cleanup has
     // no pause control, so offering Stop mid-deletion would promise a boundary
-    // that does not exist.
+    // that does not exist. Exit deletes through the same pass and is no more
+    // interruptible.
     const active = activeCommandKind(op);
-    if (active === "rollback" || active === "retry_cleanup") return [];
+    if (active !== null && DISPOSAL_COMMAND_KINDS.includes(active)) return [];
     const waitingForInput = op.state === INPUT_REQUIRED_STATE;
     return [
       {
         id: "stop",
         kind: "stop",
         label: "Stop setup",
+        placement: "row",
         tone: "neutral",
         requiresConfirmation: false,
         description:
@@ -2586,12 +2730,17 @@ export function projectOperationActions(op: any): any[] {
     ];
   }
   const actions: any[] = [];
+  // A setup the customer closed offers nothing further. Every remaining choice
+  // is about finishing or undoing an attempt they have already left, and the
+  // resources those choices act on may have just been removed.
+  if (isSetupExited(op)) return actions;
   const verification = canRetryVerification(op);
   if (verification.ok) {
     actions.push({
       id: "retry-verification",
       kind: "retry_verification",
       label: "Retry verification",
+      placement: "row",
       tone: "primary",
       requiresConfirmation: false,
       description: VERIFICATION_RETRY_DESCRIPTIONS[verification.classification],
@@ -2611,6 +2760,7 @@ export function projectOperationActions(op: any): any[] {
       id: "continue-setup",
       kind: "continue_setup",
       label: "Continue setup",
+      placement: "row",
       tone: "primary",
       requiresConfirmation: false,
       description: `Radius continues from ${setupStepLabel(
@@ -2629,6 +2779,7 @@ export function projectOperationActions(op: any): any[] {
       id: "retry-setup",
       kind: "retry_setup",
       label: "Retry setup",
+      placement: "row",
       tone: "primary",
       requiresConfirmation: false,
       description: `The last attempt stopped at ${setupStepLabel(
@@ -2657,6 +2808,7 @@ export function projectOperationActions(op: any): any[] {
         postCommit ?
           "Roll back environment setup"
         : "Roll back created resources",
+      placement: "row",
       tone: "danger",
       requiresConfirmation: true,
       confirmTitle:
@@ -2682,6 +2834,7 @@ export function projectOperationActions(op: any): any[] {
       id: "retry-cleanup",
       kind: "retry_cleanup",
       label: "Retry rollback",
+      placement: "row",
       tone: "danger",
       requiresConfirmation: true,
       confirmTitle: "Retry the rollback for the resources still present?",
@@ -2701,6 +2854,41 @@ export function projectOperationActions(op: any): any[] {
         manualActionRequired: projectRollbackPreview(op, [])
           .manualActionRequired
       }
+    });
+  }
+  const exit = canExitSetup(op);
+  if (exit.ok) {
+    // The bottom action, below the details disclosure: it is the way out of the
+    // panel rather than another attempt at the setup, so it never sits beside
+    // the forward and destructive choices the command row offers.
+    const removes = exit.targets.length > 0;
+    actions.push({
+      id: "exit-setup",
+      kind: EXIT_COMMAND_KIND,
+      label: "Exit setup",
+      placement: "bottom",
+      tone: "neutral",
+      // Confirmed only when leaving actually deletes something. An exit that
+      // removes nothing is not a destructive command, and asking a customer to
+      // confirm a deletion Radius will not perform teaches them to dismiss the
+      // dialog that matters.
+      requiresConfirmation: removes,
+      ...(removes ?
+        {
+          confirmTitle: "Exit setup and remove what Radius created?",
+          confirmLabel: "Exit setup",
+          cancelLabel: "Keep this setup"
+        }
+      : {}),
+      description:
+        removes ?
+          "Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added. Anything it reused is left alone. This cannot be undone."
+        : "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed.",
+      method: "POST",
+      path: `${base}/exit`,
+      pending: false,
+      removesResources: removes,
+      preview: projectRollbackPreview(op, exit.targets)
     });
   }
   return actions;
@@ -2727,6 +2915,12 @@ export function projectNextTransition(op: any): any {
     return {
       code: "retrying-rollback",
       message: "Retrying the rollback for the resources still present…"
+    };
+  }
+  if (active === EXIT_COMMAND_KIND) {
+    return {
+      code: "exiting",
+      message: "Closing this setup and removing the resources Radius created…"
     };
   }
   if (isStopPending(op)) {
@@ -3236,9 +3430,12 @@ export function snapshotRetryState(op: any): any {
 export function summarize(op: any): string {
   if (!op) return "";
   const env = op.environment || "environment";
+  if (isSetupExited(op)) return `Exited the setup for "${env}".`;
   switch (op.state) {
     case RUNNING_STATE: {
       const active = activeCommandKind(op);
+      if (active === EXIT_COMMAND_KIND)
+        return `Closing the setup for ${env} and removing what it created…`;
       if (active === "rollback" || active === "retry_cleanup")
         return `Rolling back the resources created for ${env}…`;
       if (isStopPending(op))
@@ -3268,8 +3465,15 @@ export function summarize(op: any): string {
       );
     case "failed":
       return `Creating environment "${env}" failed.`;
+    // "Some resources exist" is a claim about this attempt's own artifacts, so
+    // it is made from the ledger rather than from the state name. A setup that
+    // reused an existing App Registration and Service Principal created nothing
+    // to clean up, and saying otherwise sends the customer auditing resources
+    // that were already theirs.
     case "failed_partial":
-      return `Creating environment "${env}" failed partway through — some resources exist.`;
+      return hasSurvivingCreatedArtifacts(op) ?
+          `Creating environment "${env}" failed partway through — some resources exist.`
+        : `Creating environment "${env}" failed partway through.`;
     case "cancelled": {
       const command = latestCommand(op);
       if (command && CLEANUP_COMMAND_KINDS.includes(command.kind))
