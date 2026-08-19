@@ -18,12 +18,12 @@ The proposed [Radius Canvas test architecture and plan](https://github.com/radiu
 | 0–4   | Complete      | Compatibility and coverage records; runtime, server, page, and browser seams; 40 owned routes with no legacy fallback; importable browser TypeScript |
 | 5     | Complete      | Permanent runtime integration, HTTP integration, and built-extension artifact suites run in the pull-request gates                                   |
 | 6     | Complete      | PR #411 added the real Chromium browser-component, critical-journey, accessibility, and keyboard gates plus the production loopback-server harness   |
-| 7     | Not delivered | No approved visual baselines or scheduled reliability matrix; failure screenshots are diagnostics only                                               |
+| 7     | Complete      | PR #431 added 15 reviewed Ubuntu Playwright PNG baselines, pull-request visual gating, retry-only JSON reporting, and the weekly/manual P2-B matrix  |
 | 8     | Not delivered | No supported-host installation, discovery, panel-lifecycle, reopen, or reconnect qualification                                                       |
 
-The delivered Phase 6 scope is the browser-component suite plus the Playwright critical-journey, accessibility, and keyboard gates. A separate browser-functional directory is not a current required gate. Do not create or require absent Phase 7 visual or Phase 8 host suites, and do not describe loopback HTTP as real-host coverage.
+The delivered Phase 6 scope is the browser-component suite plus the Playwright critical-journey, accessibility, and keyboard gates. Phase 7 adds reviewed visual coverage and scheduled reliability without changing the Phase 6 loopback harness into real-host coverage. A separate browser-functional directory is not a current required gate. Only Phase 8 real-host qualification remains pending; do not claim installation, discovery, panel-lifecycle, reopen, or reconnect automation exists.
 
-After each remaining automation phase completes, refresh this skill in a separate signed and signed-off pull request so its available suites and required gates never lag implementation. Base the refresh on the phase branch when the delivery is still stacked and unmerged, or on the newly updated `main` after merge.
+After Phase 8 completes, refresh this skill in another separate signed and signed-off pull request so its available suites and required gates never lag implementation. Base the refresh on the Phase 8 branch when the delivery is still stacked and unmerged, or on the newly updated `main` after merge.
 
 ## Required workflow
 
@@ -91,9 +91,11 @@ After each remaining automation phase completes, refresh this skill in a separat
 | Built-extension smoke                         | `packages/adapter-canvas/test/integration/artifact/` and `vitest.artifact.config.ts`; real built artifact in an isolated subprocess with an SDK registration stub | Run `pnpm run build` immediately before `pnpm run test:integration:artifact`; `build` job          |
 | Browser component                             | `packages/adapter-canvas/test/component/` and `vitest.component.config.ts`; Vitest Browser Mode with Playwright Chromium, Testing Library, and `user-event`       | `pnpm run test:component`; `canvas-chromium` job                                                   |
 | Critical journey, accessibility, and keyboard | `packages/adapter-canvas/test/e2e/canvas-chromium.test.ts`, support harness, and `playwright.config.ts`; Playwright and `@axe-core/playwright`                    | `pnpm run test:chromium`; `canvas-chromium` job                                                    |
+| Reviewed visual baselines                     | `packages/adapter-canvas/test/visual/`, 15 canonical PNGs, `phase-7-traceability.md`, and `playwright.visual.config.ts`                                           | `pnpm run test:visual`; `canvas-chromium` pull-request job                                         |
+| Extended reliability                          | Focused suites selected by `test:reliability` in `packages/adapter-canvas/package.json`; `.github/workflows/canvas-reliability.yml`                               | `pnpm run test:reliability`; weekly/manual Ubuntu, Windows, and macOS matrix                       |
 | Windows process integration                   | `packages/adapter-canvas/src/gh.windows.test.ts`                                                                                                                  | `pnpm run test:integration:windows-process`; `windows-process-integration` job on `windows-latest` |
 
-The regular Canvas Vitest config includes collocated tests, coverage-summary checks, Chromium harness unit tests, runtime integration, and HTTP integration with a 15-second timeout. Core and shared-adapter unit configs use Vitest's default 5-second timeout. The artifact config uses 30 seconds, the browser-component config uses 10 seconds, and Playwright uses 30 seconds per case. No separate browser-functional gate is required by current CI. Do not invent a visual, scheduled-reliability, or host directory until its phase delivers and wires one into a script and CI.
+The regular Canvas Vitest config includes collocated tests, coverage-summary checks, Chromium harness unit tests, runtime integration, and HTTP integration with a 15-second timeout. Core and shared-adapter unit configs use Vitest's default 5-second timeout. The artifact config uses 30 seconds, the browser-component config uses 10 seconds, and both Playwright configs use 30 seconds per case and one worker. No separate browser-functional gate is required by current CI. Do not invent a Phase 8 host directory until that phase delivers and wires one into a script and CI.
 
 ### Chromium harness contract
 
@@ -105,6 +107,20 @@ The regular Canvas Vitest config includes collocated tests, coverage-summary che
 - Use the packaged local React, React DOM, React Flow, and dagre dependencies. Do not add CDN mirrors, network interception that disguises an external dependency, fake React, or a test-only asset loader.
 - Global setup establishes credential isolation, warms the real server-module compilation, and prepares the Windows shim when needed. Global teardown sweeps the suite temporary root.
 - Each fixture must close the page, stop and deregister its server, wait for active tasks and identity probes, reset shared state, restore environment variables, and remove its workspace. Cleanup failures are aggregated and reported; they are never swallowed.
+
+### Visual baseline contract
+
+- `packages/adapter-canvas/test/visual/canvas-visual.test.ts` owns the 15 canonical Ubuntu PNG baselines: VI-01 has 2, VI-02 has 1, VI-03 has 2, VI-04 has 2, VI-05 has 2, VI-06 has 4, and VI-07 has 2.
+- Keep the suite deterministic: fixed headless Chromium, 1440 by 1000 viewport, device scale factor 1, reduced motion, bundled Inter variable font, explicit host theme tokens, disabled animation, transition, and scroll timing, hidden carets, one worker, controlled fixture data, blocked service workers, and loopback-only network access.
+- Native `toHaveScreenshot` comparison uses CSS scale, disabled animations, hidden carets, and a maximum differing-pixel ratio of 0.01. The visual project has one diagnostic retry.
+- When a change affects a state in the selected visual inventory, update or add its baseline in the same pull request. State a clear product reason for every PNG change and require human review of the image; never approve a regenerated baseline from numeric results alone.
+- `pnpm run test:visual` is a pull-request gate. The weekly/manual Ubuntu stability job runs `pnpm run test:visual:stability`, which executes every baseline twice with `--repeat-each=2`; Windows and macOS do not own raster baselines.
+
+### Scheduled reliability contract
+
+- `.github/workflows/canvas-reliability.yml` runs `pnpm run test:reliability` weekly and by manual dispatch on Ubuntu, Windows, and macOS with matrix fail-fast disabled. Windows additionally runs `pnpm run test:integration:windows-process`.
+- The selected P2-B suites cover empty or partial data, expired caches, repeated polling, cancellation races and late callbacks, timeouts, multiple instances, cleanup, GitHub authentication command behavior, and native Windows and macOS path behavior. Maintain the package script and `packages/adapter-canvas/test/visual/phase-7-traceability.md` together when this inventory changes.
+- Reliability tests reuse focused Vitest suites and the deterministic harness; do not duplicate them in a second harness or describe this matrix as Phase 8 real-host qualification.
 
 ### Test design and placement
 
@@ -122,11 +138,13 @@ The regular Canvas Vitest config includes collocated tests, coverage-summary che
 
 ### Retry and diagnostic policy
 
-Vitest layers do not configure retries. In Playwright, `@safety` cases run in the `canvas-safety` project with zero retries; all other current Chromium cases run in the `canvas` project with one diagnostic retry. Safety, destructive, branch-selection, path-confinement, and redaction coverage must never pass through a retry.
+Vitest layers do not configure retries. In Chromium Playwright, `@safety` cases run in the `canvas-safety` project with zero retries; the remaining `canvas` cases have one diagnostic retry. The visual `canvas-visual` project also has one diagnostic retry. Safety, destructive, branch-selection, path-confinement, and redaction coverage must never pass through a retry.
 
-The Playwright list reporter and HTML result classify a retry-only pass as flaky, so the original failure remains visible in the run output. The workflow uploads `test-results` and `playwright-report` only when the final Chromium job fails; a retry-only passing CI job therefore remains visible in the job log but does not receive an uploaded artifact. Report every retry-only pass as a flake and investigate it rather than rerunning or summarizing the gate as clean.
+Both Playwright configs use `packages/adapter-canvas/test/e2e/support/retry-only-reporter.ts`. It writes `test-results/chromium-retry-only-passes.json` or `test-results/visual-retry-only-passes.json` even when the list is empty and prints the retry-only count. The list and HTML reporters classify a retry-only pass as flaky, preserving the first failure in the result.
 
-Failure traces use `retain-on-failure`, screenshots use `only-on-failure`, video is off, and the HTML report never opens automatically. These diagnostics are not Phase 7 visual baselines.
+The pull-request `canvas-chromium` job uploads `test-results`, `playwright-report`, and `playwright-visual-report` as the `canvas-chromium-traces` artifact under `if: always()`, including retry-only JSON when the primary tests pass. Missing files are ignored and retention is 14 days. The scheduled visual job likewise uploads `test-results` and `playwright-visual-report` as `canvas-visual-stability` under `if: always()`, requires files to exist, and retains them for 14 days. Report every non-empty retry-only result as a flake and investigate it rather than rerunning or summarizing the gate as clean.
+
+Failure traces use `retain-on-failure`, diagnostic screenshots use `only-on-failure`, video is off, and HTML reports never open automatically. These diagnostics are distinct from the reviewed Phase 7 PNG baselines.
 
 ## Required test level by change
 
@@ -140,7 +158,7 @@ Failure traces use `retain-on-failure`, screenshots use `only-on-failure`, video
 | Supported multi-page or browser-and-server workflow already represented in Phase 6                | Critical journey in the real Chromium harness                                                                                            |
 | Accessibility or keyboard behavior in a represented material state                                | Real Chromium keyboard assertions and `@axe-core/playwright` checks                                                                      |
 | Windows command resolution, quoting, or argv behavior                                             | Windows process integration on a real Windows runner                                                                                     |
-| Stable visual behavior                                                                            | No automated gate exists yet; do not create or approve a baseline outside Phase 7                                                        |
+| State represented in the Phase 7 visual inventory                                                 | Reviewed `toHaveScreenshot` baseline in the visual suite, with a stated product reason and human PNG review                              |
 | Real host installation, discovery, or panel lifecycle                                             | No automated gate exists yet; loopback and emulated contracts must not be reported as host coverage                                      |
 
 Choose the cheapest faithful layer, but do not stop at unit tests when the changed contract crosses a delivered boundary. Higher layers complement unit tests and never excuse missing focused unit coverage. If the only faithful layer is not delivered, add the strongest honest evidence available and state the residual gap without inventing a suite.
@@ -181,6 +199,7 @@ The current Chromium job additionally requires:
 pnpm exec playwright install --with-deps chromium
 pnpm run test:component
 pnpm run test:chromium
+pnpm run test:visual
 ```
 
 The separate Windows job requires:
@@ -196,4 +215,12 @@ pnpm run test:integration:runtime
 pnpm run test:integration:http
 ```
 
-Do not require absent Phase 7 visual or scheduled-reliability commands or Phase 8 host commands. Before finishing, confirm all affected delivered layers ran, architecture and safety contracts remain intact, coverage floors did not regress, retry-only Chromium passes are reported as flakes, and every acquired resource is cleaned up.
+The weekly/manual reliability workflow additionally requires:
+
+```text
+pnpm run test:reliability
+pnpm run test:integration:windows-process  # Windows only
+pnpm run test:visual:stability             # Ubuntu visual-stability job
+```
+
+Do not require absent Phase 8 host commands. Before finishing, confirm all affected delivered layers ran, architecture and safety contracts remain intact, coverage floors did not regress, retry-only Chromium and visual passes are reported as flakes, reviewed PNG changes have a product reason and human approval, and every acquired resource is cleaned up.
