@@ -94,8 +94,14 @@ describe("createGeneratorVersionReader", () => {
   const [installed] = generatorVersionCandidates(MODULE_DIR);
 
   it("resolves this build's own manifest version", () => {
-    expect(createGeneratorVersionReader()()).toBe(resolveGeneratorVersion());
-    expect(createGeneratorVersionReader()()).toBe("0.0.0");
+    // Not asserted against a literal: Changesets owns plugins/radius/package.json
+    // and bumps it on release, so pinning the number here would fail on the
+    // first one. The behavior under test is that the reader agrees with a direct
+    // resolve and returns something usable.
+    const version = createGeneratorVersionReader()();
+
+    expect(version).toBe(resolveGeneratorVersion());
+    expect(version).toMatch(/^\d+\.\d+\.\d+/u);
   });
 
   it("reads the manifest once and reuses the answer", () => {

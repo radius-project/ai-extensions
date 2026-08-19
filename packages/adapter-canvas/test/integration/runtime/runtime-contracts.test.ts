@@ -367,9 +367,9 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     expect(denied?.permissionDecisionReason).toContain("out of date");
     expect(denied?.additionalContext).toContain("radius_generate_app");
 
-    // The skill regenerates and rewrites the origin record against the branch's current commit.
-    // The skill regenerates and rewrites the origin record against the branch's current commit,
-    // so the worktree now reports no source change beyond the model itself.
+    // The skill regenerates and rewrites the origin record against the branch's
+    // current commit, so the worktree now reports no source change beyond the
+    // app model itself.
     harness.deps.appModel.fetchWorkspaceFile = async () =>
       origin("b".repeat(40));
     harness.deps.appModel.workspaceSourceChangedSince = async () => false;

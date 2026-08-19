@@ -12,11 +12,14 @@
 // what later lets the canvas treat the file as known-valid without recompiling
 // it on every open.
 //
-// The normalization and hash below MUST stay byte-compatible with
-// packages/core/src/modeling/app-origin.ts (hashAppBicep). They are duplicated
-// rather than imported because this script ships inside the installed plugin,
-// where the workspace packages do not exist; a collocated contract test asserts
-// the two implementations agree.
+// The normalization and hash below MUST stay byte-compatible with the
+// extension's own copies: normalizeAppBicep in
+// packages/core/src/modeling/app-origin.ts, and hashAppBicep in
+// packages/adapter-canvas/src/app-bicep-hash.ts. (The hash lives in the adapter
+// because core is compiled into the browser bundle and cannot import
+// node:crypto.) They are duplicated here rather than imported because this
+// script ships inside the installed plugin, where the workspace packages do not
+// exist; app-origin-writer.test.ts asserts the two implementations agree.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
