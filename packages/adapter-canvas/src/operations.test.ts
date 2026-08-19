@@ -3314,11 +3314,7 @@ describe("rollback eligibility", () => {
     expect(
       projectOperationActions(succeeded).map((entry) => entry.id)
     ).not.toContain("rollback");
-    expect(projectActionGuidance(succeeded)).toContainEqual({
-      code: "rollback-environment-verified",
-      message:
-        "Credential verification succeeded, so this environment is finished setup. Remove it from the environment list with Delete Environment."
-    });
+    expect(projectActionGuidance(succeeded)).toEqual([]);
   });
 
   it("offers the rollback retry, not a second first rollback, once cleanup ran", () => {

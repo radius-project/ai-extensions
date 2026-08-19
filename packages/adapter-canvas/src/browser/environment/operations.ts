@@ -1311,7 +1311,13 @@ export function initializeEnvironmentOperations(
   function renderCommandGuidance(op: OperationRecord | null): boolean {
     const list = dom.byId(PROGRESS_IDS.commandGuidance);
     if (!list) return false;
-    const notes = op?.guidance ?? [];
+    const notes =
+      (
+        op?.terminalState === "succeeded" ||
+        op?.terminalState === "succeeded_with_warnings"
+      ) ?
+        []
+      : (op?.guidance ?? []);
     if (notes.length === 0) {
       setChildren(dom, list, []);
       list.style.display = "none";
@@ -1346,7 +1352,13 @@ export function initializeEnvironmentOperations(
       dismiss.setAttribute("type", "button");
       dismiss.id = "env-progress-command-dismiss";
       dismiss.className = COMMAND_BUTTON_CLASS;
-      dismiss.textContent = "Keep resources and dismiss";
+      dismiss.textContent =
+        (
+          op.terminalState === "succeeded" ||
+          op.terminalState === "succeeded_with_warnings"
+        ) ?
+          "OK"
+        : "Keep resources and dismiss";
       const listener = (): void => hideProgress();
       dismiss.addEventListener("click", listener);
       commandButtons.push({ element: dismiss, listener });
@@ -1356,7 +1368,8 @@ export function initializeEnvironmentOperations(
       appendDismiss();
       // A record with no actions still has something to say: cleanup running
       // under its own command, or a state whose next move is automatic.
-      const transitionMessage = op?.nextTransition?.message ?? "";
+      const transitionMessage =
+        op?.terminalState === null ? (op?.nextTransition?.message ?? "") : "";
       if (op?.nextTransition) note.textContent = transitionMessage;
       else if (!hasGuidance) note.textContent = "";
       container.style.display =
@@ -1480,6 +1493,8 @@ export function initializeEnvironmentOperations(
     const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
     const target = op.journey?.resumeTarget ?? null;
     const canResume =
+      op.terminalState !== "succeeded" &&
+      op.terminalState !== "succeeded_with_warnings" &&
       op.terminalState !== null &&
       target !== null &&
       target.page === "planned" &&

@@ -2446,6 +2446,8 @@ const CONTINUE_UNAVAILABLE_MESSAGES: Record<string, string> = {
 
 export function projectActionGuidance(op: any): any[] {
   if (!op || !isTerminalState(op.state)) return [];
+  if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
+    return [];
   const notes: Array<{ code: string; message: string }> = [];
   const rollback = canStartRollback(op);
   const forward = canContinueSetup(op).ok || canRetrySetup(op).ok;
