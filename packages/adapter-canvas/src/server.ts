@@ -143,8 +143,6 @@ import {
   shouldStop,
   stopAtBoundary,
   setCommandState,
-  provenOwnedCleanupTargets,
-  unresolvedCleanupTargets,
   workflowRollbackCommitState,
   workflowRollbackTargets,
   INPUT_REQUIRED_STATE,
@@ -214,6 +212,8 @@ import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { isSetupPullRequestMerged } from "./server/services/setup-pull-request.js";
+import { CLEANUP_COMMANDS } from "./server/services/cleanup-commands.js";
+import type { CleanupCommandKind } from "./server/services/cleanup-commands.js";
 import { runWorkflowRollback } from "./server/services/workflow-rollback.js";
 import type { WorkflowRollbackPorts } from "./server/services/workflow-rollback.js";
 import {
@@ -660,6 +660,13 @@ const operationsControlRoutes = createOperationsControlRoutes({
       coordinator.scheduleCommandTask(kind, operation, commandId);
     }
     return true;
+  },
+  // The environments picker reads a repo-scoped cached listing, so an exit that
+  // closes a setup has to drop it here: the browser reloads the table straight
+  // after, and a cached payload would answer with the environment the abandoned
+  // attempt left behind.
+  invalidateEnvironmentListing: (repo) => {
+    envListCache.delete(repo);
   }
 });
 
@@ -4316,31 +4323,6 @@ function createInstanceRequestCoordinator(
     });
   }
 
-  // The confirmed first rollback and the cleanup retry are the same deletion
-  // pass over a different selection, so they share one executor. A rollback
-  // takes the whole proven-owned set; a retry takes only what the previous
-  // attempt proved it created and could not remove. Reused resources, committed
-  // workflow files, an unprovable GitHub environment, and anything discovered by
-  // name are never touched by either.
-  const CLEANUP_COMMANDS = {
-    rollback: {
-      selectTargets: provenOwnedCleanupTargets,
-      cleanedOutcome: "rolled-back",
-      terminalReason: "rollback-complete",
-      incompleteMessage:
-        "Radius removed what it could, but some resources it created are still present."
-    },
-    cleanup_retry: {
-      selectTargets: unresolvedCleanupTargets,
-      cleanedOutcome: "cleaned",
-      terminalReason: "cleanup-complete",
-      incompleteMessage:
-        "Radius removed what it could, but some resources it created still need attention."
-    }
-  } as const;
-
-  type CleanupCommandKind = keyof typeof CLEANUP_COMMANDS;
-
   /**
    * Delete the selected resources this attempt created, before the commit point.
    *
@@ -4516,8 +4498,7 @@ function createInstanceRequestCoordinator(
       finish(op, "cancelled", {
         terminal: {
           reason: command.terminalReason,
-          userMessage:
-            "Radius removed the resources it created during this attempt."
+          userMessage: command.cleanedMessage
         }
       });
     }
@@ -4626,7 +4607,7 @@ function createInstanceRequestCoordinator(
   // control routes are composed once at module init and hand the accepted
   // command back to the instance that received the request.
   const scheduleCommandTask = (
-    kind: "verification_retry" | "cleanup_retry" | "rollback",
+    kind: "verification_retry" | "cleanup_retry" | "rollback" | "exit_setup",
     op: { operationId: string },
     commandId: string
   ): void => {

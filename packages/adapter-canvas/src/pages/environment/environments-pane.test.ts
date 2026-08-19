@@ -159,14 +159,18 @@ describe("environmentsPaneMarkup", () => {
     expect(html).toContain("Needs an action from you");
   });
 
-  it("closes the progress panel with a single acknowledgement below the details", () => {
+  it("closes the progress panel from a bottom row below the details", () => {
     const html = environmentsPaneMarkup(baseOptions);
-    // The acknowledgement is the last thing in the panel, under "Show details",
-    // and it is the only control in that row.
+    // The bottom row is the last thing in the panel, under "Show details". It
+    // holds the server-projected way out — rendered into the empty container —
+    // and the acknowledgement an already-settled outcome closes on.
     expect(html.indexOf('id="env-progress-details"')).toBeLessThan(
       html.indexOf('id="env-progress-actions"')
     );
     expect(html.indexOf('id="env-progress-actions"')).toBeLessThan(
+      html.indexOf('id="env-progress-bottom-buttons"')
+    );
+    expect(html.indexOf('id="env-progress-bottom-buttons"')).toBeLessThan(
       html.indexOf('id="env-progress-dismiss"')
     );
     const actions = html.slice(
@@ -174,8 +178,13 @@ describe("environmentsPaneMarkup", () => {
       html.indexOf('id="env-rollback-modal"')
     );
     expect(actions).toContain(
+      '<div id="env-progress-bottom-buttons" class="env-progress__bottom-buttons"></div>'
+    );
+    expect(actions).toContain(
       'aria-label="Dismiss completed environment setup progress"'
     );
+    // Only the acknowledgement is static: every other control in this row is
+    // whatever the operation record projected.
     expect(actions.match(/<button/g) ?? []).toHaveLength(1);
     expect(actions).not.toContain("<a ");
   });

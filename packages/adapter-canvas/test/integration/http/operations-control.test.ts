@@ -45,6 +45,7 @@ afterEach(async () => {
 
 interface Harness {
   records: Map<string, OperationRecord>;
+  invalidatedListings: string[];
   lock: { conflict: { operationId: string } | null };
   merged: { value: boolean };
   persistError: { value: Error | null };
@@ -61,6 +62,7 @@ function start(): Harness {
   const persistCalls: string[] = [];
   const scheduled: Harness["scheduled"] = [];
   const schedulerAccepts = { value: true };
+  const invalidatedListings: string[] = [];
 
   const persistOperations = () => {
     persistCalls.push("persist");
@@ -80,6 +82,9 @@ function start(): Harness {
         if (!schedulerAccepts.value) return false;
         scheduled.push({ kind, instanceId, commandId });
         return true;
+      },
+      invalidateEnvironmentListing: (repo) => {
+        invalidatedListings.push(repo);
       }
     }),
     // The by-id read is composed too: a client that just issued a command polls
@@ -167,7 +172,8 @@ function start(): Harness {
     persistError,
     persistCalls,
     scheduled,
-    schedulerAccepts
+    schedulerAccepts,
+    invalidatedListings
   };
 }
 
@@ -509,7 +515,8 @@ describe("stop, then continue or roll back, over the socket", () => {
     expect(view.operation.headline.title).toBe("Environment setup stopped");
     expect(view.operation.actions.map((entry) => entry.label)).toEqual([
       "Continue setup",
-      "Roll back created resources"
+      "Roll back created resources",
+      "Exit setup"
     ]);
 
     // 3. Continuing reuses the same operation id and the retained ledger.
@@ -678,7 +685,8 @@ describe("stop, then continue or roll back, over the socket", () => {
     expect(view.operation.terminalState).toBe("cancelled");
     expect(view.operation.actions.map((entry) => entry.id)).toEqual([
       "continue-setup",
-      "rollback"
+      "rollback",
+      "exit-setup"
     ]);
     expect(harness.scheduled).toEqual([]);
   });
@@ -786,7 +794,8 @@ describe("stop, then continue or roll back, over the socket", () => {
     };
     expect(view.operation.actions.map((action) => action.id)).toEqual([
       "retry-verification",
-      "rollback"
+      "rollback",
+      "exit-setup"
     ]);
     const rollback = view.operation.actions.find(
       (action) => action.id === "rollback"
@@ -804,5 +813,206 @@ describe("stop, then continue or roll back, over the socket", () => {
     );
     expect(response.status).toBe(202);
     expect(harness.scheduled.map((entry) => entry.kind)).toEqual(["rollback"]);
+  });
+});
+
+// Leaving a setup behind, end to end over the socket. Both shapes matter: the
+// reported one, where every resource that exists was reused and the panel has
+// to close without deleting anything, and the one where this attempt added a
+// GitHub environment that would otherwise stay in the environment list.
+describe("exiting a setup over the socket", () => {
+  function reusedOnlyFailure(harness: Harness): OperationRecord {
+    const op = seed(harness);
+    recordAzureApp(op, {
+      state: "reused",
+      appId: "app-1",
+      displayName: "radius-deploy"
+    });
+    recordServicePrincipal(op, {
+      state: "reused",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    finish(op, "failed_partial", {
+      failure: {
+        code: "github-environment-failed",
+        message: "GitHub returned 403."
+      }
+    });
+    return op;
+  }
+
+  it("closes a reused-only failure without deleting anything and refreshes the listing", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = reusedOnlyFailure(harness);
+
+    // 1. The headline does not claim resources exist, because none of the ones
+    //    that do belong to this attempt.
+    const polled = await fetch(
+      `${entry.baseUrl}/api/operations/${op.operationId}`
+    );
+    const view = (await polled.json()) as {
+      operation: {
+        summary: string;
+        actions: Array<{
+          id: string;
+          label: string;
+          placement: string;
+          requiresConfirmation: boolean;
+          path: string;
+          preview: { removes: unknown[]; keeps: Array<{ target: string }> };
+        }>;
+      };
+    };
+    expect(view.operation.summary).toBe(
+      'Creating environment "dev" failed partway through.'
+    );
+    const exit = view.operation.actions.find(
+      (action) => action.id === "exit-setup"
+    );
+    expect(exit).toMatchObject({
+      label: "Exit setup",
+      placement: "bottom",
+      // Nothing is deleted, so nothing is confirmed.
+      requiresConfirmation: false,
+      path: `/api/operations/${op.operationId}/exit`
+    });
+    expect(exit?.preview.removes).toEqual([]);
+    expect(exit?.preview.keeps.map((keep) => keep.target)).toContain(
+      "radius-deploy (app-1)"
+    );
+
+    // 2. Exiting answers immediately: there is no deletion to schedule.
+    const response = await post(entry.baseUrl, exit!.path);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      code: string;
+      removed: boolean;
+      operation: { headline: { code: string }; actions: unknown[] };
+    };
+    expect(body.code).toBe("setup-exited");
+    expect(body.removed).toBe(false);
+    expect(body.operation.headline.code).toBe("setup-exited");
+    expect(body.operation.actions).toEqual([]);
+    expect(harness.scheduled).toEqual([]);
+    expect(harness.invalidatedListings).toEqual(["contoso/store"]);
+
+    // 3. The decision survives the poll the browser makes next, so a reload
+    //    cannot put the abandoned attempt back on the page.
+    const after = await fetch(
+      `${entry.baseUrl}/api/operations/${op.operationId}`
+    );
+    const afterView = (await after.json()) as {
+      operation: {
+        headline: { code: string; title: string };
+        actions: unknown[];
+        guidance: unknown[];
+      };
+    };
+    expect(afterView.operation.headline).toMatchObject({
+      code: "setup-exited",
+      title: "Environment setup closed"
+    });
+    expect(afterView.operation.actions).toEqual([]);
+    expect(afterView.operation.guidance).toEqual([]);
+
+    // 4. A repeated request is refused rather than closing the record twice.
+    const repeat = await post(entry.baseUrl, exit!.path);
+    expect(repeat.status).toBe(409);
+    expect((await repeat.json()) as { code: string }).toMatchObject({
+      code: "setup-already-exited"
+    });
+  });
+
+  it("confirms and schedules the disposal when this attempt created the environment", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = stoppedSetup(harness);
+
+    const polled = await fetch(
+      `${entry.baseUrl}/api/operations/${op.operationId}`
+    );
+    const view = (await polled.json()) as {
+      operation: {
+        summary: string;
+        actions: Array<{
+          id: string;
+          placement: string;
+          requiresConfirmation: boolean;
+          confirmLabel: string;
+          cancelLabel: string;
+          path: string;
+          preview: { removes: Array<{ kind: string; target: string }> };
+        }>;
+      };
+    };
+    expect(view.operation.summary).toBe(
+      'Creating environment "dev" was stopped.'
+    );
+    const exit = view.operation.actions.find(
+      (action) => action.id === "exit-setup"
+    );
+    // A deletion is confirmed against the server's own preview before it runs.
+    expect(exit).toMatchObject({
+      placement: "bottom",
+      requiresConfirmation: true,
+      confirmLabel: "Exit setup",
+      cancelLabel: "Keep this setup"
+    });
+    expect(exit?.preview.removes).toContainEqual({
+      kind: "github_environment",
+      target: "contoso/store:dev"
+    });
+
+    const response = await post(entry.baseUrl, exit!.path);
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as {
+      commandId: string;
+      operation: { state: string };
+    };
+    expect(harness.scheduled).toEqual([
+      {
+        kind: "exit_setup",
+        instanceId: "panel-a",
+        commandId: body.commandId
+      }
+    ]);
+    // The listing is dropped by the deletion pass, which is the only thing that
+    // can prove the environment is gone.
+    expect(harness.invalidatedListings).toEqual([]);
+    expect(body.operation.state).toBe("running");
+
+    // A second press while the pass is in flight resolves to the same command.
+    const repeat = await post(entry.baseUrl, exit!.path);
+    expect(repeat.status).toBe(202);
+    expect(
+      (await repeat.json()) as { duplicate: boolean; commandId: string }
+    ).toMatchObject({ duplicate: true, commandId: body.commandId });
+    expect(harness.scheduled).toHaveLength(1);
+  });
+
+  it("puts the customer back on the decision when no runner accepts the exit", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = stoppedSetup(harness);
+    harness.schedulerAccepts.value = false;
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/exit`
+    );
+
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as {
+      code: string;
+      operation: { state: string; actions: Array<{ id: string }> };
+    };
+    expect(body.code).toBe("operation-command-unscheduled");
+    expect(body.operation.state).toBe("cancelled");
+    expect(body.operation.actions.map((action) => action.id)).toContain(
+      "exit-setup"
+    );
+    expect(harness.invalidatedListings).toEqual([]);
   });
 });

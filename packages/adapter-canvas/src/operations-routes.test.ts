@@ -908,6 +908,15 @@ describe("POST /api/operations/{id}/retry/*", () => {
         classification: "workflow-installation-pending",
         requiresMergedPullRequest: true,
         pullRequestUrl: "https://github.com/contoso/store/pull/7"
+      }),
+      // Leaving the handoff behind is always on offer, and it sits below the
+      // details rather than beside the retry.
+      expect.objectContaining({
+        id: "exit-setup",
+        kind: "exit_setup",
+        placement: "bottom",
+        method: "POST",
+        path: `/api/operations/${op.operationId}/exit`
       })
     ]);
     operations.clear();

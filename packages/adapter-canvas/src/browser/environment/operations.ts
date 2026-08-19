@@ -52,6 +52,7 @@ export const PROGRESS_IDS = {
   steps: "env-progress-steps",
   details: "env-progress-details",
   actions: "env-progress-actions",
+  bottomButtons: "env-progress-bottom-buttons",
   dismiss: "env-progress-dismiss",
   failureCard: "env-progress-failure",
   failureTitle: "env-progress-failure-title",
@@ -141,9 +142,13 @@ const DEFAULT_ROLLBACK_TITLE = "Roll back resources created by this setup?";
 const DEFAULT_ROLLBACK_CONFIRM = "Roll back resources";
 const DEFAULT_ROLLBACK_CANCEL = "Keep resources";
 const CANCELLED_ACTIVITY_MESSAGE = "Environment setup cancelled.";
+// Commands that delete. Accepting one supersedes the failure the landing is
+// still reporting, so the banner comes down and the environment table is
+// refreshed as soon as the server takes the request.
 const CLEANING_COMMAND_KINDS: ReadonlySet<string> = new Set([
   "rollback",
-  "retry_cleanup"
+  "retry_cleanup",
+  "exit_setup"
 ]);
 
 // A command's own sentence. Stop, rollback, and the two forward continuations
@@ -154,7 +159,8 @@ const COMMAND_STATUS_TEXT: Readonly<Record<string, string>> = {
   retry_cleanup:
     "Rollback retry started. Removing the resources still present…",
   continue_setup: "Continuing setup…",
-  retry_setup: "Retrying setup…"
+  retry_setup: "Retrying setup…",
+  exit_setup: "Closing this setup and removing the resources Radius created…"
 };
 
 const STAGE_GLYPH: Readonly<Record<string, string>> = {
@@ -179,6 +185,11 @@ const TERMINAL_STATES: ReadonlySet<string> = new Set([
 // `cancelled` like a plain stop, but the customer already got the outcome they
 // asked for, so it is acknowledged rather than decided on again.
 const ROLLBACK_COMPLETE_CODE = "rollback-complete";
+
+// The server's own name for a setup the customer left. The record keeps the
+// verdict it ended with, so this code — not the terminal state — is what says
+// the customer is done with it and the panel has nothing left to report.
+const SETUP_EXITED_CODE = "setup-exited";
 
 // Only a non-terminal record is doing work, and only work in progress may
 // animate. A finished operation that keeps spinning claims Radius is still
@@ -247,12 +258,19 @@ export interface OperationAction {
   readonly path: string;
   readonly pending: boolean;
   readonly tone: string;
+  // Where the panel puts the control. The command row holds the decisions about
+  // the setup itself; the bottom row, below the details disclosure, holds the
+  // one that leaves it. An unrecognised placement falls back to the row, so a
+  // future action can never disappear from the panel.
+  readonly placement: OperationActionPlacement;
   readonly requiresConfirmation: boolean;
   readonly confirmTitle: string;
   readonly confirmLabel: string;
   readonly cancelLabel: string;
   readonly preview: OperationActionPreview | null;
 }
+
+export type OperationActionPlacement = "row" | "bottom";
 
 /** A resource named in a destructive command's server-built preview. */
 export interface OperationPreviewEntry {
@@ -521,6 +539,7 @@ function parseActions(value: unknown): OperationAction[] {
       path,
       pending: readBoolean(entry, "pending"),
       tone: readString(entry, "tone"),
+      placement: readString(entry, "placement") === "bottom" ? "bottom" : "row",
       requiresConfirmation: readBoolean(entry, "requiresConfirmation"),
       confirmTitle: readString(entry, "confirmTitle"),
       confirmLabel: readString(entry, "confirmLabel"),
@@ -788,10 +807,26 @@ function isCompletedRollback(op: OperationRecord | null): boolean {
 /**
  * An outcome the customer only has to acknowledge. There is no resource
  * decision left, so the panel closes on a single OK instead of offering the
- * keep-or-dismiss choice a stopped or failed attempt still needs.
+ * exit the customer of a stopped or failed attempt still needs.
  */
 function isAcknowledgedOutcome(op: OperationRecord | null): boolean {
   return isSuccessfulSetup(op) || isCompletedRollback(op);
+}
+
+/**
+ * A setup the customer closed through the exit command.
+ *
+ * The server removed what it could prove it created and recorded the decision
+ * durably, so the panel stops rendering the record entirely: re-showing it after
+ * a reload would put an abandoned attempt back on the page the customer just
+ * cleared.
+ */
+function isExitedSetup(op: OperationRecord | null): boolean {
+  return (
+    op !== null &&
+    op.headline !== null &&
+    op.headline.code === SETUP_EXITED_CODE
+  );
 }
 
 function operationsByRepoUrl(repo: string): string {
@@ -1386,12 +1421,68 @@ export function initializeEnvironmentOperations(
     return true;
   }
 
+  /** Build one server-projected control and track it for the next rebuild. */
+  function createCommandButton(
+    action: OperationAction,
+    record: OperationRecord
+  ): DomInputElement {
+    const element = dom.createElement("button") as DomInputElement;
+    element.setAttribute("type", "button");
+    element.id = `env-progress-command-${action.id}`;
+    element.className = COMMAND_TONE_CLASS[action.tone] ?? COMMAND_BUTTON_CLASS;
+    element.textContent = action.label === "" ? "Continue" : action.label;
+    element.disabled = commandInFlight || action.pending;
+    if (action.requiresConfirmation) {
+      element.setAttribute("aria-haspopup", "dialog");
+    }
+    const listener = (): void => submitCommand(action, record, element);
+    element.addEventListener("click", listener);
+    commandButtons.push({ element, listener });
+    return element;
+  }
+
+  /**
+   * The bottom row, below the details disclosure.
+   *
+   * It holds the way out of the panel — today the server-projected **Exit
+   * setup** — beside the acknowledgement an already-settled outcome closes on.
+   * Leaving is a command Radius acts on, so it is rendered from the record like
+   * every other control rather than being a local dismissal.
+   */
+  function renderBottomActions(op: OperationRecord | null): void {
+    const actionsEl = dom.byId(PROGRESS_IDS.actions);
+    const bottomEl = dom.byId(PROGRESS_IDS.bottomButtons);
+    const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
+    if (bottomEl) bottomEl.replaceChildren();
+    const acknowledged = isAcknowledgedOutcome(op);
+    if (dismissEl) {
+      dismissEl.textContent = acknowledged ? "OK" : "Dismiss";
+      dismissEl.style.display = acknowledged ? "" : "none";
+    }
+    const bottomActions =
+      op === null || acknowledged ?
+        []
+      : op.actions.filter((action) => action.placement === "bottom");
+    if (bottomEl && op !== null) {
+      for (const action of bottomActions) {
+        bottomEl.appendChild(createCommandButton(action, op));
+      }
+    }
+    if (actionsEl) {
+      actionsEl.style.display =
+        acknowledged || bottomActions.length > 0 ? "flex" : "none";
+    }
+  }
+
   function renderCommands(op: OperationRecord | null): void {
     const container = dom.byId(PROGRESS_IDS.commands);
     const buttons = dom.byId(PROGRESS_IDS.commandButtons);
     const note = dom.byId(PROGRESS_IDS.commandNote);
     if (!container || !buttons || !note) return;
     const actions = op?.actions ?? [];
+    const rowActions = actions.filter(
+      (action) => action.placement !== "bottom"
+    );
     if (op !== null && op.operationId !== commandOperationId) {
       commandOperationId = op.operationId;
       setCommandError("");
@@ -1400,25 +1491,9 @@ export function initializeEnvironmentOperations(
     releaseCommandButtons();
     buttons.replaceChildren();
     const hasGuidance = renderCommandGuidance(op);
-    const appendDismiss = (): void => {
-      if (op === null || op.terminalState === null) return;
-      // An acknowledged outcome closes on the panel's own OK button, so it
-      // never also offers a keep-or-dismiss choice about resources that are
-      // either wanted or already gone.
-      if (isAcknowledgedOutcome(op)) return;
-      const dismiss = dom.createElement("button") as DomInputElement;
-      dismiss.setAttribute("type", "button");
-      dismiss.id = "env-progress-command-dismiss";
-      dismiss.className = COMMAND_BUTTON_CLASS;
-      dismiss.textContent = "Keep resources and dismiss";
-      const listener = (): void => hideProgress();
-      dismiss.addEventListener("click", listener);
-      commandButtons.push({ element: dismiss, listener });
-      buttons.appendChild(dismiss);
-    };
-    if (op === null || actions.length === 0) {
-      appendDismiss();
-      // A record with no actions still has something to say: cleanup running
+    renderBottomActions(op);
+    if (op === null || rowActions.length === 0) {
+      // A record with no command still has something to say: cleanup running
       // under its own command, or a state whose next move is automatic.
       const transitionMessage =
         op?.terminalState === null ? (op?.nextTransition?.message ?? "") : "";
@@ -1431,30 +1506,16 @@ export function initializeEnvironmentOperations(
       return;
     }
     const record = op;
-    for (const action of actions) {
-      const element = dom.createElement("button") as DomInputElement;
-      element.setAttribute("type", "button");
-      element.id = `env-progress-command-${action.id}`;
-      element.className =
-        COMMAND_TONE_CLASS[action.tone] ?? COMMAND_BUTTON_CLASS;
-      element.textContent = action.label === "" ? "Continue" : action.label;
-      element.disabled = commandInFlight || action.pending;
-      if (action.requiresConfirmation) {
-        element.setAttribute("aria-haspopup", "dialog");
-      }
-      const listener = (): void => submitCommand(action, record, element);
-      element.addEventListener("click", listener);
-      commandButtons.push({ element, listener });
-      buttons.appendChild(element);
+    for (const action of rowActions) {
+      buttons.appendChild(createCommandButton(action, record));
     }
-    appendDismiss();
-    const descriptions = actions
+    const descriptions = rowActions
       .map((action) => action.description)
       .filter((description) => description !== "");
     const transition = record.nextTransition?.message ?? "";
     if (transition !== "") descriptions.unshift(transition);
     note.textContent = descriptions.join(" ");
-    if (actions.some((action) => action.kind === "stop" && action.pending)) {
+    if (rowActions.some((action) => action.kind === "stop" && action.pending)) {
       setCommandStatus(STOPPING_MESSAGE);
     }
     container.style.display = "";
@@ -1477,7 +1538,10 @@ export function initializeEnvironmentOperations(
   }
 
   function renderProgress(op: OperationRecord | null): void {
-    if (op === null) {
+    // An exited setup renders as nothing at all. The record survives for the
+    // history, but the customer closed it, and a poll or a page reload that put
+    // the panel back would undo the one thing Exit setup promised.
+    if (op === null || isExitedSetup(op)) {
       panel.style.display = "none";
       setPanelActive(false);
       renderFailureCard(null);
@@ -1541,18 +1605,6 @@ export function initializeEnvironmentOperations(
     if (detailsEl) {
       detailsEl.style.display = op.steps.length > 0 ? "" : "none";
     }
-
-    // The panel narrates one operation; it never navigates away from it. The
-    // planned-graph link used to sit here and sent the customer to a different
-    // page mid-outcome, so the action row now holds the acknowledgement alone.
-    const actionsEl = dom.byId(PROGRESS_IDS.actions);
-    const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
-    const acknowledged = isAcknowledgedOutcome(op);
-    if (dismissEl) {
-      dismissEl.textContent = acknowledged ? "OK" : "Dismiss";
-      dismissEl.style.display = acknowledged ? "" : "none";
-    }
-    if (actionsEl) actionsEl.style.display = acknowledged ? "flex" : "none";
   }
 
   function focusPanel(): void {
@@ -1596,6 +1648,15 @@ export function initializeEnvironmentOperations(
     // here too — applyTerminal is reachable without a preceding render (an
     // expired input prompt resolves straight to its terminal record).
     setPanelActive(false);
+    // A setup the customer exited has no outcome to announce: the panel closes,
+    // the failure banner it replaced comes down, and the table is reloaded
+    // because the server has just finished removing what this attempt created.
+    if (isExitedSetup(op)) {
+      hideProgress();
+      hideErrorBanner();
+      deps.reloadEnvironmentsTable();
+      return;
+    }
     if (deps.resetSubmitButton) deps.resetSubmitButton();
     else {
       const btn = dom.inputById(DEPLOY_BUTTON_ID);

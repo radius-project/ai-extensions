@@ -70,6 +70,7 @@ describe("environmentPage", () => {
       "env-progress-steps",
       "env-progress-failure",
       "env-progress-dismiss",
+      "env-progress-bottom-buttons",
       "env-progress-state",
       "env-progress-commands",
       "env-progress-command-buttons",

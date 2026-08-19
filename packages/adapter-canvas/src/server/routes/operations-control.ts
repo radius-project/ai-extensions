@@ -10,6 +10,7 @@ import {
   applyStopRequest,
   beginRetryAttempt,
   canContinueSetup,
+  canExitSetup,
   canRetryCleanup,
   canRetrySetup,
   canRetryVerification,
@@ -22,6 +23,8 @@ import {
   setStageState,
   snapshotRetryState,
   toClientView,
+  EXIT_COMMAND_KIND,
+  EXIT_COMMAND_OUTCOME,
   STAGE_VERIFY,
   type OperationAttemptKind,
   type OperationCommandKind,
@@ -58,6 +61,7 @@ import type { OperationRecord } from "./operations-status.js";
 export const STOP_OPERATION_ROUTE = "/api/operations/:operationId/stop";
 export const CONTINUE_OPERATION_ROUTE = "/api/operations/:operationId/continue";
 export const ROLLBACK_OPERATION_ROUTE = "/api/operations/:operationId/rollback";
+export const EXIT_OPERATION_ROUTE = "/api/operations/:operationId/exit";
 export const RETRY_OPERATION_ROUTE =
   "/api/operations/:operationId/retry/:retryKind";
 
@@ -67,15 +71,23 @@ type OperationRetryKind = OperationAttemptKind;
 
 // The command a request is asking for, independent of which route carried it.
 // `continue` and `rollback` are first-choice commands after a stop; `retry/*`
-// repeats one that already ran.
-type OperationCommandName = OperationRetryKind | "continue" | "rollback";
+// repeats one that already ran; `exit` ends the customer's involvement with the
+// attempt altogether.
+type OperationCommandName =
+  OperationRetryKind | "continue" | "rollback" | "exit";
 
 // Which server-owned runner the accepted command is handed to. The first
 // rollback removes every proven-owned pre-commit artifact rather than the
 // unresolved subset a cleanup retry repeats, so it names its own runner instead
-// of passing a flag to the cleanup one.
+// of passing a flag to the cleanup one. `exit_setup` runs the same deletion pass
+// over the same proven-owned selection, and differs in what it reports and in
+// the record it closes.
 export type OperationScheduleKind =
-  "setup_continuation" | "verification_retry" | "cleanup_retry" | "rollback";
+  | "setup_continuation"
+  | "verification_retry"
+  | "cleanup_retry"
+  | "rollback"
+  | "exit_setup";
 
 type RetryEligibility = {
   ok: boolean;
@@ -83,6 +95,7 @@ type RetryEligibility = {
   detail?: string;
   resumeFrom?: string;
   target?: string;
+  targets?: readonly unknown[];
   classification?: string;
   requiresMergedPullRequest?: boolean;
   pullRequestUrl?: string | null;
@@ -122,6 +135,12 @@ export interface OperationsControlDependencies {
     operation: OperationRecord;
     commandId: string;
   }): boolean;
+  // Drops the repository's cached environment listing. An exit that closes a
+  // setup without deleting anything still has to make the picker read GitHub
+  // again: the browser cannot invalidate a server cache, and a listing answered
+  // from the cached payload would keep showing the environment this setup left
+  // behind under the status its last attempt wrote.
+  invalidateEnvironmentListing(repo: string): void;
 }
 
 // Typed views of the model's `any`-shaped exports, pinned once here so the
@@ -176,6 +195,10 @@ interface CommandSpec {
   // Checked after eligibility, for a command that needs proof from outside the
   // saved record. Resolves false when it has already answered the request.
   precondition?: (request: CommandRequest) => Promise<boolean>;
+  // A command with no work to hand a runner finishes inside the request that
+  // asked for it. Resolves true when it has already answered, so the reopen and
+  // schedule below never run for it.
+  settleWithoutWork?: (request: CommandRequest) => Promise<boolean>;
   scheduleKind: OperationScheduleKind;
   // A retry that no runner accepted is closed with a failure, preserving the
   // established contract. A first-choice command restores the terminal decision
@@ -232,7 +255,10 @@ export function retryRefusalMessage(kind: string, code: string): string {
     "cleanup-retry-nothing-unresolved":
       "Every resource Radius proved it created has already been removed.",
     "cleanup-retry-ledger-missing":
-      "Radius has no record of resources it created for this setup."
+      "Radius has no record of resources it created for this setup.",
+    "exit-environment-ready":
+      "This environment finished setup, so there is nothing to exit. Remove it with Delete Environment instead.",
+    "setup-already-exited": "Radius already closed this setup."
   };
   return (
     messages[code] ||
@@ -436,12 +462,70 @@ const RETRY_PERSIST_FAILURE = {
     "Radius could not save the retry request, so no work was started. Try again."
 } as const;
 
-// The whole difference between the five commands. The two first-choice ones a
+/**
+ * Close a setup that has nothing left to delete.
+ *
+ * Reached only when the ledger proves this attempt owns no removable artifact —
+ * a reused App Registration and Service Principal, or a set a previous rollback
+ * already removed. There is no deletion to schedule, so the exit is recorded as
+ * a finished command and the record is durable before the caller hears it was
+ * accepted. The record keeps its own terminal verdict: the customer left the
+ * setup, which is a different fact from how the setup ended.
+ */
+async function closeExitedSetup({
+  context,
+  dependencies,
+  operationId,
+  operation,
+  eligibility
+}: CommandRequest): Promise<boolean> {
+  if ((eligibility.targets?.length ?? 0) > 0) return false;
+  const snapshot: unknown = snapshotRetryState(operation);
+  const accepted = acceptOperationCommand(operation, {
+    kind: EXIT_COMMAND_KIND,
+    attempt: 0,
+    target: eligibility.target ?? "exit"
+  });
+  const commandId = accepted.command.commandId;
+  setCommandState(operation, commandId, "finished", EXIT_COMMAND_OUTCOME);
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    // Nothing was removed and nothing was saved, so the record goes back to the
+    // decision the customer is still looking at.
+    rollbackRetryAttempt(operation, snapshot);
+    sendJson(context, 500, {
+      error:
+        "Radius could not save the request to exit setup, so the setup is still open. Try again.",
+      code: "operation-exit-persist-failed",
+      operationId,
+      detail: errorMessage(error)
+    });
+    return true;
+  }
+  // The listing the picker reads is repo-scoped and cached, so the refresh the
+  // browser performs next has to reach GitHub rather than the payload written
+  // while this setup was still running.
+  dependencies.invalidateEnvironmentListing(String(operation.repo ?? ""));
+  sendJson(context, 200, {
+    operationId,
+    code: "setup-exited",
+    statusUrl: statusUrlFor(operationId),
+    commandId,
+    removed: false,
+    operation: clientView(operation)
+  });
+  return true;
+}
+
+// The whole difference between the six commands. The two first-choice ones a
 // stopped operation offers come first; the three retries repeat a command that
 // already ran, and differ only in what they may repeat: a setup continues from
 // the first step its artifact ledger does not already prove finished, a
 // verification repeats the exact workflow identity Radius saved, and a cleanup
 // removes only the resources Radius proved it created and could not delete.
+// Exit ends the attempt: it disposes of the same proven-owned set a rollback
+// would, and closes the record whether or not there was anything to remove.
 const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
   continue: {
     name: "continue",
@@ -499,6 +583,26 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     scheduleKind: "cleanup_retry",
     schedulerMiss: "close-operation",
     ...RETRY_PERSIST_FAILURE
+  },
+  exit: {
+    name: "exit",
+    workLabel: "exit",
+    commandKind: EXIT_COMMAND_KIND,
+    // Exit deletes through the cleanup ledger, so it advances the same attempt
+    // counter a rollback does and its results select against the same attempt.
+    attemptKind: "cleanup",
+    eligibility: canExitSetup,
+    // A second submission while the disposal is in flight resolves to the
+    // command already running rather than deleting through the ledger twice.
+    activeKinds: [EXIT_COMMAND_KIND],
+    settleWithoutWork: closeExitedSetup,
+    scheduleKind: "exit_setup",
+    // Nothing ran, so the customer is put back in front of the terminal
+    // decision they were looking at instead of a record closed by a miss.
+    schedulerMiss: "restore-terminal",
+    persistFailureCode: "operation-exit-persist-failed",
+    persistFailureMessage:
+      "Radius could not save the request to exit setup, so nothing was removed and the setup is still open. Try again."
   }
 };
 
@@ -696,6 +800,7 @@ async function runCommandRoute(
     eligibility
   };
   if (spec.precondition && !(await spec.precondition(request))) return;
+  if (spec.settleWithoutWork && (await spec.settleWithoutWork(request))) return;
   await runAcceptedCommand(request, spec);
 }
 
@@ -737,6 +842,29 @@ export function handleRollbackOperation(
   );
 }
 
+/**
+ * Leave a setup the customer no longer wants to finish.
+ *
+ * Exit is the panel's way out, and it is a server-owned command rather than a
+ * dismissal: it closes the saved record so the panel stops reporting the
+ * attempt, and it removes the disposable artifacts this attempt created —
+ * chiefly the GitHub environment that would otherwise sit in the environment
+ * list forever. The deletion set is the rollback's proven-owned selection,
+ * re-derived here, so a reused App Registration, a reused Service Principal,
+ * and an environment Radius cannot prove it created are never touched.
+ */
+export function handleExitOperation(
+  context: CanvasRequestContext,
+  dependencies: OperationsControlDependencies
+): Promise<void> {
+  return runCommandRoute(
+    context,
+    dependencies,
+    EXIT_OPERATION_ROUTE,
+    () => COMMANDS.exit
+  );
+}
+
 /** Reopen a closed operation for one allowed retry. */
 export function handleRetryOperation(
   context: CanvasRequestContext,
@@ -771,6 +899,8 @@ export function createOperationsControlRoutes(
       handleContinueOperation(context, dependencies),
     [`POST ${ROLLBACK_OPERATION_ROUTE}`]: (context) =>
       handleRollbackOperation(context, dependencies),
+    [`POST ${EXIT_OPERATION_ROUTE}`]: (context) =>
+      handleExitOperation(context, dependencies),
     [`POST ${RETRY_OPERATION_ROUTE}`]: (context) =>
       handleRetryOperation(context, dependencies)
   };

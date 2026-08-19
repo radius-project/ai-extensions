@@ -5,11 +5,13 @@ import { createRequestContext } from "../request-context.js";
 import {
   createOperationsControlRoutes,
   handleContinueOperation,
+  handleExitOperation,
   handleRetryOperation,
   handleRollbackOperation,
   handleStopOperation,
   retryRefusalMessage,
   CONTINUE_OPERATION_ROUTE,
+  EXIT_OPERATION_ROUTE,
   RETRY_OPERATION_ROUTE,
   ROLLBACK_OPERATION_ROUTE,
   STOP_OPERATION_ROUTE,
@@ -115,6 +117,7 @@ function postContext(
 interface Journal {
   scheduled: Array<{ kind: string; instanceId: string; commandId: string }>;
   persistCalls: number;
+  invalidatedListings: string[];
 }
 
 // The route module calls the pure model directly, so the only doubles a test
@@ -125,7 +128,11 @@ interface Journal {
 function dependencies(
   overrides: Partial<OperationsControlDependencies> = {}
 ): OperationsControlDependencies & { journal: Journal } {
-  const journal: Journal = { scheduled: [], persistCalls: 0 };
+  const journal: Journal = {
+    scheduled: [],
+    persistCalls: 0,
+    invalidatedListings: []
+  };
   const base: OperationsControlDependencies = {
     get: () => {
       throw new Error("get not stubbed");
@@ -141,6 +148,9 @@ function dependencies(
     schedule: ({ kind, instanceId, commandId }) => {
       journal.scheduled.push({ kind, instanceId, commandId });
       return true;
+    },
+    invalidateEnvironmentListing: (repo) => {
+      journal.invalidatedListings.push(repo);
     }
   };
   return Object.assign(base, overrides, { journal });
@@ -207,13 +217,14 @@ function mergeHandoff({
 }
 
 describe("the route registry", () => {
-  it("claims exactly the four declared control routes", () => {
+  it("claims exactly the five declared control routes", () => {
     const registry = createOperationsControlRoutes(dependencies());
     expect(Object.keys(registry).sort()).toEqual(
       [
         routeKey({ method: "POST", path: STOP_OPERATION_ROUTE }),
         routeKey({ method: "POST", path: CONTINUE_OPERATION_ROUTE }),
         routeKey({ method: "POST", path: ROLLBACK_OPERATION_ROUTE }),
+        routeKey({ method: "POST", path: EXIT_OPERATION_ROUTE }),
         routeKey({ method: "POST", path: RETRY_OPERATION_ROUTE })
       ].sort()
     );
@@ -1123,7 +1134,174 @@ describe("POST /api/operations/{id}/rollback", () => {
   });
 });
 
-// The four routes carry different decisions but share one command executor, so
+describe("POST /api/operations/{id}/exit", () => {
+  // The reported scenario: setup reused an App Registration and a Service
+  // Principal that already existed, then failed. Nothing here is Radius's to
+  // remove.
+  function reusedOnlyFailure(repo = "contoso/store"): OperationFixture {
+    const op = newOperation(repo);
+    recordAzureApp(op, {
+      state: "reused",
+      appId: "app-1",
+      displayName: "radius-deploy"
+    });
+    recordServicePrincipal(op, {
+      state: "reused",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    finish(op, "failed_partial", {
+      failure: { code: "github-environment-failed", message: "gh returned 1" }
+    });
+    return op;
+  }
+
+  it("closes a setup that owns nothing without scheduling any deletion", async () => {
+    const op = reusedOnlyFailure();
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleExitOperation(
+      postContext(`/api/operations/${op.operationId}/exit`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(200);
+    expect(out.payload()).toMatchObject({
+      code: "setup-exited",
+      removed: false,
+      statusUrl: `/api/operations/${op.operationId}`
+    });
+    expect(deps.journal.scheduled).toEqual([]);
+    // Durable before the caller heard it was accepted, and recorded as a
+    // finished command so a reload reads the same decision back.
+    expect(deps.journal.persistCalls).toBe(1);
+    expect(op.control.commands).toEqual([
+      expect.objectContaining({
+        kind: "exit_setup",
+        state: "finished",
+        outcome: "exited"
+      })
+    ]);
+    // The record keeps its own verdict: how the setup ended and whether the
+    // customer left it are different facts.
+    expect(op.state).toBe("failed_partial");
+    expect(out.payload().operation.headline).toMatchObject({
+      code: "setup-exited"
+    });
+    expect(out.payload().operation.actions).toEqual([]);
+    expect(deps.journal.invalidatedListings).toEqual(["contoso/store"]);
+  });
+
+  it("schedules the disposal when the ledger proves this attempt created something", async () => {
+    const op = stoppedSetup();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleExitOperation(
+      postContext(`/api/operations/${op.operationId}/exit`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(202);
+    const payload = out.payload();
+    expect(payload.commandId).toMatch(
+      new RegExp(`^${op.operationId}:exit_setup:1:cleanup#[0-9a-f]{16}$`)
+    );
+    expect(deps.journal.scheduled).toEqual([
+      {
+        kind: "exit_setup",
+        instanceId: "panel-a",
+        commandId: payload.commandId
+      }
+    ]);
+    // The deletion is the runner's to report, so nothing is invalidated here:
+    // the pass drops the listing when it proves the environment is gone.
+    expect(deps.journal.invalidatedListings).toEqual([]);
+    expect(op.state).toBe("running");
+  });
+
+  it("refuses to exit an environment whose verification succeeded", async () => {
+    const op = newOperation();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    finishSucceeded(op);
+    const deps = dependencies({ get: () => op });
+    const out = recorder();
+
+    await handleExitOperation(
+      postContext(`/api/operations/${op.operationId}/exit`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "exit-environment-ready",
+      error:
+        "This environment finished setup, so there is nothing to exit. Remove it with Delete Environment instead."
+    });
+    expect(deps.journal.scheduled).toEqual([]);
+    expect(deps.journal.invalidatedListings).toEqual([]);
+  });
+
+  it("refuses a second exit for a setup the customer already closed", async () => {
+    const op = reusedOnlyFailure();
+    const deps = dependencies({ get: () => op });
+    await handleExitOperation(
+      postContext(
+        `/api/operations/${op.operationId}/exit`,
+        recorder().response
+      ),
+      deps
+    );
+
+    const second = recorder();
+    await handleExitOperation(
+      postContext(`/api/operations/${op.operationId}/exit`, second.response),
+      deps
+    );
+
+    expect(second.recording.status).toBe(409);
+    expect(second.payload()).toMatchObject({
+      code: "setup-already-exited",
+      error: "Radius already closed this setup."
+    });
+    expect(deps.journal.persistCalls).toBe(1);
+    expect(deps.journal.invalidatedListings).toEqual(["contoso/store"]);
+  });
+
+  it("leaves the setup open and the listing cached when the close cannot be saved", async () => {
+    const op = reusedOnlyFailure();
+    const deps = dependencies({
+      get: () => op,
+      persistOperations: () => Promise.reject(new Error("disk full"))
+    });
+    const out = recorder();
+
+    await handleExitOperation(
+      postContext(`/api/operations/${op.operationId}/exit`, out.response),
+      deps
+    );
+
+    expect(out.recording.status).toBe(500);
+    expect(out.payload()).toMatchObject({
+      code: "operation-exit-persist-failed",
+      error:
+        "Radius could not save the request to exit setup, so the setup is still open. Try again.",
+      detail: "disk full"
+    });
+    // Nothing was written, so nothing is remembered: the exit command is gone
+    // and the panel still offers the way out.
+    expect(op.control.commands).toEqual([]);
+    expect(deps.journal.invalidatedListings).toEqual([]);
+  });
+});
+
+// The five routes carry different decisions but share one command executor, so
 // the behavior that does not vary by route is asserted once over every route
 // that reaches it rather than repeated in each suite. What each row states is
 // the part that is genuinely per-route: the code, the message, and the record
@@ -1144,6 +1322,11 @@ describe("contracts shared by every control route", () => {
       name: "rollback",
       path: (id: string) => `/api/operations/${id}/rollback`,
       handler: handleRollbackOperation
+    },
+    {
+      name: "exit",
+      path: (id: string) => `/api/operations/${id}/exit`,
+      handler: handleExitOperation
     },
     {
       name: "retry",
@@ -1193,6 +1376,18 @@ describe("contracts shared by every control route", () => {
       persistFailureCode: "operation-rollback-persist-failed",
       persistFailureError:
         "Radius could not save the rollback request, so no cleanup began. Try again."
+    },
+    {
+      name: "exit",
+      path: (id: string) => `/api/operations/${id}/exit`,
+      handler: handleExitOperation,
+      operation: stoppedSetup,
+      restoredState: "cancelled",
+      attemptKind: "cleanup",
+      restoredAttempt: 0,
+      persistFailureCode: "operation-exit-persist-failed",
+      persistFailureError:
+        "Radius could not save the request to exit setup, so nothing was removed and the setup is still open. Try again."
     },
     {
       name: "retry/setup",
@@ -1325,7 +1520,7 @@ describe("contracts shared by every control route", () => {
       expect(op.control.commands).toEqual([]);
       expect(
         out.payload().operation.actions.map((entry: { id: string }) => entry.id)
-      ).toEqual(["continue-setup", "rollback"]);
+      ).toEqual(["continue-setup", "rollback", "exit-setup"]);
     }
   );
 });

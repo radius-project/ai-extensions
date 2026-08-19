@@ -162,6 +162,38 @@ function record(overrides: Record<string, unknown> = {}): OperationRecord {
   return parsed;
 }
 
+// The server's bottom-row control. Exit is projected like any other action, so
+// tests drive it through the same payload shape the panel receives.
+const EXIT_ACTION = {
+  id: "exit-setup",
+  kind: "exit_setup",
+  label: "Exit setup",
+  placement: "bottom",
+  description: "Radius closes this setup and removes what it created.",
+  path: "/api/operations/op-1/exit",
+  pending: false,
+  tone: "neutral"
+};
+
+const EXIT_ACTION_WITH_DELETIONS = {
+  ...EXIT_ACTION,
+  requiresConfirmation: true,
+  confirmTitle: "Exit setup and remove what Radius created?",
+  confirmLabel: "Exit setup",
+  cancelLabel: "Keep this setup",
+  preview: {
+    removes: [{ kind: "github_environment", target: "octo/widgets:dev" }],
+    keeps: [{ kind: "azure_app", target: "radius-deploy (app-1)" }],
+    manualActionRequired: []
+  }
+};
+
+const EXITED_HEADLINE = {
+  code: "setup-exited",
+  title: "Environment setup closed",
+  message: "Radius closed this setup and removed what it created."
+};
+
 function createDeps(overrides: Partial<EnvironmentOperationsDeps> = {}) {
   const successBanners: Array<{ provider: string; environment: string }> = [];
   const actionRequired: Array<{
@@ -414,6 +446,7 @@ describe("parseOperationResponse", () => {
         path: "/api/operations/op-1/rollback",
         pending: false,
         tone: "danger",
+        placement: "row",
         requiresConfirmation: true,
         confirmTitle: "Roll back?",
         confirmLabel: "Roll back",
@@ -1417,6 +1450,10 @@ describe("operation commands", () => {
     return browser.els[PROGRESS_IDS.commandButtons].children;
   }
 
+  function bottomButtons(browser: ReturnType<typeof setup>) {
+    return browser.els[PROGRESS_IDS.bottomButtons].children;
+  }
+
   it("renders exactly the actions the server projected", () => {
     const browser = setup();
     commandsController(browser)?.renderProgress(
@@ -1451,7 +1488,7 @@ describe("operation commands", () => {
     );
   });
 
-  it("places keep-and-dismiss beside retry verification for a terminal failure", () => {
+  it("keeps the retry in the command row and Exit setup below the details", () => {
     const browser = setup();
     commandsController(browser)?.renderProgress(
       record({
@@ -1465,21 +1502,25 @@ describe("operation commands", () => {
             description: "Check the same workflow again.",
             path: "/api/operations/op-1/retry/verification",
             pending: false
-          }
+          },
+          EXIT_ACTION
         ]
       })
     );
 
-    const rendered = buttons(browser);
-    expect(rendered.map((button) => button.textContent)).toEqual([
-      "Retry verification",
-      "Keep resources and dismiss"
+    expect(buttons(browser).map((button) => button.textContent)).toEqual([
+      "Retry verification"
     ]);
+    expect(bottomButtons(browser).map((button) => button.textContent)).toEqual([
+      "Exit setup"
+    ]);
+    expect(bottomButtons(browser)[0].id).toBe(
+      "env-progress-command-exit-setup"
+    );
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
+    // The acknowledgement is for an outcome that is already settled, so a
+    // failure that still owns a decision does not offer it.
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
-
-    rendered[1].dispatch("click");
-
-    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
   });
 
   it("drops an action with no path rather than rendering a button that can only fail", () => {
@@ -2859,14 +2900,11 @@ describe("rollback lifecycle presentation", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
   });
 
-  it("keeps the retry and keep-and-dismiss controls when the rollback left resources behind", () => {
+  it("keeps the retry in the command row when the rollback left resources behind", () => {
     const browser = setup();
     controllerFor(browser)?.renderProgress(rollbackIncomplete());
 
-    expect(buttonLabels(browser)).toEqual([
-      "Retry rollback",
-      "Keep resources and dismiss"
-    ]);
+    expect(buttonLabels(browser)).toEqual(["Retry rollback"]);
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
     // The customer still has a decision to make here, so the inventory that
@@ -2875,13 +2913,13 @@ describe("rollback lifecycle presentation", () => {
     expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("");
   });
 
-  it("keeps the keep-and-dismiss choice for a stop that was never rolled back", () => {
+  it("offers Exit setup below the details for a stop that was never rolled back", () => {
     const browser = setup();
     controllerFor(browser)?.renderProgress(
       record({
         state: "cancelled",
         terminalState: "cancelled",
-        actions: [],
+        actions: [EXIT_ACTION],
         headline: {
           code: "stopped",
           title: "Environment setup stopped",
@@ -2891,7 +2929,12 @@ describe("rollback lifecycle presentation", () => {
       })
     );
 
-    expect(buttonLabels(browser)).toEqual(["Keep resources and dismiss"]);
+    expect(buttonLabels(browser)).toEqual([]);
+    expect(
+      browser.els[PROGRESS_IDS.bottomButtons].children.map(
+        (child) => child.textContent
+      )
+    ).toEqual(["Exit setup"]);
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
   });
@@ -4649,6 +4692,7 @@ describe("graceful degradation when optional DOM elements are missing", () => {
     PROGRESS_IDS.details,
     PROGRESS_IDS.dismiss,
     PROGRESS_IDS.actions,
+    PROGRESS_IDS.bottomButtons,
     PROGRESS_IDS.failureCard,
     PROGRESS_IDS.failureMessage,
     PROGRESS_IDS.cleanupStatus,
@@ -4704,6 +4748,29 @@ describe("graceful degradation when optional DOM elements are missing", () => {
     expect(() =>
       controller?.applyTerminal(record({ terminalState: "action_required" }))
     ).not.toThrow();
+  });
+
+  it("drops the bottom controls rather than throwing when their row is missing", () => {
+    const browser = setupWithout([PROGRESS_IDS.bottomButtons]);
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: createDeps().deps
+    });
+
+    expect(() =>
+      controller?.renderProgress(
+        record({
+          state: "failed_partial",
+          terminalState: "failed_partial",
+          actions: [EXIT_ACTION]
+        })
+      )
+    ).not.toThrow();
+
+    // The row itself still reports that a control was projected, so a page
+    // missing only the container does not silently look settled.
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
+    expect(browser.els[PROGRESS_IDS.commandButtons].children).toHaveLength(0);
   });
 
   it("skips opening details and hiding the error banner when both are missing", async () => {
@@ -4957,5 +5024,256 @@ describe("OperationResumeError", () => {
     expect(error.operation).toEqual({ some: "payload" });
     expect(error.name).toBe("OperationResumeError");
     expect(error).toBeInstanceOf(Error);
+  });
+});
+
+// The way out of the panel. Exit is a server command, so the page renders what
+// the record projected, confirms only when the server says a deletion follows,
+// and treats a closed setup as one it must not show again.
+describe("exiting a setup", () => {
+  function start(
+    browser: ReturnType<typeof setup>,
+    actions: readonly unknown[],
+    overrides: Record<string, unknown> = {}
+  ) {
+    const harness = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: harness.deps
+    });
+    controller?.renderProgress(
+      record({
+        state: "failed_partial",
+        terminalState: "failed_partial",
+        failure: { message: "GitHub returned 403." },
+        actions,
+        ...overrides
+      })
+    );
+    return { controller, harness };
+  }
+
+  function exited(overrides: Record<string, unknown> = {}) {
+    return op({
+      state: "failed_partial",
+      terminalState: "failed_partial",
+      actions: [],
+      headline: EXITED_HEADLINE,
+      ...overrides
+    });
+  }
+
+  it("puts Exit setup below the details and leaves the retry in the command row", () => {
+    const browser = setup();
+    start(browser, [
+      {
+        id: "retry-setup",
+        kind: "retry_setup",
+        label: "Retry setup",
+        description: "Radius starts again from the failed step.",
+        path: "/api/operations/op-1/retry/setup",
+        pending: false,
+        tone: "primary"
+      },
+      EXIT_ACTION
+    ]);
+
+    expect(
+      browser.els[PROGRESS_IDS.commandButtons].children.map(
+        (child) => child.textContent
+      )
+    ).toEqual(["Retry setup"]);
+    expect(
+      browser.els[PROGRESS_IDS.bottomButtons].children.map(
+        (child) => child.textContent
+      )
+    ).toEqual(["Exit setup"]);
+    // The command note describes the row's choices; the exit stands on its own
+    // sentence in the dialog it opens or in the button itself.
+    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
+      "Radius starts again from the failed step."
+    );
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
+  });
+
+  it("closes the panel and refreshes the listing when nothing has to be deleted", async () => {
+    const browser = setup();
+    browser.els[ERROR_BANNER_ID].style.display = "flex";
+    browser.net.handle(EXIT_ACTION.path, () => jsonResponse(exited()));
+    const { harness } = start(browser, [EXIT_ACTION]);
+
+    browser.els[PROGRESS_IDS.bottomButtons].children[0].dispatch("click");
+    await flushPromises();
+
+    // No confirmation: the server said this exit removes nothing.
+    expect(browser.els[ROLLBACK_IDS.modal].style.display).toBe("");
+    expect(browser.net.calls.map((call) => call.url)).toEqual([
+      EXIT_ACTION.path
+    ]);
+    expect(browser.net.calls[0].init?.method).toBe("POST");
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
+    expect(harness.reloadCount).toBeGreaterThanOrEqual(1);
+    expect(harness.errors).toEqual([]);
+    expect(harness.setupWarnings).toEqual([]);
+  });
+
+  it("confirms against the server preview before deleting anything", async () => {
+    const browser = setup();
+    browser.net.handle(EXIT_ACTION.path, () => jsonResponse(exited()));
+    start(browser, [EXIT_ACTION_WITH_DELETIONS]);
+
+    browser.els[PROGRESS_IDS.bottomButtons].children[0].dispatch("click");
+
+    expect(browser.els[ROLLBACK_IDS.modal].style.display).toBe("flex");
+    expect(browser.net.calls).toHaveLength(0);
+    expect(browser.els[ROLLBACK_IDS.title].textContent).toBe(
+      "Exit setup and remove what Radius created?"
+    );
+    expect(
+      browser.els[ROLLBACK_IDS.removeList].children.map(
+        (child) => child.textContent
+      )
+    ).toEqual(["GitHub environment: octo/widgets:dev"]);
+    expect(
+      browser.els[ROLLBACK_IDS.keepList].children.map(
+        (child) => child.textContent
+      )
+    ).toEqual(["App Registration: radius-deploy (app-1)"]);
+    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe("Exit setup");
+    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe(
+      "Keep this setup"
+    );
+    expect(
+      browser.els[PROGRESS_IDS.bottomButtons].children[0].getAttribute(
+        "aria-haspopup"
+      )
+    ).toBe("dialog");
+
+    browser.els[ROLLBACK_IDS.confirm].dispatch("click");
+    await flushPromises();
+
+    expect(browser.net.calls.map((call) => call.url)).toEqual([
+      EXIT_ACTION.path
+    ]);
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+  });
+
+  it("keeps the setup open when the customer cancels the confirmation", () => {
+    const browser = setup();
+    start(browser, [EXIT_ACTION_WITH_DELETIONS]);
+
+    browser.els[PROGRESS_IDS.bottomButtons].children[0].dispatch("click");
+    browser.els[ROLLBACK_IDS.cancel].dispatch("click");
+
+    expect(browser.net.calls).toHaveLength(0);
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.bottomButtons].children[0].focusCount).toBe(
+      1
+    );
+  });
+
+  it("follows the disposal while it runs and closes the panel when it ends", async () => {
+    const browser = setup();
+    const running = op({
+      state: "running",
+      terminalState: null,
+      actions: [],
+      activeCommandKind: "exit_setup",
+      headline: {
+        code: "exiting",
+        title: "Exiting setup…",
+        message: "Radius is removing what it created."
+      }
+    });
+    browser.net.handle(EXIT_ACTION.path, () => jsonResponse(running));
+    browser.net.handle(operationsUrl(), () => jsonResponse(running));
+    const { controller, harness } = start(browser, [EXIT_ACTION]);
+
+    browser.els[PROGRESS_IDS.bottomButtons].children[0].dispatch("click");
+    await flushPromises();
+
+    // The deletion is still running in the customer's cloud account, so the
+    // panel keeps narrating it rather than claiming the setup is already gone.
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe("Exiting setup…");
+    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
+      "Closing this setup and removing the resources Radius created…"
+    );
+    const reloadsWhileRunning = harness.reloadCount;
+    expect(reloadsWhileRunning).toBeGreaterThanOrEqual(1);
+
+    const closed = parseOperationResponse(exited());
+    controller?.applyTerminal(closed!);
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(harness.reloadCount).toBe(reloadsWhileRunning + 1);
+  });
+
+  it("keeps the panel and reports the refusal when the server rejects the exit", async () => {
+    const browser = setup();
+    browser.els[ERROR_BANNER_ID].style.display = "flex";
+    browser.net.handle(EXIT_ACTION.path, () =>
+      jsonResponse({ error: "Radius already closed this setup." }, false, 409)
+    );
+    const { harness } = start(browser, [EXIT_ACTION]);
+
+    browser.els[PROGRESS_IDS.bottomButtons].children[0].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
+      "Radius already closed this setup."
+    );
+    // Nothing was removed, so the failure the landing reports is still true.
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("flex");
+    expect(harness.reloadCount).toBe(0);
+  });
+
+  it("never renders a setup the customer already closed", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () => jsonResponse(exited()));
+    const harness = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: harness.deps
+    });
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.commandButtons].children).toHaveLength(0);
+    expect(browser.els[PROGRESS_IDS.bottomButtons].children).toHaveLength(0);
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
+  });
+
+  it("keeps the acknowledgement alone for an outcome that is already settled", () => {
+    const browser = setup();
+    const harness = createDeps();
+    const controller = initializeEnvironmentOperations(browser.context, {
+      repo: REPO,
+      deps: harness.deps
+    });
+
+    controller?.renderProgress(
+      record({
+        state: "succeeded",
+        terminalState: "succeeded",
+        actions: [EXIT_ACTION]
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.bottomButtons].children).toHaveLength(0);
+    expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
+  });
+
+  it("hides the bottom row when the record projects no way out", () => {
+    const browser = setup();
+    start(browser, []);
+
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.bottomButtons].children).toHaveLength(0);
   });
 });
