@@ -112,6 +112,7 @@ export function initializeGraphDiffPage(
     stopProgress();
     const view = createGraphProgress(context, entry, {
       hostId: DIFF_PROGRESS_STEPS_ID,
+      title: "Comparing application graphs",
       initial: {
         sequence: 0,
         stage: "building_base_graph",

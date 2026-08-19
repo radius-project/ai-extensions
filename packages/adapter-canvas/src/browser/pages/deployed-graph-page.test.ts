@@ -9,9 +9,12 @@ import {
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import {
+  graphProgressElapsed,
+  graphProgressStages
+} from "../../../test/support/browser/graph-progress.js";
 import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
-import type { FakeElement } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 import {
   DEPLOYED_GRAPH_POLL_MS,
@@ -2126,14 +2129,7 @@ describe("initializeDeployedGraphPage", () => {
     );
   });
   describe("graph build progress", () => {
-    const stageText = (host: FakeElement): string[] => {
-      const list = host.children.find(
-        (child) => child.className === "rad-graph-progress__steps"
-      );
-      return (list?.children ?? []).map(
-        (row) => `${fakeText(row)}:${row.className}`
-      );
-    };
+    const stageText = graphProgressStages;
 
     it("shows the loading stage while the first request is in flight", async () => {
       const { browser, progressHost } = fixture();
@@ -2145,9 +2141,9 @@ describe("initializeDeployedGraphPage", () => {
       await flushPromises();
 
       expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.loading_deployment}:step-active`
+        `${GRAPH_STAGE_LABELS.loading_deployment}:running`
       ]);
-      expect(fakeText(progressHost)).toContain("Elapsed ");
+      expect(graphProgressElapsed(progressHost)).toMatch(/^\d+:\d{2}$/);
       expect(fakeText(progressHost)).not.toMatch(/%/);
     });
 
@@ -2174,7 +2170,7 @@ describe("initializeDeployedGraphPage", () => {
       await flushPromises();
 
       expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.loading_deployment}:step-error`
+        `${GRAPH_STAGE_LABELS.loading_deployment}:failed`
       ]);
       expect(fakeText(progressHost)).not.toContain("graph service down");
     });

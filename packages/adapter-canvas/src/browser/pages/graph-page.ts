@@ -94,19 +94,40 @@ export function initializeGraphPage(
     progressView = null;
   };
 
-  // Start a fresh progress panel for one build. The loading surface must
-  // already be mounted so the panel has its host element.
-  const startProgress = (requestGeneration: number, detail: string): void => {
-    stopProgress();
-    const view = createGraphProgress(context, entry, {
-      initial: {
-        sequence: 0,
-        stage: "checking_model",
-        state: "running",
-        detail
-      }
-    });
-    progressView = view;
+  // Start reporting progress for one build. The loading surface must already be
+  // mounted so the panel has its host element.
+  //
+  // A missing app.bicep is answered by re-issuing the request until Copilot has
+  // written the file, so those retries continue the same panel: the elapsed
+  // clock measures the whole wait and the stages already reported stay on
+  // screen, instead of the panel being rebuilt and flashing the same first line
+  // every retry.
+  const startProgress = (
+    requestGeneration: number,
+    detail: string,
+    options: { readonly continuing?: boolean } = {}
+  ): void => {
+    if (progress !== null) entry.cancel(progress);
+    progress = null;
+    const continued = options.continuing ? progressView : null;
+    let view: GraphProgressView;
+    if (continued) {
+      // The loading surface was remounted, so the retained panel has to draw
+      // itself into the new host.
+      continued.remount();
+      view = continued;
+    } else {
+      progressView?.stop();
+      view = createGraphProgress(context, entry, {
+        initial: {
+          sequence: 0,
+          stage: "checking_model",
+          state: "running",
+          detail
+        }
+      });
+      progressView = view;
+    }
     progress = entry.every(GRAPH_PROGRESS_MS, () =>
       pollProgress(requestGeneration, view)
     );
@@ -167,7 +188,7 @@ export function initializeGraphPage(
       });
   };
 
-  const load = (): void => {
+  const load = (options: { readonly continuing?: boolean } = {}): void => {
     if (requestActive || !entry.active) return;
     const branch = branchSelect?.value.trim() || page.branch;
     if (!page.repo || !branch) {
@@ -195,7 +216,8 @@ export function initializeGraphPage(
     );
     startProgress(
       requestGeneration,
-      "Checking the selected branch for .radius/app.bicep…"
+      "Checking the selected branch for .radius/app.bicep…",
+      { continuing: options.continuing }
     );
     void context.net
       .fetch("/api/load-graph", {
@@ -207,21 +229,28 @@ export function initializeGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== generation) return;
-        stopProgress();
         if (readBoolean(payload, "reload")) {
+          stopProgress();
           showStatus(context, "Application graph ready.", "info");
           context.nav.reload();
           return;
         }
+        // The work continues off-page while Copilot authors the model, so the
+        // panel keeps running rather than being torn down and rebuilt.
         if (readBoolean(payload, "needsAppBicep")) {
           showStatus(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
             "info"
           );
+          progressView?.append(
+            "creating_model",
+            "running",
+            "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…"
+          );
           retry = entry.after(GRAPH_RETRY_MS, () => {
             retry = null;
-            load();
+            load({ continuing: true });
           });
           return;
         }
@@ -233,10 +262,11 @@ export function initializeGraphPage(
           );
           retry = entry.after(GRAPH_STALE_RETRY_MS, () => {
             retry = null;
-            load();
+            load({ continuing: true });
           });
           return;
         }
+        stopProgress();
         const error = readString(payload, "error");
         if (error) {
           setError("graph-container", error);

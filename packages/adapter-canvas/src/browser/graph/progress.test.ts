@@ -22,6 +22,13 @@ import {
   createFakeElement,
   fakeText
 } from "../../../test/support/browser/fakes.js";
+import {
+  graphProgressActivity,
+  graphProgressElapsed,
+  graphProgressPanel,
+  graphProgressStages,
+  graphProgressTitle
+} from "../../../test/support/browser/graph-progress.js";
 import type { FakeElement } from "../../../test/support/browser/fakes.js";
 import type { EntryScope } from "../lifecycle.js";
 import type { GraphBuildEvent } from "./progress.js";
@@ -45,50 +52,36 @@ function setup(hostId = GRAPH_PROGRESS_STEPS_ID) {
 }
 
 function stageRows(host: FakeElement): Array<{ text: string; state: string }> {
-  const list = host.children.find(
-    (child) => child.className === "rad-graph-progress__steps"
-  );
-  return (list?.children ?? []).map((row) => ({
-    text: fakeText(row),
-    state: row.className
-  }));
+  return graphProgressStages(host).map((entry) => {
+    const separator = entry.lastIndexOf(":");
+    return {
+      text: entry.slice(0, separator),
+      state: entry.slice(separator + 1)
+    };
+  });
 }
 
 function stageHeading(host: FakeElement): string {
-  const row = host.children.find(
-    (child) => child.className === "rad-graph-progress__status"
-  );
-  const heading = row?.children.find(
-    (child) => child.className === "rad-graph-progress__stage"
-  );
-  return heading ? fakeText(heading) : "";
+  const rows = stageRows(host);
+  return rows.length > 0 ? rows[rows.length - 1].text : "";
 }
 
 function elapsedText(host: FakeElement): string {
-  const row = host.children.find(
-    (child) => child.className === "rad-graph-progress__status"
-  );
-  const elapsed = row?.children.find(
-    (child) => child.className === "rad-graph-progress__elapsed"
-  );
-  return elapsed ? fakeText(elapsed) : "";
+  return graphProgressElapsed(host);
 }
 
-function detailElement(host: FakeElement): FakeElement | undefined {
-  return host.children.find(
-    (child) => child.className === "rad-graph-progress__detail"
-  );
+function detailElement(host: FakeElement): FakeElement | null {
+  return graphProgressActivity(host);
 }
-
 describe("formatGraphElapsed", () => {
   it.each([
-    [0, "Elapsed 0s"],
-    [999, "Elapsed 0s"],
-    [1000, "Elapsed 1s"],
-    [59_000, "Elapsed 59s"],
-    [60_000, "Elapsed 1m 0s"],
-    [125_000, "Elapsed 2m 5s"],
-    [-5000, "Elapsed 0s"]
+    [0, "0:00"],
+    [999, "0:00"],
+    [1000, "0:01"],
+    [59_000, "0:59"],
+    [60_000, "1:00"],
+    [125_000, "2:05"],
+    [-5000, "0:00"]
   ])("renders %ims as %s", (ms, expected) => {
     expect(formatGraphElapsed(ms)).toBe(expected);
   });
@@ -160,12 +153,12 @@ describe("createGraphProgress", () => {
     );
 
     expect(stageRows(host)).toEqual([
-      { text: GRAPH_STAGE_LABELS.checking_model, state: "step-done" },
-      { text: GRAPH_STAGE_LABELS.building_graph, state: "step-active" }
+      { text: GRAPH_STAGE_LABELS.checking_model, state: "succeeded" },
+      { text: GRAPH_STAGE_LABELS.building_graph, state: "running" }
     ]);
     expect(stageHeading(host)).toBe(GRAPH_STAGE_LABELS.building_graph);
     expect(fakeText(detailElement(host)!)).toBe("Compiling the model.");
-    expect(elapsedText(host)).toBe("Elapsed 0s");
+    expect(elapsedText(host)).toBe("0:00");
   });
 
   it("never renders a percentage, a progress bar or an estimate", () => {
@@ -200,7 +193,7 @@ describe("createGraphProgress", () => {
 
     browser.clock.tick(GRAPH_PROGRESS_TICK_MS * 3);
 
-    expect(elapsedText(host)).toBe("Elapsed 3s");
+    expect(elapsedText(host)).toBe("0:03");
     expect(detailElement(host)).toBe(detail);
   });
 
@@ -218,7 +211,7 @@ describe("createGraphProgress", () => {
     );
 
     expect(stageRows(host)).toEqual([
-      { text: GRAPH_STAGE_LABELS.building_graph, state: "step-done" }
+      { text: GRAPH_STAGE_LABELS.building_graph, state: "succeeded" }
     ]);
   });
 
@@ -236,7 +229,7 @@ describe("createGraphProgress", () => {
 
     expect(stageRows(host).at(-1)).toEqual({
       text: GRAPH_STAGE_LABELS.building_graph,
-      state: "step-error"
+      state: "failed"
     });
   });
 
@@ -330,7 +323,7 @@ describe("createGraphProgress", () => {
       view.sync([serverEvent(1, "checking_model", "running", "Restarted.")], 2);
 
       expect(stageRows(host)).toEqual([
-        { text: GRAPH_STAGE_LABELS.checking_model, state: "step-active" }
+        { text: GRAPH_STAGE_LABELS.checking_model, state: "running" }
       ]);
       expect(fakeText(detailElement(host)!)).toBe("Restarted.");
     });
@@ -358,7 +351,7 @@ describe("createGraphProgress", () => {
 
       expect(stageRows(host).at(-1)).toEqual({
         text: GRAPH_STAGE_LABELS.building_graph,
-        state: "step-error"
+        state: "failed"
       });
     });
 
@@ -391,7 +384,7 @@ describe("createGraphProgress", () => {
       view.stop();
       browser.clock.tick(GRAPH_PROGRESS_TICK_MS * 10);
 
-      expect(elapsedText(host)).toBe("Elapsed 2s");
+      expect(elapsedText(host)).toBe("0:02");
     });
 
     it("refuses further updates", () => {
@@ -428,16 +421,70 @@ describe("createGraphProgress", () => {
     });
   });
 
+  it("labels the panel with the caller's title", () => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope, {
+      title: "Planning the deployment"
+    });
+
+    view.sync([serverEvent(1, "building_graph", "running", "Working.")], 1);
+
+    expect(graphProgressTitle(host)).toBe("Planning the deployment");
+    expect(graphProgressPanel(host)?.getAttribute("aria-label")).toBe(
+      "Planning the deployment"
+    );
+  });
+
+  it("marks the panel as failed when the latest stage failed", () => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope);
+
+    view.sync([serverEvent(1, "building_graph", "failed", "rad failed.")], 1);
+
+    expect(graphProgressPanel(host)?.className).toContain(
+      "rad-graph-progress--failed"
+    );
+  });
+
+  describe("remount", () => {
+    it("repaints the reported stages into a replaced host without restarting the clock", () => {
+      const { browser, host, scope } = setup();
+      const view = createGraphProgress(browser.context, scope);
+      view.sync([serverEvent(1, "building_graph", "running", "Working.")], 1);
+      browser.clock.tick(GRAPH_PROGRESS_TICK_MS * 4);
+      host.replaceChildren();
+
+      view.remount();
+
+      expect(stageRows(host)).toEqual([
+        { text: GRAPH_STAGE_LABELS.building_graph, state: "running" }
+      ]);
+      expect(elapsedText(host)).toBe("0:04");
+    });
+
+    it("does nothing once the view is stopped", () => {
+      const { browser, host, scope } = setup();
+      const view = createGraphProgress(browser.context, scope);
+      view.sync([serverEvent(1, "building_graph", "running", "Working.")], 1);
+      view.stop();
+      host.replaceChildren();
+
+      view.remount();
+
+      expect(graphProgressPanel(host)).toBeNull();
+    });
+  });
+
   it("stops ticking once its entry scope is torn down", () => {
     const { browser, host, scope } = setup();
     createGraphProgress(browser.context, scope);
     browser.clock.tick(GRAPH_PROGRESS_TICK_MS);
-    expect(elapsedText(host)).toBe("Elapsed 1s");
+    expect(elapsedText(host)).toBe("0:01");
 
     (scope as EntryScope).teardown();
     browser.clock.tick(GRAPH_PROGRESS_TICK_MS * 5);
 
-    expect(elapsedText(host)).toBe("Elapsed 1s");
+    expect(elapsedText(host)).toBe("0:01");
   });
 });
 

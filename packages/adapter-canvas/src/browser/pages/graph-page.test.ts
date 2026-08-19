@@ -9,9 +9,12 @@ import {
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
-import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
+import {
+  graphProgressElapsed,
+  graphProgressStages
+} from "../../../test/support/browser/graph-progress.js";
+import { formatGraphElapsed, GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
-import type { FakeElement } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 import {
   GRAPH_PAGE_STATE_ID,
@@ -816,14 +819,7 @@ describe("initializeGraphPage", () => {
   });
 
   describe("graph build progress", () => {
-    const stageText = (host: FakeElement): string[] => {
-      const list = host.children.find(
-        (child) => child.className === "rad-graph-progress__steps"
-      );
-      return (list?.children ?? []).map(
-        (row) => `${fakeText(row)}:${row.className}`
-      );
-    };
+    const stageText = graphProgressStages;
 
     it("renders typed build stages instead of prose", async () => {
       const { browser, progressHost } = fixture({ loaded: false });
@@ -855,10 +851,10 @@ describe("initializeGraphPage", () => {
       await flushPromises();
 
       expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.checking_model}:step-done`,
-        `${GRAPH_STAGE_LABELS.building_graph}:step-active`
+        `${GRAPH_STAGE_LABELS.checking_model}:succeeded`,
+        `${GRAPH_STAGE_LABELS.building_graph}:running`
       ]);
-      expect(fakeText(progressHost)).toContain("Elapsed ");
+      expect(graphProgressElapsed(progressHost)).toMatch(/^\d+:\d{2}$/);
       expect(fakeText(progressHost)).not.toMatch(/%/);
     });
 
@@ -872,7 +868,7 @@ describe("initializeGraphPage", () => {
       await flushPromises();
 
       expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.checking_model}:step-active`
+        `${GRAPH_STAGE_LABELS.checking_model}:running`
       ]);
     });
 
@@ -920,7 +916,34 @@ describe("initializeGraphPage", () => {
       await flushPromises();
 
       expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.building_graph}:step-active`
+        `${GRAPH_STAGE_LABELS.building_graph}:running`
+      ]);
+    });
+
+    it("keeps one panel and one clock running across an app.bicep retry", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      browser.net.handle("/api/load-graph", () =>
+        jsonResponse({ needsAppBicep: true })
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:running`,
+        `${GRAPH_STAGE_LABELS.creating_model}:running`
+      ]);
+
+      browser.clock.tick(GRAPH_RETRY_MS);
+      await flushPromises();
+
+      // The retry reuses the running panel, so the clock reflects the whole
+      // wait rather than restarting at zero on every poll.
+      expect(graphProgressElapsed(progressHost)).toBe(
+        formatGraphElapsed(GRAPH_RETRY_MS)
+      );
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:running`,
+        `${GRAPH_STAGE_LABELS.creating_model}:running`
       ]);
     });
 
@@ -948,14 +971,7 @@ describe("initializeGraphPage", () => {
     });
   });
   describe("graph build progress defaults", () => {
-    const stageText = (host: FakeElement): string[] => {
-      const list = host.children.find(
-        (child) => child.className === "rad-graph-progress__steps"
-      );
-      return (list?.children ?? []).map(
-        (row) => `${fakeText(row)}:${row.className}`
-      );
-    };
+    const stageText = graphProgressStages;
 
     it("accepts typed events from a payload that omits the generation", async () => {
       const { browser, progressHost } = fixture({ loaded: false });
@@ -981,7 +997,7 @@ describe("initializeGraphPage", () => {
       await flushPromises();
 
       expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.building_graph}:step-active`
+        `${GRAPH_STAGE_LABELS.building_graph}:running`
       ]);
     });
 
@@ -1002,7 +1018,7 @@ describe("initializeGraphPage", () => {
       await flushPromises();
 
       expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.checking_model}:step-active`
+        `${GRAPH_STAGE_LABELS.checking_model}:running`
       ]);
     });
   });

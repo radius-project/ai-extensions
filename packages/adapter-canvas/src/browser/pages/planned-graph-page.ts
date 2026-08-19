@@ -145,6 +145,7 @@ export function initializePlannedGraphPage(
     const abort = context.net.createAbort();
     requestAbort = abort;
     const view = createGraphProgress(context, entry, {
+      title: "Planning the deployment",
       initial: {
         sequence: 0,
         stage: "checking_model",

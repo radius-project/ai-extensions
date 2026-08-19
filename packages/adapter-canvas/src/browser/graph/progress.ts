@@ -56,10 +56,10 @@ export const GRAPH_STAGE_LABELS: Readonly<Record<GraphBuildStage, string>> = {
   rendering_graph: "Render the application graph"
 };
 
-const STATE_CLASS: Readonly<Record<GraphBuildEventState, string>> = {
-  running: "step-active",
-  succeeded: "step-done",
-  failed: "step-error"
+const STAGE_GLYPH: Readonly<Record<GraphBuildEventState, string>> = {
+  running: "◐",
+  succeeded: "✓",
+  failed: "✗"
 };
 
 function isStage(value: string): value is GraphBuildStage {
@@ -97,13 +97,13 @@ export function parseGraphBuildEvents(
   return events;
 }
 
+// Elapsed time is shown the way environment setup shows it: a plain m:ss clock
+// of time actually spent, never an estimate of time remaining.
 export function formatGraphElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
-  return minutes > 0 ?
-      `Elapsed ${minutes}m ${seconds}s`
-    : `Elapsed ${seconds}s`;
+  return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
 }
 
 export interface GraphProgressView {
@@ -119,6 +119,10 @@ export interface GraphProgressView {
   ): void;
   // Freeze the panel: the elapsed clock stops and nothing may repaint it.
   stop(): void;
+  // Repaint into the current host. A page that remounts its loading surface
+  // between retries replaces the host element, so the panel has to be drawn
+  // again without restarting the clock or losing the stages already reported.
+  remount(): void;
   readonly stopped: boolean;
   events(): readonly GraphBuildEvent[];
 }
@@ -126,6 +130,7 @@ export interface GraphProgressView {
 export interface GraphProgressOptions {
   readonly hostId?: string;
   readonly initial?: GraphBuildEvent;
+  readonly title?: string;
 }
 
 // Build the progress view for one graph request. The elapsed timer belongs to
@@ -137,6 +142,7 @@ export function createGraphProgress(
   options: GraphProgressOptions = {}
 ): GraphProgressView {
   const hostId = options.hostId ?? GRAPH_PROGRESS_STEPS_ID;
+  const title = options.title ?? "Generating application graph";
   const startedAtMs = context.clock.now();
 
   let events: GraphBuildEvent[] = [];
@@ -165,66 +171,76 @@ export function createGraphProgress(
     const latestByStage = new Map<GraphBuildStage, GraphBuildEvent>();
     for (const event of events) latestByStage.set(event.stage, event);
 
-    const steps: ElementSpec[] = [];
+    const stages: ElementSpec[] = [];
     for (const [stage, event] of latestByStage) {
-      steps.push({
+      stages.push({
         tag: "li",
-        className: STATE_CLASS[event.state],
-        text: GRAPH_STAGE_LABELS[stage]
+        className: `rad-graph-progress__stage rad-graph-progress__stage--${event.state}`,
+        children: [
+          {
+            tag: "span",
+            className: "rad-graph-progress__glyph",
+            attrs: { "aria-hidden": "true" },
+            text: STAGE_GLYPH[event.state]
+          },
+          { tag: "span", text: `${GRAPH_STAGE_LABELS[stage]} — ${event.state}` }
+        ]
       });
     }
 
+    const failed = latest?.state === "failed";
     elapsedElement = buildElement(context.dom, {
-      tag: "span",
+      tag: "div",
       className: "rad-graph-progress__elapsed",
-      attrs: { style: "font-size:12px;" },
+      attrs: { "aria-label": "Elapsed time" },
       text: elapsedText()
     });
-    const statusRow = buildElement(context.dom, {
+    const head = buildElement(context.dom, {
       tag: "div",
-      className: "rad-graph-progress__status",
-      attrs: {
-        style:
-          "display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;"
-      },
+      className: "rad-graph-progress__head",
       children: [
         {
-          tag: "strong",
-          className: "rad-graph-progress__stage",
-          attrs: { style: "color:var(--rad-text);" },
-          text: latest ? GRAPH_STAGE_LABELS[latest.stage] : ""
+          tag: "div",
+          className: "rad-graph-progress__spinner",
+          attrs: { "aria-hidden": "true" }
+        },
+        {
+          tag: "div",
+          className: "rad-graph-progress__headtext",
+          children: [
+            {
+              tag: "div",
+              className: "rad-graph-progress__title",
+              text: title
+            },
+            {
+              // Announced politely so a screen reader follows the build without
+              // the stage list being re-read on every poll.
+              tag: "div",
+              className: "rad-graph-progress__activity",
+              attrs: { role: "status", "aria-live": "polite" },
+              text: latest?.detail ?? ""
+            }
+          ]
         }
       ]
     });
-    statusRow.appendChild(elapsedElement);
+    head.appendChild(elapsedElement);
 
-    const rest: ElementSpec[] = [
-      {
-        // Announced politely so a screen reader follows the build without the
-        // stage list being re-read on every poll.
-        tag: "div",
-        className: "rad-graph-progress__detail",
-        attrs: {
-          role: "status",
-          "aria-live": "polite",
-          style: "color:var(--rad-text); margin-bottom:10px;"
-        },
-        text: latest?.detail ?? ""
-      },
-      {
-        tag: "ul",
-        className: "rad-graph-progress__steps",
-        attrs: {
-          "aria-label": "Graph build stages",
-          style: "list-style:none; margin:0; padding:0;"
-        },
-        children: steps
-      }
-    ];
-    container.replaceChildren(
-      statusRow,
-      ...rest.map((spec) => buildElement(context.dom, spec))
-    );
+    const stageList = buildElement(context.dom, {
+      tag: "ol",
+      className: "rad-graph-progress__stages",
+      children: stages
+    });
+    const panel = buildElement(context.dom, {
+      tag: "div",
+      className:
+        "rad-graph-progress" + (failed ? " rad-graph-progress--failed" : ""),
+      attrs: { role: "region", "aria-label": title }
+    });
+    panel.appendChild(head);
+    panel.appendChild(stageList);
+    container.replaceChildren(panel);
   };
 
   const timer = scope.every(GRAPH_PROGRESS_TICK_MS, () => {
@@ -273,6 +289,10 @@ export function createGraphProgress(
       if (stopped) return;
       stopped = true;
       scope.cancel(timer);
+    },
+    remount() {
+      if (stopped) return;
+      render();
     },
     get stopped() {
       return stopped;

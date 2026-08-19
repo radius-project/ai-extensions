@@ -198,12 +198,23 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   /* Shared by every graph page's progress panel. Lives here rather than in the
      graph loading fragment because the diff page renders progress without
      mounting a graph surface. */
-  .rad-graph-progress__steps li { list-style: none; }
-  .step-done::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--rad-success); margin-right: 8px; vertical-align: 1px; }
-  .step-active::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--rad-brand); box-sizing: border-box; margin-right: 8px; vertical-align: 1px; }
-  .step-active { color: var(--rad-text); font-weight: 500; }
-  .step-error::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--rad-danger); margin-right: 8px; vertical-align: 1px; }
-  .step-error { color: var(--rad-text); }
+  .rad-graph-progress { margin: 0; padding: 14px 16px; border: 1px solid var(--rad-stroke); border-radius: 10px; background: var(--rad-surface); box-shadow: 0 1px 2px var(--rad-shadow); text-align: left; }
+  .rad-graph-progress__head { display: flex; align-items: flex-start; gap: 12px; }
+  .rad-graph-progress__spinner { flex: 0 0 auto; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%; background: conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation: spin 1s linear infinite; }
+  .rad-graph-progress--failed .rad-graph-progress__spinner { animation: none; background: var(--rad-danger); }
+  /* State is never carried by motion or color alone. */
+  @media (prefers-reduced-motion: reduce) { .rad-graph-progress__spinner { animation: none; } }
+  .rad-graph-progress__headtext { flex: 1 1 auto; min-width: 0; }
+  .rad-graph-progress__title { font-size: 14px; font-weight: 600; color: var(--rad-text); line-height: 1.4; }
+  .rad-graph-progress__activity { font-size: 12px; color: var(--rad-text-tertiary); margin-top: 2px; line-height: 1.4; }
+  .rad-graph-progress__elapsed { flex: 0 0 auto; font-size: 12px; color: var(--rad-text-tertiary); font-variant-numeric: tabular-nums; }
+  .rad-graph-progress__stages { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .rad-graph-progress__stage { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--rad-text-tertiary); }
+  .rad-graph-progress__stage--running { color: var(--rad-text); font-weight: 600; }
+  .rad-graph-progress__stage--succeeded { color: var(--rad-text); }
+  .rad-graph-progress__stage--failed { color: var(--rad-danger); }
+  .rad-graph-progress__glyph { flex: 0 0 auto; width: 16px; text-align: center; font-size: 11px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ─── Legacy tabs (kept for pages not yet migrated) ───────────────────── */
   .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--rad-stroke); margin-bottom: 16px; }

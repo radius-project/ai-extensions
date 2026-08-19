@@ -9,9 +9,12 @@ import {
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import {
+  graphProgressElapsed,
+  graphProgressStages
+} from "../../../test/support/browser/graph-progress.js";
 import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
-import type { FakeElement } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 import {
   initializePlannedGraphPage,
@@ -767,14 +770,7 @@ describe("initializePlannedGraphPage", () => {
     expect(browser.clock.pending).toBe(0);
   });
   describe("graph build progress", () => {
-    const stageText = (host: FakeElement): string[] => {
-      const list = host.children.find(
-        (child) => child.className === "rad-graph-progress__steps"
-      );
-      return (list?.children ?? []).map(
-        (row) => `${fakeText(row)}:${row.className}`
-      );
-    };
+    const stageText = graphProgressStages;
 
     it("renders typed planning stages instead of prose", async () => {
       const { browser, progressHost } = fixture();
@@ -808,10 +804,10 @@ describe("initializePlannedGraphPage", () => {
       await flushPromises();
 
       expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.building_graph}:step-done`,
-        `${GRAPH_STAGE_LABELS.resolving_recipes}:step-active`
+        `${GRAPH_STAGE_LABELS.building_graph}:succeeded`,
+        `${GRAPH_STAGE_LABELS.resolving_recipes}:running`
       ]);
-      expect(fakeText(progressHost)).toContain("Elapsed ");
+      expect(graphProgressElapsed(progressHost)).toMatch(/^\d+:\d{2}$/);
       expect(fakeText(progressHost)).not.toMatch(/%/);
     });
 
@@ -827,7 +823,7 @@ describe("initializePlannedGraphPage", () => {
       await flushPromises();
 
       expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.checking_model}:step-active`
+        `${GRAPH_STAGE_LABELS.checking_model}:running`
       ]);
     });
   });
@@ -857,15 +853,9 @@ describe("initializePlannedGraphPage", () => {
       browser.clock.tick(PLAN_PROGRESS_MS);
       await flushPromises();
 
-      const list = progressHost.children.find(
-        (child) => child.className === "rad-graph-progress__steps"
-      );
-      expect((list?.children ?? []).map((row) => row.className)).toEqual([
-        "step-active"
+      expect(graphProgressStages(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.resolving_recipes}:running`
       ]);
-      expect(fakeText(progressHost)).toContain(
-        GRAPH_STAGE_LABELS.resolving_recipes
-      );
     });
   });
 });

@@ -337,6 +337,7 @@ export function initializeDeployedGraphPage(
       stopProgress();
       progressView = createGraphProgress(context, entry, {
         hostId: DEPLOYED_PROGRESS_STEPS_ID,
+        title: "Loading the deployed graph",
         initial: {
           sequence: 0,
           stage: "loading_deployment",
