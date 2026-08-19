@@ -21,15 +21,13 @@ Use this skill to generate a Radius application definition (`app.bicep`) from a 
 
 This skill currently supports only repositories that already contain a Dockerfile for building the application image, so a repository without one cannot be modeled.
 
-The extension enforces this before the skill is handed over: `radius_generate_app` inspects the repository's file listing and, when it finds no Dockerfile, returns the message below instead of these instructions. The same check denies the graph views that auto-trigger modeling. Receiving this skill therefore means the check has already passed, and the naming rule (`Dockerfile`, `Dockerfile.*`, or `*.Dockerfile`, matched case-insensitively on the file name, outside vendored and generated directories) lives in the extension rather than being re-applied here.
-
-Report the outcome to the user in these words when it does not pass, and generate nothing:
+The extension normally screens this out before handing over the skill, so re-running that check is not your job. If you do find the application has no Dockerfile, stop: generate nothing, write nothing, and report this to the user verbatim.
 
 > I could not find a Dockerfile in this repository. I can only create application definitions for containerized applications. Add a Dockerfile first, then I can create an application definition.
 
 ## Response
 
-When asked to model a repository (the [Prerequisites](#prerequisites) are enforced before this skill is handed over):
+When asked to model a repository:
 
 1. Generate the application definition and write both `.radius/app.bicep` and `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)) into the `.radius/` directory of the working tree, write the origin record (see [Origin record](#origin-record-apporiginjson)), then stage all three with `git add`. Do NOT push, and do NOT open a pull request: modeling only writes and stages the files locally. The application graph renders from the on-disk working tree, so no push is needed to preview it, and pushing to a remote is a deployment concern handled later, not part of modeling.
 2. In your chat reply, give a one-line intro naming the app (e.g. "I'll create an application definition for `todo-list-app`."), then a short, natural summary of the resources you identified, a brief list such as "Container: `todo-list-app`", "MySQL database", "Secret for DB credentials". A sentence or two of reasoning is fine; don't dump raw source analysis or the full file contents. Describe only what you actually did (that you wrote and staged the model files in the working tree); do not claim the application graph or canvas is rendering, since you cannot observe that. If a graph view is opened and shows an error or empty state, report that honestly instead of asserting success. Keep the reply about the user's application and its resources; do not name internal skill or reference files (for example, reference examples the skill consulted).
@@ -39,8 +37,6 @@ When asked to model a repository (the [Prerequisites](#prerequisites) are enforc
 Never invoke `rad` or `rad.exe` directly from PowerShell, a shell, a subprocess, or a delegated agent. Compile the generated application definition with `node "<loaded-skill-base>/scripts/validate-bicep.mjs" .radius/app.bicep`; the checker uses only the extension-managed Bicep and fails on every compiler warning or error. Graph validation must go through the Radius canvas and its tools: open `canvasId: "radius"` with `instanceId: "radius-panel"`, pass the current session repository as `repo` in `owner/repo` form, and use the current Copilot worktree branch. The extension honors an existing `RADIUS_RAD_BINARY`; otherwise it runs its managed binary from `%USERPROFILE%\.radius\ai-extensions\bin\rad.exe` on Windows or `$HOME/.radius/ai-extensions/bin/rad` on macOS/Linux, downloading it when absent and attempting a best-effort upgrade when older than the latest release (offline/API failures keep the installed binary; set `RADIUS_RAD_SKIP_VERSION_CHECK` to skip the version check). It does not resolve `rad` from `PATH` or `.rad/bin`. Diagnose graph failures only from the Radius extension log; never reproduce them with a direct CLI command or through another agent.
 
 ## Workflow
-
-The repository is already known to satisfy the [Prerequisites](#prerequisites). If you nonetheless find no Dockerfile for the application, stop and report the prerequisite message without modeling, generating, or writing anything. Then:
 
 1. Select one runnable deployment profile. Treat explicit user, scenario, and target-repository deployment requirements for Radius types, resource-name parameters, workload roles/count, native configuration keys, secret bindings, provider profile, protocol values, and connection names as acceptance criteria. Verify that the pinned source supports that profile; do not silently replace it with an easier default or optional backend.
 2. Build an internal requirement ledger that maps every acceptance criterion and planned resource property reference to source evidence, an exact Radius schema/recipe field, and the workload setting that consumes it. Use it for reasoning and validation; do not print it or add it as Bicep comments. Follow [runtime-contract.md](references/runtime-contract.md).
@@ -312,7 +308,6 @@ Read [bicep-structure-rules.md](references/bicep-structure-rules.md) for all str
 
 Before returning the Bicep, verify:
 
-- [ ] The application's own workloads build from a repository Dockerfile (see [Prerequisites](#prerequisites)).
 - [ ] One deployment profile is selected. Every explicit type, workload role/count, native key, required value, secret binding, and connection name from the request is represented in a closed requirement ledger.
 - [ ] Every planned resource property read/write has its verbatim path in the ledger and exists in the exact configured schema/API version. Every recipe-generated output also has a verified output mapping; every managed-secret reference has the declared secret-name path and key. An absent path blocks generation rather than being replaced by a guessed property, alias, or wrapper.
 - [ ] Every extensible type has an exact Recipe available in the target Environment. Each generated output and managed-secret key is verified against that Recipe or immutable provider recipe-pack source; each omitted optional input has a proven safe path.
