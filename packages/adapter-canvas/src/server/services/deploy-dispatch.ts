@@ -414,8 +414,7 @@ export function createDeployDispatchService(
     if (subjects.includes(expectedSubject)) return null;
     const nearMatchPrefix = `repo:${fullName}:environment:`;
     const nearMatches = subjects.filter(
-      (value) =>
-        value.startsWith(nearMatchPrefix) && value !== expectedSubject
+      (value) => value.startsWith(nearMatchPrefix) && value !== expectedSubject
     );
     const nearMatchNote =
       nearMatches.length > 0 ?

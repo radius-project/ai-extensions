@@ -295,7 +295,9 @@ describe("deploy dispatch environment and branch preflight", () => {
       })
     );
 
-    expect(await service.prepareAndDispatch(input)).toEqual({ dispatched: false });
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
     expect(state.deployStatus).toBe("failed");
     expect(state.deployError).toContain(
       'does not have a federated credential with subject "repo:acme/widgets:environment:production"'
