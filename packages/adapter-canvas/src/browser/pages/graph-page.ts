@@ -71,6 +71,7 @@ export function initializeGraphPage(
   const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
+  let graphLoaded = page.loaded;
   let generation = 0;
   let requestActive = false;
   let retry: ScopeTimer | null = null;
@@ -169,6 +170,16 @@ export function initializeGraphPage(
       .then((payload) => {
         if (requestGeneration !== generation) return;
         stopProgress();
+        if (isRecord(payload) && Array.isArray(payload.resources)) {
+          renderOrUpdate(parseGraphResources(payload.resources), {
+            repoUrl: githubRepositoryUrl(page.repo),
+            branch,
+            localSource: page.localSource
+          });
+          graphLoaded = true;
+          showStatus(context, "Application graph ready.", "info");
+          return;
+        }
         if (readBoolean(payload, "reload")) {
           showStatus(context, "Application graph ready.", "info");
           context.nav.reload();
@@ -268,7 +279,7 @@ export function initializeGraphPage(
         button.disabled = !branchSelect.value;
       }
       if (branchSelect.value) {
-        if (page.loaded) reloadForBranch(branchSelect.value.trim());
+        if (graphLoaded) reloadForBranch(branchSelect.value.trim());
         else load();
       }
     });
@@ -341,7 +352,7 @@ export function initializeGraphPage(
     () => entry.active
   )
     .then(() => {
-      if (!entry.active || page.loaded || !branchSelect?.value) return;
+      if (!entry.active || graphLoaded || !branchSelect?.value) return;
       if (button && button.dataset.mode !== "create-env")
         button.disabled = false;
       load();

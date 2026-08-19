@@ -284,6 +284,35 @@ describe("initializeGraphPage", () => {
     expect(status?.textContent).toBe("Application graph ready.");
   });
 
+  it("renders generated resources in place without reloading", async () => {
+    const { browser, status } = fixture({ loaded: false });
+    const render = vi.fn();
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        reload: true,
+        resources: [{ id: "app/generated" }]
+      })
+    );
+    initializeGraphPage(
+      browser.context,
+      globals({
+        radiusRenderGraph: render
+      })
+    );
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(0);
+    expect(render).toHaveBeenCalledWith(
+      "graph-container",
+      [{ id: "app/generated" }],
+      expect.objectContaining({
+        branch: "feature",
+        localSource: true
+      })
+    );
+    expect(status?.textContent).toBe("Application graph ready.");
+  });
+
   it("schedules a slow retry while Copilot drafts app.bicep and cancels it on a branch change", async () => {
     const { browser, branch, status } = fixture({ loaded: false });
     let calls = 0;
