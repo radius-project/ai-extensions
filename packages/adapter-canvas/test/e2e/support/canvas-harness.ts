@@ -855,6 +855,10 @@ export class CanvasHarness {
       // falls back to the public GitHub URL and violates offline isolation.
       serverModule.setOpenSourceHandler(async () => undefined);
 
+      // The listing caches are module-scoped, so a listing captured under a
+      // previous test's fake CLI scenario would otherwise still be served here.
+      serverModule.resetListingCaches();
+
       instanceId = `chromium-${sanitizeTitle(options.title)}-${randomUUID()}`;
       entry = await serverModule.getOrCreateServer(
         instanceId,
@@ -895,6 +899,7 @@ export class CanvasHarness {
                 )
             : undefined,
           resetState: () => {
+            cleanupServerModule?.resetListingCaches();
             ghModule?.setPreferredGhLogin("");
             ghModule?.resetGhIdentityCache();
             if (sharedModule)
@@ -1053,6 +1058,7 @@ export class CanvasHarness {
     });
     this.ghModule.setPreferredGhLogin("");
     this.ghModule.resetGhIdentityCache();
+    this.serverModule.resetListingCaches();
     const sharedModule = await import("../../../src/shared.js");
     replaceSharedCredentials(sharedModule.sharedCredentials);
     restoreEnvironment(this.originalEnv);
