@@ -90,49 +90,37 @@ describe.skipIf(!LIVE)(
   () => {
     // The deploy workflows are the ones that inject single-quoted GHA arch
     // expressions, so this is the case that would have caught radius#12640.
-    it(
-      "renders valid YAML from the current upstream deploy templates",
-      async () => {
-        const templates = await fetchTemplates(
-          [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE],
-          RADIUS_REF
-        );
-        const generated = generateDeployWorkflow(
-          "prod",
-          ".radius/app.bicep",
-          templates
-        );
-        assertAllValidYaml(generated, RADIUS_REF);
-      },
-      30_000
-    );
+    it("renders valid YAML from the current upstream deploy templates", async () => {
+      const templates = await fetchTemplates(
+        [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE],
+        RADIUS_REF
+      );
+      const generated = generateDeployWorkflow(
+        "prod",
+        ".radius/app.bicep",
+        templates
+      );
+      assertAllValidYaml(generated, RADIUS_REF);
+    }, 30_000);
 
-    it(
-      "renders valid YAML from the current upstream delete templates",
-      async () => {
-        const templates = await fetchTemplates(
-          [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE],
-          DELETE_RADIUS_REF
-        );
-        const generated = generateDeleteWorkflow("prod", templates);
-        assertAllValidYaml(generated, DELETE_RADIUS_REF);
-      },
-      30_000
-    );
+    it("renders valid YAML from the current upstream delete templates", async () => {
+      const templates = await fetchTemplates(
+        [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE],
+        DELETE_RADIUS_REF
+      );
+      const generated = generateDeleteWorkflow("prod", templates);
+      assertAllValidYaml(generated, DELETE_RADIUS_REF);
+    }, 30_000);
 
-    it(
-      "renders valid YAML from the current upstream verify templates",
-      async () => {
-        for (const [platform, file] of [
-          [azure, VERIFY_AZURE_FILE],
-          [aws, VERIFY_AWS_FILE]
-        ] as const) {
-          const template = await fetchWorkflow(file, RADIUS_REF);
-          const rendered = generateVerifyWorkflow("prod", platform, template);
-          assertAllValidYaml({ [file]: rendered }, RADIUS_REF);
-        }
-      },
-      30_000
-    );
+    it("renders valid YAML from the current upstream verify templates", async () => {
+      for (const [platform, file] of [
+        [azure, VERIFY_AZURE_FILE],
+        [aws, VERIFY_AWS_FILE]
+      ] as const) {
+        const template = await fetchWorkflow(file, RADIUS_REF);
+        const rendered = generateVerifyWorkflow("prod", platform, template);
+        assertAllValidYaml({ [file]: rendered }, RADIUS_REF);
+      }
+    }, 30_000);
   }
 );

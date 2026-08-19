@@ -295,11 +295,7 @@ describe("generateDeployWorkflow YAML validity", () => {
     };
     // Substitution still succeeds (no unresolved placeholder), so generation
     // does not throw — the breakage only surfaces when the YAML is parsed.
-    const files = generateDeployWorkflow(
-      "prod",
-      ".radius/app.bicep",
-      broken
-    );
+    const files = generateDeployWorkflow("prod", ".radius/app.bicep", broken);
 
     expect(() => parseYaml(files[DEPLOY_AZURE_FILE])).toThrow();
   });
