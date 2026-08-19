@@ -136,6 +136,15 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           instanceId: string;
         }) => unknown)
       | null;
+    deployFailureNotice?:
+      | ((input: {
+          repo: string;
+          branch: string;
+          error: string;
+          deployRunUrl: string;
+          instanceId: string;
+        }) => unknown)
+      | null;
     openSourceHandler?: (input: {
       path: string;
       line: number;
@@ -249,6 +258,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       }),
       setDeployRepairHandoff: vi.fn((fn) => {
         capturedHostCallbacks.deployRepairHandoff = fn;
+      }),
+      setDeployFailureNotice: vi.fn((fn) => {
+        capturedHostCallbacks.deployFailureNotice = fn;
       }),
       setOpenSourceHandler: vi.fn((fn) => {
         capturedHostCallbacks.openSourceHandler = fn;
