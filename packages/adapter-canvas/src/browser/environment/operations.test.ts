@@ -850,13 +850,11 @@ describe("trackProgress rendering", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
 
     controller?.renderProgress(record({ terminalState: "succeeded" }));
-    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
-    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
-    expect(
-      browser.els[PROGRESS_IDS.commandButtons].children.map(
-        (button) => button.textContent
-      )
-    ).toEqual(["OK"]);
+    expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.commandButtons].children).toHaveLength(0);
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
   });
 
   it("hides planned-graph navigation and stale terminal copy after success", () => {
@@ -888,7 +886,7 @@ describe("trackProgress rendering", () => {
     );
 
     expect(browser.els[PROGRESS_IDS.resume].style.display).toBe("none");
-    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
     expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe("");
     expect(browser.els[PROGRESS_IDS.commandGuidance].style.display).toBe(
       "none"
