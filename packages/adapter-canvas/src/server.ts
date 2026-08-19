@@ -2812,7 +2812,7 @@ const DELETE_WORKFLOW_FILE = "delete-application.yml";
 // silently disables all of it. It is exported so a test can pin it.
 //
 // Do not guess at this value: it must match
-// radius-project/radius .github/extension/actions/run-rad-commands/action.yml.
+// radius-project/ai-extensions .github/extension/actions/run-rad-commands/action.yml.
 export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
 
 // ── POST /api/deploy composition root ────────────────────────────────────────

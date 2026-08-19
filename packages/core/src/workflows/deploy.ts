@@ -1,16 +1,16 @@
 import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 
-// The pinned ref of radius-project/radius that hosts BOTH the shared composite
-// actions (setup-control-plane, restore-state, run-rad-commands, teardown) and
-// the workflow templates the extension commits into user repos. Points at
-// `main` now that the deploy-workflow actions and templates have merged there.
+// The pinned ref of radius-project/ai-extensions that hosts BOTH the shared
+// composite actions (setup-control-plane, restore-state, run-rad-commands,
+// teardown) and the workflow templates the extension commits into user repos.
+// Points at `main`, where the deploy-workflow actions and templates live.
 export const RADIUS_REF = "main";
 
-// The canonical home of the workflow templates in radius-project/radius. The
-// extension fetches them from here at commit time so a user repo always gets
-// the reviewed upstream version. radius-project/radius is the single source of
-// truth: the extension bundles no template copies of its own.
-export const RADIUS_WORKFLOW_REPO = "radius-project/radius";
+// The canonical home of the workflow templates in radius-project/ai-extensions.
+// The extension fetches them from here at commit time so a user repo always
+// gets the reviewed upstream version. radius-project/ai-extensions is the single
+// source of truth: the extension bundles no template copies of its own.
+export const RADIUS_WORKFLOW_REPO = "radius-project/ai-extensions";
 export const RADIUS_WORKFLOW_DIR = ".github/extension";
 
 // Committed workflow file names. All three are always committed to the target
@@ -63,13 +63,13 @@ export function defaultDeployTemplateVars(): DeployWorkflowTemplateVars {
 
 /**
  * Build the application-deploy GitHub Actions workflows, mirroring the
- * composite-action structure of radius-project/radius.
+ * composite-action structure of radius-project/ai-extensions.
  *
  * Returns the three files that get committed to the target repo's
  * `.github/workflows/`: the unified `run-rad-commands.yml` dispatcher plus the
  * reusable `run-rad-commands-azure.yml` / `run-rad-commands-aws.yml` provider
  * workflows. The provider-agnostic phases live in composite actions referenced
- * from `radius-project/radius@{{RADIUS_REF}}` and are never copied here. Core
+ * from `radius-project/ai-extensions@{{RADIUS_REF}}` and are never copied here. Core
  * always fills the reserved `{{ENV}}`, `{{APP_FILE}}`, and `{{RADIUS_REF}}`
  * placeholders. It also fills the architecture-aware
  * `{{TARGET_CLUSTER_ARCH_MODE}}` and
@@ -79,8 +79,8 @@ export function defaultDeployTemplateVars(): DeployWorkflowTemplateVars {
  * needs to thread through, and may override the architecture defaults.
  *
  * `templates` maps the committed file name to the raw template body fetched
- * from `radius-project/radius`. The caller must supply all three files; there
- * is no bundled fallback, so a missing file is a hard error.
+ * from `radius-project/ai-extensions`. The caller must supply all three files;
+ * there is no bundled fallback, so a missing file is a hard error.
  */
 export function generateDeployWorkflow(
   env: string,

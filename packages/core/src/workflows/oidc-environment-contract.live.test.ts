@@ -1,5 +1,5 @@
 // Opt-in live contract test. Fetches the CURRENT deploy/verify workflow
-// templates from radius-project/radius `.github/extension/` and asserts that the
+// templates from radius-project/ai-extensions `.github/extension/` and asserts that the
 // jobs which mint the Azure OIDC token are still bound to a GitHub Environment.
 //
 // Why this matters: the extension computes each federated-identity subject as
