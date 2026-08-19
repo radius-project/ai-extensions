@@ -189,6 +189,13 @@ export interface CanvasState {
   deployRepairing?: boolean;
   deployHandoffState?: string;
   deployHandoffAttempts?: number;
+  // Delivery state for the informational failure notice (separate from the
+  // repair handoff above). A "run-unconfirmed" failure is never auto-repaired,
+  // so it does not open a repair loop; instead this tracks a one-shot report to
+  // chat so the agent can tell the user what happened. Kept on its own fields so
+  // the notice can never be confused with, or suppress, a repair handoff.
+  deployNoticeState?: string;
+  deployNoticeAttempts?: number;
   // Redeploys the agent has made inside the current repair loop. Bounds the
   // automatic repair cycle server-side; reset whenever a deploy opens a new
   // attempt rather than continuing one.

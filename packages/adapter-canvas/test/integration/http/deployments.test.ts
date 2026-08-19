@@ -64,6 +64,7 @@ function start(): Harness {
     createDeploymentsRoutes({
       readInstanceEntry: () => (entryMissing ? undefined : { state }),
       triggerDeployRepairHandoff: () => false,
+      triggerDeployFailureNotice: () => false,
       deployHandoffStatus: (current) => ({
         state: current.deployHandoffState || "idle",
         attempts: current.deployHandoffAttempts || 0,
@@ -396,6 +397,7 @@ function startDeploy(): DeployHarness {
       handoffs.push(instanceId);
       return true;
     },
+    triggerDeployFailureNotice: () => false,
     monitor: {
       run: (request) => {
         monitorCalls.push(request);
@@ -416,6 +418,7 @@ function startDeploy(): DeployHarness {
     createDeploymentsRoutes({
       readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
       triggerDeployRepairHandoff: () => false,
+      triggerDeployFailureNotice: () => false,
       deployHandoffStatus: () => ({
         state: "idle",
         attempts: 0,
