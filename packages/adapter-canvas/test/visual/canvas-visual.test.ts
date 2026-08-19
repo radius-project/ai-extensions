@@ -196,6 +196,9 @@ async function openEnvironmentCreateForm(page: Page): Promise<void> {
     .click();
   await page.locator("#env-step1-next").click();
   await expect(page.locator("#env-step-details")).toBeVisible();
+  const recheck = page.locator("#env-gh-recheck");
+  await expect(recheck).toHaveText("Re-check");
+  await expect(recheck).toBeEnabled();
 }
 
 async function routeDeployments(
