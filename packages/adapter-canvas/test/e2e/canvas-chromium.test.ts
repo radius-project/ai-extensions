@@ -426,7 +426,13 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.getByLabel("Profile Name").fill("failing-azure");
     await page.getByLabel("Tenant ID").fill(VALID_TENANT_ID);
     await page.getByLabel("Subscription ID").fill(VALID_SUBSCRIPTION_ID);
+    const verifyResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/verify-azure-login" &&
+        response.request().method() === "POST"
+    );
     await page.getByRole("button", { name: "Verify Credentials" }).click();
+    const verifyPayload = await (await verifyResponse).text();
 
     const assistDialog = page.getByRole("dialog", {
       name: "Start Azure login?"
@@ -434,15 +440,32 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(assistDialog).toBeVisible();
     await assistDialog.getByRole("button", { name: "Cancel" }).click();
 
+    // The guidance half of the message is authored only by the server. The
+    // dialog's own copy also opens with "No active Azure session", so asserting
+    // that prefix alone would still pass if the cancel path stopped carrying
+    // the server's error through to the status line.
     await expect(page.locator("#cred-verify-status")).toContainText(
-      "No active Azure session"
+      'Run "az login --use-device-code" in your terminal, then click Verify Credentials again.'
     );
     expect(bodyFor(canvas, "/api/verify-azure-login")).toEqual({
       tenantId: VALID_TENANT_ID,
       subscriptionId: VALID_SUBSCRIPTION_ID
     });
+    expect(verifyPayload).not.toContain(PLACEHOLDER_SECRET);
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
-    await canvas.expectCliInvoked("az");
+    // Any `az` call would satisfy expectCliInvoked, including the unmodeled
+    // `az account set` the route makes first and swallows. Pin the command that
+    // actually produces the secret-shaped stderr under test.
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "az" &&
+            JSON.stringify(call.args) ===
+              JSON.stringify(["account", "show", "-o", "json"])
+        )
+      )
+      .toBe(true);
   });
 
   test("validates credential form requirements before any external command runs @safety", async ({
