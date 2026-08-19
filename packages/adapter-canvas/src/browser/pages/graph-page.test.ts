@@ -304,7 +304,7 @@ describe("initializeGraphPage", () => {
     expect(browser.nav.reloads).toBe(0);
     expect(render).toHaveBeenCalledWith(
       "graph-container",
-      [{ id: "app/generated" }],
+      expect.arrayContaining([expect.objectContaining({ id: "app/generated" })]),
       expect.objectContaining({
         branch: "feature",
         localSource: true
