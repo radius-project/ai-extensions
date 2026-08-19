@@ -6,13 +6,13 @@ This example records reasoning and acceptance checks for `dockersamples/todo-lis
 
 The requested profile runs the application with MySQL instead of its default SQLite path. The source supports that profile when `MYSQL_HOST` is present, so the SQLite default does not override the explicit selection.
 
-| Acceptance criterion          | Source/schema-backed decision                                                     |
-|-------------------------------|-----------------------------------------------------------------------------------|
-| MySQL backing service         | Emit the exact configured `Radius.Data/mySqlDatabases` type                       |
-| Source-built workload         | Use the complete Dockerfile context at an immutable source ref                    |
-| Native database contract      | Supply `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DB`               |
-| Developer-supplied credential | Set `MYSQL_PASSWORD` from the same `@secure()` password parameter via `env.value` |
-| Listener                      | Expose the source-configured port 3000                                            |
+| Acceptance criterion          | Source/schema-backed decision                                                                                |
+|-------------------------------|--------------------------------------------------------------------------------------------------------------|
+| MySQL backing service         | Emit the exact configured `Radius.Data/mySqlDatabases` type                                                  |
+| Source-built workload         | Use the complete Dockerfile context at an immutable source ref                                               |
+| Native database contract      | Supply `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DB`                                          |
+| Developer-supplied credential | Author a password Secret connection and preserve native `MYSQL_PASSWORD` from the same `@secure()` parameter |
+| Listener                      | Expose the source-configured port 3000                                                                       |
 
 ## Source analysis
 
@@ -40,7 +40,7 @@ The requested profile runs the application with MySQL instead of its default SQL
 
 - The selected MySQL type and source-built workload are both emitted.
 - Every required native variable appears with exact spelling and format.
-- The workload password comes from the same `@secure()` parameter assigned to `env.value`; no password is hardcoded and no wrapper secret or `secretKeyRef` is authored.
+- The workload password remains an explicit `MYSQL_PASSWORD` from the same `@secure()` parameter supplied to the backing resource; no optional Secret connection migration is performed.
 - The exact target Recipe maps every consumed output and is registered for every emitted type.
 - The source build uses the pinned commit and Recipe-validated tag/platform behavior, without unsupported package-manager or architecture assumptions.
 - The process listener, image entrypoint, and database name/version agree with the pinned source.
