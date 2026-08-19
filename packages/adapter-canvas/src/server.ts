@@ -2168,6 +2168,24 @@ const deployDispatchService = createDeployDispatchService({
       stderr: result.stderr ?? ""
     };
   },
+  runGitHubJson: async (apiPath) => {
+    const result = await ghApiJson(apiPath, {
+      headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
+    });
+    return {
+      ok: result.ok,
+      status: result.status,
+      json:
+        (
+          result.json !== null &&
+          typeof result.json === "object" &&
+          !Array.isArray(result.json)
+        ) ?
+          record(result.json)
+        : null,
+      stderr: result.stderr
+    };
+  },
   readProcessEnv: () => process.env,
   fetchFileForSelection: (entry, repo, branch, repoPath) =>
     fetchFileForSelection(entry as CanvasServerEntry, repo, branch, repoPath),

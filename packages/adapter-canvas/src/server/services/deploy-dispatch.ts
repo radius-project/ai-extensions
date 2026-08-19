@@ -1,5 +1,11 @@
 import type { BicepParam } from "../../bicep.js";
+import {
+  resolveOidcSubject,
+  type GitHubJsonRunner,
+  type ResolveOidcSubjectResult
+} from "../../azure-oidc.js";
 import type { CanvasState, DeployErrorKind } from "../../shared.js";
+import { buildEnvironmentSuffix } from "@radius-project/core/platforms";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 
 // Second runtime stage of a background deploy: everything between "we have a
@@ -52,9 +58,8 @@ export interface DeployDispatchDependencies {
     stdin: string,
     options?: DeployCommandOptions
   ): Promise<DeployCommandResult>;
-  // Optional local Azure CLI runner used for pre-dispatch OIDC coverage checks.
-  // When absent, deploy dispatch keeps legacy behavior and skips the check.
-  runAz?: (args: string[]) => Promise<DeployCommandResult>;
+  runAz(args: string[]): Promise<DeployCommandResult>;
+  runGitHubJson: GitHubJsonRunner;
   readProcessEnv(): NodeJS.ProcessEnv;
   fetchFileForSelection(
     entry: DeployDispatchInstanceEntry,
@@ -125,6 +130,8 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployDispatchDependencies)[] = [
   "getDefaultBranch",
   "runGh",
   "runGhWithStdin",
+  "runAz",
+  "runGitHubJson",
   "readProcessEnv",
   "fetchFileForSelection",
   "appParams",
@@ -356,65 +363,154 @@ export function createDeployDispatchService(
     return !!repoDefault;
   };
 
+  type AzureFederatedCredentialValidation =
+    | { status: "covered" }
+    | { status: "missing"; message: string }
+    | { status: "unavailable"; message: string };
+
+  const validationUnavailable = (
+    environment: string,
+    reason: string
+  ): AzureFederatedCredentialValidation => ({
+    status: "unavailable",
+    message:
+      `Azure deploy to environment "${environment}" is blocked because federated credential coverage could not be validated: ${reason}. ` +
+      "Resolve the validation error and retry."
+  });
+
   const validateAzureFederatedCredential = async (
     repo: string,
-    environment: string,
-    log: (message: string) => void
-  ): Promise<string | null> => {
-    if (!dependencies.runAz) return null;
-    const envPath = `/repos/${repo}/environments/${encodeURIComponent(environment)}`;
-    const clientIdResult = await dependencies.runGh([
-      "api",
-      `${envPath}/variables/AZURE_CLIENT_ID`,
-      "--jq",
-      ".value"
-    ]);
-    const clientId = (clientIdResult.stdout || "").trim();
-    if (!clientId) return null;
-    const fullNameResult = await dependencies.runGh([
-      "api",
-      `/repos/${repo}`,
-      "--jq",
-      ".full_name"
-    ]);
-    const fullName = (fullNameResult.stdout || "").trim() || repo;
-    const expectedSubject = `repo:${fullName}:environment:${environment}`;
-    const listResult = await dependencies.runAz([
-      "ad",
-      "app",
-      "federated-credential",
-      "list",
-      "--id",
-      clientId,
-      "--query",
-      "[].subject",
-      "-o",
-      "json"
-    ]);
-    if (listResult.code !== 0) {
-      log(
-        "⚠ Could not validate Azure federated credentials before deploy: " +
-          ((listResult.stderr || "").trim() || "unknown error")
-      );
-      return null;
-    }
-    let subjects: string[] = [];
+    environment: string
+  ): Promise<AzureFederatedCredentialValidation> => {
+    const envPath = `/repos/${repo}/environments/${encodeURIComponent(
+      environment
+    )}`;
+    const repoVariablePath = `/repos/${repo}/actions/variables/AZURE_CLIENT_ID`;
+    let clientId: string;
     try {
-      const parsed = JSON.parse(listResult.stdout || "[]");
-      if (Array.isArray(parsed)) {
-        subjects = parsed
-          .filter((value): value is string => typeof value === "string")
-          .map((value) => value.trim())
-          .filter(Boolean);
+      const environmentVariable = await dependencies.runGitHubJson(
+        `${envPath}/variables/AZURE_CLIENT_ID`
+      );
+      if (environmentVariable.ok) {
+        const value = environmentVariable.json?.value;
+        if (typeof value !== "string" || !value.trim()) {
+          return validationUnavailable(
+            environment,
+            `GitHub environment "${environment}" has an invalid AZURE_CLIENT_ID`
+          );
+        }
+        clientId = value.trim();
+      } else {
+        if (environmentVariable.status !== 404) {
+          return validationUnavailable(
+            environment,
+            `GitHub environment AZURE_CLIENT_ID lookup failed (${environmentVariable.stderr || `HTTP ${environmentVariable.status ?? "unknown"}`})`
+          );
+        }
+        const repositoryVariable =
+          await dependencies.runGitHubJson(repoVariablePath);
+        if (!repositoryVariable.ok) {
+          if (repositoryVariable.status === 404) {
+            return validationUnavailable(
+              environment,
+              `neither GitHub environment "${environment}" nor repository "${repo}" defines AZURE_CLIENT_ID`
+            );
+          }
+          return validationUnavailable(
+            environment,
+            `GitHub repository AZURE_CLIENT_ID lookup failed (${repositoryVariable.stderr || `HTTP ${repositoryVariable.status ?? "unknown"}`})`
+          );
+        }
+        const value = repositoryVariable.json?.value;
+        if (typeof value !== "string" || !value.trim()) {
+          return validationUnavailable(
+            environment,
+            `GitHub repository "${repo}" has an invalid AZURE_CLIENT_ID`
+          );
+        }
+        clientId = value.trim();
       }
-    } catch {
-      log("⚠ Could not parse Azure federated credentials before deploy.");
-      return null;
+    } catch (error) {
+      return validationUnavailable(
+        environment,
+        `GitHub AZURE_CLIENT_ID lookup failed (${dependencies.errorMessage(error)})`
+      );
     }
-    if (subjects.includes(expectedSubject)) return null;
-    const nearMatchPrefix = `repo:${fullName}:environment:`;
+
+    let resolved: ResolveOidcSubjectResult;
+    try {
+      resolved = await resolveOidcSubject(
+        {
+          targetRepo: repo,
+          envName: environment,
+          suffix: buildEnvironmentSuffix(environment)
+        },
+        dependencies.runGitHubJson
+      );
+    } catch (error) {
+      return validationUnavailable(
+        environment,
+        `GitHub OIDC subject resolution failed (${dependencies.errorMessage(error)})`
+      );
+    }
+    const expectedSubjects = resolved.federatedCredentials.map(
+      (credential) => credential.subject
+    );
+
+    let listResult: DeployCommandResult;
+    try {
+      listResult = await dependencies.runAz([
+        "ad",
+        "app",
+        "federated-credential",
+        "list",
+        "--id",
+        clientId,
+        "--query",
+        "[].subject",
+        "-o",
+        "json"
+      ]);
+    } catch (error) {
+      return validationUnavailable(
+        environment,
+        `Azure federated credential lookup failed (${dependencies.errorMessage(error)})`
+      );
+    }
+    if (listResult.code !== 0) {
+      return validationUnavailable(
+        environment,
+        `Azure federated credential lookup failed (${(listResult.stderr || "").trim() || "unknown error"})`
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(listResult.stdout || "");
+    } catch (error) {
+      return validationUnavailable(
+        environment,
+        `Azure federated credential lookup returned malformed JSON (${dependencies.errorMessage(error)})`
+      );
+    }
+    if (
+      !Array.isArray(parsed) ||
+      parsed.some(
+        (value) => typeof value !== "string" || value.trim().length === 0
+      )
+    ) {
+      return validationUnavailable(
+        environment,
+        "Azure federated credential lookup returned an invalid subject list"
+      );
+    }
+    const subjects = parsed.map((value) => value.trim());
+    if (expectedSubjects.some((subject) => subjects.includes(subject))) {
+      return { status: "covered" };
+    }
+    const nearMatchPrefix = `repo:${resolved.fullName}:environment:`;
     const nearMatches = subjects.filter(
-      (value) => value.startsWith(nearMatchPrefix) && value !== expectedSubject
+      (value) =>
+        value.startsWith(nearMatchPrefix) && !expectedSubjects.includes(value)
     );
     const nearMatchNote =
       nearMatches.length > 0 ?
@@ -422,12 +518,17 @@ export function createDeployDispatchService(
           .slice(0, 3)
           .join(", ")}${nearMatches.length > 3 ? " ..." : ""}.`
       : "";
-    return (
-      `Azure deploy to environment "${environment}" is blocked because App Registration ${clientId} ` +
-      `does not have a federated credential with subject "${expectedSubject}".` +
-      nearMatchNote +
-      " Re-run Create Environment with Azure auto-setup (or create the credential manually) before deploying."
-    );
+    const expectedSubjectText = expectedSubjects
+      .map((subject) => `"${subject}"`)
+      .join(" or ");
+    return {
+      status: "missing",
+      message:
+        `Azure deploy to environment "${environment}" is blocked because App Registration ${clientId} ` +
+        `does not have a federated credential with subject ${expectedSubjectText}.` +
+        nearMatchNote +
+        " Re-run Create Environment with Azure auto-setup (or create the credential manually) before deploying."
+    };
   };
 
   return {
@@ -446,14 +547,13 @@ export function createDeployDispatchService(
       entry.state.deployEnvName = envForDeploy;
       const deployWorkflowFile = dependencies.deployWorkflowFile;
       if (provider === "azure") {
-        const credentialError = await validateAzureFederatedCredential(
+        const validation = await validateAzureFederatedCredential(
           repo,
-          envForDeploy,
-          log
+          envForDeploy
         );
-        if (credentialError) {
-          log("❌ " + credentialError);
-          entry.state.deployError = credentialError;
+        if (validation.status !== "covered") {
+          log("❌ " + validation.message);
+          entry.state.deployError = validation.message;
           entry.state.deployStatus = "failed";
           return { dispatched: false };
         }

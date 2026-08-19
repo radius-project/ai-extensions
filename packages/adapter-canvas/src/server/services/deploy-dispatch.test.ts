@@ -7,6 +7,7 @@ import {
 } from "./deploy-dispatch.js";
 import type { BicepParam } from "../../bicep.js";
 import type { CanvasState } from "../../shared.js";
+import type { GitHubJsonResponse, GitHubJsonRunner } from "../../azure-oidc.js";
 
 const OK: DeployCommandResult = { code: 0, stdout: "", stderr: "" };
 
@@ -30,6 +31,12 @@ function dependencies(
     runGh: () => Promise.resolve(OK),
     runGhWithStdin: () => {
       throw new Error("runGhWithStdin not stubbed");
+    },
+    runAz: () => {
+      throw new Error("runAz not stubbed");
+    },
+    runGitHubJson: () => {
+      throw new Error("runGitHubJson not stubbed");
     },
     readProcessEnv: () => ({}),
     fetchFileForSelection: () => Promise.resolve(null),
@@ -59,7 +66,7 @@ function request(state: CanvasState = {}) {
       entry: { state },
       repo: "acme/widgets",
       branch: "feat",
-      provider: "azure",
+      provider: "aws",
       requestedEnvironment: "production",
       log: (message: string) => logs.push(message)
     }
@@ -87,6 +94,88 @@ function recordingGh(results: DeployCommandResult[] = []) {
   };
 }
 
+const DEFAULT_OIDC_CUSTOMIZATION: GitHubJsonResponse = {
+  ok: false,
+  status: 404
+};
+
+function oidcGitHubRunner(
+  customization: GitHubJsonResponse = DEFAULT_OIDC_CUSTOMIZATION
+): GitHubJsonRunner {
+  return (path) => {
+    if (path === "/repos/acme/widgets") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: {
+          full_name: "acme/widgets",
+          id: 202,
+          owner: { id: 101 }
+        }
+      });
+    }
+    if (path === "/repos/acme/widgets/actions/oidc/customization/sub") {
+      return Promise.resolve(customization);
+    }
+    throw new Error(`unexpected GitHub JSON path: ${path}`);
+  };
+}
+
+interface AzurePreflightOptions {
+  customization?: GitHubJsonResponse;
+  environmentVariable?: GitHubJsonResponse;
+  oidcError?: Error;
+  repositoryVariable?: GitHubJsonResponse;
+  runAz?: (args: string[]) => Promise<DeployCommandResult>;
+  subjects?: unknown;
+  variableError?: Error;
+}
+
+function azurePreflight(options: AzurePreflightOptions = {}) {
+  const azCalls: string[][] = [];
+  const githubJsonCalls: string[] = [];
+  return {
+    azCalls,
+    githubJsonCalls,
+    runGitHubJson: (path: string) => {
+      githubJsonCalls.push(path);
+      if (
+        path.startsWith("/repos/acme/widgets/environments/") &&
+        path.endsWith("/variables/AZURE_CLIENT_ID")
+      ) {
+        if (options.variableError) throw options.variableError;
+        return Promise.resolve(
+          options.environmentVariable ?? {
+            ok: true,
+            status: 200,
+            json: { value: "client-123" }
+          }
+        );
+      }
+      if (path === "/repos/acme/widgets/actions/variables/AZURE_CLIENT_ID") {
+        return Promise.resolve(
+          options.repositoryVariable ?? { ok: false, status: 404 }
+        );
+      }
+      if (options.oidcError) throw options.oidcError;
+      return oidcGitHubRunner(
+        options.customization ?? DEFAULT_OIDC_CUSTOMIZATION
+      )(path);
+    },
+    runAz:
+      options.runAz ??
+      ((args: string[]) => {
+        azCalls.push(args);
+        return Promise.resolve({
+          ...OK,
+          stdout: JSON.stringify(
+            options.subjects ?? ["repo:acme/widgets:environment:production"]
+          )
+        });
+      })
+  };
+}
+
 const SECRET_PARAM: BicepParam = {
   name: "dbPassword",
   type: "string",
@@ -111,6 +200,8 @@ describe("deploy dispatch construction", () => {
     "getDefaultBranch",
     "runGh",
     "runGhWithStdin",
+    "runAz",
+    "runGitHubJson",
     "readProcessEnv",
     "fetchFileForSelection",
     "appParams",
@@ -269,29 +360,19 @@ describe("deploy dispatch environment and branch preflight", () => {
     ]);
   });
 
-  it("fails fast when Azure federated credentials do not cover the target environment", async () => {
+  it("fails fast when Azure federated credentials do not cover the target environment and truncates near matches", async () => {
     const { input, state } = request();
+    input.provider = "azure";
     const gh = recordingGh();
-    const calls: string[] = [];
+    const preflight = azurePreflight({
+      subjects: ["dev", "test", "staging", "preview"].map(
+        (environment) => `repo:acme/widgets:environment:${environment}`
+      )
+    });
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
-        runGh: (args, options) => {
-          const line = args.join(" ");
-          calls.push(line);
-          if (line.includes("/variables/AZURE_CLIENT_ID")) {
-            return Promise.resolve({ ...OK, stdout: "client-123\n" });
-          }
-          if (line === "api /repos/acme/widgets --jq .full_name") {
-            return Promise.resolve({ ...OK, stdout: "acme/widgets\n" });
-          }
-          return gh.runGh(args, options);
-        },
-        runAz: () =>
-          Promise.resolve({
-            ...OK,
-            stdout: JSON.stringify(["repo:acme/widgets:environment:dev"])
-          })
+        ...preflight
       })
     );
 
@@ -300,74 +381,327 @@ describe("deploy dispatch environment and branch preflight", () => {
     });
     expect(state.deployStatus).toBe("failed");
     expect(state.deployError).toContain(
-      'does not have a federated credential with subject "repo:acme/widgets:environment:production"'
+      '"repo:acme/widgets:environment:production"'
     );
-    expect(calls.some((line) => line.startsWith("workflow run "))).toBe(false);
+    expect(state.deployError).toContain(
+      "repo:acme/widgets:environment:dev, repo:acme/widgets:environment:test, repo:acme/widgets:environment:staging ..."
+    );
+    expect(state.deployError).not.toContain(
+      "repo:acme/widgets:environment:preview"
+    );
+    expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(false);
+    expect(preflight.azCalls).toEqual([
+      [
+        "ad",
+        "app",
+        "federated-credential",
+        "list",
+        "--id",
+        "client-123",
+        "--query",
+        "[].subject",
+        "-o",
+        "json"
+      ]
+    ]);
   });
 
-  it("continues when Azure federated credentials already include the target environment", async () => {
+  it.each([
+    {
+      name: "default mutable subject",
+      environment: "production",
+      customization: DEFAULT_OIDC_CUSTOMIZATION,
+      subject: "repo:acme/widgets:environment:production"
+    },
+    {
+      name: "default immutable subject from the compatibility pair",
+      environment: "production",
+      customization: DEFAULT_OIDC_CUSTOMIZATION,
+      subject: "repo:acme@101/widgets@202:environment:production"
+    },
+    {
+      name: "immutable-only subject",
+      environment: "production",
+      customization: {
+        ok: true,
+        status: 200,
+        json: { use_default: true, use_immutable_subject: true }
+      },
+      subject: "repo:acme@101/widgets@202:environment:production"
+    },
+    {
+      name: "custom subject",
+      environment: "production",
+      customization: {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: false,
+          include_claim_keys: ["repository_owner", "repository", "environment"],
+          use_immutable_subject: false
+        }
+      },
+      subject:
+        "repository_owner:acme:repository:acme/widgets:environment:production"
+    },
+    {
+      name: "colon-escaped environment subject",
+      environment: "prod:west",
+      customization: DEFAULT_OIDC_CUSTOMIZATION,
+      subject: "repo:acme/widgets:environment:prod%3Awest"
+    }
+  ])("continues with a covered $name", async (scenario) => {
     const { input } = request();
+    input.provider = "azure";
+    input.requestedEnvironment = scenario.environment;
+    const gh = recordingGh();
+    const preflight = azurePreflight({
+      customization: scenario.customization,
+      subjects: [`  ${scenario.subject}  `]
+    });
+    const service = createDeployDispatchService(
+      dependencies({ ...gh, ...preflight })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+    expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(true);
+  });
+
+  it("reports a missing subject without inventing near matches", async () => {
+    const { input, state } = request();
+    input.provider = "azure";
     const gh = recordingGh();
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
-        runGh: (args, options) => {
-          const line = args.join(" ");
-          if (line.includes("/variables/AZURE_CLIENT_ID")) {
-            return Promise.resolve({ ...OK, stdout: "client-123\n" });
-          }
-          if (line === "api /repos/acme/widgets --jq .full_name") {
-            return Promise.resolve({ ...OK, stdout: "acme/widgets\n" });
-          }
-          return gh.runGh(args, options);
-        },
+        ...azurePreflight({
+          subjects: ["repo:other/project:environment:production"]
+        })
+      })
+    );
+
+    await service.prepareAndDispatch(input);
+
+    expect(state.deployError).not.toContain("Existing credential subjects");
+  });
+
+  it("uses a repository-scoped client id when the environment variable is absent", async () => {
+    const { input } = request();
+    input.provider = "azure";
+    const gh = recordingGh();
+    const preflight = azurePreflight({
+      environmentVariable: { ok: false, status: 404 },
+      repositoryVariable: {
+        ok: true,
+        status: 200,
+        json: { value: "repo-client-456" }
+      }
+    });
+    const service = createDeployDispatchService(
+      dependencies({ ...gh, ...preflight })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+    expect(preflight.githubJsonCalls.slice(0, 2)).toEqual([
+      "/repos/acme/widgets/environments/production/variables/AZURE_CLIENT_ID",
+      "/repos/acme/widgets/actions/variables/AZURE_CLIENT_ID"
+    ]);
+    expect(preflight.azCalls[0]).toContain("repo-client-456");
+  });
+
+  it.each([
+    {
+      name: "GitHub environment lookup failure",
+      options: {
+        environmentVariable: {
+          ok: false,
+          status: 403,
+          stderr: "environment unavailable"
+        }
+      },
+      message:
+        "GitHub environment AZURE_CLIENT_ID lookup failed (environment unavailable)"
+    },
+    {
+      name: "GitHub lookup rejection",
+      options: { variableError: new Error("GitHub process failed") },
+      message: "GitHub AZURE_CLIENT_ID lookup failed (GitHub process failed)"
+    },
+    {
+      name: "GitHub environment lookup failure without diagnostics",
+      options: {
+        environmentVariable: { ok: false, status: 503 }
+      },
+      message: "GitHub environment AZURE_CLIENT_ID lookup failed (HTTP 503)"
+    },
+    {
+      name: "GitHub environment lookup failure without status",
+      options: {
+        environmentVariable: { ok: false }
+      },
+      message: "GitHub environment AZURE_CLIENT_ID lookup failed (HTTP unknown)"
+    },
+    {
+      name: "invalid environment client id",
+      options: {
+        environmentVariable: {
+          ok: true,
+          status: 200,
+          json: { value: " " }
+        }
+      },
+      message: 'GitHub environment "production" has an invalid AZURE_CLIENT_ID'
+    },
+    {
+      name: "missing environment and repository client id",
+      options: {
+        environmentVariable: { ok: false, status: 404 },
+        repositoryVariable: { ok: false, status: 404 }
+      },
+      message:
+        'neither GitHub environment "production" nor repository "acme/widgets" defines AZURE_CLIENT_ID'
+    },
+    {
+      name: "GitHub repository lookup failure",
+      options: {
+        environmentVariable: { ok: false, status: 404 },
+        repositoryVariable: {
+          ok: false,
+          status: 403,
+          stderr: "repository unavailable"
+        }
+      },
+      message:
+        "GitHub repository AZURE_CLIENT_ID lookup failed (repository unavailable)"
+    },
+    {
+      name: "GitHub repository lookup failure without diagnostics",
+      options: {
+        environmentVariable: { ok: false, status: 404 },
+        repositoryVariable: { ok: false }
+      },
+      message: "GitHub repository AZURE_CLIENT_ID lookup failed (HTTP unknown)"
+    },
+    {
+      name: "invalid repository client id",
+      options: {
+        environmentVariable: { ok: false, status: 404 },
+        repositoryVariable: {
+          ok: true,
+          status: 200,
+          json: { value: 42 }
+        }
+      },
+      message: 'GitHub repository "acme/widgets" has an invalid AZURE_CLIENT_ID'
+    },
+    {
+      name: "GitHub OIDC resolution failure",
+      options: { oidcError: new Error("GitHub timed out") },
+      message: "GitHub OIDC subject resolution failed (GitHub timed out)"
+    },
+    {
+      name: "Azure CLI timeout",
+      options: {
+        runAz: () =>
+          Promise.resolve({
+            code: "ETIMEDOUT",
+            stdout: "",
+            stderr: "command timed out"
+          })
+      },
+      message: "Azure federated credential lookup failed (command timed out)"
+    },
+    {
+      name: "Azure CLI failure without diagnostics",
+      options: {
+        runAz: () => Promise.resolve({ code: 1, stdout: "", stderr: "" })
+      },
+      message: "Azure federated credential lookup failed (unknown error)"
+    },
+    {
+      name: "Azure CLI cancellation",
+      options: {
+        runAz: () => Promise.reject(new Error("command cancelled"))
+      },
+      message: "Azure federated credential lookup failed (command cancelled)"
+    },
+    {
+      name: "malformed Azure JSON",
+      options: {
+        runAz: () => Promise.resolve({ ...OK, stdout: "not json" })
+      },
+      message: "returned malformed JSON"
+    },
+    {
+      name: "empty Azure output",
+      options: {
+        runAz: () => Promise.resolve({ ...OK, stdout: "" })
+      },
+      message: "returned malformed JSON"
+    },
+    {
+      name: "non-array Azure JSON",
+      options: {
+        runAz: () => Promise.resolve({ ...OK, stdout: '{"subject":"value"}' })
+      },
+      message: "returned an invalid subject list"
+    },
+    {
+      name: "mixed Azure subject list",
+      options: {
         runAz: () =>
           Promise.resolve({
             ...OK,
             stdout: JSON.stringify([
               "repo:acme/widgets:environment:production",
-              "repo:acme/widgets:environment:dev"
+              null
             ])
           })
-      })
-    );
-
-    expect(await service.prepareAndDispatch(input)).toMatchObject({
-      dispatched: true
-    });
-  });
-
-  it("logs and continues when pre-dispatch Azure credential validation cannot run", async () => {
-    const { input, logs } = request();
+      },
+      message: "returned an invalid subject list"
+    }
+  ])("fails closed when validation is unavailable: $name", async (scenario) => {
+    const { input, state, logs } = request();
+    input.provider = "azure";
     const gh = recordingGh();
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
-        runGh: (args, options) => {
-          const line = args.join(" ");
-          if (line.includes("/variables/AZURE_CLIENT_ID")) {
-            return Promise.resolve({ ...OK, stdout: "client-123\n" });
-          }
-          if (line === "api /repos/acme/widgets --jq .full_name") {
-            return Promise.resolve({ ...OK, stdout: "acme/widgets\n" });
-          }
-          return gh.runGh(args, options);
+        ...azurePreflight(scenario.options)
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployError).toContain(scenario.message);
+    expect(logs.at(-1)).toBe("❌ " + state.deployError);
+    expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(false);
+  });
+
+  it("does not run Azure validation for another provider", async () => {
+    const { input } = request();
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        runAz: () => {
+          throw new Error("non-Azure deploy must not call az");
         },
-        runAz: () =>
-          Promise.resolve({
-            code: 1,
-            stdout: "",
-            stderr: "az login required"
-          })
+        runGitHubJson: () => {
+          throw new Error("non-Azure deploy must not query OIDC settings");
+        }
       })
     );
 
     expect(await service.prepareAndDispatch(input)).toMatchObject({
       dispatched: true
     });
-    expect(logs).toContain(
-      "⚠ Could not validate Azure federated credentials before deploy: az login required"
-    );
   });
 });
 
@@ -709,7 +1043,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
 
     expect(order).toEqual([
       "publish:acme/widgets:feat:production",
-      "sync:acme/widgets:production:azure:run-rad-commands.yml+run-rad-commands-azure.yml:feat",
+      "sync:acme/widgets:production:aws:run-rad-commands.yml+run-rad-commands-azure.yml:feat",
       "dispatch"
     ]);
   });

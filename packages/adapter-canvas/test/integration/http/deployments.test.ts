@@ -4,6 +4,11 @@ import { createCanvasServer } from "../../../src/server/create-canvas-server.js"
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createDeploymentsRoutes } from "../../../src/server/routes/deployments.js";
 import { createDeployRequestService } from "../../../src/server/services/deploy-request.js";
+import { createDeployDispatchService } from "../../../src/server/services/deploy-dispatch.js";
+import {
+  createDeployMonitorService,
+  type DeployMonitorService
+} from "../../../src/server/services/deploy-monitor.js";
 import {
   activeDeploymentMutation,
   beginDeployAttempt,
@@ -359,7 +364,7 @@ interface DeployHarness {
   failPersistedLookup(failure: boolean): void;
 }
 
-function startDeploy(): DeployHarness {
+function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
   const monitorCalls: DeployMonitorRequest[] = [];
   const branchLookups: string[][] = [];
   const handoffs: string[] = [];
@@ -398,7 +403,7 @@ function startDeploy(): DeployHarness {
       return true;
     },
     triggerDeployFailureNotice: () => false,
-    monitor: {
+    monitor: monitorOverride ?? {
       run: (request) => {
         monitorCalls.push(request);
         monitorSettled = new Promise<void>((resolve, reject) => {
@@ -531,6 +536,131 @@ function failedAttempt(state: CanvasState, extra: Partial<CanvasState>): void {
 }
 
 describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
+  it("fails closed through the real monitor and dispatch service when Azure OIDC coverage is missing", async () => {
+    const workflowDispatches: string[][] = [];
+    const dispatch = createDeployDispatchService({
+      deployWorkflowFile: "run-rad-commands.yml",
+      deployWorkflowFiles: [
+        "run-rad-commands.yml",
+        "run-rad-commands-azure.yml"
+      ],
+      branchNotPushedKind: "branch-not-pushed",
+      getBranchHeadSha: () => Promise.resolve("sha-1"),
+      getDefaultBranch: () => Promise.resolve("main"),
+      runGh: (args) => {
+        if (args[0] === "workflow") workflowDispatches.push(args);
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+      },
+      runGhWithStdin: () => {
+        throw new Error("OIDC refusal must happen before secret provisioning");
+      },
+      runAz: () =>
+        Promise.resolve({
+          code: 0,
+          stdout: JSON.stringify(["repo:acme/widgets:environment:development"]),
+          stderr: ""
+        }),
+      runGitHubJson: (path) => {
+        if (path.includes("/variables/AZURE_CLIENT_ID")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: { value: "client-123" }
+          });
+        }
+        if (path === "/repos/acme/widgets") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: {
+              full_name: "acme/widgets",
+              id: 202,
+              owner: { id: 101 }
+            }
+          });
+        }
+        return Promise.resolve({ ok: false, status: 404 });
+      },
+      readProcessEnv: () => ({}),
+      fetchFileForSelection: () => {
+        throw new Error("OIDC refusal must happen before reading app.bicep");
+      },
+      appParams: () => [],
+      resolveDeployParams: () => ({}),
+      partitionParams: () => ({ secret: {}, public: {} }),
+      extractAppName: () => "",
+      buildDeployRadCommand: () => "",
+      buildAppGraphRadCommand: () => "",
+      ensureDeployWorkflowsOnBranch: () => {
+        throw new Error("OIDC refusal must happen before workflow publication");
+      },
+      ensureWorkflowsCurrent: () => {
+        throw new Error(
+          "OIDC refusal must happen before workflow synchronization"
+        );
+      },
+      classifyDeployDispatchFailure: () => "run-unconfirmed",
+      invalidateDeployListCache: () => {
+        throw new Error("OIDC refusal must not invalidate the deploy cache");
+      },
+      errorMessage: (error) =>
+        error instanceof Error ? error.message : String(error),
+      now: () => 1_700_000_000_000
+    });
+    const monitor = createDeployMonitorService({
+      plannedGraph: {
+        recover: () => {
+          throw new Error("the request supplies planned resources");
+        }
+      },
+      dispatch,
+      outcome: {
+        settle: () => {
+          throw new Error("an undispatched workflow has no outcome");
+        }
+      },
+      deployRadCommandsStep: "Run rad commands",
+      unconfirmedRunKind: "run-unconfirmed",
+      findWorkflowRun: () => {
+        throw new Error("an undispatched workflow has no run");
+      },
+      getRunDetail: () => {
+        throw new Error("an undispatched workflow has no run detail");
+      },
+      createStatusReader: () => {
+        throw new Error("an undispatched workflow has no status reader");
+      },
+      buildDeployStatusMap: () => new Map(),
+      buildDeployMessageMap: () => new Map(),
+      applyDeployMessages: () => {},
+      applyDeployStatusToResources: () => [],
+      generatePortalUrl: () => "",
+      optionalString: (value) => (typeof value === "string" ? value : ""),
+      errorMessage: (error) =>
+        error instanceof Error ? error.message : String(error),
+      sleep: () => Promise.resolve(),
+      now: () => 1_700_000_000_000
+    });
+    const harness = startDeploy(monitor);
+    const entry = await container!.getOrCreate("panel-a");
+    const state = harness.stateOf("panel-a");
+    state.plannedResources = [{ id: "r1", name: "db" }];
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody()
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    await expect.poll(() => state.deployStatus).toBe("failed");
+    expect(state.deployError).toContain(
+      '"repo:acme/widgets:environment:production"'
+    );
+    expect(workflowDispatches).toEqual([]);
+    await expect.poll(() => activeDeploymentMutation(state)).toBeUndefined();
+  });
+
   it("accepts an ordinary deploy, answers 200 immediately, and hands the monitor the resolved attempt", async () => {
     const harness = startDeploy();
     const entry = await container!.getOrCreate("panel-a");
