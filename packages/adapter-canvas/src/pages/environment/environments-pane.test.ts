@@ -331,4 +331,9 @@ describe("environmentsPaneMarkup — stop, continue and rollback", () => {
       html.indexOf("</details>")
     );
   });
+
+  it("describes rollback-eligible resources in customer terms", () => {
+    expect(html).toContain("Created by Radius and available to roll back");
+    expect(html).not.toContain("Retained for a retry");
+  });
 });

@@ -113,7 +113,7 @@ export function environmentsPaneMarkup(
           <ul id="env-progress-state-created" class="env-progress__failure-list"></ul>
         </div>
         <div id="env-progress-state-retained-block" class="env-progress__failure-block" style="display:none;">
-          <div class="env-progress__failure-label">Retained for a retry</div>
+          <div class="env-progress__failure-label">Created by Radius and available to roll back</div>
           <ul id="env-progress-state-retained" class="env-progress__failure-list"></ul>
         </div>
         <div id="env-progress-state-reused-block" class="env-progress__failure-block" style="display:none;">
