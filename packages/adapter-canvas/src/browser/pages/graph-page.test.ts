@@ -302,6 +302,9 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(browser.nav.reloads).toBe(0);
+    expect(
+      browser.net.calls.filter((call) => call.url === "/api/load-graph")
+    ).toHaveLength(1);
     expect(render).toHaveBeenCalledWith(
       "graph-container",
       expect.arrayContaining([
