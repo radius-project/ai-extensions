@@ -1,15 +1,11 @@
 import type { GitHubIdentity } from "../../gh.js";
+import type { GitHubAccountReadiness } from "../services/github-account-readiness.js";
 import type {
   CredentialProfile,
   CredentialProfileInput
 } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
-
-export interface SwitchAccountResult {
-  ok: boolean;
-  error?: string;
-}
 
 // Every seam is a single narrow function lifted from `server.ts`, injected
 // rather than moved: `preflightRepoAdmin` and `errorMessage` stay defined there
@@ -25,8 +21,16 @@ export interface IdentityProfilesDependencies {
   deleteCredentialProfile(repo: string, name: string): boolean;
   getGitHubIdentity(): Promise<GitHubIdentity>;
   resetGhIdentityCache(): void;
-  switchGhAccount(login: string): Promise<SwitchAccountResult>;
-  setPreferredGitHubLogin(login: string): void;
+  prepareGitHubAccount(input: {
+    instanceId: string;
+    repo: string;
+    environment: string;
+    login: string;
+  }): Promise<{
+    readiness: GitHubAccountReadiness;
+    selectionHandle?: string;
+    expiresAt?: number;
+  }>;
   preflightRepoAdmin(repo: string): Promise<string>;
   isValidRepoSlug(value: unknown): boolean;
   errorMessage(error: unknown): string;
@@ -116,10 +120,7 @@ export async function handleGitHubIdentity(
   }
 }
 
-// Switch the active GitHub account setup acts as.
-//
-// A failed switch is a 400, not a 200 with an error payload, and so is a
-// malformed body. Both differ from `github-identity` above and are preserved.
+// Check the selected GitHub account and mint an operation-selection handle.
 export async function handleGitHubAccount(
   context: CanvasRequestContext,
   dependencies: IdentityProfilesDependencies
@@ -129,30 +130,37 @@ export async function handleGitHubAccount(
   response.setHeader("Content-Type", "application/json");
   try {
     // `body || "{}"` means an empty body yields `{}` and `login` becomes ""
-    // rather than throwing, so the empty-login rejection comes from
-    // `switchGhAccount`, not from the parse.
-    const data = JSON.parse(body || "{}") as { login?: string };
+    // rather than throwing.
+    const data = JSON.parse(body || "{}") as {
+      login?: string;
+      repo?: string;
+      environment?: string;
+    };
     const login = (data.login || "").trim();
-    const result = await dependencies.switchGhAccount(login);
-    if (!result.ok) {
+    const repo = (data.repo || "").trim();
+    const environment = (data.environment || "").trim();
+    if (!login || !environment || !dependencies.isValidRepoSlug(repo)) {
       response.writeHead(400);
       response.end(
-        JSON.stringify({ error: result.error || "Failed to switch account." })
+        JSON.stringify({
+          error:
+            "A GitHub login, environment, and valid repository are required."
+        })
       );
       return;
     }
-    // Persist the explicit choice machine-wide so it survives a restart.
-    // Without this the in-memory preference dies with the process and the
-    // token strategy reverts to the injected token's account — the same
-    // wrong-identity failure this flow exists to prevent, deferred by one
-    // process lifetime. It must happen BEFORE the identity is re-read, so the
-    // returned identity reflects the new preference.
-    dependencies.setPreferredGitHubLogin(login);
+    dependencies.resetGhIdentityCache();
+    const prepared = await dependencies.prepareGitHubAccount({
+      instanceId: context.instanceId,
+      repo,
+      environment,
+      login
+    });
     response.writeHead(200);
     response.end(
       JSON.stringify({
         success: true,
-        identity: await dependencies.getGitHubIdentity()
+        ...prepared
       })
     );
   } catch (e) {

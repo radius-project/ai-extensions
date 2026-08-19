@@ -46,6 +46,7 @@ export interface EnvironmentPaneDependencies {
     provider: "azure" | "aws"
   ): void;
   currentInfraSelection?(provider: "azure" | "aws"): EnvironmentInfrastructure;
+  canSubmit?(): boolean;
 }
 
 export interface EnvironmentDecisionPort {
@@ -506,7 +507,8 @@ export function initializeEnvironmentPane(
     if (!submit) return;
     submit.textContent =
       environmentName.disabled ? "Save Environment" : "Create Environment";
-    submit.disabled = false;
+    submit.disabled =
+      dependencies.canSubmit ? !dependencies.canSubmit() : false;
   };
 
   const switchSubtab = (name: string): void => {

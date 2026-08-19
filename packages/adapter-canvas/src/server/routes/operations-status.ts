@@ -1,4 +1,5 @@
 import type { CanvasRequestContext } from "../request-context.js";
+import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
 import {
   templatePathParameters,
   type RouteHandlerRegistry
@@ -66,6 +67,12 @@ export interface CreateOperationDependencies {
   isUuid(value: unknown): boolean;
   buildStages(options: { includeIdentity: boolean }): unknown;
   createOperation(input: unknown): OperationRecord;
+  claimSelectionHandle(input: {
+    instanceId: string;
+    repo: string;
+    environment: string;
+    handle: string;
+  }): SelectionHandleClaim;
   // Registry writes. `start` refuses a second operation for a repo already in
   // flight; `persist` durably records the registration before any work runs.
   startOperation(op: OperationRecord): StartOperationResult;
@@ -341,115 +348,178 @@ export async function handleCreateOperation(
     });
     return;
   }
-  const needsAzureCredentials =
-    provider === "azure" && !String(data.clientId || "").trim();
-  const op = dependencies.createOperation({
-    provider,
+  const selection = dependencies.claimSelectionHandle({
+    instanceId: context.instanceId,
     repo,
     environment,
-    stages: dependencies.buildStages({
-      includeIdentity: needsAzureCredentials
-    }),
-    journey: {
-      origin: data.origin || null,
-      resumeTarget: data.resumeTarget || null,
-      resumeBranch: data.resumeBranch || data.branch || null,
-      resumeReason: data.resumeReason || null
-    }
+    handle: String(data.selectionHandle || "")
   });
-  op.request = {
-    needsAzureCredentials,
-    azure: {
-      resourceGroup: data.resourceGroup || "",
+  if (!selection.ok) {
+    jsonError(context, 409, {
+      error:
+        "The selected GitHub account is no longer ready. Re-check the account and try again.",
+      code: `github-selection-${selection.error}`
+    });
+    return;
+  }
+  let selectionCommitted = false;
+  try {
+    const needsAzureCredentials =
+      provider === "azure" && !String(data.clientId || "").trim();
+    const op = dependencies.createOperation({
+      provider,
+      repo,
+      environment,
+      stages: dependencies.buildStages({
+        includeIdentity: needsAzureCredentials
+      }),
+      journey: {
+        origin: data.origin || null,
+        resumeTarget: data.resumeTarget || null,
+        resumeBranch: data.resumeBranch || data.branch || null,
+        resumeReason: data.resumeReason || null
+      }
+    });
+    op.context = {
+      githubLogin: selection.login,
+      githubCredentialSource: selection.credentialSource
+    };
+    const environmentRequest = {
+      repo,
+      environment,
+      provider,
       cluster: data.cluster || "",
-      clusterResourceGroup: data.clusterResourceGroup || "",
-      subscriptionId: data.subscriptionId || "",
+      namespace: data.namespace || "",
+      profileName: data.profileName || "",
+      branch: data.branch || "",
+      clientId: data.clientId || "",
       tenantId: data.tenantId || "",
+      subscriptionId: data.subscriptionId || "",
+      resourceGroup: data.resourceGroup || "",
+      clusterResourceGroup: data.clusterResourceGroup || "",
       appName: data.appName,
       appId: data.appId || "",
       createNew: data.createNew === true,
-      serviceManagementReference: data.serviceManagementReference || ""
-    },
-    environment: { ...data, environment, provider }
-  };
-  if (provider === "azure") {
-    op.resumeRequest = {
-      needsAzureCredentials,
-      azure: structuredClone((op.request as { azure: unknown }).azure),
-      environment: {
-        repo,
-        environment,
-        provider,
-        cluster: data.cluster || "",
-        namespace: data.namespace || "",
-        profileName: data.profileName || "",
-        branch: data.branch || "",
-        tenantId: data.tenantId || "",
-        subscriptionId: data.subscriptionId || "",
-        resourceGroup: data.resourceGroup || "",
-        origin: data.origin || null,
-        resumeTarget: data.resumeTarget || null,
-        resumeBranch: data.resumeBranch || null,
-        resumeReason: data.resumeReason || null
-      }
+      serviceManagementReference: data.serviceManagementReference || "",
+      roleArn: data.roleArn || "",
+      accountId: data.accountId || "",
+      region: data.region || "",
+      vpcId: data.vpcId || "",
+      subnetIds: data.subnetIds || "",
+      origin: data.origin || null,
+      resumeTarget: data.resumeTarget || null,
+      resumeBranch: data.resumeBranch || null,
+      resumeReason: data.resumeReason || null,
+      githubLogin: selection.login
     };
-  }
-  const started = dependencies.startOperation(op);
-  if (!started.ok) {
-    jsonError(context, 409, {
-      error: `Setup is already running for ${repo}.`,
-      code: "operation-in-progress",
-      operationId: started.conflict.operationId
-    });
-    return;
-  }
-  try {
-    await dependencies.persistOperations();
-  } catch (error) {
-    dependencies.finish(op, "failed", {
-      failure: {
-        code: "operation-registration-persist-failed",
-        stage: op.currentStage,
-        stepSeq: null,
-        message: "Radius could not durably register the environment operation.",
-        classification: "unknown",
-        evidence: dependencies.errorMessage(error)
-      }
-    });
-    jsonError(context, 500, {
-      error:
-        "Radius could not durably register the environment operation. No setup work was started.",
-      code: "operation-registration-persist-failed"
-    });
-    return;
-  }
-  const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
-  context.response.setHeader("Content-Type", "application/json");
-  context.response.setHeader("Location", statusUrl);
-  context.response.writeHead(202);
-  context.response.end(
-    JSON.stringify({ operationId: op.operationId, statusUrl })
-  );
-  // Scheduling comes strictly after the 202 is written, mirroring the legacy
-  // ordering the boundary test pins (`res.end` before `scheduleServerOwnedTask`).
-  const scheduled = dependencies.scheduleEnvironmentOperation(
-    context.instanceId,
-    op
-  );
-  if (!scheduled) {
-    // No runner accepted the operation, so nothing will ever advance or finish
-    // it. Leaving it `running` would keep polling clients spinning and block a
-    // fresh start for the same repo with a 409 until the record went stale.
-    // The 202 is already on the wire and cannot be recalled, but the record can
-    // be moved to a terminal state and persisted so the failure is observable
-    // through the same status endpoint the client is already polling.
-    await finishSchedulingFailure(
-      op,
-      context.instanceId,
-      (failure) => dependencies.finish(op, "failed", { failure }),
-      dependencies.persistOperations,
-      dependencies.errorMessage
+    op.request = {
+      needsAzureCredentials,
+      github: {
+        login: selection.login,
+        credentialSource: selection.credentialSource
+      },
+      azure: {
+        resourceGroup: data.resourceGroup || "",
+        cluster: data.cluster || "",
+        clusterResourceGroup: data.clusterResourceGroup || "",
+        subscriptionId: data.subscriptionId || "",
+        tenantId: data.tenantId || "",
+        appName: data.appName,
+        appId: data.appId || "",
+        createNew: data.createNew === true,
+        serviceManagementReference: data.serviceManagementReference || ""
+      },
+      environment: environmentRequest
+    };
+    if (provider === "azure") {
+      op.resumeRequest = {
+        needsAzureCredentials,
+        github: {
+          login: selection.login,
+          credentialSource: selection.credentialSource
+        },
+        azure: structuredClone((op.request as { azure: unknown }).azure),
+        environment: {
+          repo,
+          environment,
+          provider,
+          cluster: data.cluster || "",
+          namespace: data.namespace || "",
+          profileName: data.profileName || "",
+          branch: data.branch || "",
+          tenantId: data.tenantId || "",
+          subscriptionId: data.subscriptionId || "",
+          resourceGroup: data.resourceGroup || "",
+          githubLogin: selection.login,
+          origin: data.origin || null,
+          resumeTarget: data.resumeTarget || null,
+          resumeBranch: data.resumeBranch || null,
+          resumeReason: data.resumeReason || null
+        }
+      };
+    }
+    const started = dependencies.startOperation(op);
+    if (!started.ok) {
+      jsonError(context, 409, {
+        error: `Setup is already running for ${repo}.`,
+        code: "operation-in-progress",
+        operationId: started.conflict.operationId
+      });
+      return;
+    }
+    try {
+      await dependencies.persistOperations();
+    } catch (error) {
+      dependencies.finish(op, "failed", {
+        failure: {
+          code: "operation-registration-persist-failed",
+          stage: op.currentStage,
+          stepSeq: null,
+          message:
+            "Radius could not durably register the environment operation.",
+          classification: "unknown",
+          evidence: dependencies.errorMessage(error)
+        }
+      });
+      jsonError(context, 500, {
+        error:
+          "Radius could not durably register the environment operation. No setup work was started.",
+        code: "operation-registration-persist-failed"
+      });
+      return;
+    }
+    selection.commit();
+    selectionCommitted = true;
+    const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
+    context.response.setHeader("Content-Type", "application/json");
+    context.response.setHeader("Location", statusUrl);
+    context.response.writeHead(202);
+    context.response.end(
+      JSON.stringify({ operationId: op.operationId, statusUrl })
     );
+    // Scheduling comes strictly after the 202 is written, mirroring the legacy
+    // ordering the boundary test pins (`res.end` before `scheduleServerOwnedTask`).
+    const scheduled = dependencies.scheduleEnvironmentOperation(
+      context.instanceId,
+      op
+    );
+    if (!scheduled) {
+      // No runner accepted the operation, so nothing will ever advance or finish
+      // it. Leaving it `running` would keep polling clients spinning and block a
+      // fresh start for the same repo with a 409 until the record went stale.
+      // The 202 is already on the wire and cannot be recalled, but the record can
+      // be moved to a terminal state and persisted so the failure is observable
+      // through the same status endpoint the client is already polling.
+      await finishSchedulingFailure(
+        op,
+        context.instanceId,
+        (failure) => dependencies.finish(op, "failed", { failure }),
+        dependencies.persistOperations,
+        dependencies.errorMessage
+      );
+    }
+  } finally {
+    if (!selectionCommitted) selection.release();
   }
 }
 
