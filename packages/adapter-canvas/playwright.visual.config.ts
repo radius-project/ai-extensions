@@ -14,17 +14,17 @@ export default defineConfig({
     ["list"],
     [
       "./test/e2e/support/retry-only-reporter.ts",
-      { outputFile: "test-results/visual-retry-only-passes.json" },
+      { outputFile: "test-results/visual-retry-only-passes.json" }
     ],
-    ["html", { open: "never", outputFolder: "playwright-visual-report" }],
+    ["html", { open: "never", outputFolder: "playwright-visual-report" }]
   ],
   expect: {
     toHaveScreenshot: {
       animations: "disabled",
       caret: "hide",
       scale: "css",
-      maxDiffPixelRatio: 0.01,
-    },
+      maxDiffPixelRatio: 0.01
+    }
   },
   use: {
     browserName: "chromium",
@@ -36,12 +36,12 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "off",
-    headless: true,
+    headless: true
   },
   projects: [
     {
       name: "canvas-visual",
-      retries: 1,
-    },
-  ],
+      retries: 1
+    }
+  ]
 });

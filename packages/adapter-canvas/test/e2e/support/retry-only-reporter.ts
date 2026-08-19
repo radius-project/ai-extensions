@@ -5,7 +5,7 @@ import type {
   FullResult,
   Reporter,
   TestCase,
-  TestResult,
+  TestResult
 } from "@playwright/test/reporter";
 
 interface RetryOnlyReporterOptions {
@@ -25,11 +25,11 @@ export default class RetryOnlyReporter implements Reporter {
   constructor(options: RetryOnlyReporterOptions = {}) {
     const packageRoot = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
-      "../../..",
+      "../../.."
     );
     this.outputFile = path.resolve(
       packageRoot,
-      options.outputFile ?? "test-results/retry-only-passes.json",
+      options.outputFile ?? "test-results/retry-only-passes.json"
     );
   }
 
@@ -38,7 +38,7 @@ export default class RetryOnlyReporter implements Reporter {
     this.passes.push({
       project: test.parent.project()?.name ?? "",
       retry: result.retry,
-      title: test.titlePath().join(" > "),
+      title: test.titlePath().join(" > ")
     });
   }
 
@@ -47,7 +47,7 @@ export default class RetryOnlyReporter implements Reporter {
     await fs.writeFile(
       this.outputFile,
       `${JSON.stringify(this.passes, null, 2)}\n`,
-      "utf8",
+      "utf8"
     );
     console.log(`Retry-only passes: ${this.passes.length}`);
   }

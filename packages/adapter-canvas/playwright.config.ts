@@ -15,9 +15,9 @@ export default defineConfig({
     ["list"],
     [
       "./test/e2e/support/retry-only-reporter.ts",
-      { outputFile: "test-results/chromium-retry-only-passes.json" },
+      { outputFile: "test-results/chromium-retry-only-passes.json" }
     ],
-    ["html", { open: "never", outputFolder: "playwright-report" }],
+    ["html", { open: "never", outputFolder: "playwright-report" }]
   ],
   use: {
     browserName: "chromium",
@@ -25,18 +25,18 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "off",
-    headless: true,
+    headless: true
   },
   projects: [
     {
       name: "canvas-safety",
       grep: /@safety/,
-      retries: 0,
+      retries: 0
     },
     {
       name: "canvas",
       grepInvert: /@safety/,
-      retries: 1,
-    },
-  ],
+      retries: 1
+    }
+  ]
 });

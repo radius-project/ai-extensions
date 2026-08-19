@@ -9,7 +9,7 @@ import {
   REPOSITORY,
   test,
   WORKTREE_BRANCH,
-  type CanvasHarness,
+  type CanvasHarness
 } from "../e2e/support/canvas-harness.js";
 import type { Page } from "@playwright/test";
 import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
@@ -32,22 +32,22 @@ const GRAPH_RESOURCES: CanvasGraphResource[] = [
         id: "azure/cluster",
         name: "demo-cluster",
         type: "Microsoft.ContainerService/managedClusters",
-        portalUrl: "https://portal.azure.com/fixture",
-      },
-    ],
+        portalUrl: "https://portal.azure.com/fixture"
+      }
+    ]
   },
   {
     id: "app/cache",
     name: "cache",
     type: "Radius.Data/redisCaches",
-    connections: [],
+    connections: []
   },
   {
     id: "azure/database",
     name: "orders-db",
     type: "Microsoft.DBforPostgreSQL/flexibleServers",
-    connections: [],
-  },
+    connections: []
+  }
 ];
 
 const DIFF_RESOURCES: CanvasGraphResource[] = [
@@ -59,8 +59,8 @@ const DIFF_RESOURCES: CanvasGraphResource[] = [
     name: "old-worker",
     type: "Radius.Compute/containers",
     connections: [],
-    diffStatus: "removed",
-  },
+    diffStatus: "removed"
+  }
 ];
 
 const THEMES: Record<Theme, Record<string, string>> = {
@@ -76,7 +76,7 @@ const THEMES: Record<Theme, Record<string, string>> = {
     "--text-color-default": "#1f2328",
     "--text-color-muted": "#656d76",
     "--text-color-success": "#1a7f37",
-    "--text-color-warning": "#9a6700",
+    "--text-color-warning": "#9a6700"
   },
   dark: {
     "--background-color-default": "#0d1117",
@@ -90,31 +90,31 @@ const THEMES: Record<Theme, Record<string, string>> = {
     "--text-color-default": "#e6edf3",
     "--text-color-muted": "#8b949e",
     "--text-color-success": "#3fb950",
-    "--text-color-warning": "#d29922",
-  },
+    "--text-color-warning": "#d29922"
+  }
 };
 
 async function seed(
   canvas: CanvasHarness,
-  state: CanvasState = {},
+  state: CanvasState = {}
 ): Promise<void> {
   await fs.mkdir(path.join(canvas.workspacePath, "src", "web"), {
-    recursive: true,
+    recursive: true
   });
   await fs.writeFile(
     path.join(canvas.workspacePath, ".radius", "app.bicep"),
     "extension radius\n",
-    "utf8",
+    "utf8"
   );
   await fs.writeFile(
     path.join(canvas.workspacePath, "src", "web", "app.ts"),
     "export const fixture = true;\n",
-    "utf8",
+    "utf8"
   );
   await canvas.setScenario(defaultFakeCliScenario());
   await canvas.seedState({
     ...baseCanvasState(canvas.workspacePath),
-    ...state,
+    ...state
   });
 }
 
@@ -122,7 +122,7 @@ async function gotoVisual(
   page: Page,
   canvas: CanvasHarness,
   canvasPage: string,
-  theme: Theme,
+  theme: Theme
 ): Promise<void> {
   const visualFont = await fs.readFile(VISUAL_FONT_PATH, "base64");
   await page.goto(`${canvas.baseUrl}/?page=${canvasPage}`);
@@ -149,16 +149,16 @@ async function gotoVisual(
       }
       html { scroll-behavior: auto !important; }
       body { font-family: "Phase 7 Inter", sans-serif !important; }
-    `,
+    `
   });
   await page.waitForFunction(
-    "document.readyState === 'complete' && document.fonts.status === 'loaded'",
+    "document.readyState === 'complete' && document.fonts.status === 'loaded'"
   );
 }
 
 async function screenshot(page: Page, name: string): Promise<void> {
   await expect(page).toHaveScreenshot(name, {
-    fullPage: true,
+    fullPage: true
   });
 }
 
@@ -175,7 +175,7 @@ async function openEnvironmentCreateForm(page: Page): Promise<void> {
 
 async function routeDeployments(
   page: Page,
-  status: "failed" | "success",
+  status: "failed" | "success"
 ): Promise<void> {
   await page.route("**/api/list-deployments?*", async (route) => {
     await route.fulfill({
@@ -186,10 +186,10 @@ async function routeDeployments(
             app: "radius-app",
             environment: "fixture-environment",
             status,
-            runUrl: `https://github.com/${REPOSITORY}/actions/runs/1`,
-          },
-        ],
-      }),
+            runUrl: `https://github.com/${REPOSITORY}/actions/runs/1`
+          }
+        ]
+      })
     });
   });
 }
@@ -198,7 +198,7 @@ async function routeGraphControls(page: Page): Promise<void> {
   await page.route("**/api/list-applications?*", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ applications: [{ name: "radius-app" }] }),
+      body: JSON.stringify({ applications: [{ name: "radius-app" }] })
     });
   });
   await page.route("**/api/discover-branches", async (route) => {
@@ -207,10 +207,10 @@ async function routeGraphControls(page: Page): Promise<void> {
       body: JSON.stringify({
         branches: [
           { name: "main", sha: "1111111" },
-          { name: WORKTREE_BRANCH, sha: "2222222" },
+          { name: WORKTREE_BRANCH, sha: "2222222" }
         ],
-        workspaceBranch: WORKTREE_BRANCH,
-      }),
+        workspaceBranch: WORKTREE_BRANCH
+      })
     });
   });
   await page.route("**/api/list-environments?*", async (route) => {
@@ -221,10 +221,10 @@ async function routeGraphControls(page: Page): Promise<void> {
           {
             name: "fixture-environment",
             provider: "azure",
-            status: "success",
-          },
-        ],
-      }),
+            status: "success"
+          }
+        ]
+      })
     });
   });
 }
@@ -232,12 +232,12 @@ async function routeGraphControls(page: Page): Promise<void> {
 test.describe("Radius Canvas reviewed visual baselines", () => {
   test("VI-01 modeled graph details closed in light", async ({
     page,
-    canvas,
+    canvas
   }) => {
     await seed(canvas, {
       graphResources: GRAPH_RESOURCES,
       graphLoaded: true,
-      graphFromWorkspace: true,
+      graphFromWorkspace: true
     });
     await routeGraphControls(page);
     await gotoVisual(page, canvas, "graph", "light");
@@ -249,12 +249,12 @@ test.describe("Radius Canvas reviewed visual baselines", () => {
 
   test("VI-01 modeled graph details closed in dark", async ({
     page,
-    canvas,
+    canvas
   }) => {
     await seed(canvas, {
       graphResources: GRAPH_RESOURCES,
       graphLoaded: true,
-      graphFromWorkspace: true,
+      graphFromWorkspace: true
     });
     await routeGraphControls(page);
     await gotoVisual(page, canvas, "graph", "dark");
@@ -268,7 +268,7 @@ test.describe("Radius Canvas reviewed visual baselines", () => {
     await seed(canvas, {
       graphResources: GRAPH_RESOURCES,
       graphLoaded: true,
-      graphFromWorkspace: true,
+      graphFromWorkspace: true
     });
     await routeGraphControls(page);
     await gotoVisual(page, canvas, "graph", "light");
@@ -285,24 +285,24 @@ test.describe("Radius Canvas reviewed visual baselines", () => {
   for (const theme of ["light", "dark"] as const) {
     test(`VI-03 planned graph unresolved recipe pack in ${theme}`, async ({
       page,
-      canvas,
+      canvas
     }) => {
       await seed(canvas, {
         plannedResources: [
           {
             ...GRAPH_RESOURCES[0],
-            deployStatus: "success",
+            deployStatus: "success"
           },
           {
             ...GRAPH_RESOURCES[1],
             deployStatus: "failed",
             deployMessage:
-              "No recipe pack registered in this environment resolves Radius.Data/redisCaches.",
-          },
+              "No recipe pack registered in this environment resolves Radius.Data/redisCaches."
+          }
         ],
         plannedProvider: "azure",
         plannedEnvironment: "fixture-environment",
-        plannedFromWorkspace: true,
+        plannedFromWorkspace: true
       });
       await routeGraphControls(page);
       await gotoVisual(page, canvas, "planned", theme);
@@ -314,14 +314,14 @@ test.describe("Radius Canvas reviewed visual baselines", () => {
         .getByRole("button", { name: "Show details" })
         .click();
       await expect(page.locator("#node-popup")).toContainText(
-        "No recipe pack registered in this environment resolves Radius.Data/redisCaches.",
+        "No recipe pack registered in this environment resolves Radius.Data/redisCaches."
       );
       await screenshot(page, `vi-03-planned-unresolved-${theme}.png`);
     });
 
     test(`VI-04 graph diff with all statuses in ${theme}`, async ({
       page,
-      canvas,
+      canvas
     }) => {
       await seed(canvas, {
         diffResources: DIFF_RESOURCES,
@@ -329,7 +329,7 @@ test.describe("Radius Canvas reviewed visual baselines", () => {
         diffHead: WORKTREE_BRANCH,
         diffTargetRepo: REPOSITORY,
         branches: ["main", WORKTREE_BRANCH],
-        branchShas: { main: "1111111", [WORKTREE_BRANCH]: "2222222" },
+        branchShas: { main: "1111111", [WORKTREE_BRANCH]: "2222222" }
       });
       await routeGraphControls(page);
       await gotoVisual(page, canvas, "graph-diff", theme);
@@ -366,7 +366,7 @@ test.describe("Radius Canvas reviewed visual baselines", () => {
 
     test(`VI-06 environment create form in ${theme}`, async ({
       page,
-      canvas,
+      canvas
     }) => {
       await seed(canvas, { activeSubtab: "environments" });
       await gotoVisual(page, canvas, "environment", theme);
@@ -384,8 +384,8 @@ test.describe("Radius Canvas reviewed visual baselines", () => {
         page
           .locator("#deploy-table-body")
           .getByText(status === "success" ? "Success" : "Failed", {
-            exact: true,
-          }),
+            exact: true
+          })
       ).toBeVisible();
       await screenshot(page, `vi-07-deploy-${status}-light.png`);
     });
