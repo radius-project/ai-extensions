@@ -2,6 +2,8 @@ import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
+import { validateBrowserMutationRequest } from "../../../src/server/browser-mutation.js";
+import type { CanvasRequestContext } from "../../../src/server/request-context.js";
 import {
   createOperationsStatusRoutes,
   type OperationActionRecord
@@ -68,7 +70,7 @@ const RUNNING: OperationActionRecord = {
   }
 };
 
-function start(): Harness {
+function start(strictBrowserMutations = false): Harness {
   const records = new Map<string, OperationActionRecord>([
     ["op-running", RUNNING]
   ]);
@@ -101,6 +103,13 @@ function start(): Harness {
     scheduled.push({ instanceId, operationId: operation.operationId });
     return true;
   };
+  const validateBrowserMutation = (context: CanvasRequestContext): boolean =>
+    !strictBrowserMutations ||
+    validateBrowserMutationRequest({
+      request: context.request,
+      baseUrl: `http://${context.request.headers.host || ""}`,
+      nonce: "browser-nonce"
+    });
 
   const routes = createTestRouteTable(
     createOperationsStatusRoutes(
@@ -117,6 +126,13 @@ function start(): Harness {
         toClientView
       },
       {
+        claimSelectionHandle: () => ({
+          ok: true,
+          login: "octocat",
+          credentialSource: "keyring",
+          commit() {},
+          release() {}
+        }),
         isValidRepoSlug,
         isResourceGroupName,
         isAksClusterName,
@@ -161,6 +177,7 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
+        validateBrowserMutation,
         handleUnmatchedRequest: (_request, response) => {
           response.writeHead(404);
           response.end("unmatched");
@@ -338,8 +355,13 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
   });
 
   it("resumes and abandons operation input through the two typed templates", async () => {
-    const harness = start();
+    const harness = start(true);
     const entry = await container!.getOrCreate("panel-a");
+    const browserHeaders = {
+      Origin: entry.baseUrl,
+      "Sec-Fetch-Site": "same-origin",
+      "X-Radius-Mutation-Nonce": "browser-nonce"
+    };
 
     const resumable = createOperation({
       provider: "azure",
@@ -358,10 +380,17 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     });
     harness.records.set(resumable.operationId, resumable);
 
+    const untrustedResume = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(resumable.operationId)}/resume/service-management-reference-required`,
+      { method: "POST", body: "{}" }
+    );
+    expect(untrustedResume.status).toBe(403);
+
     const resumed = await fetch(
       `${entry.baseUrl}/api/operations/${encodeURIComponent(resumable.operationId)}/resume/service-management-reference-required`,
       {
         method: "POST",
+        headers: browserHeaders,
         body: JSON.stringify({
           checkpoint: "azure-service-management-reference",
           repo: resumable.repo,
@@ -393,9 +422,14 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
       message: "Choose an app."
     });
     harness.records.set(abandonable.operationId, abandonable);
-    const abandoned = await fetch(
+    const untrustedAbandon = await fetch(
       `${entry.baseUrl}/api/operations/${encodeURIComponent(abandonable.operationId)}/abandon`,
       { method: "POST" }
+    );
+    expect(untrustedAbandon.status).toBe(403);
+    const abandoned = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(abandonable.operationId)}/abandon`,
+      { method: "POST", headers: browserHeaders }
     );
     expect(abandoned.status).toBe(200);
     expect(abandonable.state).toBe("cancelled");

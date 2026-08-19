@@ -18,6 +18,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveGeneratorVersion } from "./generator-version.js";
 import skillMd from "../../../plugins/radius/skills/radius-app-bicep/SKILL.md";
 import runtimeContract from "../../../plugins/radius/skills/radius-app-bicep/references/runtime-contract.md";
 import componentCatalog from "../../../plugins/radius/skills/radius-app-bicep/references/component-catalog.md";
@@ -89,6 +90,11 @@ function bundledSkillBase(): string {
 export function radiusAppBicepSkill(repoPath?: string): string {
   const target = sanitizeRepoPath(repoPath);
   const skillBase = bundledSkillBase();
+  // The origin record records which generator produced the model, so the
+  // skill has to write the version of the bundle it is actually running from.
+  // Resolving it here (rather than in the skill text) keeps a released bundle
+  // and an edge bundle from both claiming the version baked into Markdown.
+  const skillVersion = resolveGeneratorVersion();
   const intro =
     `# radius-app-bicep skill (bundled with the Radius extension)\n\n` +
     `Model the repository at ${target} by following the skill below. This is ` +
@@ -102,12 +108,14 @@ export function radiusAppBicepSkill(repoPath?: string): string {
     `Bicep checker against the generated \`.radius/app.bicep\` and closing every ` +
     `validation-checklist item before reporting success.\n`;
 
-  const instructions = skillMd
-    .trim()
-    .replaceAll("<loaded-skill-base>", skillBase);
+  const resolve = (text: string): string =>
+    text
+      .replaceAll("<loaded-skill-base>", skillBase)
+      .replaceAll("<loaded-skill-version>", skillVersion);
+
+  const instructions = resolve(skillMd.trim());
   const refs = REFERENCES.map(([name, body]) => {
-    const resolved = body.trim().replaceAll("<loaded-skill-base>", skillBase);
-    return `\n\n--- Reference: ${name} ---\n\n${resolved}`;
+    return `\n\n--- Reference: ${name} ---\n\n${resolve(body.trim())}`;
   }).join("");
 
   return `${intro}\n---\n\n${instructions}${refs}\n`;
