@@ -90,6 +90,13 @@ export function initializePlannedGraphPage(
     progress = null;
   };
 
+  const clearLoadingGraph = (): void => {
+    controller?.destroy();
+    controller = null;
+    const container = context.dom.byId("graph-container");
+    if (container) container.innerHTML = "";
+  };
+
   const run = (isCurrent: () => boolean): Promise<void> => {
     if (!entry.active) return Promise.resolve();
     const selectedBranch = branch?.value.trim() || page.branch;
@@ -177,6 +184,7 @@ export function initializePlannedGraphPage(
         }
         plan.requestFailed = true;
         if (readBoolean(payload, "needsAppBicep")) {
+          clearLoadingGraph();
           status(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the planned graph will appear once it is saved.",
@@ -185,6 +193,7 @@ export function initializePlannedGraphPage(
           return;
         }
         const error = readString(payload, "error");
+        clearLoadingGraph();
         status(
           context,
           error ?
@@ -196,6 +205,7 @@ export function initializePlannedGraphPage(
       .catch((error: unknown) => {
         if (!current()) return;
         plan.requestFailed = true;
+        clearLoadingGraph();
         context.logger.error("Radius planned graph request failed.", error);
         status(
           context,

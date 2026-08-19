@@ -9,6 +9,7 @@ export default defineConfig({
   testMatch: "canvas-chromium.test.ts",
   globalSetup: "./test/e2e/global-setup.ts",
   globalTeardown: "./test/e2e/global-teardown.ts",
+  failOnFlakyTests: true,
   timeout: 30_000,
   workers: 1,
   reporter: [

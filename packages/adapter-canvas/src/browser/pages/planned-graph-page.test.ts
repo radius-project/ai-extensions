@@ -193,6 +193,86 @@ describe("initializePlannedGraphPage", () => {
     expect(browser.clock.pending).toBe(0);
   });
 
+  it.each([
+    [
+      "an unresolved recipe response",
+      () =>
+        jsonResponse({
+          error:
+            "No recipe pack providing Radius.Data/redisCaches is registered."
+        }),
+      "Error: No recipe pack providing Radius.Data/redisCaches is registered."
+    ],
+    [
+      "an incomplete response",
+      () => jsonResponse({}),
+      "The planned deployment response was incomplete. Try again."
+    ]
+  ])("clears the loading graph after %s", async (_name, response, message) => {
+    const { browser, container, status } = fixture();
+    browser.net.handle("/api/plan-graph", response);
+    initializePlannedGraphPage(
+      browser.context,
+      globals({
+        radiusSetGraphLoading: () => {
+          container.innerHTML = "<div>Generating Application Graph</div>";
+        }
+      })
+    );
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(status.textContent).toBe(message);
+    expect(container.innerHTML).toBe("");
+  });
+
+  it("clears the loading graph after a plan request failure", async () => {
+    const { browser, container, status } = fixture();
+    browser.net.handle("/api/plan-graph", () =>
+      Promise.reject(new Error("offline"))
+    );
+    initializePlannedGraphPage(
+      browser.context,
+      globals({
+        radiusSetGraphLoading: () => {
+          container.innerHTML = "<div>Generating Application Graph</div>";
+        }
+      })
+    );
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(status.textContent).toBe(
+      "The planned deployment could not be generated. Try again."
+    );
+    expect(container.innerHTML).toBe("");
+  });
+
+  it("clears the loading graph while app.bicep generation is handed off", async () => {
+    const { browser, container, status } = fixture();
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ needsAppBicep: true })
+    );
+    initializePlannedGraphPage(
+      browser.context,
+      globals({
+        radiusSetGraphLoading: () => {
+          container.innerHTML = "<div>Generating Application Graph</div>";
+        }
+      })
+    );
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(status.textContent).toContain(
+      "Copilot is generating .radius/app.bicep"
+    );
+    expect(container.innerHTML).toBe("");
+  });
+
   it("routes create-environment mode without dispatching a deploy", async () => {
     const { browser, button } = fixture();
     initializePlannedGraphPage(browser.context, globals());
@@ -281,6 +361,22 @@ describe("initializePlannedGraphPage", () => {
 
     expect(body).toContain('"repo":"octo/app"');
     expect(container.innerHTML).toBe("");
+  });
+
+  it("reports an incomplete plan when the graph container is absent", async () => {
+    const { browser, status } = fixture({
+      withContainer: false,
+      withWrapper: false
+    });
+    browser.net.handle("/api/plan-graph", () => jsonResponse({}));
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(status.textContent).toBe(
+      "The planned deployment response was incomplete. Try again."
+    );
   });
 
   it("shows a stale-environments message and retains the graph when a change is queued with resources present", async () => {
