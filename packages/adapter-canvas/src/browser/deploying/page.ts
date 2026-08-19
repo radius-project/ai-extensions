@@ -1059,7 +1059,7 @@ export function initializeDeployingPage(
             void loadDeployments(true);
             return;
           }
-          if (status.deployRunUrl && !startNotified) {
+          if (status.status !== "failed" && status.deployRunUrl && !startNotified) {
             startNotified = true;
             showInline(
               "success",
