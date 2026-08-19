@@ -136,7 +136,7 @@ resource myImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
 Rules:
 
 - The image is BUILT from `build.source` — there is NO `image` property and NO `param image string`
-- `build.source` is the repo git URL: `git::https://github.com/<org>/<repo>.git//<subdir>?ref=<sha-or-tag>`. Omit `//<subdir>` when the build context is the repo root; pin `?ref=` to the exact modeled checkout or an explicit immutable release tag. Never copy `main`, `edge`, or another mutable ref from an existing deployment file
+- `build.source` is the repo git URL: `git::https://github.com/<org>/<repo>.git//<subdir>?ref=<sha-or-tag>`. Omit `//<subdir>` when the build context is the repo root; pin `?ref=` to the exact modeled checkout or an explicit immutable release tag. Never copy `main`, `edge`, or another mutable ref from an existing deployment file. When the ref is a commit, use its full 40-character SHA; never use an abbreviated SHA. The image `tag` may remain abbreviated because it is not a Git ref
 - Optional `build.dockerfile` (path to the Dockerfile relative to the source; defaults to `Dockerfile`)
 - Inspect the exact Recipe before deciding whether to set `tag`. Omit it when the current contract's omitted-tag path is proven usable; otherwise set a Docker-valid immutable tag derived from the modeled source revision. Do not claim omission is broken without current Recipe evidence
 - Resolve the exact Recipe's default platforms before omitting `build.platforms`. Select explicit target-compatible platforms when the Dockerfile or builder cannot safely build the defaults; validate the Dockerfile's cross-build strategy and the target runtime rather than inferring support from a language package manager or native dependency alone

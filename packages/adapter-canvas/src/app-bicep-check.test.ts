@@ -38,7 +38,8 @@ function temporaryDirectory(): string {
 function fakeBicep(
   directory: string,
   compilerOutput: string,
-  status: number
+  status: number,
+  compiledOutput = "{}"
 ): NodeJS.ProcessEnv {
   const bicep = path.join(
     directory,
@@ -61,6 +62,7 @@ function fakeBicep(
     driver,
     [
       "if (!process.argv.includes('--diagnostics-format') || !process.argv.includes('sarif')) process.exit(2);",
+      `process.stdout.write(${JSON.stringify(compiledOutput)});`,
       `process.stderr.write(${JSON.stringify(compilerOutput)});`,
       `process.exit(${status});`,
       ""
@@ -80,6 +82,23 @@ function runChecker(directory: string, env: NodeJS.ProcessEnv) {
 
 function sarif(results: unknown[]): string {
   return JSON.stringify({ runs: [{ results }] });
+}
+
+const containerImageType = "Radius.Compute/containerImages@2025-08-01-preview";
+const fullSha = "a".repeat(40);
+
+function radiusResource<T extends object>(type: string, properties: T) {
+  return { type, properties: { properties } };
+}
+
+function imageResource(source: string) {
+  return radiusResource(containerImageType, {
+    build: { source }
+  });
+}
+
+function template(resources: object, parameters: object = {}): string {
+  return JSON.stringify({ resources, parameters });
 }
 
 test("passes a warning-free Bicep compilation", () => {
@@ -184,6 +203,238 @@ test("ignores Bicep overrides and PATH", () => {
     BICEP_BINARY: path.join(directory, "other-bicep"),
     PATH: ""
   });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("fails closed when compiled output is not valid JSON", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, "not json")
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Bicep did not return valid compiled JSON/u);
+});
+
+for (const { name, source, ref } of [
+  {
+    name: "an abbreviated SHA",
+    source: "git::https://github.com/example/app.git?ref=eb33f12",
+    ref: "eb33f12"
+  },
+  {
+    name: "a numeric seven-character SHA",
+    source: "git::https://github.com/example/app.git?ref=5568077",
+    ref: "5568077"
+  },
+  {
+    name: "a 39-character SHA",
+    source: `git::https://github.com/example/app.git?ref=${"a".repeat(39)}`,
+    ref: "a".repeat(39)
+  }
+]) {
+  test(`rejects a container image build source with ${name}`, () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({ image: imageResource(source) });
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /container-image-build-source/u);
+    assert.ok(result.stderr.includes(ref));
+  });
+}
+
+test("accepts refs that do not look like abbreviated commit SHAs", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    noRef: imageResource("git::https://github.com/example/app.git"),
+    branch: imageResource("git::https://github.com/example/app.git?ref=main"),
+    bareTag: imageResource(
+      "git::https://github.com/example/app.git?ref=v1.2.3"
+    ),
+    explicitTag: imageResource(
+      "git::https://github.com/BerriAI/litellm.git?ref=refs/tags/v1.91.0"
+    ),
+    dateTag: imageResource(
+      "git::https://github.com/example/app.git?ref=20240817"
+    )
+  });
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("checks every container image build source", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    goodImage: imageResource(
+      "git::https://github.com/example/good.git?ref=refs/tags/v1.2.3"
+    ),
+    badImage: imageResource(
+      "git::https://github.com/example/bad.git?ref=eb33f12"
+    )
+  });
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /badImage\.properties\.build\.source/u);
+  assert.doesNotMatch(result.stderr, /goodImage\.properties\.build\.source/u);
+});
+
+test("checks container image build sources in local modules", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    module: {
+      type: "Microsoft.Resources/deployments",
+      properties: {
+        template: {
+          resources: {
+            image: imageResource(
+              "git::https://github.com/example/app.git?ref=eb33f12"
+            )
+          },
+          parameters: {}
+        }
+      }
+    }
+  });
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /module\.image\.properties\.build\.source/u);
+});
+
+test("uses each local module's parameter defaults", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template(
+    {
+      module: {
+        type: "Microsoft.Resources/deployments",
+        properties: {
+          template: {
+            resources: {
+              image: imageResource("[parameters('buildSource')]")
+            },
+            parameters: {
+              buildSource: {
+                type: "string",
+                defaultValue:
+                  "git::https://github.com/example/app.git?ref=eb33f12"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      buildSource: {
+        type: "string",
+        defaultValue: `git::https://github.com/example/app.git?ref=${fullSha}`
+      }
+    }
+  );
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /eb33f12/u);
+});
+
+test("unwraps and rejects a short buildSource parameter default", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template(
+    { image: imageResource("[parameters('buildSource')]") },
+    {
+      buildSource: {
+        type: "string",
+        defaultValue: "git::https://github.com/example/app.git?ref=abc1234"
+      }
+    }
+  );
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /abc1234/u);
+});
+
+test("accepts literal and parameter-default full build refs", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template(
+    {
+      literal: imageResource(
+        `git::https://github.com/example/app.git?ref=${fullSha}`
+      ),
+      parameter: imageResource("[parameters('buildSource')]")
+    },
+    {
+      buildSource: {
+        type: "string",
+        defaultValue: `git::https://github.com/example/app.git?ref=${fullSha}`
+      }
+    }
+  );
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("ignores build sources that do not resolve to literal refs", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    variable: imageResource("[variables('source')]"),
+    formatted: imageResource(
+      "[format('git::https://github.com/example/app.git?ref={0}', variables('sha'))]"
+    ),
+    parameter: imageResource("[parameters('buildSource')]"),
+    build: radiusResource(containerImageType, {
+      build: "[parameters('build')]"
+    })
+  });
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("ignores Git refs outside container image resources", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    other: radiusResource("Example/other@2025-01-01", {
+      source: "git::https://github.com/example/app.git?ref=eb33f12"
+    })
+  });
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
 
   assert.equal(result.status, 0);
   assert.equal(result.stderr, "");
