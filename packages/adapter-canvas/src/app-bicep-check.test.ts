@@ -86,6 +86,8 @@ function sarif(results: unknown[]): string {
 
 const containerImageType = "Radius.Compute/containerImages@2025-08-01-preview";
 const fullSha = "a".repeat(40);
+const interpolatedGitRef =
+  "[format('git::https://github.com/example/app.git?ref={0}', parameters('gitRef'))]";
 
 function radiusResource<T extends object>(type: string, properties: T) {
   return { type, properties: { properties } };
@@ -95,6 +97,23 @@ function imageResource(source: string) {
   return radiusResource(containerImageType, {
     build: { source }
   });
+}
+
+function localModule(
+  source: string,
+  parameters: object = {},
+  parameterValues: object = {}
+) {
+  return {
+    type: "Microsoft.Resources/deployments",
+    properties: {
+      parameters: parameterValues,
+      template: {
+        resources: { image: imageResource(source) },
+        parameters
+      }
+    }
+  };
 }
 
 function template(resources: object, parameters: object = {}): string {
@@ -263,6 +282,14 @@ test("accepts refs that do not look like abbreviated commit SHAs", () => {
     ),
     dateTag: imageResource(
       "git::https://github.com/example/app.git?ref=20240817"
+    ),
+    cafeTag: imageResource("git::https://github.com/example/app.git?ref=cafe"),
+    beefTag: imageResource("git::https://github.com/example/app.git?ref=beef"),
+    addedTag: imageResource(
+      "git::https://github.com/example/app.git?ref=added"
+    ),
+    facadeTag: imageResource(
+      "git::https://github.com/example/app.git?ref=facade"
     )
   });
   const result = runChecker(
@@ -292,24 +319,13 @@ test("checks every container image build source", () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /badImage\.properties\.build\.source/u);
   assert.doesNotMatch(result.stderr, /goodImage\.properties\.build\.source/u);
+  assert.match(result.stderr, /refs\/tags\/v1\.2\.3/u);
 });
 
 test("checks container image build sources in local modules", () => {
   const directory = temporaryDirectory();
   const compiledOutput = template({
-    module: {
-      type: "Microsoft.Resources/deployments",
-      properties: {
-        template: {
-          resources: {
-            image: imageResource(
-              "git::https://github.com/example/app.git?ref=eb33f12"
-            )
-          },
-          parameters: {}
-        }
-      }
-    }
+    module: localModule("git::https://github.com/example/app.git?ref=eb33f12")
   });
   const result = runChecker(
     directory,
@@ -324,23 +340,12 @@ test("uses each local module's parameter defaults", () => {
   const directory = temporaryDirectory();
   const compiledOutput = template(
     {
-      module: {
-        type: "Microsoft.Resources/deployments",
-        properties: {
-          template: {
-            resources: {
-              image: imageResource("[parameters('buildSource')]")
-            },
-            parameters: {
-              buildSource: {
-                type: "string",
-                defaultValue:
-                  "git::https://github.com/example/app.git?ref=eb33f12"
-              }
-            }
-          }
+      module: localModule("[parameters('buildSource')]", {
+        buildSource: {
+          type: "string",
+          defaultValue: "git::https://github.com/example/app.git?ref=eb33f12"
         }
-      }
+      })
     },
     {
       buildSource: {
@@ -356,6 +361,55 @@ test("uses each local module's parameter defaults", () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /eb33f12/u);
+});
+
+test("resolves local module parameters in the parent scope", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template(
+    {
+      module: localModule(
+        interpolatedGitRef,
+        { gitRef: { type: "string" } },
+        { gitRef: { value: "[parameters('gitRef')]" } }
+      )
+    },
+    {
+      gitRef: {
+        type: "string",
+        defaultValue: "eb33f12"
+      }
+    }
+  );
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /eb33f12/u);
+});
+
+test("module invocation parameters override nested defaults", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    module: localModule(
+      interpolatedGitRef,
+      {
+        gitRef: {
+          type: "string",
+          defaultValue: "eb33f12"
+        }
+      },
+      { gitRef: { value: fullSha } }
+    )
+  });
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
 });
 
 test("unwraps and rejects a short buildSource parameter default", () => {
@@ -376,6 +430,28 @@ test("unwraps and rejects a short buildSource parameter default", () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /abc1234/u);
+});
+
+test("resolves an interpolated ref parameter default", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template(
+    {
+      image: imageResource(interpolatedGitRef)
+    },
+    {
+      gitRef: {
+        type: "string",
+        defaultValue: "eb33f12"
+      }
+    }
+  );
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /eb33f12/u);
 });
 
 test("accepts literal and parameter-default full build refs", () => {
@@ -410,6 +486,7 @@ test("ignores build sources that do not resolve to literal refs", () => {
     formatted: imageResource(
       "[format('git::https://github.com/example/app.git?ref={0}', variables('sha'))]"
     ),
+    formattedParameter: imageResource(interpolatedGitRef),
     parameter: imageResource("[parameters('buildSource')]"),
     build: radiusResource(containerImageType, {
       build: "[parameters('build')]"

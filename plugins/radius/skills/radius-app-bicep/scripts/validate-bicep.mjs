@@ -64,16 +64,35 @@ function isFailure(result) {
   return result.level !== "note" && result.level !== "none";
 }
 
-function resolveBuildSource(value, template) {
+function parameterValue(name, template, parameterValues) {
+  if (parameterValues.has(name)) {
+    return parameterValues.get(name);
+  }
+  const defaultValue = template.parameters?.[name]?.defaultValue;
+  return typeof defaultValue === "string" ? defaultValue : null;
+}
+
+function resolveTemplateString(value, template, parameterValues) {
   if (typeof value !== "string") {
     return null;
   }
   const parameter = /^\[parameters\('([^']+)'\)\]$/u.exec(value);
-  if (parameter === null) {
+  if (parameter !== null) {
+    return parameterValue(parameter[1], template, parameterValues);
+  }
+  const formattedParameter =
+    /^\[format\('([^']*\{0\}[^']*)', parameters\('([^']+)'\)\)\]$/u.exec(value);
+  if (formattedParameter === null) {
     return value;
   }
-  const defaultValue = template.parameters?.[parameter[1]]?.defaultValue;
-  return typeof defaultValue === "string" ? defaultValue : null;
+  const replacement = parameterValue(
+    formattedParameter[2],
+    template,
+    parameterValues
+  );
+  return replacement === null ? null : (
+      formattedParameter[1].replace("{0}", replacement)
+    );
 }
 
 function buildSourceRef(source) {
@@ -86,12 +105,19 @@ function buildSourceRef(source) {
 }
 
 function isAbbreviatedCommitRef(ref) {
+  // Git's automatic abbreviation uses at least seven characters. A seven-digit
+  // ref can still be a SHA, while eight-digit date tags should remain valid.
   return (
-    /^[0-9a-f]{4,39}$/iu.test(ref) && (/[a-f]/iu.test(ref) || ref.length === 7)
+    /^[0-9a-f]{7,39}$/iu.test(ref) && (/[a-f]/iu.test(ref) || ref.length === 7)
   );
 }
 
-function checkContainerImageBuildSources(template, app, parentPath = "") {
+function checkContainerImageBuildSources(
+  template,
+  app,
+  parentPath = "",
+  parameterValues = new Map()
+) {
   let failed = false;
   for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
     const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
@@ -102,8 +128,22 @@ function checkContainerImageBuildSources(template, app, parentPath = "") {
         typeof nestedTemplate === "object" &&
         !Array.isArray(nestedTemplate)
       ) {
+        const nestedParameterValues = new Map();
+        for (const [name, argument] of Object.entries(
+          resource?.properties?.parameters ?? {}
+        )) {
+          nestedParameterValues.set(
+            name,
+            resolveTemplateString(argument?.value, template, parameterValues)
+          );
+        }
         if (
-          checkContainerImageBuildSources(nestedTemplate, app, resourcePath)
+          checkContainerImageBuildSources(
+            nestedTemplate,
+            app,
+            resourcePath,
+            nestedParameterValues
+          )
         ) {
           failed = true;
         }
@@ -118,9 +158,10 @@ function checkContainerImageBuildSources(template, app, parentPath = "") {
       continue;
     }
 
-    const source = resolveBuildSource(
+    const source = resolveTemplateString(
       resource?.properties?.properties?.build?.source,
-      template
+      template,
+      parameterValues
     );
     if (typeof source !== "string" || source.startsWith("[")) {
       continue;
@@ -132,7 +173,7 @@ function checkContainerImageBuildSources(template, app, parentPath = "") {
     }
 
     console.error(
-      `${app}: error container-image-build-source: ${resourcePath}.properties.build.source: build ref "${ref}" looks like an abbreviated commit SHA; use the full 40-character SHA.`
+      `${app}: error container-image-build-source: ${resourcePath}.properties.build.source: build ref "${ref}" looks like an abbreviated commit SHA; use the full 40-character SHA or an explicit tag ref such as "refs/tags/v1.2.3".`
     );
     failed = true;
   }
