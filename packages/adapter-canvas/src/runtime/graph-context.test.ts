@@ -210,7 +210,12 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.status).toBe("generator-changed");
   });
 
-  it("judges a remote model against that branch on GitHub", async () => {
+  // The branch head is not fetched for a branch we do not have checked out. The
+  // only check it feeds cannot say anything there, because committing an app
+  // model is itself a commit past the one its record names, so the comparison
+  // never matches. Fetching it would spend a GitHub round trip on a verdict
+  // nothing reads.
+  it("does not spend a GitHub call on a comparison it cannot use", async () => {
     const { resolveAppModelStatus, deps } = helpers({
       bicepByRepoBranch: { "remote:other/repo@release": MODEL },
       filesByRepoBranch: {
@@ -228,9 +233,28 @@ describe("resolveAppModelStatus", () => {
     );
 
     expect(status.refreshable).toBe(false);
-    expect(status.freshness.status).toBe("source-changed");
+    expect(status.freshness.status).toBe("up-to-date");
+    expect(deps.appModel.branchHeadCommit).not.toHaveBeenCalled();
     expect(deps.appModel.workspaceHeadCommit).not.toHaveBeenCalled();
     expect(deps.appModel.fetchWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it("still reads the record on a branch it cannot diff, so a skill change is seen", async () => {
+    const { resolveAppModelStatus } = helpers({
+      generatorVersion: "0.2.0",
+      bicepByRepoBranch: { "remote:other/repo@release": MODEL },
+      filesByRepoBranch: {
+        [`remote:other/repo@release:${APP_ORIGIN_REPO_PATH}`]: origin()
+      }
+    });
+
+    const status = await resolveAppModelStatus(
+      "other/repo",
+      "release",
+      WORKSPACE_STATE
+    );
+
+    expect(status.freshness.status).toBe("generator-changed");
   });
 
   it("does not judge a GitHub-served model against the worktree, even for the workspace branch", async () => {

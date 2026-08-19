@@ -95,7 +95,7 @@ git diff --name-only <sourceCommit> HEAD -- . ':(exclude).radius'
 
 A commit that only touches the app model produces no output, so it does not count as a change. `workspaceSourceChangedSince` returns `undefined` when git cannot answer at all, such as an unknown commit or a shallow clone. We then compare the two commits instead, rather than read silence as "nothing changed".
 
-That command only works on the branch the workspace has checked out. Any other branch would have to compare the two commits, and those never match: committing an app model is itself a commit past the one it recorded. So on those branches we do not claim the source changed at all. A skill change or an app model we cannot verify is still reported, since those we can still tell.
+That command only works on the branch the workspace has checked out. On any other branch the question cannot be answered usefully, because the only thing left to compare is the recorded commit against the branch head, and those never match: committing an app model is itself a commit past the one it recorded. So we do not ask on those branches, which also saves a round trip to GitHub for each one. A skill change, or an app model we cannot verify, is still reported there.
 
 ### Error handling
 

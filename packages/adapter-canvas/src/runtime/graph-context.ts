@@ -118,14 +118,14 @@ export function createGraphContextHelpers(
 
     const [originText, headCommit] = await Promise.all([
       readAppOrigin(repo, branch, state, fromWorkspace),
-      (fromWorkspace ?
-        deps.appModel.workspaceHeadCommit(state.workspacePath)
-        // A transient gh failure resolves to "", which the classifier reads as
-        // "revision unknown" and therefore as fresh. That is deliberate: never
-        // regenerate on our own inability to read. But it does mean flaky
-        // GitHub access silently suppresses drift detection on remote branches.
-      : deps.appModel.branchHeadCommit(repo, branch)
-      ).catch(() => "")
+      // Only the worktree's head is worth fetching. On any other branch the
+      // comparison it feeds cannot say anything useful, because committing an
+      // app model is itself a commit past the one its record names, so the two
+      // never match. Nothing consumes that verdict, and skipping it saves a
+      // GitHub round trip per branch on the graph-diff path.
+      fromWorkspace ?
+        deps.appModel.workspaceHeadCommit(state.workspacePath).catch(() => "")
+      : Promise.resolve("")
     ]);
 
     // Head equality alone is not a usable freshness test: committing a freshly
