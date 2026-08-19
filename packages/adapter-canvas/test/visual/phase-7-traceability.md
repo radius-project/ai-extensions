@@ -4,7 +4,7 @@ Phase 7 adds the reviewed Playwright visual suite (P2-A) in `test/visual/canvas-
 
 ## Visual baseline inventory
 
-The visual suite fixes Chromium, a 1440 by 1000 CSS-pixel viewport, device scale factor 1, reduced motion, the locally bundled Inter variable font, explicit host theme tokens, hidden carets, disabled animation and transition timing, one worker, and loopback-only networking. Native `toHaveScreenshot` assertions own the reviewed PNGs. A screenshot change must state its product reason in the pull request and receive human review.
+The Ubuntu GitHub-hosted runner owns the canonical baselines. The visual suite fixes Chromium, a 1440 by 1000 CSS-pixel viewport, device scale factor 1, reduced motion, the locally bundled Inter variable font, explicit host theme tokens, hidden carets, disabled animation and transition timing, one worker, and loopback-only networking. Native `toHaveScreenshot` assertions own the reviewed PNGs. A screenshot change must state its product reason in the pull request and receive human review; the cross-platform scheduled matrix runs behavioral reliability checks rather than comparing platform-specific rasterization.
 
 | ID    | Baselines                                                                                                                                        | Disposition |
 |-------|--------------------------------------------------------------------------------------------------------------------------------------------------|-------------|

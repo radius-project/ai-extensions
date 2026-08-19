@@ -195,6 +195,12 @@ async function routeDeployments(
 }
 
 async function routeGraphControls(page: Page): Promise<void> {
+  await page.route("**/api/load-graph", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ resources: GRAPH_RESOURCES })
+    });
+  });
   await page.route("**/api/list-applications?*", async (route) => {
     await route.fulfill({
       contentType: "application/json",
