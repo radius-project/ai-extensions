@@ -52,6 +52,7 @@ function dependencies(
       };
     },
     triggerDeployRepairHandoff: () => true,
+    triggerDeployFailureNotice: () => false,
     monitor: {
       run: () => {
         throw new Error("monitor.run not stubbed");
@@ -155,6 +156,7 @@ describe("deploy request service construction", () => {
     "canvasGraphResources",
     "beginDeployAttempt",
     "triggerDeployRepairHandoff",
+    "triggerDeployFailureNotice",
     "errorMessage"
   ] as const)("refuses to construct without %s", (name) => {
     expect(() => createDeployRequestService(without(name))).toThrow(
@@ -883,6 +885,31 @@ describe("deploy request background monitor ownership", () => {
 
     expect(handoffs).toEqual(["panel-a"]);
     expect(released).toEqual(["acme/widgets"]);
+  });
+
+  it("also relays a run-unconfirmed failure notice once the monitor settles", async () => {
+    const notices: string[] = [];
+    const { monitor, control } = controllableMonitor();
+    const service = createDeployRequestService(
+      dependencies({
+        readInstanceEntry: () => entryWith({}),
+        releaseDeploymentMutation: () => {},
+        triggerDeployRepairHandoff: () => false,
+        triggerDeployFailureNotice: (_entry, instanceId) => {
+          notices.push(instanceId);
+          return true;
+        },
+        monitor
+      })
+    );
+
+    await service.deploy({ instanceId: "panel-a", body: body() });
+    // The notice fires from the monitor-owned finally, not the answer path.
+    expect(notices).toEqual([]);
+
+    await control.settle();
+
+    expect(notices).toEqual(["panel-a"]);
   });
 
   it("caps the deploy log buffer and counts the lines it dropped", async () => {
