@@ -50,10 +50,7 @@ export {
   resolveRecipeOutputs
 } from "./modeling/index.js";
 export type { ConcreteResource, RecipePackEntry } from "./modeling/index.js";
-export type {
-  AppSourceEvaluation,
-  AppSourceStatus
-} from "./modeling/index.js";
+export type { AppSourceEvaluation, AppSourceStatus } from "./modeling/index.js";
 export type {
   AppModelFreshness,
   AppModelFreshnessInput,

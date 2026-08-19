@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   serializeAppOrigin,
   APP_ORIGIN_REPO_PATH,
@@ -500,9 +500,9 @@ describe("evaluateAppSourceForBranch", () => {
 
   it("reports unknown when the worktree listing fails", async () => {
     const { evaluateAppSourceForBranch, deps } = helpers();
-    deps.workspace.fetchWorkspaceTree.mockRejectedValueOnce(
-      new Error("permission denied")
-    );
+    (
+      deps.workspace.fetchWorkspaceTree as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error("permission denied"));
 
     expect(
       await evaluateAppSourceForBranch("acme/widgets", "main", WORKSPACE_STATE)
@@ -519,7 +519,9 @@ describe("evaluateAppSourceForBranch", () => {
 
   it("reports unknown when the repository tree listing fails or is empty", async () => {
     const { evaluateAppSourceForBranch, deps } = helpers();
-    deps.github.treePaths.mockRejectedValueOnce(new Error("gh unavailable"));
+    (deps.github.treePaths as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("gh unavailable")
+    );
 
     expect(
       await evaluateAppSourceForBranch("acme/widgets", "feat", WORKSPACE_STATE)

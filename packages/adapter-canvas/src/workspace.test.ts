@@ -12,6 +12,7 @@ import {
   resolveSessionId,
   resolvePersistedSessionId,
   workspaceFileExists,
+  fetchWorkspaceTree,
   workspaceHeadCommit,
   workspaceSourceChangedSince
 } from "./workspace.js";
@@ -419,5 +420,82 @@ describe("workspaceSourceChangedSince", () => {
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// The walker prunes directories using the skip list that packages/core owns, so
+// that a vendored Dockerfile is ignored identically here and on the remote tree
+// listing, which prunes nothing of its own. A regression in that shared list
+// would silently make one of the two paths see files the other does not.
+describe("fetchWorkspaceTree", () => {
+  const state = {
+    workspacePath: "",
+    workspaceRepo: "acme/widgets",
+    workspaceBranch: "main",
+    contextRepo: "acme/widgets",
+    contextBranch: "main"
+  };
+
+  it("lists application files and prunes vendored and generated directories", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-tree-"));
+    try {
+      await fs.mkdir(path.join(dir, "services", "api"), { recursive: true });
+      await fs.mkdir(path.join(dir, "node_modules", "pkg"), {
+        recursive: true
+      });
+      await fs.mkdir(path.join(dir, "dist"), { recursive: true });
+      await fs.mkdir(path.join(dir, ".cache"), { recursive: true });
+      await fs.writeFile(path.join(dir, ".cache", "Dockerfile"), "FROM x\n");
+      await fs.writeFile(path.join(dir, ".env"), "TOKEN=x\n");
+      await fs.writeFile(path.join(dir, "Dockerfile"), "FROM scratch\n");
+      await fs.writeFile(
+        path.join(dir, "services", "api", "main.go"),
+        "package main\n"
+      );
+      await fs.writeFile(
+        path.join(dir, "node_modules", "pkg", "Dockerfile"),
+        "FROM scratch\n"
+      );
+      await fs.writeFile(path.join(dir, "dist", "bundle.js"), "//\n");
+
+      const paths = await fetchWorkspaceTree(
+        { ...state, workspacePath: dir },
+        "acme/widgets",
+        "main"
+      );
+
+      expect(paths?.sort()).toEqual([
+        ".env",
+        "Dockerfile",
+        "services/api/main.go"
+      ]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null for a selection that is not the worktree", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-tree-"));
+    try {
+      expect(
+        await fetchWorkspaceTree(
+          { ...state, workspacePath: dir },
+          "acme/widgets",
+          "feat"
+        )
+      ).toBeNull();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null rather than an empty listing when the worktree cannot be walked", async () => {
+    expect(
+      await fetchWorkspaceTree(
+        { ...state, workspacePath: path.join(os.tmpdir(), "rad-tree-absent") },
+        "acme/widgets",
+        "main"
+      )
+    ).toBeNull();
   });
 });

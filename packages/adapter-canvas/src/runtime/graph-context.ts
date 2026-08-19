@@ -9,7 +9,10 @@ import {
   evaluateAppSource,
   parseAppOrigin
 } from "@radius-project/core";
-import type { AppModelFreshness, AppSourceEvaluation } from "@radius-project/core";
+import type {
+  AppModelFreshness,
+  AppSourceEvaluation
+} from "@radius-project/core";
 import { hashAppBicep } from "../app-bicep-hash.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasState } from "../shared.js";

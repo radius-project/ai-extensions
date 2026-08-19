@@ -365,11 +365,26 @@ function makeDeps({
   appModelStatus = vi.fn(async (repo: string, branch: string) =>
     modelStatus(repo, branch)
   ),
-  appSource = vi.fn(async (): Promise<AppSourceEvaluation> => ({
-    status: "single",
-    dockerfiles: ["Dockerfile"]
-  })),
+  appSource = vi.fn(
+    async (_repo: string, _branch: string): Promise<AppSourceEvaluation> => ({
+      status: "single",
+      dockerfiles: ["Dockerfile"]
+    })
+  ),
   defaultBranch = "main"
+}: {
+  state?: { contextRepo: string };
+  appModelStatus?: (
+    repo: string,
+    branch: string,
+    state?: unknown
+  ) => Promise<AppModelStatus>;
+  appSource?: (
+    repo: string,
+    branch: string,
+    state?: unknown
+  ) => Promise<AppSourceEvaluation>;
+  defaultBranch?: string;
 } = {}) {
   const requested = new Set<string>();
   return {

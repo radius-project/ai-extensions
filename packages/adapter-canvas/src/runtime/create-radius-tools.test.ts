@@ -82,9 +82,9 @@ describe("RU-07: radius_generate_app", () => {
 
   it("hands over the skill when the repository cannot be listed", async () => {
     const { tools, deps } = setup();
-    deps.workspace.fetchWorkspaceTree.mockRejectedValueOnce(
-      new Error("permission denied")
-    );
+    (
+      deps.workspace.fetchWorkspaceTree as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error("permission denied"));
 
     const result = await findTool(tools, "radius_generate_app").handler({
       repoPath: "/some/repo"
@@ -96,9 +96,9 @@ describe("RU-07: radius_generate_app", () => {
 
   it("hands over the skill when the workspace context cannot be resolved", async () => {
     const { tools, deps } = setup();
-    deps.workspace.detectWorkspaceContext.mockRejectedValueOnce(
-      new Error("no session")
-    );
+    (
+      deps.workspace.detectWorkspaceContext as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error("no session"));
 
     const result = await findTool(tools, "radius_generate_app").handler({
       repoPath: "/some/repo"
@@ -106,6 +106,37 @@ describe("RU-07: radius_generate_app", () => {
 
     expect(result).toBe("SKILL.md content for /some/repo");
     expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/some/repo");
+  });
+
+  it("hands over the skill when deciding which listing to use throws", async () => {
+    const { tools, deps } = setup();
+    (
+      deps.workspace.isWorkspaceSelection as ReturnType<typeof vi.fn>
+    ).mockImplementationOnce(() => {
+      throw new Error("selection unavailable");
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/some/repo"
+    });
+
+    expect(result).toBe("SKILL.md content for /some/repo");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/some/repo");
+  });
+
+  it("reports no repository by name when the workspace has no repo or branch context", async () => {
+    const { tools, deps } = setup({
+      workspaceContext: { workspacePath: "/workspace", repo: "", branch: "" },
+      workspaceTreeByRepoBranch: { "@": ["src/index.ts", "package.json"] }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/some/repo"
+    });
+
+    expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(result).toContain("Application modeling stopped before it began");
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
   });
 });
 
