@@ -100,7 +100,7 @@ pnpm test -- packages/core/src/graph/diff.test.ts
 
 ### Canvas visual baselines
 
-`pnpm test:visual` compares against Linux PNGs produced by the digest-pinned Playwright container in CI. Direct pixel comparison is expected to fail on Windows and macOS because their font rasterization differs; use `pnpm test:visual -- --ignore-snapshots` to run the semantic visual journeys locally without comparing platform-specific pixels.
+`pnpm test:visual` compares against Linux PNGs produced on the pinned Ubuntu 24.04 functional runner with the lockfile-pinned Playwright browser. Direct pixel comparison is expected to fail on Windows and macOS because their font rasterization differs; use `pnpm test:visual -- --ignore-snapshots` to run the semantic visual journeys locally without comparing platform-specific pixels.
 
 To regenerate canonical baselines, manually dispatch the **Canvas Functional Tests** workflow with **Regenerate and upload the canonical visual baselines** enabled, then download the `canvas-visual-functional` artifact. Review every changed PNG before committing it.
 

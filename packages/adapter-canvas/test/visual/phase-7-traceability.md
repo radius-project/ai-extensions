@@ -4,9 +4,9 @@ Phase 7 adds the Playwright visual suite (P2-A) in `test/visual/canvas-visual.te
 
 ## Visual baseline inventory
 
-The seventeen PNGs in `__screenshots__/` are **proposed baselines awaiting human review**. They were captured by the digest-pinned Playwright container on an Ubuntu GitHub-hosted runner, which owns the canonical rasterization, and they are not reviewed merely because continuous integration produced them. A reviewer must open each PNG and accept it before this suite is a trustworthy contract, and every later change to a PNG must state its product reason in the pull request and receive the same review.
+The seventeen PNGs in `__screenshots__/` are **proposed baselines awaiting human review**. They were captured on the pinned Ubuntu 24.04 GitHub-hosted runner with the lockfile-pinned Playwright browser, which owns the canonical rasterization, and they are not reviewed merely because continuous integration produced them. A reviewer must open each PNG and accept it before this suite is a trustworthy contract, and every later change to a PNG must state its product reason in the pull request and receive the same review.
 
-The suite fixes a digest-pinned Playwright image and Chromium build, a 1440 by 1000 CSS-pixel viewport, device scale factor 1, reduced motion, the locally bundled Inter variable font, a frozen synthetic host-token palette, hidden carets, disabled animation and transition timing, one worker, and loopback-only networking. The synthetic palette deliberately shadows the shell's fallback tokens so the baselines remain independent of host palette changes; these screenshots do not claim visual coverage of the no-host-token fallback path. Because an injected `@font-face` is fetched lazily, the suite explicitly loads every weight it uses and awaits `document.fonts.ready`, then asserts the face is available before any capture; a page that would otherwise be photographed in fallback metrics fails instead of silently minting a baseline. Native `toHaveScreenshot` assertions own the PNGs with a per-pixel threshold of 0.1 and a `maxDiffPixels` budget of 250, which absorbs residual raster noise while remaining far below the pixel area of a missing badge, icon, or status string. The cross-platform scheduled matrix runs behavioral reliability checks and never compares platform-specific rasterization.
+The suite fixes the Ubuntu 24.04 runner image, the lockfile-pinned Playwright package and Chromium build, a 1440 by 1000 CSS-pixel viewport, device scale factor 1, reduced motion, the locally bundled Inter variable font, a frozen synthetic host-token palette, hidden carets, disabled animation and transition timing, one worker, and loopback-only networking. The synthetic palette deliberately shadows the shell's fallback tokens so the baselines remain independent of host palette changes; these screenshots do not claim visual coverage of the no-host-token fallback path. Because an injected `@font-face` is fetched lazily, the suite explicitly loads every weight it uses and awaits `document.fonts.ready`, then asserts the face is available before any capture; a page that would otherwise be photographed in fallback metrics fails instead of silently minting a baseline. Native `toHaveScreenshot` assertions own the PNGs with a per-pixel threshold of 0.1 and a `maxDiffPixels` budget of 250, which absorbs residual raster noise while remaining far below the pixel area of a missing badge, icon, or status string. The cross-platform scheduled matrix runs behavioral reliability checks and never compares platform-specific rasterization.
 
 VI-06 waits for the current selected-account readiness flow to settle before capture: the repository account must be selected, the readiness summary must report that deployments can be configured, the credential source must be the keyring, the re-check control must be idle, and the create action must be enabled. This semantic guard fails before screenshot comparison if the form is still checking or if its current readiness contract changes.
 
@@ -22,7 +22,7 @@ VI-06 waits for the current selected-account readiness flow to settle before cap
 
 ### Baseline ownership and update procedure
 
-The canonical Playwright container is digest-pinned in both the pull-request and scheduled workflows. An intentional Playwright image or browser upgrade can still invalidate every PNG at once; handle that baseline churn as follows.
+The canonical visual environment uses the explicit `ubuntu-24.04` runner and caches the lockfile-selected Playwright browser by operating system, architecture, and lockfile hash. An intentional runner or Playwright browser upgrade can still invalidate every PNG at once; handle that baseline churn as follows.
 
 1. Confirm the diff is environmental rather than a product regression by reading the uploaded diff images.
 2. Dispatch **Canvas Functional Tests** with **Regenerate and upload the canonical visual baselines** enabled.
@@ -30,7 +30,7 @@ The canonical Playwright container is digest-pinned in both the pull-request and
 4. Commit the regenerated PNGs in their own commit whose message states the environmental cause.
 5. Have a human review the regenerated images before merge.
 
-The checked-in PNGs use Linux rasterization from the pinned container. A direct `pnpm test:visual` comparison on Windows or macOS is expected to fail even when the rendered state is correct; use `pnpm test:visual -- --ignore-snapshots` for local semantic checks and the workflow input above for canonical regeneration.
+The checked-in PNGs use Linux rasterization from the pinned Ubuntu 24.04 runner. A direct `pnpm test:visual` comparison on Windows or macOS is expected to fail even when the rendered state is correct; use `pnpm test:visual -- --ignore-snapshots` for local semantic checks and the workflow input above for canonical regeneration.
 
 ### Worktree branch preservation
 
@@ -38,7 +38,7 @@ The graph and planned views must never fall back to `main`. Every VI-01 and VI-0
 
 ## Extended reliability inventory
 
-`pnpm run test:reliability` runs on Ubuntu, Windows, and macOS each week and on manual dispatch. A dedicated Vitest configuration selects the existing focused test areas with directory globs, so moving or adding a test inside an owning area cannot silently remove it from the scheduled gate. Running these suites natively on three hosts is what the schedule adds; it does not convert a unit test with a mocked boundary into a native end-to-end check, and the dispositions below say so.
+`pnpm run test:reliability` runs on Ubuntu, Windows, and macOS every eight hours and on manual dispatch. A dedicated Vitest configuration selects the existing focused test areas with directory globs, so moving or adding a test inside an owning area cannot silently remove it from the scheduled run. Running these suites natively on three hosts is what the schedule adds; it does not convert a unit test with a mocked boundary into a native end-to-end check, and the dispositions below say so.
 
 | Phase 7 category                       | Owning checks                                                                                                                                                                                            | Disposition |
 |----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------|
