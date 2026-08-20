@@ -71,8 +71,8 @@ export interface CreateEnvironmentOperation {
   verification?: unknown;
   setupArtifacts?: {
     roleAssignments?: readonly {
-      role?: unknown;
-      scope?: unknown;
+      role?: string;
+      scope?: string;
     }[];
   };
 }
