@@ -627,9 +627,9 @@ export async function handleCreateEnvironment(
       // though the intended permission now exists.
       verifySkipReason =
         "Azure Contributor access was just granted for this environment. Azure RBAC can take a few minutes to propagate, so Radius skipped the immediate credentials verification run.";
-      steps.push("⚠️ " + verifySkipReason);
       steps.push(
-        "⏭️ Skipping immediate credential verification while Azure role assignments propagate."
+        "⚠️ Skipping immediate credential verification while Azure role assignments propagate. " +
+          verifySkipReason
       );
     } else {
       if (verifyPlan.ref)

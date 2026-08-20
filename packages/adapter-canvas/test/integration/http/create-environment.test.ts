@@ -675,9 +675,13 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(
       harness.ghCalls.some((call) => call.startsWith("workflow run "))
     ).toBe(false);
-    expect(harness.steps).toContain(
-      "⏭️ Skipping immediate credential verification while Azure role assignments propagate."
-    );
+    expect(
+      harness.steps.filter((step) =>
+        step.includes("Skipping immediate credential verification")
+      )
+    ).toEqual([
+      "⚠️ Skipping immediate credential verification while Azure role assignments propagate. Azure Contributor access was just granted for this environment. Azure RBAC can take a few minutes to propagate, so Radius skipped the immediate credentials verification run."
+    ]);
     expect(harness.journal).toContain(`setStageState:${STAGE_VERIFY}:skipped`);
     expect(harness.finished).toEqual([
       {
