@@ -27,5 +27,9 @@ catalog:
   "@vitest/coverage-v8": ^4.1.10
   typescript: ^7.0.2
   vitest: ^4.1.10
+  # YAML parser used only by @radius-project/core tests to assert generated
+  # workflow files parse as valid YAML (dev-only; core ships no runtime deps).
+  # Caret range compatible with the 2.9.0 already resolved in the lockfile.
+  yaml: ^2.9.0
 
 minimumReleaseAge: 11520   # 8 days
