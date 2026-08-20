@@ -5,6 +5,7 @@ export default defineConfig({
     include: [
       "src/**/*.test.ts",
       "test/ci/**/*.test.mjs",
+      "test/e2e/support/**/*.test.ts",
       "test/integration/runtime/**/*.test.ts",
       "test/integration/http/**/*.test.ts"
     ],

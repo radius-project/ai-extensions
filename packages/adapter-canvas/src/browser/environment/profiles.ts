@@ -45,7 +45,10 @@ export const GITHUB_IDENTITY_IDS = {
   empty: "env-gh-account-empty",
   combo: "env-gh-account-combo",
   note: "env-gh-identity-note",
-  recheck: "env-gh-recheck"
+  recheck: "env-gh-recheck",
+  details: "env-gh-technical-details",
+  repair: "env-gh-repair",
+  fix: "env-gh-fix-access"
 } as const;
 
 export type CredentialProvider = "azure" | "aws";
@@ -78,6 +81,21 @@ export interface GithubIdentity {
   readonly actingHasWorkflow: boolean;
   readonly actingHasPackages: boolean;
   readonly accounts: readonly GithubAccountSummary[];
+}
+
+export interface GithubReadiness {
+  readonly ready: boolean;
+  readonly login: string;
+  readonly credentialSource: string;
+  readonly summary: string;
+  readonly repair: string;
+  readonly selectionHandle: string;
+  readonly checks: Readonly<Record<string, GithubReadinessCheck>>;
+}
+
+export interface GithubReadinessCheck {
+  readonly state: string;
+  readonly detail: string;
 }
 
 export interface GithubIdentityNote {
@@ -139,6 +157,7 @@ export function parseGithubIdentity(payload: unknown): GithubIdentity {
     const account = parseGithubAccount(entry);
     if (account) accounts.push(account);
   }
+
   return {
     error: readString(payload, "error"),
     actingLogin: readString(payload, "actingLogin"),
@@ -148,6 +167,30 @@ export function parseGithubIdentity(payload: unknown): GithubIdentity {
     actingHasWorkflow: readBoolean(payload, "actingHasWorkflow"),
     actingHasPackages: readBoolean(payload, "actingHasPackages"),
     accounts
+  };
+}
+
+export function parseGithubReadiness(payload: unknown): GithubReadiness {
+  const readiness =
+    isRecord(payload) && isRecord(payload.readiness) ? payload.readiness : {};
+  const checksValue =
+    isRecord(readiness) && isRecord(readiness.checks) ? readiness.checks : {};
+  const checks: Record<string, GithubReadinessCheck> = {};
+  for (const [name, value] of Object.entries(checksValue)) {
+    if (!isRecord(value)) continue;
+    checks[name] = {
+      state: readString(value, "state"),
+      detail: readString(value, "detail")
+    };
+  }
+  return {
+    ready: readBoolean(readiness, "ready"),
+    login: readString(readiness, "login"),
+    credentialSource: readString(readiness, "credentialSource"),
+    summary: readString(readiness, "summary"),
+    repair: readString(readiness, "repair"),
+    selectionHandle: readString(payload, "selectionHandle"),
+    checks
   };
 }
 
@@ -168,18 +211,7 @@ export function githubAccountLabel(
   account: GithubAccountSummary,
   actingLogin: string
 ): string {
-  let label = `@${account.login}`;
-  const missingScopes: string[] = [];
-  if (!account.hasWorkflow) missingScopes.push("workflow");
-  if (!account.hasPackages) missingScopes.push("packages");
-  if (missingScopes.length > 0) {
-    label += ` — missing ${missingScopes.join(" + ")} scope${
-      missingScopes.length > 1 ? "s" : ""
-    }`;
-  }
-  if (!account.switchable) label += " (not switchable)";
-  else if (account.login === actingLogin) label += " ✓";
-  return label;
+  return `@${account.login}${account.login === actingLogin ? " ✓" : ""}`;
 }
 
 // Mirrors the mutually-exclusive precedence of the legacy inline note builder:
@@ -253,7 +285,13 @@ export function githubIdentityNote(
 
 const TERTIARY_STYLE = "color:var(--rad-text-tertiary);";
 const STRONG_STYLE = "color:var(--rad-text);";
-const VERIFIED_STYLE = "color:var(--rad-primary);font-weight:600;";
+// "Verified" is a success status, so it uses the status token rather than
+// --rad-primary. --rad-primary is a fixed brand green tuned for solid fills
+// behind white text; as small text on the panel background it fails WCAG AA
+// contrast, which the Chromium accessibility gate catches. --rad-success is
+// mixed toward the active canvas text colour, so it stays legible in both
+// themes.
+const VERIFIED_STYLE = "color:var(--rad-success);font-weight:600;";
 
 // Mirrors the legacy inline detail markup for the credential-profile summary
 // panel, rebuilt as element specs so no interpolated field can re-enter the
@@ -313,7 +351,11 @@ export function profileDetailSpecs(
           text: "Signed in as "
         },
         { tag: "strong", attrs: { style: STRONG_STYLE }, text: profile.user },
-        { tag: "span", attrs: { style: VERIFIED_STYLE }, text: " · ✓ Verified" }
+        {
+          tag: "span",
+          attrs: { style: VERIFIED_STYLE },
+          text: " · ✓ Verified"
+        }
       ]
     });
   } else {
@@ -329,7 +371,10 @@ export function profileDetailSpecs(
 
 export interface CredentialProfilesPanelDeps {
   readonly repo: string;
+  readonly mutationNonce?: string;
+  environmentName(): string;
   onProfileChange(profile: CredentialProfile | null): void;
+  onReadinessChange?(readiness: GithubReadiness | null): void;
   discoverResources(
     provider: CredentialProvider,
     subscriptionId: string,
@@ -340,6 +385,7 @@ export interface CredentialProfilesPanelDeps {
 export interface CredentialProfilesPanelHandle {
   loadProfiles(preselectName?: string): Promise<void>;
   loadGithubIdentity(fresh?: boolean): Promise<void>;
+  invalidateReadiness(): void;
   teardown(): void;
 }
 
@@ -401,13 +447,19 @@ export function initializeCredentialProfilesPanel(
   const ghEmptyEl = context.dom.byId(GITHUB_IDENTITY_IDS.empty);
   const noteEl = context.dom.byId(GITHUB_IDENTITY_IDS.note);
   const recheckBtn = context.dom.inputById(GITHUB_IDENTITY_IDS.recheck);
+  const detailsEl = context.dom.byId(GITHUB_IDENTITY_IDS.details);
+  const detailsPanel = context.dom.byId("env-gh-details-panel");
+  const repairEl = context.dom.byId(GITHUB_IDENTITY_IDS.repair);
+  const fixAccessBtn = context.dom.byId(GITHUB_IDENTITY_IDS.fix);
 
   let profiles: CredentialProfile[] = [];
   let selectedProfile: CredentialProfile | null = null;
   let profilesToken = 0;
   let githubIdentity: GithubIdentity | null = null;
-  let scopeWarnActive = false;
+  let githubReadiness: GithubReadiness | null = null;
+  let selectedGithubLogin = "";
   let checking = false;
+  let githubRequestGeneration = 0;
 
   const profileOptionBindings: Registration[] = [];
   const githubAccountOptionBindings: Registration[] = [];
@@ -497,6 +549,9 @@ export function initializeCredentialProfilesPanel(
       bind(profileOptionBindings, optionButton, "click", () => {
         setProfileValue(profile);
         openProfileMenu(false);
+        // Closing the listbox removes the focused option, so hand focus back to
+        // the control that owns the value.
+        button.focus();
       });
       optionsEl.appendChild(optionButton);
     }
@@ -529,12 +584,11 @@ export function initializeCredentialProfilesPanel(
     const identity = githubIdentity;
     if (identity.error !== "" || identity.actingLogin === "") {
       fieldEl.style.display = "none";
-      scopeWarnActive = false;
       if (recheckBtn) recheckBtn.style.display = "none";
       return;
     }
     fieldEl.style.display = "";
-    if (ghValueEl) ghValueEl.textContent = `@${identity.actingLogin}`;
+    if (ghValueEl) ghValueEl.textContent = `@${selectedGithubLogin}`;
 
     releaseTracked(githubAccountOptionBindings);
     if (ghOptionsEl) {
@@ -546,13 +600,17 @@ export function initializeCredentialProfilesPanel(
         optionButton.setAttribute("role", "option");
         optionButton.textContent = githubAccountLabel(
           account,
-          identity.actingLogin
+          selectedGithubLogin
         );
-        if (account.switchable && account.login !== identity.actingLogin) {
+        if (
+          account.login !== selectedGithubLogin &&
+          (account.switchable || account.login === identity.displayLogin)
+        ) {
           optionButton.setAttribute("data-login", account.login);
           bind(githubAccountOptionBindings, optionButton, "click", () => {
-            void switchGitHubAccount(account.login);
+            void checkGitHubAccount(account.login);
             openGhAccountMenu(false);
+            ghButton?.focus();
           });
         } else {
           // ElementStyle has no opacity/cursor: mark the non-actionable row via
@@ -566,17 +624,53 @@ export function initializeCredentialProfilesPanel(
     if (ghEmptyEl)
       ghEmptyEl.style.display = identity.accounts.length > 0 ? "none" : "";
 
-    if (noteEl) {
-      const note = githubIdentityNote(identity);
-      setChildren(context.dom, noteEl, note.specs);
+    if (noteEl && githubReadiness) {
+      setChildren(context.dom, noteEl, [
+        {
+          tag: "strong",
+          text:
+            githubReadiness.summary ||
+            (githubReadiness.ready ?
+              "Ready to configure deployments"
+            : "Additional GitHub access is required")
+        }
+      ]);
       noteEl.style.color =
-        note.tone === "warning" ?
-          "var(--rad-warning, #9a6700)"
-        : "var(--rad-text-tertiary)";
+        githubReadiness.ready ?
+          "var(--rad-success, #1a7f37)"
+        : "var(--rad-warning, #9a6700)";
       noteEl.style.display = "";
-      scopeWarnActive = note.showRecheck;
+    } else if (noteEl && checking) {
+      setChildren(context.dom, noteEl, textNote("Checking GitHub access…"));
+      noteEl.style.color = "var(--rad-text-tertiary)";
+      noteEl.style.display = "";
     }
-    if (recheckBtn) recheckBtn.style.display = scopeWarnActive ? "" : "none";
+    if (recheckBtn) {
+      recheckBtn.style.display = "";
+      recheckBtn.disabled = checking;
+      recheckBtn.textContent = checking ? "Checking…" : "Re-check";
+    }
+    if (fixAccessBtn) {
+      fixAccessBtn.style.display = githubReadiness?.repair ? "" : "none";
+    }
+    if (repairEl) {
+      repairEl.textContent = githubReadiness?.repair || "";
+      repairEl.style.display = githubReadiness?.repair ? "" : "none";
+    }
+    if (detailsEl && githubReadiness) {
+      const detailSpecs: ElementSpec[] = [];
+      for (const [name, check] of Object.entries(githubReadiness.checks)) {
+        detailSpecs.push({
+          tag: "div",
+          text: `${name}: ${check.state} — ${check.detail}`
+        });
+      }
+      detailSpecs.push({
+        tag: "div",
+        text: `credential source: ${githubReadiness.credentialSource || "unknown"}`
+      });
+      setChildren(context.dom, detailsEl, detailSpecs);
+    }
   };
 
   const githubIdentityUrl = (fresh: boolean): string => {
@@ -585,70 +679,131 @@ export function initializeCredentialProfilesPanel(
   };
 
   const loadGithubIdentity = async (fresh = false): Promise<void> => {
-    if (checking) return;
+    const generation = ++githubRequestGeneration;
     checking = true;
-    if (fresh && recheckBtn) {
-      recheckBtn.disabled = true;
-      recheckBtn.textContent = "Checking…";
-    } else if (ghValueEl) {
+    githubReadiness = null;
+    deps.onReadinessChange?.(null);
+    if (!fresh && ghValueEl) {
       ghValueEl.textContent = "Detecting…";
     }
     try {
       const response = await context.net.fetch(githubIdentityUrl(fresh));
       const payload = await response.json();
+      if (!scope.active || generation !== githubRequestGeneration) return;
       githubIdentity = parseGithubIdentity(payload);
+      const availableLogins = new Set(
+        githubIdentity.accounts.map((account) => account.login)
+      );
+      if (!availableLogins.has(selectedGithubLogin)) {
+        selectedGithubLogin =
+          githubIdentity.actingLogin ||
+          githubIdentity.displayLogin ||
+          githubIdentity.accounts[0]?.login ||
+          "";
+      }
       renderGithubIdentity();
+      if (selectedGithubLogin) {
+        await checkGitHubAccount(selectedGithubLogin);
+      }
     } catch {
+      if (!scope.active || generation !== githubRequestGeneration) return;
       if (fieldEl) fieldEl.style.display = "none";
+      deps.onReadinessChange?.(null);
     } finally {
-      checking = false;
-      if (recheckBtn) {
-        recheckBtn.disabled = false;
-        recheckBtn.textContent = "Re-check";
+      if (generation === githubRequestGeneration) {
+        checking = false;
+        renderGithubIdentity();
       }
     }
   };
 
   const autoRecheckGithubIdentity = (): void => {
+    const packageCheck = githubReadiness?.checks.packages;
+    const packageDenied =
+      packageCheck?.state === "missing" || packageCheck?.state === "error";
     if (
-      scopeWarnActive &&
+      (!githubReadiness || !githubReadiness.ready) &&
+      !packageDenied &&
       !checking &&
       fieldEl &&
       fieldEl.style.display !== "none"
     ) {
-      void loadGithubIdentity(true);
+      void checkGitHubAccount(selectedGithubLogin);
     }
   };
 
-  const errorMessageFrom = (payload: unknown): string => {
-    const message = readString(payload, "error");
-    return message === "" ? "Could not switch account." : message;
+  const invalidateReadiness = (): void => {
+    githubRequestGeneration += 1;
+    githubReadiness = null;
+    checking = false;
+    deps.onReadinessChange?.(null);
+    if (noteEl && selectedGithubLogin) {
+      setChildren(
+        context.dom,
+        noteEl,
+        textNote("Re-check GitHub access for this environment.")
+      );
+      noteEl.style.color = "var(--rad-warning, #9a6700)";
+      noteEl.style.display = "";
+    }
+    if (recheckBtn) {
+      recheckBtn.disabled = false;
+      recheckBtn.style.display = "";
+      recheckBtn.textContent = "Re-check";
+    }
   };
 
-  const switchGitHubAccount = async (login: string): Promise<void> => {
-    if (ghValueEl) ghValueEl.textContent = "Switching…";
+  const checkGitHubAccount = async (login: string): Promise<void> => {
+    const generation = ++githubRequestGeneration;
+    selectedGithubLogin = login;
+    githubReadiness = null;
+    checking = true;
+    deps.onReadinessChange?.(null);
+    renderGithubIdentity();
     try {
       const response = await context.net.fetch(GITHUB_ACCOUNT_ENDPOINT, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ login })
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": deps.mutationNonce || ""
+        },
+        body: JSON.stringify({
+          login,
+          repo: deps.repo,
+          environment: deps.environmentName().trim() || "dev"
+        })
       });
       const payload = await response.json();
-      if (response.ok) {
-        // Re-fetch identity WITH the repo so the admin/read preflight re-runs
-        // for the freshly switched account: the switch response resolves
-        // identity without the repo, so it carries no repoAccess.
-        await loadGithubIdentity(true);
-        return;
+      if (!scope.active || generation !== githubRequestGeneration) return;
+      if (!response.ok) {
+        throw new Error(
+          readString(payload, "error") || "Could not check GitHub access."
+        );
       }
-      renderGithubIdentity();
+      githubReadiness = parseGithubReadiness(payload);
+      deps.onReadinessChange?.(githubReadiness);
+    } catch (error) {
+      if (!scope.active || generation !== githubRequestGeneration) return;
+      githubReadiness = null;
+      deps.onReadinessChange?.(null);
       if (noteEl) {
-        setChildren(context.dom, noteEl, textNote(errorMessageFrom(payload)));
+        setChildren(
+          context.dom,
+          noteEl,
+          textNote(
+            error instanceof Error && error.message ?
+              error.message
+            : "Could not check GitHub access."
+          )
+        );
         noteEl.style.color = "var(--rad-danger, #cf222e)";
         noteEl.style.display = "";
       }
-    } catch {
-      renderGithubIdentity();
+    } finally {
+      if (generation === githubRequestGeneration) {
+        checking = false;
+        renderGithubIdentity();
+      }
     }
   };
 
@@ -673,7 +828,12 @@ export function initializeCredentialProfilesPanel(
   });
   if (recheckBtn) {
     scope.on(recheckBtn, "click", () => {
-      void loadGithubIdentity(true);
+      if (selectedGithubLogin) void checkGitHubAccount(selectedGithubLogin);
+    });
+  }
+  if (fixAccessBtn) {
+    scope.on(fixAccessBtn, "click", () => {
+      if (detailsPanel) Reflect.set(detailsPanel, "open", true);
     });
   }
   scope.on(context.dom.document, "visibilitychange", () => {
@@ -700,7 +860,9 @@ export function initializeCredentialProfilesPanel(
   return {
     loadProfiles,
     loadGithubIdentity,
+    invalidateReadiness,
     teardown() {
+      deps.onReadinessChange?.(null);
       scope.teardown();
     }
   };

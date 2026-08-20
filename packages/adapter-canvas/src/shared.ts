@@ -57,7 +57,6 @@ export interface SharedCredentials {
   azure?: unknown;
   aws?: unknown;
   profiles?: unknown;
-  preferredGitHubLogin?: unknown;
 }
 
 export interface CanvasGraphConnection {
@@ -189,6 +188,13 @@ export interface CanvasState {
   deployRepairing?: boolean;
   deployHandoffState?: string;
   deployHandoffAttempts?: number;
+  // Delivery state for the informational failure notice (separate from the
+  // repair handoff above). A "run-unconfirmed" failure is never auto-repaired,
+  // so it does not open a repair loop; instead this tracks a one-shot report to
+  // chat so the agent can tell the user what happened. Kept on its own fields so
+  // the notice can never be confused with, or suppress, a repair handoff.
+  deployNoticeState?: string;
+  deployNoticeAttempts?: number;
   // Redeploys the agent has made inside the current repair loop. Bounds the
   // automatic repair cycle server-side; reset whenever a deploy opens a new
   // attempt rather than continuing one.
@@ -231,7 +237,16 @@ const __dirname_ext =
   typeof import.meta.url !== "undefined" ?
     dirname(fileURLToPath(import.meta.url))
   : ".";
-const CREDS_FILE = join(__dirname_ext, ".radius-credentials.json");
+
+export function resolveCredentialsFilePath(
+  environment: NodeJS.ProcessEnv = process.env,
+  moduleDirectory = __dirname_ext
+): string {
+  const configured = environment.RADIUS_CREDENTIALS_FILE?.trim();
+  return configured || join(moduleDirectory, ".radius-credentials.json");
+}
+
+const CREDS_FILE = resolveCredentialsFilePath();
 
 export let sharedCredentials: SharedCredentials = {};
 try {
@@ -310,22 +325,4 @@ export function deleteCredentialProfile(repo: string, name: unknown): boolean {
   root[repo] = next;
   saveCredentials();
   return next.length !== list.length;
-}
-
-// ── Preferred GitHub identity ────────────────────────────────────────────────
-// The account the user explicitly chose for setup to act as (via the Create
-// Environment dialog's account switcher). gh accounts are machine-global, so
-// this preference is stored machine-wide (not per-repo) and restored at server
-// startup — otherwise the in-memory choice dies with the process and the token
-// strategy silently reverts to the injected token's account on the next restart.
-export function getPreferredGitHubLogin(): string {
-  const v = sharedCredentials.preferredGitHubLogin;
-  return typeof v === "string" && v.trim() ? v.trim() : "";
-}
-
-export function setPreferredGitHubLogin(login: unknown): void {
-  const next = String(login || "").trim();
-  if (next) sharedCredentials.preferredGitHubLogin = next;
-  else delete sharedCredentials.preferredGitHubLogin;
-  saveCredentials();
 }

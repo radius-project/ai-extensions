@@ -83,6 +83,14 @@ export interface DeploymentsDependencies {
     entry: DeploymentsInstanceEntry | undefined,
     instanceId: string
   ): boolean;
+  // Informational sibling of triggerDeployRepairHandoff: relays a
+  // run-unconfirmed failure to chat without opening a repair loop. Its return is
+  // deliberately NOT folded into the `repairing` flag, so an unconfirmed failure
+  // never shows the "analyzing and will repair and redeploy" UI note.
+  triggerDeployFailureNotice(
+    entry: DeploymentsInstanceEntry | undefined,
+    instanceId: string
+  ): boolean;
   deployHandoffStatus(state: CanvasState): DeployHandoffSummary;
   resolveRepoAppName(repo: string, branch: string): Promise<string>;
   resolveEnvDeployment(
@@ -217,6 +225,10 @@ export function handleDeployStatus(
     dependencies.triggerDeployRepairHandoff(entry, context.instanceId) ||
     entry?.state?.deployRepairing ||
     false;
+  // Relay a run-unconfirmed failure to chat too. Kept separate from `repairing`
+  // above: this failure is reported, not repaired, so it must not light up the
+  // "analyzing and will repair and redeploy" UI note.
+  dependencies.triggerDeployFailureNotice(entry, context.instanceId);
   const handoff = dependencies.deployHandoffStatus(entry?.state || {});
   response.setHeader("Content-Type", "application/json");
   response.writeHead(200);

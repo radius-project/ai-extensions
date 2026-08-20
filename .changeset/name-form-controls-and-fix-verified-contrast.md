@@ -1,0 +1,5 @@
+---
+"@radius-project/adapter-canvas": patch
+---
+
+Give every control in the credential and environment forms a programmatic name, and correct the contrast of the verified credential badge. The seven free-text inputs revealed when a discovery dropdown is switched to "Custom…" had no accessible name, because the adjacent label names the dropdown rather than the input, so a screen reader announced an unnamed text field once the input appeared; each now carries an explicit label. The "Azure app registration" label was not associated with its input at all, and the labels on the credential form were dropped when that form was extracted into a shared module, so both are reattached. The "✓ Verified" badge on the credential profile summary was drawn in the fixed brand green intended for solid fills behind white text, which fails WCAG AA contrast as small text on the panel background; it now uses the status colour that is mixed toward the active canvas text colour and stays legible in both light and dark themes.

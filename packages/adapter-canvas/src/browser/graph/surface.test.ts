@@ -23,11 +23,13 @@ import {
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
 import {
-  createFakeGraphVendor,
+  childComponent,
+  createGraphVendor,
+  createRecordingGraphVendor,
   findByClass
-} from "../../../test/support/browser/graph-fakes.js";
+} from "../../../test/support/browser/graph-vendor.js";
 import type { FakeElement } from "../../../test/support/browser/fakes.js";
-import type { FakeGraphVendor } from "../../../test/support/browser/graph-fakes.js";
+import type { RecordingGraphVendorHarness } from "../../../test/support/browser/graph-vendor.js";
 import type { GraphResource } from "./model.js";
 import type { DomElement } from "../ports.js";
 
@@ -71,7 +73,7 @@ interface Parent {
   legends: DomElement[];
 }
 
-function setup(options: { vendor?: FakeGraphVendor | null } = {}) {
+function setup(options: { vendor?: RecordingGraphVendorHarness | null } = {}) {
   const browser = createFakeBrowser();
   const container = createFakeElement("graph-container");
   browser.document.add(container);
@@ -88,7 +90,9 @@ function setup(options: { vendor?: FakeGraphVendor | null } = {}) {
   };
   Object.assign(container, { parentNode: parent });
   const vendor =
-    options.vendor === undefined ? createFakeGraphVendor() : options.vendor;
+    options.vendor === undefined ?
+      createRecordingGraphVendor()
+    : options.vendor;
   const surface = createGraphSurface(browser.context, () => vendor);
   return {
     browser,
@@ -319,7 +323,7 @@ describe("populated graph", () => {
     const container = createFakeElement("graph-container");
     browser.document.add(container);
     const surface = createGraphSurface(browser.context, () =>
-      createFakeGraphVendor()
+      createGraphVendor()
     );
     expect(
       surface.render("graph-container", RESOURCES, { showLegend: true })
@@ -336,10 +340,7 @@ describe("controller", () => {
   it("re-lays out and pushes an update into the mounted view", () => {
     const harness = setup();
     const controller = harness.surface.render("graph-container", RESOURCES);
-    const rendered = harness.vendor!.reactDom.roots[0].rendered[0] as {
-      children: Array<{ type: (props: unknown) => unknown; props: unknown }>;
-    };
-    const app = rendered.children[0];
+    const app = childComponent(harness.vendor!.reactDom.roots[0].rendered[0]);
     app.type(app.props);
     harness.vendor!.react.runEffects();
 
@@ -547,14 +548,9 @@ describe("node interactions", () => {
     const panel = harness.container.appended[1] as FakeElement;
     // The card component the view built is reachable through the node types the
     // application was given, so drive it the way React would.
-    const app = (
-      harness.vendor!.reactDom.roots[0].rendered[0] as {
-        children: Array<{
-          type: (props: unknown) => unknown;
-          props: { initialNodes: Array<{ data: unknown }> };
-        }>;
-      }
-    ).children[0];
+    const app = childComponent<{ initialNodes: Array<{ data: unknown }> }>(
+      harness.vendor!.reactDom.roots[0].rendered[0]
+    );
     const nodeData = app.props.initialNodes[0].data;
     const tree = app.type(app.props) as { props: Record<string, unknown> };
     const nodeTypes = tree.props.nodeTypes as {
@@ -576,7 +572,7 @@ describe("node interactions", () => {
     (card?.props.onClick as (event: unknown) => void)({});
     const dots = findByClass(
       nodeTypes.rad({ data: nodeData }),
-      "rad-node__dots nodrag nopan"
+      "rad-node__dots nodrag nopan nokey"
     );
     const dot = createFakeElement("dots");
     dot.ancestors.set(".rad-node", owner);
@@ -611,13 +607,9 @@ describe("node interactions", () => {
     expect(harness.container.appended).toHaveLength(1);
     expect(harness.container.listenerCount("click")).toBe(0);
 
-    const rendered = harness.vendor!.reactDom.roots[0].rendered[0] as {
-      children: Array<{
-        type: (props: unknown) => unknown;
-        props: { initialNodes: Array<{ data: unknown }> };
-      }>;
-    };
-    const app = rendered.children[0];
+    const app = childComponent<{ initialNodes: Array<{ data: unknown }> }>(
+      harness.vendor!.reactDom.roots[0].rendered[0]
+    );
     const tree = app.type(app.props) as { props: Record<string, unknown> };
     const nodeTypes = tree.props.nodeTypes as {
       rad: (props: { data: unknown }) => unknown;

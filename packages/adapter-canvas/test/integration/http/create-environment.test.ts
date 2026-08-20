@@ -14,6 +14,7 @@ import {
   resolveGitHubEnvironmentCreateState
 } from "../../../src/server.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
+import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
 import type {
@@ -168,6 +169,8 @@ function start(script: Script = {}): Harness {
     isServerOwnedRequest: (_instanceId, request) =>
       request.headers["x-radius-server-owned"] === SERVER_OWNED_TOKEN,
     readInstanceEntry: () => entry,
+    getSelectedGitHubExecutor: () =>
+      successfulSelectedGhExecutor({ run: async (args) => runGhArgs(args) }),
 
     // --- admission ---
     isValidRepoSlug,

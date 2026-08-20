@@ -2,9 +2,34 @@ import { describe, expect, it } from "vitest";
 import { browserEntryMarker, browserScript } from "../browser/scripts.js";
 import { HOSTILE_STATE } from "../../test/support/pages/hostile-state.js";
 import { readBrowserPageState } from "../../test/support/pages/browser-state.js";
+import { unlabelledSelectIds } from "../../test/support/pages/labelled-controls.js";
 import { plannedGraphPage } from "./planned-graph-page.js";
 
 describe("plannedGraphPage", () => {
+  it("gives every selector a programmatic name", () => {
+    expect(
+      unlabelledSelectIds(
+        plannedGraphPage({
+          plannedRepo: "octo/app",
+          plannedBranch: "feature",
+          plannedEnvironment: "dev",
+          plannedProvider: "azure"
+        })
+      )
+    ).toEqual([]);
+    expect(
+      unlabelledSelectIds(
+        plannedGraphPage({
+          plannedRepo: "octo/app",
+          plannedBranch: "feature",
+          plannedEnvironment: "dev",
+          plannedProvider: "azure",
+          branches: ["feature", "main"]
+        })
+      )
+    ).toEqual([]);
+  });
+
   it("renders selectors and exactly one generated page entry", () => {
     const html = plannedGraphPage({
       plannedRepo: "octo/app",

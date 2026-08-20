@@ -98,7 +98,8 @@ describe("environmentPage", () => {
     expect(readBrowserPageState(html, ENVIRONMENT_PAGE_STATE_ID)).toEqual({
       repo: "octo/app",
       branch: "feature/x",
-      activeSubtab: "credentials"
+      activeSubtab: "credentials",
+      mutationNonce: ""
     });
     expect(html).toContain(browserEntryMarker("environment-page"));
     expect(html.split(browserScript("environment-page"))).toHaveLength(2);
@@ -115,7 +116,8 @@ describe("environmentPage", () => {
     expect(readBrowserPageState(html, ENVIRONMENT_PAGE_STATE_ID)).toEqual({
       repo: HOSTILE_STATE,
       branch: HOSTILE_STATE,
-      activeSubtab: "environments"
+      activeSubtab: "environments",
+      mutationNonce: ""
     });
     expect(html).not.toContain("<script>alert(1)</script>");
     expect(html).not.toContain("<img src=x onerror=alert(1)>");

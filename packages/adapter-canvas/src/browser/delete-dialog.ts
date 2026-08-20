@@ -56,6 +56,11 @@ interface Registration {
   readonly listener: DomEventListener;
 }
 
+const FOCUSABLE_SELECTOR =
+  "a[href], button, input, select, textarea, [tabindex]";
+
+export const DELETE_DIALOG_FOCUSABLE_SELECTOR = FOCUSABLE_SELECTOR;
+
 export function deleteDialogConfirmToken(
   app: string,
   environment: string
@@ -181,6 +186,7 @@ export function createDeleteDeploymentDialog(
 
   const owned: Registration[] = [];
   const stepBindings: Registration[] = [];
+  let returnFocusTo: DomElement | null = null;
 
   const bind = (
     into: Registration[],
@@ -205,10 +211,31 @@ export function createDeleteDeploymentDialog(
     return nodes;
   };
 
+  // A destructive dialog must own focus while it is open and hand it back to
+  // the control that opened it, otherwise keyboard and screen-reader users are
+  // left on the page behind the modal with no way back to their place.
+  const focusableIn = (root: DomElement): readonly DomElement[] =>
+    dom.all(root, FOCUSABLE_SELECTOR).filter((element) => {
+      const disabled = Reflect.get(element, "disabled");
+      return disabled !== true;
+    });
+
+  const focusableInModal = (): readonly DomElement[] => focusableIn(modal);
+
+  // Prefer the current step's own controls so the dialog opens on its primary
+  // action rather than on the decorative close affordance.
+  const focusFirstControl = (): void => {
+    const [first] = [...focusableIn(body), ...focusableInModal()];
+    if (first) context.focus.focus(first);
+  };
+
   const close = (): void => {
     modal.style.display = "none";
     releaseStepBindings();
     body.replaceChildren();
+    const invoker = returnFocusTo;
+    returnFocusTo = null;
+    if (invoker) context.focus.focus(invoker);
   };
 
   const confirmNow = (target: DeleteTarget): void => {
@@ -221,6 +248,7 @@ export function createDeleteDeploymentDialog(
     bind(stepBindings, nodes[1], "click", () => {
       showEffects(target);
     });
+    focusFirstControl();
   };
 
   const showEffects = (target: DeleteTarget): void => {
@@ -228,6 +256,7 @@ export function createDeleteDeploymentDialog(
     bind(stepBindings, nodes[2], "click", () => {
       showConfirm(target);
     });
+    focusFirstControl();
   };
 
   const showConfirm = (target: DeleteTarget): void => {
@@ -250,10 +279,13 @@ export function createDeleteDeploymentDialog(
   };
 
   const open = (app: string, environment: string): void => {
+    returnFocusTo = context.focus.active();
     if (appEl) appEl.textContent = app;
     if (envEl) envEl.textContent = environment;
-    showIntent({ app, environment });
+    // The modal has to be visible before the first step renders: a control
+    // inside a hidden subtree cannot take focus.
     modal.style.display = "flex";
+    showIntent({ app, environment });
   };
 
   if (closeEl) bind(owned, closeEl, "click", close);
@@ -261,7 +293,28 @@ export function createDeleteDeploymentDialog(
     if (event.target === modal) close();
   });
   bind(owned, dom.document, "keydown", (event) => {
-    if (event.key === "Escape" && modal.style.display === "flex") close();
+    if (modal.style.display !== "flex") return;
+    if (event.key === "Escape") {
+      close();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    // Keep Tab inside the modal so the confirmation cannot be skipped by
+    // tabbing back onto the page underneath it.
+    const focusable = focusableInModal();
+    if (focusable.length === 0) return;
+    const active = context.focus.active();
+    const index = focusable.findIndex((element) => element === active);
+    const shift = Reflect.get(event, "shiftKey") === true;
+    if (index === -1) {
+      event.preventDefault();
+      context.focus.focus(focusable[shift ? focusable.length - 1 : 0]);
+      return;
+    }
+    const atEdge = shift ? index === 0 : index === focusable.length - 1;
+    if (!atEdge) return;
+    event.preventDefault();
+    context.focus.focus(focusable[shift ? focusable.length - 1 : 0]);
   });
 
   return {

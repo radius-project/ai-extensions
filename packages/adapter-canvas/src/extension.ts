@@ -31,16 +31,19 @@ import {
   runRadBicepPublishExtension,
   runRadBicepPublish
 } from "@radius-project/adapter-shared";
-import { github } from "./gh.js";
+import { github, fetchFileFromRepo, getBranchHeadSha } from "./gh.js";
 import {
   defaultBranchForState,
   detectWorkspaceContext,
   fetchWorkspaceBicep,
+  fetchWorkspaceFile,
   isWorkspaceSelection,
   parseRepoFromRemote,
   resolvePersistedSessionId,
   toSafeRepoRelPath,
-  workspaceFileExists
+  workspaceFileExists,
+  workspaceHeadCommit,
+  workspaceSourceChangedSince
 } from "./workspace.js";
 import { radArtifactsDirForSelection } from "./remote-rad-artifacts.js";
 import {
@@ -60,6 +63,7 @@ import {
   getLastWebviewActivityAt,
   setAppBicepHandoff,
   setDeployRepairHandoff,
+  setDeployFailureNotice,
   setSessionPromptHandler,
   setOpenSourceHandler
 } from "./server.js";
@@ -81,6 +85,7 @@ import {
   disabledOperationStore
 } from "./operation-store.js";
 import { radiusAppBicepSkill } from "./skill.js";
+import { createGeneratorVersionReader } from "./generator-version.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
 import { withGhcrDockerConfig } from "./ghcr.js";
 import {
@@ -154,6 +159,7 @@ const dependencies: RadiusExtensionDependencies = {
   hostCallbacks: {
     setAppBicepHandoff,
     setDeployRepairHandoff,
+    setDeployFailureNotice,
     setSessionPromptHandler,
     setOpenSourceHandler
   },
@@ -169,6 +175,15 @@ const dependencies: RadiusExtensionDependencies = {
     hasActiveEnvironmentTasks,
     markEnvironmentInstanceShuttingDown,
     onEnvironmentTasksSettled
+  },
+  appModel: {
+    generatorVersion: createGeneratorVersionReader(),
+    workspaceHeadCommit,
+    workspaceSourceChangedSince,
+    branchHeadCommit: (repo, branch) => getBranchHeadSha(repo, branch),
+    fetchWorkspaceFile,
+    fetchRepoFile: (repo, branch, repoPath) =>
+      fetchFileFromRepo(repo, repoPath, branch)
   },
   radiusAppBicepSkill,
   renderPrDiffMarkdown,

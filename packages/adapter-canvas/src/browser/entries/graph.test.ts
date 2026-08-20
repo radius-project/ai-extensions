@@ -3,7 +3,10 @@ import {
   createFakeBrowserScope,
   createFakeElement
 } from "../../../test/support/browser/fakes.js";
-import { createFakeGraphVendor } from "../../../test/support/browser/graph-fakes.js";
+import {
+  childComponent,
+  createGraphVendor
+} from "../../../test/support/browser/graph-vendor.js";
 import { PAGE_REGISTRY_GLOBAL } from "../globals.js";
 import { resolvePageRegistry } from "../registry.js";
 import { GRAPH_ENTRY_GLOBALS, installGraphEntry } from "./graph.js";
@@ -42,7 +45,7 @@ function baseFixture() {
 
 function fixture() {
   const base = baseFixture();
-  const vendor = createFakeGraphVendor();
+  const vendor = createGraphVendor();
   return { ...base, vendor };
 }
 
@@ -99,14 +102,9 @@ describe("graph browser entry", () => {
     // Only the one genuine resource-shaped entry became a node, threading
     // repoUrl into its source link.
     const root = vendor.reactDom.roots[0];
-    const boundary = root.rendered[0] as {
-      children: Array<{
-        props: {
-          initialNodes: ReadonlyArray<{ data: { sourceUrl: string } }>;
-        };
-      }>;
-    };
-    const app = boundary.children[0];
+    const app = childComponent<{
+      initialNodes: ReadonlyArray<{ data: { sourceUrl: string } }>;
+    }>(root.rendered[0]);
     expect(app.props.initialNodes).toHaveLength(1);
     expect(app.props.initialNodes[0].data.sourceUrl).toContain(
       "https://github.com/octo/app"

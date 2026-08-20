@@ -30,8 +30,7 @@ import {
   cloudCredential,
   listCredentialProfiles,
   saveCredentialProfile,
-  deleteCredentialProfile,
-  setPreferredGitHubLogin
+  deleteCredentialProfile
 } from "./shared.js";
 import type {
   CanvasGraphResource,
@@ -51,11 +50,19 @@ import {
   createPullRequestApi,
   ghApiJson,
   getGitHubIdentity,
-  switchGhAccount,
   getGhPackageCredentials,
-  resetGhIdentityCache
+  resetGhIdentityCache,
+  createSelectedGhExecutor,
+  getActiveKeyringLogin,
+  switchGhKeyringAccount,
+  selectedGhApiJson,
+  selectedGetDefaultBranch,
+  selectedGetBranchHeadSha,
+  selectedCreateBranchRef,
+  selectedCreatePullRequest,
+  selectedFetchFileFromRepo
 } from "./gh.js";
-import type { CliOptions } from "./gh.js";
+import type { CliOptions, SelectedGhExecutor } from "./gh.js";
 import {
   buildAppDeleteArgs,
   isAzResourceNotFound,
@@ -196,6 +203,12 @@ import { createGraphsPlanningWritesRoutes } from "./server/routes/graphs-plannin
 import { createGraphPlanningWorkflows } from "./server/routes/graph-workflows.js";
 import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
 import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
+import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
+import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
+import {
+  createGitHubAccountReadinessService,
+  createGitHubSelectionHandleStore
+} from "./server/services/github-account-readiness.js";
 import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
@@ -317,6 +330,16 @@ export interface DeployRepairHandoffInput {
   instanceId: string;
 }
 
+// Payload for the informational failure notice. Carries no attemptId: a notice
+// never opens a repair loop, so there is no attempt for the agent to address.
+export interface DeployFailureNoticeInput {
+  repo: string;
+  branch: string;
+  error: string;
+  deployRunUrl: string;
+  instanceId: string;
+}
+
 interface OpenSourceInput {
   path: string;
   line: number;
@@ -326,6 +349,7 @@ interface OpenSourceInput {
 
 type AppBicepHandoff = (input: AppBicepHandoffInput) => Promise<unknown>;
 type DeployRepairHandoff = (input: DeployRepairHandoffInput) => unknown;
+type DeployFailureNotice = (input: DeployFailureNoticeInput) => unknown;
 type OpenSourceHandler = (input: OpenSourceInput) => Promise<unknown>;
 type SessionPromptHandler = (
   prompt: string | SessionPromptMessage
@@ -468,6 +492,7 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     isUuid,
     buildStages,
     createOperation,
+    claimSelectionHandle: (input) => githubSelectionHandles.claim(input),
     startOperation: (op) => operations.start(op),
     persistOperations: () => operations.persist(),
     finish,
@@ -512,6 +537,7 @@ const repositoriesRoutes = createRepositoriesRoutes({
 const deploymentsRoutes = createDeploymentsRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   triggerDeployRepairHandoff,
+  triggerDeployFailureNotice,
   deployHandoffStatus,
   resolveRepoAppName,
   resolveEnvDeployment,
@@ -626,13 +652,24 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
       }
     },
     external: {
+      getSelectedGitHubExecutor: (operationId) =>
+        selectedGitHubExecutorsByOperation.get(operationId),
       getGitHubIdentity,
-      preflightRepoAdmin: (repo) => preflightRepoAdmin(repo),
-      preflightGhcrPackageWriteAccess: () => preflightGhcrPackageWriteAccess(),
-      runGitHubJson: async (apiPath) => {
-        const result = await ghApiJson(apiPath, {
-          headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
-        });
+      preflightRepoAdmin: (repo, executor) =>
+        preflightRepoAdmin(repo, executor),
+      preflightGhcrPackageWriteAccess: (executor) =>
+        preflightGhcrPackageWriteAccess(
+          getGhPackageCredentials,
+          getGitHubIdentity,
+          executor
+        ),
+      runGitHubJson: async (apiPath, executor) => {
+        const result =
+          executor ?
+            await selectedGhApiJson(executor, apiPath)
+          : await ghApiJson(apiPath, {
+              headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
+            });
         return {
           ok: result.ok,
           status: result.status,
@@ -673,6 +710,21 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
   })
 );
 
+const githubAccountCoordinator = createGitHubAccountCoordinator({
+  createExecutor: (login) => createSelectedGhExecutor(login),
+  getActiveKeyringLogin,
+  switchKeyringAccount: switchGhKeyringAccount,
+  resetIdentityCache: resetGhIdentityCache
+});
+const githubAccountReadiness = createGitHubAccountReadinessService(
+  githubAccountCoordinator
+);
+const githubSelectionHandles = createGitHubSelectionHandleStore();
+const selectedGitHubExecutorsByOperation = new Map<
+  string,
+  SelectedGhExecutor
+>();
+
 // Composition root for the credential-profile and GitHub-identity half of the
 // `identity-credentials` family. Ten narrow function seams: the three profile
 // store operations, the four gh identity operations, the advisory repo
@@ -685,8 +737,30 @@ const identityProfilesRoutes = createIdentityProfilesRoutes({
   deleteCredentialProfile,
   getGitHubIdentity,
   resetGhIdentityCache,
-  switchGhAccount,
-  setPreferredGitHubLogin,
+  prepareGitHubAccount: async ({ instanceId, repo, environment, login }) => {
+    const generation = githubSelectionHandles.begin(instanceId);
+    const readiness = await githubAccountReadiness.check({
+      instanceId,
+      repo,
+      environment,
+      login
+    });
+    if (!readiness.ready || !readiness.credentialSource) return { readiness };
+    const selection = githubSelectionHandles.mint({
+      instanceId,
+      repo,
+      environment,
+      login: readiness.login,
+      credentialSource: readiness.credentialSource,
+      generation
+    });
+    if (!selection) return { readiness };
+    return {
+      readiness,
+      selectionHandle: selection.handle,
+      expiresAt: selection.expiresAt
+    };
+  },
   preflightRepoAdmin,
   isValidRepoSlug,
   errorMessage
@@ -853,11 +927,13 @@ const environmentsRoutes = createEnvironmentsRoutes({
     kickoffWorkflowSync(repo, managedEnvironments, workingBranch),
   now: () => Date.now(),
   getOperation: (operationId) => operations.get(operationId),
+  getSelectedGitHubExecutor: (operationId) =>
+    selectedGitHubExecutorsByOperation.get(operationId),
   hasCompleteVerificationIdentity,
-  findWorkflowRun: (repo, workflowFile, sinceMs, knownId) =>
-    findWorkflowRun(repo, workflowFile, sinceMs, knownId),
-  getRunDetail: (repo, runId) => getRunDetail(repo, runId),
-  fetchRunLog: (repo, runId) => fetchRunLog(repo, runId),
+  findWorkflowRun: (repo, workflowFile, sinceMs, knownId, executor) =>
+    findWorkflowRun(repo, workflowFile, sinceMs, knownId, executor),
+  getRunDetail: (repo, runId, executor) => getRunDetail(repo, runId, executor),
+  fetchRunLog: (repo, runId, executor) => fetchRunLog(repo, runId, executor),
   extractErrorLines: (logText, max) => extractErrorLines(logText, max),
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,
@@ -885,6 +961,8 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
     instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
     false,
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  getSelectedGitHubExecutor: (operationId) =>
+    selectedGitHubExecutorsByOperation.get(operationId),
   cliExec: (command, args, options, callback) =>
     cliExec(command, args, options, callback),
   readProcessEnv: () => process.env,
@@ -913,8 +991,13 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   persistMutationCheckpoint,
   persistBestEffort,
   runAzCommand: (args) => runCliCommand("az", args),
-  preflightRepoAdmin: (repo) => preflightRepoAdmin(repo),
-  preflightGhcrPackageWriteAccess: () => preflightGhcrPackageWriteAccess(),
+  preflightRepoAdmin: (repo, executor) => preflightRepoAdmin(repo, executor),
+  preflightGhcrPackageWriteAccess: (executor) =>
+    preflightGhcrPackageWriteAccess(
+      getGhPackageCredentials,
+      getGitHubIdentity,
+      executor
+    ),
   bootstrapGHCRStatePackage: (input) =>
     bootstrapGHCRStatePackage({
       targetRepository: input.targetRepository,
@@ -922,9 +1005,18 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
       credentials: input.credentials as GhcrPackageCredentials
     }),
   stateRegistryForEnvironment,
-  getDefaultBranch: (repo) => getDefaultBranch(repo),
-  getBranchHeadSha: (repo, branch) => getBranchHeadSha(repo, branch),
-  createBranchRef: (repo, branch, sha) => createBranchRef(repo, branch, sha),
+  getDefaultBranch: (repo, executor) =>
+    executor ?
+      selectedGetDefaultBranch(executor, repo)
+    : getDefaultBranch(repo),
+  getBranchHeadSha: (repo, branch, executor) =>
+    executor ?
+      selectedGetBranchHeadSha(executor, repo, branch)
+    : getBranchHeadSha(repo, branch),
+  createBranchRef: (repo, branch, sha, executor) =>
+    executor ?
+      selectedCreateBranchRef(executor, repo, branch, sha)
+    : createBranchRef(repo, branch, sha),
   tempFile: {
     write: (contents) => {
       const path = join(
@@ -964,12 +1056,17 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   recordCommittedWorkflowFile: (operation, entry) => {
     recordCommittedWorkflowFile(operation, entry);
   },
-  deleteLegacyDeployWorkflow: (repo) => deleteLegacyDeployWorkflow(repo),
-  createPullRequestApi: (repo, head, base, title, body) =>
-    createPullRequestApi(repo, head, base, title, body),
+  deleteLegacyDeployWorkflow: (repo, executor) =>
+    deleteLegacyDeployWorkflow(repo, executor),
+  createPullRequestApi: (repo, head, base, title, body, executor) =>
+    executor ?
+      selectedCreatePullRequest(executor, repo, head, base, title, body)
+    : createPullRequestApi(repo, head, base, title, body),
   planCredentialVerification,
-  fetchFileFromRepo: (repo, path, branch) =>
-    fetchFileFromRepo(repo, path, branch),
+  fetchFileFromRepo: (repo, path, branch, executor) =>
+    executor ?
+      selectedFetchFileFromRepo(executor, repo, path, branch)
+    : fetchFileFromRepo(repo, path, branch),
   buildVerifyWorkflowDispatchArgs,
   verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
   stageVerify: STAGE_VERIFY,
@@ -1034,14 +1131,18 @@ const canvasServer = createCanvasServer(
         markActivity: (request) => {
           if (!coordinator.isServerOwned(request)) markActivity();
         },
+        validateBrowserMutation: (context) =>
+          coordinator.validateBrowserMutation(context.request),
         preRoute: preRouteCanvasRequest
       });
     },
-    onStarted: (instanceId) => {
+    onStarted: (instanceId, entry) => {
       shuttingDownInstances.delete(instanceId);
-      instanceRequestCoordinators
-        .get(instanceId)
-        ?.startRecoveredVerificationTasks();
+      const coordinator = instanceRequestCoordinators.get(instanceId);
+      if (coordinator) {
+        entry.state.browserMutationNonce = coordinator.browserMutationNonce;
+        coordinator.startRecoveredVerificationTasks();
+      }
     },
     onStopped: (instanceId) => {
       instanceRequestCoordinators.delete(instanceId);
@@ -1487,6 +1588,15 @@ export function setDeployRepairHandoff(fn: DeployRepairHandoff | null): void {
   deployRepairHandoff = fn;
 }
 
+// Registered by the SDK entry (extension.ts) to relay a canvas deploy failure
+// that must NOT be auto-repaired (its workflow run could not be confirmed) back
+// to the agent as an informational report. Separate from the repair handoff so
+// the two can never be confused: this one never opens a repair loop.
+let deployFailureNotice: DeployFailureNotice | null = null;
+export function setDeployFailureNotice(fn: DeployFailureNotice | null): void {
+  deployFailureNotice = fn;
+}
+
 // Handler registered by the SDK entry (extension.ts) that opens a repo file in
 // the Copilot app's built-in "editor" canvas (side pane). The server has no SDK
 // access, so the webview's "View source code" click (for local-workspace graphs)
@@ -1808,6 +1918,14 @@ export function beginDeployAttempt(
   // it on every redeploy would let an undeliverable handoff retry forever.
   state.deployHandoffAttempts =
     input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
+  // The informational failure notice has no repair loop to inherit a budget
+  // from, so every new deploy attempt resets it unconditionally. Without this
+  // reset a canvas panel — whose CanvasState is reused across deploys — would
+  // keep a "delivered" (or exhausted "failed") notice for its whole life, and
+  // every later run-unconfirmed failure would bail at the trigger's guard and
+  // never reach chat.
+  state.deployNoticeState = "idle";
+  state.deployNoticeAttempts = 0;
   // Same lifetime as the delivery budget, and counted the way
   // resolveDeployRepairLoop projected it, so the number the agent is told
   // matches the one the next call is checked against. A deploy that opens a
@@ -1933,6 +2051,85 @@ export function deployHandoffStatus(state: CanvasState): DeployHandoffSummary {
     maxAttempts: DEPLOY_HANDOFF_MAX_ATTEMPTS,
     pending: handoffState === "pending" || handoffState === "retryable"
   };
+}
+
+// Relay a failed canvas deploy whose workflow run could not be confirmed
+// (DEPLOY_RUN_UNCONFIRMED_KIND) to the agent as an informational report.
+//
+// Deliberately parallel to triggerDeployRepairHandoff but kept separate:
+//   * it fires ONLY for the run-unconfirmed kind — the one the repair path
+//     refuses, so a failure is handled by exactly one of the two triggers;
+//   * it never sets deployRepairing and never opens a repair loop, because a run
+//     may still be in flight and an automatic redeploy could race it;
+//   * it tracks delivery on its own deployNotice* fields so it can never be
+//     confused with, or suppress, a repair handoff.
+// Branch-not-pushed is intentionally NOT relayed here: the canvas already shows a
+// dedicated, actionable "push the branch" panel for it, so a chat report would be
+// redundant noise.
+export function triggerDeployFailureNotice(
+  entry: { state: CanvasState } | undefined,
+  instanceId = ""
+): boolean {
+  try {
+    if (typeof deployFailureNotice !== "function") return false;
+    const state = entry?.state;
+    if (!state || state.deployStatus !== "failed") return false;
+    if (state.deployErrorKind !== DEPLOY_RUN_UNCONFIRMED_KIND) return false;
+    if (
+      state.deployNoticeState === "pending" ||
+      state.deployNoticeState === "delivered" ||
+      state.deployNoticeState === "failed"
+    )
+      return false;
+    const repo =
+      state.deployingRepo || state.plannedRepo || state.contextRepo || "";
+    const branch = state.deployingBranch || "";
+    const error = state.deployError || "";
+    const deployRunUrl = state.deployRunUrl || "";
+    // Bind delivery to the attempt that opened this notice: a canvas panel is
+    // reused across deploys and these callbacks settle asynchronously, so a new
+    // deploy started in the meantime must revoke a stale settle rather than have
+    // it mark the wrong attempt reported. Compare both sides normalized so an
+    // attempt-less notice still settles against attempt-less state.
+    const attemptId = state.deployAttempt?.id || "";
+    state.deployNoticeState = "pending";
+    state.deployNoticeAttempts = (state.deployNoticeAttempts || 0) + 1;
+    const ownsAttempt = () => (state.deployAttempt?.id || "") === attemptId;
+    const delivered = () => {
+      if (!ownsAttempt()) return;
+      state.deployNoticeState = "delivered";
+    };
+    const failed = () => {
+      if (!ownsAttempt()) return;
+      const exhausted =
+        (state.deployNoticeAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS;
+      state.deployNoticeState = exhausted ? "failed" : "retryable";
+      if (exhausted) return;
+      const timer = setTimeout(() => {
+        if (!ownsAttempt()) return;
+        triggerDeployFailureNotice(entry, instanceId);
+      }, DEPLOY_HANDOFF_RETRY_DELAY_MS);
+      timer.unref?.();
+    };
+    try {
+      Promise.resolve(
+        deployFailureNotice({
+          repo,
+          branch,
+          error,
+          deployRunUrl,
+          instanceId
+        })
+      ).then(delivered, failed);
+    } catch {
+      failed();
+      return false;
+    }
+    return true;
+  } catch {
+    /* never let a notice failure break the response */
+  }
+  return false;
 }
 
 // Bare filename of the legacy monolithic deploy workflow that the composite-
@@ -2121,6 +2318,8 @@ const deployRequestService = createDeployRequestService({
   beginDeployAttempt,
   triggerDeployRepairHandoff: (entry, instanceId) =>
     triggerDeployRepairHandoff(entry, instanceId),
+  triggerDeployFailureNotice: (entry, instanceId) =>
+    triggerDeployFailureNotice(entry, instanceId),
   monitor: deployMonitorService,
   unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
   repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
@@ -2791,13 +2990,18 @@ export async function finalizeSetupFailure(
 // non-JSON body, or an unparseable status — is treated as ambiguous and returns
 // '' so the preflight never silently misdirects; the real op then surfaces the
 // true error. GitHub still enforces permissions server-side regardless.
-async function preflightRepoAdmin(repo: string): Promise<string> {
+async function preflightRepoAdmin(
+  repo: string,
+  executor?: SelectedGhExecutor
+): Promise<string> {
   let login = "";
-  const who = await ghApiJson("user");
+  const runJson = (path: string) =>
+    executor ? selectedGhApiJson(executor, path) : ghApiJson(path);
+  const who = await runJson("user");
   if (who.ok) login = optionalString(record(who.json).login);
   let readFailed = false,
     permissions = null;
-  const res = await ghApiJson(`repos/${repo}`);
+  const res = await runJson(`repos/${repo}`);
   if (res.ok) {
     const value = record(res.json).permissions;
     permissions = value && typeof value === "object" ? record(value) : null;
@@ -2838,11 +3042,15 @@ type GhcrPackagePreflightResult =
 // packages scope is read keyring-first to match getGhPackageCredentials.
 export async function preflightGhcrPackageWriteAccess(
   loadCredentials: GhcrPackageCredentialLoader = getGhPackageCredentials,
-  loadIdentity: GhcrPackageIdentityLoader = getGitHubIdentity
+  loadIdentity: GhcrPackageIdentityLoader = getGitHubIdentity,
+  selectedExecutor?: SelectedGhExecutor
 ): Promise<GhcrPackagePreflightResult> {
   let packageCredentials: GhcrPackageCredentials;
   try {
-    packageCredentials = await loadCredentials();
+    packageCredentials =
+      selectedExecutor ?
+        selectedExecutor.packageCredentials()
+      : await loadCredentials();
   } catch (e) {
     return {
       ok: false,
@@ -2856,7 +3064,26 @@ export async function preflightGhcrPackageWriteAccess(
 
   let ghPkgIdentity: GhcrPackageIdentity;
   try {
-    ghPkgIdentity = await loadIdentity();
+    ghPkgIdentity =
+      selectedExecutor ?
+        {
+          actingLogin: selectedExecutor.login,
+          displayLogin: selectedExecutor.login,
+          mismatch: false,
+          actingHasWorkflow: selectedExecutor.scopes.includes("workflow"),
+          actingHasPackages: selectedExecutor.scopes.includes("write:packages"),
+          reason: "selected-account-executor",
+          accounts: [
+            {
+              login: selectedExecutor.login,
+              hasWorkflow: selectedExecutor.scopes.includes("workflow"),
+              hasPackages: selectedExecutor.scopes.includes("write:packages"),
+              switchable: selectedExecutor.credentialSource === "keyring",
+              acting: true
+            }
+          ]
+        }
+      : await loadIdentity();
   } catch (e) {
     return {
       ok: false,
@@ -2889,7 +3116,7 @@ export async function preflightGhcrPackageWriteAccess(
       ok: false,
       status: 403,
       code: "ghcr-scope-required",
-      error: `The GitHub account @${ghPkgLogin} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR. Run "gh auth switch -h github.com -u ${ghPkgLogin} && gh auth refresh -h github.com -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`
+      error: `The account @${ghPkgLogin} needs the write:packages permission to proceed. In the terminal, run: gh auth switch --hostname github.com --user ${ghPkgLogin}. Then run: gh auth refresh --hostname github.com --scopes read:packages,write:packages. This will make @${ghPkgLogin} the active GitHub CLI account if it is not already active.`
     };
   }
 
@@ -3107,8 +3334,33 @@ async function resolveEnvDeployment(
  * target repo. No-op when the file is absent. Self-contained (uses cliExec) so
  * it can be called from any request handler regardless of its local gh runner.
  */
-function deleteLegacyDeployWorkflow(targetRepo: string): Promise<boolean> {
+async function deleteLegacyDeployWorkflow(
+  targetRepo: string,
+  executor?: SelectedGhExecutor
+): Promise<boolean> {
   const path = ".github/workflows/" + LEGACY_DEPLOY_WORKFLOW_FILE;
+  if (executor) {
+    const lookup = await executor.run(
+      ["api", "/repos/" + targetRepo + "/contents/" + path, "--jq", ".sha"],
+      { timeout: 30000 }
+    );
+    const sha = lookup.code === 0 ? lookup.stdout.trim() : "";
+    if (!sha) return false;
+    await executor.run(
+      [
+        "api",
+        "--method",
+        "DELETE",
+        "/repos/" + targetRepo + "/contents/" + path,
+        "-f",
+        "message=Remove legacy Radius deploy workflow (replaced by run-rad-commands.yml)",
+        "-f",
+        "sha=" + sha
+      ],
+      { timeout: 30000 }
+    );
+    return true;
+  }
   return new Promise((resolve) => {
     cliExec(
       "gh",
@@ -3330,6 +3582,7 @@ function createInstanceRequestCoordinator(
 ) {
   const serverOwnedTasks = new Map<string, Promise<void>>();
   const serverOwnedToken = randomUUID();
+  const browserMutationNonce = randomUUID();
 
   function scheduleServerOwnedTask(
     operationId: string,
@@ -3470,6 +3723,20 @@ function createInstanceRequestCoordinator(
     );
   }
 
+  async function monitorVerificationAsSelectedAccount(
+    operationId: string,
+    login: string
+  ): Promise<void> {
+    const executor =
+      await githubAccountCoordinator.createReadOnlyExecutor(login);
+    selectedGitHubExecutorsByOperation.set(operationId, executor);
+    try {
+      await monitorVerification(operationId);
+    } finally {
+      selectedGitHubExecutorsByOperation.delete(operationId);
+    }
+  }
+
   async function runEnvironmentOperation(operationId: string): Promise<void> {
     if (environmentOperationTestRunner) {
       await environmentOperationTestRunner(operationId);
@@ -3478,28 +3745,85 @@ function createInstanceRequestCoordinator(
     const op = operations.get(operationId);
     if (!op) return;
     const request = op.request || op.resumeRequest || {};
-    let setupResult: any = null;
-    if (op.provider === "azure" && request.needsAzureCredentials) {
-      setupResult = await postInternal("/api/azure-auto-setup", {
-        ...request.azure,
-        repo: op.repo,
-        environment: op.environment,
-        operationId
-      });
-      if (setupResult?.inputRequired || op.state === "input_required") return;
+    const selectedLogin =
+      typeof op.context?.githubLogin === "string" ? op.context.githubLogin
+      : typeof request.github?.login === "string" ? request.github.login
+      : "";
+    if (!selectedLogin) {
+      throw new Error(
+        "The environment operation does not have a pinned GitHub account."
+      );
     }
-    const current = operations.get(operationId);
-    if (!current || current.state === "input_required" || current.endedAt)
-      return;
-    await postInternal("/api/create-environment", {
-      ...request.environment,
-      repo: op.repo,
-      environment: op.environment,
-      provider: op.provider,
-      operationId,
-      clientId: setupResult?.clientId || request.environment?.clientId || ""
-    });
-    await monitorVerification(operationId);
+    let executorRegistered = false;
+    try {
+      const setup = await githubAccountCoordinator.withSelectedAccount(
+        selectedLogin,
+        { instanceId, operationId },
+        async (executor) => {
+          selectedGitHubExecutorsByOperation.set(operationId, executor);
+          executorRegistered = true;
+          let setupResult: any = null;
+          if (op.provider === "azure" && request.needsAzureCredentials) {
+            setupResult = await postInternal("/api/azure-auto-setup", {
+              ...request.azure,
+              repo: op.repo,
+              environment: op.environment,
+              operationId
+            });
+            if (setupResult?.inputRequired || op.state === "input_required") {
+              return { shouldMonitor: false };
+            }
+          }
+          const current = operations.get(operationId);
+          if (
+            !current ||
+            current.state === "input_required" ||
+            current.endedAt
+          ) {
+            return { shouldMonitor: false };
+          }
+          await postInternal("/api/create-environment", {
+            ...request.environment,
+            repo: op.repo,
+            environment: op.environment,
+            provider: op.provider,
+            operationId,
+            clientId:
+              setupResult?.clientId || request.environment?.clientId || ""
+          });
+          return { shouldMonitor: true };
+        },
+        30000
+      );
+      setContext(op, {
+        githubLogin: setup.selectedLogin,
+        githubCredentialSource: setup.credentialSource,
+        githubAccountSwitched: setup.switched,
+        githubAccountRestoration: setup.restoration
+      });
+      if (
+        setup.restoration.state === "failed" ||
+        setup.restoration.state === "changed_externally"
+      ) {
+        addLegacyStep(
+          op,
+          `⚠️ GitHub CLI account restoration needs attention. ${
+            setup.restoration.guidance || ""
+          }`.trim()
+        );
+      }
+      await persistBestEffort({
+        operation: op,
+        persist: () => operations.persist(),
+        report: (diagnostic) => operations.report?.(diagnostic)
+      });
+      if (!setup.value.shouldMonitor) return;
+      await monitorVerification(operationId);
+    } finally {
+      if (executorRegistered) {
+        selectedGitHubExecutorsByOperation.delete(operationId);
+      }
+    }
   }
 
   function startRecoveredVerificationTasks(): void {
@@ -3514,7 +3838,18 @@ function createInstanceRequestCoordinator(
       activeVerificationMonitors.add(op.operationId);
       scheduleServerOwnedTask(op.operationId, async () => {
         try {
-          await monitorVerification(op.operationId);
+          const selectedLogin =
+            typeof op.context?.githubLogin === "string" ?
+              op.context.githubLogin
+            : "";
+          if (selectedLogin) {
+            await monitorVerificationAsSelectedAccount(
+              op.operationId,
+              selectedLogin
+            );
+          } else {
+            await monitorVerification(op.operationId);
+          }
         } finally {
           activeVerificationMonitors.delete(op.operationId);
         }
@@ -3573,6 +3908,13 @@ function createInstanceRequestCoordinator(
   // must not count as user activity or the idle-respawn timer never fires.
   const isServerOwned = (req: IncomingMessage): boolean =>
     req.headers["x-radius-server-owned"] === serverOwnedToken;
+  const validateBrowserMutation = (req: IncomingMessage): boolean => {
+    return validateBrowserMutationRequest({
+      request: req,
+      baseUrl: resolveBaseUrl(),
+      nonce: browserMutationNonce
+    });
+  };
   // Exposed so the migrated `POST /api/operations` route, which is composed once
   // at module init, can reach this instance's server-owned task runner. The
   // route registers and persists the operation itself and then hands the record
@@ -3583,9 +3925,11 @@ function createInstanceRequestCoordinator(
     );
   };
   return {
+    browserMutationNonce,
     handleUnmatchedRequest,
     startRecoveredVerificationTasks,
     isServerOwned,
+    validateBrowserMutation,
     scheduleEnvironmentOperation
   };
 }
@@ -3631,4 +3975,11 @@ export async function getOrCreateServer(
   page?: string
 ): Promise<CanvasServerEntry> {
   return await canvasServer.getOrCreate(instanceId, page);
+}
+
+export async function stopServer(
+  instanceId: string,
+  force = false
+): Promise<void> {
+  await canvasServer.stop(instanceId, force);
 }

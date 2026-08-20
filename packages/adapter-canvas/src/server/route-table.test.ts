@@ -27,6 +27,7 @@ import { createGraphPlanningWorkflows } from "./routes/graph-workflows.js";
 import { createEnvironmentsRoutes } from "./routes/environments.js";
 import { createCreateEnvironmentRoutes } from "./routes/create-environment.js";
 import { createAzureAutoSetupTestDependencies } from "../../test/support/server/azure-auto-setup.js";
+import { successfulSelectedGhExecutor } from "../../test/support/server/selected-gh.js";
 
 const productionHandlers = {
   ...createLivenessSourceRoutes({
@@ -48,6 +49,13 @@ const productionHandlers = {
       isUuid: () => false,
       buildStages: () => [],
       createOperation: () => ({ operationId: "", currentStage: null }),
+      claimSelectionHandle: () => ({
+        ok: true,
+        login: "octocat",
+        credentialSource: "keyring",
+        commit() {},
+        release() {}
+      }),
       startOperation: () => ({
         ok: true,
         operation: { operationId: "", currentStage: null }
@@ -79,6 +87,7 @@ const productionHandlers = {
   ...createDeploymentsRoutes({
     readInstanceEntry: () => undefined,
     triggerDeployRepairHandoff: () => false,
+    triggerDeployFailureNotice: () => false,
     deployHandoffStatus: () => ({
       state: "idle",
       attempts: 0,
@@ -130,13 +139,27 @@ const productionHandlers = {
         mismatch: false,
         actingHasWorkflow: false,
         actingHasPackages: false,
-        preferredLogin: null,
         reason: "",
         accounts: []
       }),
     resetGhIdentityCache: () => {},
-    switchGhAccount: () => Promise.resolve({ ok: true }),
-    setPreferredGitHubLogin: () => {},
+    prepareGitHubAccount: async () => ({
+      readiness: {
+        ready: false,
+        login: "",
+        credentialSource: null,
+        summary: "Additional GitHub access is required",
+        checks: {
+          repository: { state: "error", detail: "" },
+          workflow: { state: "error", detail: "" },
+          environment: { state: "error", detail: "" },
+          packages: { state: "error", detail: "" },
+          identity: { state: "error", detail: "" }
+        },
+        repair: null,
+        restoration: null
+      }
+    }),
     preflightRepoAdmin: () => Promise.resolve(""),
     isValidRepoSlug: () => false,
     errorMessage: (error) => String(error)
@@ -242,6 +265,7 @@ const productionHandlers = {
     kickoffWorkflowSync: () => {},
     now: () => 0,
     getOperation: () => null,
+    getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
     hasCompleteVerificationIdentity: () => false,
     findWorkflowRun: () => Promise.resolve(null),
     getRunDetail: () => Promise.resolve(null),
@@ -266,6 +290,7 @@ const productionHandlers = {
   ...createCreateEnvironmentRoutes({
     isServerOwnedRequest: () => false,
     readInstanceEntry: () => undefined,
+    getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
     cliExec: () => ({ stdin: null }),
     readProcessEnv: () => ({}),
     isValidRepoSlug: () => false,
@@ -345,6 +370,24 @@ describe("server route ownership boundary", () => {
     expect(
       SERVER_ROUTE_DECLARATIONS.every((route) => route.owner.length > 0)
     ).toBe(true);
+    expect(
+      SERVER_ROUTE_DECLARATIONS.every((route) =>
+        route.method === "POST" ?
+          route.mutationPolicy === "nonce-required" ||
+          route.mutationPolicy === "legacy-exempt"
+        : route.mutationPolicy === "none"
+      )
+    ).toBe(true);
+    expect(
+      SERVER_ROUTE_DECLARATIONS.filter(
+        (route) => route.mutationPolicy === "nonce-required"
+      ).map(routeKey)
+    ).toEqual([
+      "POST /api/github-account",
+      "POST /api/operations",
+      "POST /api/operations/:operationId/resume/:code",
+      "POST /api/operations/:operationId/abandon"
+    ]);
     expect(() => assertRouteTable(table)).not.toThrow();
   });
 
@@ -490,6 +533,20 @@ describe("server route ownership boundary", () => {
     ).toThrow("Server route has no handler: ANY /api/ping");
   });
 
+  it("requires every POST route to declare protection or a legacy exemption", () => {
+    const post = table.find((route) => route.method === "POST") as ServerRoute;
+    const get = table.find((route) => route.method === "GET") as ServerRoute;
+
+    expect(() =>
+      assertRouteTable([{ ...post, mutationPolicy: "none" }])
+    ).toThrow(`POST server route has no mutation policy: ${routeKey(post)}`);
+    expect(() =>
+      assertRouteTable([{ ...get, mutationPolicy: "nonce-required" }])
+    ).toThrow(
+      `Non-POST server route declares a mutation policy: ${routeKey(get)}`
+    );
+  });
+
   it("fails when a prefix route makes a later route unreachable", () => {
     const prefix = table.find((route) => route.path === "/api/operations/");
     expect(prefix?.method).toBe("GET");
@@ -534,7 +591,8 @@ describe("server route ownership boundary", () => {
           ...prefix,
           path: "/api/operations/abandon",
           match: "exact",
-          method: "POST"
+          method: "POST",
+          mutationPolicy: "legacy-exempt"
         } as ServerRoute
       ])
     ).not.toThrow();
