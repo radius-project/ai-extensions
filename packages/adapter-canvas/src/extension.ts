@@ -86,6 +86,11 @@ import {
   createFileOperationStore,
   disabledOperationStore
 } from "./operation-store.js";
+import { configureCredentialProvenanceStore } from "./credential-provenance.js";
+import {
+  createFileCredentialProvenanceStore,
+  disabledCredentialProvenanceStore
+} from "./credential-provenance-store.js";
 import { radiusAppBicepSkill } from "./skill.js";
 import { createGeneratorVersionReader } from "./generator-version.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
@@ -217,19 +222,27 @@ try {
         "Durable operation recovery is disabled because no verified Copilot session directory was found."
     });
     await configureOperationStore(disabledOperationStore());
+    await configureCredentialProvenanceStore(
+      disabledCredentialProvenanceStore()
+    );
   } else {
-    const operationPath = join(
+    const operationsDir = join(
       process.env.USERPROFILE || os.homedir(),
       ".copilot",
       "session-state",
       operationSessionId,
       "radius",
-      "operations",
-      "operations.json"
+      "operations"
     );
     await configureOperationStore(
       createFileOperationStore({
-        filePath: operationPath,
+        filePath: join(operationsDir, "operations.json"),
+        report: reportOperationStore
+      })
+    );
+    await configureCredentialProvenanceStore(
+      createFileCredentialProvenanceStore({
+        filePath: join(operationsDir, "credential-provenance.json"),
         report: reportOperationStore
       })
     );
@@ -240,6 +253,7 @@ try {
     message: `Durable operation recovery is disabled: ${String(error)}`
   });
   await configureOperationStore(disabledOperationStore());
+  await configureCredentialProvenanceStore(disabledCredentialProvenanceStore());
 }
 
 onOperationTerminal((op: any) => {

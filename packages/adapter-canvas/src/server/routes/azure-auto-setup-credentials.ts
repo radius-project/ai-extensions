@@ -2,6 +2,10 @@ import {
   findLegacyMutableCredentialName,
   selectMissingFederatedCredentials
 } from "../../azure-oidc.js";
+import {
+  AZURE_AD_TOKEN_EXCHANGE_AUDIENCE,
+  GITHUB_ACTIONS_OIDC_ISSUER
+} from "../../credential-provenance.js";
 import type {
   AzureAutoSetupCommandResult,
   AzureAutoSetupCredentialInput
@@ -177,9 +181,9 @@ async function createFederatedCredentials({
     steps.push(`Creating federated credential "${credential.name}"...`);
     const contents = JSON.stringify({
       name: credential.name,
-      issuer: "https://token.actions.githubusercontent.com",
+      issuer: GITHUB_ACTIONS_OIDC_ISSUER,
       subject: credential.subject,
-      audiences: ["api://AzureADTokenExchange"]
+      audiences: [AZURE_AD_TOKEN_EXCHANGE_AUDIENCE]
     });
     const path = dependencies.tempFile.createPath();
     let result: AzureAutoSetupCommandResult;
@@ -243,7 +247,11 @@ async function createFederatedCredentials({
         workflow.operation,
         {
           name: credential.name,
-          subject: credential.subject
+          subject: credential.subject,
+          clientId,
+          issuer: GITHUB_ACTIONS_OIDC_ISSUER,
+          audiences: [AZURE_AD_TOKEN_EXCHANGE_AUDIENCE],
+          repoId: typeof oidc.repoId === "number" ? oidc.repoId : undefined
         }
       );
       if (!(await checkpoint())) return false;

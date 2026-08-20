@@ -93,7 +93,17 @@ export interface AzureAutoSetupOperationArtifactPort {
   ): void;
   recordCreatedFederatedCredential(
     operation: AzureAutoSetupOperation,
-    entry: { name: string; subject: string }
+    entry: {
+      name: string;
+      subject: string;
+      // Identity captured for durable provenance (issue #331) so the delete
+      // flow can prove Radius created this credential before removing it. The
+      // pure operation ledger ignores these; the composition root persists them.
+      clientId?: string;
+      issuer?: string;
+      audiences?: string[];
+      repoId?: number;
+    }
   ): void;
   recordCreatedRoleAssignment(
     operation: AzureAutoSetupOperation,

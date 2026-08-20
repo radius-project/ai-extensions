@@ -52,6 +52,7 @@ function harness(options: {
 }) {
   const failures: Record<string, unknown>[] = [];
   const calls: string[] = [];
+  const ficEntries: Array<Record<string, unknown>> = [];
   const operation: AzureAutoSetupOperation = {
     operationId: "op-credentials",
     repo: "octo/app",
@@ -70,8 +71,10 @@ function harness(options: {
     operations: {
       recordServicePrincipal: (_operation, patch) =>
         calls.push(`sp:${String(patch.state || patch.objectId)}`),
-      recordCreatedFederatedCredential: (_operation, credential) =>
-        calls.push(`fic:${credential.name}`),
+      recordCreatedFederatedCredential: (_operation, credential) => {
+        calls.push(`fic:${credential.name}`);
+        ficEntries.push(credential as Record<string, unknown>);
+      },
       recordCreatedRoleAssignment: (_operation, assignment) =>
         calls.push(`role:${assignment.role}`)
     },
@@ -126,7 +129,7 @@ function harness(options: {
     clusterResourceGroup: "rg-aks",
     clusterName: "aks-radius"
   };
-  return { calls, failures, input, workflow };
+  return { calls, failures, ficEntries, input, workflow };
 }
 
 describe("Azure auto-setup credentials and roles service (SU-08)", () => {
@@ -370,6 +373,15 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
 
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
     expect(test.calls).toContain("fic:dev");
+    // The recorded entry carries the identity fields durable provenance needs
+    // (issue #331): the app registration id, issuer, audience and repo id.
+    expect(test.ficEntries[0]).toMatchObject({
+      name: "dev",
+      clientId: APP_ID,
+      issuer: "https://token.actions.githubusercontent.com",
+      audiences: ["api://AzureADTokenExchange"],
+      repoId: 5
+    });
   });
 
   it("warns when the immutable identity still has a legacy mutable credential", async () => {

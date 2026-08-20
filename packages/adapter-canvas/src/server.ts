@@ -221,6 +221,11 @@ import { createDeployDispatchService } from "./server/services/deploy-dispatch.j
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { runEnvironmentDeletion } from "./server/services/environment-deletion.js";
+import {
+  recordCredentialProvenance,
+  listCredentialProvenance,
+  clearCredentialProvenance
+} from "./credential-provenance.js";
 import { classifyCompletedDeleteEnvRun } from "./server/services/delete-env-run-classifier.js";
 import type {
   RadiusEnvDeletionOutcome,
@@ -657,6 +662,24 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
       },
       recordCreatedFederatedCredential: (operation, entry) => {
         recordCreatedFederatedCredential(operation, entry);
+        // Durable provenance (issue #331): record proof that Radius created
+        // this credential, keyed by repo + environment so it survives operation
+        // pruning and restart. Only "created" credentials are ever eligible for
+        // automatic reclamation when the environment is deleted.
+        if (entry.clientId) {
+          recordCredentialProvenance({
+            repo: String(operation.repo || ""),
+            environment: String(operation.environment || ""),
+            clientId: entry.clientId,
+            name: entry.name,
+            subject: entry.subject,
+            origin: "created",
+            issuer: entry.issuer,
+            audiences: entry.audiences,
+            repoId: entry.repoId,
+            operationId: String(operation.operationId || "") || undefined
+          });
+        }
       },
       recordCreatedRoleAssignment: (operation, entry) => {
         recordCreatedRoleAssignment(operation, entry);
@@ -3984,6 +4007,10 @@ function createInstanceRequestCoordinator(
         runAz: (args) => runCliCommand("az", args),
         deleteGitHubEnvironment: (input) =>
           deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
+        readCredentialProvenance: (repo, environment) =>
+          listCredentialProvenance(repo, environment),
+        clearCredentialProvenance: (repo, environment) =>
+          clearCredentialProvenance(repo, environment),
         persist: () => operations.persist(),
         errorMessage,
         log: (message) => console.error(message)

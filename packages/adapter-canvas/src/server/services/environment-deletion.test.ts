@@ -53,6 +53,25 @@ function fail(stderr: string): {
   return { code: 1, stdout: "", stderr };
 }
 
+// Provenance proving Radius created the standard per-environment credential, so
+// the reclamation plan authorizes deleting it.
+function createdProvenance(name = "github-octo-app-dev-mutable", subject = "") {
+  return [
+    {
+      schemaVersion: 1 as const,
+      repo: "octo/app",
+      environment: "dev",
+      clientId: "app-1",
+      name,
+      subject,
+      issuer: "https://token.actions.githubusercontent.com",
+      audiences: ["api://AzureADTokenExchange"],
+      origin: "created" as const,
+      recordedAt: new Date(0).toISOString()
+    }
+  ];
+}
+
 function makePorts(
   over: Partial<EnvironmentDeletionPorts> = {}
 ): EnvironmentDeletionPorts {
@@ -64,6 +83,8 @@ function makePorts(
     deleteGitHubEnvironment: vi.fn(async () => ({
       outcome: "deleted" as const
     })),
+    readCredentialProvenance: vi.fn(() => []),
+    clearCredentialProvenance: vi.fn(async () => {}),
     persist: vi.fn(async () => {}),
     errorMessage: (e) => (e instanceof Error ? e.message : String(e)),
     log: vi.fn(),
@@ -94,7 +115,10 @@ describe("runEnvironmentDeletion — azure happy path", () => {
       .mockResolvedValueOnce(ok("")) // stage 2 delete cred
       .mockResolvedValueOnce(ok("[]")) // stage 4 review list (empty → unused)
       .mockResolvedValueOnce(ok(JSON.stringify(["radius-managed"]))); // stage 4 tag show (radius-managed)
-    const ports = makePorts({ runAz });
+    const ports = makePorts({
+      runAz,
+      readCredentialProvenance: () => createdProvenance()
+    });
 
     await runEnvironmentDeletion(op, ports);
 
@@ -362,7 +386,10 @@ describe("runEnvironmentDeletion — credential stage edge cases", () => {
       .mockResolvedValueOnce(
         ok(JSON.stringify([{ name: "other-env", subject: "" }]))
       ); // review non-empty → left in place
-    const ports = makePorts({ runAz });
+    const ports = makePorts({
+      runAz,
+      readCredentialProvenance: () => createdProvenance()
+    });
     await runEnvironmentDeletion(op, ports);
     expect(stage(op, STAGE_DELETE_CREDENTIAL)).toBe("succeeded");
   });
@@ -380,9 +407,103 @@ describe("runEnvironmentDeletion — credential stage edge cases", () => {
       .mockResolvedValueOnce(
         ok(JSON.stringify([{ name: "other-env", subject: "" }]))
       ); // review non-empty → left in place
+    const ports = makePorts({
+      runAz,
+      readCredentialProvenance: () => createdProvenance()
+    });
+    await runEnvironmentDeletion(op, ports);
+    expect(stage(op, STAGE_DELETE_CREDENTIAL)).toBe("warning");
+  });
+});
+
+describe("runEnvironmentDeletion — credential provenance gate (#331)", () => {
+  it("retains a matched credential with no provenance and never calls delete", async () => {
+    const op = makeOp();
+    const runAz = vi
+      .fn()
+      .mockResolvedValueOnce(
+        ok(
+          JSON.stringify([{ name: "github-octo-app-dev-mutable", subject: "" }])
+        )
+      ) // stage 2 list — one env-scoped candidate
+      .mockResolvedValueOnce(
+        ok(
+          JSON.stringify([{ name: "github-octo-app-dev-mutable", subject: "" }])
+        )
+      ); // stage 4 review list non-empty → app left in place
+    // Default makePorts returns no provenance.
     const ports = makePorts({ runAz });
     await runEnvironmentDeletion(op, ports);
     expect(stage(op, STAGE_DELETE_CREDENTIAL)).toBe("warning");
+    const retained = op.steps.find(
+      (s: { warning?: { code?: string; message?: string } }) =>
+        s.warning?.code === "federated-credential-retained-unverified"
+    );
+    expect(retained?.warning?.message).toMatch(/no Radius provenance/);
+    // No `az ad app federated-credential delete` was ever attempted.
+    const deleteCall = runAz.mock.calls.find((c) => c[0].includes("delete"));
+    expect(deleteCall).toBeUndefined();
+    expect(ports.clearCredentialProvenance).toHaveBeenCalledWith(
+      "octo/app",
+      "dev"
+    );
+  });
+
+  it("retains a reused credential", async () => {
+    const op = makeOp();
+    const runAz = vi
+      .fn()
+      .mockResolvedValueOnce(
+        ok(
+          JSON.stringify([{ name: "github-octo-app-dev-mutable", subject: "" }])
+        )
+      )
+      .mockResolvedValueOnce(
+        ok(JSON.stringify([{ name: "keep", subject: "" }]))
+      );
+    const ports = makePorts({
+      runAz,
+      readCredentialProvenance: () => [
+        { ...createdProvenance()[0], origin: "reused" as const }
+      ]
+    });
+    await runEnvironmentDeletion(op, ports);
+    expect(stage(op, STAGE_DELETE_CREDENTIAL)).toBe("warning");
+    expect(
+      op.steps.some(
+        (s: { warning?: { code?: string } }) =>
+          s.warning?.code === "federated-credential-retained-reused"
+      )
+    ).toBe(true);
+  });
+
+  it("retains a credential whose subject drifted from the recorded evidence", async () => {
+    const op = makeOp();
+    const runAz = vi
+      .fn()
+      .mockResolvedValueOnce(
+        ok(
+          JSON.stringify([
+            { name: "github-octo-app-dev-mutable", subject: "drifted" }
+          ])
+        )
+      )
+      .mockResolvedValueOnce(
+        ok(JSON.stringify([{ name: "keep", subject: "" }]))
+      );
+    const ports = makePorts({
+      runAz,
+      // Recorded subject was "", live subject is now "drifted".
+      readCredentialProvenance: () => createdProvenance()
+    });
+    await runEnvironmentDeletion(op, ports);
+    expect(stage(op, STAGE_DELETE_CREDENTIAL)).toBe("warning");
+    expect(
+      op.steps.some(
+        (s: { warning?: { code?: string } }) =>
+          s.warning?.code === "federated-credential-retained-changed"
+      )
+    ).toBe(true);
   });
 });
 
@@ -460,6 +581,23 @@ describe("runEnvironmentDeletion — fallbacks and optional ports", () => {
       deleteGitHubEnvironment: vi.fn(async () => ({
         outcome: "deleted" as const
       })),
+      // Provenance proves Radius created this credential, so it is eligible for
+      // deletion (and the delete-failure warning path is exercised).
+      readCredentialProvenance: () => [
+        {
+          schemaVersion: 1 as const,
+          repo: "octo/app",
+          environment: "dev",
+          clientId: "app-1",
+          name: "github-octo-app-dev-mutable",
+          subject: "",
+          issuer: "https://token.actions.githubusercontent.com",
+          audiences: ["api://AzureADTokenExchange"],
+          origin: "created" as const,
+          recordedAt: new Date(0).toISOString()
+        }
+      ],
+      clearCredentialProvenance: async () => {},
       persist: vi.fn(async () => {}),
       errorMessage: (e) => String(e)
     };

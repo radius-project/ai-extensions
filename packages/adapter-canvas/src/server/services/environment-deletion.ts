@@ -59,6 +59,11 @@ import {
   selectEnvironmentFederatedCredentials,
   isAzResourceNotFound
 } from "../../azure-oidc.js";
+import {
+  planCredentialReclamation,
+  type CredentialProvenanceRecord,
+  type CredentialRetentionReason
+} from "../../credential-provenance.js";
 
 // The in-panel prompt raised when an unused app registration was NOT created by
 // Radius. The resume route and the browser progress controller key off the same
@@ -108,6 +113,16 @@ export interface EnvironmentDeletionPorts {
     repo: string;
     environment: string;
   }): Promise<GitHubEnvDeletionOutcome>;
+  // The durable provenance records for a repo + environment (issue #331). Used
+  // to prove Radius created a live federated credential before deleting it. An
+  // empty list means "no proof", which the plan treats as retain (fail-safe).
+  readCredentialProvenance(
+    repo: string,
+    environment: string
+  ): CredentialProvenanceRecord[];
+  // Forget the provenance for a repo + environment once its credentials have
+  // been reclaimed, so a later re-setup starts from a clean slate.
+  clearCredentialProvenance(repo: string, environment: string): Promise<void>;
   // Durably record the operation after each state transition.
   persist(): Promise<void>;
   errorMessage(error: unknown): string;
@@ -543,11 +558,19 @@ async function deleteEnvironmentCredentials(
     setStageState(op, STAGE_DELETE_CREDENTIAL, "warning");
     return;
   }
-  const targets = selectEnvironmentFederatedCredentials(
+  const candidates = selectEnvironmentFederatedCredentials(
     parseFederatedCredentials(listResult.stdout),
     { repoFullName: repo, envName: environment }
   );
-  if (targets.length === 0) {
+  // Provenance gate (issue #331): of the credentials that look like they belong
+  // to this environment, delete only the ones Radius can prove it created and
+  // that are unchanged. Everything else — a credential Radius reused, one with
+  // no provenance, or one whose subject drifted since Radius created it — is
+  // retained and surfaced for manual review, so a shared or user-owned
+  // credential is never removed on a name/subject heuristic alone.
+  const provenance = ports.readCredentialProvenance(repo, environment);
+  const plan = planCredentialReclamation(candidates, provenance, clientId);
+  if (plan.delete.length === 0 && plan.retain.length === 0) {
     addStep(op, {
       stage: STAGE_DELETE_CREDENTIAL,
       kind: "observation",
@@ -555,14 +578,15 @@ async function deleteEnvironmentCredentials(
       state: "succeeded"
     });
     setStageState(op, STAGE_DELETE_CREDENTIAL, "succeeded");
+    await ports.clearCredentialProvenance(repo, environment);
     return;
   }
   let warned = false;
-  for (const target of targets) {
+  for (const target of plan.delete) {
     const result = await ports.runAz(
       buildFederatedCredentialDeleteArgs({
         appId: clientId,
-        name: target.name
+        name: target.credential.name
       })
     );
     if (commandSucceeded(result) || isAzResourceNotFound(result.stderr)) {
@@ -589,7 +613,60 @@ async function deleteEnvironmentCredentials(
       });
     }
   }
+  for (const retained of plan.retain) {
+    warned = true;
+    addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "warning",
+      label: "Left a federated credential in place for manual review",
+      warning: {
+        code: retentionWarningCode(retained.reason),
+        message: retentionMessage(retained.reason, retained.credential.name),
+        impact:
+          `Radius did not delete federated credential "${retained.credential.name}" on ` +
+          `app registration ${clientId}. Review it and remove it manually if it is no ` +
+          `longer needed.`
+      }
+    });
+  }
   setStageState(op, STAGE_DELETE_CREDENTIAL, warned ? "warning" : "succeeded");
+  // Whether or not everything was reclaimed, this environment's provenance has
+  // served its purpose; drop it so a re-setup does not inherit stale records.
+  await ports.clearCredentialProvenance(repo, environment);
+}
+
+function retentionWarningCode(reason: CredentialRetentionReason): string {
+  switch (reason) {
+    case "reused":
+      return "federated-credential-retained-reused";
+    case "evidence-changed":
+      return "federated-credential-retained-changed";
+    default:
+      return "federated-credential-retained-unverified";
+  }
+}
+
+function retentionMessage(
+  reason: CredentialRetentionReason,
+  name: string
+): string {
+  switch (reason) {
+    case "reused":
+      return (
+        `Federated credential "${name}" was already present when Radius set up this ` +
+        `environment, so Radius reused it rather than creating it. It is left in place.`
+      );
+    case "evidence-changed":
+      return (
+        `Federated credential "${name}" no longer matches what Radius recorded when it ` +
+        `created it, so Radius cannot safely delete it.`
+      );
+    default:
+      return (
+        `Federated credential "${name}" has no Radius provenance, so Radius cannot prove ` +
+        `it created the credential and will not delete it.`
+      );
+  }
 }
 
 // Returns the app's remaining federated credentials, or null when the list
