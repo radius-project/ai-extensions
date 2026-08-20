@@ -197,18 +197,24 @@ export async function findWorkflowRun(
   );
   if (!Array.isArray(runs)) return null;
   // Prefer a monotonic run-id baseline when the caller captured one just before
-  // dispatch: accept the newest run whose id exceeds it, which is always the run
-  // this dispatch created and never a prior (e.g. previously failed) run. This
-  // is what keeps a redeploy's "view run" link pointing at the new run instead
-  // of the last one. Runs are listed newest first, so the first match is it.
+  // dispatch: accept the smallest run id that exceeds it, which is the first run
+  // created after the baseline rather than a later overlapping dispatch. This is
+  // what keeps a redeploy's "view run" link pointing at its newly started run
+  // instead of the last one.
   const baseline = numericRunId(afterRunId);
   if (baseline !== null) {
+    let firstRunId: number | null = null;
     for (const value of runs) {
       const r = parseWorkflowRun(value);
       if (r?.databaseId === undefined) continue;
-      if (r.databaseId > baseline) return r.databaseId;
+      if (
+        r.databaseId > baseline &&
+        (firstRunId === null || r.databaseId < firstRunId)
+      ) {
+        firstRunId = r.databaseId;
+      }
     }
-    return null;
+    return firstRunId;
   }
   // No baseline (e.g. it could not be captured): fall back to a created-at
   // window, accepting the newest run created within ~60s before dispatch (clock

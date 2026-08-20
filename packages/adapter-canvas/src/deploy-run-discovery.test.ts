@@ -66,8 +66,9 @@ describe("findWorkflowRun known-id shortcut", () => {
 });
 
 describe("findWorkflowRun with a monotonic baseline", () => {
-  it("returns the newest run whose id exceeds the baseline", async () => {
+  it("returns the first run above the baseline when a later run is also visible", async () => {
     replyWith([
+      { databaseId: 106, createdAt: "2026-08-19T00:00:40Z" },
       { databaseId: 105, createdAt: "2026-08-19T00:00:30Z" },
       { databaseId: 100, createdAt: "2026-08-19T00:00:10Z" },
       { databaseId: 90, createdAt: "2026-08-18T00:00:00Z" }
