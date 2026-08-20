@@ -525,10 +525,10 @@ function addForceLocalOnlyInput(yaml: string): string {
     0,
     "      force_local_only: ${{ inputs.force_local_only }}"
   );
-  const jobsIndex = lines.findIndex((line) => /^jobs:\s*$/.test(line));
-  if (jobsIndex === -1) {
+  const inputEnd = workflowInputEnd(lines, "workflow_dispatch");
+  if (inputEnd === -1) {
     throw new Error(
-      "addForceLocalOnlyInput: expected a jobs mapping in the delete dispatcher."
+      "addForceLocalOnlyInput: expected workflow_dispatch inputs in the delete dispatcher."
     );
   }
   const input = `      force_local_only:
@@ -537,28 +537,42 @@ function addForceLocalOnlyInput(yaml: string): string {
         required: false
         default: false
 `.split("\n");
-  lines.splice(jobsIndex, 0, ...input);
+  lines.splice(inputEnd, 0, ...input);
   return lines.join("\n");
 }
 
 function addForceLocalOnlyWorkflowInput(lines: string[]): void {
   if (lines.some((line) => /^ {6}force_local_only:\s*$/.test(line))) return;
-  const permissionsIndex = lines.findIndex((line) =>
-    /^permissions:\s*$/.test(line)
-  );
-  if (permissionsIndex === -1) {
+  const inputEnd = workflowInputEnd(lines, "workflow_call");
+  if (inputEnd === -1) {
     throw new Error(
-      "addForceLocalOnlyWorkflowInput: expected permissions after workflow_call inputs."
+      "addForceLocalOnlyWorkflowInput: expected workflow_call inputs in the Azure delete workflow."
     );
   }
   lines.splice(
-    permissionsIndex,
+    inputEnd,
     0,
     "      force_local_only:",
+    "        description: 'Allow local-only delete when state is absent'",
     "        type: boolean",
     "        required: false",
     "        default: false"
   );
+}
+
+function workflowInputEnd(lines: string[], trigger: string): number {
+  const triggerIndex = lines.findIndex((line) =>
+    new RegExp(`^ {2}${trigger}:\\s*$`).test(line)
+  );
+  if (triggerIndex === -1) return -1;
+  const inputsIndex = lines.findIndex(
+    (line, index) => index > triggerIndex && /^ {4}inputs:\s*$/.test(line)
+  );
+  if (inputsIndex === -1) return -1;
+  for (let index = inputsIndex + 1; index < lines.length; index++) {
+    if (lines[index].trim() && !/^ {6}/.test(lines[index])) return index;
+  }
+  return lines.length;
 }
 
 /**

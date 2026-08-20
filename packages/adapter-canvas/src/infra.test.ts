@@ -300,12 +300,14 @@ describe("generateDeleteWorkflow", () => {
     // Confirms the splice produces YAML GitHub will accept, not just a string
     // that happens to contain the right substrings.
     const parsed = yaml.load(azure) as {
+      on: { workflow_call: { inputs: Record<string, unknown> } };
       jobs: Record<string, { steps: Array<{ name?: string; if?: string }> }>;
     };
     expect(Object.keys(parsed.jobs)).toEqual(
       expect.arrayContaining(["delete"])
     );
     expect(parsed.jobs["detect-state"]).toBeUndefined();
+    expect(parsed.on.workflow_call.inputs).toHaveProperty("force_local_only");
     expect(parsed.jobs.delete.steps[1]).toMatchObject({
       name: "Detect persisted Radius state"
     });
