@@ -285,14 +285,19 @@ describe("initializeGraphPage", () => {
   });
 
   it("renders generated resources in place without reloading", async () => {
-    const { browser, status } = fixture({ loaded: false });
+    const { browser, branch, status, wrapper } = fixture({ loaded: false });
     const render = vi.fn();
-    browser.net.handle("/api/load-graph", () =>
-      jsonResponse({
-        reload: true,
-        resources: [{ id: "app/generated" }]
-      })
-    );
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return calls === 1 ?
+          jsonResponse({
+            reload: true,
+            resources: [{ id: "app/generated" }],
+            fromWorkspace: false
+          })
+        : jsonResponse({ needsAppBicep: true });
+    });
     initializeGraphPage(
       browser.context,
       globals({
@@ -312,10 +317,53 @@ describe("initializeGraphPage", () => {
       ]),
       expect.objectContaining({
         branch: "feature",
-        localSource: true
+        localSource: false
       })
     );
     expect(status?.textContent).toBe("Application graph ready.");
+    expect(status?.style.display).toBe("none");
+    expect(wrapper.children[1]?.textContent).toBe(
+      "Click a node to view source code links."
+    );
+
+    branch.value = "without-model";
+    branch.dispatch("change");
+    await flushPromises();
+
+    expect(status?.textContent).toContain(
+      "Copilot is generating .radius/app.bicep"
+    );
+    expect(browser.clock.timeouts).toBe(1);
+    expect(calls).toBe(2);
+  });
+
+  it("presents an empty successful graph as loaded without a ready banner", async () => {
+    const { browser, status, wrapper } = fixture({ loaded: false });
+    const render = vi.fn();
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        reload: true,
+        resources: [],
+        fromWorkspace: true
+      })
+    );
+    initializeGraphPage(
+      browser.context,
+      globals({
+        radiusRenderGraph: render
+      })
+    );
+    await flushPromises();
+
+    expect(render).toHaveBeenCalledWith(
+      "graph-container",
+      [],
+      expect.objectContaining({ localSource: true })
+    );
+    expect(status?.style.display).toBe("none");
+    expect(wrapper.children[1]?.textContent).toBe(
+      "Click a node to view source code links."
+    );
   });
 
   it("schedules a slow retry while Copilot drafts app.bicep and cancels it on a branch change", async () => {
@@ -393,10 +441,51 @@ describe("initializeGraphPage", () => {
 
     branch.value = "another";
     branch.dispatch("change");
-    expect(status?.textContent).toBe("Regenerating graph for another…");
+    expect(status?.textContent).toContain(
+      "Checking the selected branch for .radius/app.bicep"
+    );
     await flushPromises();
 
     expect(browser.nav.reloads).toBe(1);
+  });
+
+  it("updates a loaded graph for a new branch using response provenance", async () => {
+    const { browser, branch } = fixture({
+      loaded: true,
+      withStatus: false,
+      withWrapper: false
+    });
+    const render = vi.fn();
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return calls === 1 ?
+          jsonResponse({})
+        : jsonResponse({
+            resources: [{ id: "app/remote" }],
+            fromWorkspace: false
+          });
+    });
+    initializeGraphPage(
+      browser.context,
+      globals({
+        radiusRenderGraph: render
+      })
+    );
+    await flushPromises();
+
+    branch.value = "remote";
+    branch.dispatch("change");
+    await flushPromises();
+
+    expect(render).toHaveBeenLastCalledWith(
+      "graph-container",
+      [{ id: "app/remote" }],
+      expect.objectContaining({
+        branch: "remote",
+        localSource: false
+      })
+    );
   });
 
   it("surfaces a regenerate error message returned by the server", async () => {
@@ -426,7 +515,9 @@ describe("initializeGraphPage", () => {
     branch.dispatch("change");
     await flushPromises();
 
-    expect(status?.textContent).toBe("Failed to regenerate graph.");
+    expect(status?.textContent).toBe(
+      "Failed to generate the application graph."
+    );
     expect(status?.textContent).not.toContain("secret-shaped");
     expect(browser.logger.errors.length).toBeGreaterThan(0);
   });

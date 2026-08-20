@@ -71,7 +71,7 @@ export function initializeGraphPage(
   const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
-  let graphLoaded = page.loaded;
+  let hasLoadedGraph = page.loaded;
   let generation = 0;
   let requestActive = false;
   let retry: ScopeTimer | null = null;
@@ -109,6 +109,25 @@ export function initializeGraphPage(
     controller = asGraphController(
       renderGraph("graph-container", resources, options)
     );
+  };
+
+  const showLoadedGraph = (): void => {
+    const wrapper = context.dom.byId("graph-container-wrapper");
+    if (wrapper) {
+      const container = context.dom.createElement("div");
+      container.id = "graph-container";
+      const hint = context.dom.createElement("div");
+      hint.setAttribute(
+        "style",
+        "margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);"
+      );
+      hint.textContent = "Click a node to view source code links.";
+      wrapper.replaceChildren(container, hint);
+    }
+    const status =
+      context.dom.byId("graph-status") ??
+      context.dom.byId("graph-refresh-status");
+    if (status) status.style.display = "none";
   };
 
   const pollProgress = (requestGeneration: number): void => {
@@ -171,13 +190,14 @@ export function initializeGraphPage(
         if (requestGeneration !== generation) return;
         stopProgress();
         if (isRecord(payload) && Array.isArray(payload.resources)) {
+          showStatus(context, "Application graph ready.", "info");
+          showLoadedGraph();
           renderOrUpdate(parseGraphResources(payload.resources), {
             repoUrl: githubRepositoryUrl(page.repo),
             branch,
-            localSource: page.localSource
+            localSource: readBoolean(payload, "fromWorkspace")
           });
-          graphLoaded = true;
-          showStatus(context, "Application graph ready.", "info");
+          hasLoadedGraph = true;
           return;
         }
         if (readBoolean(payload, "reload")) {
@@ -237,41 +257,6 @@ export function initializeGraphPage(
       });
   };
 
-  const reloadForBranch = (branch: string): void => {
-    if (!page.repo || !branch) return;
-    const requestGeneration = ++generation;
-    requestActive = true;
-    requestAbort = context.net.createAbort();
-    showStatus(context, `Regenerating graph for ${branch}…`, "info");
-    void context.net
-      .fetch("/api/load-graph", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: page.repo, branch }),
-        signal: requestAbort?.signal
-      })
-      .then((response) => response.json())
-      .then((payload) => {
-        if (requestGeneration !== generation) return;
-        if (readBoolean(payload, "reload")) context.nav.reload();
-        else {
-          const error = readString(payload, "error");
-          if (error) showStatus(context, `Error: ${error}`, "error");
-        }
-      })
-      .catch((error: unknown) => {
-        if (!entry.active || requestGeneration !== generation) return;
-        context.logger.error("Radius graph regeneration failed.", error);
-        showStatus(context, "Failed to regenerate graph.", "error");
-      })
-      .then(() => {
-        if (requestGeneration === generation) {
-          requestActive = false;
-          requestAbort = null;
-        }
-      });
-  };
-
   if (branchSelect) {
     entry.on(branchSelect, "change", () => {
       stopRequest();
@@ -279,8 +264,7 @@ export function initializeGraphPage(
         button.disabled = !branchSelect.value;
       }
       if (branchSelect.value) {
-        if (graphLoaded) reloadForBranch(branchSelect.value.trim());
-        else load();
+        load();
       }
     });
   }
@@ -352,7 +336,7 @@ export function initializeGraphPage(
     () => entry.active
   )
     .then(() => {
-      if (!entry.active || graphLoaded || !branchSelect?.value) return;
+      if (!entry.active || hasLoadedGraph || !branchSelect?.value) return;
       if (button && button.dataset.mode !== "create-env")
         button.disabled = false;
       load();

@@ -226,6 +226,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         return json(200, {
           reload: false,
           resources: state.graphResources,
+          fromWorkspace: selection.fromWorkspace,
           cached: true
         });
       }
@@ -269,7 +270,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         state.graphLoaded = true;
         state.graphDefinitionHash = definitionHash;
       }
-      return json(200, { reload: !data.refresh, resources });
+      return json(200, {
+        reload: !data.refresh,
+        resources,
+        fromWorkspace: selection.fromWorkspace
+      });
     } catch (e) {
       return json(400, { error: dependencies.errorMessage(e) });
     }
