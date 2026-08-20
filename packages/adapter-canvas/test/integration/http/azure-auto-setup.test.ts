@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createAzureAutoSetupRoutes } from "../../../src/server/routes/azure-auto-setup.js";
+import { buildRadiusAppProvenanceTags } from "../../../src/azure-oidc.js";
 import type {
   AzureAutoSetupCommandResult,
   AzureAutoSetupDependencies,
@@ -168,6 +169,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
 
   it("completes setup over the typed table without reaching unmatched routing", async () => {
     const unmatchedCalls: string[] = [];
+    const operationSteps: string[] = [];
     const operation: AzureAutoSetupOperation = {
       operationId: "op-http-success",
       repo: "octo/app",
@@ -175,6 +177,11 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       provider: "azure",
       currentStage: "authorize_identity"
     };
+    const requiredTags = buildRadiusAppProvenanceTags({
+      repo: "octo/app",
+      environment: "dev",
+      operationId: operation.operationId
+    });
     const runAz = async (
       args: string[]
     ): Promise<AzureAutoSetupCommandResult> => {
@@ -188,14 +195,30 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
           stderr: ""
         };
       }
-      if (line.startsWith(`ad app show --id ${APP_ID} `)) {
-        return { code: 0, stdout: "app-object", stderr: "" };
+      if (line.startsWith("ad app list ")) {
+        return { code: 0, stdout: "[]", stderr: "" };
+      }
+      if (line.startsWith("ad app create ")) {
+        return { code: 0, stdout: APP_ID, stderr: "" };
       }
       if (line.startsWith("ad signed-in-user show ")) {
         return { code: 0, stdout: OBJECT_ID, stderr: "" };
       }
+      if (line.startsWith(`ad app owner add --id ${APP_ID}`)) {
+        return { code: 0, stdout: "", stderr: "" };
+      }
       if (line.startsWith(`ad app owner list --id ${APP_ID}`)) {
         return { code: 0, stdout: OBJECT_ID, stderr: "" };
+      }
+      if (line.startsWith("rest --method PATCH ")) {
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (line.startsWith(`ad app show --id ${APP_ID} --query tags`)) {
+        return {
+          code: 0,
+          stdout: JSON.stringify(requiredTags),
+          stderr: ""
+        };
       }
       if (line.includes("federated-credential list")) {
         return { code: 0, stdout: "[]", stderr: "" };
@@ -211,7 +234,10 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     const dependencies = createAzureAutoSetupTestDependencies({
       isServerOwnedRequest: (_instanceId, request) =>
         request.headers["x-radius-server-owned"] === "token-a",
-      operations: { create: () => operation },
+      operations: {
+        create: () => operation,
+        addLegacyStep: (_operation, step) => operationSteps.push(step)
+      },
       external: {
         getGitHubIdentity: async () => null,
         preflightRepoAdmin: async () => "",
@@ -229,6 +255,12 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
             };
           }
           if (path === "/repos/octo/app/actions/oidc/customization/sub") {
+            return { ok: false, status: 404, json: null };
+          }
+          if (
+            path ===
+            "/repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID"
+          ) {
             return { ok: false, status: 404, json: null };
           }
           throw new Error(`unscripted GitHub call: ${path}`);
@@ -285,16 +317,28 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
         "Content-Type": "application/json",
         "X-Radius-Server-Owned": "token-a"
       },
-      body: JSON.stringify(VALID_BODY)
+      body: JSON.stringify({
+        ...VALID_BODY,
+        clientId: undefined,
+        appName: "radius-deploy-octo-app"
+      })
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    const payload = (await response.json()) as {
+      steps: string[];
+      [key: string]: unknown;
+    };
+    expect(payload).toMatchObject({
       success: true,
       operationId: "op-http-success",
       clientId: APP_ID,
       tenantId: TENANT,
       subscriptionId: SUBSCRIPTION
     });
+    const retentionStep =
+      "✅ Created Entra app registration `radius-deploy-octo-app`. Radius retains this app registration if you later delete the environment; environment deletion removes only that environment's federated identity credential.";
+    expect(payload.steps).toContain(retentionStep);
+    expect(operationSteps).toContain(retentionStep);
     expect(unmatchedCalls).toEqual([]);
   });
 });

@@ -33,6 +33,7 @@ interface Harness {
   calls: string[];
   failures: Record<string, unknown>[];
   responses: Array<{ status: number; payload: unknown }>;
+  steps: string[];
 }
 
 function command(
@@ -107,6 +108,7 @@ function harness(
     calls,
     failures,
     responses,
+    steps: workflow.steps,
     input: {
       workflow,
       dependencies: { operations: dependencies.operations },
@@ -180,6 +182,12 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     expect(githubCalls).toEqual([
       "/repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID"
     ]);
+    expect(test.steps).toContain(
+      `✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(
+      "Radius retains this app registration"
+    );
   });
 
   it("reuses the repository's owned client id and persists before returning", async () => {
@@ -208,6 +216,12 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     });
     expect(test.calls).toEqual(["record:reused", "persist"]);
     expect(azCalls).toHaveLength(3);
+    expect(test.steps).toContain(
+      `✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(
+      "Radius retains this app registration"
+    );
   });
 
   it.each([
@@ -386,6 +400,12 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       appName: "radius-deploy-octo-app"
     });
     expect(test.calls).toEqual(["record:reused"]);
+    expect(test.steps).toContain(
+      `✅ Using the selected App Registration: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(
+      "Radius retains this app registration"
+    );
   });
 
   it("fails closed when ownership of an explicit application cannot be read", async () => {
@@ -515,6 +535,12 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       appName: "radius-deploy-octo-app"
     });
     expect(test.calls).toEqual(["record:reused", "persist"]);
+    expect(test.steps).toContain(
+      `✅ Reusing existing App Registration: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(
+      "Radius retains this app registration"
+    );
   });
 
   it("fails closed when the reused name match cannot be persisted", async () => {
@@ -696,6 +722,9 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       appName: "radius-deploy-octo-app"
     });
     expect(test.calls).toEqual(["record:created", "checkpoint"]);
+    expect(test.steps).toContain(
+      "✅ Created Entra app registration `radius-deploy-octo-app`. Radius retains this app registration if you later delete the environment; environment deletion removes only that environment's federated identity credential."
+    );
     const create = azCalls.findIndex((line) =>
       line.startsWith("ad app create ")
     );

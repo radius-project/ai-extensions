@@ -475,7 +475,9 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         }
         clientId = createResult.stdout.trim();
-        steps.push(`✅ App Registration created: ${clientId}`);
+        steps.push(
+          `✅ Created Entra app registration \`${appName}\`. Radius retains this app registration if you later delete the environment; environment deletion removes only that environment's federated identity credential.`
+        );
         operations.recordAzureApp(operation, {
           state: "created",
           appId: clientId,
