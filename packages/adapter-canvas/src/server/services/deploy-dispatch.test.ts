@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildFederatedCredentialListArgs,
   createDeployDispatchService,
   type DeployCommandOptions,
   type DeployCommandResult,
@@ -125,12 +126,12 @@ function oidcGitHubRunner(
 
 interface AzurePreflightOptions {
   customization?: GitHubJsonResponse;
+  environmentLookup?: GitHubJsonResponse;
   environmentVariable?: GitHubJsonResponse;
   oidcError?: Error;
   repositoryVariable?: GitHubJsonResponse;
   runAz?: (args: string[]) => Promise<DeployCommandResult>;
   subjects?: unknown;
-  tenantVariable?: GitHubJsonResponse;
   variableError?: Error;
 }
 
@@ -144,15 +145,6 @@ function azurePreflight(options: AzurePreflightOptions = {}) {
     githubJsonCalls,
     runGitHubJson: (path: string) => {
       githubJsonCalls.push(path);
-      if (path.endsWith("/variables/AZURE_TENANT_ID")) {
-        // Absent at both scopes unless a scenario supplies one, so `az` picks
-        // its own tenant.
-        return Promise.resolve(
-          path.includes("/environments/") ?
-            (options.tenantVariable ?? ABSENT)
-          : ABSENT
-        );
-      }
       if (
         path.startsWith("/repos/acme/widgets/environments/") &&
         path.endsWith("/variables/AZURE_CLIENT_ID")
@@ -168,6 +160,20 @@ function azurePreflight(options: AzurePreflightOptions = {}) {
       }
       if (path === "/repos/acme/widgets/actions/variables/AZURE_CLIENT_ID") {
         return Promise.resolve(options.repositoryVariable ?? ABSENT);
+      }
+      if (path.startsWith("/repos/acme/widgets/environments/")) {
+        // GitHub echoes the environment's stored name, which is what the
+        // subject must be built from.
+        const requested = decodeURIComponent(
+          path.slice("/repos/acme/widgets/environments/".length)
+        );
+        return Promise.resolve(
+          options.environmentLookup ?? {
+            ok: true,
+            status: 200,
+            json: { name: requested }
+          }
+        );
       }
       if (options.oidcError) throw options.oidcError;
       return oidcGitHubRunner(
@@ -266,6 +272,44 @@ describe("deploy dispatch construction", () => {
     expect(() => createDeployDispatchService(empty)).toThrow(
       "createDeployDispatchService is missing required dependencies: branchNotPushedKind"
     );
+  });
+
+  it("refuses to construct without the OIDC-subject-missing error kind", () => {
+    const missing: Partial<DeployDispatchDependencies> = dependencies();
+    delete missing.oidcSubjectMissingKind;
+    expect(() =>
+      createDeployDispatchService(missing as DeployDispatchDependencies)
+    ).toThrow(
+      "createDeployDispatchService is missing required dependencies: oidcSubjectMissingKind"
+    );
+    const empty = dependencies();
+    Object.defineProperty(empty, "oidcSubjectMissingKind", { value: "" });
+    expect(() => createDeployDispatchService(empty)).toThrow(
+      "createDeployDispatchService is missing required dependencies: oidcSubjectMissingKind"
+    );
+  });
+});
+
+describe("federated credential list arguments", () => {
+  it("passes only --id and global arguments az accepts", () => {
+    const args = buildFederatedCredentialListArgs("client-123");
+
+    expect(args).toEqual([
+      "ad",
+      "app",
+      "federated-credential",
+      "list",
+      "--id",
+      "client-123",
+      "--query",
+      "[].subject",
+      "-o",
+      "json"
+    ]);
+    // `az ad app federated-credential list` rejects any scoping flag with
+    // "unrecognized arguments", which would make the preflight a no-op.
+    expect(args).not.toContain("--tenant");
+    expect(args).not.toContain("--subscription");
   });
 });
 
@@ -401,10 +445,11 @@ describe("deploy dispatch environment and branch preflight", () => {
     // credential in Azure.
     expect(state.deployErrorKind).toBe("oidc-subject-missing");
     expect(state.deployError).toContain(
-      '"repo:acme/widgets:environment:production" and "repo:acme@101/widgets@202:environment:production"'
+      '"repo:acme/widgets:environment:production" or "repo:acme@101/widgets@202:environment:production"'
     );
+    expect(state.deployError).toContain("expected one of");
     expect(state.deployError).toContain(
-      "repo:acme/widgets:environment:dev, repo:acme/widgets:environment:test, repo:acme/widgets:environment:staging ..."
+      "repo:acme/widgets:environment:dev, repo:acme/widgets:environment:test, repo:acme/widgets:environment:staging, ..."
     );
     expect(state.deployError).not.toContain(
       "repo:acme/widgets:environment:preview"
@@ -426,15 +471,97 @@ describe("deploy dispatch environment and branch preflight", () => {
     ]);
   });
 
-  it("scopes the Azure lookup to the environment's tenant when one is configured", async () => {
+  it("never passes a scoping flag az would reject", async () => {
+    const { input } = request();
+    input.provider = "azure";
+    const preflight = azurePreflight();
+    const service = createDeployDispatchService(
+      dependencies({ ...recordingGh(), ...preflight })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+    // `az ad app federated-credential list` exits with "unrecognized
+    // arguments" for --tenant, which would make every check unverified and the
+    // whole preflight a no-op.
+    expect(preflight.azCalls[0]).toEqual([
+      "ad",
+      "app",
+      "federated-credential",
+      "list",
+      "--id",
+      "client-123",
+      "--query",
+      "[].subject",
+      "-o",
+      "json"
+    ]);
+  });
+
+  it("skips the check when the environment deliberately disables Azure login", async () => {
+    const { input, state, logs } = request();
+    input.provider = "azure";
+    const gh = recordingGh();
+    const preflight = azurePreflight({
+      environmentVariable: { ok: true, status: 200, json: { value: "  " } }
+    });
+    const service = createDeployDispatchService(
+      dependencies({ ...gh, ...preflight })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+    expect(state.deployStatus).not.toBe("failed");
+    // The upstream workflow gates azure/login on `vars.AZURE_CLIENT_ID != ''`,
+    // so a blank value means there is no login to fail — not broken config.
+    expect(
+      logs.some(
+        (line) =>
+          line.startsWith("• ") && line.includes("Azure login is disabled")
+      )
+    ).toBe(true);
+    expect(
+      logs.some((line) => line.includes("federated credential coverage"))
+    ).toBe(false);
+    expect(preflight.azCalls).toEqual([]);
+  });
+
+  it("builds the subject from the environment name GitHub reports, not the requested spelling", async () => {
+    const { input } = request();
+    input.provider = "azure";
+    input.requestedEnvironment = "dev";
+    const preflight = azurePreflight({
+      environmentLookup: { ok: true, status: 200, json: { name: "Dev" } },
+      subjects: [
+        "repo:acme/widgets:environment:Dev",
+        "repo:acme@101/widgets@202:environment:Dev"
+      ]
+    });
+    const service = createDeployDispatchService(
+      dependencies({ ...recordingGh(), ...preflight })
+    );
+
+    // GitHub resolves the environment case-insensitively but Entra compares the
+    // subject case-sensitively, so the requested spelling would wrongly block a
+    // deploy that works today.
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+  });
+
+  it("ignores credentials that report no subject instead of disabling the check", async () => {
     const { input } = request();
     input.provider = "azure";
     const preflight = azurePreflight({
-      tenantVariable: {
-        ok: true,
-        status: 200,
-        json: { value: "tenant-abc" }
-      }
+      // Entra flexible federated credentials match on claimsMatchingExpression
+      // and report a null subject.
+      subjects: [
+        null,
+        "repo:acme/widgets:environment:production",
+        "repo:acme@101/widgets@202:environment:production"
+      ]
     });
     const service = createDeployDispatchService(
       dependencies({ ...recordingGh(), ...preflight })
@@ -443,22 +570,27 @@ describe("deploy dispatch environment and branch preflight", () => {
     expect(await service.prepareAndDispatch(input)).toMatchObject({
       dispatched: true
     });
-    // Without this the check reads the app from whichever tenant `az` happens to
-    // be signed into, and a cross-tenant miss looks like missing coverage.
-    expect(preflight.azCalls[0]).toEqual([
-      "ad",
-      "app",
-      "federated-credential",
-      "list",
-      "--id",
-      "client-123",
-      "--tenant",
-      "tenant-abc",
-      "--query",
-      "[].subject",
-      "-o",
-      "json"
-    ]);
+  });
+
+  it("lists immutable-form subjects as near matches when the credential is missing", async () => {
+    const { input, state } = request();
+    input.provider = "azure";
+    const service = createDeployDispatchService(
+      dependencies({
+        ...recordingGh(),
+        ...azurePreflight({
+          subjects: ["repo:acme@101/widgets@202:environment:staging"]
+        })
+      })
+    );
+
+    await service.prepareAndDispatch(input);
+
+    // A prefix filter built from the mutable spelling would hide these exactly
+    // when the user most needs to see how close the credential was.
+    expect(state.deployError).toContain(
+      "Existing credential subjects on the app: repo:acme@101/widgets@202:environment:staging."
+    );
   });
 
   it("reports an unpushed branch before spending the Azure preflight", async () => {
@@ -600,7 +732,7 @@ describe("deploy dispatch environment and branch preflight", () => {
     await service.prepareAndDispatch(input);
 
     expect(state.deployError).toContain(
-      "Existing credential subjects for this repo on the app: repo:acme/widgets:environment:dev, repo:acme/widgets:environment:test."
+      "Existing credential subjects on the app: repo:acme/widgets:environment:dev, repo:acme/widgets:environment:test."
     );
     expect(state.deployError).not.toContain("...");
   });
@@ -613,7 +745,7 @@ describe("deploy dispatch environment and branch preflight", () => {
       dependencies({
         ...gh,
         ...azurePreflight({
-          subjects: ["repo:other/project:environment:production"]
+          subjects: []
         })
       })
     );
@@ -689,10 +821,43 @@ describe("deploy dispatch environment and branch preflight", () => {
         environmentVariable: {
           ok: true,
           status: 200,
-          json: { value: " " }
+          json: { value: 42 }
         }
       },
       message: 'GitHub environment "production" has an invalid AZURE_CLIENT_ID'
+    },
+    {
+      name: "environment name lookup failure",
+      options: {
+        environmentLookup: {
+          ok: false,
+          status: 403,
+          stderr: "environment unavailable"
+        }
+      },
+      message:
+        'GitHub environment "production" lookup failed (environment unavailable)'
+    },
+    {
+      name: "environment name lookup failure without diagnostics",
+      options: {
+        environmentLookup: { ok: false, status: 503 }
+      },
+      message: 'GitHub environment "production" lookup failed (HTTP 503)'
+    },
+    {
+      name: "environment name lookup failure without a status",
+      options: {
+        environmentLookup: { ok: false }
+      },
+      message: 'GitHub environment "production" lookup failed (HTTP unknown)'
+    },
+    {
+      name: "environment name missing from the lookup",
+      options: {
+        environmentLookup: { ok: true, status: 200, json: { name: "  " } }
+      },
+      message: 'GitHub did not report a name for environment "production"'
     },
     {
       name: "missing environment and repository client id",
@@ -790,7 +955,7 @@ describe("deploy dispatch environment and branch preflight", () => {
       message: "returned an invalid subject list"
     },
     {
-      name: "mixed Azure subject list",
+      name: "partially covered subject pair",
       options: {
         runAz: () =>
           Promise.resolve({
@@ -801,7 +966,10 @@ describe("deploy dispatch environment and branch preflight", () => {
             ])
           })
       },
-      message: "returned an invalid subject list"
+      // Null subjects come from flexible credentials and are skipped, leaving
+      // only the mutable half of the pair — indeterminate, so a warning.
+      message:
+        'covers only part of the subject pair GitHub may mint (no credential for "repo:acme@101/widgets@202:environment:production")'
     }
   ])(
     "warns and still deploys when coverage cannot be verified: $name",
@@ -825,7 +993,7 @@ describe("deploy dispatch environment and branch preflight", () => {
       expect(state.deployStatus).not.toBe("failed");
       const warning = logs.find((line) => line.startsWith("⚠ "));
       expect(warning).toContain(scenario.message);
-      expect(warning).toContain("AADSTS7002138");
+      expect(warning).toContain("AADSTS700213");
       expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(true);
     }
   );

@@ -1252,6 +1252,13 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
             json: { value: "client-123" }
           });
         }
+        if (path === "/repos/acme/widgets/environments/production") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: { name: "production" }
+          });
+        }
         if (path === "/repos/acme/widgets") {
           return Promise.resolve({
             ok: true,
@@ -1384,8 +1391,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       "commit-source-refs",
       "branch-head-sha",
       "github-json:/repos/acme/widgets/environments/production/variables/AZURE_CLIENT_ID",
-      "github-json:/repos/acme/widgets/environments/production/variables/AZURE_TENANT_ID",
-      "github-json:/repos/acme/widgets/actions/variables/AZURE_TENANT_ID",
+      "github-json:/repos/acme/widgets/environments/production",
       "github-json:/repos/acme/widgets",
       "github-json:/repos/acme/widgets/actions/oidc/customization/sub",
       "az:ad app federated-credential list",

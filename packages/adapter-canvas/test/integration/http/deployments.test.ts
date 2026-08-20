@@ -569,6 +569,15 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
             json: { value: "client-123" }
           });
         }
+        const environmentMatch =
+          /^\/repos\/acme\/widgets\/environments\/([^/]+)$/.exec(path);
+        if (environmentMatch) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: { name: decodeURIComponent(environmentMatch[1] ?? "") }
+          });
+        }
         if (path === "/repos/acme/widgets") {
           return Promise.resolve({
             ok: true,
@@ -601,6 +610,9 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         );
       },
       classifyDeployDispatchFailure: () => "run-unconfirmed",
+      latestWorkflowRunId: () => {
+        throw new Error("OIDC refusal must happen before run discovery");
+      },
       invalidateDeployListCache: () => {
         throw new Error("OIDC refusal must not invalidate the deploy cache");
       },

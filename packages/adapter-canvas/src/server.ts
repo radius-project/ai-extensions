@@ -73,6 +73,7 @@ import {
   isResourceGroupName,
   GITHUB_API_VERSION
 } from "./azure-oidc.js";
+import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage } from "./ghcr.js";
 import {
   appParams,
@@ -397,6 +398,37 @@ function record(value: unknown): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value));
 }
 
+// The one adapter from `ghApiJson` to the `GitHubJsonRunner` port. Both the
+// auto-setup routes and the deploy preflight read GitHub variables and OIDC
+// customization through it, so status, body shape, and API version cannot drift
+// between them. `executor` routes the read through a specific signed-in account
+// when the caller has one; the deploy path has no operation context, so it uses
+// the default `gh` credentials, the same identity the rest of the deploy uses.
+async function runGitHubJsonRequest(
+  apiPath: string,
+  executor?: SelectedGhExecutor
+): Promise<GitHubJsonResponse> {
+  const result =
+    executor ?
+      await selectedGhApiJson(executor, apiPath)
+    : await ghApiJson(apiPath, {
+        headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
+      });
+  return {
+    ok: result.ok,
+    status: result.status,
+    json:
+      (
+        result.json !== null &&
+        typeof result.json === "object" &&
+        !Array.isArray(result.json)
+      ) ?
+        record(result.json)
+      : null,
+    stderr: result.stderr
+  };
+}
+
 function optionalString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
@@ -664,27 +696,8 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
           getGitHubIdentity,
           executor
         ),
-      runGitHubJson: async (apiPath, executor) => {
-        const result =
-          executor ?
-            await selectedGhApiJson(executor, apiPath)
-          : await ghApiJson(apiPath, {
-              headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
-            });
-        return {
-          ok: result.ok,
-          status: result.status,
-          json:
-            (
-              result.json !== null &&
-              typeof result.json === "object" &&
-              !Array.isArray(result.json)
-            ) ?
-              record(result.json)
-            : null,
-          stderr: result.stderr
-        };
-      },
+      runGitHubJson: (apiPath, executor) =>
+        runGitHubJsonRequest(apiPath, executor),
       runAz: (args) => runCliCommand("az", args)
     },
     tempFile: {
@@ -1806,6 +1819,11 @@ export const DEPLOY_RUN_UNCONFIRMED_KIND: DeployErrorKind = "run-unconfirmed";
 export const DEPLOY_OIDC_SUBJECT_MISSING_KIND: DeployErrorKind =
   "oidc-subject-missing";
 
+// Ceiling for the preflight's `az` call. The check is advisory — it can only
+// block on a definitive answer — so a slow or hung `az` must not hold up a
+// deploy that authenticates in Actions rather than locally.
+const AZURE_PREFLIGHT_TIMEOUT_MS = 15000;
+
 // Split a failed `gh workflow run` by whether it proves no run was created.
 // GitHub naming the branch as unresolvable is proof: it rejected the request.
 // Anything else is not — the request can be accepted and the answer lost (the
@@ -2265,31 +2283,18 @@ const deployDispatchService = createDeployDispatchService({
   runGh: runGhForDeploy,
   runGhWithStdin: runGhWithStdinForDeploy,
   runAz: async (args) => {
-    const result = await runCliCommand("az", args);
+    // Short timeout on purpose: this runs before every Azure deploy, including
+    // redeploys and repair attempts, and an unusable check is only ever a
+    // warning. Waiting out the default 60s would add a minute of dead time to a
+    // deploy that was always going to succeed.
+    const result = await runCliCommand("az", args, AZURE_PREFLIGHT_TIMEOUT_MS);
     return {
       code: result.code ?? 1,
       stdout: result.stdout ?? "",
       stderr: result.stderr ?? ""
     };
   },
-  runGitHubJson: async (apiPath) => {
-    const result = await ghApiJson(apiPath, {
-      headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
-    });
-    return {
-      ok: result.ok,
-      status: result.status,
-      json:
-        (
-          result.json !== null &&
-          typeof result.json === "object" &&
-          !Array.isArray(result.json)
-        ) ?
-          record(result.json)
-        : null,
-      stderr: result.stderr
-    };
-  },
+  runGitHubJson: (apiPath) => runGitHubJsonRequest(apiPath),
   readProcessEnv: () => process.env,
   fetchFileForSelection: (entry, repo, branch, repoPath) =>
     fetchFileForSelection(entry as CanvasServerEntry, repo, branch, repoPath),
