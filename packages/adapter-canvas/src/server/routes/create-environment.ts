@@ -16,8 +16,10 @@ import {
 import { createWorkflowFileCommitter } from "./create-environment-workflow-committer.js";
 import {
   applyProviderConfiguration,
-  publishWorkflowFiles
+  publishWorkflowFiles,
+  resolveAzureProviderConfiguration
 } from "./create-environment-workflow-publisher.js";
+import { shouldDeferAzureCredentialVerificationForRbacPropagation } from "./create-environment-rbac-propagation.js";
 import type { WorkflowTempFilePort } from "./create-environment-workflow-committer.js";
 import type {
   CreateEnvironmentCommandResult,
@@ -206,21 +208,6 @@ export interface CreateEnvironmentDependencies
   // --- clocks ---
   sleep(milliseconds: number): Promise<void>;
   now(): number;
-}
-
-function hasCreatedAzureContributorRoleAssignment(
-  operation: CreateEnvironmentOperation,
-  subscriptionId: string,
-  resourceGroup: string
-): boolean {
-  if (!subscriptionId || !resourceGroup) return false;
-  const expectedScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
-  return (
-    operation.setupArtifacts?.roleAssignments?.some(
-      (assignment) =>
-        assignment.role === "Contributor" && assignment.scope === expectedScope
-    ) ?? false
-  );
 }
 
 export async function handleCreateEnvironment(
@@ -466,9 +453,18 @@ export async function handleCreateEnvironment(
     }
 
     // Step 2: Set environment variables and secrets based on provider
+    const providerCredential = dependencies.azureCredential() || {};
+    const azureProviderConfiguration =
+      provider === "azure" ?
+        resolveAzureProviderConfiguration(
+          data,
+          providerCredential,
+          dependencies.optionalString
+        )
+      : null;
     const { credentialsComplete, missingCredNote } =
       await applyProviderConfiguration(provider, data, {
-        azureCredential: () => dependencies.azureCredential(),
+        azureCredential: () => providerCredential,
         awsCredential: () => dependencies.awsCredential(),
         optionalString: (value) => dependencies.optionalString(value),
         setEnvironmentVariable,
@@ -482,14 +478,19 @@ export async function handleCreateEnvironment(
     // /api/verify-status, which would otherwise spin until the timeout.
     let verifySkipReason = "";
     let skipVerifyDueToRbacDelay = false;
-    if (provider === "azure" && credentialsComplete) {
-      const azureCredential = dependencies.azureCredential() || {};
-      skipVerifyDueToRbacDelay = hasCreatedAzureContributorRoleAssignment(
-        operation,
-        dependencies.optionalString(data.subscriptionId) ||
-          dependencies.optionalString(azureCredential.subscriptionId),
-        dependencies.optionalString(data.resourceGroup)
-      );
+    if (
+      provider === "azure" &&
+      credentialsComplete &&
+      azureProviderConfiguration
+    ) {
+      skipVerifyDueToRbacDelay =
+        shouldDeferAzureCredentialVerificationForRbacPropagation({
+          operation,
+          clientId: azureProviderConfiguration.clientId,
+          subscriptionId: azureProviderConfiguration.subscriptionId,
+          resourceGroup: azureProviderConfiguration.resourceGroup,
+          now: dependencies.now()
+        });
     }
 
     // Steps 3, 4 and 4b: publish the verify, deploy and delete workflow files.
@@ -732,50 +733,14 @@ export async function handleCreateEnvironment(
       }
     }
 
-    const actionRequired = !verifyPlan.shouldDispatch;
-    dependencies.recordCleanupState(operation, { state: "not_needed" });
-    if (actionRequired) {
-      dependencies.recordCommitState(operation, {
-        mode: "pull_request",
-        branch: prState?.branch || defaultBranch,
-        baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
-        pullRequestUrl: pullRequestUrl || null
-      });
-      // The third terminal state, and the one the product kept getting wrong.
-      // Verification was never dispatched, so there is nothing to wait for and
-      // nothing failed — the operation is finished and the remaining work is the
-      // user's. The client used to poll for a verify run that could not exist
-      // and, eight minutes later, reported this as a timeout.
-      dependencies.setStageState(
-        operation,
-        dependencies.stageVerify,
-        "skipped"
-      );
-      dependencies.finish(operation, "action_required", {
-        terminal: {
-          reason: "pr-merge-required",
-          pullRequestUrl: pullRequestUrl || null,
-          branch: prState?.branch || null,
-          baseBranch: prState?.base || verifyPlan.defaultBranch || null,
-          userMessage:
-            pullRequestUrl ?
-              "Merge the pull request to finish setup; credential verification and deploys run once it lands."
-            : `Open and merge a pull request from "${
-                prState?.branch || "the setup branch"
-              }" into "${
-                prState?.base ||
-                verifyPlan.defaultBranch ||
-                "the default branch"
-              }" to finish setup.`
-        }
-      });
-      await dependencies.persistBestEffort({
-        operation,
-        persist: () => dependencies.persistOperations(),
-        report: (diagnostic) =>
-          dependencies.reportOperationDiagnostic(diagnostic)
-      });
-    } else if (skipVerifyDueToRbacDelay) {
+    const actionRequired =
+      !verifyPlan.shouldDispatch ||
+      skipVerifyDueToRbacDelay ||
+      !credentialsComplete;
+    const actionRequiredDueToPullRequest = !verifyPlan.shouldDispatch;
+    const finishSkippedVerificationActionRequired = async (
+      terminal: Record<string, unknown>
+    ): Promise<void> => {
       dependencies.recordCommitState(operation, {
         mode: prState ? "pull_request" : "default_branch",
         branch: prState?.branch || defaultBranch,
@@ -787,41 +752,51 @@ export async function handleCreateEnvironment(
         dependencies.stageVerify,
         "skipped"
       );
-      dependencies.finish(operation, "succeeded_with_warnings", {});
+      dependencies.finish(operation, "action_required", { terminal });
       await dependencies.persistBestEffort({
         operation,
         persist: () => dependencies.persistOperations(),
         report: (diagnostic) =>
           dependencies.reportOperationDiagnostic(diagnostic)
+      });
+    };
+    dependencies.recordCleanupState(operation, { state: "not_needed" });
+    if (!verifyPlan.shouldDispatch) {
+      // The third terminal state, and the one the product kept getting wrong.
+      // Verification was never dispatched, so there is nothing to wait for and
+      // nothing failed — the operation is finished and the remaining work is the
+      // user's. The client used to poll for a verify run that could not exist
+      // and, eight minutes later, reported this as a timeout.
+      await finishSkippedVerificationActionRequired({
+        reason: "pr-merge-required",
+        pullRequestUrl: pullRequestUrl || null,
+        branch: prState?.branch || null,
+        baseBranch: prState?.base || verifyPlan.defaultBranch || null,
+        userMessage:
+          pullRequestUrl ?
+            "Merge the pull request to finish setup; credential verification and deploys run once it lands."
+          : `Open and merge a pull request from "${
+              prState?.branch || "the setup branch"
+            }" into "${
+              prState?.base || verifyPlan.defaultBranch || "the default branch"
+            }" to finish setup.`
+      });
+    } else if (skipVerifyDueToRbacDelay) {
+      await finishSkippedVerificationActionRequired({
+        reason: "azure-rbac-propagation",
+        pullRequestUrl: null,
+        userMessage:
+          "Azure role access was just granted for this environment and may take a few minutes to propagate. Verify credentials again from the Environments list after propagation completes."
       });
     } else if (!credentialsComplete) {
       // Verify was deliberately not dispatched because the identifying cloud
       // credentials are incomplete (issue #219). There is no run to wait for, so
       // finish the operation as action_required carrying the reason, rather than
       // leaving it in progress polling a verify run that will never exist.
-      dependencies.recordCommitState(operation, {
-        mode: prState ? "pull_request" : "default_branch",
-        branch: prState?.branch || defaultBranch,
-        baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
-        pullRequestUrl: pullRequestUrl || null
-      });
-      dependencies.setStageState(
-        operation,
-        dependencies.stageVerify,
-        "skipped"
-      );
-      dependencies.finish(operation, "action_required", {
-        terminal: {
-          reason: "credentials-incomplete",
-          pullRequestUrl: pullRequestUrl || null,
-          userMessage: missingCredNote
-        }
-      });
-      await dependencies.persistBestEffort({
-        operation,
-        persist: () => dependencies.persistOperations(),
-        report: (diagnostic) =>
-          dependencies.reportOperationDiagnostic(diagnostic)
+      await finishSkippedVerificationActionRequired({
+        reason: "credentials-incomplete",
+        pullRequestUrl: pullRequestUrl || null,
+        userMessage: missingCredNote
       });
     } else {
       dependencies.recordCommitState(operation, {
@@ -849,9 +824,10 @@ export async function handleCreateEnvironment(
       // decision — that inference is what #247 was.
       actionRequired,
       pullRequestUrl,
-      pullRequestBranch: actionRequired ? prState?.branch || null : null,
+      pullRequestBranch:
+        actionRequiredDueToPullRequest ? prState?.branch || null : null,
       pullRequestBaseBranch:
-        actionRequired ?
+        actionRequiredDueToPullRequest ?
           prState?.base || verifyPlan.defaultBranch || null
         : null,
       // Distinct signal for a deliberately-skipped verification (incomplete

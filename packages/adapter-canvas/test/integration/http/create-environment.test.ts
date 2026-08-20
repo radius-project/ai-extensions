@@ -131,6 +131,7 @@ function start(script: Script = {}): Harness {
     repo: "octo/app",
     environment: "dev",
     provider: "azure",
+    state: "running",
     currentStage: STAGE_CONFIGURE,
     inputRequired: null
   };
@@ -642,12 +643,26 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   });
 
   it("skips immediate verification after creating Azure Contributor access", async () => {
-    const harness = start({ continuedOperation: true });
+    const harness = start({
+      continuedOperation: true,
+      azureCredential: () => ({
+        clientId: "client-1",
+        tenantId: "t",
+        subscriptionId: "s",
+        resourceGroup: "rg"
+      })
+    });
     harness.operation.setupArtifacts = {
+      servicePrincipal: {
+        appId: "client-1",
+        objectId: "principal-1"
+      },
       roleAssignments: [
         {
           role: "Contributor",
-          scope: "/subscriptions/s/resourceGroups/rg"
+          scope: "/subscriptions/s/resourceGroups/rg",
+          principalObjectId: "principal-1",
+          createdAt: new Date(1700000000000 - 60_000).toISOString()
         }
       ]
     };
@@ -655,16 +670,14 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     const response = await post({
       repo: "octo/app",
       environment: "dev",
-      operationId: "op-http",
-      subscriptionId: "s",
-      resourceGroup: "rg"
+      operationId: "op-http"
     });
 
     expect(response.status).toBe(200);
     const payload = (await response.json()) as Record<string, unknown>;
     expect(payload).toMatchObject({
       success: true,
-      actionRequired: false,
+      actionRequired: true,
       verifySkipped: true,
       verifyRunUrl: ""
     });
@@ -685,10 +698,59 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(harness.journal).toContain(`setStageState:${STAGE_VERIFY}:skipped`);
     expect(harness.finished).toEqual([
       {
-        state: "succeeded_with_warnings",
-        options: {}
+        state: "action_required",
+        options: {
+          terminal: {
+            reason: "azure-rbac-propagation",
+            pullRequestUrl: null,
+            userMessage:
+              "Azure role access was just granted for this environment and may take a few minutes to propagate. Verify credentials again from the Environments list after propagation completes."
+          }
+        }
       }
     ]);
+  });
+
+  it("keeps incomplete credentials action_required even when a setup ledger exists", async () => {
+    const harness = start({
+      continuedOperation: true,
+      azureCredential: () => ({
+        clientId: "client-1",
+        tenantId: "t",
+        resourceGroup: "rg"
+      })
+    });
+    harness.operation.setupArtifacts = {
+      servicePrincipal: {
+        appId: "client-1",
+        objectId: "principal-1"
+      },
+      roleAssignments: [
+        {
+          role: "Contributor",
+          scope: "/subscriptions/s/resourceGroups/rg",
+          principalObjectId: "principal-1",
+          createdAt: new Date(1700000000000 - 60_000).toISOString()
+        }
+      ]
+    };
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "dev",
+      operationId: "op-http"
+    });
+
+    expect(response.status).toBe(200);
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+    expect(harness.finished[0]).toMatchObject({
+      state: "action_required",
+      options: {
+        terminal: {
+          reason: "credentials-incomplete"
+        }
+      }
+    });
   });
 
   it("preflights GHCR package scopes before bootstrapping the state package", async () => {
@@ -1056,6 +1118,49 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       }
     ]);
     expect(harness.journal).toContain("persistBestEffort");
+  });
+
+  it("keeps the pull-request action ahead of an RBAC propagation ledger", async () => {
+    const harness = start({
+      ...protectedScript,
+      continuedOperation: true,
+      azureCredential: () => ({
+        clientId: "client-1",
+        tenantId: "t",
+        subscriptionId: "s",
+        resourceGroup: "rg"
+      })
+    });
+    harness.operation.setupArtifacts = {
+      servicePrincipal: {
+        appId: "client-1",
+        objectId: "principal-1"
+      },
+      roleAssignments: [
+        {
+          role: "Contributor",
+          scope: "/subscriptions/s/resourceGroups/rg",
+          principalObjectId: "principal-1",
+          createdAt: new Date(1700000000000 - 60_000).toISOString()
+        }
+      ]
+    };
+
+    const response = await post({
+      repo: "octo/app",
+      operationId: "op-http"
+    });
+
+    expect(response.status).toBe(200);
+    expect(harness.finished[0]).toMatchObject({
+      state: "action_required",
+      options: {
+        terminal: {
+          reason: "pr-merge-required",
+          pullRequestUrl: "https://github.com/octo/app/pull/7"
+        }
+      }
+    });
   });
 
   it("skips deleting the legacy deploy workflow while commits go through a pull request", async () => {

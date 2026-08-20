@@ -45,6 +45,34 @@ export interface ProviderCredentialStatus {
   missingCredNote: string;
 }
 
+export interface AzureProviderConfiguration {
+  clientId: string;
+  tenantId: string;
+  subscriptionId: string;
+  resourceGroup: string;
+  cluster: string;
+  location: string | undefined;
+  namespace: string | undefined;
+}
+
+export function resolveAzureProviderConfiguration(
+  data: CreateEnvironmentRequestData,
+  azureCreds: Record<string, unknown>,
+  optionalString: (value: unknown) => string
+): AzureProviderConfiguration {
+  return {
+    clientId: data.clientId || optionalString(azureCreds.clientId),
+    tenantId: data.tenantId || optionalString(azureCreds.tenantId),
+    subscriptionId:
+      data.subscriptionId || optionalString(azureCreds.subscriptionId),
+    resourceGroup:
+      data.resourceGroup || optionalString(azureCreds.resourceGroup),
+    cluster: data.cluster || optionalString(azureCreds.cluster),
+    location: data.location,
+    namespace: data.namespace
+  };
+}
+
 // The RBAC scope at which to grant the environment identity a subscription-
 // visible role. A role assignment at resource-group scope still surfaces the
 // parent subscription to `az account list` / azure/login (fixing the
@@ -87,36 +115,41 @@ export async function applyProviderConfiguration(
   const awsCreds = ports.awsCredential();
 
   if (provider === "azure") {
-    const clientId = data.clientId || ports.optionalString(azureCreds.clientId);
-    const tenantId = data.tenantId || ports.optionalString(azureCreds.tenantId);
-    const subscriptionId =
-      data.subscriptionId || ports.optionalString(azureCreds.subscriptionId);
-    const rg = data.resourceGroup || "";
-    const k8s = data.cluster || "";
+    const azure = resolveAzureProviderConfiguration(
+      data,
+      azureCreds,
+      ports.optionalString
+    );
 
-    await ports.setEnvironmentVariable("AZURE_CLIENT_ID", clientId);
-    await ports.setEnvironmentVariable("AZURE_TENANT_ID", tenantId);
-    await ports.setEnvironmentVariable("AZURE_SUBSCRIPTION_ID", subscriptionId);
-    await ports.setEnvironmentVariable("AZURE_RESOURCE_GROUP", rg);
-    await ports.setEnvironmentVariable("AZURE_AKS_CLUSTER_NAME", k8s);
-    await ports.setEnvironmentVariable("AZURE_LOCATION", data.location);
-    await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
+    await ports.setEnvironmentVariable("AZURE_CLIENT_ID", azure.clientId);
+    await ports.setEnvironmentVariable("AZURE_TENANT_ID", azure.tenantId);
+    await ports.setEnvironmentVariable(
+      "AZURE_SUBSCRIPTION_ID",
+      azure.subscriptionId
+    );
+    await ports.setEnvironmentVariable(
+      "AZURE_RESOURCE_GROUP",
+      azure.resourceGroup
+    );
+    await ports.setEnvironmentVariable("AZURE_AKS_CLUSTER_NAME", azure.cluster);
+    await ports.setEnvironmentVariable("AZURE_LOCATION", azure.location);
+    await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", azure.namespace);
 
     const setCount = [
-      clientId,
-      tenantId,
-      subscriptionId,
-      rg,
-      k8s,
-      data.location,
-      data.namespace
+      azure.clientId,
+      azure.tenantId,
+      azure.subscriptionId,
+      azure.resourceGroup,
+      azure.cluster,
+      azure.location,
+      azure.namespace
     ].filter(Boolean).length;
     ports.pushStep(`Set ${setCount} environment value(s) for Azure.`);
     if (
       !cloudCredentialsComplete("azure", {
-        clientId,
-        tenantId,
-        subscriptionId
+        clientId: azure.clientId,
+        tenantId: azure.tenantId,
+        subscriptionId: azure.subscriptionId
       })
     ) {
       ports.pushStep(
@@ -133,10 +166,10 @@ export async function applyProviderConfiguration(
     // Azure Login with "No subscriptions found" (issue #280). Surface the exact
     // grant command rather than running it, since the identity may be shared or
     // owned by another team.
-    const roleScope = azureRoleScope(subscriptionId, rg);
+    const roleScope = azureRoleScope(azure.subscriptionId, azure.resourceGroup);
     ports.pushStep(
       'ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: ' +
-        buildManualRoleAssignmentGuidance(clientId, roleScope)
+        buildManualRoleAssignmentGuidance(azure.clientId, roleScope)
     );
     return { credentialsComplete: true, missingCredNote: "" };
   }

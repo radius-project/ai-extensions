@@ -101,6 +101,7 @@ export interface AzureAutoSetupOperationArtifactPort {
       role: string;
       scope: string;
       principalObjectId: string;
+      createdAt?: string;
     }
   ): void;
 }

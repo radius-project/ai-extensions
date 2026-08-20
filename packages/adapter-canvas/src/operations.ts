@@ -65,6 +65,7 @@ export type RoleAssignmentArtifact = {
   role: string;
   scope: string;
   principalObjectId: string | null;
+  createdAt: string;
 };
 
 export type GitHubEnvironmentArtifact = {
@@ -569,7 +570,8 @@ export function recordCreatedRoleAssignment(op: any, entry: any): any {
     principalObjectId:
       entry.principalObjectId == null || entry.principalObjectId === "" ?
         null
-      : String(entry.principalObjectId)
+      : String(entry.principalObjectId),
+    createdAt: String(entry.createdAt || nowIso())
   };
   if (!next.role || !next.scope) return op;
   if (

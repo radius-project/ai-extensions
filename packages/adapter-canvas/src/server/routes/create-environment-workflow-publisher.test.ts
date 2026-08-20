@@ -74,16 +74,20 @@ describe("applyProviderConfiguration", () => {
       azureCredential: () => ({
         clientId: "shared-client",
         tenantId: "shared-tenant",
-        subscriptionId: "shared-sub"
+        subscriptionId: "shared-sub",
+        resourceGroup: "shared-rg",
+        cluster: "shared-aks"
       })
     });
 
     await applyProviderConfiguration("azure", {}, ports);
 
-    expect(variables.slice(0, 3)).toEqual([
+    expect(variables.slice(0, 5)).toEqual([
       ["AZURE_CLIENT_ID", "shared-client"],
       ["AZURE_TENANT_ID", "shared-tenant"],
-      ["AZURE_SUBSCRIPTION_ID", "shared-sub"]
+      ["AZURE_SUBSCRIPTION_ID", "shared-sub"],
+      ["AZURE_RESOURCE_GROUP", "shared-rg"],
+      ["AZURE_AKS_CLUSTER_NAME", "shared-aks"]
     ]);
   });
 
