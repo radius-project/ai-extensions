@@ -47,6 +47,29 @@ export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([1, 2, 3]);
 // the surviving inventory and lets a later resume rebuild it.
 export type SetupArtifactPresence =
   "not_started" | "created" | "reused" | "deleted";
+
+// Who made the resource, which is a different question from whether Radius may
+// delete it. `state` answers "is this attempt allowed to remove it"; `origin`
+// answers "where did it come from", and only the second one can explain to a
+// customer why an App Registration they remember Radius creating is now being
+// reused rather than removed.
+//
+//   unknown              — nothing proven; the default, and what a record
+//                          written before this field existed restores to.
+//   pre_existing         — observed present before this operation touched it.
+//   radius_earlier_setup — pre-existing, and its Radius provenance proves an
+//                          earlier Radius setup for this repo and environment
+//                          created it.
+//   this_operation       — this operation observed absence and then created it.
+export type SetupArtifactOrigin =
+  "unknown" | "pre_existing" | "radius_earlier_setup" | "this_operation";
+
+const SETUP_ARTIFACT_ORIGINS: readonly SetupArtifactOrigin[] = Object.freeze([
+  "unknown",
+  "pre_existing",
+  "radius_earlier_setup",
+  "this_operation"
+]);
 export type SetupCommitMode = "not_started" | "default_branch" | "pull_request";
 export type SetupCleanupStatus =
   | "not_started"
@@ -58,13 +81,21 @@ export type SetupCleanupStatus =
 
 export type AzureAppArtifact = {
   state: SetupArtifactPresence;
+  origin: SetupArtifactOrigin;
   appId: string | null;
   displayName: string | null;
   serviceManagementReference: string | null;
 };
 
+// `created_candidate` is the Service Principal's own unprovable middle state:
+// the lookup before creation said the principal was absent, `az ad sp create`
+// then failed, and a second lookup found one. Radius almost certainly created
+// it — but "almost certainly" is not a licence to delete, so the state is
+// neither `created` nor the `reused` that would claim it was the customer's all
+// along.
 export type ServicePrincipalArtifact = {
-  state: SetupArtifactPresence;
+  state: SetupArtifactPresence | "created_candidate";
+  origin: SetupArtifactOrigin;
   appId: string | null;
   objectId: string | null;
 };
@@ -82,6 +113,7 @@ export type RoleAssignmentArtifact = {
 
 export type GitHubEnvironmentArtifact = {
   state: SetupArtifactPresence | "created_candidate";
+  origin: SetupArtifactOrigin;
   repo: string | null;
   name: string | null;
 };
@@ -433,12 +465,14 @@ export function createSetupArtifactLedger(): SetupArtifactLedger {
   return {
     azureApp: {
       state: "not_started",
+      origin: "unknown",
       appId: null,
       displayName: null,
       serviceManagementReference: null
     },
     servicePrincipal: {
       state: "not_started",
+      origin: "unknown",
       appId: null,
       objectId: null
     },
@@ -446,6 +480,7 @@ export function createSetupArtifactLedger(): SetupArtifactLedger {
     roleAssignments: [],
     githubEnvironment: {
       state: "not_started",
+      origin: "unknown",
       repo: null,
       name: null
     },
@@ -475,6 +510,12 @@ export function getSetupArtifactLedger(op: any): SetupArtifactLedger | null {
 function optionalShaString(value: any): string | null {
   const text = String(value == null ? "" : value).trim();
   return text ? text : null;
+}
+
+function readArtifactOrigin(value: any): SetupArtifactOrigin {
+  return SETUP_ARTIFACT_ORIGINS.includes(value as SetupArtifactOrigin) ?
+      (value as SetupArtifactOrigin)
+    : "unknown";
 }
 
 /**
@@ -509,16 +550,27 @@ export function readWorkflowCommitArtifact(value: any): WorkflowCommitArtifact {
  * branch on which schema version wrote the record. Unknown keys are dropped
  * rather than carried forward, and anything unreadable degrades to the
  * "nothing proven" default that fails destructive work closed.
+ *
+ * `origin` is normalized rather than merged: a record written before the field
+ * existed, and a saved value outside the vocabulary, both restore to "unknown",
+ * which claims nothing about who created the resource.
  */
 export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
   const ledger = createSetupArtifactLedger();
   if (!value || typeof value !== "object") return ledger;
   const source = value as Record<string, any>;
   return {
-    azureApp: { ...ledger.azureApp, ...(source.azureApp || {}) },
+    azureApp: {
+      ...ledger.azureApp,
+      ...(source.azureApp || {}),
+      origin: readArtifactOrigin(source.azureApp && source.azureApp.origin)
+    },
     servicePrincipal: {
       ...ledger.servicePrincipal,
-      ...(source.servicePrincipal || {})
+      ...(source.servicePrincipal || {}),
+      origin: readArtifactOrigin(
+        source.servicePrincipal && source.servicePrincipal.origin
+      )
     },
     federatedCredentials:
       Array.isArray(source.federatedCredentials) ?
@@ -528,7 +580,10 @@ export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
       Array.isArray(source.roleAssignments) ? source.roleAssignments : [],
     githubEnvironment: {
       ...ledger.githubEnvironment,
-      ...(source.githubEnvironment || {})
+      ...(source.githubEnvironment || {}),
+      origin: readArtifactOrigin(
+        source.githubEnvironment && source.githubEnvironment.origin
+      )
     },
     commit: {
       ...ledger.commit,
@@ -860,17 +915,119 @@ export function setCloudContext(op: any, kind: any, fields: any): any {
   return op;
 }
 
+// ─── Provenance reconciliation ───────────────────────────────────────────────
+// One rule, applied to every identity-bearing artifact in the ledger: a later
+// observation may strengthen what Radius has proven about a resource, never
+// weaken it.
+//
+// The defect this exists to make unrepresentable: a continuation re-enters the
+// same routes inside the same operation, finds the App Registration and Service
+// Principal this attempt just created, and records them as "reused". That reads
+// to the customer as "these were already yours", takes both out of the rollback
+// selection, and lists them under "Radius will keep — reused". Finding a
+// resource Radius created is not evidence that it pre-existed, so a `created`
+// this attempt proved outranks any number of later lookups that merely find it
+// present.
+//
+// A patch naming a *different* resource is not a downgrade — it is a different
+// resource — so it replaces the slot wholesale and carries its own provenance.
+
+const ARTIFACT_PRESENCE_STRENGTH: Record<string, number> = {
+  not_started: 0,
+  // A proven deletion is not a claim of ownership, so a later observation of a
+  // resource at the same identity is free to describe it afresh.
+  deleted: 0,
+  reused: 1,
+  created_candidate: 2,
+  created: 3
+};
+
+const ARTIFACT_ORIGIN_STRENGTH: Record<SetupArtifactOrigin, number> = {
+  unknown: 0,
+  pre_existing: 1,
+  radius_earlier_setup: 2,
+  this_operation: 3
+};
+
+function strongerPresence(current: any, next: any): any {
+  const currentRank = ARTIFACT_PRESENCE_STRENGTH[String(current)] ?? 0;
+  const nextRank = ARTIFACT_PRESENCE_STRENGTH[String(next)] ?? 0;
+  return nextRank >= currentRank ? next : current;
+}
+
+function strongerOrigin(current: any, next: any): SetupArtifactOrigin {
+  const currentOrigin = readArtifactOrigin(current);
+  const nextOrigin = readArtifactOrigin(next);
+  return (
+      ARTIFACT_ORIGIN_STRENGTH[nextOrigin] >=
+        ARTIFACT_ORIGIN_STRENGTH[currentOrigin]
+    ) ?
+      nextOrigin
+    : currentOrigin;
+}
+
+/**
+ * Merge one observation into a saved artifact without losing what is proven.
+ *
+ * Identity is computed on the merged record rather than on the patch, because a
+ * legitimate follow-up patch carries only the field it learned — the Service
+ * Principal's object id arrives in a second call with no appId — and judging
+ * that patch on its own would read as a different resource and discard the
+ * first call's state.
+ */
+export function reconcileArtifactProvenance(
+  artifactType: SetupCleanupArtifactType | string,
+  current: any,
+  patch: any
+): any {
+  const merged = { ...(current || {}) };
+  for (const [key, value] of Object.entries(patch || {})) {
+    // A later observation adds detail; it never erases a value the ledger
+    // already holds. Otherwise the reuse path's `displayName: null` wipes the
+    // name the create path recorded, and the customer is shown a bare GUID.
+    if (value === undefined || value === null || value === "") continue;
+    merged[key] = value;
+  }
+  const currentIdentity = cleanupArtifactIdentity(artifactType, current);
+  const mergedIdentity = cleanupArtifactIdentity(artifactType, merged);
+  if (currentIdentity && currentIdentity !== mergedIdentity) {
+    // A different resource occupies the slot now. Nothing the previous one
+    // proved transfers to it, so the record is rebuilt from the patch alone
+    // with the saved fields cleared rather than inherited.
+    const replaced: Record<string, unknown> = {};
+    for (const key of Object.keys(current || {})) replaced[key] = null;
+    replaced.state = "not_started";
+    replaced.origin = "unknown";
+    for (const [key, value] of Object.entries(patch || {})) {
+      if (value === undefined) continue;
+      replaced[key] = value;
+    }
+    return replaced;
+  }
+  merged.state = strongerPresence(current && current.state, merged.state);
+  merged.origin = strongerOrigin(current && current.origin, merged.origin);
+  return merged;
+}
+
 export function recordAzureApp(op: any, patch: any): any {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger || !patch) return op;
-  ledger.azureApp = { ...ledger.azureApp, ...patch };
+  ledger.azureApp = reconcileArtifactProvenance(
+    "azure_app",
+    ledger.azureApp,
+    patch
+  );
   return op;
 }
 
 export function recordServicePrincipal(op: any, patch: any): any {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger || !patch) return op;
-  ledger.servicePrincipal = { ...ledger.servicePrincipal, ...patch };
+  ledger.servicePrincipal = reconcileArtifactProvenance(
+    "service_principal",
+    ledger.servicePrincipal,
+    patch
+  );
   return op;
 }
 
@@ -920,27 +1077,54 @@ export function recordCreatedRoleAssignment(op: any, entry: any): any {
 export function recordGitHubEnvironment(op: any, patch: any): any {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger || !patch) return op;
-  const sameEnvironment =
-    typeof ledger.githubEnvironment.repo === "string" &&
-    typeof patch.repo === "string" &&
-    ledger.githubEnvironment.repo.toLowerCase() === patch.repo.toLowerCase() &&
-    typeof ledger.githubEnvironment.name === "string" &&
-    typeof patch.name === "string" &&
-    ledger.githubEnvironment.name.toLowerCase() === patch.name.toLowerCase();
-  const state =
-    (
-      sameEnvironment &&
-      ledger.githubEnvironment.state === "created_candidate" &&
-      patch.state === "reused"
-    ) ?
-      "created_candidate"
-    : patch.state;
-  ledger.githubEnvironment = {
-    ...ledger.githubEnvironment,
-    ...patch,
-    ...(state ? { state } : {})
-  };
+  ledger.githubEnvironment = reconcileArtifactProvenance(
+    "github_environment",
+    ledger.githubEnvironment,
+    patch
+  );
   return op;
+}
+
+/**
+ * Turn the GitHub environment this operation created from a candidate into a
+ * proven creation.
+ *
+ * GitHub's environment PUT is idempotent, so a 200 on its own never proves the
+ * request created anything — which is why the write is first recorded as
+ * `created_candidate`. Ownership becomes provable only when three facts line up
+ * and the caller has established all three before calling: this operation read
+ * the environment and GitHub answered "not found", the PUT that followed
+ * succeeded, and the exact identity was durably checkpointed. The caller owns
+ * the proof; this function owns the invariant that a promotion may only ever
+ * touch a candidate carrying that identity.
+ *
+ * Anything else — a different repo or environment name, a state that is already
+ * `reused`, a ledger that never recorded the candidate — is refused, so a
+ * mismatch leaves the safe under-claim in place rather than adopting a resource
+ * Radius may not own.
+ */
+export function promoteCreatedGitHubEnvironment(
+  op: any,
+  { repo, name }: { repo?: string | null; name?: string | null } = {}
+): boolean {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return false;
+  const artifact = ledger.githubEnvironment;
+  if (artifact.state !== "created_candidate") return false;
+  const provenRepo = String(repo == null ? "" : repo).trim();
+  const provenName = String(name == null ? "" : name).trim();
+  if (!provenRepo || !provenName) return false;
+  const provenIdentity = cleanupArtifactIdentity("github_environment", {
+    repo: provenRepo,
+    name: provenName
+  });
+  if (
+    provenIdentity !== cleanupArtifactIdentity("github_environment", artifact)
+  )
+    return false;
+  artifact.state = "created";
+  artifact.origin = "this_operation";
+  return true;
 }
 
 export function recordCommitState(op: any, patch: any): any {
@@ -1078,6 +1262,7 @@ function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
   return (
     ledger.azureApp.state === "created" ||
     ledger.servicePrincipal.state === "created" ||
+    ledger.servicePrincipal.state === "created_candidate" ||
     ledger.federatedCredentials.length > 0 ||
     ledger.roleAssignments.length > 0 ||
     ledger.githubEnvironment.state === "created" ||
@@ -1133,6 +1318,40 @@ function formatWorkflowFileLabel(file: any): string {
   const branch = String((file && file.branch) || "").trim();
   if (!path) return "";
   return branch ? `${path} on ${branch}` : path;
+}
+
+// ─── Reuse and unproven-ownership copy ───────────────────────────────────────
+// "Reused" on its own is the sentence that sends a customer to a support
+// thread: they watched Create Environment make an App Registration, and the
+// next screen says Radius is keeping it because it was reused. Both statements
+// are true of *different attempts*, and the resource's origin is what closes
+// that gap, so every retained entry carries the reason it is being kept.
+
+const UNPROVEN_GITHUB_ENVIRONMENT_ACTION =
+  "Radius cannot prove it created this GitHub environment, so it was left in place. Delete it yourself if this setup should be rolled back.";
+
+const UNPROVEN_SERVICE_PRINCIPAL_ACTION =
+  "Radius could not prove whether it created this Service Principal — the principal was absent before setup ran and present afterwards, but the create command did not report success — so it was left in place. Review it and delete it yourself if this setup should be rolled back.";
+
+const REUSE_NOUNS: Record<string, string> = {
+  azure_app: "App Registration",
+  service_principal: "Service Principal",
+  github_environment: "GitHub environment"
+};
+
+const RETAINED_KEEP_ACTION =
+  "This attempt created it, and the command you are confirming leaves it in place.";
+
+/** Why a resource is being kept rather than removed, in the customer's terms. */
+function reuseExplanation(kind: string, origin: any): string {
+  const noun = REUSE_NOUNS[kind] || "resource";
+  if (origin === "radius_earlier_setup") {
+    return `An earlier Radius setup for this repository and environment created this ${noun}, and this attempt reused it instead of creating a second one. Rolling back this attempt does not remove it.`;
+  }
+  if (origin === "pre_existing") {
+    return `This ${noun} already existed before this attempt started, so Radius reused it rather than creating one.`;
+  }
+  return `Radius did not create this ${noun} during this attempt, so it is left exactly as it was found.`;
 }
 
 // ─── Stable artifact identity ────────────────────────────────────────────────
@@ -1314,28 +1533,46 @@ export function projectCleanupSummary(op: any): any {
     pushRetainedArtifact(retained, {
       kind: "azure_app",
       reason: "reused",
-      target: formatAzureAppLabel(ledger.azureApp)
+      target: formatAzureAppLabel(ledger.azureApp),
+      detail: reuseExplanation("azure_app", ledger.azureApp.origin)
     });
   }
   if (ledger.servicePrincipal.state === "reused") {
     pushRetainedArtifact(retained, {
       kind: "service_principal",
       reason: "reused",
-      target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
+      target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger),
+      detail: reuseExplanation(
+        "service_principal",
+        ledger.servicePrincipal.origin
+      )
     });
   }
   if (ledger.githubEnvironment.state === "reused") {
     pushRetainedArtifact(retained, {
       kind: "github_environment",
       reason: "reused",
-      target: formatGitHubEnvironmentLabel(ledger.githubEnvironment)
+      target: formatGitHubEnvironmentLabel(ledger.githubEnvironment),
+      detail: reuseExplanation(
+        "github_environment",
+        ledger.githubEnvironment.origin
+      )
+    });
+  }
+  if (ledger.servicePrincipal.state === "created_candidate") {
+    pushRetainedArtifact(retained, {
+      kind: "service_principal",
+      reason: "manual_cleanup_required",
+      target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger),
+      detail: UNPROVEN_SERVICE_PRINCIPAL_ACTION
     });
   }
   if (ledger.githubEnvironment.state === "created_candidate") {
     pushRetainedArtifact(retained, {
       kind: "github_environment",
       reason: "manual_cleanup_required",
-      target: formatGitHubEnvironmentLabel(ledger.githubEnvironment)
+      target: formatGitHubEnvironmentLabel(ledger.githubEnvironment),
+      detail: UNPROVEN_GITHUB_ENVIRONMENT_ACTION
     });
   }
   ledger.commit.workflowFiles.forEach((entry: any) => {
@@ -1518,13 +1755,15 @@ function survivingCreatedArtifacts(ledger: any): SurvivingArtifact[] {
  * A setup that reused an existing App Registration and Service Principal and
  * then failed created nothing, so telling the customer "some resources exist"
  * would send them looking for resources that are not this attempt's to clean
- * up. The unprovable GitHub environment counts: Radius cannot delete it, and it
- * is exactly the resource the customer has to decide about by hand.
+ * up. The unprovable GitHub environment and Service Principal count: Radius
+ * cannot delete either one, and they are exactly the resources the customer has
+ * to decide about by hand.
  */
 export function hasSurvivingCreatedArtifacts(op: any): boolean {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return false;
   if (ledger.githubEnvironment.state === "created_candidate") return true;
+  if (ledger.servicePrincipal.state === "created_candidate") return true;
   const removedKeys = removedArtifactKeys(cleanupAttemptResults(ledger));
   return survivingCreatedArtifacts(ledger).some(
     (entry) => ![...entry.keys].some((key: string) => removedKeys.has(key))
@@ -1585,8 +1824,17 @@ function projectPartialState(
       manualActionRequired.push({
         kind: "github_environment",
         target,
-        action:
-          "Radius cannot prove it created this GitHub environment, so it was left in place. Delete it yourself if this setup should be rolled back."
+        action: UNPROVEN_GITHUB_ENVIRONMENT_ACTION
+      });
+    }
+  }
+  if (ledger.servicePrincipal.state === "created_candidate") {
+    const target = formatServicePrincipalLabel(ledger.servicePrincipal, ledger);
+    if (!manualActionRequired.some((entry: any) => entry.target === target)) {
+      manualActionRequired.push({
+        kind: "service_principal",
+        target,
+        action: UNPROVEN_SERVICE_PRINCIPAL_ACTION
       });
     }
   }
@@ -1595,17 +1843,26 @@ function projectPartialState(
   if (ledger.azureApp.state === "reused")
     reused.push({
       kind: "azure_app",
-      target: formatAzureAppLabel(ledger.azureApp)
+      target: formatAzureAppLabel(ledger.azureApp),
+      detail: reuseExplanation("azure_app", ledger.azureApp.origin)
     });
   if (ledger.servicePrincipal.state === "reused")
     reused.push({
       kind: "service_principal",
-      target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
+      target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger),
+      detail: reuseExplanation(
+        "service_principal",
+        ledger.servicePrincipal.origin
+      )
     });
   if (ledger.githubEnvironment.state === "reused")
     reused.push({
       kind: "github_environment",
-      target: formatGitHubEnvironmentLabel(ledger.githubEnvironment)
+      target: formatGitHubEnvironmentLabel(ledger.githubEnvironment),
+      detail: reuseExplanation(
+        "github_environment",
+        ledger.githubEnvironment.origin
+      )
     });
 
   const surviving = survivingCreatedArtifacts(ledger);
@@ -1763,7 +2020,10 @@ export function nextIncompleteSetupStep(op: any): string {
   if (!ledger) return "azure_app";
   // A rolled-back artifact is incomplete again: cleanup proved it is gone, so
   // resuming past it would leave the setup permanently missing that resource.
-  const present = (state: any) => state === "created" || state === "reused";
+  // A `created_candidate` is the opposite case — the resource is there, only its
+  // provenance is unproven — so a resume must not try to create a second one.
+  const present = (state: any) =>
+    state === "created" || state === "reused" || state === "created_candidate";
   if (op?.provider === "azure") {
     if (!present(ledger.azureApp.state)) return "azure_app";
     if (!present(ledger.servicePrincipal.state)) return "service_principal";
@@ -1771,11 +2031,7 @@ export function nextIncompleteSetupStep(op: any): string {
       return "federated_credentials";
     if (ledger.roleAssignments.length === 0) return "role_assignments";
   }
-  if (
-    !present(ledger.githubEnvironment.state) &&
-    ledger.githubEnvironment.state !== "created_candidate"
-  )
-    return "github_environment";
+  if (!present(ledger.githubEnvironment.state)) return "github_environment";
   if (ledger.commit.workflowFiles.length === 0) return "workflow_commit";
   return "verification";
 }
@@ -2450,7 +2706,10 @@ function projectContinuationPreview(op: any, resumeFrom: any): any {
   const ledger = getSetupArtifactLedger(op);
   const reuses: Array<{ kind: string; target: string }> = [];
   if (ledger) {
-    const present = (state: any) => state === "created" || state === "reused";
+    const present = (state: any) =>
+      state === "created" ||
+      state === "reused" ||
+      state === "created_candidate";
     if (present(ledger.azureApp.state))
       reuses.push({
         kind: "azure_app",
@@ -2506,14 +2765,20 @@ function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
     ...(summary.reused || []).map((entry: any) => ({
       kind: entry.kind,
       target: entry.target,
-      reason: "reused"
+      reason: "reused",
+      // The dialog renders this verbatim beside the resource. Without it,
+      // "Radius will keep — App Registration" is indistinguishable from a bug
+      // to a customer who watched Radius create that App Registration in an
+      // earlier attempt.
+      action: String(entry.detail || "")
     })),
     ...(summary.retainedArtifacts || [])
       .filter((entry: any) => !removeKeys.has(`${entry.kind}#${entry.target}`))
       .map((entry: any) => ({
         kind: entry.kind,
         target: entry.target,
-        reason: "retained"
+        reason: "retained",
+        action: RETAINED_KEEP_ACTION
       }))
   ];
   return {

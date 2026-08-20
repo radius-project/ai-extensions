@@ -55,6 +55,7 @@ describe("ensureGitHubEnvironment", () => {
     const ensured = await ensureGitHubEnvironment({
       repo: "octo/app",
       requestedName: "Production West",
+      now: () => 1_700_000_000_000,
       readGitHubJson: async (apiPath) => {
         reads.push(apiPath);
         return apiPath === "/repos/octo/app" ?
@@ -71,7 +72,11 @@ describe("ensureGitHubEnvironment", () => {
 
     expect(ensured).toEqual({
       name: "Production West",
-      state: "created_candidate"
+      state: "created_candidate",
+      creationEvidence: {
+        putResponseBody: JSON.stringify({ name: "Production West" }),
+        putStartedAtMs: 1_700_000_000_000
+      }
     });
     expect(reads).toEqual([
       "/repos/octo/app/environments/Production%20West",

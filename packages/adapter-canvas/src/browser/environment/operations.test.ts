@@ -10,6 +10,7 @@ import {
   ROLLBACK_IDS,
   VERIFY_STATUS_PATH,
   initializeEnvironmentOperations,
+  previewEntryLabel,
   previewResourceLabel,
   parseOperationResponse,
   parseVerifyStatus
@@ -340,7 +341,7 @@ describe("parseOperationResponse", () => {
           warnings: ["partial cleanup", "", 7, null],
           created: [{ target: "app-radius-dev" }, { target: "" }],
           retainedArtifacts: [{ target: "ghcr package" }],
-          reused: [{ target: "existing-sp" }],
+          reused: [{ target: "existing-sp", detail: "It already existed." }],
           cleaned: [{ target: "federated credential" }],
           manualActionRequired: [
             { target: "role assignment", action: "Remove it in the portal" },
@@ -355,13 +356,13 @@ describe("parseOperationResponse", () => {
       state: "succeeded_with_warnings",
       rollbackBeforeCommit: false,
       retry: { startsCleanly: true, guidance: "Retry any time." },
-      removed: [{ target: "rg-dev" }],
-      retained: [{ target: "kv-dev" }],
+      removed: [{ target: "rg-dev", detail: "" }],
+      retained: [{ target: "kv-dev", detail: "" }],
       warnings: ["partial cleanup"],
-      created: [{ target: "app-radius-dev" }],
-      retainedArtifacts: [{ target: "ghcr package" }],
-      reused: [{ target: "existing-sp" }],
-      cleaned: [{ target: "federated credential" }],
+      created: [{ target: "app-radius-dev", detail: "" }],
+      retainedArtifacts: [{ target: "ghcr package", detail: "" }],
+      reused: [{ target: "existing-sp", detail: "It already existed." }],
+      cleaned: [{ target: "federated credential", detail: "" }],
       manualActionRequired: [
         { target: "role assignment", action: "Remove it in the portal" },
         { target: "orphan app", action: "" }
@@ -1306,7 +1307,12 @@ describe("partial-state inventory", () => {
         cleanup: {
           created: [{ target: "app radius-dev" }],
           retainedArtifacts: [{ target: "ghcr package" }],
-          reused: [{ target: "existing service principal" }],
+          reused: [
+            {
+              target: "existing service principal",
+              detail: "An earlier Radius setup created it."
+            }
+          ],
           cleaned: [{ target: "federated credential" }],
           manualActionRequired: [
             { target: "role assignment", action: "Remove it in the portal" },
@@ -1321,8 +1327,10 @@ describe("partial-state inventory", () => {
       browser.els[id].children.map((child) => child.textContent ?? "");
     expect(listed(PROGRESS_IDS.stateCreatedList)).toEqual(["app radius-dev"]);
     expect(listed(PROGRESS_IDS.stateRetainedList)).toEqual(["ghcr package"]);
+    // A reused resource carries why it is being kept: without it, a customer who
+    // watched Radius create the resource reads the group as a bug.
     expect(listed(PROGRESS_IDS.stateReusedList)).toEqual([
-      "existing service principal"
+      "existing service principal — An earlier Radius setup created it."
     ]);
     expect(listed(PROGRESS_IDS.stateCleanedList)).toEqual([
       "federated credential"
@@ -2032,6 +2040,26 @@ describe("previewResourceLabel", () => {
   });
 });
 
+describe("previewEntryLabel", () => {
+  it("carries the server's reason beside the resource it explains", () => {
+    expect(
+      previewEntryLabel({
+        kind: "azure_app",
+        target: "radius-dev (app-1)",
+        action: "An earlier Radius setup created it."
+      })
+    ).toBe(
+      "App Registration: radius-dev (app-1) — An earlier Radius setup created it."
+    );
+  });
+
+  it("says nothing extra when the server sent no reason", () => {
+    expect(
+      previewEntryLabel({ kind: "azure_app", target: "radius-dev", action: "" })
+    ).toBe("App Registration: radius-dev");
+  });
+});
+
 describe("rollback confirmation", () => {
   const rollbackAction = {
     id: "rollback",
@@ -2047,7 +2075,13 @@ describe("rollback confirmation", () => {
     cancelLabel: "Keep resources",
     preview: {
       removes: [{ kind: "azure_app", target: "radius-dev" }],
-      keeps: [{ kind: "service_principal", target: "existing-sp" }],
+      keeps: [
+        {
+          kind: "service_principal",
+          target: "existing-sp",
+          action: "It already existed before this attempt started."
+        }
+      ],
       manualActionRequired: [
         { kind: "role_assignment", target: "Contributor", action: "Remove it" }
       ]
@@ -2086,7 +2120,9 @@ describe("rollback confirmation", () => {
       browser.els[ROLLBACK_IDS.keepList].children.map(
         (child) => child.textContent
       )
-    ).toEqual(["Service Principal: existing-sp"]);
+    ).toEqual([
+      "Service Principal: existing-sp — It already existed before this attempt started."
+    ]);
     expect(
       browser.els[ROLLBACK_IDS.manualList].children.map(
         (child) => child.textContent

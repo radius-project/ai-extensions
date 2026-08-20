@@ -220,6 +220,8 @@ export interface OperationFailure {
 
 export interface OperationCleanupEntry {
   readonly target: string;
+  /** The server's sentence about why this entry is in its group, if any. */
+  readonly detail: string;
 }
 
 export interface OperationManualAction {
@@ -439,8 +441,10 @@ function parseCleanupEntries(value: unknown): OperationCleanupEntry[] {
   if (!Array.isArray(value)) return [];
   const entries: OperationCleanupEntry[] = [];
   for (const entry of value) {
-    const target = isRecord(entry) ? readString(entry, "target") : "";
-    if (target !== "") entries.push({ target });
+    if (!isRecord(entry)) continue;
+    const target = readString(entry, "target");
+    if (target !== "")
+      entries.push({ target, detail: readString(entry, "detail") });
   }
   return entries;
 }
@@ -770,6 +774,19 @@ export function previewResourceLabel(entry: OperationPreviewEntry): string {
   return `${labels[entry.kind] ?? "Resource"}: ${entry.target}`;
 }
 
+/**
+ * The same name, followed by the server's sentence about it when there is one.
+ *
+ * Used for every list whose entries need a reason as well as a name. "Radius
+ * will keep — App Registration: radius-deploy-octo-app" is the line a customer
+ * reads as a bug when they watched Radius create that App Registration, so the
+ * reason travels with it rather than being left to the reader.
+ */
+export function previewEntryLabel(entry: OperationPreviewEntry): string {
+  const label = previewResourceLabel(entry);
+  return entry.action === "" ? label : `${label} — ${entry.action}`;
+}
+
 function commandStatusText(action: OperationAction): string {
   return COMMAND_STATUS_TEXT[action.kind] ?? COMMAND_ACCEPTED_MESSAGE;
 }
@@ -1093,7 +1110,9 @@ export function initializeEnvironmentOperations(
     const shown = [
       ...PARTIAL_STATE_GROUPS.map((entry) =>
         setStateList(
-          cleanup[entry.group].map((item) => item.target),
+          cleanup[entry.group].map((item) =>
+            item.detail === "" ? item.target : `${item.target} — ${item.detail}`
+          ),
           entry.list,
           entry.block
         )
@@ -1209,11 +1228,6 @@ export function initializeEnvironmentOperations(
 
   scope.onTeardown(unbindRollbackKeydown);
 
-  function manualPreviewLabel(entry: OperationPreviewEntry): string {
-    const label = previewResourceLabel(entry);
-    return entry.action === "" ? label : `${label} — ${entry.action}`;
-  }
-
   function openRollbackDialog(
     action: OperationAction,
     op: OperationRecord,
@@ -1241,12 +1255,12 @@ export function initializeEnvironmentOperations(
       ROLLBACK_IDS.removeBlock
     );
     setRollbackList(
-      (preview?.keeps ?? []).map(previewResourceLabel),
+      (preview?.keeps ?? []).map(previewEntryLabel),
       ROLLBACK_IDS.keepList,
       ROLLBACK_IDS.keepBlock
     );
     setRollbackList(
-      (preview?.manualActionRequired ?? []).map(manualPreviewLabel),
+      (preview?.manualActionRequired ?? []).map(previewEntryLabel),
       ROLLBACK_IDS.manualList,
       ROLLBACK_IDS.manualBlock
     );

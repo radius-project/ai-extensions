@@ -24,6 +24,7 @@ import {
   readEnsuredGitHubEnvironment,
   type GitHubEnvironmentReadResult
 } from "../services/github-environment.js";
+import { proveGitHubEnvironmentCreated } from "../services/github-environment-provenance.js";
 import type { WorkflowTempFilePort } from "./create-environment-workflow-committer.js";
 import type {
   CreateEnvironmentCommandResult,
@@ -140,8 +141,16 @@ export interface CreateEnvironmentDependencies
   ): void;
   recordGitHubEnvironment(
     operation: CreateEnvironmentOperation,
-    patch: { state: string; repo: string; name: string }
+    patch: { state: string; repo: string; name: string; origin: string }
   ): void;
+  // Promotes the environment this request wrote from "Radius may own this" to
+  // "Radius created this", and only after the identity is durably saved. It
+  // answers false when the ledger cannot match the proof, which leaves the safe
+  // under-claim in place.
+  promoteCreatedGitHubEnvironment(
+    operation: CreateEnvironmentOperation,
+    identity: { repo: string; name: string }
+  ): boolean;
   envListCacheDelete(repo: string): void;
   ociStateBackend: string;
   defaultStateArchive: string;
@@ -359,7 +368,8 @@ export async function handleCreateEnvironment(
         requestedName: envName,
         readGitHubJson: (apiPath) =>
           dependencies.readGitHubJson(apiPath, selectedExecutor),
-        runGh: (args) => selectedExecutor.run(args)
+        runGh: (args) => selectedExecutor.run(args),
+        now: dependencies.now
       });
     } catch (error) {
       if (
@@ -439,7 +449,9 @@ export async function handleCreateEnvironment(
     dependencies.recordGitHubEnvironment(operation, {
       state: ensuredEnvironment.state,
       repo: targetRepo,
-      name: envName
+      name: envName,
+      origin:
+        ensuredEnvironment.state === "reused" ? "pre_existing" : "unknown"
     });
     if (requestedEnvName === envName) {
       steps.push(`✅ GitHub environment "${envName}" resolved.`);
@@ -449,6 +461,38 @@ export async function handleCreateEnvironment(
       );
     }
     if (!(await checkpoint())) return;
+    const creationEvidence = ensuredEnvironment.creationEvidence;
+    if (
+      ensuredEnvironment.state === "created_candidate" &&
+      creationEvidence
+    ) {
+      const proof = proveGitHubEnvironmentCreated({
+        preflight: ensuredEnvironment.state,
+        putResponseBody: creationEvidence.putResponseBody,
+        putStartedAtMs: creationEvidence.putStartedAtMs
+      });
+      if (
+        proof.proven &&
+        dependencies.promoteCreatedGitHubEnvironment(operation, {
+          repo: targetRepo,
+          name: envName
+        })
+      ) {
+        steps.push(
+          `✅ GitHub environment "${envName}" created by this setup — Radius owns it and can remove it.`
+        );
+        await dependencies.persistBestEffort({
+          operation,
+          persist: () => dependencies.persistOperations(),
+          report: (diagnostic) =>
+            dependencies.reportOperationDiagnostic(diagnostic)
+        });
+      } else if (!proof.proven) {
+        steps.push(
+          `ℹ️ Radius left GitHub environment "${envName}" outside its cleanup scope. ${proof.detail}`
+        );
+      }
+    }
 
     const defaultBranch =
       (await dependencies.getDefaultBranch(targetRepo, selectedExecutor)) ||

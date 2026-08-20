@@ -119,7 +119,7 @@ export function environmentsPaneMarkup(
           <ul id="env-progress-state-retained" class="env-progress__failure-list"></ul>
         </div>
         <div id="env-progress-state-reused-block" class="env-progress__failure-block" style="display:none;">
-          <div class="env-progress__failure-label">Reused — Radius does not own these</div>
+          <div class="env-progress__failure-label">Reused — not created by this attempt</div>
           <ul id="env-progress-state-reused" class="env-progress__failure-list"></ul>
         </div>
         <div id="env-progress-state-cleaned-block" class="env-progress__failure-block" style="display:none;">

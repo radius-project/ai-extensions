@@ -149,7 +149,12 @@ export interface AzureAutoSetupDependencies {
     clientId: string,
     runAz: (args: string[]) => Promise<Partial<AzureAutoSetupCommandResult>>
   ): Promise<
-    | { ok: true; state: "created" | "reused"; objectId: string | null }
+    | {
+        ok: true;
+        state: "created" | "reused" | "created_candidate";
+        origin: "pre_existing" | "this_operation";
+        objectId: string | null;
+      }
     | { ok: false; stderr: string }
   >;
   finalizeSetupFailure(

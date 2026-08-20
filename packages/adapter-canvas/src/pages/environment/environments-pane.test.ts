@@ -155,7 +155,7 @@ describe("environmentsPaneMarkup", () => {
       expect(html).toContain(`id="${id}"`);
       expect(html).toContain(`id="${id}-block"`);
     }
-    expect(html).toContain("Reused — Radius does not own these");
+    expect(html).toContain("Reused — not created by this attempt");
     expect(html).toContain("Needs an action from you");
   });
 
