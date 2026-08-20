@@ -4,7 +4,7 @@ import {
   createGraphPlanningWorkflows,
   type GraphPlanningWorkflows,
   type GraphWorkflowDependencies,
-  type GraphWorkflowOutcome,
+  type GraphWorkflowOutcome
 } from "./graph-workflows.js";
 import type {
   AppBicepSelection,
@@ -12,11 +12,11 @@ import type {
   GraphInstanceEntry,
   GraphPipeline,
   StageArtifactsInput,
-  StagedRadArtifacts,
+  StagedRadArtifacts
 } from "./graph-pipeline.js";
 import {
   prepareSourceRefResources,
-  setSourceRefResources,
+  setSourceRefResources
 } from "../../source-refs.js";
 import { defaultBranchForState } from "../../workspace.js";
 import {
@@ -24,7 +24,7 @@ import {
   beginPlannedGraphRequest,
   canReuseModeledGraph,
   isCurrentPlannedGraphRequest,
-  isCurrentSourceRefToken,
+  isCurrentSourceRefToken
 } from "../../server.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 
@@ -90,19 +90,19 @@ interface Harness {
   setEntryMissing(missing: boolean): void;
   run(
     workflow: keyof GraphPlanningWorkflows,
-    body: string,
+    body: string
   ): Promise<GraphWorkflowOutcome>;
 }
 
 function selectionOf(
-  overrides: Partial<AppBicepSelection> = {},
+  overrides: Partial<AppBicepSelection> = {}
 ): AppBicepSelection {
   return {
     content: "resource app 'Radius.Compute/containers' = {}",
     fromWorkspace: false,
     branch: "main",
     bicepPath: "",
-    ...overrides,
+    ...overrides
   };
 }
 
@@ -126,7 +126,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     compiled: {},
     jsonPath: "",
     definitionHash: "hash-a",
-    ...script,
+    ...script
   };
   const recipes: unknown[] = [];
   const plannedOutputs: unknown[] = [];
@@ -134,7 +134,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   function requireScripted<T>(
     table: Record<string, T>,
     key: string,
-    stage: string,
+    stage: string
   ): T {
     const value = table[key];
     if (!value) throw new Error(`unscripted ${stage} for branch: ${key}`);
@@ -147,7 +147,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       const failure = harnessScript.selectThrows?.[branch];
       if (failure) return Promise.reject(failure);
       return Promise.resolve(
-        requireScripted(harnessScript.selections, branch, "selectAppBicep"),
+        requireScripted(harnessScript.selections, branch, "selectAppBicep")
       );
     },
     bicepPathOf: (selection) => selection.bicepPath || ".radius/app.bicep",
@@ -156,7 +156,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       const staged = requireScripted(
         harnessScript.staged,
         branch,
-        "stageArtifacts",
+        "stageArtifacts"
       );
       harnessScript.afterStage?.();
       return Promise.resolve(staged);
@@ -168,7 +168,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       const compiled = requireScripted(
         harnessScript.compiled,
         selection.branch,
-        "compileResources",
+        "compileResources"
       );
       harnessScript.afterCompile?.();
       return Promise.resolve(compiled);
@@ -179,7 +179,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     discardStagedArtifacts: (staged) => {
       order.push(`discard:${staged.dir}`);
       if (harnessScript.discardThrows) throw harnessScript.discardThrows;
-    },
+    }
   };
 
   const dependencies: GraphWorkflowDependencies = {
@@ -214,7 +214,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       computeGraphDiff(baseResources, headResources) as CanvasGraphResource[],
     record,
     optionalString,
-    errorMessage,
+    errorMessage
   };
 
   const workflows = createGraphPlanningWorkflows(dependencies);
@@ -236,7 +236,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     },
     run(workflow, body) {
       return workflows[workflow]({ instanceId: "panel-a", body });
-    },
+    }
   };
 }
 
@@ -261,7 +261,7 @@ describe("graph planning workflows", () => {
       expect(outcome.status).toBe(503);
       expect(outcome.kind).toBe("bare");
       expect(JSON.stringify(outcome.payload)).toBe(
-        '{"error":"Canvas server state is unavailable."}',
+        '{"error":"Canvas server state is unavailable."}'
       );
     });
 
@@ -271,7 +271,7 @@ describe("graph planning workflows", () => {
       const outcome = await harness.run("loadGraph", "{}");
       expect(outcome.status).toBe(200);
       expect(JSON.stringify(outcome.payload)).toBe(
-        '{"error":"Please select a repository."}',
+        '{"error":"Please select a repository."}'
       );
       // The claim happens first, so an in-flight compile is invalidated even by
       // a request that goes no further than this.
@@ -281,7 +281,7 @@ describe("graph planning workflows", () => {
 
     it("hands off to the app-bicep skill when the branch has no app.bicep", async () => {
       const harness = start({
-        selections: { main: selectionOf({ content: null }) },
+        selections: { main: selectionOf({ content: null }) }
       });
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
       expect(outcome.status).toBe(200);
@@ -290,19 +290,19 @@ describe("graph planning workflows", () => {
           "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.",
         needsAppBicep: true,
         repo: "octo/app",
-        branch: "main",
+        branch: "main"
       });
       expect(harness.handoffs).toEqual([
         {
           repo: "octo/app",
           branches: "main",
           page: "graph",
-          hasEntry: true,
-        },
+          hasEntry: true
+        }
       ]);
       expect(messages(harness.state)).toEqual([
         "Checking octo/app for existing app.bicep...",
-        ".radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill.",
+        ".radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill."
       ]);
     });
 
@@ -312,13 +312,13 @@ describe("graph planning workflows", () => {
           "feature/x": selectionOf({
             branch: "feature/x",
             fromWorkspace: true,
-            bicepPath: "infra/app.bicep",
-          }),
+            bicepPath: "infra/app.bicep"
+          })
         },
         staged: { "feature/x": { dir: "/ws/.radius", remote: false } },
         compiled: { "feature/x": [{ id: "res-a" } as CanvasGraphResource] },
         jsonPath: "/ws/infra/app-graph.json",
-        definitionHash: "hash-x",
+        definitionHash: "hash-x"
       });
       harness.state.workspaceBranch = "feature/x";
 
@@ -329,12 +329,12 @@ describe("graph planning workflows", () => {
       expect(outcome.payload).toEqual({
         reload: true,
         resources: [{ id: "res-a" }],
-        fromWorkspace: true,
+        fromWorkspace: true
       });
       expect(harness.order).toEqual([
         "select:feature/x",
         "stage:feature/x",
-        "compile:feature/x",
+        "compile:feature/x"
       ]);
       expect(harness.state).toMatchObject({
         graphTargetRepo: "octo/app",
@@ -342,13 +342,13 @@ describe("graph planning workflows", () => {
         graphFromWorkspace: true,
         activeGraphView: "graph",
         graphLoaded: true,
-        graphDefinitionHash: "hash-x",
+        graphDefinitionHash: "hash-x"
       });
       expect(harness.state.graphResources).toEqual([{ id: "res-a" }]);
       expect(messages(harness.state)).toEqual([
         "Checking octo/app for existing app.bicep...",
         "Found existing app.bicep — parsing resources...",
-        "Mapped 1 resource(s) — rendering graph...",
+        "Mapped 1 resource(s) — rendering graph..."
       ]);
     });
 
@@ -356,16 +356,16 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "", remote: false } },
-        compiled: { main: [] },
+        compiled: { main: [] }
       });
       const outcome = await harness.run(
         "loadGraph",
-        '{"repo":"octo/app","refresh":true}',
+        '{"repo":"octo/app","refresh":true}'
       );
       expect(outcome.payload).toEqual({
         reload: false,
         resources: [],
-        fromWorkspace: false,
+        fromWorkspace: false
       });
     });
 
@@ -377,7 +377,7 @@ describe("graph planning workflows", () => {
           // A newer request claims the generation while this one was staging.
           harness.state.graphBuildGeneration =
             (harness.state.graphBuildGeneration || 0) + 1;
-        },
+        }
       });
 
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
@@ -390,7 +390,7 @@ describe("graph planning workflows", () => {
       expect(harness.order).toEqual([
         "select:main",
         "stage:main",
-        "discard:/tmp/staged",
+        "discard:/tmp/staged"
       ]);
     });
 
@@ -401,7 +401,7 @@ describe("graph planning workflows", () => {
         discardThrows: new Error("EBUSY"),
         afterStage: () => {
           harness.state.graphBuildGeneration = 99;
-        },
+        }
       });
 
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
@@ -414,7 +414,7 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "/tmp/staged", remote: true } },
-        definitionHash: "hash-a",
+        definitionHash: "hash-a"
       });
       Object.assign(harness.state, {
         graphLoaded: true,
@@ -422,12 +422,12 @@ describe("graph planning workflows", () => {
         graphBranch: "main",
         graphFromWorkspace: true,
         graphDefinitionHash: "hash-a",
-        graphResources: [{ id: "cached" }] as CanvasGraphResource[],
+        graphResources: [{ id: "cached" }] as CanvasGraphResource[]
       });
 
       const outcome = await harness.run(
         "loadGraph",
-        '{"repo":"octo/app","refresh":true}',
+        '{"repo":"octo/app","refresh":true}'
       );
 
       expect(outcome.status).toBe(200);
@@ -435,7 +435,7 @@ describe("graph planning workflows", () => {
         reload: false,
         resources: [{ id: "cached" }],
         fromWorkspace: false,
-        cached: true,
+        cached: true
       });
       // Persisted provenance follows the response, so the next page render
       // cannot contradict what this request just reported.
@@ -444,7 +444,7 @@ describe("graph planning workflows", () => {
       expect(harness.order).toEqual([
         "select:main",
         "stage:main",
-        "discard:/tmp/staged",
+        "discard:/tmp/staged"
       ]);
     });
 
@@ -453,19 +453,19 @@ describe("graph planning workflows", () => {
         selections: { main: selectionOf() },
         staged: { main: { dir: "/tmp/staged", remote: true } },
         definitionHash: "hash-a",
-        discardThrows: new Error("EBUSY"),
+        discardThrows: new Error("EBUSY")
       });
       Object.assign(harness.state, {
         graphLoaded: true,
         graphTargetRepo: "octo/app",
         graphBranch: "main",
         graphDefinitionHash: "hash-a",
-        graphResources: [] as CanvasGraphResource[],
+        graphResources: [] as CanvasGraphResource[]
       });
 
       const outcome = await harness.run(
         "loadGraph",
-        '{"repo":"octo/app","refresh":true}',
+        '{"repo":"octo/app","refresh":true}'
       );
 
       expect(outcome.status).toBe(400);
@@ -477,19 +477,19 @@ describe("graph planning workflows", () => {
         selections: { main: selectionOf() },
         staged: { main: { dir: "", remote: false } },
         compiled: { main: [{ id: "fresh" } as CanvasGraphResource] },
-        definitionHash: "hash-b",
+        definitionHash: "hash-b"
       });
       Object.assign(harness.state, {
         graphLoaded: true,
         graphTargetRepo: "octo/app",
         graphBranch: "main",
         graphDefinitionHash: "hash-a",
-        graphResources: [{ id: "cached" }] as CanvasGraphResource[],
+        graphResources: [{ id: "cached" }] as CanvasGraphResource[]
       });
 
       const outcome = await harness.run(
         "loadGraph",
-        '{"repo":"octo/app","refresh":true}',
+        '{"repo":"octo/app","refresh":true}'
       );
 
       expect(outcome.payload.resources).toEqual([{ id: "fresh" }]);
@@ -503,7 +503,7 @@ describe("graph planning workflows", () => {
         compiled: { main: [] },
         afterCompile: () => {
           harness.state.graphBuildGeneration = 42;
-        },
+        }
       });
 
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
@@ -521,7 +521,7 @@ describe("graph planning workflows", () => {
         compiled: { main: [] },
         afterCompile: () => {
           harness.state.graphBuildGeneration = 42;
-        },
+        }
       });
 
       await harness.run("loadGraph", '{"repo":"octo/app"}');
@@ -529,7 +529,7 @@ describe("graph planning workflows", () => {
       // "Mapped N resource(s)" is generation-gated and must not appear.
       expect(messages(harness.state)).toEqual([
         "Checking octo/app for existing app.bicep...",
-        "Found existing app.bicep — parsing resources...",
+        "Found existing app.bicep — parsing resources..."
       ]);
     });
 
@@ -543,9 +543,9 @@ describe("graph planning workflows", () => {
           // must be refused even though the generation still matches.
           prepareSourceRefResources(harness.entry, "graph", {
             repo: "octo/other",
-            branch: "main",
+            branch: "main"
           });
-        },
+        }
       });
 
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
@@ -571,7 +571,7 @@ describe("graph planning workflows", () => {
 
     it("hands off as the graph page when the branch has no app.bicep", async () => {
       const harness = start({
-        selections: { main: selectionOf({ content: null }) },
+        selections: { main: selectionOf({ content: null }) }
       });
 
       const outcome = await harness.run("planGraph", '{"repo":"octo/app"}');
@@ -582,7 +582,7 @@ describe("graph planning workflows", () => {
           "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.",
         needsAppBicep: true,
         repo: "octo/app",
-        branch: "main",
+        branch: "main"
       });
       // "graph", not "planned": the handoff key is derived from the page.
       expect(harness.handoffs[0]?.page).toBe("graph");
@@ -592,17 +592,17 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "", remote: false } },
-        compiled: { main: [{ id: "res-a" } as CanvasGraphResource] },
+        compiled: { main: [{ id: "res-a" } as CanvasGraphResource] }
       });
       harness.recipes.push({
         resourceType: "Radius.Data/redisCaches",
-        concreteResources: [{ type: "Microsoft.Cache/redis" }],
+        concreteResources: [{ type: "Microsoft.Cache/redis" }]
       });
       harness.plannedOutputs.push({ id: "res-a" }, { id: "redis" });
 
       const outcome = await harness.run(
         "planGraph",
-        '{"repo":"octo/app","environment":"prod"}',
+        '{"repo":"octo/app","environment":"prod"}'
       );
 
       expect(outcome.status).toBe(200);
@@ -612,8 +612,8 @@ describe("graph planning workflows", () => {
         {
           resources: [{ id: "res-a" }],
           recipes: harness.recipes,
-          provider: "azure",
-        },
+          provider: "azure"
+        }
       ]);
       expect(harness.state).toMatchObject({
         plannedRepo: "octo/app",
@@ -621,12 +621,12 @@ describe("graph planning workflows", () => {
         plannedFromWorkspace: false,
         plannedProvider: "azure",
         plannedEnvironment: "prod",
-        activeGraphView: "planned",
+        activeGraphView: "planned"
       });
       expect(harness.state.resolvedRecipes).toBe(harness.recipes);
       expect(harness.state.plannedResources).toEqual([
         { id: "res-a" },
-        { id: "redis" },
+        { id: "redis" }
       ]);
       expect(messages(harness.state)).toEqual([
         "Checking octo/app for app.bicep...",
@@ -635,7 +635,7 @@ describe("graph planning workflows", () => {
         "Fetching the default recipe pack from GitHub...",
         "Loaded 1 recipe(s) from the default recipe pack.",
         "Resolving recipe outputs for planned resources...",
-        "Planned 2 resource(s) — rendering graph...",
+        "Planned 2 resource(s) — rendering graph..."
       ]);
     });
 
@@ -643,7 +643,7 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "", remote: false } },
-        compiled: { main: [] },
+        compiled: { main: [] }
       });
 
       await harness.run("planGraph", '{"repo":"octo/app","provider":"aws"}');
@@ -655,12 +655,12 @@ describe("graph planning workflows", () => {
 
     it.each([
       ["a non-string environment", '{"repo":"octo/app","environment":7}'],
-      ["an absent environment", '{"repo":"octo/app"}'],
+      ["an absent environment", '{"repo":"octo/app"}']
     ])("stores an empty planned environment for %s", async (_label, body) => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "", remote: false } },
-        compiled: { main: [] },
+        compiled: { main: [] }
       });
       await harness.run("planGraph", body);
       expect(harness.state.plannedEnvironment).toBe("");
@@ -670,15 +670,15 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "", remote: false } },
-        compiled: { main: [] },
+        compiled: { main: [] }
       });
       harness.recipes.push(
         { resourceType: "Radius.Data/redisCaches", concreteResources: [] },
         { resourceType: "Radius.Security/secrets" },
         {
           resourceType: "Radius.Compute/containers",
-          concreteResources: [{ type: "Microsoft.App/containerApps" }],
-        },
+          concreteResources: [{ type: "Microsoft.App/containerApps" }]
+        }
       );
 
       await harness.run("planGraph", '{"repo":"octo/app"}');
@@ -686,7 +686,7 @@ describe("graph planning workflows", () => {
       expect(messages(harness.state)).toContain(
         "Note: 2 pack recipe(s) have no concrete-resource mapping yet " +
           "(Radius.Data/redisCaches, Radius.Security/secrets); those nodes " +
-          "show their abstract Radius type.",
+          "show their abstract Radius type."
       );
     });
 
@@ -694,17 +694,17 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "", remote: false } },
-        compiled: { main: [] },
+        compiled: { main: [] }
       });
       harness.recipes.push({
         resourceType: "Radius.Compute/containers",
-        concreteResources: [{ type: "Microsoft.App/containerApps" }],
+        concreteResources: [{ type: "Microsoft.App/containerApps" }]
       });
 
       await harness.run("planGraph", '{"repo":"octo/app"}');
 
       expect(
-        messages(harness.state).some((message) => message.startsWith("Note:")),
+        messages(harness.state).some((message) => message.startsWith("Note:"))
       ).toBe(false);
     });
 
@@ -712,7 +712,7 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "", remote: false } },
-        compiled: { main: [] },
+        compiled: { main: [] }
       });
 
       const outcome = await harness.run("planGraph", "{}");
@@ -730,7 +730,7 @@ describe("graph planning workflows", () => {
         afterCompile: () => {
           // A newer plan request claims the plan generation.
           beginPlannedGraphRequest(harness.state);
-        },
+        }
       });
 
       const outcome = await harness.run("planGraph", '{"repo":"octo/app"}');
@@ -742,7 +742,7 @@ describe("graph planning workflows", () => {
       // Unlike load-graph's, this progress log is not generation-gated, so the
       // superseded request's final message is still there.
       expect(messages(harness.state)).toContain(
-        "Planned 0 resource(s) — rendering graph...",
+        "Planned 0 resource(s) — rendering graph..."
       );
     });
 
@@ -754,9 +754,9 @@ describe("graph planning workflows", () => {
         afterCompile: () => {
           prepareSourceRefResources(harness.entry, "planned", {
             repo: "octo/other",
-            branch: "main",
+            branch: "main"
           });
-        },
+        }
       });
 
       const outcome = await harness.run("planGraph", '{"repo":"octo/app"}');
@@ -790,8 +790,8 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: {
           main: selectionOf({ branch: "main", content: null }),
-          "feature/x": selectionOf({ branch: "feature/x", content: null }),
-        },
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        }
       });
 
       const outcome = await harness.run("diffBranches", diffBody);
@@ -802,15 +802,15 @@ describe("graph planning workflows", () => {
         error:
           "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.",
         needsAppBicep: true,
-        repo: "octo/app",
+        repo: "octo/app"
       });
       expect(harness.handoffs).toEqual([
         {
           repo: "octo/app",
           branches: ["main", "feature/x"],
           page: "graph-diff",
-          hasEntry: true,
-        },
+          hasEntry: true
+        }
       ]);
       expect(harness.order).toEqual(["select:main", "select:feature/x"]);
     });
@@ -819,19 +819,19 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: {
           main: selectionOf({ branch: "main" }),
-          "feature/x": selectionOf({ branch: "feature/x" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
         },
         staged: {
           main: { dir: "/tmp/base", remote: true },
-          "feature/x": { dir: "/tmp/head", remote: true },
+          "feature/x": { dir: "/tmp/head", remote: true }
         },
         compiled: {
           main: [{ id: "res-a", name: "api" } as CanvasGraphResource],
           "feature/x": [
             { id: "res-a", name: "api" } as CanvasGraphResource,
-            { id: "res-b", name: "cache" } as CanvasGraphResource,
-          ],
-        },
+            { id: "res-b", name: "cache" } as CanvasGraphResource
+          ]
+        }
       });
 
       const outcome = await harness.run("diffBranches", diffBody);
@@ -845,11 +845,11 @@ describe("graph planning workflows", () => {
         "stage:main",
         "stage:feature/x",
         "compile:main",
-        "compile:feature/x",
+        "compile:feature/x"
       ]);
       expect(outcome.payload).toEqual({
         message: "Comparing main → feature/x",
-        reload: true,
+        reload: true
       });
       expect(harness.state).toMatchObject({
         diffBase: "main",
@@ -858,13 +858,13 @@ describe("graph planning workflows", () => {
         diffBaseGenerated: false,
         diffHeadGenerated: false,
         page: "graphDiff",
-        activeGraphView: "diff",
+        activeGraphView: "diff"
       });
       // The real diff algorithm ran: the head-only resource is tagged added.
       const diffed = harness.state.diffResources || [];
       expect(diffed).toHaveLength(2);
       expect(
-        diffed.find((resource) => resource.id === "res-b")?.diffStatus,
+        diffed.find((resource) => resource.id === "res-b")?.diffStatus
       ).toBe("added");
     });
 
@@ -872,16 +872,16 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: {
           main: selectionOf({ branch: "main", content: null }),
-          "feature/x": selectionOf({ branch: "feature/x" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
         },
         staged: {
           main: { dir: "", remote: false },
-          "feature/x": { dir: "", remote: false },
+          "feature/x": { dir: "", remote: false }
         },
         compiled: {
           main: [],
-          "feature/x": [{ id: "res-b", name: "cache" } as CanvasGraphResource],
-        },
+          "feature/x": [{ id: "res-b", name: "cache" } as CanvasGraphResource]
+        }
       });
 
       const outcome = await harness.run("diffBranches", diffBody);
@@ -895,18 +895,18 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: {
           main: selectionOf({ branch: "main" }),
-          "feature/x": selectionOf({ branch: "feature/x" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
         },
         staged: {
           main: { dir: "", remote: false },
-          "feature/x": { dir: "", remote: false },
+          "feature/x": { dir: "", remote: false }
         },
-        compiled: { main: [], "feature/x": [] },
+        compiled: { main: [], "feature/x": [] }
       });
 
       const outcome = await harness.run(
         "diffBranches",
-        '{"base":"main","head":"feature/x"}',
+        '{"base":"main","head":"feature/x"}'
       );
 
       expect(outcome.status).toBe(200);
@@ -917,20 +917,20 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: {
           main: selectionOf({ branch: "main" }),
-          "feature/x": selectionOf({ branch: "feature/x" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
         },
         staged: {
           main: { dir: "", remote: false },
-          "feature/x": { dir: "", remote: false },
+          "feature/x": { dir: "", remote: false }
         },
         compiled: { main: [], "feature/x": [] },
         afterCompile: () => {
           prepareSourceRefResources(harness.entry, "diff", {
             repo: "octo/app",
             baseBranch: "main",
-            headBranch: "other",
+            headBranch: "other"
           });
-        },
+        }
       });
 
       const outcome = await harness.run("diffBranches", diffBody);
@@ -945,13 +945,13 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: {
           main: selectionOf({ branch: "main" }),
-          "feature/x": selectionOf({ branch: "feature/x" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
         },
         staged: {
           main: { dir: "", remote: false },
-          "feature/x": { dir: "", remote: false },
+          "feature/x": { dir: "", remote: false }
         },
-        compileThrows: { main: new Error("rad exited 1") },
+        compileThrows: { main: new Error("rad exited 1") }
       });
 
       const outcome = await harness.run("diffBranches", diffBody);
@@ -966,11 +966,11 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: {
           main: selectionOf({ branch: "main" }),
-          "feature/x": selectionOf({ branch: "feature/x" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
         },
         staged: {
           main: { dir: "", remote: false },
-          "feature/x": { dir: "", remote: false },
+          "feature/x": { dir: "", remote: false }
         },
         compileThrows: { main: new Error("rad exited 1") },
         afterStage: () => {
@@ -978,9 +978,9 @@ describe("graph planning workflows", () => {
           prepareSourceRefResources(harness.entry, "diff", {
             repo: "octo/app",
             baseBranch: "main",
-            headBranch: "other",
+            headBranch: "other"
           });
-        },
+        }
       });
 
       const outcome = await harness.run("diffBranches", diffBody);
@@ -1004,13 +1004,13 @@ describe("graph planning workflows", () => {
         selections: { main: selectionOf({ branch: "main" }) },
         staged: { main: { dir: "/tmp/stage", remote: true } },
         compiled: { main: [] },
-        ...script,
+        ...script
       });
     }
 
     it("surfaces a recipe-pack fetch failure as 400 and commits no planned state", async () => {
       const harness = planHarness({
-        recipePackThrows: new Error("recipe pack fetch failed: 502"),
+        recipePackThrows: new Error("recipe pack fetch failed: 502")
       });
 
       const outcome = await harness.run("planGraph", planBody);
@@ -1018,7 +1018,7 @@ describe("graph planning workflows", () => {
       expect(outcome.status).toBe(400);
       expect(outcome.kind).toBe("json");
       expect(outcome.payload).toEqual({
-        error: "recipe pack fetch failed: 502",
+        error: "recipe pack fetch failed: 502"
       });
       expect(harness.recipePackCalls).toEqual(["azure"]);
       // The resolution stage must never run on a pack that failed to load.
@@ -1030,7 +1030,7 @@ describe("graph planning workflows", () => {
 
     it("surfaces a recipe-output resolution failure as 400 and commits no planned state", async () => {
       const harness = planHarness({
-        recipeOutputsThrows: new Error("recipe outputs unavailable"),
+        recipeOutputsThrows: new Error("recipe outputs unavailable")
       });
 
       const outcome = await harness.run("planGraph", planBody);
@@ -1045,7 +1045,7 @@ describe("graph planning workflows", () => {
 
     it("surfaces a model-selection failure as 400 before any artifact is staged", async () => {
       const harness = planHarness({
-        selectThrows: { main: new Error("app.bicep lookup failed") },
+        selectThrows: { main: new Error("app.bicep lookup failed") }
       });
 
       const outcome = await harness.run("planGraph", planBody);
@@ -1059,19 +1059,19 @@ describe("graph planning workflows", () => {
 
     it("surfaces a compilation failure as 400 after staging and commits no planned state", async () => {
       const harness = planHarness({
-        compileThrows: { main: new Error("rad bicep build-graph exited 1") },
+        compileThrows: { main: new Error("rad bicep build-graph exited 1") }
       });
 
       const outcome = await harness.run("planGraph", planBody);
 
       expect(outcome.status).toBe(400);
       expect(outcome.payload).toEqual({
-        error: "rad bicep build-graph exited 1",
+        error: "rad bicep build-graph exited 1"
       });
       expect(harness.order).toEqual([
         "select:main",
         "stage:main",
-        "compile:main",
+        "compile:main"
       ]);
       expect(harness.recipePackCalls).toEqual([]);
       expect(harness.state.plannedRepo).toBeUndefined();
@@ -1079,7 +1079,7 @@ describe("graph planning workflows", () => {
 
     it("surfaces a non-Error rejection as its string form", async () => {
       const harness = planHarness({
-        recipePackThrows: "recipe pack offline" as unknown as Error,
+        recipePackThrows: "recipe pack offline" as unknown as Error
       });
 
       const outcome = await harness.run("planGraph", planBody);

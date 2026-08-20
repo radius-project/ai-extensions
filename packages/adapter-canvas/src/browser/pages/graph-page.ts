@@ -7,7 +7,7 @@ import {
   loadModeledEnvState,
   modeledPrimaryAction,
   populateApplications,
-  populateBranches,
+  populateBranches
 } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphOptions } from "../graph/build.js";
@@ -37,14 +37,14 @@ function parseState(context: BrowserContext): GraphPageState {
     branch: readString(state, "branch") || "main",
     resources: parseGraphResources(readArray(state, "resources")),
     loaded: readBoolean(state, "loaded"),
-    localSource: readBoolean(state, "localSource"),
+    localSource: readBoolean(state, "localSource")
   };
 }
 
 function showStatus(
   context: BrowserContext,
   message: string,
-  tone: "info" | "error",
+  tone: "info" | "error"
 ): void {
   const status =
     context.dom.byId("graph-status") ??
@@ -57,7 +57,7 @@ function showStatus(
 
 export function initializeGraphPage(
   context: BrowserContext,
-  globalScope: unknown,
+  globalScope: unknown
 ): BrowserTeardown {
   if (!context.dom.byId(GRAPH_PAGE_STATE_ID)) return NOOP_TEARDOWN;
   const page = parseState(context);
@@ -66,7 +66,7 @@ export function initializeGraphPage(
   const renderGraph = requireBrowserFunction(globalScope, "radiusRenderGraph");
   const setLoading = requireBrowserFunction(
     globalScope,
-    "radiusSetGraphLoading",
+    "radiusSetGraphLoading"
   );
   const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
   const entry = beginEntry(context, ENTRY_KEY);
@@ -105,7 +105,7 @@ export function initializeGraphPage(
 
   const renderOrUpdate = (
     resources: GraphResource[],
-    options: GraphOptions,
+    options: GraphOptions
   ): void => {
     if (controller) {
       if (carriesOptions(options)) {
@@ -118,7 +118,7 @@ export function initializeGraphPage(
       controller.destroy();
     }
     controller = asGraphController(
-      renderGraph("graph-container", resources, options),
+      renderGraph("graph-container", resources, options)
     );
     renderedOptions = options;
   };
@@ -126,9 +126,9 @@ export function initializeGraphPage(
   // The server recomputes provenance per request, so a response that reports it
   // wins over the value serialized into the initial page render.
   const sourceProvenance = (payload: unknown): boolean =>
-    isRecord(payload) && typeof payload.fromWorkspace === "boolean"
-      ? payload.fromWorkspace
-      : page.localSource;
+    isRecord(payload) && typeof payload.fromWorkspace === "boolean" ?
+      payload.fromWorkspace
+    : page.localSource;
 
   const showLoadedGraph = (): void => {
     const wrapper = context.dom.byId("graph-container-wrapper");
@@ -138,7 +138,7 @@ export function initializeGraphPage(
       const hint = context.dom.createElement("div");
       hint.setAttribute(
         "style",
-        "margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);",
+        "margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);"
       );
       hint.textContent = "Click a node to view source code links.";
       wrapper.replaceChildren(container, hint);
@@ -156,7 +156,7 @@ export function initializeGraphPage(
       .then((payload) => {
         if (!entry.active || requestGeneration !== generation) return;
         const messages = readArray(payload, "messages").filter(
-          (message): message is string => typeof message === "string",
+          (message): message is string => typeof message === "string"
         );
         const latest = messages.at(-1);
         if (latest) showStatus(context, latest, "info");
@@ -174,7 +174,7 @@ export function initializeGraphPage(
       showStatus(
         context,
         "Select a branch to generate the application graph.",
-        "info",
+        "info"
       );
       return;
     }
@@ -191,18 +191,18 @@ export function initializeGraphPage(
     showStatus(
       context,
       "Checking the selected branch for .radius/app.bicep…",
-      "info",
+      "info"
     );
     stopProgress();
     progress = entry.every(GRAPH_PROGRESS_MS, () =>
-      pollProgress(requestGeneration),
+      pollProgress(requestGeneration)
     );
     void context.net
       .fetch("/api/load-graph", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo: page.repo, branch }),
-        signal: requestAbort?.signal,
+        signal: requestAbort?.signal
       })
       .then((response) => response.json())
       .then((payload) => {
@@ -214,7 +214,7 @@ export function initializeGraphPage(
           renderOrUpdate(parseGraphResources(payload.resources), {
             repoUrl: githubRepositoryUrl(page.repo),
             branch,
-            localSource: sourceProvenance(payload),
+            localSource: sourceProvenance(payload)
           });
           hasLoadedGraph = true;
           return;
@@ -228,7 +228,7 @@ export function initializeGraphPage(
           showStatus(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
-            "info",
+            "info"
           );
           retry = entry.after(GRAPH_RETRY_MS, () => {
             retry = null;
@@ -240,7 +240,7 @@ export function initializeGraphPage(
           showStatus(
             context,
             "A newer graph request replaced this one. Retrying…",
-            "info",
+            "info"
           );
           retry = entry.after(GRAPH_STALE_RETRY_MS, () => {
             retry = null;
@@ -260,12 +260,12 @@ export function initializeGraphPage(
         context.logger.error("Radius graph request failed.", error);
         setError(
           "graph-container",
-          "Failed to generate the application graph.",
+          "Failed to generate the application graph."
         );
         showStatus(
           context,
           "Failed to generate the application graph.",
-          "error",
+          "error"
         );
       })
       .then(() => {
@@ -295,7 +295,7 @@ export function initializeGraphPage(
     const graphOptions: GraphOptions = {
       repoUrl: githubRepositoryUrl(page.repo),
       branch: page.branch,
-      localSource: page.localSource,
+      localSource: page.localSource
     };
     renderOrUpdate(page.resources, graphOptions);
     const refreshGeneration = ++generation;
@@ -307,9 +307,9 @@ export function initializeGraphPage(
         body: JSON.stringify({
           repo: page.repo,
           branch: page.branch,
-          refresh: true,
+          refresh: true
         }),
-        signal: requestAbort?.signal,
+        signal: requestAbort?.signal
       })
       .then((response) => response.json())
       .then((payload) => {
@@ -317,13 +317,13 @@ export function initializeGraphPage(
         if (isRecord(payload) && Array.isArray(payload.resources)) {
           renderOrUpdate(parseGraphResources(payload.resources), {
             ...graphOptions,
-            localSource: sourceProvenance(payload),
+            localSource: sourceProvenance(payload)
           });
         } else if (readBoolean(payload, "needsAppBicep")) {
           showStatus(
             context,
             "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.",
-            "info",
+            "info"
           );
         } else {
           const error = readString(payload, "error");
@@ -331,7 +331,7 @@ export function initializeGraphPage(
             showStatus(
               context,
               `Unable to refresh the application graph: ${error}`,
-              "error",
+              "error"
             );
           }
         }
@@ -342,7 +342,7 @@ export function initializeGraphPage(
         showStatus(
           context,
           "Unable to refresh the application graph.",
-          "error",
+          "error"
         );
       })
       .then(() => {
@@ -355,7 +355,7 @@ export function initializeGraphPage(
     ["graph-branch"],
     page.repo,
     [page.branch],
-    () => entry.active,
+    () => entry.active
   )
     .then(() => {
       if (!entry.active || hasLoadedGraph || !branchSelect?.value) return;

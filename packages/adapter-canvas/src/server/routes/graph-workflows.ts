@@ -2,7 +2,7 @@ import type {
   CanvasGraphResource,
   CanvasState,
   GraphView,
-  SourceRefContext,
+  SourceRefContext
 } from "../../shared.js";
 import type { GraphInstanceEntry, GraphPipeline } from "./graph-pipeline.js";
 
@@ -23,7 +23,7 @@ import type { GraphInstanceEntry, GraphPipeline } from "./graph-pipeline.js";
 // The stale-race payload every generation guard in this family answers with.
 const STALE_PAYLOAD = { stale: true } as const;
 const MISSING_ENTRY_PAYLOAD = {
-  error: "Canvas server state is unavailable.",
+  error: "Canvas server state is unavailable."
 } as const;
 const GENERATING_APP_BICEP_MESSAGE =
   "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.";
@@ -54,7 +54,7 @@ export interface GraphPlanningWorkflows {
 }
 
 export interface GraphWorkflowDependencies<
-  TEntry extends GraphInstanceEntry = GraphInstanceEntry,
+  TEntry extends GraphInstanceEntry = GraphInstanceEntry
 > {
   // Returns undefined when the instance has no entry, which is what the legacy
   // `servers.get(instanceId)` miss meant. A request context's `state` snapshot
@@ -66,36 +66,36 @@ export interface GraphWorkflowDependencies<
     entry: TEntry | undefined,
     repo: string,
     branches: string | string[],
-    page: string,
+    page: string
   ): void;
   prepareSourceRefResources(
     entry: TEntry,
     view: GraphView,
-    context: Record<string, unknown>,
+    context: Record<string, unknown>
   ): SourceRefContext;
   setSourceRefResources(
     entry: TEntry,
     view: GraphView,
     resources: CanvasGraphResource[],
     context: Record<string, unknown>,
-    expectedToken?: string,
+    expectedToken?: string
   ): boolean;
   isCurrentSourceRefToken(
     state: CanvasState,
     view: GraphView,
-    token: unknown,
+    token: unknown
   ): boolean;
   defaultBranchForState(state: CanvasState | null | undefined): string;
   canReuseModeledGraph(
     state: CanvasState,
     repo: string,
     branch: string,
-    definitionHash: string,
+    definitionHash: string
   ): boolean;
   addGraphProgress(
     state: CanvasState,
     generation: number,
-    message: string,
+    message: string
   ): boolean;
   beginPlannedGraphRequest(state: CanvasState): number;
   isCurrentPlannedGraphRequest(state: CanvasState, generation: number): boolean;
@@ -105,11 +105,11 @@ export interface GraphWorkflowDependencies<
   resolveRecipeOutputs(
     resources: CanvasGraphResource[],
     recipes: unknown[],
-    provider: string,
+    provider: string
   ): Promise<unknown[]>;
   computeGraphDiff(
     baseResources: CanvasGraphResource[],
-    headResources: CanvasGraphResource[],
+    headResources: CanvasGraphResource[]
   ): CanvasGraphResource[];
   record(value: unknown): Record<string, unknown>;
   optionalString(value: unknown): string;
@@ -118,14 +118,14 @@ export interface GraphWorkflowDependencies<
 
 function json(
   status: number,
-  payload: Record<string, unknown>,
+  payload: Record<string, unknown>
 ): GraphWorkflowOutcome {
   return { kind: "json", status, payload };
 }
 
 function bare(
   status: number,
-  payload: Record<string, unknown>,
+  payload: Record<string, unknown>
 ): GraphWorkflowOutcome {
   return { kind: "bare", status, payload };
 }
@@ -133,14 +133,14 @@ function bare(
 const MISSING_ENTRY_OUTCOME = bare(503, MISSING_ENTRY_PAYLOAD);
 
 export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
-  dependencies: GraphWorkflowDependencies<TEntry>,
+  dependencies: GraphWorkflowDependencies<TEntry>
 ): GraphPlanningWorkflows {
   const { pipeline } = dependencies;
 
   function appBicepHandoffOutcome(
     entry: TEntry,
     repo: string,
-    branch: string,
+    branch: string
   ): GraphWorkflowOutcome {
     // Both single-branch routes hand off as the "graph" page. plan-graph doing
     // so is pre-existing and load-bearing: the handoff dedupe key derives from
@@ -150,7 +150,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       error: GENERATING_APP_BICEP_MESSAGE,
       needsAppBicep: true,
       repo,
-      branch,
+      branch
     });
   }
 
@@ -160,7 +160,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
   // model skips the `rad` compile entirely.
   async function loadGraph({
     instanceId,
-    body,
+    body
   }: GraphWorkflowRequest): Promise<GraphWorkflowOutcome> {
     try {
       const data = JSON.parse(body);
@@ -177,7 +177,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       const sourceRefContext = dependencies.prepareSourceRefResources(
         entry,
         "graph",
-        { repo, branch },
+        { repo, branch }
       );
 
       // Every progress line is gated on the generation, so a superseded request
@@ -203,7 +203,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         selection,
         repo,
         branch,
-        log: addProgress,
+        log: addProgress
       });
       const definitionHash = pipeline.definitionHashFor(selection, staged);
       if (state.graphBuildGeneration !== requestGeneration) {
@@ -230,7 +230,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           reload: false,
           resources: state.graphResources,
           fromWorkspace: selection.fromWorkspace,
-          cached: true,
+          cached: true
         });
       }
 
@@ -238,10 +238,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         selection,
         staged,
         log: addProgress,
-        saveGraphJsonTo: graphJsonPath,
+        saveGraphJsonTo: graphJsonPath
       });
       addProgress(
-        `Mapped ${resources.length} resource(s) — rendering graph...`,
+        `Mapped ${resources.length} resource(s) — rendering graph...`
       );
 
       if (sourceRefContext) {
@@ -259,7 +259,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             "graph",
             resources,
             { repo, branch },
-            sourceRefContext.token,
+            sourceRefContext.token
           )
         ) {
           return json(409, STALE_PAYLOAD);
@@ -276,7 +276,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       return json(200, {
         reload: !data.refresh,
         resources,
-        fromWorkspace: selection.fromWorkspace,
+        fromWorkspace: selection.fromWorkspace
       });
     } catch (e) {
       return json(400, { error: dependencies.errorMessage(e) });
@@ -288,7 +288,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
   // resources its recipe would create.
   async function planGraph({
     instanceId,
-    body,
+    body
   }: GraphWorkflowRequest): Promise<GraphWorkflowOutcome> {
     try {
       const data = JSON.parse(body);
@@ -306,7 +306,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       const sourceRefContext = dependencies.prepareSourceRefResources(
         entry,
         "planned",
-        { repo, branch },
+        { repo, branch }
       );
 
       // Unlike load-graph's, this log is *not* generation-gated: a superseded
@@ -334,15 +334,15 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         selection,
         repo,
         branch,
-        log: addProgress,
+        log: addProgress
       });
       const resources = await pipeline.compileResources({
         selection,
         staged,
-        log: addProgress,
+        log: addProgress
       });
       addProgress(
-        `Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`,
+        `Parsed ${resources.length} resource(s) — resolving ${provider} recipes...`
       );
 
       // Resolve recipes from the default recipe pack
@@ -355,7 +355,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       addProgress(
         `Loaded ${
           Array.isArray(recipes) ? recipes.length : 0
-        } recipe(s) from the default recipe pack.`,
+        } recipe(s) from the default recipe pack.`
       );
 
       // Surface pack recipes we couldn't map to a concrete resource so the gap
@@ -373,20 +373,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           } pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes
             .map((recipe) =>
               dependencies.optionalString(
-                dependencies.record(recipe).resourceType,
-              ),
+                dependencies.record(recipe).resourceType
+              )
             )
-            .join(", ")}); those nodes show their abstract Radius type.`,
+            .join(", ")}); those nodes show their abstract Radius type.`
         );
       }
 
       // For each abstract resource, resolve its recipe and concrete outputs.
       addProgress("Resolving recipe outputs for planned resources...");
       const plannedResources = pipeline.toCanvasResources(
-        await dependencies.resolveRecipeOutputs(resources, recipes, provider),
+        await dependencies.resolveRecipeOutputs(resources, recipes, provider)
       );
       addProgress(
-        `Planned ${plannedResources.length} resource(s) — rendering graph...`,
+        `Planned ${plannedResources.length} resource(s) — rendering graph...`
       );
 
       if (sourceRefContext) {
@@ -400,7 +400,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             "planned",
             plannedResources,
             { repo, branch },
-            sourceRefContext.token,
+            sourceRefContext.token
           )
         ) {
           return json(409, STALE_PAYLOAD);
@@ -426,7 +426,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
   // added or removed) rather than failing the comparison.
   async function diffBranches({
     instanceId,
-    body,
+    body
   }: GraphWorkflowRequest): Promise<GraphWorkflowOutcome> {
     // Declared outside the `try` so the catch can tell whether the failure
     // belongs to the selection still on screen before it writes `diffError`.
@@ -440,7 +440,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       sourceRefContext = dependencies.prepareSourceRefResources(entry, "diff", {
         repo,
         baseBranch: data.base,
-        headBranch: data.head,
+        headBranch: data.head
       });
       state.diffBase = data.base;
       state.diffHead = data.head;
@@ -452,7 +452,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       // one simply contribute nothing to the diff (added/removed).
       const [baseSelection, headSelection] = await Promise.all([
         pipeline.selectAppBicep(entry, repo, data.base),
-        pipeline.selectAppBicep(entry, repo, data.head),
+        pipeline.selectAppBicep(entry, repo, data.head)
       ]);
 
       if (!baseSelection.content && !headSelection.content) {
@@ -460,13 +460,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           entry,
           repo,
           [data.base, data.head],
-          "graph-diff",
+          "graph-diff"
         );
         // No `branch` key here, unlike the other two routes: the diff spans two.
         return json(200, {
           error: GENERATING_APP_BICEP_MESSAGE,
           needsAppBicep: true,
-          repo,
+          repo
         });
       }
 
@@ -480,27 +480,27 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         entry,
         selection: baseSelection,
         repo,
-        branch: data.base,
+        branch: data.base
       });
       const headStaged = await pipeline.stageArtifacts({
         entry,
         selection: headSelection,
         repo,
-        branch: data.head,
+        branch: data.head
       });
       const baseResources = await pipeline.compileResources({
         selection: baseSelection,
-        staged: baseStaged,
+        staged: baseStaged
       });
       const headResources = await pipeline.compileResources({
         selection: headSelection,
-        staged: headStaged,
+        staged: headStaged
       });
 
       // Compute diff using the shared algorithm (see computeGraphDiff).
       const diffResources = dependencies.computeGraphDiff(
         baseResources,
-        headResources,
+        headResources
       );
 
       if (sourceRefContext) {
@@ -513,9 +513,9 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             {
               repo,
               baseBranch: data.base,
-              headBranch: data.head,
+              headBranch: data.head
             },
-            sourceRefContext.token,
+            sourceRefContext.token
           )
         ) {
           return json(409, STALE_PAYLOAD);
@@ -529,7 +529,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
 
       return json(200, {
         message: `Comparing ${data.base} → ${data.head}`,
-        reload: true,
+        reload: true
       });
     } catch (e) {
       // The entry is re-read rather than reused: the failure may have happened
@@ -540,7 +540,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         dependencies.isCurrentSourceRefToken(
           entry.state,
           "diff",
-          sourceRefContext?.token || "",
+          sourceRefContext?.token || ""
         )
       ) {
         entry.state.diffError = dependencies.errorMessage(e);
