@@ -39,7 +39,7 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
     "delete-application.yml":
       "name: delete\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n",
     "delete-azure.yml":
-      "name: delete-azure\njobs:\n  a:\n    uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
+      "name: delete-azure\njobs:\n  delete:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Azure Login (OIDC)\n        uses: azure/login@abc\n      - name: Delete Radius resource\n        uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
   };
   return {
     BASE_UPSTREAM,
@@ -87,6 +87,7 @@ const {
   generateVerifyWorkflow,
   generateDeployWorkflow,
   generateDeleteWorkflow,
+  addDeleteStateCheck,
   configureVerifyGhcrProbe
 } = await import("./infra.js");
 
@@ -130,6 +131,37 @@ describe("GHCR verification probe", () => {
     expect(workflow).not.toContain("| jq ");
     expect(workflow).not.toContain("uses: action");
     expect(workflow).toContain("- name: Summary");
+  });
+});
+
+describe("generateDeleteWorkflow", () => {
+  it("skips Azure OIDC when no persisted state archive exists", async () => {
+    const workflows = await generateDeleteWorkflow("dev");
+    const azure = workflows["delete-azure.yml"];
+
+    expect(azure).toContain("  detect-state:");
+    expect(azure).toContain(
+      'docker manifest inspect "$STATE_REGISTRY:$archive"'
+    );
+    expect(azure).toContain("manifest unknown|not found|no such manifest");
+    expect(azure).toContain(
+      "No persisted Radius state was found; skipping cloud deletion. No cloud resources were touched."
+    );
+    expect(azure).toContain(
+      "  delete:\n    needs: detect-state\n    if: ${{ needs.detect-state.outputs.has_state == 'true' }}"
+    );
+    expect(azure.indexOf("  detect-state:")).toBeLessThan(
+      azure.indexOf("Azure Login (OIDC)")
+    );
+  });
+
+  it("does not duplicate the state check when the upstream template provides it", () => {
+    const workflow =
+      "name: delete-azure\njobs:\n  detect-state:\n    runs-on: ubuntu-24.04\n  delete:\n    runs-on: ubuntu-24.04\n";
+
+    expect(
+      addDeleteStateCheck(workflow).match(/  detect-state:/g)
+    ).toHaveLength(1);
   });
 });
 

@@ -271,7 +271,97 @@ export async function generateDeleteWorkflow(
       generated[DELETE_APP_DISPATCHER_FILE]
     );
   }
+  if (generated && typeof generated[DELETE_AZURE_FILE] === "string") {
+    generated[DELETE_AZURE_FILE] = addDeleteStateCheck(
+      generated[DELETE_AZURE_FILE]
+    );
+  }
   return generated;
+}
+
+/**
+ * Keep the cloud delete job from requiring cloud OIDC when the environment has
+ * never persisted Radius state. A missing state tag proves no prior deploy
+ * reached teardown, so succeeding with the cloud job skipped lets the canvas
+ * remove its GitHub-side records. Unexpected registry failures remain failures.
+ */
+export function addDeleteStateCheck(yaml: string): string {
+  const job = "  delete:";
+  const index = yaml.indexOf(job);
+  if (index < 0 || yaml.includes("  detect-state:")) return yaml;
+  const stateCheck = `  detect-state:
+    name: Detect persisted Radius state
+    runs-on: ubuntu-24.04
+    environment: \${{ inputs.environment }}
+    outputs:
+      has_state: \${{ steps.state.outputs.has_state }}
+    steps:
+      - name: Checkout state repository
+        if: \${{ vars.RADIUS_STATE_BACKEND == 'git' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - name: Log in to GHCR for the state archive
+        if: \${{ vars.RADIUS_STATE_BACKEND != 'git' && vars.RADIUS_STATE_REGISTRY != '' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: \${{ github.actor }}
+          password: \${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect persisted Radius state
+        id: state
+        shell: bash
+        env:
+          STATE_BACKEND: \${{ vars.RADIUS_STATE_BACKEND }}
+          STATE_REGISTRY: \${{ vars.RADIUS_STATE_REGISTRY }}
+          STATE_ARCHIVE: \${{ vars.RADIUS_STATE_ARCHIVE }}
+        run: |
+          set -euo pipefail
+          no_state() {
+            echo "has_state=false" >> "$GITHUB_OUTPUT"
+            echo "No persisted Radius state was found; skipping cloud deletion. No cloud resources were touched." | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          if [[ "\${STATE_BACKEND:-oci}" == "git" ]]; then
+            set +e
+            git ls-remote --exit-code origin refs/heads/radius-state >/dev/null 2>&1
+            status=$?
+            set -e
+            if [[ "$status" == "0" ]]; then
+              echo "has_state=true" >> "$GITHUB_OUTPUT"
+            elif [[ "$status" == "2" ]]; then
+              no_state
+            else
+              echo "Could not determine whether persisted Radius state exists." >&2
+              exit "$status"
+            fi
+            exit 0
+          fi
+
+          if [[ -z "$STATE_REGISTRY" ]]; then
+            no_state
+            exit 0
+          fi
+
+          archive="\${STATE_ARCHIVE:-radius-state}"
+          if output="$(docker manifest inspect "$STATE_REGISTRY:$archive" 2>&1)"; then
+            echo "has_state=true" >> "$GITHUB_OUTPUT"
+          elif grep -qiE 'manifest unknown|not found|no such manifest' <<< "$output"; then
+            no_state
+          else
+            echo "Could not determine whether persisted Radius state exists:" >&2
+            echo "$output" >&2
+            exit 1
+          fi
+
+  delete:
+    needs: detect-state
+    if: \${{ needs.detect-state.outputs.has_state == 'true' }}
+`;
+  return (
+    yaml.slice(0, index) +
+    stateCheck +
+    yaml.slice(index + job.length).replace(/^\n/, "")
+  );
 }
 
 /**
