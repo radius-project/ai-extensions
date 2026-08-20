@@ -15,6 +15,10 @@ export interface EnvironmentConfirmOptions {
   readonly confirmVariant?: "danger" | "primary";
   readonly onConfirm: () => void;
   readonly onCancel?: () => void;
+  // Hide the secondary/cancel button so the dialog reads as a single-action
+  // acknowledgement (e.g. an informational "Environment deleted" notice) rather
+  // than a destructive confirm.
+  readonly hideCancel?: boolean;
 }
 
 export interface EnvironmentConfirmDialog {
@@ -95,8 +99,13 @@ export function createEnvironmentConfirmDialog(
     }
     if (event.key !== "Tab") return;
     // The dialog is aria-modal, so Tab must cycle between its two buttons
-    // instead of walking into the inert page behind it.
+    // instead of walking into the inert page behind it. When the cancel button
+    // is hidden (an acknowledgement dialog) focus simply stays on confirm.
     event.preventDefault();
+    if (cancel.style.display === "none") {
+      confirm.focus();
+      return;
+    }
     const active = context.focus.active();
     const backwards = event.shiftKey === true;
     const next =
@@ -122,6 +131,8 @@ export function createEnvironmentConfirmDialog(
           "rad-btn rad-btn--primary"
         : "rad-btn rad-btn--danger-outline";
       cancel.textContent = options.cancelLabel ?? "Cancel";
+      const hideCancel = options.hideCancel === true;
+      cancel.style.display = hideCancel ? "none" : "";
       usageList.replaceChildren(
         ...(options.usage ?? []).map((item) => {
           const element: DomElement = context.dom.createElement("li");
@@ -132,7 +143,7 @@ export function createEnvironmentConfirmDialog(
       usageLabel.textContent = options.usageLabel ?? "";
       usageBlock.style.display = (options.usage?.length ?? 0) > 0 ? "" : "none";
       modal.style.display = "flex";
-      cancel.focus();
+      (hideCancel ? confirm : cancel).focus();
     },
     close,
     teardown() {

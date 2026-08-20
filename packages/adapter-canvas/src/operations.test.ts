@@ -92,7 +92,6 @@ function newDeleteOp(requestOverrides = {}) {
     clientId: "app-1",
     tenantId: "tenant-1",
     repoId: 42,
-    appDisplayName: "radius-app",
     ...requestOverrides
   };
   return op;
@@ -1104,11 +1103,11 @@ describe("registry", () => {
       }
     };
     const first = createRegistry({ store });
-    const op = newDeleteOp({ deleteAppRegistration: true });
+    const op = newDeleteOp({ credentialConsumerRetirementReady: true });
     enterStage(op, STAGE_REVIEW_APP_REGISTRATION);
     requireInput(op, {
-      code: "delete-app-registration-decision",
-      message: "Delete it?"
+      code: "confirm-credential-retirement",
+      message: "Proceed?"
     });
     first.put(op);
     await first.persist();
@@ -1120,7 +1119,7 @@ describe("registry", () => {
     expect(back.recoveryState).toBe("waiting_input");
     expect(back.request).toMatchObject({
       clientId: "app-1",
-      deleteAppRegistration: true
+      credentialConsumerRetirementReady: true
     });
   });
 
@@ -1298,7 +1297,6 @@ describe("startup reconciliation", () => {
 
   it("persists a typed delete-recovery request for delete operations only", () => {
     const del = newDeleteOp({
-      deleteAppRegistration: true,
       credentialConsumerRetirementReady: true
     });
     const record = toPersistedOperation(del);
@@ -1309,8 +1307,6 @@ describe("startup reconciliation", () => {
       clientId: "app-1",
       tenantId: "tenant-1",
       repoId: 42,
-      appDisplayName: "radius-app",
-      deleteAppRegistration: true,
       credentialConsumerRetirementReady: true
     });
     // The broad, secret-bearing `request` itself is never persisted.
@@ -1355,8 +1351,8 @@ describe("startup reconciliation", () => {
     const op = newDeleteOp();
     enterStage(op, STAGE_REVIEW_APP_REGISTRATION);
     requireInput(op, {
-      code: "delete-app-registration-decision",
-      message: "Delete it?"
+      code: "confirm-credential-retirement",
+      message: "Proceed?"
     });
     const restored = fromPersistedOperation(toPersistedOperation(op));
     // Delete ops never populate resumeRequest — only deleteRecovery carries the inputs.

@@ -113,8 +113,6 @@ sequenceDiagram
   Flow->>Prim: deleteGitHubEnvironment(repo, env)
   Prim->>Ext: gh api DELETE .../environments/{env}
   Prim-->>Flow: result + env-list cache invalidated
-  Flow->>Prim: (if allowed) deleteAppRegistration(appId)
-  Prim-->>Flow: cleanup result
   Flow->>UI: projectCleanupSummary(op)
 ```
 
@@ -179,10 +177,10 @@ The following **must stay separate** — sharing it would be a safety bug:
 - **Eligibility / entry point.** Rollback = an *unverified* attempt with complete provenance (`canStartRollback`). Delete = an *established* environment plus live discovery plus explicit user confirmation. Sharing an eligibility shortcut would let rollback's provenance assumptions leak into deletion.
 - **Deletion order — opposite for credentials.**
   - Rollback: workflows → GitHub environment → role assignments → federated credentials → service principal → app registration (backward along the dependency chain).
-  - Delete: the Radius-environment delete workflow runs **first, while the federated credential still exists**, because the workflow authenticates to the cluster with that credential; only then is the credential removed, then the GitHub environment, then the app-registration review. These orders are load-bearing and different on purpose.
+  - Delete: the Radius-environment delete workflow runs **first, while the federated credential still exists**, because the workflow authenticates to the cluster with that credential; only then is the credential removed, then the GitHub environment. The app registration is left in place (never reviewed or deleted). These orders are load-bearing and different on purpose.
 - **Role assignments + service principal.** Rollback deletes them (it created them); established-environment delete does not touch them.
 - **Workflow provenance / revert** (rollback-only: `workflow-provenance.ts`, `workflow-rollback.ts`). Delete *dispatches* the committed `delete-environment` workflow rather than reverting workflow files.
-- **App-registration policy.** Rollback: provenance-gated auto-delete (delete only if the attempt created it). Delete: usage discovery plus a **mandatory prompt** — Radius never auto-deletes an app registration. Same primitive (item 4), different gate.
+- **App-registration policy.** Rollback: provenance-gated auto-delete (delete only if the attempt created it). Delete: **never touched** — Radius records an informational "left in place" step and reminds the user (via an acknowledgement dialog on success) to remove it themselves in Azure if unwanted. Deleting a shared identity from under other environments or callers is never worth the risk.
 
 ### API design (if applicable)
 

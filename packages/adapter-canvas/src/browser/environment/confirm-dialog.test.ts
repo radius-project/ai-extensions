@@ -93,6 +93,53 @@ describe("createEnvironmentConfirmDialog", () => {
     expect(elements["env-confirm-cancel"].textContent).toBe("Stay here");
   });
 
+  it("hides cancel and focuses confirm for an acknowledgement dialog", () => {
+    const { dialog, elements, browser } = openDialog();
+
+    dialog.show({
+      title: "Environment deleted",
+      message: "The app registration was left in place.",
+      confirmLabel: "Done",
+      confirmVariant: "primary",
+      hideCancel: true,
+      onConfirm: vi.fn()
+    });
+
+    expect(elements["env-confirm-modal"].style.display).toBe("flex");
+    expect(elements["env-confirm-cancel"].style.display).toBe("none");
+    // Confirm is the only actionable button, so it takes focus rather than
+    // cancel.
+    expect(elements["env-confirm-ok"].focusCount).toBe(1);
+    expect(elements["env-confirm-cancel"].focusCount).toBe(0);
+
+    // Tab keeps focus on confirm instead of cycling onto the hidden cancel.
+    browser.document.activeElement = elements["env-confirm-ok"];
+    browser.document.dispatch("keydown", { key: "Tab" });
+    expect(elements["env-confirm-ok"].focusCount).toBe(2);
+    expect(elements["env-confirm-cancel"].focusCount).toBe(0);
+  });
+
+  it("restores the cancel button on a later dialog after hiding it once", () => {
+    const { dialog, elements } = openDialog();
+
+    dialog.show({
+      title: "Environment deleted",
+      message: "Acknowledgement only.",
+      confirmLabel: "Done",
+      hideCancel: true,
+      onConfirm: vi.fn()
+    });
+    expect(elements["env-confirm-cancel"].style.display).toBe("none");
+
+    dialog.show({
+      title: "Delete environment?",
+      message: "This deletes the GitHub environment.",
+      confirmLabel: "Delete environment",
+      onConfirm: vi.fn()
+    });
+    expect(elements["env-confirm-cancel"].style.display).toBe("");
+  });
+
   it("lists the usage it was given and hides the block without any", () => {
     const { dialog, elements } = openDialog();
 

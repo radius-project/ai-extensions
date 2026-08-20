@@ -190,10 +190,6 @@ function createDeps(overrides: Partial<EnvironmentOperationsDeps> = {}) {
       Promise.reject(
         new Error("promptAppSelection was not stubbed for this test")
       ),
-    confirmDeleteAppRegistration: () =>
-      Promise.reject(
-        new Error("confirmDeleteAppRegistration was not stubbed for this test")
-      ),
     ...overrides
   };
   return {
@@ -429,8 +425,7 @@ describe("parseOperationResponse", () => {
           servesRepos: ["octo/widgets", "octo/gizmos"]
         }
       ],
-      defaultAppId: "app-2",
-      appDisplayName: ""
+      defaultAppId: "app-2"
     });
   });
 });
@@ -1694,55 +1689,6 @@ describe("resume flow", () => {
 
     expect(resumeBody).toMatchObject({ createNew: true });
   });
-
-  it.each([[true], [false]])(
-    "resumes an app-registration delete decision with confirm=%s",
-    async (confirmed) => {
-      const browser = setup();
-      const deps = createDeps();
-      let confirmRequest: unknown;
-      deps.deps.confirmDeleteAppRegistration = (request) => {
-        confirmRequest = request;
-        return Promise.resolve(confirmed);
-      };
-      const controller = initializeEnvironmentOperations(browser.context, {
-        repo: REPO,
-        deps: deps.deps
-      });
-      let resumeBody: unknown;
-      browser.net.handle(operationsUrl(), () =>
-        jsonResponse(
-          op({
-            state: "input_required",
-            inputRequired: {
-              requestedAt: "2024-01-01T00:00:00.000Z",
-              code: "delete-app-registration-decision",
-              checkpoint: {},
-              message: "Delete the app registration?",
-              metadata: { clientId: "app-1", appDisplayName: "my-app" }
-            }
-          })
-        )
-      );
-      browser.net.handle(
-        resumeUrl("op-1", "delete-app-registration-decision"),
-        (init) => {
-          resumeBody = init && init.body ? JSON.parse(init.body) : undefined;
-          return jsonResponse({ ok: true });
-        }
-      );
-
-      controller?.trackProgress("dev", "azure");
-      await flushPromises();
-      await flushPromises();
-
-      expect(confirmRequest).toEqual({
-        appDisplayName: "my-app",
-        message: "Delete the app registration?"
-      });
-      expect(resumeBody).toMatchObject({ deleteAppRegistration: confirmed });
-    }
-  );
 
   it("does not prompt for an unrecognized input code and keeps polling", async () => {
     const browser = setup();

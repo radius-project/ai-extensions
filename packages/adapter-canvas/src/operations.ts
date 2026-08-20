@@ -1278,8 +1278,6 @@ interface PersistedDeleteRecovery {
   clientId?: string;
   tenantId?: string;
   repoId?: number;
-  appDisplayName?: string;
-  deleteAppRegistration?: boolean;
   credentialConsumerRetirementReady?: boolean;
 }
 
@@ -1291,13 +1289,9 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
     "environment",
     "provider",
     "clientId",
-    "tenantId",
-    "appDisplayName"
+    "tenantId"
   ] as const) {
     if (typeof request[key] === "string") out[key] = request[key];
-  }
-  if (typeof request.deleteAppRegistration === "boolean") {
-    out.deleteAppRegistration = request.deleteAppRegistration;
   }
   if (typeof request.credentialConsumerRetirementReady === "boolean") {
     out.credentialConsumerRetirementReady =

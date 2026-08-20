@@ -10,7 +10,6 @@ import {
 } from "../../operations.js";
 import {
   runEnvironmentDeletion,
-  DELETE_APP_REGISTRATION_DECISION,
   type EnvironmentDeletionPorts
 } from "./environment-deletion.js";
 
@@ -38,7 +37,6 @@ function makeOp(
     clientId: "app-1",
     tenantId: "tenant-1",
     repoId: 5,
-    appDisplayName: "radius-deploy-octo-app",
     ...overrides.request
   };
   return op;
@@ -175,9 +173,10 @@ describe("runEnvironmentDeletion — azure happy path", () => {
     expect(lockHeld).toBe(false);
   });
 
-  it("deletes env, credential, github env, and prompts for the now-unused app", async () => {
+  it("deletes env, credential, github env, and leaves the app registration in place", async () => {
     const op = makeOp();
-    // list returns the env's credential first, then empty on the review list.
+    // list returns the env's credential first, then the delete succeeds. Stage 4
+    // performs no Azure calls — it only records that the app was left in place.
     const runAz = vi
       .fn()
       .mockResolvedValueOnce(
@@ -187,9 +186,7 @@ describe("runEnvironmentDeletion — azure happy path", () => {
           ])
         )
       ) // stage 2 list
-      .mockResolvedValueOnce(ok("")) // stage 2 delete cred
-      .mockResolvedValueOnce(ok("[]")) // stage 4 review list (empty → unused)
-      .mockResolvedValueOnce(ok(JSON.stringify(["radius-managed"]))); // stage 4 tag show (radius-managed)
+      .mockResolvedValueOnce(ok("")); // stage 2 delete cred
     const ports = makePorts({
       runAz,
       readCredentialProvenance: () => createdProvenance()
@@ -200,18 +197,17 @@ describe("runEnvironmentDeletion — azure happy path", () => {
     expect(stage(op, STAGE_DELETE_RADIUS_ENV)).toBe("succeeded");
     expect(stage(op, STAGE_DELETE_CREDENTIAL)).toBe("succeeded");
     expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("succeeded");
-    // The unused app registration is never auto-deleted — even one Radius
-    // created — so the operation parks in `input_required` awaiting a decision.
-    expect(op.state).toBe("input_required");
-    expect(op.endedAt).toBeNull();
-    expect(op.inputRequired.code).toBe(DELETE_APP_REGISTRATION_DECISION);
-    expect(op.inputRequired.message).toMatch(/Radius created it/);
-    expect(runAz).toHaveBeenCalledTimes(4); // no `az ad app delete`
+    // The app registration is never touched — no prompt, no delete, no probe.
+    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("succeeded");
+    expect(op.state).toBe("succeeded");
+    expect(op.endedAt).not.toBeNull();
+    // Only the two stage-2 calls ran; stage 4 issued no `az` command.
+    expect(runAz).toHaveBeenCalledTimes(2);
     expect(
       op.steps.some((s: { label: string }) =>
-        /Deleted the unused app registration/.test(s.label)
+        /Left the app registration \(app-1\) in place/.test(s.label)
       )
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 
@@ -266,28 +262,6 @@ describe("runEnvironmentDeletion — environment still has deployed applications
     expect(op.terminal.userMessage).toMatch(
       /still has one or more deployed applications/
     );
-  });
-});
-
-describe("runEnvironmentDeletion — app registration still in use", () => {
-  it("does not delete when credentials remain", async () => {
-    const op = makeOp();
-    const runAz = vi
-      .fn()
-      .mockResolvedValueOnce(ok("[]")) // stage 2 list (nothing to delete)
-      .mockResolvedValueOnce(
-        ok(JSON.stringify([{ id: "x", name: "other-env", subject: "" }]))
-      ); // stage 4 review list (non-empty)
-    const ports = makePorts({ runAz });
-    await runEnvironmentDeletion(op, ports);
-    expect(op.state).toBe("succeeded");
-    // No app delete is attempted while a credential remains.
-    expect(runAz).toHaveBeenCalledTimes(2);
-    expect(
-      op.steps.some((s: { label: string }) =>
-        /still has 1 credential/.test(s.label)
-      )
-    ).toBe(true);
   });
 });
 
@@ -811,56 +785,6 @@ describe("runEnvironmentDeletion — credential provenance gate (#331)", () => {
     ).toBe(true);
   });
 
-  it("matches tenant GUIDs case-insensitively during app review", async () => {
-    const op = makeOp({ request: { tenantId: "TENANT-1" } });
-    await runEnvironmentDeletion(op, makePorts());
-    expect(op.state).toBe("input_required");
-    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("running");
-  });
-
-  it("does not review an app registration without the expected tenant", async () => {
-    const op = makeOp();
-    const credentialStage = op.stages.find(
-      (candidate: { id: string }) => candidate.id === STAGE_DELETE_CREDENTIAL
-    );
-    if (credentialStage) credentialStage.state = "succeeded";
-    delete op.request.tenantId;
-    const runAz = vi.fn();
-    await runEnvironmentDeletion(op, makePorts({ runAz }));
-    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("warning");
-    expect(runAz).not.toHaveBeenCalled();
-    expect(
-      op.steps.some(
-        (step: { warning?: { code?: string } }) =>
-          step.warning?.code === "app-registration-tenant-unavailable"
-      )
-    ).toBe(true);
-  });
-
-  it("does not review an app registration when its identity cannot be read", async () => {
-    const op = makeOp();
-    const credentialStage = op.stages.find(
-      (candidate: { id: string }) => candidate.id === STAGE_DELETE_CREDENTIAL
-    );
-    if (credentialStage) credentialStage.state = "succeeded";
-    const runAz = vi.fn();
-    const ports = makePorts({
-      runAz,
-      readAzureIdentity: async () => {
-        throw new Error("identity lookup failed");
-      }
-    });
-    await runEnvironmentDeletion(op, ports);
-    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("warning");
-    expect(runAz).not.toHaveBeenCalled();
-    expect(
-      op.steps.some(
-        (step: { warning?: { code?: string } }) =>
-          step.warning?.code === "app-registration-identity-unavailable"
-      )
-    ).toBe(true);
-  });
-
   it("reports a warning when clearing provenance fails after a confirmed delete", async () => {
     const op = makeOp();
     const runAz = vi
@@ -890,59 +814,6 @@ describe("runEnvironmentDeletion — credential provenance gate (#331)", () => {
           step.warning?.code === "credential-provenance-clear-failed"
       )
     ).toBe(true);
-  });
-});
-
-describe("runEnvironmentDeletion — review edge cases", () => {
-  it("warns when the review list is unreadable", async () => {
-    const op = makeOp();
-    const runAz = vi
-      .fn()
-      .mockResolvedValueOnce(ok("[]")) // stage 2 list empty
-      .mockResolvedValueOnce(fail("network")); // stage 4 review list fails
-    const ports = makePorts({ runAz });
-    await runEnvironmentDeletion(op, ports);
-    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("warning");
-    expect(op.state).toBe("succeeded_with_warnings");
-  });
-
-  it("warns when the review list output is unreadable", async () => {
-    const op = makeOp();
-    const runAz = vi
-      .fn()
-      .mockResolvedValueOnce(ok("[]")) // stage 2 list empty
-      // Stage 4 review list succeeds but returns unparseable output, so the app
-      // registration is left in place with a warning rather than prompted for
-      // deletion on data it could not read.
-      .mockResolvedValueOnce(ok("not json"));
-    const ports = makePorts({ runAz });
-    await runEnvironmentDeletion(op, ports);
-    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("warning");
-    const warn = op.steps.find(
-      (s: { warning?: { code?: string } }) =>
-        s.warning?.code === "app-registration-review-unavailable"
-    );
-    expect(warn).toBeDefined();
-    expect(op.state).toBe("succeeded_with_warnings");
-  });
-
-  it("warns when the app delete fails", async () => {
-    const op = makeOp({ request: { deleteAppRegistration: true } });
-    const runAz = vi
-      .fn()
-      .mockResolvedValueOnce(ok("[]")) // stage 2 list empty (nothing to delete)
-      .mockResolvedValueOnce(ok("[]")) // stage 4 re-list before delete: still empty
-      .mockResolvedValueOnce(fail("")); // stage 4 app delete fails (empty stderr → fallback)
-    const ports = makePorts({ runAz });
-    await runEnvironmentDeletion(op, ports);
-    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("warning");
-    const warn = op.steps.find(
-      (s: { warning?: { code?: string; message?: string } }) =>
-        s.warning?.code === "app-registration-delete-failed"
-    );
-    expect(warn?.warning?.message).toBe(
-      "Deleting the app registration failed."
-    );
   });
 });
 
@@ -998,175 +869,6 @@ describe("runEnvironmentDeletion — fallbacks and optional ports", () => {
   });
 });
 
-describe("runEnvironmentDeletion — app-registration provenance", () => {
-  it("prompts (never auto-deletes) when the unused app was not created by Radius", async () => {
-    const op = makeOp();
-    const runAz = vi
-      .fn()
-      .mockResolvedValueOnce(ok("[]")) // stage 2 list empty
-      .mockResolvedValueOnce(ok("[]")) // stage 4 review list empty → unused
-      .mockResolvedValueOnce(ok(JSON.stringify(["some-user-tag"]))); // tag show: no radius-managed → user
-    const ports = makePorts({ runAz });
-
-    await runEnvironmentDeletion(op, ports);
-
-    expect(op.state).toBe("input_required");
-    expect(op.endedAt).toBeNull();
-    expect(op.inputRequired.code).toBe(DELETE_APP_REGISTRATION_DECISION);
-    expect(op.inputRequired.metadata.clientId).toBe("app-1");
-    expect(op.inputRequired.metadata.appDisplayName).toBe(
-      "radius-deploy-octo-app"
-    );
-    expect(op.inputRequired.message).toMatch(/did not create it/);
-    // The provenance probe ran, but no `az ad app delete` was attempted.
-    expect(runAz).toHaveBeenCalledTimes(3);
-    expect(
-      op.steps.some((s: { label: string }) =>
-        /Deleted the unused app registration/.test(s.label)
-      )
-    ).toBe(false);
-  });
-
-  it("prompts when provenance cannot be read", async () => {
-    const op = makeOp();
-    const runAz = vi
-      .fn()
-      .mockResolvedValueOnce(ok("[]")) // stage 2 list empty
-      .mockResolvedValueOnce(ok("[]")) // stage 4 review list empty → unused
-      .mockResolvedValueOnce(fail("network")); // tag show fails (not a 404) → unknown
-    const ports = makePorts({ runAz });
-
-    await runEnvironmentDeletion(op, ports);
-
-    expect(op.state).toBe("input_required");
-    expect(op.inputRequired.code).toBe(DELETE_APP_REGISTRATION_DECISION);
-    expect(op.inputRequired.message).toMatch(/could not confirm/);
-  });
-
-  it("prompts (labelled by client id) when the tag output is unparseable and no display name is known", async () => {
-    const op = makeOp({ request: { appDisplayName: "" } });
-    const runAz = vi
-      .fn()
-      .mockResolvedValueOnce(ok("[]")) // stage 2 list empty
-      .mockResolvedValueOnce(ok("[]")) // stage 4 review list empty → unused
-      .mockResolvedValueOnce(ok("not-json")); // tag show returns unparseable stdout → unknown
-    const ports = makePorts({ runAz });
-
-    await runEnvironmentDeletion(op, ports);
-
-    expect(op.state).toBe("input_required");
-    expect(op.inputRequired.code).toBe(DELETE_APP_REGISTRATION_DECISION);
-    expect(op.inputRequired.metadata.appDisplayName).toBe("");
-    // Falls back to the client id in the prompt when no display name is known.
-    expect(op.inputRequired.message).toContain("app-1");
-    expect(op.inputRequired.message).toMatch(/could not confirm/);
-  });
-
-  it("records an already-deleted app registration as a clean success", async () => {
-    const op = makeOp();
-    const runAz = vi
-      .fn()
-      .mockResolvedValueOnce(ok("[]")) // stage 2 list empty
-      .mockResolvedValueOnce(ok("[]")) // stage 4 review list empty → unused
-      .mockResolvedValueOnce(fail("Request_ResourceNotFound")); // tag show 404 → gone
-    const ports = makePorts({ runAz });
-
-    await runEnvironmentDeletion(op, ports);
-
-    expect(op.state).toBe("succeeded");
-    expect(runAz).toHaveBeenCalledTimes(3); // no delete attempted
-    expect(
-      op.steps.some((s: { label: string }) =>
-        /App registration was already deleted/.test(s.label)
-      )
-    ).toBe(true);
-  });
-
-  it("deletes on resume when the user confirms", async () => {
-    const op = makeOp({ request: { deleteAppRegistration: true } });
-    const runAz = vi
-      .fn()
-      .mockResolvedValueOnce(ok("[]")) // stage 2 list empty
-      .mockResolvedValueOnce(ok("[]")) // stage 4 re-list before delete: still empty
-      .mockResolvedValueOnce(ok("")); // stage 4 app delete (no provenance probe)
-    const ports = makePorts({ runAz });
-
-    await runEnvironmentDeletion(op, ports);
-
-    expect(op.state).toBe("succeeded");
-    expect(runAz).toHaveBeenLastCalledWith([
-      "ad",
-      "app",
-      "delete",
-      "--id",
-      "app-1"
-    ]);
-    expect(
-      op.steps.some((s: { label: string }) =>
-        /Deleted the unused app registration/.test(s.label)
-      )
-    ).toBe(true);
-  });
-
-  it("keeps the app registration on resume when the user declines", async () => {
-    const op = makeOp({ request: { deleteAppRegistration: false } });
-    const runAz = vi.fn().mockResolvedValueOnce(ok("[]")); // stage 2 list only
-    const ports = makePorts({ runAz });
-
-    await runEnvironmentDeletion(op, ports);
-
-    expect(op.state).toBe("succeeded");
-    expect(runAz).toHaveBeenCalledTimes(1); // no provenance probe, no delete
-    expect(
-      op.steps.some((s: { label: string }) =>
-        /Kept the app registration at your request/.test(s.label)
-      )
-    ).toBe(true);
-  });
-
-  it("does not delete the app when a credential appeared while the prompt was open", async () => {
-    const op = makeOp({ request: { deleteAppRegistration: true } });
-    const runAz = vi
-      .fn()
-      .mockResolvedValueOnce(ok("[]")) // stage 2 list empty
-      .mockResolvedValueOnce(
-        ok(JSON.stringify([{ name: "new-cred", subject: "" }]))
-      ); // stage 4 re-list: a credential was added while awaiting the decision
-    const ports = makePorts({ runAz });
-
-    await runEnvironmentDeletion(op, ports);
-
-    expect(op.state).toBe("succeeded_with_warnings");
-    expect(runAz).toHaveBeenCalledTimes(2); // re-list only; NO app delete
-    const warn = op.steps.find(
-      (s: { warning?: { code?: string } }) =>
-        s.warning?.code === "app-registration-became-shared"
-    );
-    expect(warn).toBeDefined();
-    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("warning");
-  });
-
-  it("does not delete the app when the re-check list is unreadable after confirmation", async () => {
-    const op = makeOp({ request: { deleteAppRegistration: true } });
-    const runAz = vi
-      .fn()
-      .mockResolvedValueOnce(ok("[]")) // stage 2 list empty
-      .mockResolvedValueOnce(fail("boom")); // stage 4 re-list fails → unreadable
-    const ports = makePorts({ runAz });
-
-    await runEnvironmentDeletion(op, ports);
-
-    expect(op.state).toBe("succeeded_with_warnings");
-    expect(runAz).toHaveBeenCalledTimes(2); // re-list only; NO app delete
-    const warn = op.steps.find(
-      (s: { warning?: { code?: string } }) =>
-        s.warning?.code === "app-registration-recheck-unavailable"
-    );
-    expect(warn).toBeDefined();
-    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("warning");
-  });
-});
-
 describe("runEnvironmentDeletion — fail-closed default message", () => {
   it("uses a generic retry message when the failed outcome has no detail", async () => {
     const op = makeOp({ provider: "aws", includeAzureCleanup: false });
@@ -1184,25 +886,30 @@ describe("runEnvironmentDeletion — fail-closed default message", () => {
 describe("runEnvironmentDeletion — heartbeat", () => {
   it("passes a heartbeat that refreshes activity and persists while the run is polled", async () => {
     const op = makeOp();
-    let heartbeat: (() => void | Promise<void>) | undefined;
+    const persist = vi.fn(async () => {});
+    let persistedDuringHeartbeat = 0;
+    let activityAdvanced = false;
+    // Invoke the heartbeat while the operation is still in flight (before the
+    // runner finishes it), which is the real scenario: `touchOperation` only
+    // refreshes activity on a non-terminal operation.
     const deleteRadiusEnvironment = vi.fn(
       async (_input, onHeartbeat?: () => void | Promise<void>) => {
-        heartbeat = onHeartbeat;
+        expect(typeof onHeartbeat).toBe("function");
+        // Simulate a long, quiet poll: force a stale timestamp, then heartbeat.
+        op.lastActivityAt = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+        const stale = op.lastActivityAt;
+        persist.mockClear();
+        await onHeartbeat!();
+        persistedDuringHeartbeat = persist.mock.calls.length;
+        activityAdvanced = Date.parse(op.lastActivityAt) > Date.parse(stale);
         return { outcome: "deleted" as const };
       }
     );
-    const persist = vi.fn(async () => {});
     const ports = makePorts({ deleteRadiusEnvironment, persist });
 
     await runEnvironmentDeletion(op, ports);
 
-    expect(typeof heartbeat).toBe("function");
-    // Simulate a long, quiet poll: force a stale timestamp, then heartbeat.
-    op.lastActivityAt = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-    const stale = op.lastActivityAt;
-    persist.mockClear();
-    await heartbeat!();
-    expect(persist).toHaveBeenCalledTimes(1);
-    expect(Date.parse(op.lastActivityAt)).toBeGreaterThan(Date.parse(stale));
+    expect(persistedDuringHeartbeat).toBe(1);
+    expect(activityAdvanced).toBe(true);
   });
 });

@@ -153,7 +153,6 @@ export interface OperationInputPrompt {
   readonly message: string;
   readonly candidates: readonly AppPickerCandidate[];
   readonly defaultAppId: string;
-  readonly appDisplayName: string;
 }
 
 export type OperationTerminalPayload = Readonly<Record<string, unknown>>;
@@ -200,10 +199,6 @@ export interface EnvironmentOperationsDeps {
   resetSubmitButton?(): void;
   promptServiceManagementReference(): Promise<string>;
   promptAppSelection(request: AppPickerRequest): Promise<AppPickerChoice>;
-  confirmDeleteAppRegistration(request: {
-    appDisplayName: string;
-    message: string;
-  }): Promise<boolean>;
   prefersReducedMotion?(): boolean;
 }
 
@@ -348,8 +343,7 @@ function parseInputPrompt(value: unknown): OperationInputPrompt | null {
     candidates: parseAppCandidates(
       metadata ? metadata["candidates"] : undefined
     ),
-    defaultAppId: metadata ? readString(metadata, "defaultAppId") : "",
-    appDisplayName: metadata ? readString(metadata, "appDisplayName") : ""
+    defaultAppId: metadata ? readString(metadata, "defaultAppId") : ""
   };
 }
 
@@ -924,13 +918,6 @@ export function initializeEnvironmentOperations(
           .then((choice) =>
             choice.createNew ? { createNew: true } : { appId: choice.appId }
           );
-      } else if (prompt.code === "delete-app-registration-decision") {
-        answer = deps
-          .confirmDeleteAppRegistration({
-            appDisplayName: prompt.appDisplayName,
-            message: prompt.message
-          })
-          .then((deleteAppRegistration) => ({ deleteAppRegistration }));
       }
       if (!answer) return false;
 

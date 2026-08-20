@@ -266,8 +266,24 @@ export function initializeEnvironmentPage(
           )
         );
         operations.focusPanel();
-        operations.trackProgress(environment, provider, () => {
+        operations.trackProgress(environment, provider, (op) => {
           environments.loadEnvironmentTable();
+          const succeeded =
+            op.terminalState === "succeeded" ||
+            op.terminalState === "succeeded_with_warnings";
+          // Azure environments own a Microsoft Entra app registration that
+          // Radius never deletes automatically (it may be shared). Tell the user
+          // it was left behind so they can remove it in Azure if they want to.
+          if (succeeded && provider === "azure" && confirmDialog) {
+            confirmDialog.show({
+              title: "Environment deleted",
+              message: `The environment "${environment}" was deleted.\n\nIts Microsoft Entra app registration was not deleted — Radius never removes app registrations automatically because they can be shared by other environments or services. If you no longer need it, delete it yourself in the Azure portal.`,
+              confirmLabel: "Done",
+              confirmVariant: "primary",
+              hideCancel: true,
+              onConfirm: () => {}
+            });
+          }
         });
       }
     }
@@ -295,25 +311,7 @@ export function initializeEnvironmentPage(
       resetSubmitButton: environments.resetSubmitButton,
       promptServiceManagementReference:
         discovery.promptServiceManagementReference,
-      promptAppSelection: discovery.promptAppSelection,
-      confirmDeleteAppRegistration: ({ appDisplayName, message }) =>
-        new Promise<boolean>((resolve) => {
-          if (!confirmDialog) {
-            resolve(false);
-            return;
-          }
-          confirmDialog.show({
-            title: "Delete unused app registration?",
-            message,
-            usageLabel: "App registration",
-            usage: appDisplayName ? [appDisplayName] : undefined,
-            confirmLabel: "Delete App Registration",
-            cancelLabel: "Keep",
-            confirmVariant: "danger",
-            onConfirm: () => resolve(true),
-            onCancel: () => resolve(false)
-          });
-        })
+      promptAppSelection: discovery.promptAppSelection
     }
   });
 

@@ -8,14 +8,12 @@
 //   1. Delete the Radius environment on the cluster (via a dispatched workflow).
 //   2. Remove the per-environment Azure federated credential(s).
 //   3. Delete the GitHub environment.
-//   4. Review the app registration: when it has no federated credentials left
-//      it is unused. Radius never deletes an app registration automatically —
-//      removing one can break other callers that still rely on it — so it always
-//      prompts for a decision, tailoring the message by whether Radius created
-//      it (`radius-managed` tag) or the user brought their own. When credentials
-//      remain (it is still shared with another environment) or the list cannot
-//      be read, it is left in place. An app that is already gone is a clean,
-//      idempotent success and needs no prompt.
+//   4. Note the app registration: Radius never touches the Entra app
+//      registration during an environment deletion. An app registration can be
+//      shared by other environments or callers, so deleting it — or even probing
+//      it — is out of scope for an environment teardown. This stage only records
+//      an informational step so the user knows it was intentionally left in
+//      place and can remove it manually if it is no longer needed.
 //
 // Sequencing is load-bearing: the Radius-env-delete workflow authenticates to
 // the cluster with the environment's own federated credential, so the credential
@@ -38,10 +36,8 @@ import {
   setStageState,
   finish,
   finishSucceeded,
-  requireInput,
   hasWarnings,
   touchOperation,
-  INPUT_REQUIRED_STATE,
   STAGE_DELETE_RADIUS_ENV,
   STAGE_DELETE_CREDENTIAL,
   STAGE_DELETE_GITHUB_ENV,
@@ -50,12 +46,8 @@ import {
 import {
   buildFederatedCredentialListArgs,
   buildFederatedCredentialDeleteArgs,
-  buildAppDeleteArgs,
-  buildAppTagShowArgs,
   parseFederatedCredentials,
   federatedCredentialListUnreadable,
-  parseAppTags,
-  parseRadiusAppProvenanceTags,
   selectEnvironmentFederatedCredentials,
   isAzResourceNotFound
 } from "../../azure-oidc.js";
@@ -64,12 +56,6 @@ import {
   type CredentialProvenanceRecord,
   type CredentialRetentionReason
 } from "../../credential-provenance.js";
-
-// The in-panel prompt raised when an unused app registration was NOT created by
-// Radius. The resume route and the browser progress controller key off the same
-// literal.
-export const DELETE_APP_REGISTRATION_DECISION =
-  "delete-app-registration-decision";
 
 export interface DeletionCommandResult {
   code?: string | number;
@@ -148,8 +134,6 @@ interface DeletionOperation {
     clientId?: string;
     tenantId?: string;
     repoId?: number;
-    appDisplayName?: string;
-    deleteAppRegistration?: boolean;
     [key: string]: unknown;
   };
   inputRequired?: unknown;
@@ -394,41 +378,23 @@ export async function runEnvironmentDeletion(
     }
   }
 
-  // Stage 4 — review the app registration (Azure only). When it has no
-  // federated credentials left it is unused. Radius never auto-deletes an app
-  // registration: removing one can break other environments or callers that
-  // still rely on it, so it always prompts for a decision. When credentials
-  // remain (still shared) or the list cannot be read, it is left in place.
+  // Stage 4 — the Entra app registration. Radius never touches it during an
+  // environment deletion: an app registration can be shared by other
+  // environments or callers, so removing it — or even probing it — is out of
+  // scope for an environment teardown. Record an informational step so the user
+  // knows it was intentionally left in place and can remove it manually if it is
+  // no longer needed.
   if (stagePending(op, STAGE_REVIEW_APP_REGISTRATION)) {
     enterStage(op, STAGE_REVIEW_APP_REGISTRATION);
-    await ports.persist();
-    if (op.request?.deleteAppRegistration === true) {
-      try {
-        await ports.withCredentialProvenanceLock(() =>
-          reviewAppRegistration(op, ports, clientId)
-        );
-      } catch (error) {
-        addStep(op, {
-          stage: STAGE_REVIEW_APP_REGISTRATION,
-          kind: "warning",
-          label: "Could not lock the app registration for final review",
-          warning: {
-            code: "app-registration-lock-unavailable",
-            message: ports.errorMessage(error),
-            impact: "The app registration was left in place."
-          }
-        });
-        setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "warning");
-      }
-    } else {
-      await reviewAppRegistration(op, ports, clientId);
-    }
+    addStep(op, {
+      stage: STAGE_REVIEW_APP_REGISTRATION,
+      kind: "observation",
+      label: `Left the app registration (${clientId}) in place — Radius does not delete Entra app registrations. Remove it manually if it is no longer needed.`,
+      state: "succeeded"
+    });
+    setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "succeeded");
     await ports.persist();
   }
-
-  // A user-provenance prompt parks the operation in `input_required`; it must
-  // not be finished until the user answers and the runner is resumed.
-  if (op.state === INPUT_REQUIRED_STATE) return;
 
   finishSucceeded(
     op,
@@ -503,201 +469,6 @@ async function deleteGitHubEnvironmentStage(
     }
   }
   await ports.persist();
-}
-
-// Prompt/decision handling for the unused app registration. A resumed decision
-// (`op.request.deleteAppRegistration`) short-circuits the provenance probe.
-async function reviewAppRegistration(
-  op: DeletionOperation,
-  ports: EnvironmentDeletionPorts,
-  clientId: string
-): Promise<void> {
-  const decision = op.request?.deleteAppRegistration;
-  if (
-    decision !== false &&
-    !(await appRegistrationIdentityMatchesRequest(op, ports, clientId))
-  ) {
-    return;
-  }
-  if (decision === true) {
-    // Re-list the federated credentials immediately before deleting. The prompt
-    // may have been open for a while, and a credential added to this app
-    // registration in the meantime (e.g. another environment created against
-    // it) would make it shared again. Deleting the app now would remove that
-    // fresh credential too, so only delete when the app is still unused.
-    const remaining = await listRemainingCredentials(ports, clientId);
-    if (remaining === null) {
-      addStep(op, {
-        stage: STAGE_REVIEW_APP_REGISTRATION,
-        kind: "warning",
-        label: "Could not re-check the app registration's credentials",
-        warning: {
-          code: "app-registration-recheck-unavailable",
-          message:
-            "Re-listing the app registration's federated credentials failed after you confirmed deletion; leaving it in place.",
-          impact: "The app registration was not deleted."
-        }
-      });
-      setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "warning");
-      return;
-    }
-    if (remaining.length > 0) {
-      addStep(op, {
-        stage: STAGE_REVIEW_APP_REGISTRATION,
-        kind: "warning",
-        label: `App registration gained ${remaining.length} credential(s) while awaiting your decision; left in place`,
-        warning: {
-          code: "app-registration-became-shared",
-          message:
-            "A federated credential was added to the app registration while the delete prompt was open, so it is in use again and was not deleted.",
-          impact: "The app registration was left in place."
-        }
-      });
-      setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "warning");
-      return;
-    }
-    await deleteAppRegistration(op, ports, clientId);
-    return;
-  }
-  if (decision === false) {
-    addStep(op, {
-      stage: STAGE_REVIEW_APP_REGISTRATION,
-      kind: "observation",
-      label: "Kept the app registration at your request",
-      state: "succeeded"
-    });
-    setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "succeeded");
-    return;
-  }
-  const remaining = await listRemainingCredentials(ports, clientId);
-  if (remaining === null) {
-    addStep(op, {
-      stage: STAGE_REVIEW_APP_REGISTRATION,
-      kind: "warning",
-      label: "Could not read the app registration's credentials",
-      warning: {
-        code: "app-registration-review-unavailable",
-        message:
-          "Listing the app registration's federated credentials failed; leaving it in place.",
-        impact: "The app registration was not reviewed for deletion."
-      }
-    });
-    setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "warning");
-    return;
-  }
-  if (remaining.length > 0) {
-    addStep(op, {
-      stage: STAGE_REVIEW_APP_REGISTRATION,
-      kind: "observation",
-      label: `App registration still has ${remaining.length} credential(s); left in place`,
-      state: "succeeded"
-    });
-    setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "succeeded");
-    return;
-  }
-  // The app registration is unused. It is never auto-deleted: removing an app
-  // registration can break other callers that still rely on it, so Radius always
-  // asks before deleting one. A not-found app is already gone and needs no
-  // prompt. Provenance only tailors the prompt wording.
-  const provenance = await readAppProvenance(ports, clientId);
-  if (provenance === "not_found") {
-    addStep(op, {
-      stage: STAGE_REVIEW_APP_REGISTRATION,
-      kind: "observation",
-      label: "App registration was already deleted",
-      state: "succeeded"
-    });
-    setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "succeeded");
-    return;
-  }
-  const appDisplayName = String(op.request?.appDisplayName || "");
-  const label = appDisplayName || clientId;
-  const message =
-    provenance === "managed" ?
-      `App registration "${label}" is no longer used by any environment. Radius created it — delete it now?`
-    : provenance === "user" ?
-      `App registration "${label}" is no longer used by any environment. Radius did not create it, so it was left in place. Delete it?`
-    : `App registration "${label}" is no longer used by any environment, and Radius could not confirm whether it created it. Delete it?`;
-  addStep(op, {
-    stage: STAGE_REVIEW_APP_REGISTRATION,
-    kind: "observation",
-    label: "App registration is unused — awaiting your decision",
-    state: "pending"
-  });
-  requireInput(op, {
-    code: DELETE_APP_REGISTRATION_DECISION,
-    checkpoint: DELETE_APP_REGISTRATION_DECISION,
-    message,
-    metadata: { clientId, appDisplayName }
-  });
-}
-
-async function appRegistrationIdentityMatchesRequest(
-  op: DeletionOperation,
-  ports: EnvironmentDeletionPorts,
-  clientId: string
-): Promise<boolean> {
-  const expectedTenantId = String(op.request?.tenantId || "");
-  if (!expectedTenantId) {
-    addStep(op, {
-      stage: STAGE_REVIEW_APP_REGISTRATION,
-      kind: "warning",
-      label: "Could not verify the app registration tenant",
-      warning: {
-        code: "app-registration-tenant-unavailable",
-        message:
-          "The deletion request does not contain the tenant identity needed to review the app registration safely.",
-        impact: "The app registration was left in place."
-      }
-    });
-    setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "warning");
-    return false;
-  }
-  try {
-    const identity = await ports.readAzureIdentity(clientId);
-    if (identity.tenantId.toLowerCase() === expectedTenantId.toLowerCase()) {
-      return true;
-    }
-    addStep(op, {
-      stage: STAGE_REVIEW_APP_REGISTRATION,
-      kind: "warning",
-      label: "Left an app registration from another tenant in place",
-      warning: {
-        code: "app-registration-tenant-mismatch",
-        message: `The active Azure tenant is "${identity.tenantId}", but this environment was configured for "${expectedTenantId}".`,
-        impact: "The app registration was not reviewed or deleted."
-      }
-    });
-  } catch (error) {
-    addStep(op, {
-      stage: STAGE_REVIEW_APP_REGISTRATION,
-      kind: "warning",
-      label: "Could not verify the app registration identity",
-      warning: {
-        code: "app-registration-identity-unavailable",
-        message: ports.errorMessage(error),
-        impact: "The app registration was left in place."
-      }
-    });
-  }
-  setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "warning");
-  return false;
-}
-
-// Classify an unused app registration's provenance from its `radius-managed`
-// tag. A not-found app is already gone (idempotent success); an unreadable tag
-// read is "unknown" so the caller stays conservative and never auto-deletes.
-async function readAppProvenance(
-  ports: EnvironmentDeletionPorts,
-  clientId: string
-): Promise<"managed" | "user" | "not_found" | "unknown"> {
-  const result = await ports.runAz(buildAppTagShowArgs({ appId: clientId }));
-  if (!commandSucceeded(result)) {
-    return isAzResourceNotFound(result?.stderr) ? "not_found" : "unknown";
-  }
-  const tags = parseAppTags(result.stdout);
-  if (tags === null) return "unknown";
-  return parseRadiusAppProvenanceTags(tags).managed ? "managed" : "user";
 }
 
 async function deleteEnvironmentCredentials(
@@ -1112,52 +883,6 @@ function retentionMessage(
         `it created the credential and will not delete it.`
       );
   }
-}
-
-// Returns the app's remaining federated credentials, or null when the list
-// could not be read (so the caller can warn rather than prompt on bad data).
-async function listRemainingCredentials(
-  ports: EnvironmentDeletionPorts,
-  clientId: string
-): Promise<ReturnType<typeof parseFederatedCredentials> | null> {
-  if (!clientId) return null;
-  const result = await ports.runAz(
-    buildFederatedCredentialListArgs({ appId: clientId })
-  );
-  if (listNotReadable(result)) return null;
-  if (federatedCredentialListUnreadable(result.stdout)) return null;
-  return parseFederatedCredentials(result.stdout);
-}
-
-async function deleteAppRegistration(
-  op: DeletionOperation,
-  ports: EnvironmentDeletionPorts,
-  clientId: string
-): Promise<void> {
-  const result = await ports.runAz(buildAppDeleteArgs({ appId: clientId }));
-  if (commandSucceeded(result) || isAzResourceNotFound(result.stderr)) {
-    addStep(op, {
-      stage: STAGE_REVIEW_APP_REGISTRATION,
-      kind: "mutation",
-      label: "Deleted the unused app registration",
-      state: "succeeded"
-    });
-    setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "succeeded");
-    return;
-  }
-  addStep(op, {
-    stage: STAGE_REVIEW_APP_REGISTRATION,
-    kind: "warning",
-    label: "Could not delete the app registration",
-    warning: {
-      code: "app-registration-delete-failed",
-      message:
-        (result.stderr || "").trim() || "Deleting the app registration failed.",
-      impact:
-        "The app registration still exists; delete it manually if intended."
-    }
-  });
-  setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "warning");
 }
 
 function commandSucceeded(result: DeletionCommandResult): boolean {
