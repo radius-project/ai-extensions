@@ -287,7 +287,15 @@ ${confirmDialogMarkup()}
 </style>
 
 <div hidden id="${ENVIRONMENT_PAGE_STATE_ID}">${escapeHtml(
-      inlineJson({ repo: ctxRepo, branch: ctxBranch, activeSubtab })
+      inlineJson({
+        repo: ctxRepo,
+        branch: ctxBranch,
+        activeSubtab,
+        mutationNonce:
+          typeof state.browserMutationNonce === "string" ?
+            state.browserMutationNonce
+          : ""
+      })
     )}</div>
 ${browserScriptTag("environment-page")}`
   );

@@ -201,7 +201,7 @@ export function environmentsPaneMarkup(
             GitHub
           </div>
           <div class="rad-field" id="env-gh-identity-field" style="display:none;">
-            <label>Account</label>
+            <label>GitHub account</label>
             <div class="rad-combo" id="env-gh-account-combo">
               <button type="button" class="rad-combo__button" id="env-gh-account-button" aria-haspopup="listbox" aria-expanded="false">
                 <span class="rad-combo__value" id="env-gh-account-value">Detecting…</span>
@@ -212,9 +212,17 @@ export function environmentsPaneMarkup(
                 <div class="rad-combo__empty" id="env-gh-account-empty" style="display:none;">No GitHub accounts detected.</div>
               </div>
             </div>
-            <div class="rad-field__help" id="env-gh-account-note" style="margin-top:6px;">Choosing a different account runs <code>gh auth switch</code> which changes the active GitHub account for every terminal and tool on this machine, remaining changed even after Radius closes. Switch back anytime with <code>gh auth switch -u &lt;account&gt;</code>.</div>
-            <div id="env-gh-identity-note" style="margin-top:6px; font-size:13px; display:none;"></div>
-            <button type="button" id="env-gh-recheck" style="display:none; margin-top:6px; font-size:12px; padding:2px 10px; cursor:pointer;">Re-check</button>
+            <div class="rad-field__help" id="env-gh-account-note" style="margin-top:6px;">Used to create GitHub Environment.</div>
+            <div id="env-gh-identity-note" role="status" style="margin-top:8px; font-size:13px; display:none;"></div>
+            <div style="display:flex; gap:8px; margin-top:6px;">
+              <button type="button" id="env-gh-fix-access" class="rad-btn rad-btn--ghost" style="display:none; font-size:12px; padding:2px 10px;">Show how to fix</button>
+              <button type="button" id="env-gh-recheck" class="rad-btn rad-btn--ghost" style="display:none; font-size:12px; padding:2px 10px;">Re-check</button>
+            </div>
+            <details id="env-gh-details-panel" style="margin-top:8px; font-size:12px;">
+              <summary>View technical details</summary>
+              <div id="env-gh-technical-details" style="margin-top:6px; line-height:1.5;"></div>
+              <div id="env-gh-repair" style="display:none; margin-top:6px; font-family:monospace; overflow-wrap:anywhere;"></div>
+            </details>
           </div>
         </div>
 

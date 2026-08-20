@@ -376,6 +376,18 @@ export async function handleAzureAutoSetup(
       operation,
       dependencies.stageAuthorizeIdentity
     );
+    const selectedExecutor = dependencies.external.getSelectedGitHubExecutor(
+      operation.operationId
+    );
+    if (!selectedExecutor) {
+      await fail(
+        409,
+        "The selected GitHub account executor is unavailable. Re-check the account and retry.",
+        "github-selection-unavailable"
+      );
+      return;
+    }
+    await selectedExecutor.verifyIdentity();
 
     const activeOperation = operation;
     const rawPush = steps.push.bind(steps);
@@ -391,30 +403,27 @@ export async function handleAzureAutoSetup(
     };
 
     try {
-      const identity = await dependencies.external.getGitHubIdentity();
-      if (identity?.actingLogin) {
-        dependencies.operations.setContext(operation, {
-          githubLogin: identity.actingLogin
-        });
-        steps.push(`Acting on GitHub as @${identity.actingLogin}.`);
-        if (identity.mismatch && identity.displayLogin) {
-          steps.push(
-            `⚠️ Note: the app shows @${identity.displayLogin} but setup is acting as @${identity.actingLogin}. If setup fails with a permission error, switch accounts in the Create Environment dialog.`
-          );
-        }
-      }
+      dependencies.operations.setContext(operation, {
+        githubLogin: selectedExecutor.login,
+        githubCredentialSource: selectedExecutor.credentialSource
+      });
+      steps.push(`Acting on GitHub as @${selectedExecutor.login}.`);
     } catch {
       // Identity narration is advisory and never blocks setup.
     }
 
-    const accessMessage =
-      await dependencies.external.preflightRepoAdmin(targetRepo);
+    const accessMessage = await dependencies.external.preflightRepoAdmin(
+      targetRepo,
+      selectedExecutor
+    );
     if (accessMessage) {
       await fail(403, accessMessage, "repo-admin-required");
       return;
     }
     const packageAccess =
-      await dependencies.external.preflightGhcrPackageWriteAccess();
+      await dependencies.external.preflightGhcrPackageWriteAccess(
+        selectedExecutor
+      );
     if (!packageAccess.ok) {
       await fail(
         packageAccess.status,
@@ -431,7 +440,8 @@ export async function handleAzureAutoSetup(
       steps,
       respond: (status, payload) => respond(context, status, payload),
       runAz: (args) => dependencies.external.runAz(args),
-      runGitHubJson: (apiPath) => dependencies.external.runGitHubJson(apiPath),
+      runGitHubJson: (apiPath) =>
+        dependencies.external.runGitHubJson(apiPath, selectedExecutor),
       fail,
       checkpoint
     };

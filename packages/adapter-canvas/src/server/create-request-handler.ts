@@ -18,6 +18,7 @@ export interface CreateRequestHandlerInput {
   // Receives the request so the caller can exclude traffic that must not count
   // as user activity (server-owned internal calls).
   markActivity(request: IncomingMessage): void;
+  validateBrowserMutation?(context: CanvasRequestContext): boolean;
   // Global pre-routing applied to every request. It runs before route
   // selection and before any body read so typed routes cannot bypass the
   // checks required before typed dispatch.
@@ -31,6 +32,7 @@ export function createRequestHandler({
   routes,
   handleUnmatchedRequest,
   markActivity,
+  validateBrowserMutation,
   preRoute
 }: CreateRequestHandlerInput): RequestListener {
   assertRouteTable(routes);
@@ -45,6 +47,16 @@ export function createRequestHandler({
     if (preRoute?.(context)) return;
     const route = matchRoute(routes, request.method, context.pathname);
     if (route) {
+      if (
+        route.mutationPolicy === "nonce-required" &&
+        !validateBrowserMutation?.(context)
+      ) {
+        context.json(403, {
+          error: "This browser mutation request is not trusted.",
+          code: "browser-mutation-validation-failed"
+        });
+        return;
+      }
       await route.handler(context);
       return;
     }
