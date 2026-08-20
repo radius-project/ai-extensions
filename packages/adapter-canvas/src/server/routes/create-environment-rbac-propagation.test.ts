@@ -247,6 +247,27 @@ describe("shouldDeferAzureCredentialVerificationForRbacPropagation", () => {
     ).toBe(true);
   });
 
+  it("requires the effective resource group even for subscription-scope access", () => {
+    expect(
+      shouldDefer(
+        operation({
+          setupArtifacts: {
+            servicePrincipal: { appId: "client-1", objectId: "principal-1" },
+            roleAssignments: [
+              {
+                role: "Owner",
+                scope: "/subscriptions/sub-1",
+                principalObjectId: "principal-1",
+                createdAt: FRESH
+              }
+            ]
+          }
+        }),
+        { resourceGroup: "" }
+      )
+    ).toBe(false);
+  });
+
   it("uses any matching role assignment when other assignments do not match", () => {
     expect(
       shouldDefer(

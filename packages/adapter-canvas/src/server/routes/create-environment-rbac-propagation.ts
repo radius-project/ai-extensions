@@ -71,11 +71,10 @@ function scopeMatches(
   const normalizedAssignment = parseAzureScope(assignmentScope);
   const expectedSubscription = normalizeIdentifier(subscriptionId);
   const expectedResourceGroup = normalizeIdentifier(resourceGroup);
-  if (!normalizedAssignment || !expectedSubscription) return false;
+  if (!normalizedAssignment || !expectedSubscription || !expectedResourceGroup)
+    return false;
   if (normalizedAssignment.subscriptionId !== expectedSubscription)
     return false;
-  if (!expectedResourceGroup)
-    return normalizedAssignment.resourceGroup === null;
   return (
     normalizedAssignment.resourceGroup === null ||
     normalizedAssignment.resourceGroup === expectedResourceGroup

@@ -739,10 +739,12 @@ export async function handleCreateEnvironment(
       !credentialsComplete;
     const actionRequiredDueToPullRequest = !verifyPlan.shouldDispatch;
     const finishSkippedVerificationActionRequired = async (
-      terminal: Record<string, unknown>
+      terminal: Record<string, unknown>,
+      commitMode: "default_branch" | "pull_request" = prState ? "pull_request"
+      : "default_branch"
     ): Promise<void> => {
       dependencies.recordCommitState(operation, {
-        mode: prState ? "pull_request" : "default_branch",
+        mode: commitMode,
         branch: prState?.branch || defaultBranch,
         baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
         pullRequestUrl: pullRequestUrl || null
@@ -767,20 +769,25 @@ export async function handleCreateEnvironment(
       // nothing failed — the operation is finished and the remaining work is the
       // user's. The client used to poll for a verify run that could not exist
       // and, eight minutes later, reported this as a timeout.
-      await finishSkippedVerificationActionRequired({
-        reason: "pr-merge-required",
-        pullRequestUrl: pullRequestUrl || null,
-        branch: prState?.branch || null,
-        baseBranch: prState?.base || verifyPlan.defaultBranch || null,
-        userMessage:
-          pullRequestUrl ?
-            "Merge the pull request to finish setup; credential verification and deploys run once it lands."
-          : `Open and merge a pull request from "${
-              prState?.branch || "the setup branch"
-            }" into "${
-              prState?.base || verifyPlan.defaultBranch || "the default branch"
-            }" to finish setup.`
-      });
+      await finishSkippedVerificationActionRequired(
+        {
+          reason: "pr-merge-required",
+          pullRequestUrl: pullRequestUrl || null,
+          branch: prState?.branch || null,
+          baseBranch: prState?.base || verifyPlan.defaultBranch || null,
+          userMessage:
+            pullRequestUrl ?
+              "Merge the pull request to finish setup; credential verification and deploys run once it lands."
+            : `Open and merge a pull request from "${
+                prState?.branch || "the setup branch"
+              }" into "${
+                prState?.base ||
+                verifyPlan.defaultBranch ||
+                "the default branch"
+              }" to finish setup.`
+        },
+        "pull_request"
+      );
     } else if (skipVerifyDueToRbacDelay) {
       await finishSkippedVerificationActionRequired({
         reason: "azure-rbac-propagation",
