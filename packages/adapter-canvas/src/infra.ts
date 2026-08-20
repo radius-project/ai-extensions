@@ -338,8 +338,8 @@ export function addDeleteStateCheck(yaml: string): string {
           fi
 
           if [[ -z "$STATE_REGISTRY" ]]; then
-            no_state
-            exit 0
+            echo "RADIUS_STATE_REGISTRY is not configured; cannot determine whether persisted Radius state exists." | tee -a "$GITHUB_STEP_SUMMARY" >&2
+            exit 1
           fi
 
           archive="\${STATE_ARCHIVE:-radius-state}"
