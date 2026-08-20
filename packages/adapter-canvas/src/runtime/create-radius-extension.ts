@@ -50,7 +50,9 @@ export interface RadiusExtension {
         }
       | undefined
     >;
-    onSessionStart: () => Promise<{ additionalContext: string }>;
+    onSessionStart: (input: {
+      workingDirectory?: unknown;
+    }) => Promise<{ additionalContext: string } | undefined>;
   };
   // Attaches the real (or fake) joined session. Must be called exactly once,
   // strictly after joinSession() resolves in production.
@@ -376,9 +378,21 @@ export function createRadiusExtension(
           return undefined;
         }
       },
-      onSessionStart: async () => ({
-        additionalContext: RADIUS_SESSION_START_CONTEXT
-      })
+      onSessionStart: async (input) => {
+        const workingDirectory =
+          typeof input.workingDirectory === "string" ?
+            input.workingDirectory
+          : "";
+        if (
+          !workingDirectory ||
+          !(await deps.workspace
+            .hasRadiusApplicationModel(workingDirectory)
+            .catch(() => false))
+        ) {
+          return undefined;
+        }
+        return { additionalContext: RADIUS_SESSION_START_CONTEXT };
+      }
     },
     attachSession,
     shutdown,

@@ -87,6 +87,7 @@ export function createFakeSession(
 }
 
 export interface FakeDependenciesOptions {
+  radiusEnabled?: boolean;
   workspaceContext?: WorkspaceContext;
   bicepByRepoBranch?: Record<string, string | null>;
   // Keyed `workspace:<repo>@<branch>:<repoPath>` / `remote:<repo>@<branch>:<repoPath>`.
@@ -183,6 +184,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     getOrCreateServer,
     getLastWebviewActivityAt: vi.fn(() => lastWebviewActivityAt),
     workspace: {
+      hasRadiusApplicationModel: vi.fn(
+        async () => options.radiusEnabled ?? false
+      ),
       detectWorkspaceContext: vi.fn(async () => workspaceContext),
       defaultBranchForState: vi.fn(
         (state) => (state?.contextBranch as string) || "main"

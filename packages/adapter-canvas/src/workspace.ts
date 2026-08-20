@@ -361,6 +361,34 @@ export async function workspaceFileExists(
 // JSON is saved next to whichever one is actually found.
 const WORKSPACE_BICEP_PATHS = [".radius/app.bicep", "app.bicep"];
 
+// A root app.bicep is a common Azure convention, so its filename alone cannot
+// activate Radius. Accept the current extension declaration or either supported
+// Radius application resource type used by legacy models.
+function isLegacyRadiusAppModel(content: string): boolean {
+  return (
+    /^\s*extension\s+radius\b/im.test(content) ||
+    /^\s*resource\s+\w+\s+['"](?:Radius|Applications)\.Core\/applications@/im.test(
+      content
+    )
+  );
+}
+
+export async function hasRadiusApplicationModel(
+  workspacePath: string | null | undefined
+): Promise<boolean> {
+  const radiusModel = await readWorkspaceFile(
+    workspacePath,
+    WORKSPACE_BICEP_PATHS[0]
+  );
+  if (radiusModel?.trim()) return true;
+
+  const legacyModel = await readWorkspaceFile(
+    workspacePath,
+    WORKSPACE_BICEP_PATHS[1]
+  );
+  return legacyModel ? isLegacyRadiusAppModel(legacyModel) : false;
+}
+
 // Reads the workspace app.bicep and reports which repo-relative path it came
 // from, so callers can persist sibling artifacts (e.g. app-graph.json) next to
 // the exact file that was graphed. Returns null when the selection is not the

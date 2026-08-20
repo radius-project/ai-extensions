@@ -14,6 +14,7 @@ import {
   workspaceFileExists,
   fetchWorkspaceTree,
   isWorkspacePath,
+  hasRadiusApplicationModel,
   workspaceHeadCommit,
   workspaceSourceChangedSince
 } from "./workspace.js";
@@ -282,6 +283,80 @@ describe("workspaceFileExists", () => {
       expect(await workspaceFileExists(dir, "")).toBe(false);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("hasRadiusApplicationModel", () => {
+  async function workspace(
+    files: Record<string, string>
+  ): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "radius-enabled-"));
+    for (const [repoPath, content] of Object.entries(files)) {
+      const filePath = path.join(dir, ...repoPath.split("/"));
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, content);
+    }
+    return {
+      dir,
+      cleanup: () => fs.rm(dir, { recursive: true, force: true })
+    };
+  }
+
+  it("recognizes a non-empty .radius/app.bicep without repository metadata or a Git remote", async () => {
+    const testWorkspace = await workspace({
+      ".radius/app.bicep": "resource app {}\n"
+    });
+    try {
+      expect(await hasRadiusApplicationModel(testWorkspace.dir)).toBe(true);
+    } finally {
+      await testWorkspace.cleanup();
+    }
+  });
+
+  it.each([
+    ["the radius extension", "extension radius\n"],
+    [
+      "the current Radius application type",
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {}\n"
+    ],
+    [
+      "the legacy Radius application type",
+      "resource app 'Applications.Core/applications@2023-10-01-preview' = {}\n"
+    ]
+  ])("recognizes a root app.bicep containing %s", async (_label, content) => {
+    const testWorkspace = await workspace({ "app.bicep": content });
+    try {
+      expect(await hasRadiusApplicationModel(testWorkspace.dir)).toBe(true);
+    } finally {
+      await testWorkspace.cleanup();
+    }
+  });
+
+  it("rejects a generic Azure root app.bicep", async () => {
+    const testWorkspace = await workspace({
+      "app.bicep":
+        "resource site 'Microsoft.Web/sites@2024-04-01' = { name: 'web' }\n"
+    });
+    try {
+      expect(await hasRadiusApplicationModel(testWorkspace.dir)).toBe(false);
+    } finally {
+      await testWorkspace.cleanup();
+    }
+  });
+
+  it("rejects empty and missing application models", async () => {
+    const emptyWorkspace = await workspace({
+      ".radius/app.bicep": " \n",
+      "app.bicep": ""
+    });
+    const missingWorkspace = await workspace({});
+    try {
+      expect(await hasRadiusApplicationModel(emptyWorkspace.dir)).toBe(false);
+      expect(await hasRadiusApplicationModel(missingWorkspace.dir)).toBe(false);
+      expect(await hasRadiusApplicationModel("")).toBe(false);
+    } finally {
+      await Promise.all([emptyWorkspace.cleanup(), missingWorkspace.cleanup()]);
     }
   });
 });

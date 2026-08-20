@@ -26,6 +26,9 @@ export interface WorkspaceContext {
 }
 
 export interface WorkspaceDependencies {
+  hasRadiusApplicationModel(
+    workspacePath: string | null | undefined
+  ): Promise<boolean>;
   detectWorkspaceContext(session: {
     cwd?: string;
     workspacePath?: string;

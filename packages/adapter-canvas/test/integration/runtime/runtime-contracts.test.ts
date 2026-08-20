@@ -125,6 +125,34 @@ describe("P0-A Radius runtime registration contract", () => {
     await harness.extension.shutdown("test");
   });
 
+  it("injects Radius guidance only for a worktree with an existing application model", async () => {
+    const unrelated = await createRuntimeSdkHarness();
+    const enabled = await createRuntimeSdkHarness({ radiusEnabled: true });
+
+    const unrelatedResult = await unrelated.extension.hooks.onSessionStart({
+      workingDirectory: "/worktrees/unrelated"
+    });
+    const enabledResult = await enabled.extension.hooks.onSessionStart({
+      workingDirectory: "/worktrees/radius-app"
+    });
+
+    expect(unrelatedResult).toBeUndefined();
+    expect(unrelated.session.send).not.toHaveBeenCalled();
+    expect(unrelated.session.rpc.canvas.open).not.toHaveBeenCalled();
+    expect(unrelated.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+    expect(unrelated.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(enabledResult?.additionalContext).toContain("radius-panel");
+    expect(enabledResult?.additionalContext).toContain(
+      "radius_generate_pr_diff_markdown"
+    );
+    expect(
+      enabled.deps.workspace.hasRadiusApplicationModel
+    ).toHaveBeenCalledExactlyOnceWith("/worktrees/radius-app");
+
+    await unrelated.extension.shutdown("test");
+    await enabled.extension.shutdown("test");
+  });
+
   describe("P0-A RU-21 operation-aware keepalive", () => {
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());

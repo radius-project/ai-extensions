@@ -196,14 +196,59 @@ describe("RU-19: onPreToolUse hook", () => {
 });
 
 describe("RU-19: onSessionStart hook", () => {
-  it("returns additionalContext with the stable instanceId + core tool guidance", async () => {
-    const { ext } = setup();
-    const result = await ext.hooks.onSessionStart();
-    expect(result.additionalContext).toContain("radius-panel");
-    expect(result.additionalContext).toContain("radius_generate_app");
-    expect(result.additionalContext).toContain(
+  it("returns the full guidance for a Radius-enabled worktree before session attachment", async () => {
+    const fake = createFakeDependencies({ radiusEnabled: true });
+    const ext = createRadiusExtension(fake.deps);
+
+    const result = await ext.hooks.onSessionStart({
+      workingDirectory: "/worktrees/radius-app"
+    });
+
+    expect(result?.additionalContext).toContain("radius-panel");
+    expect(result?.additionalContext).toContain("radius_generate_app");
+    expect(result?.additionalContext).toContain(
       "radius_generate_pr_diff_markdown"
     );
+    expect(
+      fake.deps.workspace.hasRadiusApplicationModel
+    ).toHaveBeenCalledExactlyOnceWith("/worktrees/radius-app");
+  });
+
+  it("returns no context or side effects for an unrelated worktree", async () => {
+    const fake = createFakeDependencies();
+    const session = createFakeSession();
+    fake.sessionHolder.set(session);
+    const ext = createRadiusExtension(fake.deps);
+
+    const result = await ext.hooks.onSessionStart({
+      workingDirectory: "/worktrees/unrelated"
+    });
+
+    expect(result).toBeUndefined();
+    expect(session.send).not.toHaveBeenCalled();
+    expect(session.rpc.canvas.open).not.toHaveBeenCalled();
+    expect(fake.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(fake.deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
+  });
+
+  it("returns no context when the working directory is unavailable", async () => {
+    const { ext, deps } = setup();
+
+    await expect(
+      ext.hooks.onSessionStart({ workingDirectory: undefined })
+    ).resolves.toBeUndefined();
+    expect(deps.workspace.hasRadiusApplicationModel).not.toHaveBeenCalled();
+  });
+
+  it("does not block session startup when model detection fails", async () => {
+    const { ext, deps } = setup();
+    (
+      deps.workspace.hasRadiusApplicationModel as ReturnType<typeof vi.fn>
+    ).mockRejectedValue(new Error("filesystem unavailable"));
+
+    await expect(
+      ext.hooks.onSessionStart({ workingDirectory: "/worktrees/widgets" })
+    ).resolves.toBeUndefined();
   });
 });
 
