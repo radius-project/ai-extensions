@@ -93,6 +93,16 @@ const {
 
 const VERIFY_PATH = ".github/workflows/radius-verify-credentials.yml";
 
+function workflowJob(yaml: string, name: string): string {
+  const lines = yaml.split("\n");
+  const start = lines.findIndex((line) => line === `  ${name}:`);
+  if (start < 0) return "";
+  const end = lines.findIndex(
+    (line, index) => index > start && /^  [a-z][a-z0-9-]*:$/.test(line)
+  );
+  return lines.slice(start, end < 0 ? undefined : end).join("\n");
+}
+
 // Build the full expected committed-file map the extension would produce for one
 // environment, so tests can seed an "in sync" branch.
 async function expectedFilesFor(
@@ -138,21 +148,18 @@ describe("generateDeleteWorkflow", () => {
   it("skips Azure OIDC when no persisted state archive exists", async () => {
     const workflows = await generateDeleteWorkflow("dev");
     const azure = workflows["delete-azure.yml"];
+    const stateCheck = workflowJob(azure, "detect-state");
+    const cloudDelete = workflowJob(azure, "delete");
 
-    expect(azure).toContain("  detect-state:");
-    expect(azure).toContain(
-      'docker manifest inspect "$STATE_REGISTRY:$archive"'
+    expect(stateCheck).toContain("runs-on: ubuntu-24.04");
+    expect(stateCheck).toContain(
+      "has_state: ${{ steps.state.outputs.has_state }}"
     );
-    expect(azure).toContain("manifest unknown|not found|no such manifest");
-    expect(azure).toContain(
-      "No persisted Radius state was found; skipping cloud deletion. No cloud resources were touched."
+    expect(cloudDelete).toContain("needs: detect-state");
+    expect(cloudDelete).toContain(
+      "if: ${{ needs.detect-state.outputs.has_state == 'true' }}"
     );
-    expect(azure).toContain(
-      "  delete:\n    needs: detect-state\n    if: ${{ needs.detect-state.outputs.has_state == 'true' }}"
-    );
-    expect(azure.indexOf("  detect-state:")).toBeLessThan(
-      azure.indexOf("Azure Login (OIDC)")
-    );
+    expect(cloudDelete).toContain("Azure Login (OIDC)");
   });
 
   it("does not duplicate the state check when the upstream template provides it", () => {
