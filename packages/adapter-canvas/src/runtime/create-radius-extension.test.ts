@@ -205,6 +205,18 @@ describe("RU-19: onSessionStart hook", () => {
       "radius_generate_pr_diff_markdown"
     );
   });
+
+  it("tells the agent to omit the PR graph diff section when no diff comes back", async () => {
+    const { ext } = setup();
+    const result = await ext.hooks.onSessionStart();
+    expect(result.additionalContext).toMatch(/If it does NOT return a diff/);
+    expect(result.additionalContext).toMatch(
+      /Leave the graph diff section out of the description entirely/
+    );
+    expect(result.additionalContext).toMatch(
+      /do not add a sentence explaining why it is missing/
+    );
+  });
 });
 
 describe("RU-19: host-channel callback wiring (context/permission/session)", () => {

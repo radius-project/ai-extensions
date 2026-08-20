@@ -7,7 +7,8 @@ import {
   RESERVED_DECLARATION_NAMES,
   buildRadiusCanvasInputSchema,
   RADIUS_ACTION_DECLARATIONS,
-  RADIUS_TOOL_DECLARATIONS
+  RADIUS_TOOL_DECLARATIONS,
+  RADIUS_SESSION_START_CONTEXT
 } from "./declarations.js";
 
 // Declared schemas are typed as Record<string, unknown> (JSON Schema is
@@ -168,6 +169,19 @@ describe("RU-03: tool declarations", () => {
     ]);
   });
 
+  // The tool description is read at the call site, so it must carry the same
+  // condition as the session-start rule: embed a diff that came back, and leave
+  // the section out when one did not.
+  it("makes embedding the pr-diff result conditional in its own description", () => {
+    const decl = RADIUS_TOOL_DECLARATIONS.find(
+      (t) => t.name === "radius_generate_pr_diff_markdown"
+    )!;
+    expect(decl.description).toMatch(/only when it returns a diff/);
+    expect(decl.description).toMatch(
+      /leave the graph diff section out of the PR body/
+    );
+  });
+
   it("requires file/target on radius_publish_recipe", () => {
     const decl = RADIUS_TOOL_DECLARATIONS.find(
       (t) => t.name === "radius_publish_recipe"
@@ -196,6 +210,70 @@ describe("RU-03: tool declarations", () => {
     const actionNames = new Set(RADIUS_ACTION_DECLARATIONS.map((a) => a.name));
     for (const tool of RADIUS_TOOL_DECLARATIONS) {
       expect(actionNames.has(tool.name)).toBe(false);
+    }
+  });
+});
+
+// RU-19: the session-start instruction the extension feeds back to the agent.
+// The PR graph-diff rule is the part that writes into a durable artifact (a
+// pull request description), so both of its outcomes are pinned here.
+describe("RU-19: session-start PR graph-diff instruction", () => {
+  const prDiffRule = RADIUS_SESSION_START_CONTEXT.slice(
+    RADIUS_SESSION_START_CONTEXT.indexOf("Automatic PR Graph Diff"),
+    RADIUS_SESSION_START_CONTEXT.indexOf(
+      'When the user asks to "show me the app graph"'
+    )
+  );
+
+  it("still asks for the diff first and puts a returned diagram at the top of the body", () => {
+    expect(prDiffRule).toContain("radius_generate_pr_diff_markdown");
+    expect(prDiffRule).toMatch(/TOP of the PR description/);
+  });
+
+  it("makes including the section conditional on the tool returning a diff", () => {
+    expect(prDiffRule).toMatch(
+      /If it returns a Mermaid application graph diff/
+    );
+    expect(prDiffRule).toMatch(/If it does NOT return a diff/);
+  });
+
+  it("names every way the diff can be unavailable so none falls through to the body", () => {
+    for (const outcome of [
+      /denied/,
+      /no application to model/,
+      /no committed \.radius\/app\.bicep/,
+      /reported an error/
+    ]) {
+      expect(prDiffRule).toMatch(outcome);
+    }
+  });
+
+  it("requires omitting the section rather than explaining its absence", () => {
+    expect(prDiffRule).toMatch(
+      /Leave the graph diff section out of the description entirely/
+    );
+    expect(prDiffRule).toMatch(
+      /do not add a sentence explaining why it is missing/
+    );
+  });
+
+  it("routes the unavailable reason to chat and skips the canvas page", () => {
+    expect(prDiffRule).toMatch(/report the reason in the chat session/);
+    expect(prDiffRule).toMatch(/do not open the graph-diff canvas page/);
+  });
+
+  // The rule suppresses one section, not a subject. A pull request that changes
+  // Radius modeling must still be described normally, so the omission must never
+  // widen into a ban on naming Radius, app.bicep, or Dockerfiles in the body.
+  it("suppresses only the graph diff section, not Radius as a subject", () => {
+    expect(prDiffRule).toMatch(/governs only the graph diff section/);
+    expect(prDiffRule).toMatch(/describe the change itself/);
+    expect(prDiffRule).not.toMatch(/do not mention Radius/);
+  });
+
+  it("keeps every instruction line flush-left so the agent reads one list", () => {
+    for (const line of RADIUS_SESSION_START_CONTEXT.split("\n")) {
+      expect(line).not.toMatch(/^\s{4,}\d\./);
     }
   });
 });

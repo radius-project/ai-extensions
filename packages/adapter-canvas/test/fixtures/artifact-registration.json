@@ -115,7 +115,7 @@
     },
     {
       "name": "radius_generate_pr_diff_markdown",
-      "description": "Generates a Mermaid application graph diff diagram and summary markdown for embedding in a PR description. Call this BEFORE creating the PR and include the returned markdown in the PR body.",
+      "description": "Generates a Mermaid application graph diff diagram and summary markdown for embedding in a PR description. Call this BEFORE creating the PR. Include the returned markdown in the PR body only when it returns a diff; when there is no application model to diff, or the call is denied or fails, leave the graph diff section out of the PR body rather than describing what came back.",
       "parameters": {
         "type": "object",
         "properties": {
