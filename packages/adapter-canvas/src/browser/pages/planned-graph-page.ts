@@ -1,6 +1,6 @@
 import { requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
-import { createGraphProgress } from "../graph/progress.js";
+import { clearGraphProgress, createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { readArray, readBoolean, readNumber, readString } from "../json.js";
@@ -88,20 +88,15 @@ export function initializePlannedGraphPage(
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
 
-  const endProgress = (failure: string | null): void => {
+  const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
     progress = null;
-    const view = progressView;
+    progressView?.stop();
     progressView = null;
-    if (!view) return;
-    // A failed plan closes out the running stage so the panel does not sit on
-    // "running" for work that has already ended.
-    if (failure !== null) view.fail(failure);
-    else view.stop();
+    // The page states a terminal outcome in its own status surface, so a frozen
+    // panel left underneath would repeat it as a second box.
+    clearGraphProgress(context);
   };
-
-  const stopProgress = (): void => endProgress(null);
-  const failProgress = (detail: string): void => endProgress(detail);
 
   const run = (isCurrent: () => boolean): Promise<void> => {
     if (!entry.active) return Promise.resolve();
@@ -162,9 +157,6 @@ export function initializePlannedGraphPage(
       }
     });
     progressView = view;
-    // Set by whichever terminal path observed a failure, so the panel can close
-    // out its running stage once the request settles.
-    let failureDetail: string | null = null;
     progress = entry.every(PLAN_PROGRESS_MS, () => {
       void context.net
         .fetch("/api/progress")
@@ -216,23 +208,26 @@ export function initializePlannedGraphPage(
           return;
         }
         const error = readString(payload, "error");
-        failureDetail =
+        status(
+          context,
           error ?
             `Error: ${error}`
-          : "The planned deployment response was incomplete. Try again.";
-        status(context, failureDetail, "error");
+          : "The planned deployment response was incomplete. Try again.",
+          "error"
+        );
       })
       .catch((error: unknown) => {
         if (!current()) return;
         plan.requestFailed = true;
         context.logger.error("Radius planned graph request failed.", error);
-        failureDetail =
-          "The planned deployment could not be generated. Try again.";
-        status(context, failureDetail, "error");
+        status(
+          context,
+          "The planned deployment could not be generated. Try again.",
+          "error"
+        );
       })
       .then(() => {
-        if (failureDetail !== null) failProgress(failureDetail);
-        else stopProgress();
+        stopProgress();
         if (requestAbort === abort) requestAbort = null;
       });
   };

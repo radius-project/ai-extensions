@@ -1024,9 +1024,9 @@ describe("initializeGraphPage", () => {
         GRAPH_APP_BICEP_TIMEOUT_MESSAGE
       );
       expect(status?.textContent).toBe("");
-      expect(graphProgressStages(progressHost)).toContain(
-        `${GRAPH_STAGE_LABELS.creating_model}:failed`
-      );
+      // The failure belongs on the graph surface alone; a frozen panel left
+      // underneath would state it a second time.
+      expect(graphProgressStages(progressHost)).toEqual([]);
     });
 
     it("stops immediately when the server says the skill cannot model the repo", async () => {
@@ -1066,32 +1066,36 @@ describe("initializeGraphPage", () => {
         }
       ],
       ["the build errors", { error: "invalid app.bicep" }]
-    ])(
-      "closes out the running stage as failed when %s",
-      async (_name, body) => {
-        const { browser, progressHost } = fixture({ loaded: false });
-        browser.net.handle("/api/load-graph", () => jsonResponse(body));
-        initializeGraphPage(browser.context, globals());
-        await flushPromises();
-
-        // A frozen "running" row would claim the build is still going.
-        expect(stageText(progressHost)).toEqual([
-          `${GRAPH_STAGE_LABELS.checking_model}:failed`
-        ]);
-      }
-    );
-
-    it("closes out the running stage as failed when the request throws", async () => {
+    ])("clears the panel when %s", async (_name, body) => {
       const { browser, progressHost } = fixture({ loaded: false });
+      const setError = vi.fn();
+      browser.net.handle("/api/load-graph", () => jsonResponse(body));
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      // The failure is stated once, on the graph surface. A panel left behind
+      // would either repeat it or claim the build is still running.
+      expect(setError).toHaveBeenCalledTimes(1);
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("clears the panel when the request throws", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      const setError = vi.fn();
       browser.net.handle("/api/load-graph", () =>
         Promise.reject(new Error("offline"))
       );
-      initializeGraphPage(browser.context, globals());
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
       await flushPromises();
 
-      expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.checking_model}:failed`
-      ]);
+      expect(setError).toHaveBeenCalledTimes(1);
+      expect(stageText(progressHost)).toEqual([]);
     });
 
     it("surfaces a regeneration failure on the graph surface", async () => {

@@ -521,30 +521,27 @@ describe("initializeGraphDiffPage", () => {
         }
       ],
       ["the comparison errors", { error: "invalid app.bicep" }]
-    ])(
-      "closes out the running stage as failed when %s",
-      async (_name, body) => {
-        const { browser, head, progressHost } = fixture();
-        browser.net.handle("/api/diff-branches", () => jsonResponse(body));
-        browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
-        initializeGraphDiffPage(browser.context, {
-          radiusRenderGraph: vi.fn()
-        });
-        await flushPromises();
+    ])("clears the panel when %s", async (_name, body) => {
+      const { browser, head, progressHost, status } = fixture();
+      browser.net.handle("/api/diff-branches", () => jsonResponse(body));
+      browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
+      initializeGraphDiffPage(browser.context, {
+        radiusRenderGraph: vi.fn()
+      });
+      await flushPromises();
 
-        head.dispatch("change");
-        browser.clock.tick(DIFF_DEBOUNCE_MS);
-        await flushPromises();
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
 
-        // A frozen "running" row would claim the comparison is still going.
-        expect(stageText(progressHost)).toEqual([
-          `${GRAPH_STAGE_LABELS.building_base_graph}:failed`
-        ]);
-      }
-    );
+      // The failure is stated once, in the status banner. A panel left behind
+      // would repeat it and keep claiming the comparison is running.
+      expect(status.textContent).not.toBe("");
+      expect(stageText(progressHost)).toEqual([]);
+    });
 
-    it("closes out the running stage as failed when the request throws", async () => {
-      const { browser, head, progressHost } = fixture();
+    it("clears the panel when the request throws", async () => {
+      const { browser, head, progressHost, status } = fixture();
       browser.net.handle("/api/diff-branches", () =>
         Promise.reject(new Error("offline"))
       );
@@ -556,12 +553,11 @@ describe("initializeGraphDiffPage", () => {
       browser.clock.tick(DIFF_DEBOUNCE_MS);
       await flushPromises();
 
-      expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.building_base_graph}:failed`
-      ]);
+      expect(status.textContent).toContain("Failed to compute diff");
+      expect(stageText(progressHost)).toEqual([]);
     });
 
-    it("leaves the stage running while Copilot authors the model", async () => {
+    it("clears the panel while Copilot authors the model", async () => {
       const { browser, head, progressHost } = fixture();
       browser.net.handle("/api/diff-branches", () =>
         jsonResponse({ needsAppBicep: true })
@@ -574,9 +570,7 @@ describe("initializeGraphDiffPage", () => {
       browser.clock.tick(DIFF_DEBOUNCE_MS);
       await flushPromises();
 
-      expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.building_base_graph}:running`
-      ]);
+      expect(stageText(progressHost)).toEqual([]);
     });
 
     it("stops polling progress once the diff settles", async () => {

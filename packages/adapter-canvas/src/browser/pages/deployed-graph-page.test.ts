@@ -2160,8 +2160,8 @@ describe("initializeDeployedGraphPage", () => {
       expect(fakeText(progressHost)).toBe("");
     });
 
-    it("leaves a failed stage on screen when the request fails", async () => {
-      const { browser, progressHost } = fixture();
+    it("reports the failure once in the status banner, clearing the panel", async () => {
+      const { browser, progressHost, status } = fixture();
       browser.net.handle(
         "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
         () => Promise.reject(new Error("graph service down"))
@@ -2169,6 +2169,23 @@ describe("initializeDeployedGraphPage", () => {
       initializeDeployedGraphPage(browser.context, globals());
       await flushPromises();
 
+      expect(status.textContent).toBe(
+        "The deployed application graph could not be loaded."
+      );
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("states the failure on the panel when there is no status banner", async () => {
+      const { browser, progressHost } = fixture({ withStatus: false });
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => Promise.reject(new Error("graph service down"))
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      // The panel is the only surface left, so it carries the failure rather
+      // than being cleared and leaving the outcome unreported.
       expect(stageText(progressHost)).toEqual([
         `${GRAPH_STAGE_LABELS.loading_deployment}:failed`
       ]);

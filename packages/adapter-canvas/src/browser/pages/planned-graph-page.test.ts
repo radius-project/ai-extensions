@@ -829,24 +829,20 @@ describe("initializePlannedGraphPage", () => {
     it.each([
       ["the plan errors", { error: "invalid app.bicep" }],
       ["the plan response is incomplete", {}]
-    ])(
-      "closes out the running stage as failed when %s",
-      async (_name, body) => {
-        const { browser, progressHost } = fixture();
-        browser.net.handle("/api/plan-graph", () => jsonResponse(body));
-        initializePlannedGraphPage(browser.context, globals());
-        await flushPromises();
-        browser.clock.tick(0);
-        await flushPromises();
+    ])("clears the panel when %s", async (_name, body) => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle("/api/plan-graph", () => jsonResponse(body));
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
 
-        // A frozen "running" row would claim the plan is still going.
-        expect(stageText(progressHost)).toEqual([
-          `${GRAPH_STAGE_LABELS.checking_model}:failed`
-        ]);
-      }
-    );
+      // The failure is stated once, in the status surface. A panel left behind
+      // would repeat it and keep claiming the plan is running.
+      expect(stageText(progressHost)).toEqual([]);
+    });
 
-    it("closes out the running stage as failed when the request throws", async () => {
+    it("clears the panel when the request throws", async () => {
       const { browser, progressHost } = fixture();
       browser.net.handle("/api/plan-graph", () =>
         Promise.reject(new Error("offline"))
@@ -856,12 +852,10 @@ describe("initializePlannedGraphPage", () => {
       browser.clock.tick(0);
       await flushPromises();
 
-      expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.checking_model}:failed`
-      ]);
+      expect(stageText(progressHost)).toEqual([]);
     });
 
-    it("leaves the stage running while Copilot authors the model", async () => {
+    it("clears the panel while Copilot authors the model", async () => {
       const { browser, progressHost } = fixture();
       browser.net.handle("/api/plan-graph", () =>
         jsonResponse({ needsAppBicep: true })
@@ -871,9 +865,7 @@ describe("initializePlannedGraphPage", () => {
       browser.clock.tick(0);
       await flushPromises();
 
-      expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.checking_model}:running`
-      ]);
+      expect(stageText(progressHost)).toEqual([]);
     });
   });
   describe("planned graph progress defaults", () => {

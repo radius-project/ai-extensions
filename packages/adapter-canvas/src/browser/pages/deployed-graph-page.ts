@@ -397,13 +397,18 @@ export function initializeDeployedGraphPage(
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== graphGeneration) return;
-        failProgress("The deployed application graph could not be loaded.");
         context.logger.error("Radius deployed graph request failed.", error);
+        const message = "The deployed application graph could not be loaded.";
+        // Report the failure once: in the status banner when there is one, and
+        // otherwise on the panel, which is the only surface a rendered graph
+        // leaves available.
         if (!controller && status) {
+          stopProgress();
           status.style.display = "";
           status.className = "status error";
-          status.textContent =
-            "The deployed application graph could not be loaded.";
+          status.textContent = message;
+        } else {
+          failProgress(message);
         }
         scheduleGraphPoll();
       })

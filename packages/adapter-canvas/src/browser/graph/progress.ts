@@ -134,6 +134,17 @@ export function formatGraphElapsed(ms: number): string {
   return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
 }
 
+// Remove the panel from its host. A page that reports a terminal outcome in its
+// own error surface clears the panel first, so the failure is stated once
+// rather than repeated by a frozen panel sitting underneath it.
+export function clearGraphProgress(
+  context: BrowserContext,
+  hostId: string = GRAPH_PROGRESS_STEPS_ID
+): void {
+  const host = context.dom.byId(hostId);
+  if (host) host.replaceChildren();
+}
+
 export interface GraphProgressView {
   // Apply a server snapshot. `generation` identifies the stream that produced
   // it; snapshots from a superseded stream are ignored.
