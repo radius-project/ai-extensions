@@ -27,12 +27,23 @@ import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
 } from "../deploy-diagnostics.js";
+import {
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+  unsupportedAppSourceReport
+} from "@radius-project/core";
+import type { AppSourceEvaluation } from "@radius-project/core";
 import type { AppModelStatus } from "./graph-context.js";
 import type { CanvasState } from "../shared.js";
 
 interface GraphTriggerTarget {
   repo: string;
   branches: Array<string | undefined>;
+  // True for a trigger that compares two explicitly named committed branches
+  // (graph-diff). Those branches mean exactly what they say. Every other graph
+  // view renders the workspace repository from its checked-out worktree, so a
+  // branch named alongside the workspace repo is not the branch that will be
+  // rendered — see resolveTargetBranches.
+  comparesCommittedBranches: boolean;
 }
 
 interface AppBicepHookInput {
@@ -48,6 +59,14 @@ interface AppBicepHookDependencies {
     branch: string,
     state: CanvasState
   ): Promise<AppModelStatus>;
+  // What a branch's source listing says about whether the repository can be
+  // modeled at all. Consulted only when no model exists, since a model that is
+  // already there answers the question by existing.
+  appSource(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<AppSourceEvaluation>;
   // True the first time this exact staleness evidence is seen, false afterwards.
   // Owned by the caller so the memo lives with the extension instance.
   shouldRequestRefresh(key: string): boolean;
@@ -164,12 +183,14 @@ export function graphTriggerTargets(
       ].filter((branch): branch is string => Boolean(branch));
       return {
         repo: optionalString(input.repo) || "",
-        branches: branches.length ? branches : [undefined]
+        branches: branches.length ? branches : [undefined],
+        comparesCommittedBranches: true
       };
     }
     return {
       repo: optionalString(input.repo) || "",
-      branches: [optionalString(input.branch)]
+      branches: [optionalString(input.branch)],
+      comparesCommittedBranches: false
     };
   }
 
@@ -180,11 +201,41 @@ export function graphTriggerTargets(
     ].filter((branch): branch is string => Boolean(branch));
     return {
       repo: optionalString(args.repo) || "",
-      branches: branches.length ? branches : [undefined]
+      branches: branches.length ? branches : [undefined],
+      comparesCommittedBranches: true
     };
   }
 
   return null;
+}
+
+// The branches this trigger will actually be judged against.
+//
+// The canvas ignores a caller-supplied branch for the workspace repository and
+// renders the checked-out worktree instead (see createRadiusCanvas). This hook
+// has to resolve the target the same way, or it decides against a branch the
+// user will never see: asked for the workspace repo on `main` while a feature
+// branch is checked out, it would read `main` from GitHub and could deny — or
+// call the repository unsupported — on evidence from a branch the canvas was
+// never going to render. A graph diff is the exception, since its two branches
+// are explicitly named committed refs and mean exactly what they say.
+function resolveTargetBranches(
+  targets: GraphTriggerTarget,
+  repo: string,
+  state: CanvasState,
+  defaultBranchForState: (state: CanvasState) => string
+): string[] {
+  const workspaceBranch = optionalString(state?.workspaceBranch);
+  if (
+    !targets.comparesCommittedBranches &&
+    workspaceBranch &&
+    repo === optionalString(state?.workspaceRepo)
+  ) {
+    return [workspaceBranch];
+  }
+  return targets.branches.map(
+    (candidate) => candidate || defaultBranchForState(state)
+  );
 }
 
 // Core pre-tool-use decision. `deps` supplies the I/O so this stays pure:
@@ -217,9 +268,15 @@ export async function evaluateAppBicepHook(
   const repo = targets.repo || state?.contextRepo || "";
   if (!repo) return undefined; // no repo context to check against → fail open
 
+  const branches = resolveTargetBranches(
+    targets,
+    repo,
+    state,
+    deps.defaultBranchForState
+  );
+
   const statuses = await Promise.all(
-    targets.branches.map(async (candidate) => {
-      const branch = candidate || deps.defaultBranchForState(state);
+    branches.map(async (branch) => {
       try {
         return await deps.appModelStatus(repo, branch, state);
       } catch {
@@ -234,11 +291,36 @@ export async function evaluateAppBicepHook(
   );
 
   if (!present.length) {
+    // This is the path most users reach modeling through, so it is also where an
+    // unmodelable repository has to be caught: telling the agent to create a
+    // model it cannot create is what turned this exception into a late,
+    // ambiguous failure. Only a branch whose listing was actually established
+    // and actually lacks a Dockerfile counts, and every candidate branch has to
+    // agree — one modelable branch means there is still real work to hand off.
+    const sources = await Promise.all(
+      branches.map(async (branch) => {
+        try {
+          return await deps.appSource(repo, branch, state);
+        } catch {
+          return null;
+        }
+      })
+    );
+    if (sources.every((source) => source?.status === "none")) {
+      return {
+        permissionDecision: "deny",
+        // The reason is what the user is shown, so it carries only the
+        // statement about their repository. The agent-facing half — what not to
+        // author, and that nothing was written — belongs in additionalContext.
+        permissionDecisionReason: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+        additionalContext: unsupportedAppSourceReport(repo)
+      };
+    }
     return {
       permissionDecision: "deny",
       permissionDecisionReason:
         "No .radius/app.bicep found. It must be created and saved by the radius-app-bicep skill before the application graph can be generated.",
-      additionalContext: appBicepReminder(repo, targets.branches)
+      additionalContext: appBicepReminder(repo, branches)
     };
   }
 
