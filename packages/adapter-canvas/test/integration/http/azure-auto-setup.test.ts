@@ -243,6 +243,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       ensureServicePrincipal: async () => ({
         ok: true,
         state: "reused",
+        origin: "pre_existing",
         objectId: OBJECT_ID
       }),
       persistMutationCheckpoint: async (input) => {

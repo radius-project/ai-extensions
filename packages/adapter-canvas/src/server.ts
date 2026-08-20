@@ -126,6 +126,7 @@ import {
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
+  promoteCreatedGitHubEnvironment,
   recordCommitState,
   recordCommittedWorkflowFile,
   recordCleanupState,
@@ -1180,6 +1181,8 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   recordGitHubEnvironment: (operation, patch) => {
     recordGitHubEnvironment(operation, patch);
   },
+  promoteCreatedGitHubEnvironment: (operation, identity) =>
+    promoteCreatedGitHubEnvironment(operation, identity),
   envListCacheDelete: (repo) => {
     envListCache.invalidate(repo);
   },
@@ -2663,11 +2666,35 @@ function cleanupTargetLabel(
   return String(artifact.appId || "");
 }
 
+/**
+ * Find or create the Service Principal for an App Registration, and say which
+ * of the two actually happened.
+ *
+ * Three outcomes, deliberately not two:
+ *
+ *   reused            — the lookup that runs *before* any create found it, so
+ *                       it existed independently of this attempt.
+ *   created           — the lookup found nothing and `az ad sp create`
+ *                       succeeded, so this attempt made it and may remove it.
+ *   created_candidate — the lookup found nothing, the create reported failure,
+ *                       and a second lookup found a principal anyway. Radius
+ *                       very likely created it, but "very likely" is not a
+ *                       licence to delete, and calling it `reused` would claim
+ *                       something provably false: it was absent moments ago.
+ *
+ * Collapsing the third case into `reused` is what put a Service Principal this
+ * setup created under "Radius will keep — reused" and out of every rollback.
+ */
 export async function ensureServicePrincipal(
   clientId: string,
   runAz: (args: string[]) => Promise<Partial<CommandResult>>
 ): Promise<
-  | { ok: true; state: "created" | "reused"; objectId: string | null }
+  | {
+      ok: true;
+      state: "created" | "reused" | "created_candidate";
+      origin: "pre_existing" | "this_operation";
+      objectId: string | null;
+    }
   | { ok: false; stderr: string }
 > {
   const showArgs = [
@@ -2684,7 +2711,12 @@ export async function ensureServicePrincipal(
   const before = await runAz(showArgs);
   const existingObjectId = String(before.stdout || "").trim();
   if ((before.code === 0 || before.code === "0") && existingObjectId) {
-    return { ok: true, state: "reused", objectId: existingObjectId };
+    return {
+      ok: true,
+      state: "reused",
+      origin: "pre_existing",
+      objectId: existingObjectId
+    };
   }
   if (before.code === 0 || before.code === "0") {
     return {
@@ -2703,13 +2735,25 @@ export async function ensureServicePrincipal(
 
   const create = await runAz(["ad", "sp", "create", "--id", clientId]);
   if (create.code === 0 || create.code === "0") {
-    return { ok: true, state: "created", objectId: null };
+    return {
+      ok: true,
+      state: "created",
+      origin: "this_operation",
+      objectId: null
+    };
   }
 
   const after = await runAz(showArgs);
   const racedObjectId = String(after.stdout || "").trim();
   if ((after.code === 0 || after.code === "0") && racedObjectId) {
-    return { ok: true, state: "reused", objectId: racedObjectId };
+    // Absent before this attempt, present after its own create attempt: this
+    // reconciles a failed create against reality, and it is not a reuse.
+    return {
+      ok: true,
+      state: "created_candidate",
+      origin: "this_operation",
+      objectId: racedObjectId
+    };
   }
 
   return {

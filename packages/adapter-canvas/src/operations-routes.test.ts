@@ -510,7 +510,9 @@ describe("GET /api/operations", () => {
       {
         kind: "azure_app",
         reason: "reused",
-        target: "shared-app (shared-app-id)"
+        target: "shared-app (shared-app-id)",
+        detail:
+          "Radius did not create this App Registration during this attempt, so it is left exactly as it was found."
       }
     ]);
     expect(body.operation.cleanup.warnings).toEqual([

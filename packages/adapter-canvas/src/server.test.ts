@@ -374,6 +374,7 @@ describe("ensureServicePrincipal", () => {
     expect(result).toEqual({
       ok: true,
       state: "reused",
+      origin: "pre_existing",
       objectId: "sp-object-1"
     });
     expect(calls).toEqual([
@@ -395,7 +396,12 @@ describe("ensureServicePrincipal", () => {
         : { code: 0, stdout: "", stderr: "" };
     });
 
-    expect(result).toEqual({ ok: true, state: "created", objectId: null });
+    expect(result).toEqual({
+      ok: true,
+      state: "created",
+      origin: "this_operation",
+      objectId: null
+    });
     expect(calls).toEqual([
       ["ad", "sp", "show", "--id", "app-1", "--query", "id", "-o", "tsv"],
       ["ad", "sp", "create", "--id", "app-1"]
@@ -412,6 +418,51 @@ describe("ensureServicePrincipal", () => {
     expect(result).toEqual({
       ok: false,
       stderr: "The Service Principal lookup returned an empty object id."
+    });
+  });
+
+  it("reconciles a failed create that produced a principal anyway", async () => {
+    const calls: string[][] = [];
+    const result = await ensureServicePrincipal("app-1", async (args) => {
+      calls.push(args);
+      if (calls.length === 1) {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "Request_ResourceNotFound: Resource 'app-1' does not exist"
+        };
+      }
+      if (calls.length === 2) {
+        return { code: 1, stdout: "", stderr: "the request timed out" };
+      }
+      return { code: 0, stdout: "sp-object-1\n", stderr: "" };
+    });
+
+    // Absent before, present after this attempt's own create: not a reuse, and
+    // not something Radius may delete either.
+    expect(result).toEqual({
+      ok: true,
+      state: "created_candidate",
+      origin: "this_operation",
+      objectId: "sp-object-1"
+    });
+    expect(calls).toHaveLength(3);
+  });
+
+  it("fails closed when neither the create nor the reconciliation lookup found one", async () => {
+    const result = await ensureServicePrincipal("app-1", async (args) =>
+      args[2] === "create" ?
+        { code: 1, stdout: "", stderr: "" }
+      : {
+          code: 1,
+          stdout: "",
+          stderr: "Request_ResourceNotFound: Resource 'app-1' does not exist"
+        }
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      stderr: "Request_ResourceNotFound: Resource 'app-1' does not exist"
     });
   });
 });

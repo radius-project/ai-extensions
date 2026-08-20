@@ -96,6 +96,11 @@ export interface CreateEnvironmentOperation {
   // from being narrower than what `operations.ts` actually writes.
   inputRequired?: unknown;
   verification?: unknown;
+  // The artifact ledger the route records the GitHub environment into. Declared
+  // as `unknown` because this route never reads it: it writes through the
+  // injected ledger ports, which own the provenance rules. A test that asserts
+  // on the ledger after the fact still needs the field to exist here.
+  setupArtifacts?: unknown;
   // Set by the stop route and read by `guardStopBoundary` at each safe
   // checkpoint between remote mutations. Optional because a fixture that never
   // exercises cancellation has no reason to set it.

@@ -14,6 +14,12 @@ import {
   persistMutationCheckpoint,
   resolveGitHubEnvironmentCreateState
 } from "../../../src/server.js";
+import {
+  createSetupArtifactLedger,
+  promoteCreatedGitHubEnvironment,
+  recordGitHubEnvironment
+} from "../../../src/operations.js";
+import type { SetupArtifactLedger } from "../../../src/operations.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
@@ -69,7 +75,9 @@ interface Harness {
   setJournalHook(hook: ((entry: string) => void) | null): void;
   ghCalls: string[];
   steps: string[];
-  operation: CreateEnvironmentOperation;
+  operation: CreateEnvironmentOperation & {
+    setupArtifacts: SetupArtifactLedger;
+  };
   state: CanvasState;
   finished: Array<{ state: string; options: Record<string, unknown> }>;
   commitStates: Record<string, unknown>[];
@@ -105,7 +113,13 @@ const DEFAULT_GH_RULES: GhRule[] = [
   },
   {
     match: /^api --method PUT \/repos\/octo\/app\/environments\/dev$/,
-    result: { code: 0 }
+    result: {
+      code: 0,
+      stdout: JSON.stringify({
+        name: "dev",
+        created_at: "2023-11-14T22:13:20.000Z"
+      })
+    }
   },
   { match: /^variable set /, result: { code: 0 } },
   {
@@ -161,7 +175,9 @@ function start(script: Script = {}): Harness {
 
   // `stages` and `steps` are present because the real stop guard closes the
   // record through the production `finish`, which walks both.
-  const operation: CreateEnvironmentOperation = {
+  const operation: CreateEnvironmentOperation & {
+    setupArtifacts: SetupArtifactLedger;
+  } = {
     operationId: "op-http",
     repo: "octo/app",
     environment: "dev",
@@ -169,8 +185,9 @@ function start(script: Script = {}): Harness {
     currentStage: STAGE_CONFIGURE,
     inputRequired: null,
     stages: [{ id: STAGE_CONFIGURE, label: "Configure", state: "running" }],
-    steps: []
-  } as CreateEnvironmentOperation;
+    steps: [],
+    setupArtifacts: createSetupArtifactLedger()
+  };
 
   const rules = [...(script.gh ?? []), ...DEFAULT_GH_RULES];
 
@@ -353,8 +370,20 @@ function start(script: Script = {}): Harness {
 
     // --- GitHub environment ---
     resolveGitHubEnvironmentCreateState,
-    recordGitHubEnvironment: (_operation, patch) => {
+    // The real ledger writers, so the provenance this route records is the
+    // provenance a rollback would later read. A hand-written double could only
+    // restate the monotonic rule these two enforce.
+    recordGitHubEnvironment: (targetOperation, patch) => {
       journal.push(`recordGitHubEnvironment:${patch.state}`);
+      recordGitHubEnvironment(targetOperation, patch);
+    },
+    promoteCreatedGitHubEnvironment: (targetOperation, identity) => {
+      const promoted = promoteCreatedGitHubEnvironment(
+        targetOperation,
+        identity
+      );
+      journal.push(`promoteCreatedGitHubEnvironment:${String(promoted)}`);
+      return promoted;
     },
     envListCacheDelete: (repo) => {
       journal.push(`envListCacheDelete:${repo}`);
@@ -753,6 +782,107 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     await post({ repo: "octo/app" });
 
     expect(harness.journal).toContain("recordGitHubEnvironment:reused");
+    expect(harness.operation.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "reused",
+      origin: "pre_existing"
+    });
+    expect(harness.journal).not.toContain(
+      "promoteCreatedGitHubEnvironment:true"
+    );
+  });
+
+  it("owns the environment it proved it created, after the identity is saved", async () => {
+    const harness = start();
+
+    await post({ repo: "octo/app" });
+
+    // Order is the proof: the candidate is recorded, the checkpoint makes the
+    // identity durable, and only then is ownership claimed.
+    const recorded = harness.journal.indexOf(
+      "recordGitHubEnvironment:created_candidate"
+    );
+    const checkpoint = harness.journal.indexOf("checkpoint", recorded);
+    const promoted = harness.journal.indexOf(
+      "promoteCreatedGitHubEnvironment:true"
+    );
+    expect(recorded).toBeGreaterThan(-1);
+    expect(checkpoint).toBeGreaterThan(recorded);
+    expect(promoted).toBeGreaterThan(checkpoint);
+    expect(harness.operation.setupArtifacts.githubEnvironment).toEqual({
+      state: "created",
+      origin: "this_operation",
+      repo: "octo/app",
+      name: "dev"
+    });
+    expect(harness.steps).toContain(
+      '✅ GitHub environment "dev" created by this setup — Radius owns it and can remove it.'
+    );
+  });
+
+  it("keeps the environment unowned when GitHub says it predates this request", async () => {
+    const harness = start({
+      gh: [
+        {
+          match: /^api --method PUT \/repos\/octo\/app\/environments\/dev$/,
+          result: {
+            code: 0,
+            stdout: JSON.stringify({
+              name: "dev",
+              created_at: "2020-01-01T00:00:00.000Z",
+              updated_at: "2026-02-01T12:00:00.000Z"
+            })
+          }
+        }
+      ]
+    });
+
+    await post({ repo: "octo/app" });
+
+    expect(harness.operation.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "created_candidate",
+      origin: "unknown"
+    });
+    expect(harness.journal).not.toContain(
+      "promoteCreatedGitHubEnvironment:true"
+    );
+    expect(
+      harness.steps.some(
+        (step) =>
+          step.startsWith(
+            'ℹ️ Radius left GitHub environment "dev" outside its cleanup scope.'
+          ) && step.includes("2020-01-01T00:00:00.000Z")
+      )
+    ).toBe(true);
+  });
+
+  it("keeps the safer candidate on disk when the promotion cannot be saved", async () => {
+    // The checkpoint that makes the identity durable is the last successful
+    // save; the best-effort save that follows the promotion fails. The claim
+    // survives in memory for the next checkpoint, and the record on disk keeps
+    // the under-claim rather than an unsaved ownership assertion.
+    const harness = start({ persistRejectsAfter: 2 });
+
+    await post({ repo: "octo/app" });
+
+    const promoted = harness.journal.indexOf(
+      "promoteCreatedGitHubEnvironment:true"
+    );
+    expect(promoted).toBeGreaterThan(-1);
+    expect(harness.journal[promoted + 1]).toBe("persistBestEffort");
+    expect(harness.journal).toContain(
+      "diagnostic:operation-store-write-failed"
+    );
+    // The claim is real and survives in memory for the next checkpoint. The
+    // best-effort save never ends the run itself: the setup only stops later,
+    // at the next mutation checkpoint, which is a save that is not optional.
+    expect(harness.operation.setupArtifacts.githubEnvironment.state).toBe(
+      "created"
+    );
+    expect(
+      harness.journal.indexOf(
+        "finalizeSetupFailure:operation-persistence-failed"
+      )
+    ).toBeGreaterThan(promoted);
   });
 
   it("aborts without creating anything when the environment lookup is ambiguous", async () => {

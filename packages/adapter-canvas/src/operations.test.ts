@@ -32,6 +32,8 @@ import {
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
+  promoteCreatedGitHubEnvironment,
+  reconcileArtifactProvenance,
   recordServicePrincipal,
   reconcileRestoredOperation,
   sanitizeResumeTarget,
@@ -205,12 +207,14 @@ describe("record shape", () => {
     expect(newOp().setupArtifacts).toEqual({
       azureApp: {
         state: "not_started",
+        origin: "unknown",
         appId: null,
         displayName: null,
         serviceManagementReference: null
       },
       servicePrincipal: {
         state: "not_started",
+        origin: "unknown",
         appId: null,
         objectId: null
       },
@@ -218,6 +222,7 @@ describe("record shape", () => {
       roleAssignments: [],
       githubEnvironment: {
         state: "not_started",
+        origin: "unknown",
         repo: null,
         name: null
       },
@@ -644,7 +649,12 @@ describe("client projection", () => {
       { kind: "azure_app", target: "radius-contoso-store (app-1)" }
     ]);
     expect(view.cleanup.reused).toEqual([
-      { kind: "github_environment", target: "contoso/store:dev" }
+      {
+        kind: "github_environment",
+        target: "contoso/store:dev",
+        detail:
+          "Radius did not create this GitHub environment during this attempt, so it is left exactly as it was found."
+      }
     ]);
     expect(view.cleanup.cleaned).toEqual([]);
     expect(view.cleanup.manualActionRequired).toEqual([]);
@@ -760,7 +770,9 @@ describe("client projection", () => {
       {
         kind: "azure_app",
         reason: "reused",
-        target: "shared-app (shared-app-id)"
+        target: "shared-app (shared-app-id)",
+        detail:
+          "Radius did not create this App Registration during this attempt, so it is left exactly as it was found."
       }
     ]);
     expect(view.cleanup.retry).toEqual({
@@ -870,7 +882,9 @@ describe("client projection", () => {
         {
           kind: "github_environment",
           reason: "manual_cleanup_required",
-          target: "contoso/store:dev"
+          target: "contoso/store:dev",
+          detail:
+            "Radius cannot prove it created this GitHub environment, so it was left in place. Delete it yourself if this setup should be rolled back."
         },
         {
           kind: "workflow_file",
@@ -2728,7 +2742,9 @@ describe("partial-state summary", () => {
     expect(summary.reused).toEqual([
       {
         kind: "service_principal",
-        target: "Service Principal for radius-contoso-store (app-1)"
+        target: "Service Principal for radius-contoso-store (app-1)",
+        detail:
+          "Radius did not create this Service Principal during this attempt, so it is left exactly as it was found."
       }
     ]);
     expect(summary.manualActionRequired).toEqual([
@@ -2947,6 +2963,43 @@ function stoppedWithCreatedResources(overrides = {}) {
   });
   recordGitHubEnvironment(op, {
     state: "created",
+    repo: "contoso/store",
+    name: "dev"
+  });
+  requestStop(op);
+  stopAtBoundary(op, "after_environment");
+  return op;
+}
+
+// The same stopped attempt, but one that found an App Registration and Service
+// Principal already in the tenant and could not prove it created the GitHub
+// environment. Nothing here is a downgrade of a proven creation: the ledger
+// refuses those, which is exactly the guarantee the rollback preview rests on.
+function stoppedWithReusedIdentity(overrides = {}) {
+  const op = addSafeResumeRequest(newOp(overrides));
+  recordAzureApp(op, {
+    state: "reused",
+    origin: "pre_existing",
+    appId: "app-1",
+    displayName: "radius-deploy"
+  });
+  recordServicePrincipal(op, {
+    state: "reused",
+    origin: "pre_existing",
+    appId: "app-1",
+    objectId: "sp-1"
+  });
+  recordCreatedFederatedCredential(op, {
+    name: "radius-main",
+    subject: "repo:contoso/store:ref:refs/heads/main"
+  });
+  recordCreatedRoleAssignment(op, {
+    role: "Contributor",
+    scope: "/subscriptions/s1",
+    principalObjectId: "sp-1"
+  });
+  recordGitHubEnvironment(op, {
+    state: "created_candidate",
     repo: "contoso/store",
     name: "dev"
   });
@@ -3289,25 +3342,23 @@ describe("rollback eligibility", () => {
   });
 
   it("previews exactly what rollback removes, keeps, and leaves to the customer", () => {
-    const op = stoppedWithCreatedResources();
-    recordGitHubEnvironment(op, {
-      state: "created_candidate",
-      repo: "contoso/store",
-      name: "dev"
-    });
-    recordAzureApp(op, { state: "reused", appId: "app-1" });
+    // Built from a reused App Registration and an unprovable environment rather
+    // than by downgrading created ones: the ledger refuses that downgrade, and
+    // this is the state a setup that reused an existing identity reaches.
+    const op = stoppedWithReusedIdentity();
     const rollback = projectOperationActions(op).find(
       (entry) => entry.id === "rollback"
     );
     expect(rollback.preview.removes.map((entry) => entry.kind)).toEqual([
       "role_assignment",
-      "federated_credential",
-      "service_principal"
+      "federated_credential"
     ]);
     expect(rollback.preview.keeps).toContainEqual({
       kind: "azure_app",
       target: "radius-deploy (app-1)",
-      reason: "reused"
+      reason: "reused",
+      action:
+        "This App Registration already existed before this attempt started, so Radius reused it rather than creating one."
     });
     expect(
       rollback.preview.manualActionRequired.map((entry) => entry.target)
@@ -4282,5 +4333,637 @@ describe("exiting a setup", () => {
     expect(isSetupExited(restored)).toBe(true);
     expect(projectOperationActions(restored)).toEqual([]);
     expect(setupExitState({})).toBe("none");
+  });
+});
+
+// ─── Artifact provenance ─────────────────────────────────────────────────────
+// A continuation re-enters the same routes inside the same operation, so the
+// ledger sees the App Registration, the Service Principal and the GitHub
+// environment a second time — and the second look is always a lookup that finds
+// them present. These tests pin the rule that keeps that second look from
+// rewriting this attempt's own creations as somebody else's resources.
+
+describe("artifact provenance never weakens", () => {
+  it("keeps a created App Registration created when a later pass reuses it", () => {
+    const op = newOp();
+    recordAzureApp(op, {
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1",
+      displayName: "radius-deploy"
+    });
+
+    recordAzureApp(op, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-1",
+      displayName: null
+    });
+
+    expect(op.setupArtifacts.azureApp).toEqual({
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1",
+      displayName: "radius-deploy",
+      serviceManagementReference: null
+    });
+  });
+
+  it("keeps a created Service Principal created across a continuation lookup", () => {
+    const op = newOp();
+    recordServicePrincipal(op, {
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1"
+    });
+
+    recordServicePrincipal(op, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+
+    expect(op.setupArtifacts.servicePrincipal).toEqual({
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+  });
+
+  it("keeps a created GitHub environment created when the next pass finds it present", () => {
+    const op = newOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      origin: "this_operation",
+      repo: "contoso/store",
+      name: "dev"
+    });
+
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      origin: "pre_existing",
+      repo: "contoso/store",
+      name: "dev"
+    });
+
+    expect(op.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "created",
+      origin: "this_operation"
+    });
+  });
+
+  it("keeps an unprovable candidate out of reach of a later reuse", () => {
+    const op = newOp();
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      origin: "pre_existing",
+      repo: "contoso/store",
+      name: "dev"
+    });
+
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("created_candidate");
+  });
+
+  it("records a genuinely pre-existing resource as reused", () => {
+    const op = newOp();
+    recordAzureApp(op, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-1"
+    });
+    expect(op.setupArtifacts.azureApp).toMatchObject({
+      state: "reused",
+      origin: "pre_existing"
+    });
+  });
+
+  it("replaces the slot wholesale when a different resource takes it", () => {
+    const op = newOp();
+    recordAzureApp(op, {
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1",
+      displayName: "radius-deploy",
+      serviceManagementReference: "tree-1"
+    });
+
+    recordAzureApp(op, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-2"
+    });
+
+    expect(op.setupArtifacts.azureApp).toEqual({
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-2",
+      displayName: null,
+      serviceManagementReference: null
+    });
+  });
+
+  it("lets a rebuilt resource take over a rolled-back slot", () => {
+    const op = newOp();
+    recordAzureApp(op, {
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1"
+    });
+    recordCleanupDeletion(op, { artifactType: "azure_app", identity: "app-1" });
+    expect(op.setupArtifacts.azureApp.state).toBe("deleted");
+
+    recordAzureApp(op, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-1"
+    });
+
+    expect(op.setupArtifacts.azureApp.state).toBe("reused");
+  });
+
+  it("upgrades a reuse to a Radius-earlier-setup reuse but never back", () => {
+    const op = newOp();
+    recordAzureApp(op, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-1"
+    });
+    recordAzureApp(op, {
+      state: "reused",
+      origin: "radius_earlier_setup",
+      appId: "app-1"
+    });
+    expect(op.setupArtifacts.azureApp.origin).toBe("radius_earlier_setup");
+
+    recordAzureApp(op, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-1"
+    });
+    expect(op.setupArtifacts.azureApp.origin).toBe("radius_earlier_setup");
+  });
+
+  it("ignores an empty patch and an operation with no record", () => {
+    const op = newOp();
+    recordAzureApp(op, {
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1"
+    });
+    recordAzureApp(op, null);
+    recordServicePrincipal(op, null);
+    recordGitHubEnvironment(op, null);
+    expect(op.setupArtifacts.azureApp.state).toBe("created");
+    expect(recordAzureApp(null, { state: "created" })).toBeNull();
+    expect(recordServicePrincipal(null, { state: "created" })).toBeNull();
+    expect(recordGitHubEnvironment(null, { state: "created" })).toBeNull();
+  });
+
+  it("treats an unrecognised state and origin as proving nothing", () => {
+    expect(
+      reconcileArtifactProvenance(
+        "azure_app",
+        { state: "reused", origin: "pre_existing", appId: "app-1" },
+        { state: "invented", origin: "invented", appId: "app-1" }
+      )
+    ).toEqual({ state: "reused", origin: "pre_existing", appId: "app-1" });
+  });
+});
+
+describe("proving the GitHub environment this setup created", () => {
+  function candidate() {
+    const op = newOp();
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    return op;
+  }
+
+  it("promotes the candidate the caller proved it created", () => {
+    const op = candidate();
+
+    expect(
+      promoteCreatedGitHubEnvironment(op, {
+        repo: "contoso/store",
+        name: "dev"
+      })
+    ).toBe(true);
+    expect(op.setupArtifacts.githubEnvironment).toEqual({
+      state: "created",
+      origin: "this_operation",
+      repo: "contoso/store",
+      name: "dev"
+    });
+  });
+
+  it("puts the promoted environment into the rollback selection", () => {
+    const op = candidate();
+    promoteCreatedGitHubEnvironment(op, {
+      repo: "contoso/store",
+      name: "dev"
+    });
+    addSafeResumeRequest(op);
+    finish(op, "failed_partial", {
+      failure: {
+        code: "verify-dispatch-failed",
+        message: "Could not dispatch the verify workflow.",
+        classification: "user-fixable"
+      }
+    });
+
+    const rollback = canStartRollback(op);
+    expect(rollback.ok).toBe(true);
+    expect(rollback.targets.map((entry) => entry.artifactType)).toEqual([
+      "github_environment"
+    ]);
+    expect(projectCleanupSummary(op).manualActionRequired).toEqual([]);
+  });
+
+  it("refuses a promotion for a different repository or environment name", () => {
+    const op = candidate();
+    expect(
+      promoteCreatedGitHubEnvironment(op, {
+        repo: "contoso/other",
+        name: "dev"
+      })
+    ).toBe(false);
+    expect(
+      promoteCreatedGitHubEnvironment(op, {
+        repo: "contoso/store",
+        name: "prod"
+      })
+    ).toBe(false);
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("created_candidate");
+  });
+
+  it.each([
+    ["no identity at all", {}],
+    ["a blank repository", { repo: "  ", name: "dev" }],
+    ["a blank environment name", { repo: "contoso/store", name: "" }]
+  ])("refuses a promotion carrying %s", (_label, identity) => {
+    const op = candidate();
+    expect(promoteCreatedGitHubEnvironment(op, identity)).toBe(false);
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("created_candidate");
+  });
+
+  it("refuses to promote anything that is not a candidate", () => {
+    const reused = newOp();
+    recordGitHubEnvironment(reused, {
+      state: "reused",
+      origin: "pre_existing",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    expect(
+      promoteCreatedGitHubEnvironment(reused, {
+        repo: "contoso/store",
+        name: "dev"
+      })
+    ).toBe(false);
+    expect(reused.setupArtifacts.githubEnvironment.state).toBe("reused");
+    expect(
+      promoteCreatedGitHubEnvironment(null, {
+        repo: "contoso/store",
+        name: "dev"
+      })
+    ).toBe(false);
+  });
+
+  it("survives a persist and restore as a proven creation", () => {
+    const op = candidate();
+    promoteCreatedGitHubEnvironment(op, {
+      repo: "contoso/store",
+      name: "dev"
+    });
+
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+
+    expect(restored.setupArtifacts.githubEnvironment).toEqual({
+      state: "created",
+      origin: "this_operation",
+      repo: "contoso/store",
+      name: "dev"
+    });
+  });
+
+  it("restores a ledger written before origin existed as proving nothing", () => {
+    const ledger = readSetupArtifactLedger({
+      azureApp: { state: "created", appId: "app-1" },
+      servicePrincipal: { state: "created", appId: "app-1" },
+      githubEnvironment: {
+        state: "created_candidate",
+        repo: "contoso/store",
+        name: "dev",
+        origin: "invented"
+      }
+    });
+
+    expect(ledger.azureApp.origin).toBe("unknown");
+    expect(ledger.servicePrincipal.origin).toBe("unknown");
+    expect(ledger.githubEnvironment.origin).toBe("unknown");
+    expect(ledger.azureApp.state).toBe("created");
+  });
+});
+
+describe("provenance survives an extension restart", () => {
+  function envelopeStore() {
+    let envelope = null;
+    return {
+      async load() {
+        return envelope;
+      },
+      async save(next) {
+        envelope = structuredClone(next);
+      },
+      read: () => envelope
+    };
+  }
+
+  it("still owns the environment and the identity it created", async () => {
+    const store = envelopeStore();
+    const op = newOp();
+    addSafeResumeRequest(op);
+    recordAzureApp(op, {
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1",
+      displayName: "radius-deploy"
+    });
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    promoteCreatedGitHubEnvironment(op, {
+      repo: "contoso/store",
+      name: "dev"
+    });
+    const first = createRegistry({ store });
+    first.put(op);
+    await first.persist();
+
+    const restored = createRegistry({ store });
+    await restored.hydrate();
+    const reloaded = restored.get(op.operationId);
+
+    expect(reloaded.setupArtifacts.githubEnvironment).toEqual({
+      state: "created",
+      origin: "this_operation",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    expect(reloaded.setupArtifacts.azureApp).toMatchObject({
+      state: "created",
+      origin: "this_operation"
+    });
+    // The restart is what turns the interrupted run terminal, and the rollback
+    // it offers is built from the ownership the restart just restored.
+    expect(
+      canStartRollback(reloaded).targets.map((entry) => entry.artifactType)
+    ).toEqual(["github_environment", "azure_app"]);
+  });
+
+  it("does not let a resumed pass rewrite the restored ownership", async () => {
+    const store = envelopeStore();
+    const op = newOp();
+    addSafeResumeRequest(op);
+    recordServicePrincipal(op, {
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    const first = createRegistry({ store });
+    first.put(op);
+    await first.persist();
+
+    const restored = createRegistry({ store });
+    await restored.hydrate();
+    const reloaded = restored.get(op.operationId);
+    // Exactly what a continuation does: look the principal up and find it.
+    recordServicePrincipal(reloaded, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+
+    expect(reloaded.setupArtifacts.servicePrincipal).toMatchObject({
+      state: "created",
+      origin: "this_operation"
+    });
+  });
+
+  it("reads a record saved before provenance existed without claiming ownership", async () => {
+    const legacy = toPersistedOperation(addSafeResumeRequest(newOp()));
+    legacy.schemaVersion = 2;
+    legacy.setupArtifacts = {
+      azureApp: { state: "created", appId: "app-1", displayName: "radius" },
+      servicePrincipal: { state: "created", appId: "app-1", objectId: "sp-1" },
+      githubEnvironment: {
+        state: "created_candidate",
+        repo: "contoso/store",
+        name: "dev"
+      }
+    };
+    let envelope = { schemaVersion: 1, operations: [legacy] };
+    const store = {
+      async load() {
+        return envelope;
+      },
+      async save(next) {
+        envelope = structuredClone(next);
+      }
+    };
+
+    const restored = createRegistry({ store });
+    await restored.hydrate();
+    const reloaded = restored.get(legacy.operationId);
+
+    expect(reloaded.setupArtifacts.azureApp).toMatchObject({
+      state: "created",
+      origin: "unknown"
+    });
+    expect(reloaded.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "created_candidate",
+      origin: "unknown"
+    });
+    // The candidate is still the customer's to decide about: no restore path
+    // reconstructs a proof that was never recorded.
+    expect(
+      projectCleanupSummary(reloaded).manualActionRequired.map(
+        (entry) => entry.kind
+      )
+    ).toEqual(["github_environment"]);
+  });
+});
+
+describe("an unprovable Service Principal", () => {
+  function racedServicePrincipal() {
+    const op = addSafeResumeRequest(newOp());
+    recordAzureApp(op, {
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1",
+      displayName: "radius-deploy"
+    });
+    recordServicePrincipal(op, {
+      state: "created_candidate",
+      origin: "this_operation",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    finish(op, "failed_partial", {
+      failure: {
+        code: "role-assignment-failed",
+        message: "Failed to assign Contributor.",
+        classification: "user-fixable"
+      }
+    });
+    return op;
+  }
+
+  it("is never selected for deletion", () => {
+    const op = racedServicePrincipal();
+    expect(
+      canStartRollback(op).targets.map((entry) => entry.artifactType)
+    ).toEqual(["azure_app"]);
+  });
+
+  it("is reported as work the customer has to decide about", () => {
+    const summary = projectCleanupSummary(racedServicePrincipal());
+    expect(summary.manualActionRequired).toContainEqual({
+      kind: "service_principal",
+      target: "Service Principal for radius-deploy (app-1)",
+      action:
+        "Radius could not prove whether it created this Service Principal — the principal was absent before setup ran and present afterwards, but the create command did not report success — so it was left in place. Review it and delete it yourself if this setup should be rolled back."
+    });
+    expect(summary.reused).toEqual([]);
+  });
+
+  it("counts as something this attempt left behind", () => {
+    expect(hasSurvivingCreatedArtifacts(racedServicePrincipal())).toBe(true);
+  });
+
+  it("is not recreated by a continuation", () => {
+    expect(nextIncompleteSetupStep(racedServicePrincipal())).toBe(
+      "federated_credentials"
+    );
+  });
+});
+
+describe("reuse is explained in the customer's terms", () => {
+  function reusedWith(origin) {
+    const op = newOp();
+    recordAzureApp(op, {
+      state: "reused",
+      origin,
+      appId: "app-1",
+      displayName: "radius-deploy"
+    });
+    finish(op, "failed", {
+      failure: {
+        code: "env-create-failed",
+        message: "Creating the GitHub environment failed.",
+        classification: "user-fixable"
+      }
+    });
+    return projectCleanupSummary(op).reused[0].detail;
+  }
+
+  it("names an earlier Radius setup as the source when the tags prove it", () => {
+    expect(reusedWith("radius_earlier_setup")).toBe(
+      "An earlier Radius setup for this repository and environment created this App Registration, and this attempt reused it instead of creating a second one. Rolling back this attempt does not remove it."
+    );
+  });
+
+  it("says a pre-existing resource was found rather than created", () => {
+    expect(reusedWith("pre_existing")).toBe(
+      "This App Registration already existed before this attempt started, so Radius reused it rather than creating one."
+    );
+  });
+
+  it("claims nothing about a resource whose origin was never proven", () => {
+    expect(reusedWith("unknown")).toBe(
+      "Radius did not create this App Registration during this attempt, so it is left exactly as it was found."
+    );
+  });
+
+  it("keeps the sentence on the rollback dialog's keep list", () => {
+    const op = addSafeResumeRequest(newOp());
+    recordAzureApp(op, {
+      state: "reused",
+      origin: "radius_earlier_setup",
+      appId: "app-1",
+      displayName: "radius-deploy"
+    });
+    recordCreatedRoleAssignment(op, {
+      role: "Contributor",
+      scope: "/subscriptions/s1",
+      principalObjectId: "sp-1"
+    });
+    finish(op, "failed_partial", {
+      failure: {
+        code: "role-assignment-failed",
+        message: "Failed to assign Contributor.",
+        classification: "user-fixable"
+      }
+    });
+
+    const rollback = projectOperationActions(op).find(
+      (entry) => entry.id === "rollback"
+    );
+    expect(rollback.preview.keeps).toContainEqual({
+      kind: "azure_app",
+      target: "radius-deploy (app-1)",
+      reason: "reused",
+      action:
+        "An earlier Radius setup for this repository and environment created this App Registration, and this attempt reused it instead of creating a second one. Rolling back this attempt does not remove it."
+    });
+  });
+
+  it("explains a retained resource the confirmed command leaves alone", () => {
+    const op = newOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      origin: "this_operation",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/radius-verify-credentials.yml",
+      mode: "default_branch",
+      branch: "main",
+      commitSha: "c".repeat(40),
+      blobSha: "b".repeat(40),
+      contentSha256: "d".repeat(64),
+      previousBlobSha: null
+    });
+    recordCommitState(op, { mode: "default_branch", branch: "main" });
+    addSafeResumeRequest(op);
+    finish(op, "failed_partial", {
+      failure: {
+        code: "verify-run-failed",
+        message: "The verify workflow failed.",
+        classification: "user-fixable"
+      }
+    });
+
+    const rollback = projectOperationActions(op).find(
+      (entry) => entry.id === "rollback"
+    );
+    expect(rollback.preview.keeps.map((entry) => entry.action)).not.toContain(
+      ""
+    );
   });
 });

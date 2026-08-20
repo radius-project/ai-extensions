@@ -230,6 +230,7 @@ function orchestrationHarness(
       (async () => ({
         ok: true,
         state: "reused",
+        origin: "pre_existing",
         objectId: USER_ID
       })),
     persistMutationCheckpoint: async (input) => {
@@ -1005,6 +1006,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         ensureServicePrincipal: async () => ({
           ok: true,
           state: "reused",
+          origin: "pre_existing",
           objectId: USER_ID
         }),
         persistMutationCheckpoint: async (input) => {

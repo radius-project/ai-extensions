@@ -341,6 +341,7 @@ const productionHandlers = {
     tempFile: { write: () => "", remove: () => {} },
     resolveGitHubEnvironmentCreateState: () => null,
     recordGitHubEnvironment: () => {},
+    promoteCreatedGitHubEnvironment: () => false,
     envListCacheDelete: () => {},
     ociStateBackend: "oci",
     defaultStateArchive: "latest",

@@ -18,6 +18,7 @@ import {
   applyProviderConfiguration,
   publishWorkflowFiles
 } from "./create-environment-workflow-publisher.js";
+import { proveGitHubEnvironmentCreated } from "../services/github-environment-provenance.js";
 import type { WorkflowTempFilePort } from "./create-environment-workflow-committer.js";
 import type {
   CreateEnvironmentCommandResult,
@@ -129,8 +130,16 @@ export interface CreateEnvironmentDependencies
   ): "created_candidate" | "reused" | null;
   recordGitHubEnvironment(
     operation: CreateEnvironmentOperation,
-    patch: { state: string; repo: string; name: string }
+    patch: { state: string; repo: string; name: string; origin: string }
   ): void;
+  // Promotes the environment this request wrote from "Radius may own this" to
+  // "Radius created this", and only after the identity is durably saved. It
+  // answers false when the ledger cannot match the proof, which leaves the safe
+  // under-claim in place.
+  promoteCreatedGitHubEnvironment(
+    operation: CreateEnvironmentOperation,
+    identity: { repo: string; name: string }
+  ): boolean;
   envListCacheDelete(repo: string): void;
   ociStateBackend: string;
   defaultStateArchive: string;
@@ -447,16 +456,55 @@ export async function handleCreateEnvironment(
       );
     }
     steps.push('Creating GitHub environment "' + envName + '"...');
-    await runGhOrThrow(
+    // Read before the write, so the response's own creation timestamp can be
+    // compared against the moment this request issued the PUT.
+    const environmentPutStartedAt = dependencies.now();
+    const environmentPut = await runGhOrThrow(
       ["api", "--method", "PUT", environmentPath],
       'Failed to create GitHub environment "' + envName + '"'
     );
     dependencies.recordGitHubEnvironment(operation, {
       state: environmentState,
       repo: targetRepo,
-      name: envName
+      name: envName,
+      // A candidate claims nothing about who created it; the promotion below is
+      // the only thing that may write "this operation".
+      origin: environmentState === "reused" ? "pre_existing" : "unknown"
     });
     if (!(await checkpoint("after-github-environment"))) return;
+    // The identity is durable now, so the third leg of the ownership proof is
+    // in place and the candidate can be settled either way. A promotion that
+    // does not survive the best-effort save is not lost: the in-memory record
+    // carries it into the next mutation checkpoint, and until then the saved
+    // record keeps the safer candidate.
+    if (environmentState === "created_candidate") {
+      const proof = proveGitHubEnvironmentCreated({
+        preflight: environmentState,
+        putResponseBody: environmentPut.stdout || "",
+        putStartedAtMs: environmentPutStartedAt
+      });
+      if (
+        proof.proven &&
+        dependencies.promoteCreatedGitHubEnvironment(operation, {
+          repo: targetRepo,
+          name: envName
+        })
+      ) {
+        steps.push(
+          `✅ GitHub environment "${envName}" created by this setup — Radius owns it and can remove it.`
+        );
+        await dependencies.persistBestEffort({
+          operation,
+          persist: () => dependencies.persistOperations(),
+          report: (diagnostic) =>
+            dependencies.reportOperationDiagnostic(diagnostic)
+        });
+      } else if (!proof.proven) {
+        steps.push(
+          `ℹ️ Radius left GitHub environment "${envName}" outside its cleanup scope. ${proof.detail}`
+        );
+      }
+    }
     // Tag the environment as Radius-managed so the listing can filter out
     // environments created outside this extension.
     await setEnvironmentVariable("RADIUS_MANAGED", "true");
