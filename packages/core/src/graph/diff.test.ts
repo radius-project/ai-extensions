@@ -289,3 +289,121 @@ describe("computeGraphDiff — connection-level (edge) diff", () => {
     expect(api.connections[0]).not.toHaveProperty("diffStatus");
   });
 });
+
+describe("computeGraphDiff — degenerate resource and connection shapes", () => {
+  it("falls back to the name when a resource carries no id", () => {
+    const base = [{ name: "api", type: "Radius.Compute/containers" }];
+    const head = [
+      { name: "api", type: "Radius.Compute/containers", diffHash: "h2" }
+    ];
+
+    const result = computeGraphDiff(base, head);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].diffStatus).toBe("modified");
+  });
+
+  it("matches keyless resources on both sides under the empty key", () => {
+    // Neither id nor name is present, so both sides collapse to the "" key and
+    // the pair is compared rather than reported as one added and one removed.
+    const result = computeGraphDiff(
+      [{ type: "Radius.Compute/containers" }],
+      [{ type: "Radius.Compute/containers" }]
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].diffStatus).toBe("unchanged");
+  });
+
+  it("treats resources with no connections array as having no edges", () => {
+    const base = [{ id: "a", name: "a", type: "T" }];
+    const head = [{ id: "a", name: "a", type: "T" }];
+
+    const result = computeGraphDiff(base, head);
+
+    expect(result[0].connections).toEqual([]);
+  });
+
+  it("carries no edges for a removed node that never declared connections", () => {
+    const result = computeGraphDiff([{ id: "a", name: "a", type: "T" }], []);
+
+    expect(result[0].diffStatus).toBe("removed");
+    expect(result[0].connections).toEqual([]);
+  });
+
+  it("ignores null entries inside a connections array", () => {
+    const base = [{ id: "a", name: "a", type: "T", connections: [null] }];
+    const head = [{ id: "a", name: "a", type: "T", connections: [null] }];
+
+    const result = computeGraphDiff(base, head);
+
+    // A null connection defaults to Outbound with an empty target key, so it is
+    // annotated rather than dropped, and matches across branches.
+    expect(result[0].connections[0].diffStatus).toBe("unchanged");
+  });
+
+  it("keys an edge by the connection name when it carries no id", () => {
+    const base = [
+      { id: "a", name: "a", type: "T", connections: [{ name: "cache" }] }
+    ];
+    const head = [
+      { id: "a", name: "a", type: "T", connections: [{ name: "cache" }] }
+    ];
+
+    const result = computeGraphDiff(base, head);
+
+    expect(result[0].connections[0].diffStatus).toBe("unchanged");
+  });
+
+  it("distinguishes an added edge from a base edge on the same source", () => {
+    const base = [
+      { id: "a", name: "a", type: "T", connections: [{ name: "cache" }] }
+    ];
+    const head = [
+      { id: "a", name: "a", type: "T", connections: [{ name: "queue" }] }
+    ];
+
+    const result = computeGraphDiff(base, head);
+    const statuses = result[0].connections.map((c: any) => [
+      c.name,
+      c.diffStatus
+    ]);
+
+    expect(statuses).toEqual([
+      ["queue", "added"],
+      ["cache", "removed"]
+    ]);
+  });
+
+  it("does not re-attach base edges to a source that head does not contain", () => {
+    const base = [
+      { id: "a", name: "a", type: "T", connections: [{ id: "b" }] },
+      { id: "b", name: "b", type: "T" }
+    ];
+    const head = [{ id: "b", name: "b", type: "T" }];
+
+    const result = computeGraphDiff(base, head);
+    const removedNode = result.find((r) => r.id === "a");
+    const survivor = result.find((r) => r.id === "b");
+
+    expect(removedNode.connections).toHaveLength(1);
+    expect(removedNode.connections[0].diffStatus).toBe("removed");
+    expect(survivor.connections).toEqual([]);
+  });
+
+  it("never re-attaches a non-outbound base connection as a removed edge", () => {
+    const base = [
+      {
+        id: "a",
+        name: "a",
+        type: "T",
+        connections: [{ id: "b", direction: "Inbound" }]
+      }
+    ];
+    const head = [{ id: "a", name: "a", type: "T", connections: [] }];
+
+    const result = computeGraphDiff(base, head);
+
+    expect(result[0].connections).toEqual([]);
+  });
+});

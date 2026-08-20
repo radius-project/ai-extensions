@@ -19,7 +19,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint \"src/**/*.ts\" vitest.config.ts"
+    "test:functional": "vitest run test/functional",
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" vitest.config.ts"
   },
   "devDependencies": {
     "vitest": "catalog:",

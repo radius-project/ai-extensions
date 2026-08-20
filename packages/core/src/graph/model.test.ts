@@ -91,4 +91,115 @@ describe("addInboundConnections", () => {
     expect(inboundToB).toHaveLength(2);
     expect(inboundToB.map((c: any) => c.id).sort()).toEqual([aId, cId].sort());
   });
+
+  it("orders a mutual pair of edges by direction when the ids are equal", () => {
+    // A and B point at each other, so A ends up with an Outbound and an Inbound
+    // edge that share the same target id; only the direction tiebreak makes the
+    // ordering deterministic for computeGraphDiff.
+    const graph = {
+      resources: [
+        { id: "a", connections: [{ id: "b", direction: "Outbound" }] },
+        { id: "b", connections: [{ id: "a", direction: "Outbound" }] }
+      ]
+    };
+
+    addInboundConnections(graph);
+
+    expect(graph.resources[0].connections).toEqual([
+      { id: "b", direction: "Inbound" },
+      { id: "b", direction: "Outbound" }
+    ]);
+  });
+
+  it("skips resources that are null or carry no id", () => {
+    const graph: { resources: any[] } = {
+      resources: [
+        null,
+        { name: "no-id", connections: [{ id: "b", direction: "Outbound" }] },
+        { id: "b", connections: [] }
+      ]
+    };
+
+    expect(() => addInboundConnections(graph)).not.toThrow();
+    expect(graph.resources[2].connections).toEqual([]);
+  });
+
+  it("ignores connection entries that are null, id-less, or not outbound", () => {
+    const graph = {
+      resources: [
+        {
+          id: "a",
+          connections: [
+            null,
+            { direction: "Outbound" },
+            { id: "b", direction: "Inbound" }
+          ]
+        },
+        { id: "b", connections: [] }
+      ]
+    };
+
+    addInboundConnections(graph);
+
+    expect(graph.resources[1].connections).toEqual([]);
+    // A null entry must survive the deterministic sort rather than crash it.
+    expect(graph.resources[0].connections).toHaveLength(3);
+  });
+
+  it("creates the connections array on a target that has none", () => {
+    const graph: { resources: any[] } = {
+      resources: [
+        { id: "a", connections: [{ id: "b", direction: "Outbound" }] },
+        { id: "b" }
+      ]
+    };
+
+    addInboundConnections(graph);
+
+    expect(graph.resources[1].connections).toEqual([
+      { id: "a", direction: "Inbound" }
+    ]);
+  });
+
+  it("leaves a resource whose connections value is not an array untouched", () => {
+    const graph = { resources: [{ id: "a", connections: "none" }] };
+
+    expect(() => addInboundConnections(graph)).not.toThrow();
+    expect(graph.resources[0].connections).toBe("none");
+  });
+
+  it("sorts a resource's own outbound edges by target id", () => {
+    const graph = {
+      resources: [
+        {
+          id: "a",
+          connections: [
+            { id: "z", direction: "Outbound" },
+            { id: "m", direction: "Outbound" }
+          ]
+        }
+      ]
+    };
+
+    addInboundConnections(graph);
+
+    expect(graph.resources[0].connections.map((c: any) => c.id)).toEqual([
+      "m",
+      "z"
+    ]);
+  });
+
+  it("handles an empty resources array", () => {
+    const graph = { resources: [] };
+
+    expect(() => addInboundConnections(graph)).not.toThrow();
+    expect(graph.resources).toEqual([]);
+  });
+
+  it("handles an isolated resource that declares no connections", () => {
+    const graph: { resources: any[] } = { resources: [{ id: "solo" }] };
+
+    expect(() => addInboundConnections(graph)).not.toThrow();
+    expect(graph.resources[0].connections).toBeUndefined();
+  });
 });

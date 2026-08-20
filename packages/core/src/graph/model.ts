@@ -35,13 +35,15 @@ export function addInboundConnections(graph: any): void {
   // Sort every resource's connections deterministically. Inbound edges are
   // appended in resource-iteration order above, so without this the final
   // ordering depends on input order and computeGraphDiff (which stringifies
-  // connections) would report spurious "modified" diffs.
+  // connections) would report spurious "modified" diffs. Entries are read
+  // optionally because the synthesis loop above already tolerates null and
+  // id-less connections, so sorting must not be the step that throws on them.
   for (const r of graph.resources) {
     if (!r || !Array.isArray(r.connections)) continue;
     r.connections.sort((a: any, b: any) => {
-      const byID2 = String(a.id).localeCompare(String(b.id));
+      const byID2 = String(a?.id).localeCompare(String(b?.id));
       if (byID2 !== 0) return byID2;
-      return String(a.direction).localeCompare(String(b.direction));
+      return String(a?.direction).localeCompare(String(b?.direction));
     });
   }
 }
