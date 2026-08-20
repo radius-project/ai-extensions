@@ -197,8 +197,18 @@ async function openEnvironmentCreateForm(page: Page): Promise<void> {
   await page.locator("#env-step1-next").click();
   await expect(page.locator("#env-step-details")).toBeVisible();
   const recheck = page.locator("#env-gh-recheck");
+  await expect(page.locator("#env-gh-account-button")).toHaveAccessibleName(
+    "@repo-user"
+  );
+  await expect(page.locator("#env-gh-identity-note")).toHaveText(
+    "Ready to configure deployments"
+  );
+  await expect(page.locator("#env-gh-technical-details")).toContainText(
+    "credential source: keyring"
+  );
   await expect(recheck).toHaveText("Re-check");
   await expect(recheck).toBeEnabled();
+  await expect(page.locator("#deploy-btn")).toBeEnabled();
 }
 
 async function routeDeployments(
