@@ -1271,7 +1271,7 @@ function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
   );
 }
 
-function hasReachedSetupCommitPoint(op: any): boolean {
+export function hasReachedSetupCommitPoint(op: any): boolean {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return false;
   return (
@@ -1306,7 +1306,7 @@ function formatServicePrincipalLabel(sp: any, ledger: any): string {
   return appLabel ? `Service Principal for ${appLabel}` : "Service Principal";
 }
 
-function formatGitHubEnvironmentLabel(env: any): string {
+export function formatGitHubEnvironmentLabel(env: any): string {
   const repo = String((env && env.repo) || "").trim();
   const name = String((env && env.name) || "").trim();
   if (repo && name) return `${repo}:${name}`;
@@ -1403,6 +1403,149 @@ export function cleanupArtifactIdentity(
     default:
       return "";
   }
+}
+
+// ─── Ledger artifact table ───────────────────────────────────────────────────
+// Every projection below — what a rollback removes, what it keeps, what a
+// continuation reuses, what survived a failure — walks the same six artifact
+// kinds in the same creation order. Enumerating them once as data is what keeps
+// a seventh kind from being added to four lists and forgotten in the fifth, and
+// what guarantees the rollback order stays the exact reverse of creation.
+
+interface LedgerArtifactEntry {
+  kind: SetupCleanupArtifactType;
+  artifact: any;
+  // `created` for the list kinds, which are recorded only when this attempt
+  // made them, and the artifact's own state for the singular kinds.
+  state: string;
+  target: string;
+}
+
+interface LedgerArtifactRow {
+  kind: SetupCleanupArtifactType;
+  entries(ledger: any): LedgerArtifactEntry[];
+  // The sentence a kind carries when it is left behind unproven. Only the two
+  // kinds with an unprovable middle state have one.
+  unprovenAction?: string;
+}
+
+function ledgerEntry(
+  kind: SetupCleanupArtifactType,
+  artifact: any,
+  target: string,
+  state: string
+): LedgerArtifactEntry {
+  return { kind, artifact, state, target };
+}
+
+const LEDGER_ARTIFACTS: readonly LedgerArtifactRow[] = Object.freeze([
+  {
+    kind: "azure_app",
+    entries: (ledger: any) => [
+      ledgerEntry(
+        "azure_app",
+        ledger.azureApp,
+        formatAzureAppLabel(ledger.azureApp),
+        ledger.azureApp.state
+      )
+    ]
+  },
+  {
+    kind: "service_principal",
+    entries: (ledger: any) => [
+      ledgerEntry(
+        "service_principal",
+        ledger.servicePrincipal,
+        formatServicePrincipalLabel(ledger.servicePrincipal, ledger),
+        ledger.servicePrincipal.state
+      )
+    ],
+    unprovenAction: UNPROVEN_SERVICE_PRINCIPAL_ACTION
+  },
+  {
+    kind: "federated_credential",
+    entries: (ledger: any) =>
+      ledger.federatedCredentials.map((entry: any) =>
+        ledgerEntry(
+          "federated_credential",
+          entry,
+          `${String(entry.name || "")} @ ${String(entry.subject || "")}`,
+          "created"
+        )
+      )
+  },
+  {
+    kind: "role_assignment",
+    entries: (ledger: any) =>
+      ledger.roleAssignments.map((entry: any) =>
+        ledgerEntry(
+          "role_assignment",
+          entry,
+          `${String(entry.role || "")} @ ${String(entry.scope || "")}`,
+          "created"
+        )
+      )
+  },
+  {
+    kind: "github_environment",
+    entries: (ledger: any) => [
+      ledgerEntry(
+        "github_environment",
+        ledger.githubEnvironment,
+        formatGitHubEnvironmentLabel(ledger.githubEnvironment),
+        ledger.githubEnvironment.state
+      )
+    ],
+    unprovenAction: UNPROVEN_GITHUB_ENVIRONMENT_ACTION
+  },
+  {
+    kind: "workflow_file",
+    entries: (ledger: any) =>
+      ledger.commit.workflowFiles.map((entry: any) =>
+        ledgerEntry(
+          "workflow_file",
+          entry,
+          formatWorkflowFileLabel(entry),
+          // A reverted file is gone; anything else the ledger still claims was
+          // written by this attempt.
+          entry.state === "removed" ? "deleted" : "created"
+        )
+      )
+  }
+]);
+
+/** The rows that describe cloud and GitHub resources, workflow files aside. */
+const LEDGER_RESOURCE_ARTIFACTS = Object.freeze(
+  LEDGER_ARTIFACTS.filter((row) => row.kind !== "workflow_file")
+);
+
+/**
+ * Every ledger entry in one of the named states, in creation order.
+ *
+ * `rows` is passed rather than filtered here so a caller can walk the table
+ * backwards — which is what deletion order is — without a second table.
+ */
+function ledgerArtifacts(
+  ledger: any,
+  states: readonly string[],
+  rows: readonly LedgerArtifactRow[] = LEDGER_ARTIFACTS
+): LedgerArtifactEntry[] {
+  const found: LedgerArtifactEntry[] = [];
+  for (const row of rows) {
+    for (const entry of row.entries(ledger)) {
+      if (states.includes(entry.state)) found.push(entry);
+    }
+  }
+  return found;
+}
+
+const LEDGER_WORKFLOW_ARTIFACTS = Object.freeze(
+  LEDGER_ARTIFACTS.filter((row) => row.kind === "workflow_file")
+);
+
+/** The workflow files the ledger still claims, with their rendered labels. */
+function pendingWorkflowArtifacts(ledger: any): LedgerArtifactEntry[] {
+  return ledgerArtifacts(ledger, ["created"], LEDGER_WORKFLOW_ARTIFACTS);
 }
 
 /**
@@ -1517,106 +1660,44 @@ export function projectCleanupSummary(op: any): any {
         .map((entry: any) => entry.detail)
     )
   ];
-  const removed = results
-    .filter(
-      (entry: any) =>
-        entry.outcome === "deleted" || entry.outcome === "not_found"
-    )
-    .map((entry: any) => ({
-      artifactType: entry.artifactType,
-      outcome: entry.outcome,
-      target: cleanupResultTarget(entry)
-    }));
-
   const retained: any[] = [];
-  if (ledger.azureApp.state === "reused") {
+  for (const entry of ledgerArtifacts(ledger, ["reused"])) {
     pushRetainedArtifact(retained, {
-      kind: "azure_app",
+      kind: entry.kind,
       reason: "reused",
-      target: formatAzureAppLabel(ledger.azureApp),
-      detail: reuseExplanation("azure_app", ledger.azureApp.origin)
+      target: entry.target,
+      detail: reuseExplanation(entry.kind, entry.artifact.origin)
     });
   }
-  if (ledger.servicePrincipal.state === "reused") {
-    pushRetainedArtifact(retained, {
-      kind: "service_principal",
-      reason: "reused",
-      target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger),
-      detail: reuseExplanation(
-        "service_principal",
-        ledger.servicePrincipal.origin
-      )
-    });
+  for (const row of LEDGER_ARTIFACTS) {
+    if (!row.unprovenAction) continue;
+    for (const entry of row.entries(ledger)) {
+      if (entry.state !== "created_candidate") continue;
+      pushRetainedArtifact(retained, {
+        kind: entry.kind,
+        reason: "manual_cleanup_required",
+        target: entry.target,
+        detail: row.unprovenAction
+      });
+    }
   }
-  if (ledger.githubEnvironment.state === "reused") {
+  for (const entry of pendingWorkflowArtifacts(ledger)) {
     pushRetainedArtifact(retained, {
-      kind: "github_environment",
-      reason: "reused",
-      target: formatGitHubEnvironmentLabel(ledger.githubEnvironment),
-      detail: reuseExplanation(
-        "github_environment",
-        ledger.githubEnvironment.origin
-      )
-    });
-  }
-  if (ledger.servicePrincipal.state === "created_candidate") {
-    pushRetainedArtifact(retained, {
-      kind: "service_principal",
-      reason: "manual_cleanup_required",
-      target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger),
-      detail: UNPROVEN_SERVICE_PRINCIPAL_ACTION
-    });
-  }
-  if (ledger.githubEnvironment.state === "created_candidate") {
-    pushRetainedArtifact(retained, {
-      kind: "github_environment",
-      reason: "manual_cleanup_required",
-      target: formatGitHubEnvironmentLabel(ledger.githubEnvironment),
-      detail: UNPROVEN_GITHUB_ENVIRONMENT_ACTION
-    });
-  }
-  ledger.commit.workflowFiles.forEach((entry: any) => {
-    if (entry.state === "removed") return;
-    pushRetainedArtifact(retained, {
-      kind: "workflow_file",
+      kind: entry.kind,
       reason: "retained",
-      target: formatWorkflowFileLabel(entry)
+      target: entry.target
     });
-  });
+  }
   if (commitPointReached) {
-    if (ledger.azureApp.state === "created") {
+    for (const entry of ledgerArtifacts(
+      ledger,
+      ["created"],
+      LEDGER_RESOURCE_ARTIFACTS
+    )) {
       pushRetainedArtifact(retained, {
-        kind: "azure_app",
+        kind: entry.kind,
         reason: "retained",
-        target: formatAzureAppLabel(ledger.azureApp)
-      });
-    }
-    if (ledger.servicePrincipal.state === "created") {
-      pushRetainedArtifact(retained, {
-        kind: "service_principal",
-        reason: "retained",
-        target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
-      });
-    }
-    ledger.federatedCredentials.forEach((entry: any) => {
-      pushRetainedArtifact(retained, {
-        kind: "federated_credential",
-        reason: "retained",
-        target: `${String(entry.name || "")} @ ${String(entry.subject || "")}`
-      });
-    });
-    ledger.roleAssignments.forEach((entry: any) => {
-      pushRetainedArtifact(retained, {
-        kind: "role_assignment",
-        reason: "retained",
-        target: `${String(entry.role || "")} @ ${String(entry.scope || "")}`
-      });
-    });
-    if (ledger.githubEnvironment.state === "created") {
-      pushRetainedArtifact(retained, {
-        kind: "github_environment",
-        reason: "retained",
-        target: formatGitHubEnvironmentLabel(ledger.githubEnvironment)
+        target: entry.target
       });
     }
   }
@@ -1657,8 +1738,6 @@ export function projectCleanupSummary(op: any): any {
     rollbackBeforeCommit: !commitPointReached,
     state: cleanupState,
     results,
-    removed,
-    retained,
     warnings,
     retry,
     ...projectPartialState(op, {
@@ -1688,64 +1767,31 @@ interface SurvivingArtifact {
 }
 
 function survivingCreatedArtifacts(ledger: any): SurvivingArtifact[] {
-  const surviving: SurvivingArtifact[] = [];
-  const push = (
-    kind: string,
-    artifact: any,
-    target: string,
-    extra: Partial<SurvivingArtifact> = {}
-  ) => {
-    surviving.push({
-      kind,
-      target,
-      keys: artifactMatchKeys(kind, cleanupArtifactIdentity(kind, artifact), [
-        target
-      ]),
-      ...extra
-    });
-  };
-  if (ledger.azureApp.state === "created")
-    push("azure_app", ledger.azureApp, formatAzureAppLabel(ledger.azureApp));
-  if (ledger.servicePrincipal.state === "created")
-    push(
-      "service_principal",
-      ledger.servicePrincipal,
-      formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
-    );
-  ledger.federatedCredentials.forEach((entry: any) => {
-    push(
-      "federated_credential",
-      entry,
-      `${String(entry.name || "")} @ ${String(entry.subject || "")}`
-    );
-  });
-  ledger.roleAssignments.forEach((entry: any) => {
-    push(
-      "role_assignment",
-      entry,
-      `${String(entry.role || "")} @ ${String(entry.scope || "")}`
-    );
-  });
-  if (ledger.githubEnvironment.state === "created")
-    push(
-      "github_environment",
-      ledger.githubEnvironment,
-      formatGitHubEnvironmentLabel(ledger.githubEnvironment)
-    );
-  ledger.commit.workflowFiles.forEach((entry: any) => {
+  const surviving: SurvivingArtifact[] = ledgerArtifacts(
+    ledger,
+    ["created"],
+    LEDGER_RESOURCE_ARTIFACTS
+  ).map((entry) => ({
+    kind: entry.kind,
+    target: entry.target,
+    keys: artifactMatchKeys(
+      entry.kind,
+      cleanupArtifactIdentity(entry.kind, entry.artifact),
+      [entry.target]
+    )
+  }));
+  for (const entry of pendingWorkflowArtifacts(ledger)) {
     // A reverted file is no longer surviving. `keepAlways` exists because a
     // committed workflow is never removed by the pre-commit cleanup path, not
     // because the entry outlives its own removal.
-    if (entry.state === "removed") return;
-    const target = formatWorkflowFileLabel(entry);
-    if (target)
-      surviving.push({
-        kind: "workflow_file",
-        target,
-        keys: new Set<string>(),
-        keepAlways: true
-      });
-  });
+    if (!entry.target) continue;
+    surviving.push({
+      kind: entry.kind,
+      target: entry.target,
+      keys: new Set<string>(),
+      keepAlways: true
+    });
+  }
   return surviving;
 }
 
@@ -1762,8 +1808,7 @@ function survivingCreatedArtifacts(ledger: any): SurvivingArtifact[] {
 export function hasSurvivingCreatedArtifacts(op: any): boolean {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return false;
-  if (ledger.githubEnvironment.state === "created_candidate") return true;
-  if (ledger.servicePrincipal.state === "created_candidate") return true;
+  if (ledgerArtifacts(ledger, ["created_candidate"]).length > 0) return true;
   const removedKeys = removedArtifactKeys(cleanupAttemptResults(ledger));
   return survivingCreatedArtifacts(ledger).some(
     (entry) => ![...entry.keys].some((key: string) => removedKeys.has(key))
@@ -1818,52 +1863,29 @@ function projectPartialState(
         entry.detail ||
         "Review this resource in the Azure or GitHub portal and remove it if this setup should be rolled back."
     }));
-  if (ledger.githubEnvironment.state === "created_candidate") {
-    const target = formatGitHubEnvironmentLabel(ledger.githubEnvironment);
-    if (!manualActionRequired.some((entry: any) => entry.target === target)) {
+  // Reverse table order: the GitHub environment is the resource a customer is
+  // most likely to find first, so it leads the manual list.
+  for (const row of [...LEDGER_ARTIFACTS].reverse()) {
+    if (!row.unprovenAction) continue;
+    for (const entry of row.entries(ledger)) {
+      if (entry.state !== "created_candidate") continue;
+      if (
+        manualActionRequired.some((item: any) => item.target === entry.target)
+      )
+        continue;
       manualActionRequired.push({
-        kind: "github_environment",
-        target,
-        action: UNPROVEN_GITHUB_ENVIRONMENT_ACTION
-      });
-    }
-  }
-  if (ledger.servicePrincipal.state === "created_candidate") {
-    const target = formatServicePrincipalLabel(ledger.servicePrincipal, ledger);
-    if (!manualActionRequired.some((entry: any) => entry.target === target)) {
-      manualActionRequired.push({
-        kind: "service_principal",
-        target,
-        action: UNPROVEN_SERVICE_PRINCIPAL_ACTION
+        kind: entry.kind,
+        target: entry.target,
+        action: row.unprovenAction
       });
     }
   }
 
-  const reused: any[] = [];
-  if (ledger.azureApp.state === "reused")
-    reused.push({
-      kind: "azure_app",
-      target: formatAzureAppLabel(ledger.azureApp),
-      detail: reuseExplanation("azure_app", ledger.azureApp.origin)
-    });
-  if (ledger.servicePrincipal.state === "reused")
-    reused.push({
-      kind: "service_principal",
-      target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger),
-      detail: reuseExplanation(
-        "service_principal",
-        ledger.servicePrincipal.origin
-      )
-    });
-  if (ledger.githubEnvironment.state === "reused")
-    reused.push({
-      kind: "github_environment",
-      target: formatGitHubEnvironmentLabel(ledger.githubEnvironment),
-      detail: reuseExplanation(
-        "github_environment",
-        ledger.githubEnvironment.origin
-      )
-    });
+  const reused: any[] = ledgerArtifacts(ledger, ["reused"]).map((entry) => ({
+    kind: entry.kind,
+    target: entry.target,
+    detail: reuseExplanation(entry.kind, entry.artifact.origin)
+  }));
 
   const surviving = survivingCreatedArtifacts(ledger);
 
@@ -2331,50 +2353,13 @@ export function provenOwnedCleanupTargets(op: any): RollbackTarget[] {
       );
     }
   }
-  if (ledger.githubEnvironment.state === "created") {
-    targets.push(
-      rollbackTarget(
-        "github_environment",
-        ledger.githubEnvironment,
-        formatGitHubEnvironmentLabel(ledger.githubEnvironment)
-      )
-    );
-  }
-  for (const entry of [...ledger.roleAssignments].reverse()) {
-    targets.push(
-      rollbackTarget(
-        "role_assignment",
-        entry,
-        `${String(entry.role || "")} @ ${String(entry.scope || "")}`
-      )
-    );
-  }
-  for (const entry of [...ledger.federatedCredentials].reverse()) {
-    targets.push(
-      rollbackTarget(
-        "federated_credential",
-        entry,
-        `${String(entry.name || "")} @ ${String(entry.subject || "")}`
-      )
-    );
-  }
-  if (ledger.servicePrincipal.state === "created") {
-    targets.push(
-      rollbackTarget(
-        "service_principal",
-        ledger.servicePrincipal,
-        formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
-      )
-    );
-  }
-  if (ledger.azureApp.state === "created") {
-    targets.push(
-      rollbackTarget(
-        "azure_app",
-        ledger.azureApp,
-        formatAzureAppLabel(ledger.azureApp)
-      )
-    );
+  // Reverse creation order, and reversed again within each kind, so a role
+  // assignment or federated credential is removed newest-first.
+  for (const row of [...LEDGER_RESOURCE_ARTIFACTS].reverse()) {
+    for (const entry of row.entries(ledger).reverse()) {
+      if (entry.state !== "created") continue;
+      targets.push(rollbackTarget(entry.kind, entry.artifact, entry.target));
+    }
   }
   return targets.sort(
     (a, b) =>
@@ -2585,30 +2570,19 @@ export function canExitSetup(op: any): any {
 }
 
 function isProvenOwnedCleanupTarget(ledger: any, result: any): boolean {
-  switch (result.artifactType) {
-    case "azure_app":
-      return ledger.azureApp.state === "created";
-    case "service_principal":
-      return ledger.servicePrincipal.state === "created";
-    case "federated_credential":
-      return ledger.federatedCredentials.length > 0;
-    case "role_assignment":
-      return ledger.roleAssignments.length > 0;
-    case "github_environment":
-      return ledger.githubEnvironment.state === "created";
-    case "workflow_file":
-      return ledger.commit.workflowFiles.some(
-        (file: WorkflowCommitArtifact) =>
-          file.state !== "removed" &&
-          cleanupTargetKey({
-            artifactType: "workflow_file",
-            identity: cleanupArtifactIdentity("workflow_file", file),
-            target: formatWorkflowFileLabel(file)
-          }) === cleanupTargetKey(result)
-      );
-    default:
-      return false;
-  }
+  const key = cleanupTargetKey(result);
+  return ledgerArtifacts(ledger, ["created"]).some(
+    (entry) =>
+      entry.kind === result.artifactType &&
+      // The ledger can hold several workflow files, so a warning about one is
+      // not proof of ownership of another; every other kind is claimed whole.
+      (entry.kind !== "workflow_file" ||
+        cleanupTargetKey({
+          artifactType: "workflow_file",
+          identity: cleanupArtifactIdentity("workflow_file", entry.artifact),
+          target: entry.target
+        }) === key)
+  );
 }
 
 /**
@@ -2704,44 +2678,17 @@ export function setupStepLabel(step: any): string {
  */
 function projectContinuationPreview(op: any, resumeFrom: any): any {
   const ledger = getSetupArtifactLedger(op);
-  const reuses: Array<{ kind: string; target: string }> = [];
-  if (ledger) {
-    const present = (state: any) =>
-      state === "created" ||
-      state === "reused" ||
-      state === "created_candidate";
-    if (present(ledger.azureApp.state))
-      reuses.push({
-        kind: "azure_app",
-        target: formatAzureAppLabel(ledger.azureApp)
-      });
-    if (present(ledger.servicePrincipal.state))
-      reuses.push({
-        kind: "service_principal",
-        target: formatServicePrincipalLabel(ledger.servicePrincipal, ledger)
-      });
-    ledger.federatedCredentials.forEach((entry: any) => {
-      reuses.push({
-        kind: "federated_credential",
-        target: `${String(entry.name || "")} @ ${String(entry.subject || "")}`
-      });
-    });
-    ledger.roleAssignments.forEach((entry: any) => {
-      reuses.push({
-        kind: "role_assignment",
-        target: `${String(entry.role || "")} @ ${String(entry.scope || "")}`
-      });
-    });
-    if (present(ledger.githubEnvironment.state))
-      reuses.push({
-        kind: "github_environment",
-        target: formatGitHubEnvironmentLabel(ledger.githubEnvironment)
-      });
-  }
   return {
     resumeFrom: String(resumeFrom || ""),
     resumeLabel: setupStepLabel(resumeFrom),
-    reuses
+    reuses:
+      ledger ?
+        ledgerArtifacts(
+          ledger,
+          ["created", "reused", "created_candidate"],
+          LEDGER_RESOURCE_ARTIFACTS
+        ).map((entry) => ({ kind: entry.kind, target: entry.target }))
+      : []
   };
 }
 
@@ -2800,7 +2747,7 @@ function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
  * Silence reads as a bug. Every refusal that a customer can reasonably reach
  * gets one sentence naming the constraint that produced it.
  */
-const ROLLBACK_UNAVAILABLE_MESSAGES: Record<string, string> = {
+const UNAVAILABLE_GUIDANCE_MESSAGES: Record<string, string> = {
   "rollback-nothing-owned":
     "Radius did not create any resources in this attempt, so there is nothing to roll back.",
   "rollback-environment-verified":
@@ -2808,10 +2755,7 @@ const ROLLBACK_UNAVAILABLE_MESSAGES: Record<string, string> = {
   "rollback-provenance-incomplete":
     "Radius cannot prove the committed workflow files are still exactly what it wrote, so it will not remove them or the resources they depend on. Review and remove them yourself.",
   "rollback-already-attempted":
-    "Radius already ran a rollback for this attempt. Anything still listed needs the retry above or a manual removal."
-};
-
-const CONTINUE_UNAVAILABLE_MESSAGES: Record<string, string> = {
+    "Radius already ran a rollback for this attempt. Anything still listed needs the retry above or a manual removal.",
   "setup-continue-request-missing":
     "Radius no longer holds the environment details needed to continue this setup.",
   "setup-continue-ownership-ambiguous":
@@ -2830,21 +2774,12 @@ export function projectActionGuidance(op: any): any[] {
   const notes: Array<{ code: string; message: string }> = [];
   const rollback = canStartRollback(op);
   const forward = canContinueSetup(op).ok || canRetrySetup(op).ok;
-  if (!rollback.ok && ROLLBACK_UNAVAILABLE_MESSAGES[rollback.code]) {
-    notes.push({
-      code: rollback.code,
-      message: ROLLBACK_UNAVAILABLE_MESSAGES[rollback.code]
-    });
-  }
-  if (!forward) {
-    const continuation = canContinueSetup(op);
-    if (CONTINUE_UNAVAILABLE_MESSAGES[continuation.code]) {
-      notes.push({
-        code: continuation.code,
-        message: CONTINUE_UNAVAILABLE_MESSAGES[continuation.code]
-      });
-    }
-  }
+  const explain = (code: string) => {
+    const message = UNAVAILABLE_GUIDANCE_MESSAGES[code];
+    if (message) notes.push({ code, message });
+  };
+  if (!rollback.ok) explain(rollback.code);
+  if (!forward) explain(canContinueSetup(op).code);
   return notes;
 }
 
@@ -3095,6 +3030,9 @@ export function projectOperationActions(op: any): any[] {
   }
   const cleanup = canRetryCleanup(op);
   if (cleanup.ok) {
+    // The retry removes its own unresolved subset, but keeps and manual items
+    // are the same whole-record projection a rollback that removes nothing has.
+    const kept = projectRollbackPreview(op, []);
     actions.push({
       id: "retry-cleanup",
       kind: "retry_cleanup",
@@ -3115,9 +3053,8 @@ export function projectOperationActions(op: any): any[] {
           kind: entry.artifactType,
           target: entry.target
         })),
-        keeps: projectRollbackPreview(op, []).keeps,
-        manualActionRequired: projectRollbackPreview(op, [])
-          .manualActionRequired
+        keeps: kept.keeps,
+        manualActionRequired: kept.manualActionRequired
       }
     });
   }

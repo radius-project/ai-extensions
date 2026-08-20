@@ -138,6 +138,8 @@ import {
   recordCleanupDeletion,
   cleanupArtifactIdentity,
   cleanupTargetKey,
+  formatGitHubEnvironmentLabel,
+  hasReachedSetupCommitPoint,
   projectCleanupSummary,
   finish,
   finishSucceeded,
@@ -3146,15 +3148,6 @@ export async function cleanupAzureSetupArtifacts(
   };
 }
 
-function hasReachedSetupCommitPoint(op: any): boolean {
-  const ledger = getSetupArtifactLedger(op);
-  if (!ledger) return false;
-  return (
-    ledger.commit.mode !== "not_started" ||
-    ledger.commit.workflowFiles.length > 0
-  );
-}
-
 function sanitizeFailureExtra(extra: Record<string, unknown> = {}) {
   const safe = { ...(extra || {}) };
   delete safe.azError;
@@ -3262,10 +3255,7 @@ export async function cleanupGitHubEnvironmentArtifact(
   }
   const envRepo = optionalString(artifact.repo);
   const envName = optionalString(artifact.name);
-  const target =
-    envRepo && envName ?
-      `${envRepo}:${envName}`
-    : envName || envRepo || "GitHub environment";
+  const target = formatGitHubEnvironmentLabel(artifact);
   const identity = cleanupArtifactIdentity("github_environment", artifact);
   const recordOutcome = (
     outcome: SetupCleanupOutcome,
@@ -4005,6 +3995,16 @@ function createInstanceRequestCoordinator(
   const serverOwnedToken = randomUUID();
   const browserMutationNonce = randomUUID();
 
+  // Every server-owned runner saves through the same registry and reports
+  // through the same diagnostic channel, so the wiring is bound once rather
+  // than rebuilt at each write.
+  const saveOperation = (operation: any): Promise<boolean> =>
+    persistBestEffort({
+      operation,
+      persist: () => operations.persist(),
+      report: (diagnostic) => operations.report?.(diagnostic)
+    });
+
   function scheduleServerOwnedTask(
     operationId: string,
     task: () => Promise<void>
@@ -4094,11 +4094,7 @@ function createInstanceRequestCoordinator(
       // Each polling observation is a safe boundary: nothing is being written.
       if (shouldStop(op)) {
         stopAtBoundary(op, "verification-observation", { announce: false });
-        const saved = await persistBestEffort({
-          operation: op,
-          persist: () => operations.persist(),
-          report: (diagnostic) => operations.report?.(diagnostic)
-        });
+        const saved = await saveOperation(op);
         if (saved) announceOperationTerminal(op);
         return;
       }
@@ -4136,11 +4132,7 @@ function createInstanceRequestCoordinator(
               evidence: null
             }
           });
-          await persistBestEffort({
-            operation: current,
-            persist: () => operations.persist(),
-            report: (diagnostic) => operations.report?.(diagnostic)
-          });
+          await saveOperation(current);
         }
         return;
       }
@@ -4284,11 +4276,7 @@ function createInstanceRequestCoordinator(
           }`.trim()
         );
       }
-      await persistBestEffort({
-        operation: op,
-        persist: () => operations.persist(),
-        report: (diagnostic) => operations.report?.(diagnostic)
-      });
+      await saveOperation(op);
       if (!setup.value.shouldMonitor) return;
       await monitorVerification(operationId);
     } finally {
@@ -4319,26 +4307,16 @@ function createInstanceRequestCoordinator(
     if (!op || op.endedAt) return;
     const saved = op.verification || {};
     const dispatchedAt = Date.now();
-    const dispatch = await new Promise<CommandResult>((resolve) => {
-      const child = cliExec(
-        "gh",
-        buildVerifyWorkflowDispatchArgs({
-          workflowFile: String(saved.workflow || VERIFY_WORKFLOW_FILE),
-          targetRepo: op.repo,
-          envName: String(saved.environment || op.environment),
-          ref: String(saved.ref || "")
-        }),
-        { timeout: 30000 },
-        (err, stdout, stderr) => {
-          resolve({
-            code: err ? err.code || 1 : 0,
-            stdout: stdout || "",
-            stderr: stderr || ""
-          });
-        }
-      );
-      endChildInput(child);
-    });
+    const dispatch = await runCliCommand(
+      "gh",
+      buildVerifyWorkflowDispatchArgs({
+        workflowFile: String(saved.workflow || VERIFY_WORKFLOW_FILE),
+        targetRepo: op.repo,
+        envName: String(saved.environment || op.environment),
+        ref: String(saved.ref || "")
+      }),
+      30000
+    );
     if (dispatch.code !== 0) {
       const detail =
         (dispatch.stderr || dispatch.stdout || "").trim() ||
@@ -4356,11 +4334,7 @@ function createInstanceRequestCoordinator(
           evidence: detail
         }
       });
-      await persistBestEffort({
-        operation: op,
-        persist: () => operations.persist(),
-        report: (diagnostic) => operations.report?.(diagnostic)
-      });
+      await saveOperation(op);
       return;
     }
     // Keep the saved workflow, ref, and environment; only the run identity is
@@ -4376,11 +4350,7 @@ function createInstanceRequestCoordinator(
     };
     addLegacyStep(op, "✅ Verify workflow dispatched again.", STAGE_VERIFY);
     setCommandState(op, commandId, "running");
-    await persistBestEffort({
-      operation: op,
-      persist: () => operations.persist(),
-      report: (diagnostic) => operations.report?.(diagnostic)
-    });
+    await saveOperation(op);
     await monitorVerification(operationId);
     setCommandState(
       op,
@@ -4388,11 +4358,7 @@ function createInstanceRequestCoordinator(
       "finished",
       operations.get(operationId)?.state || null
     );
-    await persistBestEffort({
-      operation: op,
-      persist: () => operations.persist(),
-      report: (diagnostic) => operations.report?.(diagnostic)
-    });
+    await saveOperation(op);
   }
 
   /**
@@ -4425,11 +4391,7 @@ function createInstanceRequestCoordinator(
     const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
     const steps: string[] = [];
     const persist = async (): Promise<void> => {
-      await persistBestEffort({
-        operation: op,
-        persist: () => operations.persist(),
-        report: (diagnostic) => operations.report?.(diagnostic)
-      });
+      await saveOperation(op);
     };
     const warnings: string[] = [];
     let results: SetupCleanupResult[] = [];
@@ -4511,22 +4473,8 @@ function createInstanceRequestCoordinator(
       }
     }
 
-    const runAz = (args: string[]): Promise<Partial<CommandResult>> =>
-      new Promise((resolve) => {
-        const child = cliExec(
-          "az",
-          args,
-          { timeout: 60000 },
-          (err, stdout, stderr) => {
-            resolve({
-              code: err ? err.code || 1 : 0,
-              stdout: stdout || "",
-              stderr: stderr || ""
-            });
-          }
-        );
-        endChildInput(child);
-      });
+    const runAz = (args: string[]): Promise<CommandResult> =>
+      runCliCommand("az", args);
     const azureCleanup = await cleanupAzureSetupArtifacts(op, {
       runAz,
       steps,

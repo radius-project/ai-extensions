@@ -74,8 +74,6 @@ function optimisticOperation(
       state: "",
       rollbackBeforeCommit: undefined,
       retry: { startsCleanly: false, guidance: "" },
-      removed: [],
-      retained: [],
       warnings: [],
       created: [],
       retainedArtifacts: [],

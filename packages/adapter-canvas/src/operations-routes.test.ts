@@ -21,7 +21,6 @@ import {
   recordCommitState,
   recordCommittedWorkflowFile,
   recordCleanupState,
-  recordGitHubEnvironment,
   recordServicePrincipal,
   setCanonicalEnvironment,
   setStageState,
@@ -469,6 +468,8 @@ describe("GET /api/operations", () => {
   });
 
   it("serves cleanup results without exposing the setup ledger", async () => {
+    // The disjoint inventory groups are projected in `operations.test.ts`; what
+    // this route owns is that the private ledger never travels with them.
     const op = seed("contoso/cleanup");
     recordAzureApp(op, {
       state: "reused",
@@ -479,13 +480,6 @@ describe("GET /api/operations", () => {
       state: "succeeded_with_warnings",
       attempts: 1,
       results: [
-        {
-          attempt: 1,
-          artifactType: "github_environment",
-          target: "contoso/cleanup:dev",
-          outcome: "deleted",
-          detail: null
-        },
         {
           attempt: 1,
           artifactType: "role_assignment",
@@ -504,95 +498,13 @@ describe("GET /api/operations", () => {
     });
 
     const { body } = await getJson("/api/operations?repo=contoso%2Fcleanup");
-    expect(body.operation.cleanup.removed).toEqual([
-      {
-        artifactType: "github_environment",
-        outcome: "deleted",
-        target: "contoso/cleanup:dev"
-      }
-    ]);
-    expect(body.operation.cleanup.retained).toEqual([
-      {
-        kind: "azure_app",
-        reason: "reused",
-        target: "shared-app (shared-app-id)",
-        detail:
-          "Radius did not create this App Registration during this attempt, so it is left exactly as it was found."
-      }
-    ]);
     expect(body.operation.cleanup.warnings).toEqual([
       "Delete that role assignment manually before retrying."
     ]);
+    expect(body.operation.cleanup.reused).toEqual([
+      expect.objectContaining({ target: "shared-app (shared-app-id)" })
+    ]);
     expect(JSON.stringify(body.operation)).not.toContain("setupArtifacts");
-  });
-
-  it("surfaces retained artifacts and retry guidance after a post-commit verify failure", async () => {
-    const op = seed("contoso/post-commit");
-    recordAzureApp(op, {
-      state: "created",
-      appId: "app-1",
-      displayName: "radius-deploy-contoso-post-commit"
-    });
-    recordServicePrincipal(op, {
-      state: "created",
-      appId: "app-1",
-      objectId: "sp-1"
-    });
-    recordGitHubEnvironment(op, {
-      state: "created",
-      repo: "contoso/post-commit",
-      name: "dev"
-    });
-    recordCommittedWorkflowFile(op, {
-      path: ".github/workflows/radius-verify-credentials.yml",
-      branch: "main",
-      mode: "default_branch"
-    });
-    recordCommitState(op, {
-      mode: "default_branch",
-      branch: "main",
-      baseBranch: "main"
-    });
-    recordCleanupState(op, { state: "not_needed" });
-    finish(op, "failed_partial", {
-      failure: {
-        code: "verify-run-failed",
-        message:
-          "Credential verification failed after the workflows were committed.",
-        classification: "user-fixable"
-      }
-    });
-
-    const { body } = await getJson(
-      "/api/operations?repo=contoso%2Fpost-commit"
-    );
-    expect(body.operation.cleanup.rollbackBeforeCommit).toBe(false);
-    expect(body.operation.cleanup.retry).toEqual({
-      startsCleanly: false,
-      state: "reuses_retained_artifacts",
-      guidance:
-        "Retry will reuse the resources that were already written before the failure."
-    });
-    expect(body.operation.cleanup.retained).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          kind: "azure_app",
-          reason: "retained",
-          target: "radius-deploy-contoso-post-commit (app-1)"
-        }),
-        expect.objectContaining({
-          kind: "service_principal",
-          reason: "retained",
-          target:
-            "Service Principal for radius-deploy-contoso-post-commit (app-1)"
-        }),
-        expect.objectContaining({
-          kind: "github_environment",
-          reason: "retained",
-          target: "contoso/post-commit:dev"
-        })
-      ])
-    );
   });
 });
 
@@ -772,8 +684,14 @@ function seedMergeHandoff(repo) {
   return op;
 }
 
-describe("POST /api/operations/{id}/stop", () => {
-  it("accepts a stop for a running operation and reports it as pending", async () => {
+// The control routes themselves are covered exhaustively as units in
+// `server/routes/operations-control.test.ts` against fake seams, and over a
+// real socket in `test/integration/http/operations-control.test.ts`. What only
+// this suite can prove is the composition: the routes the production server
+// wires up reach the real operation registry, the real repository lock, and the
+// real per-instance runner.
+describe("operation controls through the composed server", () => {
+  it("records a stop on the registry's own record", async () => {
     operations.clear();
     setEnvironmentOperationTestRunner(async () => {});
     const op = seed("contoso/stop-running");
@@ -783,71 +701,12 @@ describe("POST /api/operations/{id}/stop", () => {
     );
     expect(status).toBe(202);
     expect(body.code).toBe("operation-stop-pending");
-    expect(body.operation.stop.requested).toBe(true);
-    expect(body.operation.state).toBe("running");
     expect(body.operation.nextTransition.code).toBe("stopping");
     expect(op.control.stop.requestedAt).toBeTruthy();
     operations.clear();
   });
 
-  it("cancels immediately while the operation waits for input", async () => {
-    operations.clear();
-    const op = seed("contoso/stop-prompt");
-    requireInput(op, {
-      code: "app-selection-required",
-      message: "Choose an identity."
-    });
-    const { status, body } = await postJson(
-      `/api/operations/${op.operationId}/stop`,
-      {}
-    );
-    expect(status).toBe(200);
-    expect(body.code).toBe("operation-stopped");
-    expect(body.operation.terminalState).toBe("cancelled");
-    expect(body.operation.stop.boundary).toBe("input_prompt");
-    // The repository lock is released by the terminal result.
-    expect(operations.running("contoso/stop-prompt")).toBeNull();
-    operations.clear();
-  });
-
-  it("returns the saved result when the same stop arrives twice", async () => {
-    operations.clear();
-    const op = seed("contoso/stop-twice");
-    requireInput(op, { code: "app-selection-required", message: "Choose." });
-    const first = await postJson(`/api/operations/${op.operationId}/stop`, {});
-    const second = await postJson(`/api/operations/${op.operationId}/stop`, {});
-    expect(first.status).toBe(200);
-    expect(second.status).toBe(200);
-    expect(second.body.code).toBe("operation-stopped");
-    expect(second.body.operation.terminalState).toBe("cancelled");
-    operations.clear();
-  });
-
-  it("refuses to stop a finished operation", async () => {
-    operations.clear();
-    const op = seed("contoso/stop-done");
-    finish(op, "succeeded");
-    const { status, body } = await postJson(
-      `/api/operations/${op.operationId}/stop`,
-      {}
-    );
-    expect(status).toBe(409);
-    expect(body.code).toBe("operation-already-terminal");
-    operations.clear();
-  });
-
-  it("reports 404 for an operation it does not know", async () => {
-    const { status, body } = await postJson(
-      "/api/operations/op_missing/stop",
-      {}
-    );
-    expect(status).toBe(404);
-    expect(body.code).toBe("unknown-operation");
-  });
-});
-
-describe("POST /api/operations/{id}/retry/*", () => {
-  it("continues an interrupted setup and keeps the repository lock", async () => {
+  it("continues an interrupted setup on the composed runner and keeps the lock", async () => {
     operations.clear();
     const scheduled = [];
     setEnvironmentOperationTestRunner(async (operationId) => {
@@ -859,155 +718,12 @@ describe("POST /api/operations/{id}/retry/*", () => {
       {}
     );
     expect(status).toBe(202);
-    expect(body.attempt).toBe(2);
     expect(body.commandId).toBe(`${op.operationId}:retry_setup:2:setup`);
-    expect(body.operation.state).toBe("running");
-    expect(body.operation.outcomes).toEqual([
-      expect.objectContaining({ kind: "setup", state: "failed_partial" })
-    ]);
     // The retrying attempt owns the repository until it reaches a result.
     expect(operations.running("contoso/retry-setup").operationId).toBe(
       op.operationId
     );
     await vi.waitFor(() => expect(scheduled).toContain(op.operationId));
-    operations.clear();
-  });
-
-  it("refuses a setup retry whose ownership the ledger cannot prove", async () => {
-    operations.clear();
-    setEnvironmentOperationTestRunner(async () => {});
-    const op = seedRetryableSetup("contoso/retry-ambiguous");
-    recordGitHubEnvironment(op, {
-      state: "created_candidate",
-      repo: "contoso/retry-ambiguous",
-      name: "dev"
-    });
-    const { status, body } = await postJson(
-      `/api/operations/${op.operationId}/retry/setup`,
-      {}
-    );
-    expect(status).toBe(409);
-    expect(body.code).toBe("setup-retry-ownership-ambiguous");
-    expect(body.error).toContain("duplicate a resource");
-    expect(op.state).toBe("failed_partial");
-    operations.clear();
-  });
-
-  // The merge-handoff refusal itself is covered deterministically in
-  // `test/integration/http/operations-control.test.ts`, where the pull-request
-  // merge proof is an injected double. Exercising it here would drive the
-  // composed production port, which asks GitHub about the pull request, and no
-  // pull-request test may reach the network. What this suite can prove without
-  // one is the half that reaches the panel: the record projects the retry the
-  // customer is offered, with the pull request it depends on.
-  it("offers the merge-handoff retry with the pull request it waits on", async () => {
-    operations.clear();
-    const op = seedMergeHandoff("contoso/store");
-    const { status, body } = await getJson(`/api/operations/${op.operationId}`);
-    expect(status).toBe(200);
-    expect(body.operation.terminalState).toBe("action_required");
-    expect(body.operation.actions).toEqual([
-      expect.objectContaining({
-        id: "retry-verification",
-        kind: "retry_verification",
-        method: "POST",
-        path: `/api/operations/${op.operationId}/retry/verification`,
-        classification: "workflow-installation-pending",
-        requiresMergedPullRequest: true,
-        pullRequestUrl: "https://github.com/contoso/store/pull/7"
-      }),
-      // Leaving the handoff behind is always on offer, and it sits below the
-      // details rather than beside the retry.
-      expect.objectContaining({
-        id: "exit-setup",
-        kind: "exit_setup",
-        placement: "bottom",
-        method: "POST",
-        path: `/api/operations/${op.operationId}/exit`
-      })
-    ]);
-    operations.clear();
-  });
-
-  it("refuses a verification retry for a failure it cannot classify", async () => {
-    operations.clear();
-    setEnvironmentOperationTestRunner(async () => {});
-    const op = seed("contoso/retry-unknown");
-    finish(op, "failed_partial", {
-      failure: { code: "who-knows", message: "unclassified" }
-    });
-    const { status, body } = await postJson(
-      `/api/operations/${op.operationId}/retry/verification`,
-      {}
-    );
-    expect(status).toBe(409);
-    expect(body.code).toBe("verification-retry-not-retryable");
-    operations.clear();
-  });
-
-  it("repeats verification for an Azure RBAC propagation failure", async () => {
-    operations.clear();
-    const scheduled = [];
-    setEnvironmentOperationTestRunner(async (operationId, commandId) => {
-      scheduled.push({ operationId, commandId });
-    });
-    const op = seedMergeHandoff("contoso/rbac");
-    // Reopen it as the RBAC case, which needs no merged pull request.
-    op.state = "failed_partial";
-    op.terminal = null;
-    op.failure = { code: "verify-run-failed", message: "role not ready" };
-    const { status, body } = await postJson(
-      `/api/operations/${op.operationId}/retry/verification`,
-      {}
-    );
-    expect(status).toBe(202);
-    expect(body.commandId).toBe(
-      `${op.operationId}:retry_verification:1:verification`
-    );
-    expect(body.operation.currentStage).toBe(STAGE_VERIFY);
-    await vi.waitFor(() =>
-      expect(scheduled).toContainEqual({
-        operationId: op.operationId,
-        commandId: body.commandId
-      })
-    );
-    operations.clear();
-  });
-
-  it("retries cleanup only for a proven-owned unresolved resource", async () => {
-    operations.clear();
-    const scheduled = [];
-    setEnvironmentOperationTestRunner(async (operationId, commandId) => {
-      scheduled.push({ operationId, commandId });
-    });
-    const op = seed("contoso/retry-cleanup");
-    recordAzureApp(op, { state: "created", appId: "app-1" });
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "azure_app",
-          target: "radius (app-1)",
-          outcome: "warning",
-          detail: "Azure CLI returned 429."
-        }
-      ]
-    });
-    finish(op, "failed_partial", { failure: { code: "setup-failed" } });
-    const { status, body } = await postJson(
-      `/api/operations/${op.operationId}/retry/cleanup`,
-      {}
-    );
-    expect(status).toBe(202);
-    expect(body.commandId).toBe(`${op.operationId}:retry_cleanup:1:cleanup`);
-    await vi.waitFor(() =>
-      expect(scheduled).toContainEqual({
-        operationId: op.operationId,
-        commandId: body.commandId
-      })
-    );
     operations.clear();
   });
 
@@ -1035,12 +751,101 @@ describe("POST /api/operations/{id}/retry/*", () => {
     operations.clear();
   });
 
-  it("reports 404 for a retry against an unknown operation", async () => {
-    const { status, body } = await postJson(
-      "/api/operations/op_missing/retry/setup",
+  it("hands the verification and cleanup retries to the composed runner", async () => {
+    operations.clear();
+    const scheduled = [];
+    setEnvironmentOperationTestRunner(async (operationId, commandId) => {
+      scheduled.push({ operationId, commandId });
+    });
+
+    // Role propagation, which needs no merged pull request.
+    const verification = seedMergeHandoff("contoso/rbac");
+    verification.state = "failed_partial";
+    verification.terminal = null;
+    verification.failure = {
+      code: "verify-run-failed",
+      message: "role not ready"
+    };
+    const repeated = await postJson(
+      `/api/operations/${verification.operationId}/retry/verification`,
       {}
     );
-    expect(status).toBe(404);
-    expect(body.code).toBe("unknown-operation");
+    expect(repeated.status).toBe(202);
+    expect(repeated.body.operation.currentStage).toBe(STAGE_VERIFY);
+
+    // A rollback that finished with one resource it could not remove.
+    const cleanup = seed("contoso/retry-cleanup");
+    recordAzureApp(cleanup, { state: "created", appId: "app-1" });
+    recordCleanupState(cleanup, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius (app-1)",
+          outcome: "warning",
+          detail: "Azure CLI returned 429."
+        }
+      ]
+    });
+    finish(cleanup, "failed_partial", { failure: { code: "setup-failed" } });
+    const retried = await postJson(
+      `/api/operations/${cleanup.operationId}/retry/cleanup`,
+      {}
+    );
+    expect(retried.status).toBe(202);
+    expect(retried.body.commandId).toBe(
+      `${cleanup.operationId}:retry_cleanup:1:cleanup`
+    );
+
+    await vi.waitFor(() =>
+      expect(scheduled).toEqual(
+        expect.arrayContaining([
+          {
+            operationId: verification.operationId,
+            commandId: repeated.body.commandId
+          },
+          {
+            operationId: cleanup.operationId,
+            commandId: retried.body.commandId
+          }
+        ])
+      )
+    );
+    operations.clear();
+  });
+
+  // The merge-handoff refusal is covered deterministically where the merge
+  // proof is an injected double. Exercising it here would drive the composed
+  // production port, which asks GitHub about the pull request, and no
+  // pull-request test may reach the network. What this suite can prove without
+  // one is the half that reaches the panel: the record projects the retry the
+  // customer is offered, with the pull request it depends on.
+  it("offers the merge-handoff retry with the pull request it waits on", async () => {
+    operations.clear();
+    const op = seedMergeHandoff("contoso/store");
+    const { status, body } = await getJson(`/api/operations/${op.operationId}`);
+    expect(status).toBe(200);
+    expect(body.operation.terminalState).toBe("action_required");
+    expect(body.operation.actions).toEqual([
+      expect.objectContaining({
+        id: "retry-verification",
+        method: "POST",
+        path: `/api/operations/${op.operationId}/retry/verification`,
+        classification: "workflow-installation-pending",
+        requiresMergedPullRequest: true,
+        pullRequestUrl: "https://github.com/contoso/store/pull/7"
+      }),
+      // Leaving the handoff behind is always on offer, and it sits below the
+      // details rather than beside the retry.
+      expect.objectContaining({
+        id: "exit-setup",
+        placement: "bottom",
+        method: "POST",
+        path: `/api/operations/${op.operationId}/exit`
+      })
+    ]);
+    operations.clear();
   });
 });

@@ -60,10 +60,6 @@ export const PROGRESS_IDS = {
   failureMessage: "env-progress-failure-message",
   cleanupStatus: "env-progress-cleanup-status",
   retry: "env-progress-retry",
-  cleanupRemovedList: "env-progress-cleanup-removed",
-  cleanupRemovedBlock: "env-progress-cleanup-removed-block",
-  cleanupRetainedList: "env-progress-cleanup-retained",
-  cleanupRetainedBlock: "env-progress-cleanup-retained-block",
   cleanupWarningsList: "env-progress-cleanup-warnings",
   cleanupWarningsBlock: "env-progress-cleanup-warnings-block",
   partialState: "env-progress-state",
@@ -238,8 +234,6 @@ export interface OperationCleanup {
   readonly state: string;
   readonly rollbackBeforeCommit: boolean | undefined;
   readonly retry: OperationCleanupRetry;
-  readonly removed: readonly OperationCleanupEntry[];
-  readonly retained: readonly OperationCleanupEntry[];
   readonly warnings: readonly string[];
   readonly created: readonly OperationCleanupEntry[];
   readonly retainedArtifacts: readonly OperationCleanupEntry[];
@@ -461,8 +455,6 @@ const EMPTY_CLEANUP: OperationCleanup = {
   state: "",
   rollbackBeforeCommit: undefined,
   retry: { startsCleanly: false, guidance: "" },
-  removed: [],
-  retained: [],
   warnings: [],
   created: [],
   retainedArtifacts: [],
@@ -489,8 +481,6 @@ function parseCleanup(value: unknown): OperationCleanup {
     state: readString(value, "state"),
     rollbackBeforeCommit: readOptionalBoolean(value, "rollbackBeforeCommit"),
     retry: parseCleanupRetry(value["retry"]),
-    removed: parseCleanupEntries(value["removed"]),
-    retained: parseCleanupEntries(value["retained"]),
     warnings: readStringArray(value, "warnings").filter(
       (entry) => entry !== ""
     ),
@@ -994,16 +984,6 @@ export function initializeEnvironmentOperations(
       retryEl.textContent = "";
       setFailureList(
         [],
-        dom.byId(PROGRESS_IDS.cleanupRemovedList),
-        dom.byId(PROGRESS_IDS.cleanupRemovedBlock)
-      );
-      setFailureList(
-        [],
-        dom.byId(PROGRESS_IDS.cleanupRetainedList),
-        dom.byId(PROGRESS_IDS.cleanupRetainedBlock)
-      );
-      setFailureList(
-        [],
         dom.byId(PROGRESS_IDS.cleanupWarningsList),
         dom.byId(PROGRESS_IDS.cleanupWarningsBlock)
       );
@@ -1036,16 +1016,10 @@ export function initializeEnvironmentOperations(
       cleanup.retry.guidance !== "" ?
         `Retry starts cleanly: ${cleanup.retry.startsCleanly ? "Yes" : "No"}. ${cleanup.retry.guidance}`
       : "";
-    setFailureList(
-      cleanup.removed.map((entry) => entry.target),
-      dom.byId(PROGRESS_IDS.cleanupRemovedList),
-      dom.byId(PROGRESS_IDS.cleanupRemovedBlock)
-    );
-    setFailureList(
-      cleanup.retained.map((entry) => entry.target),
-      dom.byId(PROGRESS_IDS.cleanupRetainedList),
-      dom.byId(PROGRESS_IDS.cleanupRetainedBlock)
-    );
+    // Only the warnings live on the card. What exists after the attempt is the
+    // disjoint inventory below, which says whether Radius intends to reuse a
+    // resource or has left it behind — a distinction a second flat list of the
+    // same targets can only blur.
     setFailureList(
       cleanup.warnings,
       dom.byId(PROGRESS_IDS.cleanupWarningsList),

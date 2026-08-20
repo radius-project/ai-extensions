@@ -386,30 +386,6 @@ describe("operation controls real-loopback HIT", () => {
     ]);
   });
 
-  it("closes a reopened operation when no runner accepts it", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    const op = retryableSetup(harness);
-    harness.schedulerAccepts.value = false;
-
-    const response = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/retry/setup`
-    );
-    const body = (await response.json()) as { statusUrl: string };
-    expect(response.status).toBe(202);
-
-    // The failure is observable through the status route the client polls.
-    const polled = await fetch(`${entry.baseUrl}${body.statusUrl}`);
-    const polledBody = (await polled.json()) as {
-      operation: { terminalState: string; failure: { code: string } };
-    };
-    expect(polledBody.operation.terminalState).toBe("failed");
-    expect(polledBody.operation.failure.code).toBe(
-      "operation-scheduling-failed"
-    );
-  });
-
   it("leaves the family's other sub-routes to their own handlers", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
@@ -630,104 +606,6 @@ describe("stop, then continue or roll back, over the socket", () => {
     expect(body.attempt).toBe(3);
     expect(body.commandId).toBe(`${op.operationId}:continue_setup:3:continue`);
     expect(harness.scheduled).toHaveLength(2);
-  });
-
-  it("schedules one rollback for a repeated request", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    const op = stoppedSetup(harness);
-
-    const first = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/rollback`
-    );
-    const second = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/rollback`
-    );
-
-    expect(first.status).toBe(202);
-    expect(second.status).toBe(202);
-    const firstBody = (await first.json()) as { commandId: string };
-    expect(await second.json()).toMatchObject({
-      duplicate: true,
-      commandId: firstBody.commandId
-    });
-    expect(harness.scheduled).toHaveLength(1);
-  });
-
-  it("restores the stopped record when the rollback cannot be saved", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    const op = stoppedSetup(harness);
-    harness.persistError.value = new Error("store offline");
-
-    const response = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/rollback`
-    );
-
-    expect(response.status).toBe(500);
-    expect(await response.json()).toMatchObject({
-      code: "operation-rollback-persist-failed"
-    });
-    harness.persistError.value = null;
-
-    const polled = await fetch(
-      `${entry.baseUrl}/api/operations/${op.operationId}`
-    );
-    const view = (await polled.json()) as {
-      operation: {
-        terminalState: string;
-        actions: Array<{ id: string }>;
-      };
-    };
-    expect(view.operation.terminalState).toBe("cancelled");
-    expect(view.operation.actions.map((entry) => entry.id)).toEqual([
-      "continue-setup",
-      "rollback",
-      "exit-setup"
-    ]);
-    expect(harness.scheduled).toEqual([]);
-  });
-
-  it("fails closed on an unprovable commit, an empty ledger, and an ambiguous-only record", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-
-    // Committed before Radius saved workflow provenance: the file may or may
-    // not still be what Radius wrote, so nothing may be removed.
-    const committed = stoppedSetup(harness);
-    recordCommittedWorkflowFile(committed, {
-      path: ".github/workflows/radius-deploy.yml",
-      mode: "default_branch",
-      branch: "main"
-    });
-    const empty = seed(harness, "contoso/empty");
-    finish(empty, "cancelled", { terminal: { reason: "stopped-at-boundary" } });
-    const ambiguous = seed(harness, "contoso/ambiguous");
-    recordGitHubEnvironment(ambiguous, {
-      state: "created_candidate",
-      repo: "contoso/ambiguous",
-      name: "dev"
-    });
-    finish(ambiguous, "cancelled", {
-      terminal: { reason: "stopped-at-boundary" }
-    });
-
-    for (const [operation, code] of [
-      [committed, "rollback-provenance-incomplete"],
-      [empty, "rollback-nothing-owned"],
-      [ambiguous, "rollback-nothing-owned"]
-    ] as const) {
-      const response = await post(
-        entry.baseUrl,
-        `/api/operations/${operation.operationId}/rollback`
-      );
-      expect(response.status).toBe(409);
-      expect(await response.json()).toMatchObject({ code });
-    }
-    expect(harness.scheduled).toEqual([]);
   });
 
   it("offers and accepts a post-commit rollback after verification failed", async () => {

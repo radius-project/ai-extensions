@@ -73,14 +73,6 @@ export function environmentsPaneMarkup(
       <div id="env-progress-failure-message" class="env-progress__failure-copy"></div>
       <div id="env-progress-cleanup-status" class="env-progress__failure-copy"></div>
       <div id="env-progress-retry" class="env-progress__failure-copy"></div>
-      <div id="env-progress-cleanup-removed-block" class="env-progress__failure-block" style="display:none;">
-        <div class="env-progress__failure-label">Removed resources</div>
-        <ul id="env-progress-cleanup-removed" class="env-progress__failure-list"></ul>
-      </div>
-      <div id="env-progress-cleanup-retained-block" class="env-progress__failure-block" style="display:none;">
-        <div class="env-progress__failure-label">Retained reusable artifacts</div>
-        <ul id="env-progress-cleanup-retained" class="env-progress__failure-list"></ul>
-      </div>
       <div id="env-progress-cleanup-warnings-block" class="env-progress__failure-block" style="display:none;">
         <div class="env-progress__failure-label">Cleanup warnings / manual guidance</div>
         <ul id="env-progress-cleanup-warnings" class="env-progress__failure-list"></ul>
