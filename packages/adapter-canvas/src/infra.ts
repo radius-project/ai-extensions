@@ -376,12 +376,16 @@ export function addDeleteStateCheck(yaml: string): string {
           }
           absent_state() {
             if [[ "$FORCE_LOCAL_ONLY" == "true" ]]; then
+              message="State is confirmed absent; force_local_only was selected. Cloud resources may remain if an earlier deployment was interrupted before state was persisted."
               echo "has_state=false" >> "$GITHUB_OUTPUT"
-              summary "::warning::State is confirmed absent; force_local_only was selected. Cloud resources may remain if an earlier deployment was interrupted before state was persisted."
+              echo "::warning::$message"
+              summary "$message"
               return
             fi
-            summary "::error::State is confirmed absent, but this does not prove cloud mutation never began. Re-run with force_local_only=true only after confirming no cloud resources need teardown."
-            echo "Persisted Radius state is absent. Refusing to skip cloud deletion without explicit force_local_only=true." >&2
+            message="Persisted Radius state is absent. This does not prove cloud mutation never began; re-run with force_local_only=true only after confirming no cloud resources need teardown."
+            echo "::error::$message"
+            summary "$message"
+            echo "$message" >&2
             exit 1
           }
 
@@ -458,6 +462,12 @@ export function addDeleteStateCheck(yaml: string): string {
   let insertAt = checkoutIndex + 1;
   while (insertAt < lines.length && !/^\s{6}- name:\s/.test(lines[insertAt])) {
     insertAt++;
+  }
+  if (insertAt === lines.length) {
+    throw new Error(
+      'addDeleteStateCheck: expected a step after "Checkout" in the generated ' +
+        "Azure delete workflow before applying the persisted-state gate."
+    );
   }
   lines.splice(insertAt, 0, ...stateCheckStep.split("\n"));
   addStateGateToDeleteSteps(

@@ -355,6 +355,26 @@ describe("generateDeleteWorkflow", () => {
     expect(() => addDeleteStateCheck(workflow)).toThrow();
   });
 
+  it("throws when Checkout is the last delete step", () => {
+    const workflow = `on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+permissions:
+  contents: read
+jobs:
+  delete:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+`;
+
+    expect(() => addDeleteStateCheck(workflow)).toThrow(
+      /expected a step after "Checkout"/
+    );
+  });
+
   describe("detect-state shell logic", () => {
     // Extracts the actual `run:` script for the delete job's "Detect persisted
     // Radius state" step from the generated workflow, so these tests exercise the
