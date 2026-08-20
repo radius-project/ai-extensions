@@ -545,6 +545,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         "run-rad-commands-azure.yml"
       ],
       branchNotPushedKind: "branch-not-pushed",
+      oidcSubjectMissingKind: "oidc-subject-missing",
       getBranchHeadSha: () => Promise.resolve("sha-1"),
       getDefaultBranch: () => Promise.resolve("main"),
       runGh: (args) => {
@@ -657,6 +658,9 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     expect(state.deployError).toContain(
       '"repo:acme/widgets:environment:production"'
     );
+    // The refusal must be marked so the repair loop never opens for a failure
+    // the agent cannot fix by editing the model.
+    expect(state.deployErrorKind).toBe("oidc-subject-missing");
     expect(workflowDispatches).toEqual([]);
     await expect.poll(() => activeDeploymentMutation(state)).toBeUndefined();
   });

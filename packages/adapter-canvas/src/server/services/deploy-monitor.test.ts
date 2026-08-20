@@ -1179,6 +1179,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
         "run-rad-commands-azure.yml"
       ],
       branchNotPushedKind: "branch-not-pushed",
+      oidcSubjectMissingKind: "oidc-subject-missing",
       getBranchHeadSha: () => {
         record("branch-head-sha");
         return Promise.resolve("sha-1");
@@ -1339,11 +1340,13 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       "fetch-recipe-pack",
       "resolve-recipe-outputs",
       "commit-source-refs",
+      "branch-head-sha",
       "github-json:/repos/acme/widgets/environments/production/variables/AZURE_CLIENT_ID",
+      "github-json:/repos/acme/widgets/environments/production/variables/AZURE_TENANT_ID",
+      "github-json:/repos/acme/widgets/actions/variables/AZURE_TENANT_ID",
       "github-json:/repos/acme/widgets",
       "github-json:/repos/acme/widgets/actions/oidc/customization/sub",
       "az:ad app federated-credential list",
-      "branch-head-sha",
       "fetch-file:.radius/app.bicep",
       "publish-workflows",
       "sync-workflows",

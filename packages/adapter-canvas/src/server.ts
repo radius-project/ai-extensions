@@ -1760,7 +1760,9 @@ function triggerAppBicepHandoff(
 // per repair loop: once the agent owns the loop it redeploys and re-reads status
 // itself, so re-handing off every failed attempt would double-drive it.
 // `branch-not-pushed` is excluded: the user fixes that with a push, not by
-// editing the model.
+// editing the model. `oidc-subject-missing` is excluded for the same reason: the
+// remedy is re-running Create Environment or adding a federated credential in
+// Azure, neither of which the agent can reach by editing app.bicep.
 //
 // Delivery is tracked explicitly (pending -> delivered | failed) because the
 // browser stops polling once a deploy is terminal: a rejected send has no later
@@ -1794,6 +1796,14 @@ export const DEPLOY_BRANCH_NOT_PUSHED_KIND: DeployErrorKind =
 // kind a repair redeploy may act on, because it is the only kind that cannot
 // leave a run in flight for a redeploy to race.
 export const DEPLOY_RUN_UNCONFIRMED_KIND: DeployErrorKind = "run-unconfirmed";
+
+// Marks a deploy refused by the Azure OIDC preflight: the app registration the
+// target environment names holds no federated credential GitHub's token could
+// match, so the workflow could only fail its login. Nothing was dispatched, and
+// the fix is in Azure and GitHub configuration rather than in the model, so this
+// never opens a repair loop.
+export const DEPLOY_OIDC_SUBJECT_MISSING_KIND: DeployErrorKind =
+  "oidc-subject-missing";
 
 // Split a failed `gh workflow run` by whether it proves no run was created.
 // GitHub naming the branch as unresolvable is proof: it rejected the request.
@@ -1964,6 +1974,9 @@ export function triggerDeployRepairHandoff(
     if (!state || state.deployStatus !== "failed") return false;
     if (
       state.deployErrorKind === DEPLOY_BRANCH_NOT_PUSHED_KIND ||
+      // Refused before dispatch because no federated credential can match the
+      // token GitHub would mint. Repairing the model cannot change that.
+      state.deployErrorKind === DEPLOY_OIDC_SUBJECT_MISSING_KIND ||
       // An attempt whose run may still be in flight can never be repaired: the
       // resolver refuses its redeploy. Opening a loop only to refuse its first
       // call would spend a cycle and tell the agent two different things.
@@ -2245,6 +2258,7 @@ const deployDispatchService = createDeployDispatchService({
   deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
   deployWorkflowFiles: [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
   branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
+  oidcSubjectMissingKind: DEPLOY_OIDC_SUBJECT_MISSING_KIND,
   getBranchHeadSha,
   getDefaultBranch,
   runGh: runGhForDeploy,

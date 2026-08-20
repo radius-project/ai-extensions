@@ -24,6 +24,7 @@ function dependencies(
     deployWorkflowFile: "run-rad-commands.yml",
     deployWorkflowFiles: ["run-rad-commands.yml", "run-rad-commands-azure.yml"],
     branchNotPushedKind: "branch-not-pushed",
+    oidcSubjectMissingKind: "oidc-subject-missing",
     getBranchHeadSha: () => Promise.resolve("sha-1"),
     getDefaultBranch: () => {
       throw new Error("getDefaultBranch not stubbed");
@@ -128,8 +129,11 @@ interface AzurePreflightOptions {
   repositoryVariable?: GitHubJsonResponse;
   runAz?: (args: string[]) => Promise<DeployCommandResult>;
   subjects?: unknown;
+  tenantVariable?: GitHubJsonResponse;
   variableError?: Error;
 }
+
+const ABSENT: GitHubJsonResponse = { ok: false, status: 404 };
 
 function azurePreflight(options: AzurePreflightOptions = {}) {
   const azCalls: string[][] = [];
@@ -139,6 +143,15 @@ function azurePreflight(options: AzurePreflightOptions = {}) {
     githubJsonCalls,
     runGitHubJson: (path: string) => {
       githubJsonCalls.push(path);
+      if (path.endsWith("/variables/AZURE_TENANT_ID")) {
+        // Absent at both scopes unless a scenario supplies one, so `az` picks
+        // its own tenant.
+        return Promise.resolve(
+          path.includes("/environments/") ?
+            (options.tenantVariable ?? ABSENT)
+          : ABSENT
+        );
+      }
       if (
         path.startsWith("/repos/acme/widgets/environments/") &&
         path.endsWith("/variables/AZURE_CLIENT_ID")
@@ -153,9 +166,7 @@ function azurePreflight(options: AzurePreflightOptions = {}) {
         );
       }
       if (path === "/repos/acme/widgets/actions/variables/AZURE_CLIENT_ID") {
-        return Promise.resolve(
-          options.repositoryVariable ?? { ok: false, status: 404 }
-        );
+        return Promise.resolve(options.repositoryVariable ?? ABSENT);
       }
       if (options.oidcError) throw options.oidcError;
       return oidcGitHubRunner(
@@ -363,7 +374,7 @@ describe("deploy dispatch environment and branch preflight", () => {
     ]);
   });
 
-  it("fails fast when Azure federated credentials do not cover the target environment and truncates near matches", async () => {
+  it("fails fast when no Azure federated credential covers the target environment and truncates near matches", async () => {
     const { input, state } = request();
     input.provider = "azure";
     const gh = recordingGh();
@@ -383,6 +394,9 @@ describe("deploy dispatch environment and branch preflight", () => {
       dispatched: false
     });
     expect(state.deployStatus).toBe("failed");
+    // Marked so the repair loop stays shut: no model edit can add a federated
+    // credential in Azure.
+    expect(state.deployErrorKind).toBe("oidc-subject-missing");
     expect(state.deployError).toContain(
       '"repo:acme/widgets:environment:production" and "repo:acme@101/widgets@202:environment:production"'
     );
@@ -407,6 +421,62 @@ describe("deploy dispatch environment and branch preflight", () => {
         "json"
       ]
     ]);
+  });
+
+  it("scopes the Azure lookup to the environment's tenant when one is configured", async () => {
+    const { input } = request();
+    input.provider = "azure";
+    const preflight = azurePreflight({
+      tenantVariable: {
+        ok: true,
+        status: 200,
+        json: { value: "tenant-abc" }
+      }
+    });
+    const service = createDeployDispatchService(
+      dependencies({ ...recordingGh(), ...preflight })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+    // Without this the check reads the app from whichever tenant `az` happens to
+    // be signed into, and a cross-tenant miss looks like missing coverage.
+    expect(preflight.azCalls[0]).toEqual([
+      "ad",
+      "app",
+      "federated-credential",
+      "list",
+      "--id",
+      "client-123",
+      "--tenant",
+      "tenant-abc",
+      "--query",
+      "[].subject",
+      "-o",
+      "json"
+    ]);
+  });
+
+  it("reports an unpushed branch before spending the Azure preflight", async () => {
+    const { input, state } = request();
+    input.provider = "azure";
+    const preflight = azurePreflight();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...recordingGh(),
+        ...preflight,
+        getBranchHeadSha: () => Promise.resolve(null),
+        getDefaultBranch: () => Promise.resolve("main")
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployErrorKind).toBe("branch-not-pushed");
+    expect(preflight.azCalls).toEqual([]);
+    expect(preflight.githubJsonCalls).toEqual([]);
   });
 
   it.each([
@@ -485,9 +555,9 @@ describe("deploy dispatch environment and branch preflight", () => {
       missing: "repo:acme/widgets:environment:production"
     }
   ])(
-    "fails closed when the default compatibility pair has $name",
+    "warns but still deploys when the default compatibility pair has $name",
     async (scenario) => {
-      const { input, state } = request();
+      const { input, state, logs } = request();
       input.provider = "azure";
       const gh = recordingGh();
       const service = createDeployDispatchService(
@@ -497,13 +567,16 @@ describe("deploy dispatch environment and branch preflight", () => {
         })
       );
 
-      expect(await service.prepareAndDispatch(input)).toEqual({
-        dispatched: false
+      // Only one of the pair is ever presented and the resolver could not tell
+      // which, so holding the other half is not proof the deploy is doomed.
+      expect(await service.prepareAndDispatch(input)).toMatchObject({
+        dispatched: true
       });
-      expect(state.deployStatus).toBe("failed");
-      expect(state.deployError).toContain(`"${scenario.missing}"`);
-      expect(state.deployError).not.toContain(`"${scenario.present}"`);
-      expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(false);
+      expect(state.deployStatus).not.toBe("failed");
+      const warning = logs.find((line) => line.startsWith("⚠ "));
+      expect(warning).toContain(`"${scenario.missing}"`);
+      expect(warning).not.toContain(`"${scenario.present}"`);
+      expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(true);
     }
   );
 
@@ -584,26 +657,28 @@ describe("deploy dispatch environment and branch preflight", () => {
         }
       },
       message:
-        "GitHub environment AZURE_CLIENT_ID lookup failed (environment unavailable)"
+        'GitHub environment "production" AZURE_CLIENT_ID lookup failed (environment unavailable)'
     },
     {
       name: "GitHub lookup rejection",
       options: { variableError: new Error("GitHub process failed") },
-      message: "GitHub AZURE_CLIENT_ID lookup failed (GitHub process failed)"
+      message: "GitHub variable lookup failed (GitHub process failed)"
     },
     {
       name: "GitHub environment lookup failure without diagnostics",
       options: {
         environmentVariable: { ok: false, status: 503 }
       },
-      message: "GitHub environment AZURE_CLIENT_ID lookup failed (HTTP 503)"
+      message:
+        'GitHub environment "production" AZURE_CLIENT_ID lookup failed (HTTP 503)'
     },
     {
       name: "GitHub environment lookup failure without status",
       options: {
         environmentVariable: { ok: false }
       },
-      message: "GitHub environment AZURE_CLIENT_ID lookup failed (HTTP unknown)"
+      message:
+        'GitHub environment "production" AZURE_CLIENT_ID lookup failed (HTTP unknown)'
     },
     {
       name: "invalid environment client id",
@@ -636,7 +711,7 @@ describe("deploy dispatch environment and branch preflight", () => {
         }
       },
       message:
-        "GitHub repository AZURE_CLIENT_ID lookup failed (repository unavailable)"
+        'GitHub repository "acme/widgets" AZURE_CLIENT_ID lookup failed (repository unavailable)'
     },
     {
       name: "GitHub repository lookup failure without diagnostics",
@@ -644,7 +719,8 @@ describe("deploy dispatch environment and branch preflight", () => {
         environmentVariable: { ok: false, status: 404 },
         repositoryVariable: { ok: false }
       },
-      message: "GitHub repository AZURE_CLIENT_ID lookup failed (HTTP unknown)"
+      message:
+        'GitHub repository "acme/widgets" AZURE_CLIENT_ID lookup failed (HTTP unknown)'
     },
     {
       name: "invalid repository client id",
@@ -724,25 +800,32 @@ describe("deploy dispatch environment and branch preflight", () => {
       },
       message: "returned an invalid subject list"
     }
-  ])("fails closed when validation is unavailable: $name", async (scenario) => {
-    const { input, state, logs } = request();
-    input.provider = "azure";
-    const gh = recordingGh();
-    const service = createDeployDispatchService(
-      dependencies({
-        ...gh,
-        ...azurePreflight(scenario.options)
-      })
-    );
+  ])(
+    "warns and still deploys when coverage cannot be verified: $name",
+    async (scenario) => {
+      const { input, state, logs } = request();
+      input.provider = "azure";
+      const gh = recordingGh();
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          ...azurePreflight(scenario.options)
+        })
+      );
 
-    expect(await service.prepareAndDispatch(input)).toEqual({
-      dispatched: false
-    });
-    expect(state.deployStatus).toBe("failed");
-    expect(state.deployError).toContain(scenario.message);
-    expect(logs.at(-1)).toBe("❌ " + state.deployError);
-    expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(false);
-  });
+      // `az` and Graph access are not otherwise required to deploy — the
+      // workflow authenticates in Actions — so an unusable local check must not
+      // become a deploy blocker.
+      expect(await service.prepareAndDispatch(input)).toMatchObject({
+        dispatched: true
+      });
+      expect(state.deployStatus).not.toBe("failed");
+      const warning = logs.find((line) => line.startsWith("⚠ "));
+      expect(warning).toContain(scenario.message);
+      expect(warning).toContain("AADSTS7002138");
+      expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(true);
+    }
+  );
 
   it("does not run Azure validation for another provider", async () => {
     const { input } = request();
