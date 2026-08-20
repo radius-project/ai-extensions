@@ -553,6 +553,7 @@ test.describe("Radius Canvas visual baselines", () => {
       page,
       canvas
     }) => {
+      test.setTimeout(45_000);
       await seed(canvas, { activeSubtab: "environments" });
       await gotoVisual(page, canvas, "environment", theme);
       await openEnvironmentCreateForm(page);

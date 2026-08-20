@@ -61,9 +61,9 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: pnpm exec playwright install chromium
 
-      - name: Run visual functional comparisons
+      - name: Run visual stability comparisons
         if: ${{ !inputs.update_snapshots }}
-        run: pnpm run test:visual:functional
+        run: pnpm run test:visual:stability
 
       - name: Regenerate visual baselines
         if: ${{ inputs.update_snapshots }}
@@ -108,7 +108,7 @@ jobs:
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
           if [[ "$SCHEDULE_FAILED" == "true" ]]; then
-            body="The scheduled Canvas functional workflow failed: $RESULT. Run: $run_url"
+            body="The recurring post-merge Canvas functional workflow failed: $RESULT. Run: $run_url"
             if [[ -n "$issue_number" ]]; then
               gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body "$body"
             else
