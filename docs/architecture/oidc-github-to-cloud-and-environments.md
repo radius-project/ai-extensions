@@ -295,15 +295,9 @@ cross-cutting fix strips `COPILOT_AGENT_SESSION_ID` from every child CLI so Azur
 CLI's "agentic session" tagging doesn't trigger `AADSTS901001` in locked-down
 tenants.
 
-### C.6 `pages.ts` — the four-step UI
+### C.6 Page renderers — the four-step UI
 
-The Create Environment dialog was restructured into four numbered steps (see
-[Part D](#part-d--the-ui-redesign-and-its-rationale)). `pages.ts` also holds the
-owned-app picker, the opt-in "shared identity" pin, the acting-account switcher, and
-the provider-aware profile detail. Note the **client-script constraint** captured by
-a regression test: the client `<script>` is emitted inside a template literal, so an
-escaped apostrophe (`\'`) un-escapes to a raw `'` and halts page init — a `vm.Script`
-guard test now compiles every emitted script block.
+The Create Environment dialog was restructured into four numbered steps (see [Part D](#part-d--the-ui-redesign-and-its-rationale)). The page renderers under `packages/adapter-canvas/src/pages/` hold the owned-app picker, the opt-in "shared identity" pin, the acting-account switcher, and the provider-aware profile detail. Note the **client-script constraint** captured by a regression test: the client `<script>` is emitted inside a template literal, so an escaped apostrophe (`\'`) un-escapes to a raw `'` and halts page init — a `vm.Script` guard test now compiles every emitted script block.
 
 ### C.7 `shared.ts` — credential profiles
 
@@ -344,16 +338,16 @@ the user can't diagnose.
 A one-line index from "symptom" to "where it's handled." The full analysis is in the
 companion write-up ([References](#references)).
 
-| Symptom (enterprise)                               | Handled in                                                                     |
-|----------------------------------------------------|--------------------------------------------------------------------------------|
-| `AADSTS901001` (agentic-session client_session)    | `COPILOT_AGENT_SESSION_ID` stripped from child CLIs (`server.ts`, `gh.ts`)     |
-| `ServiceManagementReference field is required`     | `buildAppCreateArgs` + SMR detection (`azure-oidc.ts`), UI prompt (`pages.ts`) |
-| GHCR `403 … Enterprise Managed User cannot access` | `getGhPackageCredentials` pins push to the acting account (`gh.ts`)            |
-| `AADSTS700213` (subject mismatch)                  | `buildOidcSubject` query-don't-assume + immutable subjects (`oidc-subject.ts`) |
-| Wrong GitHub account acting                        | `decideGhTokenStrategy` + account switcher (`gh.ts`, `pages.ts`, `server.ts`)  |
-| App-registration sprawl / collisions               | owned-first `decideAppSelection` + FIC dedup (`azure-oidc.ts`)                 |
-| Bare `404` from GitHub preflight                   | repo access + admin preflight (`server.ts`)                                    |
-| AKS Automatic data-plane `Forbidden`               | AKS RBAC Cluster Admin assignment (`server.ts`)                                |
+| Symptom (enterprise)                               | Handled in                                                                         |
+|----------------------------------------------------|------------------------------------------------------------------------------------|
+| `AADSTS901001` (agentic-session client_session)    | `COPILOT_AGENT_SESSION_ID` stripped from child CLIs (`server.ts`, `gh.ts`)         |
+| `ServiceManagementReference field is required`     | `buildAppCreateArgs` + SMR detection (`azure-oidc.ts`), UI prompt (page renderers) |
+| GHCR `403 … Enterprise Managed User cannot access` | `getGhPackageCredentials` pins push to the acting account (`gh.ts`)                |
+| `AADSTS700213` (subject mismatch)                  | `buildOidcSubject` query-don't-assume + immutable subjects (`oidc-subject.ts`)     |
+| Wrong GitHub account acting                        | `decideGhTokenStrategy` + account switcher (`gh.ts`, page renderers, `server.ts`)  |
+| App-registration sprawl / collisions               | owned-first `decideAppSelection` + FIC dedup (`azure-oidc.ts`)                     |
+| Bare `404` from GitHub preflight                   | repo access + admin preflight (`server.ts`)                                        |
+| AKS Automatic data-plane `Forbidden`               | AKS RBAC Cluster Admin assignment (`server.ts`)                                    |
 
 ### A note on AKS vs AKS Automatic
 
@@ -415,7 +409,7 @@ Suggested reading order for the diff:
    credential pinning; focus on `decideGhTokenStrategy`.
 4. `packages/adapter-canvas/src/server.ts` — `/api/azure-auto-setup` as the orchestration
    spine that composes the above.
-5. `packages/adapter-canvas/src/pages.ts` — the four-step UI and its client-script guard.
+5. `packages/adapter-canvas/src/pages/` — the four-step UI and its client-script guard.
 6. `shared.ts` / `deploy.ts` — credential-profile persistence and the deploy path.
 
 The pure modules (1–3) carry the bulk of the test coverage precisely because they

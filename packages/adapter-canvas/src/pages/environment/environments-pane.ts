@@ -105,22 +105,76 @@ export function environmentsPaneMarkup(
   </div>
 </div>
 
-<!-- Create Environment form (revealed by New Environment / Deploy Apps / edit) -->
+<!-- Create Environment wizard (revealed by New Environment / Deploy Apps / edit).
+     Two steps, because a credential profile only ever exists in service of an
+     environment: pick or create the cloud credential first, then describe the
+     environment that uses it. -->
 <div id="env-form" style="display:none;">
+  <div class="rad-wizard-head">
+    <ol class="rad-wizard" id="env-wizard-steps">
+      <li class="rad-wizard__step rad-wizard__step--active" id="env-wizard-step-1" data-step="1" aria-current="step">
+        <span class="rad-wizard__num">1</span><span class="rad-wizard__label">Cloud credentials</span>
+      </li>
+      <li class="rad-wizard__sep" aria-hidden="true"></li>
+      <li class="rad-wizard__step" id="env-wizard-step-2" data-step="2">
+        <span class="rad-wizard__num">2</span><span class="rad-wizard__label">Environment</span>
+      </li>
+    </ol>
+    <button id="cancel-env-btn" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to environments</button>
+  </div>
+
+  <!-- ── Step 1 · Cloud credentials ── -->
+  <div id="env-step-credentials">
+    <div class="rad-card" id="env-step-credentials-card">
+      <div class="rad-card__title" style="margin:0;">Choose cloud credentials</div>
+      <div class="rad-section">
+        <div class="rad-section__desc">Select the verified cloud account this environment deploys into, or create a new credential profile for it.</div>
+        <div class="rad-field" style="max-width:520px; margin-top:14px;">
+          <label>Credential profile</label>
+          <div class="rad-combo" id="env-profile-combo">
+            <button type="button" class="rad-combo__button" id="env-profile-button" aria-haspopup="listbox" aria-expanded="false">
+              <span class="rad-combo__value" id="env-profile-value">Select a credential profile…</span>
+              <span class="rad-combo__chevron" aria-hidden="true"></span>
+            </button>
+            <div class="rad-combo__menu" id="env-profile-menu" role="listbox" style="display:none;">
+              <div class="rad-combo__options" id="env-profile-options"></div>
+              <div class="rad-combo__empty" id="env-profile-empty" style="display:none;">No credential profiles yet.</div>
+              <button type="button" class="rad-combo__action" id="env-create-profile-link">+ Create new profile</button>
+            </div>
+          </div>
+          <!-- Holds the selected profile name; read by the create flow. -->
+          <input type="hidden" id="env-profile-select" value="" />
+          <div id="env-profile-status" style="margin-top:6px; font-size:13px; line-height:1.6; display:none;"></div>
+        </div>
+      </div>
+      <div class="rad-section" id="env-step1-actions">
+        <div style="display:flex; align-items:center; gap:16px;">
+          <button id="env-step1-next" class="rad-btn rad-btn--primary" style="margin:0; padding:11px 22px; font-size:14px;" disabled>Continue</button>
+          <span id="env-step1-hint" style="font-size:12px; color:var(--rad-text-tertiary);">Select or create a credential profile to continue.</span>
+        </div>
+      </div>
+    </div>
+    <!-- The shared credential form docks here while the wizard is creating or
+         editing a profile; #env-step-credentials-card hides in that mode. -->
+    <div id="env-cred-form-host" style="display:none;"></div>
+  </div>
+
+  <!-- ── Step 2 · Environment ── -->
+  <div id="env-step-details" style="display:none;">
   <div class="rad-card">
     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-      <div class="rad-card__title" style="margin:0;">Create Environment</div>
-      <button id="cancel-env-btn" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to environments</button>
+      <div class="rad-card__title" id="env-step2-title" style="margin:0;">Create Environment</div>
+      <button id="env-step2-back" type="button" class="rad-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">← Back to credentials</button>
     </div>
     <!-- 1 · Name this environment -->
     <div class="rad-section">
       <div class="rad-section__title">1 · Name this environment</div>
       <div class="rad-field" style="max-width:420px;">
-        <label>Environment name</label>
+        <label for="env-name-input">Environment name</label>
         <input id="env-name-input" type="text" placeholder="e.g. prod, test, eastus-prod" value="${escapeHtml(
           envName
         )}" />
-        <div class="rad-field__help">The deployment target you'll deploy apps into by name.</div>
+        <div class="rad-field__help" id="env-name-help">The deployment target you'll deploy apps into by name.</div>
       </div>
       <!-- Repository and branch are assumed from the current workspace. -->
       <input type="hidden" id="target-repo" value="${escapeHtml(ctxRepo)}" />
@@ -134,7 +188,7 @@ export function environmentsPaneMarkup(
     <!-- 2 · Connect GitHub to a cloud -->
     <div class="rad-section">
       <div class="rad-section__title">2 · Connect GitHub to a cloud</div>
-      <div class="rad-section__desc">Radius wires a passwordless OIDC trust so GitHub Actions can deploy into this environment — no secrets stored in the repo.</div>
+      <div class="rad-section__desc">Radius wires a passwordless OIDC trust so GitHub Actions can deploy into this environment — no secrets stored in the repo. These are the two ends of that trust, not a choice between them: the cloud credentials are the profile you selected, shown here to confirm.</div>
 
       <div class="rad-conn">
         <!-- GitHub side of the trust. The account combo is populated by
@@ -147,7 +201,7 @@ export function environmentsPaneMarkup(
             GitHub
           </div>
           <div class="rad-field" id="env-gh-identity-field" style="display:none;">
-            <label>Account</label>
+            <label>GitHub account</label>
             <div class="rad-combo" id="env-gh-account-combo">
               <button type="button" class="rad-combo__button" id="env-gh-account-button" aria-haspopup="listbox" aria-expanded="false">
                 <span class="rad-combo__value" id="env-gh-account-value">Detecting…</span>
@@ -158,17 +212,25 @@ export function environmentsPaneMarkup(
                 <div class="rad-combo__empty" id="env-gh-account-empty" style="display:none;">No GitHub accounts detected.</div>
               </div>
             </div>
-            <div class="rad-field__help" id="env-gh-account-note" style="margin-top:6px;">Choosing a different account runs <code>gh auth switch</code> which changes the active GitHub account for every terminal and tool on this machine, remaining changed even after Radius closes. Switch back anytime with <code>gh auth switch -u &lt;account&gt;</code>.</div>
-            <div id="env-gh-identity-note" style="margin-top:6px; font-size:13px; display:none;"></div>
-            <button type="button" id="env-gh-recheck" style="display:none; margin-top:6px; font-size:12px; padding:2px 10px; cursor:pointer;">Re-check</button>
+            <div class="rad-field__help" id="env-gh-account-note" style="margin-top:6px;">Used to create GitHub Environment.</div>
+            <div id="env-gh-identity-note" role="status" style="margin-top:8px; font-size:13px; display:none;"></div>
+            <div style="display:flex; gap:8px; margin-top:6px;">
+              <button type="button" id="env-gh-fix-access" class="rad-btn rad-btn--ghost" style="display:none; font-size:12px; padding:2px 10px;">Show how to fix</button>
+              <button type="button" id="env-gh-recheck" class="rad-btn rad-btn--ghost" style="display:none; font-size:12px; padding:2px 10px;">Re-check</button>
+            </div>
+            <details id="env-gh-details-panel" style="margin-top:8px; font-size:12px;">
+              <summary>View technical details</summary>
+              <div id="env-gh-technical-details" style="margin-top:6px; line-height:1.5;"></div>
+              <div id="env-gh-repair" style="display:none; margin-top:6px; font-family:monospace; overflow-wrap:anywhere;"></div>
+            </details>
           </div>
         </div>
 
         <div class="rad-conn__arrow" aria-hidden="true">→</div>
 
-        <!-- Cloud side of the trust. The provider (Azure/AWS) comes from the
-             selected credential profile; the profile detail below the combo
-             reflects what the connection does and where deploys land. -->
+        <!-- Cloud side of the trust. The profile itself is chosen in step 1;
+             this is the read-only confirmation of that choice, with a way back
+             to step 1 to change it. -->
         <div class="rad-conn__side">
           <div class="rad-conn__badge">
             <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.5 13a3.5 3.5 0 01-.36-6.98A4 4 0 0111.9 6.1 3 3 0 0111.5 13h-7z"/></svg>
@@ -176,20 +238,11 @@ export function environmentsPaneMarkup(
           </div>
           <div class="rad-field">
             <label>Credential profile</label>
-            <div class="rad-combo" id="env-profile-combo">
-              <button type="button" class="rad-combo__button" id="env-profile-button" aria-haspopup="listbox" aria-expanded="false">
-                <span class="rad-combo__value" id="env-profile-value">Select a credential profile…</span>
-                <span class="rad-combo__chevron" aria-hidden="true"></span>
-              </button>
-              <div class="rad-combo__menu" id="env-profile-menu" role="listbox" style="display:none;">
-                <div class="rad-combo__options" id="env-profile-options"></div>
-                <div class="rad-combo__empty" id="env-profile-empty" style="display:none;">No credential profiles yet.</div>
-                <button type="button" class="rad-combo__action" id="env-create-profile-link">+ Create new profile</button>
-              </div>
+            <div class="rad-chosen">
+              <span class="rad-chosen__value" id="env-profile-summary">No credential profile selected</span>
+              <button type="button" class="rad-link" id="env-change-profile-link" style="background:none; border:none; padding:0; margin:0; font-size:12px; font-weight:500; cursor:pointer;">Change</button>
             </div>
-            <!-- Holds the selected profile name; read by the create flow. -->
-            <input type="hidden" id="env-profile-select" value="" />
-            <div id="env-profile-status" style="margin-top:6px; font-size:13px; line-height:1.6; display:none;"></div>
+            <div id="env-profile-detail" style="margin-top:6px; font-size:13px; line-height:1.6; display:none;"></div>
           </div>
         </div>
       </div>
@@ -200,7 +253,7 @@ export function environmentsPaneMarkup(
       <div class="rad-section__title">3 · Deploy identity</div>
       <div class="rad-section__desc">The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets.</div>
       <div class="rad-field" id="env-identity-azure" style="max-width:560px;">
-        <label>Azure app registration</label>
+        <label for="az-app-name-input">Azure app registration</label>
         <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml(
           (ctxRepo || "").replace("/", "-")
         )}" data-default-name="radius-deploy-${escapeHtml(
@@ -232,19 +285,19 @@ export function environmentsPaneMarkup(
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="rad-field">
-            <label>Resource Group</label>
+            <label for="azure-rg-select">Resource Group</label>
             <select id="azure-rg-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-rg-custom" type="text" placeholder="Enter resource group" style="display:none; margin-top:4px;" />
+            <input id="azure-rg-custom" type="text" aria-label="Resource Group (custom)" placeholder="Enter resource group" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Cluster</label>
+            <label for="azure-cluster-select">Cluster</label>
             <select id="azure-cluster-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
+            <input id="azure-cluster-custom" type="text" aria-label="Cluster (custom)" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Namespace</label>
+            <label for="azure-namespace-select">Namespace</label>
             <select id="azure-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <input id="azure-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
           </div>
         </div>
       </div>
@@ -257,24 +310,24 @@ export function environmentsPaneMarkup(
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div class="rad-field">
-            <label>EKS Cluster</label>
+            <label for="aws-cluster-select">EKS Cluster</label>
             <select id="aws-cluster-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
+            <input id="aws-cluster-custom" type="text" aria-label="EKS Cluster (custom)" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Namespace</label>
+            <label for="aws-namespace-select">Namespace</label>
             <select id="aws-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <input id="aws-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>VPC</label>
+            <label for="aws-vpc-select">VPC</label>
             <select id="aws-vpc-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-vpc-custom" type="text" placeholder="vpc-xxxxxxxx" style="display:none; margin-top:4px;" />
+            <input id="aws-vpc-custom" type="text" aria-label="VPC (custom)" placeholder="vpc-xxxxxxxx" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Subnets</label>
+            <label for="aws-subnets-select">Subnets</label>
             <select id="aws-subnets-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-subnets-custom" type="text" placeholder="subnet-xxx,subnet-yyy" style="display:none; margin-top:4px;" />
+            <input id="aws-subnets-custom" type="text" aria-label="Subnets (custom)" placeholder="subnet-xxx,subnet-yyy" style="display:none; margin-top:4px;" />
           </div>
         </div>
       </div>
@@ -285,6 +338,7 @@ export function environmentsPaneMarkup(
     <div class="rad-section">
       <button id="deploy-btn" class="rad-btn rad-btn--primary" style="margin:0; padding:11px 22px; font-size:14px;" disabled>Create Environment</button>
     </div>
+  </div>
   </div>
 </div>
 </section>`;

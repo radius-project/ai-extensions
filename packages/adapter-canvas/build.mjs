@@ -65,6 +65,63 @@ const optionalPluginSources = ["CHANGELOG.md"];
 // the source manifests alone.
 const stampedVersion = process.env.PLUGIN_VERSION?.trim();
 
+function writeThirdPartyNotices(inputs) {
+  const packages = new Map();
+  for (const input of inputs) {
+    if (!/[\\/]node_modules[\\/]/.test(input)) continue;
+    let current = dirname(input);
+    while (!existsSync(join(current, "package.json"))) {
+      const parent = dirname(current);
+      if (parent === current) {
+        throw new Error(`Unable to locate package metadata for "${input}".`);
+      }
+      current = parent;
+    }
+    const manifest = JSON.parse(
+      readFileSync(join(current, "package.json"), "utf8")
+    );
+    const key = `${manifest.name}@${manifest.version}`;
+    if (packages.has(key)) continue;
+    packages.set(key, {
+      manifest,
+      root: current
+    });
+  }
+  if (packages.size === 0) {
+    throw new Error(
+      "The browser bundles contained no third-party package inputs."
+    );
+  }
+
+  const notices = [...packages.values()]
+    .sort(
+      (a, b) =>
+        String(a.manifest.name).localeCompare(String(b.manifest.name)) ||
+        String(a.manifest.version).localeCompare(String(b.manifest.version))
+    )
+    .map(({ manifest, root }) => {
+      const licensePath = [
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt",
+        "license",
+        "license.md"
+      ]
+        .map((name) => join(root, name))
+        .find(existsSync);
+      if (!licensePath) {
+        throw new Error(
+          `Missing license file for bundled dependency ${manifest.name}@${manifest.version} in ${root}.`
+        );
+      }
+      return `===== ${manifest.name}@${manifest.version} =====\n\n${readFileSync(licensePath, "utf8").trim()}`;
+    });
+  writeFileSync(
+    join(distDir, "THIRD-PARTY-NOTICES.txt"),
+    `${notices.join("\n\n")}\n`
+  );
+}
+
 function assembleDist() {
   for (const entry of pluginSources) {
     const from = join(pluginDir, entry);
@@ -79,6 +136,7 @@ function assembleDist() {
     cpSync(from, join(distDir, entry), { recursive: true });
   }
   resolveCatalogSpecifiers(join(distDir, "package.json"));
+  writeThirdPartyNotices(browserBundleInputs);
   for (const manifest of ["package.json", "plugin.json"]) {
     stampVersion(join(distDir, manifest));
   }
@@ -149,25 +207,40 @@ function installToLocal() {
       copyFileSync(from, tmp);
       renameSync(tmp, to);
     }
-    const checkerFrom = join(
-      distDir,
-      "skills",
-      "radius-app-bicep",
-      "scripts",
-      "validate-bicep.mjs"
-    );
-    if (existsSync(checkerFrom)) {
-      const checkerTo = join(
+    const noticesFrom = join(distDir, "THIRD-PARTY-NOTICES.txt");
+    const noticesTo = join(installDir, "THIRD-PARTY-NOTICES.txt");
+    const noticesTmp = `${noticesTo}.tmp-${process.pid}`;
+    copyFileSync(noticesFrom, noticesTmp);
+    renameSync(noticesTmp, noticesTo);
+    // Copy the whole scripts directory rather than naming files one at a time,
+    // so a script added later is installed without touching this list. The
+    // skill resolves <loaded-skill-base> by probing this directory, so a script
+    // missing here resolves to a path that does not exist.
+    const scriptsFrom = join(distDir, "skills", "radius-app-bicep", "scripts");
+    if (existsSync(scriptsFrom)) {
+      const scriptsTo = join(
         installDir,
         "skills",
         "radius-app-bicep",
-        "scripts",
-        "validate-bicep.mjs"
+        "scripts"
       );
-      mkdirSync(dirname(checkerTo), { recursive: true });
-      const tmp = `${checkerTo}.tmp-${process.pid}`;
-      copyFileSync(checkerFrom, tmp);
-      renameSync(tmp, checkerTo);
+      mkdirSync(scriptsTo, { recursive: true });
+      for (const entry of readdirSync(scriptsFrom)) {
+        const to = join(scriptsTo, entry);
+        const tmp = `${to}.tmp-${process.pid}`;
+        copyFileSync(join(scriptsFrom, entry), tmp);
+        renameSync(tmp, to);
+      }
+    }
+    // The plugin manifest carries the version recorded in each origin record.
+    // Without it a dev install resolves no version and the generator-drift
+    // check silently does nothing.
+    const manifestFrom = join(distDir, "package.json");
+    if (existsSync(manifestFrom)) {
+      const manifestTo = join(installDir, "package.json");
+      const tmp = `${manifestTo}.tmp-${process.pid}`;
+      copyFileSync(manifestFrom, tmp);
+      renameSync(tmp, manifestTo);
     }
     // Remove any legacy `.dev-reload` sentinel from older installs so it can't
     // keep the (now opt-in) self-reloader armed on this machine.
@@ -200,6 +273,7 @@ const finalizePlugin = {
 
 const browserDir = join(__dirname, "src", "browser");
 let browserCompilerRevision = 0;
+let browserBundleInputs = [];
 
 function browserSourceFiles(directory = browserDir) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -225,24 +299,42 @@ const browserBundlePlugin = {
           "revision",
           String(browserCompilerRevision++)
         );
-        const { BROWSER_ENTRY_NAMES, compileAllBrowserEntries } = await import(
+        const { BROWSER_ENTRY_NAMES, compileAllBrowserBundles } = await import(
           compilerUrl.href
         );
-        const bundles = compileAllBrowserEntries();
+        const bundles = compileAllBrowserBundles();
+        browserBundleInputs = [
+          ...new Set(Object.values(bundles).flatMap((bundle) => bundle.inputs))
+        ];
+        const payloads = Object.fromEntries(
+          Object.entries(bundles).map(([name, bundle]) => [
+            name,
+            { script: bundle.script, style: bundle.style }
+          ])
+        );
         return {
           contents: `// AUTO-GENERATED at build time from packages/adapter-canvas/src/browser/entries.
 export const BROWSER_ENTRY_NAMES = ${JSON.stringify(BROWSER_ENTRY_NAMES)};
-const BROWSER_BUNDLES = ${JSON.stringify(bundles)};
+const BROWSER_BUNDLES = ${JSON.stringify(payloads)};
 export function loadBrowserScript(name) {
-  const code = BROWSER_BUNDLES[name];
-  if (typeof code !== "string") {
+  const bundle = BROWSER_BUNDLES[name];
+  if (bundle === undefined) {
     throw new Error(\`Unknown browser entry "\${name}".\`);
   }
-  return code;
+  return bundle.script;
+}
+export function loadBrowserStyle(name) {
+  const bundle = BROWSER_BUNDLES[name];
+  if (bundle === undefined) {
+    throw new Error(\`Unknown browser entry "\${name}".\`);
+  }
+  return bundle.style;
 }
 `,
           loader: "js",
-          watchFiles: browserSourceFiles()
+          watchFiles: [
+            ...new Set([...browserSourceFiles(), ...browserBundleInputs])
+          ]
         };
       }
     );

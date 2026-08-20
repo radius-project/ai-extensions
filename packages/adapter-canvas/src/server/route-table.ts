@@ -3,6 +3,7 @@ import type { CanvasRequestContext } from "./request-context.js";
 export type RouteMethod = "ANY" | "GET" | "POST";
 export type RouteMatcher = "exact" | "prefix" | "template";
 export type RouteBodyPolicy = "none" | "json";
+export type RouteMutationPolicy = "none" | "nonce-required" | "legacy-exempt";
 export type RouteOwner =
   | "liveness-source"
   | "operations-status"
@@ -24,6 +25,7 @@ export interface RouteDeclaration {
   path: string;
   match: RouteMatcher;
   bodyPolicy: RouteBodyPolicy;
+  mutationPolicy: RouteMutationPolicy;
   owner: RouteOwner;
 }
 
@@ -36,9 +38,21 @@ function declare(
   path: string,
   match: RouteMatcher,
   bodyPolicy: RouteBodyPolicy,
+  owner: RouteOwner,
+  mutationPolicy: RouteMutationPolicy = method === "POST" ? "nonce-required" : (
+    "none"
+  )
+): RouteDeclaration {
+  return { method, path, match, bodyPolicy, mutationPolicy, owner };
+}
+
+function legacyPost(
+  path: string,
+  match: RouteMatcher,
+  bodyPolicy: RouteBodyPolicy,
   owner: RouteOwner
 ): RouteDeclaration {
-  return { method, path, match, bodyPolicy, owner };
+  return declare("POST", path, match, bodyPolicy, owner, "legacy-exempt");
 }
 
 interface CompiledRouteTemplate {
@@ -105,29 +119,15 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("ANY", "/api/ping", "exact", "none", "liveness-source"),
   declare("GET", "/api/operations", "exact", "none", "operations-status"),
   declare("GET", "/api/operations/", "prefix", "none", "operations-status"),
-  declare("POST", "/api/open-source", "exact", "json", "liveness-source"),
-  declare("POST", "/api/oidc", "exact", "json", "identity-credentials"),
-  declare(
-    "POST",
+  legacyPost("/api/open-source", "exact", "json", "liveness-source"),
+  legacyPost(
     "/api/verify-azure-login",
     "exact",
     "json",
     "identity-credentials"
   ),
-  declare(
-    "POST",
-    "/api/azure-cli-assist",
-    "exact",
-    "json",
-    "identity-credentials"
-  ),
-  declare(
-    "POST",
-    "/api/verify-aws-login",
-    "exact",
-    "json",
-    "identity-credentials"
-  ),
+  legacyPost("/api/azure-cli-assist", "exact", "json", "identity-credentials"),
+  legacyPost("/api/verify-aws-login", "exact", "json", "identity-credentials"),
   declare(
     "GET",
     "/api/credential-profiles",
@@ -149,23 +149,21 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "json",
     "identity-credentials"
   ),
-  declare(
-    "POST",
+  legacyPost(
     "/api/save-credential-profile",
     "exact",
     "json",
     "identity-credentials"
   ),
-  declare(
-    "POST",
+  legacyPost(
     "/api/delete-credential-profile",
     "exact",
     "json",
     "identity-credentials"
   ),
-  declare("POST", "/api/delete-environment", "exact", "json", "environments"),
+  legacyPost("/api/delete-environment", "exact", "json", "environments"),
   declare("POST", "/api/operations", "exact", "json", "operations-status"),
-  declare("POST", "/api/azure-auto-setup", "exact", "json", "azure-discovery"),
+  legacyPost("/api/azure-auto-setup", "exact", "json", "azure-discovery"),
   declare(
     "GET",
     "/api/list-azure-app-registrations",
@@ -180,26 +178,26 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "none",
     "azure-discovery"
   ),
-  declare("POST", "/api/app-params", "exact", "json", "environments"),
-  declare("POST", "/api/create-environment", "exact", "json", "environments"),
+  legacyPost("/api/app-params", "exact", "json", "environments"),
+  legacyPost("/api/create-environment", "exact", "json", "environments"),
   declare("GET", "/api/load-graph-stream", "exact", "none", "graphs-planning"),
   declare("GET", "/api/progress", "exact", "none", "graphs-planning"),
   declare("GET", "/api/deployed-graph", "exact", "none", "graphs-planning"),
   declare("GET", "/api/deploy-status", "exact", "none", "deployments"),
-  declare("POST", "/api/load-graph", "exact", "json", "graphs-planning"),
+  legacyPost("/api/load-graph", "exact", "json", "graphs-planning"),
   declare("GET", "/api/list-environments", "exact", "none", "environments"),
   declare("GET", "/api/list-applications", "exact", "none", "deployments"),
   declare("GET", "/api/list-deployments", "exact", "none", "deployments"),
-  declare("POST", "/api/delete-deployment", "exact", "json", "deployments"),
+  legacyPost("/api/delete-deployment", "exact", "json", "deployments"),
   declare("GET", "/api/verify-status", "exact", "none", "environments"),
   declare("GET", "/api/user-repos", "exact", "none", "repositories"),
-  declare("POST", "/api/repo-branches", "exact", "json", "repositories"),
-  declare("POST", "/api/plan-graph", "exact", "json", "graphs-planning"),
-  declare("POST", "/api/discover-branches", "exact", "json", "repositories"),
-  declare("POST", "/api/diff-branches", "exact", "json", "graphs-planning"),
-  declare("POST", "/api/deploy", "exact", "json", "deployments"),
-  declare("POST", "/api/deploy-reset", "exact", "none", "deployments"),
-  declare("POST", "/api/discover", "exact", "json", "azure-discovery"),
+  legacyPost("/api/repo-branches", "exact", "json", "repositories"),
+  legacyPost("/api/plan-graph", "exact", "json", "graphs-planning"),
+  legacyPost("/api/discover-branches", "exact", "json", "repositories"),
+  legacyPost("/api/diff-branches", "exact", "json", "graphs-planning"),
+  legacyPost("/api/deploy", "exact", "json", "deployments"),
+  legacyPost("/api/deploy-reset", "exact", "none", "deployments"),
+  legacyPost("/api/discover", "exact", "json", "azure-discovery"),
   declare(
     "POST",
     "/api/operations/:operationId/resume/:code",
@@ -286,6 +284,14 @@ export function assertRouteTable(routes: readonly ServerRoute[]): void {
     }
     if (route.match === "prefix") precedingPrefixes.push(route);
     if (route.match === "template") compileRouteTemplate(route.path);
+    if (route.method === "POST" && route.mutationPolicy === "none") {
+      throw new Error(`POST server route has no mutation policy: ${key}`);
+    }
+    if (route.method !== "POST" && route.mutationPolicy !== "none") {
+      throw new Error(
+        `Non-POST server route declares a mutation policy: ${key}`
+      );
+    }
     if (!route.owner) throw new Error(`Unowned server route: ${key}`);
     if (typeof route.handler !== "function") {
       throw new Error(`Server route has no handler: ${key}`);

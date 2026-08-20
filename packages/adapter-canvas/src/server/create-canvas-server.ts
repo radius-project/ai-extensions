@@ -7,7 +7,7 @@ export interface CanvasServerContainer {
   readonly instances: Map<string, CanvasServerEntry>;
   getLastActivityAt(): number;
   getOrCreate(instanceId: string, page?: string): Promise<CanvasServerEntry>;
-  stop(instanceId: string): Promise<void>;
+  stop(instanceId: string, force?: boolean): Promise<void>;
   stopAll(): Promise<void>;
 }
 
@@ -213,7 +213,7 @@ export function createCanvasServer(
     instances,
     getLastActivityAt: () => lastActivityAt,
     getOrCreate,
-    stop: (instanceId) => stop(instanceId),
+    stop,
     async stopAll() {
       const ids = [...new Set([...instances.keys(), ...starting.keys()])];
       const requestedStops = ids.map((id) => stop(id, true));

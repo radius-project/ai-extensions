@@ -81,11 +81,7 @@ export interface DeployMonitorDependencies {
     resources: CanvasGraphResource[],
     statuses: Map<string, DeployResourceStatus>
   ): DeployStatusChange[];
-  generatePortalUrl(
-    resourceType: string,
-    provider: string,
-    state: CanvasState
-  ): string;
+  generatePortalUrl(resourceType: string, provider: string): string;
   optionalString(value: unknown): string;
   errorMessage(error: unknown): string;
   sleep(milliseconds: number): Promise<void>;
@@ -201,8 +197,7 @@ export function createDeployMonitorService(
               );
               o.portalUrl = dependencies.generatePortalUrl(
                 portalUrlKey,
-                provider,
-                entry.state
+                provider
               );
             }
           });

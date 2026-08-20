@@ -189,16 +189,6 @@ export interface PublishTargetsDependencies {
   ): string | null;
 }
 
-export interface OidcResult {
-  message: string;
-  output: string;
-}
-
-export interface InfraDependencies {
-  generateAzureOIDC(data: Record<string, unknown>): OidcResult;
-  generateAWSOIDC(data: Record<string, unknown>): OidcResult;
-}
-
 export interface HostCallbackDependencies {
   setAppBicepHandoff(
     fn: (input: {
@@ -215,6 +205,17 @@ export interface HostCallbackDependencies {
           error: string;
           deployRunUrl: string;
           attemptId: string;
+          instanceId: string;
+        }) => unknown)
+      | null
+  ): void;
+  setDeployFailureNotice(
+    fn:
+      | ((input: {
+          repo: string;
+          branch: string;
+          error: string;
+          deployRunUrl: string;
           instanceId: string;
         }) => unknown)
       | null
@@ -243,6 +244,41 @@ export interface ProcessDependencies {
     args: string[],
     options: { timeout?: number; encoding?: BufferEncoding }
   ): Promise<{ stdout: string; stderr: string }>;
+}
+
+// Facts needed to decide whether an existing application model still describes
+// the branch it sits on. Grouped into one narrow port so the freshness check has
+// a single seam: a graph open reads an origin record, a head commit, and the installed
+// generator version, and nothing else.
+export interface AppModelDependencies {
+  // Installed generator (radius-app-bicep) version, or "" when unresolvable.
+  generatorVersion(): string;
+  // Commit the local worktree is on. "" when it cannot be resolved.
+  workspaceHeadCommit(
+    workspacePath: string | null | undefined
+  ): Promise<string>;
+  // Whether application source (excluding the model's own directory) changed
+  // between a recorded commit and the worktree head. undefined when git cannot
+  // answer, so the caller falls back instead of reading silence as "unchanged".
+  workspaceSourceChangedSince(
+    workspacePath: string | null | undefined,
+    sinceCommit: string
+  ): Promise<boolean | undefined>;
+  // Head commit of a branch on GitHub. "" when it cannot be resolved.
+  branchHeadCommit(repo: string, branch: string): Promise<string>;
+  // Repo-relative file read from the local worktree, when the selection is it.
+  fetchWorkspaceFile(
+    state: CanvasState,
+    repo: string,
+    branch: string,
+    repoPath: string
+  ): Promise<string | null>;
+  // Repo-relative file read from a branch on GitHub.
+  fetchRepoFile(
+    repo: string,
+    branch: string,
+    repoPath: string
+  ): Promise<string | null>;
 }
 
 export interface OperationsDependencies {
@@ -274,11 +310,11 @@ export interface RadiusExtensionDependencies {
   deployTools: DeployToolsDependencies;
   sourceRefs: SourceRefsDependencies;
   publishTargets: PublishTargetsDependencies;
-  infra: InfraDependencies;
   hostCallbacks: HostCallbackDependencies;
   process: ProcessDependencies;
   deploy: DeployRunnerDependencies;
   operations: OperationsDependencies;
+  appModel: AppModelDependencies;
   radiusAppBicepSkill(repoPath?: string): string;
   renderPrDiffMarkdown(
     resources: CanvasGraphResource[],

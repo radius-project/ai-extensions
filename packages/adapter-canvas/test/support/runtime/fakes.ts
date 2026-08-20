@@ -85,6 +85,13 @@ export function createFakeSession(
 export interface FakeDependenciesOptions {
   workspaceContext?: WorkspaceContext;
   bicepByRepoBranch?: Record<string, string | null>;
+  // Keyed `workspace:<repo>@<branch>:<repoPath>` / `remote:<repo>@<branch>:<repoPath>`.
+  filesByRepoBranch?: Record<string, string | null>;
+  // Keyed `workspace:<workspacePath>` / `<repo>@<branch>`.
+  headCommits?: Record<string, string>;
+  // Answer for workspaceSourceChangedSince; undefined means "git cannot say".
+  sourceChangedSince?: boolean;
+  generatorVersion?: string;
 }
 
 // Builds a complete RadiusExtensionDependencies fake. `servers` is a real Map
@@ -101,6 +108,8 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   };
 
   const bicepByRepoBranch = options.bicepByRepoBranch ?? {};
+  const filesByRepoBranch = options.filesByRepoBranch ?? {};
+  const headCommits = options.headCommits ?? {};
 
   const getOrCreateServer = vi.fn(
     async (instanceId: string, page?: string): Promise<CanvasServerEntry> => {
@@ -133,6 +142,15 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           error: string;
           deployRunUrl: string;
           attemptId: string;
+          instanceId: string;
+        }) => unknown)
+      | null;
+    deployFailureNotice?:
+      | ((input: {
+          repo: string;
+          branch: string;
+          error: string;
+          deployRunUrl: string;
           instanceId: string;
         }) => unknown)
       | null;
@@ -243,22 +261,15 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       resolveRadiusArtifactTarget: vi.fn(resolveRadiusArtifactTarget),
       validateGhcrTargetForRepo: vi.fn(validateGhcrTargetForRepo)
     },
-    infra: {
-      generateAzureOIDC: vi.fn((_data) => ({
-        message: "Azure OIDC configuration generated",
-        output: "# azure oidc script"
-      })),
-      generateAWSOIDC: vi.fn((_data) => ({
-        message: "AWS OIDC configuration generated",
-        output: "# aws oidc script"
-      }))
-    },
     hostCallbacks: {
       setAppBicepHandoff: vi.fn((fn) => {
         capturedHostCallbacks.appBicepHandoff = fn;
       }),
       setDeployRepairHandoff: vi.fn((fn) => {
         capturedHostCallbacks.deployRepairHandoff = fn;
+      }),
+      setDeployFailureNotice: vi.fn((fn) => {
+        capturedHostCallbacks.deployFailureNotice = fn;
       }),
       setOpenSourceHandler: vi.fn((fn) => {
         capturedHostCallbacks.openSourceHandler = fn;
@@ -286,6 +297,28 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       markEnvironmentInstanceShuttingDown: vi.fn(),
       onEnvironmentTasksSettled: vi.fn(
         (_instanceId: string, _listener: () => void) => () => {}
+      )
+    },
+    appModel: {
+      generatorVersion: vi.fn(() => options.generatorVersion ?? "0.1.0-test"),
+      workspaceHeadCommit: vi.fn(
+        async (workspacePath: string | null | undefined) =>
+          headCommits[`workspace:${workspacePath}`] ?? ""
+      ),
+      workspaceSourceChangedSince: vi.fn(
+        async () => options.sourceChangedSince
+      ),
+      branchHeadCommit: vi.fn(
+        async (repo: string, branch: string) =>
+          headCommits[`${repo}@${branch}`] ?? ""
+      ),
+      fetchWorkspaceFile: vi.fn(
+        async (_state, repo: string, branch: string, repoPath: string) =>
+          filesByRepoBranch[`workspace:${repo}@${branch}:${repoPath}`] ?? null
+      ),
+      fetchRepoFile: vi.fn(
+        async (repo: string, branch: string, repoPath: string) =>
+          filesByRepoBranch[`remote:${repo}@${branch}:${repoPath}`] ?? null
       )
     },
     radiusAppBicepSkill: vi.fn(

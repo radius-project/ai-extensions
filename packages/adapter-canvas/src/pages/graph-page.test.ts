@@ -12,6 +12,8 @@ describe("graphPage", () => {
     });
     expect(html).toContain('id="graph-app"');
     expect(html).toContain('id="graph-branch"');
+    expect(html).toContain('<label for="graph-app">Application</label>');
+    expect(html).toContain('<label for="graph-branch">Branch</label>');
     expect(html).toContain('id="graph-container-wrapper"');
     expect(html).toContain(browserEntryMarker("graph-page"));
     expect(html.split(browserScript("graph-page"))).toHaveLength(2);

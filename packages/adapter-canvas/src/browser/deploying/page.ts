@@ -25,6 +25,8 @@ import {
   ENVIRONMENTS_PATH,
   WORKTREE_SHA,
   buildEnvironmentOptions,
+  environmentAllowsDeploy,
+  environmentNotReadyReason,
   parseApplicationListing,
   parseBranchListing,
   parseEnvironmentListing
@@ -371,6 +373,7 @@ export function initializeDeployingPage(
   if (!entry) return NOOP_TEARDOWN;
 
   let providers: Record<string, string> = {};
+  let environmentStatuses: Record<string, string> = {};
   let hasApplications = false;
   let hasEnvironments = false;
   const overrides = new Map<string, DeploymentOverride>();
@@ -441,15 +444,29 @@ export function initializeDeployingPage(
     const selectedEnvironment = envSelect.value;
     const blockedStatus =
       selectedEnvironment ? deployedEnvs.get(selectedEnvironment) : undefined;
+    const selectedEnvironmentStatus =
+      environmentStatuses[selectedEnvironment] ?? "";
+    const environmentReady =
+      selectedEnvironment !== "" &&
+      environmentAllowsDeploy(selectedEnvironmentStatus);
     deployBtn.disabled =
       !(options.repo && appSelect.value && selectedEnvironment) ||
-      Boolean(blockedStatus);
+      Boolean(blockedStatus) ||
+      !environmentReady;
     if (blockedStatus) {
       deployBtn.setAttribute(
         "title",
         blockedStatus === "deleting" ?
           `Application is being deleted from environment "${selectedEnvironment}". Wait for the delete to finish before deploying again.`
         : `A deployment is already in progress in environment "${selectedEnvironment}". Wait for it to finish before deploying again.`
+      );
+    } else if (!environmentReady && selectedEnvironment !== "") {
+      deployBtn.setAttribute(
+        "title",
+        environmentNotReadyReason(
+          selectedEnvironment,
+          selectedEnvironmentStatus
+        )
       );
     } else {
       deployBtn.removeAttribute("title");
@@ -517,10 +534,13 @@ export function initializeDeployingPage(
           return;
         }
         const nextProviders: Record<string, string> = {};
+        const nextStatuses: Record<string, string> = {};
         for (const environment of listing.environments) {
           nextProviders[environment.name] = environment.provider;
+          nextStatuses[environment.name] = environment.status;
         }
         providers = nextProviders;
+        environmentStatuses = nextStatuses;
         context.dom.setOptions(
           envSelect,
           buildEnvironmentOptions(

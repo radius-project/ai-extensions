@@ -1,20 +1,5 @@
-import type { CanvasState } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
-
-export interface AzureCredentialValidation {
-  success: boolean;
-  error?: string;
-  tenantId?: string;
-  subscriptionId?: string;
-  subscriptionName?: string;
-  userName?: string;
-}
-
-export interface OidcGeneration {
-  message: string;
-  output: string;
-}
 
 export interface SessionPromptOutcome {
   status: number;
@@ -56,27 +41,12 @@ export type IdentityAuthRunCommand = (
   options: { timeout: number }
 ) => Promise<string>;
 
-// Fourteen narrow function seams for four routes. Nothing is moved: the OIDC
-// generators stay in `infra.ts`, the CLI runner in `gh.ts`, and the prompt,
-// GUID and Azure-message helpers in `server.ts`; every one of them is handed in.
-// The module therefore spawns no process, touches no disk, holds no instance
-// map, and reads no module-level mutable state.
+// Eight narrow function seams for three routes. Nothing is moved: the CLI
+// runner stays in `gh.ts`, and the prompt, GUID and Azure-message helpers in
+// `server.ts`; every one of them is handed in. The module therefore spawns no
+// process, touches no disk, holds no instance map, and reads no module-level
+// mutable state.
 export interface IdentityAuthDependencies {
-  validateAzureCredentials(data: {
-    tenantId?: string;
-    subscriptionId?: string;
-  }): Promise<AzureCredentialValidation>;
-  generateAzureOIDC(data: Record<string, unknown>): OidcGeneration;
-  generateAWSOIDC(data: Record<string, unknown>): OidcGeneration;
-  // Returns undefined when the instance has no entry, which is what the legacy
-  // `servers.get(instanceId)` miss meant. The request context's `state`
-  // snapshot substitutes `{}` for a missing entry and so cannot express it.
-  readInstanceState(instanceId: string): CanvasState | undefined;
-  // Split deliberately: the legacy branch assigns the shared credential and
-  // *then* saves, and two seams keep that order observable. Collapsing them
-  // into one port would hide a swapped or dropped save.
-  setSharedAzureCredentials(credentials: Record<string, unknown>): void;
-  saveCredentials(): void;
   azureCredentialIdValidationError(input: AzureCredentialIdInput): string;
   azureLoginRequiredResponse(
     input: AzureLoginRequiredInput
@@ -98,98 +68,6 @@ const AWS_TIMEOUT = 15000;
 
 function detailOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error || "");
-}
-
-// Validate cloud credentials and hand back the OIDC bootstrap instructions.
-//
-// Three pre-existing shapes are preserved verbatim.
-//
-// 1. The body is parsed *unguarded* — `JSON.parse(body)`, not
-//    `JSON.parse(body || "{}")` — so an empty body throws into the catch. Any
-//    guard here would silently reroute those requests to the azure/aws branch
-//    instead, which is a behavior change.
-// 2. A failed Azure validation answers **200**, not 400. Only a throw reaches
-//    the 400. Turning the failure into an error status would be observable
-//    hardening.
-// 3. The success and failure payloads carry non-ASCII code points: U+2705
-//    (WHITE HEAVY CHECK MARK), U+2014 (EM DASH) and U+274C (CROSS MARK). They
-//    are response bytes the canvas renders, so they are pinned by assertion.
-export async function handleOidc(
-  context: CanvasRequestContext,
-  dependencies: IdentityAuthDependencies
-): Promise<void> {
-  const { response } = context;
-  const body = await context.readTextBody();
-  try {
-    const data = JSON.parse(body);
-    if (data.provider === "azure") {
-      // Real Azure validation via az CLI
-      const validation = await dependencies.validateAzureCredentials(data);
-      const state = dependencies.readInstanceState(context.instanceId);
-      if (validation.success) {
-        const result = {
-          message: `\u2705 Azure authentication confirmed \u2014 logged in as ${
-            validation.userName || "user"
-          }`,
-          validated: true,
-          tenantId: validation.tenantId,
-          subscriptionId: validation.subscriptionId,
-          subscriptionName: validation.subscriptionName,
-          userName: validation.userName,
-          output: dependencies.generateAzureOIDC(data).output
-        };
-        if (state) {
-          state.oidcAzure = {
-            ...result,
-            clientId: data.clientId || "",
-            tenantName: "",
-            clientName: ""
-          };
-        }
-        // Persist credentials
-        dependencies.setSharedAzureCredentials({
-          tenantId: validation.tenantId,
-          subscriptionId: validation.subscriptionId,
-          subscriptionName: validation.subscriptionName,
-          userName: validation.userName,
-          clientId: data.clientId || ""
-        });
-        dependencies.saveCredentials();
-        response.setHeader("Content-Type", "application/json");
-        response.writeHead(200);
-        response.end(JSON.stringify(result));
-      } else {
-        response.setHeader("Content-Type", "application/json");
-        response.writeHead(200);
-        response.end(
-          JSON.stringify({
-            message: `\u274c ${validation.error}`,
-            validated: false,
-            output: ""
-          })
-        );
-      }
-    } else {
-      const result = dependencies.generateAWSOIDC(data);
-      const state = dependencies.readInstanceState(context.instanceId);
-      if (state) {
-        state.oidcAws = {
-          ...result,
-          accountId: data.accountId || "",
-          accountName: data.accountName || "",
-          region: data.region || ""
-        };
-      }
-      response.setHeader("Content-Type", "application/json");
-      response.writeHead(200);
-      response.end(JSON.stringify(result));
-    }
-  } catch (e) {
-    const detail = detailOf(e);
-    response.setHeader("Content-Type", "application/json");
-    response.writeHead(400);
-    response.end(JSON.stringify({ error: detail || "Bad request." }));
-  }
 }
 
 // Verify the caller's existing Azure CLI session for a credential profile.
@@ -418,7 +296,6 @@ export function createIdentityAuthRoutes(
   dependencies: IdentityAuthDependencies
 ): RouteHandlerRegistry {
   return {
-    "POST /api/oidc": (context) => handleOidc(context, dependencies),
     "POST /api/verify-azure-login": (context) =>
       handleVerifyAzureLogin(context, dependencies),
     "POST /api/azure-cli-assist": (context) =>

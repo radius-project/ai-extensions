@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import type { EnvironmentConfirmOptions } from "./confirm-dialog.js";
 import {
   ENVIRONMENT_DELETE_PATH,
-  ENVIRONMENT_DELETE_REDIRECT_MS,
   ENVIRONMENT_LIST_PATH,
   ENVIRONMENT_POLL_MS,
   environmentRowsMarkup,
@@ -23,15 +23,28 @@ import {
 import type { FakeBrowser } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 
-function renderPage(repo = "octo/app") {
+function renderPage(repo = "octo/app", withoutInfraSelection = false) {
   const browser = createFakeBrowser();
   const elements = {
     environmentPane: createFakeElement("pane-environments"),
     credentialPane: createFakeElement("pane-credentials"),
     environmentLanding: createFakeElement("env-landing"),
+    newEnvironment: createFakeElement("new-env-btn", "button"),
     environmentForm: createFakeElement("env-form"),
     environmentName: createFakeInput("env-name-input", "dev"),
     profileSelect: createFakeInput("env-profile-select"),
+    submit: createFakeInput("deploy-btn"),
+    stepOne: createFakeElement("env-step-credentials"),
+    stepTwo: createFakeElement("env-step-details"),
+    stepOneMarker: createFakeElement("env-wizard-step-1"),
+    stepTwoMarker: createFakeElement("env-wizard-step-2"),
+    stepOneNext: createFakeInput("env-step1-next"),
+    stepTwoBack: createFakeElement("env-step2-back"),
+    changeProfile: createFakeElement("env-change-profile-link"),
+    profileButton: createFakeElement("env-profile-button"),
+    selectedProvider: createFakeInput("env-selected-provider", "azure"),
+    stepTwoTitle: createFakeElement("env-step2-title"),
+    nameHelp: createFakeElement("env-name-help"),
     clientId: createFakeInput("az-client-id", "old-client"),
     deployStatus: createFakeElement("deploy-status"),
     tableBody: createFakeElement("env-table-body"),
@@ -62,18 +75,27 @@ function renderPage(repo = "octo/app") {
 
   const dependencies = {
     loadCredentialTable: vi.fn(),
-    loadProfiles: vi.fn(),
+    loadProfiles: vi.fn().mockResolvedValue(undefined),
     loadGitHubIdentity: vi.fn(),
-    clearSharedAppPin: vi.fn()
+    clearSharedAppPin: vi.fn(),
+    setPendingInfraSelection: vi.fn(),
+    currentInfraSelection: vi.fn(() => ({}))
   };
   const decisions = {
     confirm: vi.fn(() => true),
     notify: vi.fn()
   };
+  const confirmDialog = {
+    show: vi.fn((options: EnvironmentConfirmOptions) => options.onConfirm()),
+    close: vi.fn(),
+    teardown: vi.fn()
+  };
   const initialized = initializeEnvironmentPane(
     browser.context,
-    { repo, decisions },
-    dependencies
+    { repo, decisions, confirmDialog },
+    withoutInfraSelection ?
+      { ...dependencies, currentInfraSelection: undefined }
+    : dependencies
   );
   if (!isEnvironmentPaneController(initialized)) {
     throw new Error("Expected environment pane controller.");
@@ -85,6 +107,7 @@ function renderPage(repo = "octo/app") {
     credentialTab,
     dependencies,
     decisions,
+    confirmDialog,
     controller: initialized
   };
 }
@@ -94,9 +117,12 @@ function addRowButtons(browser: FakeBrowser, name = "dev") {
   deploy.setAttribute("data-env", name);
   const remove = createFakeInput("delete-row");
   remove.setAttribute("data-env", name);
+  const edit = createFakeInput("edit-row");
+  edit.setAttribute("data-env", name);
+  browser.document.addSelectorAll(".js-edit-env", [edit]);
   browser.document.addSelectorAll(".js-deploy-apps", [deploy]);
   browser.document.addSelectorAll(".js-delete-env", [remove]);
-  return { deploy, remove };
+  return { deploy, remove, edit };
 }
 
 function renderRequiredOnly() {
@@ -121,9 +147,15 @@ function renderRequiredOnly() {
     },
     {
       loadCredentialTable() {},
-      loadProfiles() {},
+      loadProfiles() {
+        return Promise.resolve();
+      },
       loadGitHubIdentity() {},
-      clearSharedAppPin() {}
+      clearSharedAppPin() {},
+      setPendingInfraSelection() {},
+      currentInfraSelection() {
+        return {};
+      }
     }
   );
   if (!isEnvironmentPaneController(initialized)) {
@@ -148,7 +180,8 @@ describe("environment records and markup", () => {
     ["failed", "rad-dot--failed", "Failed"],
     ["pending", "rad-dot--pending", "Pending"],
     ["unverified", "rad-dot--pending", "Unverified"],
-    ["unknown", "rad-dot--pending", "Pending"]
+    ["unknown", "rad-dot--success", "Available"],
+    ["mystery", "rad-dot--pending", "Pending"]
   ])("renders %s status", (status, tone, label) => {
     const markup = environmentStatusMarkup(status);
     expect(markup).toContain(tone);
@@ -178,7 +211,14 @@ describe("environment records and markup", () => {
         status: "pending",
         provider: "azure",
         credentialProfile: "profile",
-        webUrl: "https://github.com/octo/app/settings/environments/dev"
+        webUrl: "https://github.com/octo/app/settings/environments/dev",
+        config: {
+          resourceGroup: "",
+          cluster: "",
+          namespace: "",
+          vpcId: "",
+          subnetIds: ""
+        }
       }
     ]);
     expect(parseEnvironmentRecords(null)).toEqual([]);
@@ -222,9 +262,10 @@ describe("environment records and markup", () => {
     );
     expect(markup).not.toContain("<img");
     expect(markup).toContain("&lt;img");
-    expect(markup).toContain(
-      'href="https://github.com/octo/app/settings/environments"'
-    );
+    // Editing happens in the canvas rather than on GitHub, so the row carries
+    // a button rather than an external link.
+    expect(markup).not.toContain("href=");
+    expect(markup).toContain("js-edit-env");
   });
 });
 
@@ -315,6 +356,7 @@ describe("environment pane initialization", () => {
       page.controller.showWarnings(["⚠️ warning"]);
       page.controller.showActionRequired("azure", "dev", "");
       page.controller.hideTerminalBanners();
+      page.controller.resetSubmitButton();
     }).not.toThrow();
   });
 
@@ -327,11 +369,16 @@ describe("environment pane initialization", () => {
     expect(page.dependencies.loadProfiles).not.toHaveBeenCalled();
   });
 
-  it("opens and closes the environment form with fresh cross-pane state", () => {
+  it("opens and closes the environment form with fresh cross-pane state", async () => {
     const page = renderPage();
     page.elements.deployStatus.style.display = "block";
     page.elements.success.style.display = "flex";
 
+    // Loading the preset profile selects it, which is what lets the wizard
+    // advance past the credential step.
+    page.dependencies.loadProfiles.mockImplementation((profile?: string) => {
+      page.elements.profileSelect.value = profile ?? "";
+    });
     page.controller.showEnvironmentForm({
       name: "prod",
       profile: "azure-prod"
@@ -345,6 +392,18 @@ describe("environment pane initialization", () => {
     expect(page.dependencies.clearSharedAppPin).toHaveBeenCalledOnce();
     expect(page.dependencies.loadProfiles).toHaveBeenCalledWith("azure-prod");
     expect(page.dependencies.loadGitHubIdentity).toHaveBeenCalledWith();
+    // The form opens on the credential step and only advances to the details
+    // step once the preset profile has loaded, so the name is focused then.
+    expect(
+      page.elements.stepTwoMarker.classList.contains("rad-wizard__step--active")
+    ).toBe(false);
+    await flushPromises();
+    expect(
+      page.elements.stepTwoMarker.classList.contains("rad-wizard__step--active")
+    ).toBe(true);
+    expect(page.elements.stepTwoMarker.getAttribute("aria-current")).toBe(
+      "step"
+    );
     expect(page.elements.environmentName.focusCount).toBe(1);
     expect(page.elements.success.style.display).toBe("none");
 
@@ -354,6 +413,255 @@ describe("environment pane initialization", () => {
     page.controller.showEnvironmentLanding();
     expect(page.elements.environmentForm.style.display).toBe("none");
     expect(page.elements.environmentLanding.style.display).toBe("");
+    expect(page.elements.newEnvironment.focusCount).toBe(1);
+  });
+
+  it("returns to the landing view when the reveal control is absent", () => {
+    const page = renderRequiredOnly();
+    expect(() => page.controller.showEnvironmentLanding()).not.toThrow();
+  });
+
+  it("opens an existing environment for editing without renaming it", async () => {
+    const page = renderPage();
+    page.dependencies.loadProfiles.mockImplementation((profile?: string) => {
+      page.elements.profileSelect.value = profile ?? "";
+    });
+
+    page.controller.showEnvironmentForm({
+      name: "prod",
+      profile: "azure-prod",
+      config: { resourceGroup: "rg-prod" },
+      editing: "prod"
+    });
+    await flushPromises();
+
+    expect(page.elements.environmentName.value).toBe("prod");
+    // An environment cannot be renamed, so editing locks the name field and
+    // explains why instead of silently ignoring a changed value.
+    expect(page.elements.environmentName.disabled).toBe(true);
+    expect(page.elements.environmentName.focusCount).toBe(0);
+    expect(page.elements.stepTwoTitle.textContent).toBe("Edit Environment");
+    expect(page.elements.nameHelp.textContent).toContain("cannot be renamed");
+    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
+      { resourceGroup: "rg-prod" },
+      "azure"
+    );
+  });
+
+  it("restores aws infrastructure when editing an aws environment", async () => {
+    const page = renderPage();
+    page.dependencies.loadProfiles.mockImplementation((profile?: string) => {
+      page.elements.profileSelect.value = profile ?? "";
+    });
+
+    page.controller.showEnvironmentForm({
+      name: "prod",
+      profile: "aws-prod",
+      provider: "aws",
+      config: { cluster: "eks-prod" },
+      editing: "prod"
+    });
+    await flushPromises();
+
+    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
+      { cluster: "eks-prod" },
+      "aws"
+    );
+  });
+
+  it("labels a fresh form for creation and carries no pending infrastructure", () => {
+    const page = renderPage();
+
+    page.controller.showEnvironmentForm();
+
+    expect(page.elements.environmentName.disabled).toBe(false);
+    expect(page.elements.stepTwoTitle.textContent).toBe("Create Environment");
+    expect(page.elements.nameHelp.textContent).toContain("deploy apps into");
+    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
+      null,
+      "azure"
+    );
+  });
+
+  it("keeps the wizard on the credential step when asked not to advance", async () => {
+    const page = renderPage();
+    page.dependencies.loadProfiles.mockImplementation((profile?: string) => {
+      page.elements.profileSelect.value = profile ?? "";
+    });
+
+    page.controller.showEnvironmentForm({
+      profile: "azure-prod",
+      advance: false
+    });
+    await flushPromises();
+
+    expect(
+      page.elements.stepTwoMarker.classList.contains("rad-wizard__step--active")
+    ).toBe(false);
+    expect(page.elements.stepOne.style.display).toBe("");
+    expect(page.elements.stepTwo.style.display).toBe("none");
+  });
+
+  it("opens the edit form from an environment row", async () => {
+    const page = renderPage();
+    const { edit } = addRowButtons(page.browser, "dev");
+    edit.setAttribute("data-env", "dev");
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [
+          {
+            name: "dev",
+            provider: "azure",
+            status: "success",
+            credentialProfile: "azure-prod",
+            config: { resourceGroup: "rg-dev" }
+          }
+        ]
+      })
+    );
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    edit.dispatch("click");
+
+    expect(page.elements.environmentForm.style.display).toBe("");
+    expect(page.elements.environmentName.value).toBe("dev");
+    expect(page.elements.environmentName.disabled).toBe(true);
+    expect(page.dependencies.loadProfiles).toHaveBeenCalledWith("azure-prod");
+    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceGroup: "rg-dev" }),
+      "azure"
+    );
+  });
+
+  it("ignores an edit button that carries no environment name", async () => {
+    const page = renderPage();
+    const { edit } = addRowButtons(page.browser, "dev");
+    edit.removeAttribute("data-env");
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [{ name: "dev", provider: "azure", status: "success" }]
+      })
+    );
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    edit.dispatch("click");
+
+    expect(page.elements.environmentForm.style.display).toBe("none");
+  });
+
+  it("edits an environment that stored no infrastructure selection", async () => {
+    const page = renderPage();
+
+    page.controller.showEnvironmentForm({ name: "prod", editing: "prod" });
+
+    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
+      null,
+      "azure"
+    );
+  });
+
+  it("labels the submit button for the environment being saved", () => {
+    const page = renderPage();
+
+    page.controller.showEnvironmentForm({ name: "prod", editing: "prod" });
+
+    expect(page.elements.submit.textContent).toBe("Save Environment");
+    expect(page.elements.submit.disabled).toBe(false);
+
+    page.controller.showEnvironmentForm();
+
+    expect(page.elements.submit.textContent).toBe("Create Environment");
+  });
+
+  it("restores the open form's infrastructure when returning from credentials", async () => {
+    const page = renderPage();
+    page.elements.selectedProvider.value = "aws";
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({ environments: [] })
+    );
+    page.dependencies.currentInfraSelection.mockReturnValue({
+      cluster: "eks-1"
+    });
+    page.controller.showEnvironmentForm();
+    await flushPromises();
+    page.dependencies.setPendingInfraSelection.mockClear();
+
+    page.controller.switchSubtab("environments");
+
+    expect(page.dependencies.currentInfraSelection).toHaveBeenCalledWith("aws");
+    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
+      { cluster: "eks-1" },
+      "aws"
+    );
+    expect(page.dependencies.loadProfiles).toHaveBeenCalledWith("");
+  });
+
+  it("falls back to an empty selection when no discovery panel is wired", async () => {
+    const page = renderPage("octo/app", true);
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({ environments: [] })
+    );
+    page.controller.showEnvironmentForm();
+    await flushPromises();
+    page.dependencies.setPendingInfraSelection.mockClear();
+
+    page.controller.switchSubtab("environments");
+
+    expect(page.dependencies.setPendingInfraSelection).toHaveBeenCalledWith(
+      {},
+      "azure"
+    );
+  });
+
+  it("ignores an edit request for a row that is no longer listed", async () => {
+    const page = renderPage();
+    const { edit } = addRowButtons(page.browser, "dev");
+    edit.setAttribute("data-env", "ghost");
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [{ name: "dev", provider: "azure", status: "success" }]
+      })
+    );
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    edit.dispatch("click");
+
+    expect(page.elements.environmentForm.style.display).toBe("none");
+  });
+
+  it("moves between the credential and detail steps from the wizard controls", async () => {
+    const page = renderPage();
+    page.controller.showEnvironmentForm();
+    await flushPromises();
+
+    // Without a chosen profile the wizard refuses to advance, because the
+    // environment cannot be created without a credential.
+    page.elements.stepOneNext.dispatch("click");
+    expect(page.elements.stepTwo.style.display).toBe("none");
+    expect(page.elements.environmentName.focusCount).toBe(0);
+
+    page.elements.profileSelect.value = "azure-prod";
+    page.elements.stepOneNext.dispatch("click");
+    expect(page.elements.stepTwo.style.display).toBe("");
+    expect(page.elements.stepOne.style.display).toBe("none");
+    expect(page.elements.environmentName.focusCount).toBe(1);
+    expect(
+      page.elements.stepOneMarker.classList.contains("rad-wizard__step--done")
+    ).toBe(true);
+
+    page.elements.stepTwoBack.dispatch("click");
+    expect(page.elements.stepOne.style.display).toBe("");
+    expect(page.elements.stepOneMarker.getAttribute("aria-current")).toBe(
+      "step"
+    );
+
+    page.elements.stepOneNext.dispatch("click");
+    page.elements.changeProfile.dispatch("click");
+    expect(page.elements.stepOne.style.display).toBe("");
+    expect(page.elements.stepTwoMarker.getAttribute("aria-current")).toBe(null);
   });
 
   it("uses empty form defaults when no preset is supplied", () => {
@@ -541,11 +849,16 @@ describe("environment deletion", () => {
   it("does not dispatch without identity or confirmation", async () => {
     const unnamed = await readyDelete("");
     unnamed.rows.remove.dispatch("click");
+    expect(unnamed.page.confirmDialog.show).not.toHaveBeenCalled();
     expect(unnamed.page.browser.net.calls).toHaveLength(1);
 
     const refused = await readyDelete();
-    refused.page.decisions.confirm.mockReturnValue(false);
+    refused.page.confirmDialog.show.mockImplementation(() => {});
     refused.rows.remove.dispatch("click");
+    expect(refused.page.confirmDialog.show).toHaveBeenCalledOnce();
+    expect(refused.page.confirmDialog.show.mock.calls[0][0].title).toBe(
+      "Delete environment?"
+    );
     expect(refused.page.browser.net.calls).toHaveLength(1);
   });
 
@@ -593,8 +906,14 @@ describe("environment deletion", () => {
     ).toHaveLength(1);
   });
 
-  it("shows an app conflict and redirects only to the safe deployment flow", async () => {
+  it("explains an app conflict instead of navigating away", async () => {
     const { page, rows } = await readyDelete();
+    page.confirmDialog.show
+      .mockReset()
+      .mockImplementationOnce((options: EnvironmentConfirmOptions) =>
+        options.onConfirm()
+      )
+      .mockImplementation(() => {});
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
       jsonResponse(
         {
@@ -609,16 +928,35 @@ describe("environment deletion", () => {
 
     rows.remove.dispatch("click");
     await flushPromises();
-    expect(page.elements.errorText.textContent).toContain(
-      "Delete the app first."
-    );
-    expect(page.browser.clock.timeouts).toBe(1);
-    page.browser.clock.tick(ENVIRONMENT_DELETE_REDIRECT_MS);
+    // Nothing was deleted, so the page stays put and explains why rather than
+    // sweeping the user off to another page on a timer.
+    expect(page.browser.clock.timeouts).toBe(0);
+    expect(page.browser.nav.assigned).toEqual([]);
+    expect(rows.remove.disabled).toBe(false);
+    expect(rows.remove.textContent).toBe("Delete Env");
+
+    const conflict = page.confirmDialog.show.mock.calls[1][0];
+    expect(conflict.title).toBe("Delete the application first");
+    expect(conflict.message).toContain("Delete the app first.");
+    expect(conflict.message).toContain("Nothing has been deleted.");
+    expect(conflict.confirmLabel).toBe("Go to Deployments");
+    expect(conflict.confirmVariant).toBe("primary");
+    expect(conflict.cancelLabel).toBe("Stay here");
+
+    // Only an explicit confirmation navigates, and a hostile redirect is
+    // replaced by the deployments page.
+    conflict.onConfirm();
     expect(page.browser.nav.assigned).toEqual(["/?page=deploying"]);
   });
 
-  it("accepts a same-page deployment conflict redirect", async () => {
+  it("keeps a same-page deployment conflict redirect", async () => {
     const { page, rows } = await readyDelete();
+    page.confirmDialog.show
+      .mockReset()
+      .mockImplementationOnce((options: EnvironmentConfirmOptions) =>
+        options.onConfirm()
+      )
+      .mockImplementation(() => {});
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
       jsonResponse(
         {
@@ -632,9 +970,11 @@ describe("environment deletion", () => {
 
     rows.remove.dispatch("click");
     await flushPromises();
-    rows.remove.dispatch("click");
-    await flushPromises();
-    page.browser.clock.tick(ENVIRONMENT_DELETE_REDIRECT_MS);
+    const conflict = page.confirmDialog.show.mock.calls[1][0];
+    expect(conflict.message).toContain(
+      "An application is still deployed to this environment."
+    );
+    conflict.onConfirm();
     expect(page.browser.nav.assigned).toEqual(["/?page=deploying&env=dev"]);
   });
 
@@ -680,24 +1020,6 @@ describe("environment deletion", () => {
     pendingFailure.reject(new Error("late"));
     await flushPromises();
     expect(failure.page.decisions.notify).not.toHaveBeenCalled();
-  });
-
-  it("cancels a pending conflict redirect during teardown", async () => {
-    const { page, rows } = await readyDelete();
-    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
-      jsonResponse(
-        { code: "app-deployed", redirect: "/?page=deploying&env=dev" },
-        false,
-        409
-      )
-    );
-    rows.remove.dispatch("click");
-    await flushPromises();
-    expect(page.browser.clock.pending).toBe(1);
-
-    page.controller.teardown();
-    expect(page.browser.clock.pending).toBe(0);
-    expect(page.browser.nav.assigned).toEqual([]);
   });
 });
 
@@ -759,6 +1081,19 @@ describe("environment terminal banners", () => {
     page.controller.showActionRequired("aws", "prod", "");
     expect(page.elements.actionText.innerHTML).toContain("the setup branch");
     expect(page.elements.action.style.display).toBe("flex");
+
+    // A non-PR outcome carrying its own guidance (incomplete cloud credentials,
+    // issue #219) shows the message verbatim, escaped, instead of the
+    // open-a-pull-request text.
+    page.controller.showActionRequired("azure", "dev", "", {
+      userMessage: "Missing <subscription> ID."
+    });
+    expect(page.elements.actionText.innerHTML).toContain(
+      "Missing &lt;subscription&gt; ID."
+    );
+    expect(page.elements.actionText.innerHTML).not.toContain(
+      "could not open a pull request"
+    );
   });
 
   it("dismisses and clears every terminal banner", () => {

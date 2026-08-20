@@ -8,6 +8,7 @@ import {
   isCredentialsPaneController
 } from "./credentials.js";
 import { initializeDiscoveryPanel } from "./discovery.js";
+import { createEnvironmentConfirmDialog } from "./confirm-dialog.js";
 import {
   initializeEnvironmentPane,
   isEnvironmentPaneController,
@@ -19,7 +20,8 @@ import {
 } from "./operations.js";
 import {
   initializeCredentialProfilesPanel,
-  type CredentialProfile
+  type CredentialProfile,
+  type GithubReadiness
 } from "./profiles.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
@@ -32,6 +34,7 @@ interface EnvironmentPageState {
   readonly repo: string;
   readonly branch: string;
   readonly activeSubtab: "credentials" | "environments";
+  readonly mutationNonce: string;
 }
 
 function parsePageState(context: BrowserContext): EnvironmentPageState {
@@ -39,6 +42,7 @@ function parsePageState(context: BrowserContext): EnvironmentPageState {
   return {
     repo: readString(state, "repo"),
     branch: readString(state, "branch"),
+    mutationNonce: readString(state, "mutationNonce"),
     activeSubtab:
       readString(state, "activeSubtab") === "credentials" ? "credentials" : (
         "environments"
@@ -125,28 +129,60 @@ export function initializeEnvironmentPage(
 
   const discovery = initializeDiscoveryPanel(context);
   let selectedProfile: CredentialProfile | null = null;
+  let githubReadiness: GithubReadiness | null = null;
   let creating = false;
   let createAbort: AbortHandle | null = null;
+  const refreshCreateEligibility = (): void => {
+    createButton.disabled =
+      creating || !selectedProfile || githubReadiness?.ready !== true;
+  };
 
   if (!discovery) {
     scope.teardown();
     return NOOP_TEARDOWN;
   }
+  const confirmDialog = createEnvironmentConfirmDialog(context);
 
   const profiles = initializeCredentialProfilesPanel(context, {
     repo: state.repo,
+    mutationNonce: state.mutationNonce,
+    environmentName: () => environmentInput.value,
+    onReadinessChange(readiness) {
+      githubReadiness = readiness;
+      refreshCreateEligibility();
+    },
     onProfileChange(profile) {
       selectedProfile = profile;
+      refreshCreateEligibility();
+      const summary = context.dom.byId("env-profile-summary");
+      if (summary) {
+        summary.textContent =
+          profile ?
+            `${profile.name} (${profile.provider === "aws" ? "AWS" : "Azure"})`
+          : "No credential profile selected";
+      }
+      const detail = context.dom.byId("env-profile-detail");
+      const status = context.dom.byId("env-profile-status");
+      if (detail) {
+        detail.innerHTML = profile ? (status?.innerHTML ?? "") : "";
+        detail.style.display = profile ? "" : "none";
+      }
+      const next = context.dom.inputById("env-step1-next");
+      if (next) next.disabled = !profile;
+      const hint = context.dom.byId("env-step1-hint");
+      if (hint) hint.style.display = profile ? "none" : "";
     },
     discoverResources(provider, subscriptionId, tenantId) {
       void discovery.discoverResources(provider, subscriptionId, tenantId);
     }
   });
   if (!profiles) {
+    confirmDialog?.teardown();
     discovery.teardown();
     scope.teardown();
     return NOOP_TEARDOWN;
   }
+  scope.on(environmentInput, "input", profiles.invalidateReadiness);
 
   // Credential actions call into the environment controller only after user
   // interaction, so construct credentials first and close over the controller
@@ -155,17 +191,28 @@ export function initializeEnvironmentPage(
   let environments: EnvironmentPaneController;
   const credentials = initializeCredentialsPane(
     context,
-    { repo: state.repo, decisions: context.dialogs },
+    {
+      repo: state.repo,
+      decisions: context.dialogs,
+      ...(confirmDialog ? { confirmDialog } : {})
+    },
     {
       selectEnvironmentsSubtab() {
         environments.switchSubtab("environments");
       },
       openEnvironmentForm(preset) {
         environments.showEnvironmentForm(preset);
+      },
+      credentialCreated(name) {
+        void profiles.loadProfiles(name).then(() => {
+          environments.showWizardStep(2);
+          environmentInput.focus();
+        });
       }
     }
   );
   if (!isCredentialsPaneController(credentials)) {
+    confirmDialog?.teardown();
     profiles.teardown();
     discovery.teardown();
     scope.teardown();
@@ -174,24 +221,42 @@ export function initializeEnvironmentPage(
 
   const initializedEnvironments = initializeEnvironmentPane(
     context,
-    { repo: state.repo, decisions: context.dialogs },
+    {
+      repo: state.repo,
+      decisions: context.dialogs,
+      ...(confirmDialog ? { confirmDialog } : {})
+    },
     {
       loadCredentialTable() {
         credentials.loadCredentialTable();
       },
       loadProfiles(preselectName) {
-        void profiles.loadProfiles(preselectName);
+        return profiles.loadProfiles(preselectName);
       },
       loadGitHubIdentity(fresh) {
         void profiles.loadGithubIdentity(fresh);
       },
       clearSharedAppPin() {
         discovery.clearSharedAppPin();
+      },
+      setPendingInfraSelection(config, provider) {
+        discovery.setPendingInfraSelection(config, provider);
+      },
+      currentInfraSelection(provider) {
+        return discovery.currentInfraSelection(provider);
+      },
+      canSubmit() {
+        return (
+          !creating &&
+          selectedProfile !== null &&
+          githubReadiness?.ready === true
+        );
       }
     }
   );
 
   if (!isEnvironmentPaneController(initializedEnvironments)) {
+    confirmDialog?.teardown();
     credentials.teardown();
     profiles.teardown();
     discovery.teardown();
@@ -202,12 +267,14 @@ export function initializeEnvironmentPage(
 
   const operations = initializeEnvironmentOperations(context, {
     repo: state.repo,
+    mutationNonce: state.mutationNonce,
     deps: {
       showSuccessBanner: environments.showSuccess,
       showActionRequired: environments.showActionRequired,
       showSetupWarnings: environments.showWarnings,
       showError: environments.showError,
       reloadEnvironmentsTable: environments.loadEnvironmentTable,
+      resetSubmitButton: environments.resetSubmitButton,
       promptServiceManagementReference:
         discovery.promptServiceManagementReference,
       promptAppSelection: discovery.promptAppSelection
@@ -215,6 +282,7 @@ export function initializeEnvironmentPage(
   });
 
   if (!operations) {
+    confirmDialog?.teardown();
     credentials.teardown();
     environments.teardown();
     profiles.teardown();
@@ -231,8 +299,7 @@ export function initializeEnvironmentPage(
 
   const restoreCreateButton = (): void => {
     creating = false;
-    createButton.disabled = false;
-    createButton.textContent = "Create Environment";
+    environments.resetSubmitButton();
   };
 
   const failCreate = (message: string): void => {
@@ -245,6 +312,15 @@ export function initializeEnvironmentPage(
     if (creating) return;
     if (!selectedProfile) {
       showFormError("Please select a credential profile.");
+      return;
+    }
+    if (
+      githubReadiness?.ready !== true ||
+      githubReadiness.selectionHandle === ""
+    ) {
+      showFormError(
+        "Re-check the selected GitHub account before creating the environment."
+      );
       return;
     }
     const environment = environmentInput.value.trim();
@@ -290,13 +366,13 @@ export function initializeEnvironmentPage(
     }
     if (provider === "azure" && (subscriptionId === "" || tenantId === "")) {
       showFormError(
-        "The selected profile needs both a tenant ID and subscription ID. Edit the profile before creating the environment."
+        "The selected profile needs both a tenant ID and subscription ID. Delete the profile and create it again with those values before creating the environment."
       );
       return;
     }
     if (provider === "aws" && (accountId === "" || region === "")) {
       showFormError(
-        "The selected profile needs both an account ID and region. Edit the profile before creating the environment."
+        "The selected profile needs both an account ID and region. Delete the profile and create it again with those values before creating the environment."
       );
       return;
     }
@@ -315,6 +391,7 @@ export function initializeEnvironmentPage(
       resumeReason: "View planned graph",
       branch
     };
+    body.selectionHandle = githubReadiness.selectionHandle;
     if (provider === "azure") {
       body.clientId = clientIdInput.value.trim();
       body.tenantId = tenantId;
@@ -334,21 +411,28 @@ export function initializeEnvironmentPage(
 
     creating = true;
     createButton.disabled = true;
-    createButton.textContent = "Creating environment…";
+    createButton.textContent =
+      environmentInput.disabled ?
+        "Saving environment…"
+      : "Creating environment…";
     formStatus.style.display = "none";
     environments.showEnvironmentLanding();
     environments.hideTerminalBanners();
     operations.stopProgress();
-    operations.renderProgress(
-      optimisticOperation(environment, provider, context.clock.now())
-    );
+    operations.renderProgress({
+      ...optimisticOperation(environment, provider, context.clock.now()),
+      summary: `${environmentInput.disabled ? "Updating" : "Creating"} ${environment}…`
+    });
     operations.focusPanel();
 
     createAbort = context.net.createAbort();
     void context.net
       .fetch(CREATE_ENVIRONMENT_OPERATION_PATH, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": state.mutationNonce
+        },
         body: JSON.stringify(body),
         ...(createAbort ? { signal: createAbort.signal } : {})
       })
@@ -406,8 +490,8 @@ export function initializeEnvironmentPage(
   scope.on(cancelEnvironment, "click", environments.showEnvironmentLanding);
   scope.on(createProfile, "click", (event) => {
     event.preventDefault();
-    environments.switchSubtab("credentials");
-    context.dom.dispatch(newCredential, "click");
+    environments.showWizardStep(1);
+    credentials.startWizardCreation();
   });
   scope.on(createButton, "click", createEnvironment);
 
@@ -430,6 +514,7 @@ export function initializeEnvironmentPage(
     operations.teardown();
     profiles.teardown();
     credentials.teardown();
+    confirmDialog?.teardown();
     environments.teardown();
     discovery.teardown();
     scope.teardown();

@@ -19,6 +19,7 @@ import type {
   EnvironmentDecisionPort,
   EnvironmentFormPreset
 } from "./environments.js";
+import type { EnvironmentConfirmDialog } from "./confirm-dialog.js";
 
 export const CREDENTIALS_ENTRY_KEY = "environment-credentials";
 export const CREDENTIAL_PROFILES_PATH = "/api/credential-profiles";
@@ -83,15 +84,19 @@ export interface AzureCliAssistPromptView {
 export interface CredentialsPaneDependencies {
   selectEnvironmentsSubtab(): void;
   openEnvironmentForm(preset: EnvironmentFormPreset): void;
+  credentialCreated(name: string): void;
 }
 
 export interface CredentialsPaneOptions {
   repo: string;
   decisions: EnvironmentDecisionPort;
+  confirmDialog?: EnvironmentConfirmDialog;
 }
 
 export interface CredentialsPaneController {
   loadCredentialTable(): void;
+  startWizardCreation(): void;
+  endWizardCreation(): void;
   teardown(): void;
 }
 
@@ -134,7 +139,6 @@ export function credentialRowsMarkup(
         )}</td>` +
         `<td>${environmentStatusMarkup(profile.status)}</td>` +
         '<td class="rad-table__actions">' +
-        `<a class="rad-link js-cred-edit" href="#" data-name="${name}">edit</a>` +
         `<button class="rad-btn rad-btn--neutral js-cred-createenv" data-name="${name}" style="margin:0;">Create Env</button>` +
         `<button class="rad-btn rad-btn--danger-outline js-cred-delete" data-name="${name}" style="margin:0;">Delete Profile</button>` +
         "</td></tr>"
@@ -190,7 +194,7 @@ export function renderGitHubAccessView(
         identity.actingLogin
       )}</strong> cannot publish packages. Run the command below, complete the GitHub authorization, then retry. ` +
       "<strong>Note:</strong> <code>gh auth switch</code> changes the active account machine-wide until you switch back.",
-    statusColor: "var(--rad-warning, #9a6700)",
+    statusColor: "var(--rad-warning)",
     commandVisible: true,
     command,
     retryVisible: true
@@ -251,6 +255,10 @@ export function initializeCredentialsPane(
 ): CredentialsPaneController | BrowserTeardown {
   const credLanding = context.dom.byId("cred-landing");
   const credForm = context.dom.byId("cred-form");
+  const credFormCard = context.dom.byId("cred-form-card");
+  const credFormTitle = context.dom.byId("cred-form-title");
+  const wizardFormHost = context.dom.byId("env-cred-form-host");
+  const wizardStepCard = context.dom.byId("env-step-credentials-card");
   const credProviderSelect = context.dom.selectById("cred-provider-select");
   const credPanelAzure = context.dom.byId("cred-panel-azure");
   const credPanelAws = context.dom.byId("cred-panel-aws");
@@ -287,6 +295,10 @@ export function initializeCredentialsPane(
   if (
     !credLanding ||
     !credForm ||
+    !credFormCard ||
+    !credFormTitle ||
+    !wizardFormHost ||
+    !wizardStepCard ||
     !credProviderSelect ||
     !credPanelAzure ||
     !credPanelAws ||
@@ -338,6 +350,7 @@ export function initializeCredentialsPane(
   let ghChecking = false;
   let credVerified: VerifiedCredentials | null = null;
   let credPackagesVerified = false;
+  let formContext: "standalone" | "wizard" = "standalone";
   let pendingAssist: {
     action: AzureCliAssistAction;
     tenantId: string;
@@ -461,7 +474,7 @@ export function initializeCredentialsPane(
           if (!active || request !== tableRequest) return;
           const profiles = parseCredentialProfiles(payload);
           credTableBody.innerHTML = credentialRowsMarkup(profiles);
-          wireRows(profiles);
+          wireRows();
         },
         (error: unknown) => {
           if (
@@ -491,24 +504,55 @@ export function initializeCredentialsPane(
     credSuccessBanner.style.display = "flex";
   };
 
-  const showCredentialsForm = (
-    preset: CredentialProfile | null = null
-  ): void => {
+  const saveLabel = (): string =>
+    formContext === "wizard" ? "Save & Continue" : "Save Credential Profile";
+
+  const moveFormTo = (host: DomElement): void => {
+    host.appendChild(credFormCard);
+  };
+
+  const endWizardCreation = (): void => {
+    // Leaving the form invalidates any save still in flight, exactly as
+    // showLanding does for the standalone form; otherwise a save that resolves
+    // after Cancel still passes the token check and reports a created profile.
+    formToken += 1;
+    wizardFormHost.style.display = "none";
+    wizardStepCard.style.display = "";
+    moveFormTo(credForm);
+    credForm.style.display = "none";
+    credLanding.style.display = "";
+    formContext = "standalone";
+  };
+
+  const showCredentialsForm = (mode: "standalone" | "wizard"): void => {
+    formContext = mode;
     credSuccessBanner.style.display = "none";
-    const profile = preset && preset.name ? preset : null;
-    credNameInput.value = profile?.name ?? "";
-    credProviderSelect.value = profile?.provider || "azure";
-    applyProvider(credProviderSelect.value);
-    azTenantId.value = profile?.tenantId ?? "";
-    azSubId.value = profile?.subscriptionId ?? "";
-    awsAccountId.value = profile?.accountId ?? "";
-    awsRegion.value = profile?.region ?? "";
-    awsRoleArn.value = profile?.roleArn ?? "";
+    credFormTitle.textContent = "Create Credential Profile";
+    saveCredBtn.textContent = saveLabel();
+    cancelCredBtn.textContent =
+      mode === "wizard" ? "Cancel" : "← Back to credentials";
+    credNameInput.value = "";
+    credProviderSelect.value = "azure";
+    applyProvider("azure");
+    azTenantId.value = "";
+    azSubId.value = "";
+    awsAccountId.value = "";
+    awsRegion.value = "";
+    awsRoleArn.value = "";
     resetVerification();
     credPackagesVerified = false;
     updateSaveState();
-    credLanding.style.display = "none";
-    credForm.style.display = "";
+    if (mode === "wizard") {
+      moveFormTo(wizardFormHost);
+      wizardStepCard.style.display = "none";
+      wizardFormHost.style.display = "";
+    } else {
+      endWizardCreation();
+      formContext = "standalone";
+      moveFormTo(credForm);
+      credLanding.style.display = "none";
+      credForm.style.display = "";
+    }
     loadGitHubAccess();
     credNameInput.focus();
   };
@@ -571,13 +615,92 @@ export function initializeCredentialsPane(
       );
   };
 
-  const findProfile = (
-    profiles: readonly CredentialProfile[],
-    name: string
-  ): CredentialProfile | null =>
-    profiles.find((profile) => profile.name === name) ?? null;
+  const deleteCredentialProfile = (name: string, button: DomElement): void => {
+    setButtonState(button, true, "Deleting…");
+    void context.net
+      .fetch(CREDENTIAL_DELETE_PATH, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: options.repo, name })
+      })
+      .then(async (response) => ({
+        ok: response.ok,
+        body: await response.json()
+      }))
+      .then(
+        (result) => {
+          if (!active) return;
+          const error = readString(result.body, "error");
+          if (!result.ok || error !== "") {
+            setButtonState(button, false, "Delete Profile");
+            options.decisions.notify(
+              error || "Could not delete the credential profile."
+            );
+            return;
+          }
+          loadCredentialTable();
+        },
+        () => {
+          if (!active) return;
+          setButtonState(button, false, "Delete Profile");
+          options.decisions.notify(
+            "Could not delete the credential profile. Please try again."
+          );
+        }
+      );
+  };
 
-  function wireRows(profiles: readonly CredentialProfile[]): void {
+  const confirmCredentialDelete = (name: string, button: DomElement): void => {
+    setButtonState(button, true, "Checking usage…");
+    // Rows are only wired after a repository-scoped fetch succeeds, so a row
+    // action always has a repository to look usage up against.
+    const usageRequest = context.net
+      .fetch(`/api/list-environments?repo=${encodeURIComponent(options.repo)}`)
+      .then((response) => {
+        // The handler reports its own failures as HTTP 200 with an `error`
+        // field, so a non-OK status is not the only failure shape to catch.
+        if (!response.ok) throw new Error("list-environments request failed");
+        return response.json();
+      })
+      .then((payload) => {
+        if (readString(payload, "error") !== "") {
+          throw new Error("list-environments reported an error");
+        }
+        return {
+          usage: readArray(payload, "environments")
+            .filter(isRecord)
+            .filter(
+              (environment) =>
+                readString(environment, "credentialProfile") === name
+            )
+            .map((environment) => readString(environment, "name"))
+            .filter((environment) => environment !== ""),
+          checked: true
+        };
+      })
+      .catch(() => ({ usage: [] as string[], checked: false }));
+    void usageRequest.then(({ usage, checked }) => {
+      if (!active) return;
+      setButtonState(button, false, "Delete Profile");
+      options.confirmDialog?.show({
+        title: "Delete credential profile?",
+        message: `This deletes the credential profile "${name}". You will not be able to create new environments from it.${
+          checked ? "" : (
+            "\n\nCould not check which environments use this profile."
+          )
+        }`,
+        usageLabel:
+          usage.length === 1 ?
+            "This environment was created from this credential profile and will keep working as the environment has stored its own copy of the credential values:"
+          : "These environments were created from this credential profile and will keep working as each environment has stored its own copy of the credential values:",
+        usage,
+        confirmLabel: "Delete profile",
+        onConfirm: () => deleteCredentialProfile(name, button)
+      });
+    });
+  };
+
+  function wireRows(): void {
     release(rows);
     for (const button of context.dom.all(
       context.dom.document,
@@ -589,61 +712,13 @@ export function initializeCredentialsPane(
         dependencies.openEnvironmentForm({ name: "", profile: name });
       });
     }
-    for (const anchor of context.dom.all(
-      context.dom.document,
-      ".js-cred-edit"
-    )) {
-      bind(rows, anchor, "click", (event) => {
-        event.preventDefault();
-        showCredentialsForm(
-          findProfile(profiles, anchor.getAttribute("data-name") ?? "")
-        );
-      });
-    }
     for (const button of context.dom.all(
       context.dom.document,
       ".js-cred-delete"
     )) {
       bind(rows, button, "click", () => {
         const name = button.getAttribute("data-name") ?? "";
-        if (
-          !name ||
-          !options.decisions.confirm(`Delete credential profile "${name}"?`)
-        ) {
-          return;
-        }
-        setButtonState(button, true, "Deleting…");
-        void context.net
-          .fetch(CREDENTIAL_DELETE_PATH, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ repo: options.repo, name })
-          })
-          .then(async (response) => ({
-            ok: response.ok,
-            body: await response.json()
-          }))
-          .then(
-            (result) => {
-              if (!active) return;
-              const error = readString(result.body, "error");
-              if (!result.ok || error !== "") {
-                setButtonState(button, false, "Delete Profile");
-                options.decisions.notify(
-                  error || "Could not delete the credential profile."
-                );
-                return;
-              }
-              loadCredentialTable();
-            },
-            () => {
-              if (!active) return;
-              setButtonState(button, false, "Delete Profile");
-              options.decisions.notify(
-                "Could not delete the credential profile. Please try again."
-              );
-            }
-          );
+        if (name !== "") confirmCredentialDelete(name, button);
       });
     }
   }
@@ -653,8 +728,14 @@ export function initializeCredentialsPane(
     resetVerification();
   });
 
-  scope.on(newCredBtn, "click", () => showCredentialsForm());
-  scope.on(cancelCredBtn, "click", () => showLanding());
+  scope.on(newCredBtn, "click", () => showCredentialsForm("standalone"));
+  scope.on(cancelCredBtn, "click", () => {
+    if (formContext === "wizard") {
+      endWizardCreation();
+      return;
+    }
+    showLanding();
+  });
   scope.on(credSuccessBannerClose, "click", () => {
     credSuccessBanner.style.display = "none";
   });
@@ -838,6 +919,7 @@ export function initializeCredentialsPane(
       profile.roleArn = awsRoleArn.value.trim();
     }
     const token = formToken;
+    const wizard = formContext === "wizard";
     saveCredBtn.disabled = true;
     saveCredBtn.textContent = "Saving…";
     void context.net
@@ -851,19 +933,24 @@ export function initializeCredentialsPane(
         (payload) => {
           if (!active || token !== formToken) return;
           saveCredBtn.disabled = false;
-          saveCredBtn.textContent = "Save Credential Profile";
+          saveCredBtn.textContent = saveLabel();
           const error = readString(payload, "error");
           if (error !== "") {
             options.decisions.notify(`Could not save profile: ${error}`);
             return;
           }
-          showLanding();
-          showSuccessBanner(name);
+          if (wizard) {
+            endWizardCreation();
+            dependencies.credentialCreated(name);
+          } else {
+            showLanding();
+            showSuccessBanner(name);
+          }
         },
         () => {
           if (!active || token !== formToken) return;
           saveCredBtn.disabled = false;
-          saveCredBtn.textContent = "Save Credential Profile";
+          saveCredBtn.textContent = saveLabel();
           options.decisions.notify(
             "Could not save the credential profile. Please try again."
           );
@@ -873,6 +960,10 @@ export function initializeCredentialsPane(
 
   return {
     loadCredentialTable,
+    startWizardCreation() {
+      showCredentialsForm("wizard");
+    },
+    endWizardCreation,
     teardown() {
       if (!active) return;
       active = false;

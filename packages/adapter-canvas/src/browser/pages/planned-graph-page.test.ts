@@ -93,7 +93,12 @@ function fixture(options: FixtureOptions = {}) {
   const envPayload: Record<string, unknown> =
     envListing === "error" ? { environments: [], error: "boom" }
     : envListing === "empty" ? { environments: [] }
-    : { environments: [{ name: "dev", provider: "azure" }] };
+    : {
+        environments: [
+          { name: "dev", provider: "azure", status: "success" },
+          { name: "half-built", provider: "azure", status: "pending" }
+        ]
+      };
   browser.net.handle(
     `/api/list-environments?repo=${encodeURIComponent(repo)}`,
     () => jsonResponse(envPayload)

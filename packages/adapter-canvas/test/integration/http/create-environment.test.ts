@@ -14,6 +14,7 @@ import {
   resolveGitHubEnvironmentCreateState
 } from "../../../src/server.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
+import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
 import type {
@@ -51,6 +52,7 @@ interface Script {
   headSha?: string | null;
   createBranch?: { ok: boolean; stderr: string };
   files?: Record<string, string>;
+  azureCredential?: () => Record<string, unknown>;
   pullRequest?: {
     ok: boolean;
     url?: string;
@@ -167,6 +169,8 @@ function start(script: Script = {}): Harness {
     isServerOwnedRequest: (_instanceId, request) =>
       request.headers["x-radius-server-owned"] === SERVER_OWNED_TOKEN,
     readInstanceEntry: () => entry,
+    getSelectedGitHubExecutor: () =>
+      successfulSelectedGhExecutor({ run: async (args) => runGhArgs(args) }),
 
     // --- admission ---
     isValidRepoSlug,
@@ -313,7 +317,9 @@ function start(script: Script = {}): Harness {
     defaultStateArchive: "radius-state",
 
     // --- credentials ---
-    azureCredential: () => ({ clientId: "c", tenantId: "t" }),
+    azureCredential:
+      script.azureCredential ??
+      (() => ({ clientId: "c", tenantId: "t", subscriptionId: "s" })),
     awsCredential: () => ({}),
     optionalString: (value) => (typeof value === "string" ? value : ""),
 
@@ -589,6 +595,48 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(harness.steps).toContain("✅ Credentials verification dispatched.");
   });
 
+  it("skips verification and finishes action_required when cloud credentials are incomplete", async () => {
+    // Issue #219: the shared Azure credential is missing a subscription ID, so
+    // dispatching verify would only produce a run that fails at the cloud-login
+    // step. The handler must skip the dispatch and finish the operation as
+    // action_required with guidance, rather than leaving it polling a verify run
+    // that will never exist.
+    const harness = start({
+      azureCredential: () => ({ clientId: "c", tenantId: "t" })
+    });
+
+    const response = await post({ repo: "octo/app", environment: "dev" });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      success: true,
+      verifySkipped: true,
+      verifyRunUrl: ""
+    });
+    expect(payload.verifySkipReason).toEqual(expect.any(String));
+    expect(payload.verifySkipReason).not.toBe("");
+    // No verify run was dispatched.
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("workflow run "))
+    ).toBe(false);
+    // The operation reaches a terminal action_required state carrying the note.
+    expect(harness.journal).toContain(`setStageState:${STAGE_VERIFY}:skipped`);
+    expect(harness.finished).toEqual([
+      {
+        state: "action_required",
+        options: {
+          terminal: {
+            reason: "credentials-incomplete",
+            pullRequestUrl: null,
+            userMessage: payload.verifySkipReason
+          }
+        }
+      }
+    ]);
+  });
+
   it("preflights GHCR package scopes before bootstrapping the state package", async () => {
     // Migrated from the textual `createRoute` ordering assertion in
     // `operations.test.ts`: the same property, observed as call order.
@@ -705,7 +753,11 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   });
 
   it("falls back to the shared Azure credential for values the request omits", async () => {
-    const harness = start();
+    // The shared credential is missing a subscription ID, so the fallback fills
+    // client/tenant but verification is skipped with a warning (issue #219).
+    const harness = start({
+      azureCredential: () => ({ clientId: "c", tenantId: "t" })
+    });
 
     await post({ repo: "octo/app" });
 

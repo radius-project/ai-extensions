@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import type { SelectedGhExecutor } from "../../gh.js";
 import type { CanvasState } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
@@ -50,6 +51,9 @@ export interface CreateEnvironmentDependencies
   // Evaluated per request against this instance's server-owned token. Never a
   // construction-time value: the token is a per-instance randomUUID().
   isServerOwnedRequest(instanceId: string, request: IncomingMessage): boolean;
+  getSelectedGitHubExecutor(
+    operationId: string
+  ): SelectedGhExecutor | null | undefined;
   readInstanceEntry(
     instanceId: string
   ): CreateEnvironmentInstanceEntry | undefined;
@@ -76,8 +80,13 @@ export interface CreateEnvironmentDependencies
   ): Promise<Partial<CreateEnvironmentCommandResult>>;
 
   // --- preflight ---
-  preflightRepoAdmin(repo: string): Promise<string>;
-  preflightGhcrPackageWriteAccess(): Promise<GhcrPreflightResult>;
+  preflightRepoAdmin(
+    repo: string,
+    executor?: SelectedGhExecutor
+  ): Promise<string>;
+  preflightGhcrPackageWriteAccess(
+    executor?: SelectedGhExecutor
+  ): Promise<GhcrPreflightResult>;
   bootstrapGHCRStatePackage(input: {
     targetRepository: string;
     registry: string;
@@ -86,15 +95,20 @@ export interface CreateEnvironmentDependencies
   stateRegistryForEnvironment(repo: string, environment: string): string;
 
   // --- committer ports ---
-  getDefaultBranch(repo: string): Promise<string | null | undefined>;
+  getDefaultBranch(
+    repo: string,
+    executor?: SelectedGhExecutor
+  ): Promise<string | null | undefined>;
   getBranchHeadSha(
     repo: string,
-    branch: string
+    branch: string,
+    executor?: SelectedGhExecutor
   ): Promise<string | null | undefined>;
   createBranchRef(
     repo: string,
     branch: string,
-    sha: string
+    sha: string,
+    executor?: SelectedGhExecutor
   ): Promise<{ ok: boolean; stderr: string }>;
   tempFile: WorkflowTempFilePort;
 
@@ -129,13 +143,17 @@ export interface CreateEnvironmentDependencies
     operation: CreateEnvironmentOperation,
     entry: { path: string; branch: string | null; mode: string }
   ): void;
-  deleteLegacyDeployWorkflow(repo: string): Promise<boolean>;
+  deleteLegacyDeployWorkflow(
+    repo: string,
+    executor?: SelectedGhExecutor
+  ): Promise<boolean>;
   createPullRequestApi(
     repo: string,
     head: string,
     base: string,
     title: string,
-    body: string
+    body: string,
+    executor?: SelectedGhExecutor
   ): Promise<CreateEnvironmentPullRequestResult>;
 
   // --- verification ---
@@ -153,7 +171,8 @@ export interface CreateEnvironmentDependencies
   fetchFileFromRepo(
     repo: string,
     path: string,
-    branch: string
+    branch: string,
+    executor?: SelectedGhExecutor
   ): Promise<string | null | undefined>;
   buildVerifyWorkflowDispatchArgs(input: {
     workflowFile: string;
@@ -228,6 +247,15 @@ export async function handleCreateEnvironment(
     const { targetRepo, envName, provider } = admission;
     op = admission.operation;
     const operation = admission.operation;
+    const selectedExecutor = dependencies.getSelectedGitHubExecutor(
+      operation.operationId
+    );
+    if (!selectedExecutor) {
+      throw new Error(
+        "The selected GitHub account executor is unavailable. Re-check the account and retry."
+      );
+    }
+    await selectedExecutor.verifyIdentity();
 
     steps = [];
     const rawPush = steps.push.bind(steps);
@@ -245,7 +273,10 @@ export async function handleCreateEnvironment(
     // Preflight repo access + admin BEFORE any GitHub mutation. Reachable
     // directly when credentials already exist and azure-auto-setup is skipped,
     // so guarding here too is required.
-    const accessMsg = await dependencies.preflightRepoAdmin(targetRepo);
+    const accessMsg = await dependencies.preflightRepoAdmin(
+      targetRepo,
+      selectedExecutor
+    );
     if (accessMsg) {
       const failure = await dependencies.finalizeSetupFailure(operation, {
         status: 403,
@@ -263,10 +294,14 @@ export async function handleCreateEnvironment(
       return;
     }
 
-    const runner = createWorkflowScopeGhRunner(dependencies, {
-      targetRepo,
-      envName
-    });
+    const runner = createWorkflowScopeGhRunner(
+      dependencies,
+      {
+        targetRepo,
+        envName
+      },
+      selectedExecutor
+    );
     const { runGh, runGhOrThrow, setEnvironmentVariable, runGhWorkflow } =
       runner;
 
@@ -312,7 +347,8 @@ export async function handleCreateEnvironment(
       });
 
     const defaultBranch =
-      (await dependencies.getDefaultBranch(targetRepo)) || "main";
+      (await dependencies.getDefaultBranch(targetRepo, selectedExecutor)) ||
+      "main";
     const stateRegistry = dependencies.stateRegistryForEnvironment(
       targetRepo,
       envName
@@ -321,7 +357,8 @@ export async function handleCreateEnvironment(
     steps.push(
       'Creating private GHCR state package "' + stateRegistry + '"...'
     );
-    const ghcrPreflight = await dependencies.preflightGhcrPackageWriteAccess();
+    const ghcrPreflight =
+      await dependencies.preflightGhcrPackageWriteAccess(selectedExecutor);
     if (!ghcrPreflight.ok) {
       await fail(403, ghcrPreflight.error, ghcrPreflight.code, { steps });
       return;
@@ -340,11 +377,12 @@ export async function handleCreateEnvironment(
       {
         runGh: (args) => runGh(args),
         runGhWorkflow: (args) => runGhWorkflow(args),
-        getDefaultBranch: (repo) => dependencies.getDefaultBranch(repo),
+        getDefaultBranch: (repo) =>
+          dependencies.getDefaultBranch(repo, selectedExecutor),
         getBranchHeadSha: (repo, branch) =>
-          dependencies.getBranchHeadSha(repo, branch),
+          dependencies.getBranchHeadSha(repo, branch, selectedExecutor),
         createBranchRef: (repo, branch, sha) =>
-          dependencies.createBranchRef(repo, branch, sha),
+          dependencies.createBranchRef(repo, branch, sha, selectedExecutor),
         tempFile: dependencies.tempFile,
         errorMessage: (error) => dependencies.errorMessage(error),
         pushStep: (message) => {
@@ -413,15 +451,21 @@ export async function handleCreateEnvironment(
     }
 
     // Step 2: Set environment variables and secrets based on provider
-    await applyProviderConfiguration(provider, data, {
-      azureCredential: () => dependencies.azureCredential(),
-      awsCredential: () => dependencies.awsCredential(),
-      optionalString: (value) => dependencies.optionalString(value),
-      setEnvironmentVariable,
-      pushStep: (message) => {
-        steps.push(message);
-      }
-    });
+    const { credentialsComplete, missingCredNote } =
+      await applyProviderConfiguration(provider, data, {
+        azureCredential: () => dependencies.azureCredential(),
+        awsCredential: () => dependencies.awsCredential(),
+        optionalString: (value) => dependencies.optionalString(value),
+        setEnvironmentVariable,
+        pushStep: (message) => {
+          steps.push(message);
+        }
+      });
+    // When verification is deliberately not dispatched (incomplete cloud
+    // credentials, or workflows that only exist on a PR branch), this holds the
+    // reason so the response can signal the client to skip polling
+    // /api/verify-status, which would otherwise spin until the timeout.
+    let verifySkipReason = "";
 
     // Steps 3, 4 and 4b: publish the verify, deploy and delete workflow files.
     // `gate` is this use case's own `checkpoint`, passed in so the gates fire at
@@ -439,7 +483,7 @@ export async function handleCreateEnvironment(
         recordCommittedWorkflowFile: (op, entry) =>
           dependencies.recordCommittedWorkflowFile(op, entry),
         deleteLegacyDeployWorkflow: (repo) =>
-          dependencies.deleteLegacyDeployWorkflow(repo),
+          dependencies.deleteLegacyDeployWorkflow(repo, selectedExecutor),
         usingPullRequestBranch: () => Boolean(committer.pullRequestState()),
         pullRequestBranch: prBranch,
         errorMessage: (error) => dependencies.errorMessage(error),
@@ -487,7 +531,8 @@ export async function handleCreateEnvironment(
         prState.branch,
         prState.base,
         prTitle,
-        prBody
+        prBody,
+        selectedExecutor
       );
       if (pr.ok) {
         pullRequestUrl = pr.url || "";
@@ -524,16 +569,30 @@ export async function handleCreateEnvironment(
       prState: prState || null,
       pullRequestUrl,
       fetchFile: (repo, path, branch) =>
-        dependencies.fetchFileFromRepo(repo, path, branch),
-      resolveDefaultBranch: (repo) => dependencies.getDefaultBranch(repo)
+        dependencies.fetchFileFromRepo(repo, path, branch, selectedExecutor),
+      resolveDefaultBranch: (repo) =>
+        dependencies.getDefaultBranch(repo, selectedExecutor)
     });
     pullRequestUrl = verifyPlan.pullRequestUrl;
     if (!verifyPlan.shouldDispatch) {
+      verifySkipReason =
+        verifyPlan.skipReason ||
+        "Credential verification will run automatically once the workflows are on the default branch.";
       steps.push(
         `⏭️ Skipping credential verification until the pull request is merged — ${
           verifyPlan.skipReason ||
           "the workflows are not on the default branch yet"
         }.`
+      );
+    } else if (!credentialsComplete) {
+      // The identifying cloud credentials the verify workflow needs to log in
+      // weren't configured, so dispatching would only produce a run that fails
+      // at the cloud-login step (issue #219). Skip it and tell the user how to
+      // finish, rather than surfacing an unexplained failure.
+      verifySkipReason = missingCredNote;
+      steps.push(
+        "⏭️ Skipping credential verification — cloud credentials are not fully configured. " +
+          missingCredNote
       );
     } else {
       if (verifyPlan.ref)
@@ -680,6 +739,35 @@ export async function handleCreateEnvironment(
         report: (diagnostic) =>
           dependencies.reportOperationDiagnostic(diagnostic)
       });
+    } else if (!credentialsComplete) {
+      // Verify was deliberately not dispatched because the identifying cloud
+      // credentials are incomplete (issue #219). There is no run to wait for, so
+      // finish the operation as action_required carrying the reason, rather than
+      // leaving it in progress polling a verify run that will never exist.
+      dependencies.recordCommitState(operation, {
+        mode: prState ? "pull_request" : "default_branch",
+        branch: prState?.branch || defaultBranch,
+        baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
+        pullRequestUrl: pullRequestUrl || null
+      });
+      dependencies.setStageState(
+        operation,
+        dependencies.stageVerify,
+        "skipped"
+      );
+      dependencies.finish(operation, "action_required", {
+        terminal: {
+          reason: "credentials-incomplete",
+          pullRequestUrl: pullRequestUrl || null,
+          userMessage: missingCredNote
+        }
+      });
+      await dependencies.persistBestEffort({
+        operation,
+        persist: () => dependencies.persistOperations(),
+        report: (diagnostic) =>
+          dependencies.reportOperationDiagnostic(diagnostic)
+      });
     } else {
       dependencies.recordCommitState(operation, {
         mode: prState ? "pull_request" : "default_branch",
@@ -711,6 +799,12 @@ export async function handleCreateEnvironment(
         actionRequired ?
           prState?.base || verifyPlan.defaultBranch || null
         : null,
+      // Distinct signal for a deliberately-skipped verification (incomplete
+      // cloud credentials, or workflows not yet on the default branch) so a
+      // direct API caller can tell it apart from a dispatched run; the canvas
+      // itself reads the operation's terminal state, not this field.
+      verifySkipped: verifySkipReason !== "",
+      verifySkipReason,
       steps
     });
   } catch (e) {

@@ -19,7 +19,8 @@ import { RADIUS_SESSION_START_CONTEXT } from "./declarations.js";
 import {
   evaluateAppBicepHook,
   appBicepHandoffMessage,
-  deployRepairHandoffMessage
+  deployRepairHandoffMessage,
+  deployFailureNoticeMessage
 } from "./hooks.js";
 import { errorMessage } from "./util.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
@@ -65,7 +66,7 @@ export interface RadiusExtension {
 export function createRadiusExtension(
   deps: RadiusExtensionDependencies
 ): RadiusExtension {
-  const { workspaceState, fetchBicepForBranch } =
+  const { workspaceState, resolveAppModelStatus } =
     createGraphContextHelpers(deps);
 
   // ─── Host-channel callbacks ────────────────────────────────────────────────
@@ -86,6 +87,14 @@ export function createRadiusExtension(
           attemptId
         })
       )
+  );
+  // The informational sibling of the repair handoff: a deploy whose run could
+  // not be confirmed is relayed to chat as a report, never as a repair loop.
+  deps.hostCallbacks.setDeployFailureNotice(
+    ({ repo, branch, error, deployRunUrl }) =>
+      deps.session
+        .get()
+        .send(deployFailureNoticeMessage(repo, branch, { error, deployRunUrl }))
   );
   // Routes hand us either a bare prompt or an already-paired
   // {prompt, displayPrompt}; forward both shapes untouched so the server owns
@@ -323,6 +332,19 @@ export function createRadiusExtension(
     startKeepalive();
   }
 
+  // Staleness signals already handed to the agent, so a refresh that does not
+  // clear the drift cannot block every later graph open. Scoped to this
+  // extension instance rather than the module.
+  //
+  // Bounded because the key includes the commit the record names, so every
+  // regeneration produces a new one and the set would otherwise grow for as
+  // long as the process runs. Set preserves insertion order, so dropping the
+  // oldest evicts the least recently seen problem. Re-asking about a signal
+  // that fell out is harmless: the point is to stop a tight loop, not to
+  // remember forever.
+  const REFRESH_MEMO_LIMIT = 100;
+  const requestedRefreshes = new Set<string>();
+
   return {
     canvases: [createRadiusCanvas(deps)],
     tools: createRadiusTools(deps),
@@ -336,8 +358,17 @@ export function createRadiusExtension(
             { toolName: input.toolName, toolArgs: input.toolArgs },
             {
               workspaceState,
-              fetchBicep: fetchBicepForBranch,
-              defaultBranchForState: deps.workspace.defaultBranchForState
+              defaultBranchForState: deps.workspace.defaultBranchForState,
+              appModelStatus: resolveAppModelStatus,
+              shouldRequestRefresh: (key: string) => {
+                if (requestedRefreshes.has(key)) return false;
+                requestedRefreshes.add(key);
+                if (requestedRefreshes.size > REFRESH_MEMO_LIMIT) {
+                  const oldest = requestedRefreshes.values().next().value;
+                  if (oldest !== undefined) requestedRefreshes.delete(oldest);
+                }
+                return true;
+              }
             }
           );
         } catch {

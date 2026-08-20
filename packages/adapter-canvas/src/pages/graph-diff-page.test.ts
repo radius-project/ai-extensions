@@ -2,9 +2,32 @@ import { describe, expect, it } from "vitest";
 import { browserEntryMarker, browserScript } from "../browser/scripts.js";
 import { HOSTILE_STATE } from "../../test/support/pages/hostile-state.js";
 import { readBrowserPageState } from "../../test/support/pages/browser-state.js";
+import { unlabelledSelectIds } from "../../test/support/pages/labelled-controls.js";
 import { graphDiffPage } from "./graph-diff-page.js";
 
 describe("graphDiffPage", () => {
+  it("gives every branch and application selector a programmatic name", () => {
+    expect(
+      unlabelledSelectIds(
+        graphDiffPage({
+          diffTargetRepo: "octo/app",
+          diffBase: "main",
+          diffHead: "feature"
+        })
+      )
+    ).toEqual([]);
+    expect(
+      unlabelledSelectIds(
+        graphDiffPage({
+          diffTargetRepo: "octo/app",
+          diffBase: "main",
+          diffHead: "feature",
+          branches: ["main", "feature"]
+        })
+      )
+    ).toEqual([]);
+  });
+
   it("renders the selector state and one generated entry", () => {
     const html = graphDiffPage({
       diffTargetRepo: "octo/app",

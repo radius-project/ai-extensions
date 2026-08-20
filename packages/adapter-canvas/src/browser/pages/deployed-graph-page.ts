@@ -127,6 +127,7 @@ export function initializeDeployedGraphPage(
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
   const providers: EnvironmentProviders = {};
+  const environmentStatuses: Record<string, string> = {};
   const adaptive = createDeployedState();
   const deployments = new Map<string, string>();
   let hasEnvironments = false;
@@ -192,7 +193,8 @@ export function initializeDeployedGraphPage(
       exists,
       deploymentStatus,
       deploymentStatesStale,
-      environmentsUnavailable
+      environmentsUnavailable,
+      environmentStatuses[environment] ?? ""
     );
     if (label) {
       label.textContent =
@@ -542,6 +544,7 @@ export function initializeDeployedGraphPage(
         hasEnvironments = listing.environments.length > 0;
         for (const environment of listing.environments) {
           providers[environment.name] = environment.provider;
+          environmentStatuses[environment.name] = environment.status;
         }
         if (!envSelect) return;
         context.dom.setOptions(
