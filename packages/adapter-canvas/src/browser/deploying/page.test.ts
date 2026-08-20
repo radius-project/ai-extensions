@@ -1195,18 +1195,16 @@ describe("deploy flow", () => {
       deployBody = deployInit?.body;
       return jsonResponse({ ok: true });
     });
-    const deployStatuses = [
-      { status: "in_progress" },
-      { status: "in_progress", deployRunUrl: "https://example.test/run/1" }
-    ];
-    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-      jsonResponse(
-        deployStatuses.shift() ?? {
-          status: "in_progress",
-          deployRunUrl: "https://example.test/run/1"
-        }
-      )
-    );
+    let pollCount = 0;
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () => {
+      pollCount++;
+      return pollCount === 1 ?
+          jsonResponse({ status: "in_progress" })
+        : jsonResponse({
+            status: "in_progress",
+            deployRunUrl: "https://example.test/run/1"
+          });
+    });
 
     page.deployBtn.dispatch("click");
     expect(page.deployBtn.disabled).toBe(true);
@@ -1223,6 +1221,7 @@ describe("deploy flow", () => {
     page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toBe("");
+    expect(page.progressModal.style.display).toBe("flex");
     page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain("has started");
@@ -1289,7 +1288,8 @@ describe("deploy flow", () => {
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain("has started");
 
-    const closeButton = page.inlineStatus.children[2];
+    const closeButton = page.inlineStatus.querySelector(".rad-inline__close");
+    if (!closeButton) throw new Error("Expected inline status close button.");
     closeButton.dispatch("click");
     expect(page.inlineStatus.style.display).toBe("none");
 
@@ -1324,6 +1324,29 @@ describe("deploy flow", () => {
     );
   });
 
+  it("does not show a deployment-started notification for terminal success", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "success",
+        deployRunUrl: "https://example.test/run/1"
+      })
+    );
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).not.toContain("has started");
+    expect(page.progressModal.style.display).toBe("flex");
+    page.browser.clock.tick(DEPLOY_AUTO_HIDE_MS);
+    expect(page.progressModal.style.display).toBe("none");
+  });
+
   it("dismisses the inline status banner when its close button is clicked", async () => {
     const page = fixture();
     init(page);
@@ -1340,7 +1363,8 @@ describe("deploy flow", () => {
     page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
     await flushPromises();
     expect(page.inlineStatus.style.display).toBe("flex");
-    const closeButton = page.inlineStatus.children[2];
+    const closeButton = page.inlineStatus.querySelector(".rad-inline__close");
+    if (!closeButton) throw new Error("Expected inline status close button.");
     closeButton.dispatch("click");
     expect(page.inlineStatus.style.display).toBe("none");
   });
@@ -1451,7 +1475,7 @@ describe("deploy flow", () => {
   });
 
   it("cancels a click-started poll superseded by another attempt", async () => {
-    const page = fixture();
+    const page = fixture({ withProgressModalElement: false });
     const currentStatus = {
       status: "failed",
       error: "someone else's failure",
@@ -1881,6 +1905,74 @@ describe("deploy flow", () => {
     expect(page.browser.clock.pending).toBe(0);
   });
 
+  it("does not show a started notification if repair polling observes a new run URL", async () => {
+    const page = fixture();
+    const teardown = init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    let ticks = 0;
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () => {
+      ticks++;
+      return ticks === 1 ?
+          jsonResponse({
+            status: "failed",
+            error: "workflow startup failed",
+            handoff: { pending: true, state: "pending" }
+          })
+        : jsonResponse({
+            status: "in_progress",
+            deployRunUrl: "https://example.test/run/2"
+          });
+    });
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "workflow startup failed"
+    );
+
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).not.toContain("has started");
+    teardown();
+  });
+
+  it("keeps failure UI visible when a confirmed workflow enters repair handoff", async () => {
+    const page = fixture();
+    const teardown = init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    let ticks = 0;
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () => {
+      ticks++;
+      return ticks === 1 ?
+          jsonResponse({
+            status: "in_progress",
+            deployRunUrl: "https://example.test/run/1"
+          })
+        : jsonResponse({
+            status: "failed",
+            error: "deployment failed",
+            handoff: { pending: true, state: "pending" }
+          });
+    });
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).toContain("has started");
+
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.progressModal.style.display).toBe("flex");
+    expect(page.progressSubtitle.innerHTML).toContain("deployment failed");
+    expect(page.failRepairNote.textContent).toContain("Handing this failure");
+    teardown();
+  });
+
   it("shows the repair-failed note when Copilot cannot be reached", async () => {
     const page = fixture();
     init(page);
@@ -1982,22 +2074,37 @@ describe("deploy flow", () => {
     expect(page.progressModal.style.display).toBe("none");
   });
 
-  it("gives up after the workflow poll cap and falls back to the real listing", async () => {
-    const page = fixture();
-    init(page);
-    await flushPromises();
-    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
-    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-      jsonResponse({ status: "in_progress" })
-    );
-    page.deployBtn.dispatch("click");
-    await flushPromises();
-    for (let tick = 0; tick <= DEPLOY_WORKFLOW_POLL_LIMIT + 1; tick++) {
-      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+  it.each([
+    { label: "present", withProgressModalElement: true },
+    { label: "absent", withProgressModalElement: false }
+  ])(
+    "gives up after the workflow poll cap when the optional progress modal is $label",
+    async ({ withProgressModalElement }) => {
+      const page = fixture({ withProgressModalElement });
+      init(page);
       await flushPromises();
+      page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          status: "in_progress",
+          deployRunUrl: "https://example.test/run/1"
+        })
+      );
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      for (let tick = 0; tick <= DEPLOY_WORKFLOW_POLL_LIMIT + 1; tick++) {
+        page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+        await flushPromises();
+      }
+      expect(page.browser.clock.pending).toBe(0);
+      if (withProgressModalElement) {
+        expect(page.progressModal.style.display).toBe("none");
+      }
+      expect(inlineMessage(page.inlineStatus)).toContain(
+        "taking longer than expected"
+      );
     }
-    expect(page.browser.clock.pending).toBe(0);
-  });
+  );
 
   it("dismisses the progress dialog on backdrop click and refreshes fresh", async () => {
     const page = fixture();

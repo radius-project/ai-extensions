@@ -669,13 +669,17 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(deployNow).toHaveText("Deploy");
     await deployNow.click();
 
-    await expect.poll(() => statusPolls > 0).toBe(true);
+    await expect.poll(() => statusPolls).toBeGreaterThan(0);
     const inlineStatus = page.locator("#deploy-inline-status");
+    // Waiting for a status request makes this absence cover the old eager
+    // notification path rather than merely asserting the initial page state.
     await expect(inlineStatus).not.toContainText("has started");
+    await expect(page.locator("#deploy-progress-modal")).toBeVisible();
 
     workflowConfirmed = true;
-    await expect.poll(() => statusPolls > 1).toBe(true);
+    await expect.poll(() => statusPolls).toBeGreaterThan(1);
     await expect(inlineStatus).toContainText("has started");
+    await expect(page.locator("#deploy-progress-modal")).toBeHidden();
   });
 
   test("does not show deployment-started notification when workflow startup fails in Chromium", async ({
@@ -708,7 +712,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(deployNow).toHaveText("Deploy");
     await deployNow.click();
 
-    await expect.poll(() => statusPolls > 0).toBe(true);
+    await expect.poll(() => statusPolls).toBeGreaterThan(0);
     await expect(page.locator("#deploy-inline-status")).not.toContainText(
       "has started"
     );
