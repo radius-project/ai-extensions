@@ -61,6 +61,9 @@ jobs:
   canvas-chromium:
     name: Canvas Chromium
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
     permissions:
       contents: read
     steps:
@@ -81,9 +84,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Install Chromium
-        run: pnpm exec playwright install --with-deps chromium
 
       - name: Run Canvas browser component tests
         run: pnpm run test:component

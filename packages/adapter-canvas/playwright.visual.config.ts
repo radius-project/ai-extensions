@@ -1,4 +1,8 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
+
+const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   testDir: "./test/visual",
@@ -14,7 +18,12 @@ export default defineConfig({
     ["list"],
     [
       "./test/e2e/support/retry-only-reporter.ts",
-      { outputFile: "test-results/visual-retry-only-passes.json" }
+      {
+        outputFile: path.join(
+          packageRoot,
+          "test-results/visual-retry-only-passes.json"
+        )
+      }
     ],
     ["html", { open: "never", outputFolder: "playwright-visual-report" }]
   ],
@@ -23,6 +32,7 @@ export default defineConfig({
       animations: "disabled",
       caret: "hide",
       scale: "css",
+      threshold: 0.1,
       maxDiffPixels: 250
     }
   },

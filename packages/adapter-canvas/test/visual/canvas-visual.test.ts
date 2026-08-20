@@ -18,7 +18,10 @@ type Theme = "dark" | "light";
 
 type GraphRequestBody = { branch: string; repo: string };
 
-type GraphRequests = { loadGraph: GraphRequestBody[] };
+type GraphRequests = {
+  loadGraph: GraphRequestBody[];
+  planGraph: GraphRequestBody[];
+};
 
 function isGraphRequestBody(value: unknown): value is GraphRequestBody {
   if (typeof value !== "object" || value === null) return false;
@@ -31,6 +34,7 @@ function isGraphRequestBody(value: unknown): value is GraphRequestBody {
 const require = createRequire(import.meta.url);
 const VISUAL_FONT_PATH =
   require.resolve("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2");
+const VISUAL_FONT = fs.readFile(VISUAL_FONT_PATH, "base64");
 
 const GRAPH_RESOURCES: CanvasGraphResource[] = [
   {
@@ -110,9 +114,12 @@ async function seed(
   canvas: CanvasHarness,
   state: CanvasState = {}
 ): Promise<void> {
-  await fs.mkdir(path.join(canvas.workspacePath, "src", "web"), {
-    recursive: true
-  });
+  await Promise.all([
+    fs.mkdir(path.join(canvas.workspacePath, ".radius"), { recursive: true }),
+    fs.mkdir(path.join(canvas.workspacePath, "src", "web"), {
+      recursive: true
+    })
+  ]);
   await fs.writeFile(
     path.join(canvas.workspacePath, ".radius", "app.bicep"),
     "extension radius\n",
@@ -136,7 +143,7 @@ async function gotoVisual(
   canvasPage: string,
   theme: Theme
 ): Promise<void> {
-  const visualFont = await fs.readFile(VISUAL_FONT_PATH, "base64");
+  const visualFont = await VISUAL_FONT;
   await page.goto(`${canvas.baseUrl}/?page=${canvasPage}`);
   await page.waitForLoadState("domcontentloaded");
   const themeVariables = Object.entries(THEMES[theme])
@@ -213,28 +220,36 @@ async function openEnvironmentCreateForm(page: Page): Promise<void> {
 
 async function routeDeployments(
   page: Page,
+  canvas: CanvasHarness,
   status: "failed" | "success"
 ): Promise<void> {
-  await page.route("**/api/list-deployments?*", async (route) => {
-    await route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({
-        deployments: [
-          {
-            app: "radius-app",
-            environment: "fixture-environment",
-            status,
-            runUrl: `https://github.com/${REPOSITORY}/actions/runs/1`
-          }
-        ]
-      })
-    });
-  });
+  await page.route(
+    `${canvas.baseUrl}/api/list-deployments?*`,
+    async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          deployments: [
+            {
+              app: "radius-app",
+              environment: "fixture-environment",
+              status,
+              runUrl: `https://github.com/${REPOSITORY}/actions/runs/1`
+            }
+          ]
+        })
+      });
+    }
+  );
 }
 
-async function routeGraphControls(page: Page): Promise<GraphRequests> {
+async function routeGraphControls(
+  page: Page,
+  canvas: CanvasHarness
+): Promise<GraphRequests> {
   const loadGraph: GraphRequestBody[] = [];
-  await page.route("**/api/load-graph", async (route) => {
+  const planGraph: GraphRequestBody[] = [];
+  await page.route(`${canvas.baseUrl}/api/load-graph`, async (route) => {
     const body: unknown = route.request().postDataJSON();
     if (isGraphRequestBody(body)) loadGraph.push(body);
     await route.fulfill({
@@ -242,13 +257,24 @@ async function routeGraphControls(page: Page): Promise<GraphRequests> {
       body: JSON.stringify({ resources: GRAPH_RESOURCES })
     });
   });
-  await page.route("**/api/list-applications?*", async (route) => {
+  await page.route(`${canvas.baseUrl}/api/plan-graph`, async (route) => {
+    const body: unknown = route.request().postDataJSON();
+    if (isGraphRequestBody(body)) planGraph.push(body);
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ applications: [{ name: "radius-app" }] })
+      body: JSON.stringify({ error: "Fixture request completed." })
     });
   });
-  await page.route("**/api/discover-branches", async (route) => {
+  await page.route(
+    `${canvas.baseUrl}/api/list-applications?*`,
+    async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ applications: [{ name: "radius-app" }] })
+      });
+    }
+  );
+  await page.route(`${canvas.baseUrl}/api/discover-branches`, async (route) => {
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -260,32 +286,39 @@ async function routeGraphControls(page: Page): Promise<GraphRequests> {
       })
     });
   });
-  await page.route("**/api/list-environments?*", async (route) => {
-    await route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({
-        environments: [
-          {
-            name: "fixture-environment",
-            provider: "azure",
-            status: "success"
-          }
-        ]
-      })
-    });
-  });
-  return { loadGraph };
+  await page.route(
+    `${canvas.baseUrl}/api/list-environments?*`,
+    async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          environments: [
+            {
+              name: "fixture-environment",
+              provider: "azure",
+              status: "success"
+            }
+          ]
+        })
+      });
+    }
+  );
+  return { loadGraph, planGraph };
 }
 
 async function expectWorktreeBranchRequests(
-  requests: GraphRequests
+  requests: GraphRequestBody[]
 ): Promise<void> {
   await expect
-    .poll(() => requests.loadGraph.map((request) => request.branch))
-    .toContain(WORKTREE_BRANCH);
-  expect(
-    requests.loadGraph.every((request) => request.branch === WORKTREE_BRANCH)
-  ).toBe(true);
+    .poll(
+      () =>
+        requests.length > 0 &&
+        requests.every(
+          (request) =>
+            request.branch === WORKTREE_BRANCH && request.repo === REPOSITORY
+        )
+    )
+    .toBe(true);
 }
 
 test.describe("Radius Canvas visual baselines", () => {
@@ -298,12 +331,12 @@ test.describe("Radius Canvas visual baselines", () => {
       graphLoaded: true,
       graphFromWorkspace: true
     });
-    const requests = await routeGraphControls(page);
+    const requests = await routeGraphControls(page, canvas);
     await gotoVisual(page, canvas, "graph", "light");
     await expect(page.locator(".rad-node")).toHaveCount(4);
     await expect(page.locator("#graph-app")).toHaveValue("radius-app");
     await expect(page.locator("#graph-branch")).toHaveValue(WORKTREE_BRANCH);
-    await expectWorktreeBranchRequests(requests);
+    await expectWorktreeBranchRequests(requests.loadGraph);
     await expect(page.locator("#node-popup")).toBeHidden();
     await screenshot(page, "vi-01-modeled-graph-light.png");
   });
@@ -317,10 +350,12 @@ test.describe("Radius Canvas visual baselines", () => {
       graphLoaded: true,
       graphFromWorkspace: true
     });
-    await routeGraphControls(page);
+    const requests = await routeGraphControls(page, canvas);
     await gotoVisual(page, canvas, "graph", "dark");
     await expect(page.locator(".rad-node")).toHaveCount(4);
     await expect(page.locator("#graph-app")).toHaveValue("radius-app");
+    await expect(page.locator("#graph-branch")).toHaveValue(WORKTREE_BRANCH);
+    await expectWorktreeBranchRequests(requests.loadGraph);
     await expect(page.locator("#node-popup")).toBeHidden();
     await screenshot(page, "vi-01-modeled-graph-dark.png");
   });
@@ -331,9 +366,11 @@ test.describe("Radius Canvas visual baselines", () => {
       graphLoaded: true,
       graphFromWorkspace: true
     });
-    await routeGraphControls(page);
+    const requests = await routeGraphControls(page, canvas);
     await gotoVisual(page, canvas, "graph", "light");
     await expect(page.locator("#graph-app")).toHaveValue("radius-app");
+    await expect(page.locator("#graph-branch")).toHaveValue(WORKTREE_BRANCH);
+    await expectWorktreeBranchRequests(requests.loadGraph);
     await page
       .locator(".rad-node")
       .filter({ hasText: "web" })
@@ -365,13 +402,17 @@ test.describe("Radius Canvas visual baselines", () => {
         plannedEnvironment: "fixture-environment",
         plannedFromWorkspace: true
       });
-      await routeGraphControls(page);
+      const requests = await routeGraphControls(page, canvas);
       await gotoVisual(page, canvas, "planned", theme);
       await expect(page.locator(".rad-node")).toHaveCount(2);
       await expect(page.locator("#planned-app")).toHaveValue("radius-app");
       await expect(page.locator("#planned-branch")).toHaveValue(
         WORKTREE_BRANCH
       );
+      await page.locator("#planned-branch").dispatchEvent("change");
+      await expectWorktreeBranchRequests(requests.planGraph);
+      await gotoVisual(page, canvas, "planned", theme);
+      await expect(page.locator(".rad-node")).toHaveCount(2);
       await page
         .locator(".rad-node")
         .filter({ hasText: "cache" })
@@ -395,7 +436,7 @@ test.describe("Radius Canvas visual baselines", () => {
         branches: ["main", WORKTREE_BRANCH],
         branchShas: { main: "1111111", [WORKTREE_BRANCH]: "2222222" }
       });
-      await routeGraphControls(page);
+      await routeGraphControls(page, canvas);
       await gotoVisual(page, canvas, "graph-diff", theme);
       await expect(page.locator(".rad-node")).toHaveCount(5);
       await expect(page.locator("#base-branch")).toHaveValue("main");
@@ -436,13 +477,19 @@ test.describe("Radius Canvas visual baselines", () => {
       await gotoVisual(page, canvas, "environment", theme);
       await openEnvironmentCreateForm(page);
       await screenshot(page, `vi-06-environment-create-${theme}.png`);
+      const deploy = page.locator("#deploy-btn");
+      await deploy.scrollIntoViewIfNeeded();
+      await expect(page.locator("#env-identity-section")).toBeVisible();
+      await expect(page.locator("#env-infra-section")).toBeVisible();
+      await expect(deploy).toBeInViewport();
+      await screenshot(page, `vi-06-environment-create-lower-${theme}.png`);
     });
   }
 
   for (const status of ["success", "failed"] as const) {
     test(`VI-07 deploy ${status} in light`, async ({ page, canvas }) => {
       await seed(canvas);
-      await routeDeployments(page, status);
+      await routeDeployments(page, canvas, status);
       await gotoVisual(page, canvas, "deploying", "light");
       await expect(
         page

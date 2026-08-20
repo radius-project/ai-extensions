@@ -1,4 +1,8 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
+
+const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 
 // Safety, destructive, branch-selection, path-confinement and redaction cases
 // never retry: a pass that only happens on the second attempt would hide the
@@ -11,11 +15,19 @@ export default defineConfig({
   globalTeardown: "./test/e2e/global-teardown.ts",
   timeout: 30_000,
   workers: 1,
+  // Keep Chromium output separate so this run cannot erase a visual report
+  // produced earlier in the same checkout.
+  outputDir: "test-results/chromium",
   reporter: [
     ["list"],
     [
       "./test/e2e/support/retry-only-reporter.ts",
-      { outputFile: "test-results/chromium-retry-only-passes.json" }
+      {
+        outputFile: path.join(
+          packageRoot,
+          "test-results/chromium-retry-only-passes.json"
+        )
+      }
     ],
     ["html", { open: "never", outputFolder: "playwright-report" }]
   ],
