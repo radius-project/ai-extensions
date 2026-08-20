@@ -117,12 +117,20 @@ export function initializeGraphPage(
   // null when the page is not waiting on one.
   let appBicepWaitStartedAtMs: number | null = null;
 
-  const stopProgress = (): void => {
+  const endProgress = (failure: string | null): void => {
     if (progress !== null) entry.cancel(progress);
     progress = null;
-    progressView?.stop();
+    const view = progressView;
     progressView = null;
+    if (!view) return;
+    // A failed build closes out the running stage so the panel does not sit on
+    // "running" for work that has already ended.
+    if (failure !== null) view.fail(failure);
+    else view.stop();
   };
+
+  const stopProgress = (): void => endProgress(null);
+  const failProgress = (detail: string): void => endProgress(detail);
 
   // Start reporting progress for one build. The loading surface must already be
   // mounted so the panel has its host element.
@@ -273,12 +281,7 @@ export function initializeGraphPage(
           if (appBicepWaitStartedAtMs === null) appBicepWaitStartedAtMs = now;
           if (now - appBicepWaitStartedAtMs >= GRAPH_APP_BICEP_TIMEOUT_MS) {
             appBicepWaitStartedAtMs = null;
-            progressView?.append(
-              "creating_model",
-              "failed",
-              GRAPH_APP_BICEP_TIMEOUT_MESSAGE
-            );
-            stopProgress();
+            failProgress(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
             showFailure(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
             return;
           }
@@ -311,16 +314,21 @@ export function initializeGraphPage(
           });
           return;
         }
-        stopProgress();
         const error = readString(payload, "error");
-        if (error) showFailure(error);
+        if (error) {
+          failProgress(error);
+          showFailure(error);
+        } else {
+          stopProgress();
+        }
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
         appBicepWaitStartedAtMs = null;
-        stopProgress();
+        const message = "Failed to generate the application graph.";
+        failProgress(message);
         context.logger.error("Radius graph request failed.", error);
-        showFailure("Failed to generate the application graph.");
+        showFailure(message);
       })
       .then(() => {
         if (requestGeneration === generation) {
@@ -354,18 +362,25 @@ export function initializeGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== generation) return;
-        stopProgress();
-        if (readBoolean(payload, "reload")) context.nav.reload();
-        else {
+        if (readBoolean(payload, "reload")) {
+          stopProgress();
+          context.nav.reload();
+        } else {
           const error = readString(payload, "error");
-          if (error) showFailure(error);
+          if (error) {
+            failProgress(error);
+            showFailure(error);
+          } else {
+            stopProgress();
+          }
         }
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
-        stopProgress();
+        const message = "Failed to regenerate graph.";
+        failProgress(message);
         context.logger.error("Radius graph regeneration failed.", error);
-        showFailure("Failed to regenerate graph.");
+        showFailure(message);
       })
       .then(() => {
         if (requestGeneration === generation) {

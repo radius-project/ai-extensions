@@ -826,6 +826,55 @@ describe("initializePlannedGraphPage", () => {
         `${GRAPH_STAGE_LABELS.checking_model}:running`
       ]);
     });
+    it.each([
+      ["the plan errors", { error: "invalid app.bicep" }],
+      ["the plan response is incomplete", {}]
+    ])(
+      "closes out the running stage as failed when %s",
+      async (_name, body) => {
+        const { browser, progressHost } = fixture();
+        browser.net.handle("/api/plan-graph", () => jsonResponse(body));
+        initializePlannedGraphPage(browser.context, globals());
+        await flushPromises();
+        browser.clock.tick(0);
+        await flushPromises();
+
+        // A frozen "running" row would claim the plan is still going.
+        expect(stageText(progressHost)).toEqual([
+          `${GRAPH_STAGE_LABELS.checking_model}:failed`
+        ]);
+      }
+    );
+
+    it("closes out the running stage as failed when the request throws", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle("/api/plan-graph", () =>
+        Promise.reject(new Error("offline"))
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:failed`
+      ]);
+    });
+
+    it("leaves the stage running while Copilot authors the model", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle("/api/plan-graph", () =>
+        jsonResponse({ needsAppBicep: true })
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:running`
+      ]);
+    });
   });
   describe("planned graph progress defaults", () => {
     it("accepts typed events from a payload that omits the generation", async () => {

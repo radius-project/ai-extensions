@@ -88,12 +88,20 @@ export function initializePlannedGraphPage(
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
 
-  const stopProgress = (): void => {
+  const endProgress = (failure: string | null): void => {
     if (progress !== null) entry.cancel(progress);
     progress = null;
-    progressView?.stop();
+    const view = progressView;
     progressView = null;
+    if (!view) return;
+    // A failed plan closes out the running stage so the panel does not sit on
+    // "running" for work that has already ended.
+    if (failure !== null) view.fail(failure);
+    else view.stop();
   };
+
+  const stopProgress = (): void => endProgress(null);
+  const failProgress = (detail: string): void => endProgress(detail);
 
   const run = (isCurrent: () => boolean): Promise<void> => {
     if (!entry.active) return Promise.resolve();
@@ -154,6 +162,9 @@ export function initializePlannedGraphPage(
       }
     });
     progressView = view;
+    // Set by whichever terminal path observed a failure, so the panel can close
+    // out its running stage once the request settles.
+    let failureDetail: string | null = null;
     progress = entry.every(PLAN_PROGRESS_MS, () => {
       void context.net
         .fetch("/api/progress")
@@ -205,26 +216,23 @@ export function initializePlannedGraphPage(
           return;
         }
         const error = readString(payload, "error");
-        status(
-          context,
+        failureDetail =
           error ?
             `Error: ${error}`
-          : "The planned deployment response was incomplete. Try again.",
-          "error"
-        );
+          : "The planned deployment response was incomplete. Try again.";
+        status(context, failureDetail, "error");
       })
       .catch((error: unknown) => {
         if (!current()) return;
         plan.requestFailed = true;
         context.logger.error("Radius planned graph request failed.", error);
-        status(
-          context,
-          "The planned deployment could not be generated. Try again.",
-          "error"
-        );
+        failureDetail =
+          "The planned deployment could not be generated. Try again.";
+        status(context, failureDetail, "error");
       })
       .then(() => {
-        stopProgress();
+        if (failureDetail !== null) failProgress(failureDetail);
+        else stopProgress();
         if (requestAbort === abort) requestAbort = null;
       });
   };

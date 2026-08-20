@@ -145,6 +145,10 @@ export interface GraphProgressView {
     state: GraphBuildEventState,
     detail: string
   ): void;
+  // End the panel on the failure the caller just observed: the stage still
+  // reported as running is marked failed, then the panel freezes. Stopping
+  // without this leaves a stage reading "running" for work that has ended.
+  fail(detail: string): void;
   // Freeze the panel: the elapsed clock stops and nothing may repaint it.
   stop(): void;
   // Repaint into the current host. A page that remounts its loading surface
@@ -291,6 +295,27 @@ export function createGraphProgress(
     elapsedElement.textContent = elapsedText();
   });
 
+  const appendEvent = (
+    stage: GraphBuildStage,
+    state: GraphBuildEventState,
+    detail: string
+  ): void => {
+    const sequence =
+      events.reduce((max, event) => Math.max(max, event.sequence), 0) + 1;
+    const event: GraphBuildEvent = { sequence, stage, state, detail };
+    events = applyGraphSnapshot(events, [...events, event]);
+    latestEvent = event;
+    appliedSequence = sequence;
+    localAhead = true;
+    render();
+  };
+
+  const stopView = (): void => {
+    if (stopped) return;
+    stopped = true;
+    scope.cancel(timer);
+  };
+
   const view: GraphProgressView = {
     sync(nextEvents, generation) {
       if (stopped) return;
@@ -322,19 +347,19 @@ export function createGraphProgress(
     },
     append(stage, state, detail) {
       if (stopped) return;
-      const sequence =
-        events.reduce((max, event) => Math.max(max, event.sequence), 0) + 1;
-      const event: GraphBuildEvent = { sequence, stage, state, detail };
-      events = applyGraphSnapshot(events, [...events, event]);
-      latestEvent = event;
-      appliedSequence = sequence;
-      localAhead = true;
-      render();
+      appendEvent(stage, state, detail);
+    },
+    fail(detail) {
+      if (stopped) return;
+      // The stage that is still running is the one the failure belongs to. With
+      // no such stage the panel has nothing in flight to close out, so only the
+      // clock stops.
+      const running = events.filter((event) => event.state === "running").pop();
+      if (running) appendEvent(running.stage, "failed", detail);
+      stopView();
     },
     stop() {
-      if (stopped) return;
-      stopped = true;
-      scope.cancel(timer);
+      stopView();
     },
     remount() {
       if (stopped) return;

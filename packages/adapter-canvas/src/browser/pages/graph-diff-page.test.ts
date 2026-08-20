@@ -512,6 +512,73 @@ describe("initializeGraphDiffPage", () => {
         `${GRAPH_STAGE_LABELS.comparing_graphs}:running`
       ]);
     });
+    it.each([
+      [
+        "the skill refuses the repository",
+        {
+          error: "octo/app has no Dockerfile on feature/x.",
+          appBicepUnsupported: true
+        }
+      ],
+      ["the comparison errors", { error: "invalid app.bicep" }]
+    ])(
+      "closes out the running stage as failed when %s",
+      async (_name, body) => {
+        const { browser, head, progressHost } = fixture();
+        browser.net.handle("/api/diff-branches", () => jsonResponse(body));
+        browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
+        initializeGraphDiffPage(browser.context, {
+          radiusRenderGraph: vi.fn()
+        });
+        await flushPromises();
+
+        head.dispatch("change");
+        browser.clock.tick(DIFF_DEBOUNCE_MS);
+        await flushPromises();
+
+        // A frozen "running" row would claim the comparison is still going.
+        expect(stageText(progressHost)).toEqual([
+          `${GRAPH_STAGE_LABELS.building_base_graph}:failed`
+        ]);
+      }
+    );
+
+    it("closes out the running stage as failed when the request throws", async () => {
+      const { browser, head, progressHost } = fixture();
+      browser.net.handle("/api/diff-branches", () =>
+        Promise.reject(new Error("offline"))
+      );
+      browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_base_graph}:failed`
+      ]);
+    });
+
+    it("leaves the stage running while Copilot authors the model", async () => {
+      const { browser, head, progressHost } = fixture();
+      browser.net.handle("/api/diff-branches", () =>
+        jsonResponse({ needsAppBicep: true })
+      );
+      browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_base_graph}:running`
+      ]);
+    });
+
     it("stops polling progress once the diff settles", async () => {
       const { browser, head } = fixture();
       browser.net.handle("/api/diff-branches", () => jsonResponse({}));

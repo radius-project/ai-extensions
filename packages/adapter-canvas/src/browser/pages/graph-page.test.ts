@@ -1057,6 +1057,43 @@ describe("initializeGraphPage", () => {
       expect(status?.textContent).toBe("");
     });
 
+    it.each([
+      [
+        "the skill refuses the repository",
+        {
+          error: "octo/app has no Dockerfile on main.",
+          appBicepUnsupported: true
+        }
+      ],
+      ["the build errors", { error: "invalid app.bicep" }]
+    ])(
+      "closes out the running stage as failed when %s",
+      async (_name, body) => {
+        const { browser, progressHost } = fixture({ loaded: false });
+        browser.net.handle("/api/load-graph", () => jsonResponse(body));
+        initializeGraphPage(browser.context, globals());
+        await flushPromises();
+
+        // A frozen "running" row would claim the build is still going.
+        expect(stageText(progressHost)).toEqual([
+          `${GRAPH_STAGE_LABELS.checking_model}:failed`
+        ]);
+      }
+    );
+
+    it("closes out the running stage as failed when the request throws", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      browser.net.handle("/api/load-graph", () =>
+        Promise.reject(new Error("offline"))
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:failed`
+      ]);
+    });
+
     it("surfaces a regeneration failure on the graph surface", async () => {
       const { browser, branch, status } = fixture({ loaded: true });
       const setError = vi.fn();

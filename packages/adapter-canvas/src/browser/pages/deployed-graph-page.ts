@@ -164,8 +164,7 @@ export function initializeDeployedGraphPage(
   // Leave the panel on screen showing which stage failed, rather than clearing
   // it and leaving only the status banner to explain the outcome.
   const failProgress = (detail: string): void => {
-    progressView?.append("loading_deployment", "failed", detail);
-    progressView?.stop();
+    progressView?.fail(detail);
     progressView = null;
   };
 

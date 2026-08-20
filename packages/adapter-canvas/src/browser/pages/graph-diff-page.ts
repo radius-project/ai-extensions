@@ -73,12 +73,20 @@ export function initializeGraphDiffPage(
   let progress: ScopeTimer | null = null;
   let progressView: GraphProgressView | null = null;
 
-  const stopProgress = (): void => {
+  const endProgress = (failure: string | null): void => {
     if (progress !== null) entry.cancel(progress);
     progress = null;
-    progressView?.stop();
+    const view = progressView;
     progressView = null;
+    if (!view) return;
+    // A failed comparison closes out the running stage so the panel does not
+    // sit on "running" for work that has already ended.
+    if (failure !== null) view.fail(failure);
+    else view.stop();
   };
+
+  const stopProgress = (): void => endProgress(null);
+  const failProgress = (detail: string): void => endProgress(detail);
 
   const pollProgress = (
     requestGeneration: number,
@@ -134,15 +142,14 @@ export function initializeGraphDiffPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== generation) return;
-        stopProgress();
         if (readBoolean(payload, "appBicepUnsupported")) {
-          showStatus(
-            context,
+          const message =
             readString(payload, "error") ||
-              "The Radius app-bicep skill cannot model this repository.",
-            "error"
-          );
+            "The Radius app-bicep skill cannot model this repository.";
+          failProgress(message);
+          showStatus(context, message, "error");
         } else if (readBoolean(payload, "needsAppBicep")) {
+          stopProgress();
           showStatus(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.",
@@ -151,28 +158,27 @@ export function initializeGraphDiffPage(
         } else {
           const error = readString(payload, "error");
           if (error) {
-            showStatus(
-              context,
-              `Error computing diff: ${error}. Please ensure both branches exist and contain a valid .radius/app.bicep.`,
-              "error"
-            );
-          } else if (readBoolean(payload, "reload")) {
-            context.nav.reload();
+            const message = `Error computing diff: ${error}. Please ensure both branches exist and contain a valid .radius/app.bicep.`;
+            failProgress(message);
+            showStatus(context, message, "error");
           } else {
-            const message = readString(payload, "message");
-            if (message) showStatus(context, message, "info");
+            stopProgress();
+            if (readBoolean(payload, "reload")) {
+              context.nav.reload();
+            } else {
+              const message = readString(payload, "message");
+              if (message) showStatus(context, message, "info");
+            }
           }
         }
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
-        stopProgress();
+        const message =
+          "Failed to compute diff. Please verify network connectivity and that .radius/app.bicep is valid on both branches.";
+        failProgress(message);
         context.logger.error("Radius graph diff request failed.", error);
-        showStatus(
-          context,
-          "Failed to compute diff. Please verify network connectivity and that .radius/app.bicep is valid on both branches.",
-          "error"
-        );
+        showStatus(context, message, "error");
       })
       .then(() => {
         if (requestGeneration === generation) requestAbort = null;

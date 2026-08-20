@@ -424,6 +424,78 @@ describe("createGraphProgress", () => {
     });
   });
 
+  describe("fail", () => {
+    it("marks the running stage failed and freezes the panel", () => {
+      const { browser, host, scope } = setup();
+      const view = createGraphProgress(browser.context, scope);
+      view.sync(
+        [
+          serverEvent(1, "checking_model", "succeeded"),
+          serverEvent(2, "creating_model", "running", "Creating.")
+        ],
+        1
+      );
+
+      view.fail("The repository cannot be modeled.");
+
+      expect(stageRows(host)).toEqual([
+        { text: GRAPH_STAGE_LABELS.checking_model, state: "succeeded" },
+        { text: GRAPH_STAGE_LABELS.creating_model, state: "failed" }
+      ]);
+      expect(fakeText(detailElement(host)!)).toBe(
+        "The repository cannot be modeled."
+      );
+      expect(view.stopped).toBe(true);
+    });
+
+    it("closes out the stage that is still running, not the newest one", () => {
+      const { browser, host, scope } = setup();
+      const view = createGraphProgress(browser.context, scope);
+      view.sync(
+        [
+          serverEvent(1, "checking_model", "running", "Checking."),
+          serverEvent(2, "building_graph", "succeeded")
+        ],
+        1
+      );
+
+      view.fail("Interrupted.");
+
+      expect(stageRows(host)).toEqual([
+        { text: GRAPH_STAGE_LABELS.checking_model, state: "failed" },
+        { text: GRAPH_STAGE_LABELS.building_graph, state: "succeeded" }
+      ]);
+    });
+
+    it("only freezes the clock when no stage is running", () => {
+      const { browser, host, scope } = setup();
+      const view = createGraphProgress(browser.context, scope);
+      view.sync([serverEvent(1, "checking_model", "succeeded")], 1);
+
+      view.fail("Nothing was in flight.");
+
+      expect(stageRows(host)).toEqual([
+        { text: GRAPH_STAGE_LABELS.checking_model, state: "succeeded" }
+      ]);
+      expect(view.stopped).toBe(true);
+      expect(browser.clock.pending).toBe(0);
+    });
+
+    it("refuses to reopen a stopped panel", () => {
+      const { browser, host, scope } = setup();
+      const view = createGraphProgress(browser.context, scope);
+      view.sync([serverEvent(1, "building_graph", "running", "Working.")], 1);
+      view.stop();
+
+      view.fail("Too late.");
+
+      expect(stageRows(host)).toEqual([
+        { text: GRAPH_STAGE_LABELS.building_graph, state: "running" }
+      ]);
+      expect(view.events()).toHaveLength(1);
+    });
+  });
+
   it("repaints only when the reported stages or detail actually change", () => {
     const { browser, host, scope } = setup();
     const view = createGraphProgress(browser.context, scope);
