@@ -162,10 +162,10 @@ export function initializeGraphPage(
     requestActive = true;
     const requestGeneration = ++generation;
     requestAbort = context.net.createAbort();
+    controller?.destroy();
+    controller = null;
     const wrapper = context.dom.byId("graph-container-wrapper");
     if (wrapper) {
-      controller?.destroy();
-      controller = null;
       wrapper.innerHTML = '<div id="graph-container"></div>';
     }
     setLoading("graph-container");

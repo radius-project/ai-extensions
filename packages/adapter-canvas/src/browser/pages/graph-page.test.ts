@@ -455,7 +455,8 @@ describe("initializeGraphPage", () => {
       withStatus: false,
       withWrapper: false
     });
-    const render = vi.fn();
+    const first = { update: vi.fn(() => first), destroy: vi.fn() };
+    const render = vi.fn().mockReturnValueOnce(first);
     let calls = 0;
     browser.net.handle("/api/load-graph", () => {
       calls++;
@@ -486,6 +487,9 @@ describe("initializeGraphPage", () => {
         localSource: false
       })
     );
+    expect(first.destroy).toHaveBeenCalledTimes(1);
+    expect(first.update).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledTimes(2);
   });
 
   it("surfaces a regenerate error message returned by the server", async () => {
