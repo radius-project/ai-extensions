@@ -49,6 +49,7 @@ function dependencies(
     buildAppGraphRadCommand: () => "rad app graph",
     ensureDeployWorkflowsOnBranch: () => Promise.resolve(),
     ensureWorkflowsCurrent: () => Promise.resolve({ created: [], failed: [] }),
+    latestWorkflowRunId: () => Promise.resolve(null),
     classifyDeployDispatchFailure: () => "run-unconfirmed",
     invalidateDeployListCache: () => {},
     errorMessage: (error) =>
@@ -226,6 +227,7 @@ describe("deploy dispatch construction", () => {
     "buildAppGraphRadCommand",
     "ensureDeployWorkflowsOnBranch",
     "ensureWorkflowsCurrent",
+    "latestWorkflowRunId",
     "classifyDeployDispatchFailure",
     "invalidateDeployListCache",
     "errorMessage",
@@ -280,7 +282,8 @@ describe("deploy dispatch environment and branch preflight", () => {
       dispatched: true,
       workflowFile: "run-rad-commands.yml",
       dispatchedAt: 1_700_000_000_000,
-      environment: "resolved-env"
+      environment: "resolved-env",
+      baselineRunId: null
     });
   });
 
@@ -1225,6 +1228,52 @@ describe("deploy dispatch workflow publication and dispatch", () => {
 
     expect(evictions).toEqual(["acme/widgets"]);
     expect(logs).toContain("✅ Run rad commands workflow dispatched.");
+  });
+
+  it("captures the newest run id before dispatch and returns it as the baseline", async () => {
+    const { input } = request();
+    const order: string[] = [];
+    const baselineCalls: [string, string][] = [];
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        runGh: (args: string[], options: DeployCommandOptions = {}) => {
+          order.push("dispatch");
+          return gh.runGh(args, options);
+        },
+        runGhWithStdin: gh.runGhWithStdin,
+        latestWorkflowRunId: (repo: string, workflowFile: string) => {
+          order.push("baseline");
+          baselineCalls.push([repo, workflowFile]);
+          return Promise.resolve(88);
+        }
+      })
+    );
+
+    const outcome = await service.prepareAndDispatch(input);
+
+    expect(outcome).toMatchObject({ dispatched: true, baselineRunId: 88 });
+    expect(baselineCalls).toEqual([["acme/widgets", "run-rad-commands.yml"]]);
+    expect(order).toEqual(["baseline", "dispatch"]);
+  });
+
+  it("falls back to a null baseline and warns when the run id read fails", async () => {
+    const { input, logs } = request();
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        latestWorkflowRunId: () =>
+          Promise.reject(new Error("run list unavailable"))
+      })
+    );
+
+    const outcome = await service.prepareAndDispatch(input);
+
+    expect(outcome).toMatchObject({ dispatched: true, baselineRunId: null });
+    expect(logs).toContain(
+      "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will fall back to a time window."
+    );
   });
 
   it("retries the dispatch with the injected token stripped", async () => {

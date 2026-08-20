@@ -155,6 +155,7 @@ import {
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
   findWorkflowRun,
+  latestWorkflowRunId,
   getRunDetail,
   fetchRunLog,
   extractErrorLines,
@@ -2300,6 +2301,7 @@ const deployDispatchService = createDeployDispatchService({
   buildAppGraphRadCommand,
   ensureDeployWorkflowsOnBranch,
   ensureWorkflowsCurrent,
+  latestWorkflowRunId,
   classifyDeployDispatchFailure,
   invalidateDeployListCache: (repo) => {
     deployListCache.delete(repo);
@@ -2325,7 +2327,15 @@ const deployMonitorService = createDeployMonitorService({
   outcome: deployOutcomeService,
   deployRadCommandsStep: DEPLOY_RAD_COMMANDS_STEP,
   unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
-  findWorkflowRun,
+  findWorkflowRun: (repo, workflowFile, sinceMs, knownId, afterRunId) =>
+    findWorkflowRun(
+      repo,
+      workflowFile,
+      sinceMs,
+      knownId,
+      undefined,
+      afterRunId
+    ),
   getRunDetail,
   createStatusReader: (state, repo, branch, runId) =>
     deployStatusReaderFromState(state, repo, branch, runId),

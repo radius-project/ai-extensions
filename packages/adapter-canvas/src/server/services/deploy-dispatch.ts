@@ -96,6 +96,13 @@ export interface DeployDispatchDependencies {
     only: string[],
     workingBranch: string
   ): Promise<unknown>;
+  // Reads the newest existing run id for the deploy workflow so a baseline can
+  // be captured immediately before dispatch. Resolves to null on any read
+  // failure, in which case run discovery falls back to its time window.
+  latestWorkflowRunId(
+    repo: string,
+    workflowFile: string
+  ): Promise<number | string | null>;
   classifyDeployDispatchFailure(stderr: string): DeployErrorKind;
   invalidateDeployListCache(repo: string): void;
   errorMessage(error: unknown): string;
@@ -120,6 +127,11 @@ export type DeployDispatchOutcome =
       workflowFile: string;
       dispatchedAt: number;
       environment: string;
+      // Newest run id that existed just before this dispatch, so the run
+      // monitor can identify the run this dispatch created as the first one
+      // whose id exceeds it, rather than matching a prior run by time window.
+      // Null when the baseline could not be read.
+      baselineRunId: number | string | null;
     };
 
 export interface DeployDispatchService {
@@ -145,6 +157,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployDispatchDependencies)[] = [
   "buildAppGraphRadCommand",
   "ensureDeployWorkflowsOnBranch",
   "ensureWorkflowsCurrent",
+  "latestWorkflowRunId",
   "classifyDeployDispatchFailure",
   "invalidateDeployListCache",
   "errorMessage",
@@ -704,6 +717,22 @@ export function createDeployDispatchService(
       );
 
       const deployDispatchedAt = dependencies.now();
+      // Capture the newest existing run id right before dispatching, so the
+      // monitor can pick out the run this dispatch creates (the first with a
+      // greater id) instead of matching a prior run by its creation time.
+      let baselineRunId: number | string | null = null;
+      try {
+        baselineRunId = await dependencies.latestWorkflowRunId(
+          repo,
+          deployWorkflowFile
+        );
+      } catch (e) {
+        log(
+          "⚠ Could not read the latest run id before dispatch (" +
+            dependencies.errorMessage(e) +
+            "); run discovery will fall back to a time window."
+        );
+      }
       log(
         "🚀 Dispatching run rad commands workflow (" +
           deployWorkflowFile +
@@ -772,7 +801,8 @@ export function createDeployDispatchService(
         dispatched: true,
         workflowFile: deployWorkflowFile,
         dispatchedAt: deployDispatchedAt,
-        environment: envForDeploy
+        environment: envForDeploy,
+        baselineRunId
       };
     }
   };
