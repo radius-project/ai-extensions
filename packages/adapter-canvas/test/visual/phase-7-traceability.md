@@ -1,6 +1,6 @@
 # Phase 7 visual and reliability traceability
 
-Phase 7 adds the Playwright visual suite (P2-A) in `test/visual/canvas-visual.test.ts` and the scheduled extended resilience gate (P2-B) in `.github/workflows/canvas-reliability.yml`. Both reuse the Phase 6 real Chromium harness and deterministic fake CLI boundary. No personal credential, live cloud, mutable repository, public content network, or inherited credential store is used.
+Phase 7 adds the Playwright visual suite (P2-A) in `test/visual/canvas-visual.test.ts`, the recurring functional workflow in `.github/workflows/canvas-functional.yml`, and the scheduled extended resilience gate (P2-B) in `.github/workflows/canvas-reliability.yml`. All reuse the Phase 6 real Chromium harness and deterministic fake CLI boundary. No personal credential, live cloud, mutable repository, public content network, or inherited credential store is used.
 
 ## Visual baseline inventory
 
@@ -25,8 +25,8 @@ VI-06 waits for the current selected-account readiness flow to settle before cap
 The canonical Playwright container is digest-pinned in both the pull-request and scheduled workflows. An intentional Playwright image or browser upgrade can still invalidate every PNG at once; handle that baseline churn as follows.
 
 1. Confirm the diff is environmental rather than a product regression by reading the uploaded diff images.
-2. Dispatch **Canvas Reliability** with **Regenerate and upload the canonical visual baselines** enabled.
-3. Download the `canvas-visual-stability` artifact and take the PNGs from `packages/adapter-canvas/test/visual/__screenshots__/`.
+2. Dispatch **Canvas Functional Tests** with **Regenerate and upload the canonical visual baselines** enabled.
+3. Download the `canvas-visual-functional` artifact and take the PNGs from `packages/adapter-canvas/test/visual/__screenshots__/`.
 4. Commit the regenerated PNGs in their own commit whose message states the environmental cause.
 5. Have a human review the regenerated images before merge.
 
@@ -65,4 +65,4 @@ Scheduled jobs have explicit timeouts and concurrency cancellation. A scheduled 
 
 ## Retry-only observability
 
-The scheduled Ubuntu visual job runs every baseline twice with Playwright retries disabled, so either repetition failing makes the job fail. In the pull-request Chromium and visual gates, a first-attempt failure followed by a permitted diagnostic retry pass is never silent: both Playwright configurations write a JSON retry-only report, continuous integration uploads it with traces and HTML output, and the reporter writes the offending test titles into the job summary and raises a GitHub warning annotation for each one. Safety tests remain in the non-retrying Phase 6 project and never retry.
+The hermetic Canvas functional workflow runs the visual comparisons every eight hours with Playwright retries disabled, so a mismatch fails the run rather than becoming a retry-only warning. The visual suite is intentionally not a pull-request, publish, or release gate. The pull-request Chromium gate retains one permitted diagnostic retry for non-safety journeys: both Playwright configurations write a JSON retry-only report when used, and the reporter writes offending test titles into the job summary and raises a GitHub warning annotation for each one. Safety tests remain in the non-retrying Phase 6 project and never retry.
