@@ -15,10 +15,10 @@
 // no template copy, so it would only assert against a fixture we wrote here.
 //
 // This hits the network and depends on an external repo's moving ref, so it is
-// NOT part of the default hermetic suite: it runs only when
-// RUN_LIVE_WORKFLOW_TESTS is set (e.g. locally or in a scheduled job), never in
-// normal CI. Runtime day-to-day protection is the verify-credentials flow, which
-// fails loudly if the FIC does not match; this test catches the drift earlier.
+// NOT part of the default hermetic suite. A separate non-required CI workflow
+// sets RUN_LIVE_WORKFLOW_TESTS on pull requests, pushes to main, and nightly.
+// Runtime day-to-day protection is the verify-credentials flow, which fails
+// loudly if the FIC does not match; this test catches the drift earlier.
 import { describe, it, expect } from "vitest";
 import {
   RADIUS_WORKFLOW_REPO,

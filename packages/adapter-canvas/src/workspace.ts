@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { IGNORED_SOURCE_DIRS } from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 
 export interface CanvasSessionWorkspace {
@@ -27,18 +28,6 @@ export interface WorkspaceGitHub {
   listNames(): Promise<string[]>;
   treePaths(requestedRepo: string): Promise<string[]>;
 }
-
-const IGNORED_DIRS = new Set([
-  ".git",
-  "node_modules",
-  "dist",
-  "build",
-  "coverage",
-  ".next",
-  ".turbo",
-  ".venv",
-  "venv"
-]);
 
 function runGit(
   workspacePath: string | null | undefined,
@@ -295,6 +284,33 @@ export function toSafeRepoRelPath(input: unknown): string {
   return rel;
 }
 
+// Whether a caller-supplied path denotes the worktree or something inside it.
+//
+// Used to decide whether a worktree listing is evidence about the target a
+// caller named. A subdirectory qualifies: if the whole worktree contains no
+// Dockerfile, neither does any directory within it, so the listing answers the
+// question for a subdirectory too.
+//
+// Resolves both sides before comparing, so `..` cannot walk out and a sibling
+// whose name merely starts with the root (`/workspace-other` against
+// `/workspace`) is not mistaken for a child.
+export function isWorkspacePath(
+  workspacePath: string | null | undefined,
+  candidate: string | null | undefined
+): boolean {
+  if (!workspacePath || !candidate) return false;
+  // Accept either separator on either side: the value reaches us as
+  // agent-authored text, and forward slashes resolve correctly on Windows too.
+  const toSlashes = (value: string) => value.replace(/\\/g, "/");
+  try {
+    const root = path.resolve(toSlashes(workspacePath));
+    const resolved = path.resolve(toSlashes(candidate));
+    return resolved === root || resolved.startsWith(root + path.sep);
+  } catch {
+    return false;
+  }
+}
+
 function safeWorkspacePath(
   workspacePath: string | null | undefined,
   repoPath: string | null | undefined
@@ -475,7 +491,7 @@ async function walkWorkspace(
     if (entry.name.startsWith(".") && entry.name !== ".radius") {
       if (entry.isDirectory() && entry.name !== ".github") continue;
     }
-    if (entry.isDirectory() && IGNORED_DIRS.has(entry.name)) continue;
+    if (entry.isDirectory() && IGNORED_SOURCE_DIRS.has(entry.name)) continue;
 
     const rel = dir ? `${dir}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {
