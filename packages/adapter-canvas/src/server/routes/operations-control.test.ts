@@ -114,6 +114,34 @@ function postContext(
   );
 }
 
+type ControlHandler = (
+  context: ReturnType<typeof createRequestContext>,
+  dependencies: OperationsControlDependencies
+) => Promise<void>;
+
+/**
+ * Drive one control handler over a fresh recorder and hand back the recording.
+ *
+ * Every scenario arranges a saved record, invokes exactly one handler, and
+ * reads the status and payload back, so the plumbing is written once and each
+ * test keeps only the arrangement and the assertions that make it distinct.
+ */
+/** The control path for one action on a saved record. */
+function controlPath(op: { operationId: string }, action: string): string {
+  return `/api/operations/${op.operationId}/${action}`;
+}
+
+async function call(
+  handler: ControlHandler,
+  path: string,
+  deps: OperationsControlDependencies,
+  instanceId = "panel-a"
+): Promise<ReturnType<typeof recorder>> {
+  const out = recorder();
+  await handler(postContext(path, out.response, instanceId), deps);
+  return out;
+}
+
 interface Journal {
   scheduled: Array<{ kind: string; instanceId: string; commandId: string }>;
   persistCalls: number;
@@ -236,35 +264,26 @@ describe("the route registry", () => {
     const registry = createOperationsControlRoutes(deps);
     const stop = recorder();
     await registry[`POST ${STOP_OPERATION_ROUTE}`](
-      postContext(`/api/operations/${op.operationId}/stop`, stop.response)
+      postContext(controlPath(op, "stop"), stop.response)
     );
     expect(stop.payload().code).toBe("operation-stop-pending");
 
     const retry = recorder();
     await registry[`POST ${RETRY_OPERATION_ROUTE}`](
-      postContext(
-        `/api/operations/${op.operationId}/retry/setup`,
-        retry.response
-      )
+      postContext(controlPath(op, "retry/setup"), retry.response)
     );
     // The same record is now running, so a setup retry has nothing to continue.
     expect(retry.payload().code).toBe("operation-active");
 
     const continued = recorder();
     await registry[`POST ${CONTINUE_OPERATION_ROUTE}`](
-      postContext(
-        `/api/operations/${op.operationId}/continue`,
-        continued.response
-      )
+      postContext(controlPath(op, "continue"), continued.response)
     );
     expect(continued.payload().code).toBe("operation-active");
 
     const rolledBack = recorder();
     await registry[`POST ${ROLLBACK_OPERATION_ROUTE}`](
-      postContext(
-        `/api/operations/${op.operationId}/rollback`,
-        rolledBack.response
-      )
+      postContext(controlPath(op, "rollback"), rolledBack.response)
     );
     expect(rolledBack.payload().code).toBe("operation-active");
   });
@@ -274,12 +293,7 @@ describe("POST /api/operations/{id}/stop", () => {
   it("records a stop for a running operation and reports it as pending", async () => {
     const op = newOperation();
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleStopOperation(
-      postContext(`/api/operations/${op.operationId}/stop`, out.response),
-      deps
-    );
+    const out = await call(handleStopOperation, controlPath(op, "stop"), deps);
 
     expect(out.recording.status).toBe(202);
     expect(out.recording.headers["Cache-Control"]).toBe("no-store");
@@ -302,12 +316,7 @@ describe("POST /api/operations/{id}/stop", () => {
       message: "Choose an identity."
     });
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleStopOperation(
-      postContext(`/api/operations/${op.operationId}/stop`, out.response),
-      deps
-    );
+    const out = await call(handleStopOperation, controlPath(op, "stop"), deps);
 
     expect(out.recording.status).toBe(200);
     const payload = out.payload();
@@ -324,17 +333,18 @@ describe("POST /api/operations/{id}/stop", () => {
     requireInput(op, { code: "app-selection-required", message: "Choose." });
     const deps = dependencies({ get: () => op });
 
-    const first = recorder();
-    await handleStopOperation(
-      postContext(`/api/operations/${op.operationId}/stop`, first.response),
+    const first = await call(
+      handleStopOperation,
+      controlPath(op, "stop"),
       deps
     );
-    const second = recorder();
-    await handleStopOperation(
-      postContext(`/api/operations/${op.operationId}/stop`, second.response),
+    const second = await call(
+      handleStopOperation,
+      controlPath(op, "stop"),
       deps
     );
 
+    expect(first.recording.status).toBe(200);
     expect(second.recording.status).toBe(200);
     expect(second.payload().code).toBe("operation-stopped");
     // The repeat writes nothing: the cancellation is already durable.
@@ -345,12 +355,7 @@ describe("POST /api/operations/{id}/stop", () => {
     const op = newOperation();
     finish(op, "succeeded");
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleStopOperation(
-      postContext(`/api/operations/${op.operationId}/stop`, out.response),
-      deps
-    );
+    const out = await call(handleStopOperation, controlPath(op, "stop"), deps);
 
     expect(out.recording.status).toBe(409);
     expect(out.payload().code).toBe("operation-already-terminal");
@@ -365,12 +370,7 @@ describe("POST /api/operations/{id}/stop", () => {
       get: () => op,
       persistOperations: () => Promise.reject(new Error("disk gone"))
     });
-    const out = recorder();
-
-    await handleStopOperation(
-      postContext(`/api/operations/${op.operationId}/stop`, out.response),
-      deps
-    );
+    const out = await call(handleStopOperation, controlPath(op, "stop"), deps);
 
     expect(out.recording.status).toBe(500);
     expect(out.payload()).toMatchObject({
@@ -389,12 +389,7 @@ describe("POST /api/operations/{id}/stop", () => {
         throw new Error("lookup must not run for an undecodable id");
       }
     });
-    const out = recorder();
-
-    await handleStopOperation(
-      postContext("/api/operations/%/stop", out.response),
-      deps
-    );
+    const out = await call(handleStopOperation, "/api/operations/%/stop", deps);
 
     expect(out.recording.status).toBe(404);
     expect(out.payload().code).toBe("unknown-operation");
@@ -406,10 +401,9 @@ describe("POST /api/operations/{id}/stop", () => {
         throw new Error("lookup must not run for a path outside the template");
       }
     });
-    const out = recorder();
-
-    await handleStopOperation(
-      postContext("/api/operations/op-1/stop/now", out.response),
+    const out = await call(
+      handleStopOperation,
+      "/api/operations/op-1/stop/now",
       deps
     );
 
@@ -427,13 +421,9 @@ describe("POST /api/operations/{id}/stop", () => {
         return op;
       }
     });
-    const out = recorder();
-
-    await handleStopOperation(
-      postContext(
-        `/api/operations/${encodeURIComponent("octo/app:setup")}/stop`,
-        out.response
-      ),
+    const out = await call(
+      handleStopOperation,
+      `/api/operations/${encodeURIComponent("octo/app:setup")}/stop`,
       deps
     );
 
@@ -447,13 +437,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
   it("continues an interrupted setup from the first unfinished step", async () => {
     const op = retryableSetup();
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/setup`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/setup"),
       deps
     );
 
@@ -488,13 +474,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       name: "dev"
     });
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/setup`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/setup"),
       deps
     );
 
@@ -518,13 +500,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
         return Promise.resolve(false);
       }
     });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/verification`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/verification"),
       deps
     );
 
@@ -544,13 +522,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       get: () => op,
       isPullRequestMerged: () => Promise.resolve(true)
     });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/verification`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/verification"),
       deps
     );
 
@@ -577,6 +551,35 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     ]);
   });
 
+  it("repeats verification without a merge proof for an Azure RBAC failure", async () => {
+    // Role propagation needs no pull request, so the merge port must not be
+    // reached at all: asking GitHub about a pull request this failure does not
+    // depend on would make the retry fail for an unrelated reason.
+    const op = mergeHandoff();
+    op.state = "failed_partial";
+    op.terminal = null;
+    op.failure = { code: "verify-run-failed", message: "role not ready" };
+    const deps = dependencies({ get: () => op });
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/verification"),
+      deps
+    );
+
+    expect(out.recording.status).toBe(202);
+    const payload = out.payload();
+    expect(payload.commandId).toBe(
+      `${op.operationId}:retry_verification:1:verification`
+    );
+    expect(deps.journal.scheduled).toEqual([
+      {
+        kind: "verification_retry",
+        instanceId: "panel-a",
+        commandId: payload.commandId
+      }
+    ]);
+  });
+
   it("refuses when the record changed while the pull request was checked", async () => {
     const op = mergeHandoff();
     const deps = dependencies({
@@ -587,13 +590,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
         return Promise.resolve(true);
       }
     });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/verification`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/verification"),
       deps
     );
 
@@ -614,13 +613,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
         return Promise.resolve(false);
       }
     });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/verification`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/verification"),
       deps
     );
 
@@ -641,13 +636,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
         conflict: { operationId: "op_live" }
       })
     });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/setup`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/setup"),
       deps
     );
 
@@ -662,13 +653,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       failure: { code: "who-knows", message: "unclassified" }
     });
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/verification`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/verification"),
       deps
     );
 
@@ -699,13 +686,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     });
     finish(op, "failed_partial", { failure: { code: "setup-failed" } });
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/cleanup`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/cleanup"),
       deps
     );
 
@@ -725,27 +708,22 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     const op = retryableSetup();
     const deps = dependencies({ get: () => op });
 
-    const first = recorder();
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/setup`,
-        first.response
-      ),
+    const first = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/setup"),
       deps
     );
     // The second submission arrives before the first attempt finished, so the
     // attempt counter has already advanced and the derived id is the same.
     finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
     op.control.attempts.setup = 1;
-    const second = recorder();
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/setup`,
-        second.response
-      ),
+    const second = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/setup"),
       deps
     );
 
+    expect(first.payload().duplicate).toBeUndefined();
     expect(second.recording.status).toBe(202);
     expect(second.payload()).toMatchObject({
       duplicate: true,
@@ -767,13 +745,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       },
       schedule: () => false
     });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/setup`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/setup"),
       deps
     );
 
@@ -802,13 +776,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       },
       schedule: () => false
     });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/setup`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/setup"),
       deps
     );
 
@@ -820,13 +790,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
   it("refuses a retry kind it does not implement", async () => {
     const op = retryableSetup();
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(
-        `/api/operations/${op.operationId}/retry/everything`,
-        out.response
-      ),
+    const out = await call(
+      handleRetryOperation,
+      controlPath(op, "retry/everything"),
       deps
     );
 
@@ -838,10 +804,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
   it("refuses an undecodable retry kind rather than throwing", async () => {
     const op = retryableSetup();
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRetryOperation(
-      postContext(`/api/operations/${op.operationId}/retry/%`, out.response),
+    const out = await call(
+      handleRetryOperation,
+      `/api/operations/${op.operationId}/retry/%`,
       deps
     );
 
@@ -902,10 +867,9 @@ describe("POST /api/operations/{id}/continue", () => {
   it("continues a stopped setup from the first unfinished step", async () => {
     const op = stoppedSetup();
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleContinueOperation(
-      postContext(`/api/operations/${op.operationId}/continue`, out.response),
+    const out = await call(
+      handleContinueOperation,
+      controlPath(op, "continue"),
       deps
     );
 
@@ -936,10 +900,9 @@ describe("POST /api/operations/{id}/continue", () => {
       name: "dev"
     });
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleContinueOperation(
-      postContext(`/api/operations/${op.operationId}/continue`, out.response),
+    const out = await call(
+      handleContinueOperation,
+      controlPath(op, "continue"),
       deps
     );
 
@@ -955,10 +918,9 @@ describe("POST /api/operations/{id}/continue", () => {
   it("refuses to continue a running operation", async () => {
     const op = newOperation();
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleContinueOperation(
-      postContext(`/api/operations/${op.operationId}/continue`, out.response),
+    const out = await call(
+      handleContinueOperation,
+      controlPath(op, "continue"),
       deps
     );
 
@@ -972,10 +934,9 @@ describe("POST /api/operations/{id}/rollback", () => {
   it("accepts a rollback for a stopped attempt and schedules it once", async () => {
     const op = stoppedSetup();
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRollbackOperation(
-      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+    const out = await call(
+      handleRollbackOperation,
+      controlPath(op, "rollback"),
       deps
     );
 
@@ -1003,10 +964,9 @@ describe("POST /api/operations/{id}/rollback", () => {
       branch: "main"
     });
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRollbackOperation(
-      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+    const out = await call(
+      handleRollbackOperation,
+      controlPath(op, "rollback"),
       deps
     );
 
@@ -1031,10 +991,9 @@ describe("POST /api/operations/{id}/rollback", () => {
       previousBlobSha: null
     });
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRollbackOperation(
-      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+    const out = await call(
+      handleRollbackOperation,
+      controlPath(op, "rollback"),
       deps
     );
 
@@ -1053,10 +1012,9 @@ describe("POST /api/operations/{id}/rollback", () => {
     recordAzureApp(op, { state: "created", appId: "app-1" });
     finishSucceeded(op);
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRollbackOperation(
-      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+    const out = await call(
+      handleRollbackOperation,
+      controlPath(op, "rollback"),
       deps
     );
 
@@ -1077,10 +1035,9 @@ describe("POST /api/operations/{id}/rollback", () => {
     requestStop(op);
     stopAtBoundary(op, "after_environment");
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRollbackOperation(
-      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+    const out = await call(
+      handleRollbackOperation,
+      controlPath(op, "rollback"),
       deps
     );
 
@@ -1093,10 +1050,9 @@ describe("POST /api/operations/{id}/rollback", () => {
     const op = newOperation();
     recordAzureApp(op, { state: "created", appId: "app-1" });
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleRollbackOperation(
-      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+    const out = await call(
+      handleRollbackOperation,
+      controlPath(op, "rollback"),
       deps
     );
 
@@ -1119,10 +1075,9 @@ describe("POST /api/operations/{id}/rollback", () => {
         return Promise.reject(new Error("store offline"));
       }
     });
-    const out = recorder();
-
-    await handleRollbackOperation(
-      postContext(`/api/operations/${op.operationId}/rollback`, out.response),
+    const out = await call(
+      handleRollbackOperation,
+      controlPath(op, "rollback"),
       deps
     );
 
@@ -1159,12 +1114,7 @@ describe("POST /api/operations/{id}/exit", () => {
   it("closes a setup that owns nothing without scheduling any deletion", async () => {
     const op = reusedOnlyFailure();
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleExitOperation(
-      postContext(`/api/operations/${op.operationId}/exit`, out.response),
-      deps
-    );
+    const out = await call(handleExitOperation, controlPath(op, "exit"), deps);
 
     expect(out.recording.status).toBe(200);
     expect(out.payload()).toMatchObject({
@@ -1201,12 +1151,7 @@ describe("POST /api/operations/{id}/exit", () => {
       name: "dev"
     });
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleExitOperation(
-      postContext(`/api/operations/${op.operationId}/exit`, out.response),
-      deps
-    );
+    const out = await call(handleExitOperation, controlPath(op, "exit"), deps);
 
     expect(out.recording.status).toBe(202);
     const payload = out.payload();
@@ -1231,12 +1176,7 @@ describe("POST /api/operations/{id}/exit", () => {
     recordAzureApp(op, { state: "created", appId: "app-1" });
     finishSucceeded(op);
     const deps = dependencies({ get: () => op });
-    const out = recorder();
-
-    await handleExitOperation(
-      postContext(`/api/operations/${op.operationId}/exit`, out.response),
-      deps
-    );
+    const out = await call(handleExitOperation, controlPath(op, "exit"), deps);
 
     expect(out.recording.status).toBe(409);
     expect(out.payload()).toMatchObject({
@@ -1252,16 +1192,13 @@ describe("POST /api/operations/{id}/exit", () => {
     const op = reusedOnlyFailure();
     const deps = dependencies({ get: () => op });
     await handleExitOperation(
-      postContext(
-        `/api/operations/${op.operationId}/exit`,
-        recorder().response
-      ),
+      postContext(controlPath(op, "exit"), recorder().response),
       deps
     );
 
-    const second = recorder();
-    await handleExitOperation(
-      postContext(`/api/operations/${op.operationId}/exit`, second.response),
+    const second = await call(
+      handleExitOperation,
+      controlPath(op, "exit"),
       deps
     );
 
@@ -1280,12 +1217,7 @@ describe("POST /api/operations/{id}/exit", () => {
       get: () => op,
       persistOperations: () => Promise.reject(new Error("disk full"))
     });
-    const out = recorder();
-
-    await handleExitOperation(
-      postContext(`/api/operations/${op.operationId}/exit`, out.response),
-      deps
-    );
+    const out = await call(handleExitOperation, controlPath(op, "exit"), deps);
 
     expect(out.recording.status).toBe(500);
     expect(out.payload()).toMatchObject({
@@ -1411,12 +1343,7 @@ describe("contracts shared by every control route", () => {
         get: () => op,
         persistOperations: () => Promise.reject(new Error("disk gone"))
       });
-      const out = recorder();
-
-      await route.handler(
-        postContext(route.path(op.operationId), out.response),
-        deps
-      );
+      const out = await call(route.handler, route.path(op.operationId), deps);
 
       expect(out.recording.status).toBe(500);
       expect(out.payload()).toMatchObject({
@@ -1444,12 +1371,7 @@ describe("contracts shared by every control route", () => {
           conflict: { operationId: "op_live" }
         })
       });
-      const out = recorder();
-
-      await route.handler(
-        postContext(route.path(op.operationId), out.response),
-        deps
-      );
+      const out = await call(route.handler, route.path(op.operationId), deps);
 
       expect(out.recording.status).toBe(409);
       expect(out.payload()).toEqual({
@@ -1499,12 +1421,7 @@ describe("contracts shared by every control route", () => {
     async (route) => {
       const op = route.operation();
       const deps = dependencies({ get: () => op, schedule: () => false });
-      const out = recorder();
-
-      await route.handler(
-        postContext(route.path(op.operationId), out.response),
-        deps
-      );
+      const out = await call(route.handler, route.path(op.operationId), deps);
 
       // Nothing ran, so the customer is put back on the same decision rather
       // than shown a failure that never happened, and no command is left behind

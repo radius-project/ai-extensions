@@ -1559,13 +1559,7 @@ describe("finalizeSetupFailure", () => {
     expect(failure.body.cleanup).toMatchObject({
       rollbackAttempted: false,
       state: "not_needed",
-      retained: [
-        {
-          kind: "github_environment",
-          reason: "reused",
-          target: "octo/app:dev"
-        }
-      ]
+      reused: [expect.objectContaining({ target: "octo/app:dev" })]
     });
   });
 
@@ -1593,12 +1587,11 @@ describe("finalizeSetupFailure", () => {
       rollbackAttempted: true,
       rollbackBeforeCommit: true,
       state: "succeeded_with_warnings",
-      retained: [
-        {
+      manualActionRequired: [
+        expect.objectContaining({
           kind: "github_environment",
-          reason: "manual_cleanup_required",
           target: "octo/app:dev"
-        }
+        })
       ]
     });
     expect((failure.body.cleanup as any).warnings).toEqual(
@@ -1682,30 +1675,18 @@ describe("finalizeSetupFailure", () => {
       rollbackBeforeCommit: false,
       state: "not_needed"
     });
-    expect((failure.body.cleanup as any).retained).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          kind: "azure_app",
-          reason: "retained",
-          target: "radius-deploy-octo-app (app-1)"
-        }),
-        expect.objectContaining({
-          kind: "service_principal",
-          reason: "retained",
-          target: "Service Principal for radius-deploy-octo-app (app-1)"
-        }),
-        expect.objectContaining({
-          kind: "github_environment",
-          reason: "retained",
-          target: "octo/app:dev"
-        }),
-        expect.objectContaining({
-          kind: "workflow_file",
-          reason: "retained",
-          target: ".github/workflows/radius-verify-credentials.yml on main"
-        })
-      ])
-    );
+    expect((failure.body.cleanup as any).retainedArtifacts).toEqual([
+      { kind: "azure_app", target: "radius-deploy-octo-app (app-1)" },
+      {
+        kind: "service_principal",
+        target: "Service Principal for radius-deploy-octo-app (app-1)"
+      },
+      { kind: "github_environment", target: "octo/app:dev" },
+      {
+        kind: "workflow_file",
+        target: ".github/workflows/radius-verify-credentials.yml on main"
+      }
+    ]);
     expect(op.state).toBe("failed_partial");
   });
 });

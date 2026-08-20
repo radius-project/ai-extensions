@@ -213,55 +213,59 @@ interface CommandSpec {
  *
  * Each string maps to one closed refusal code so the page never has to guess at
  * a reason, and an unrecognised code degrades to the honest general statement
- * rather than an invented cause.
+ * rather than an invented cause. The map is module state because it is constant
+ * data, and the sentences the two forward commands share are named once so the
+ * pair cannot drift.
  */
+const FORWARD_REQUEST_MISSING =
+  "Radius no longer holds the environment details needed to continue this setup.";
+const FORWARD_OWNERSHIP_AMBIGUOUS =
+  "Radius cannot prove what it created during this attempt, so continuing could duplicate a resource. Review the listed resources first.";
+const PROVENANCE_INCOMPLETE =
+  "Radius did not save enough about the workflow files it committed to prove they are unchanged, so it will not remove them or anything they depend on.";
+
+const REFUSAL_MESSAGES: Record<string, string> = {
+  "unknown-operation": "Radius has no record of this operation.",
+  "operation-active":
+    "This setup is still running, so there is nothing to retry yet.",
+  "verification-retry-not-retryable":
+    "This result is not one Radius can fix by checking credentials again.",
+  "verification-provenance-incomplete":
+    "Radius did not save enough of the workflow, branch, and identity details to repeat verification safely.",
+  "setup-retry-not-retryable":
+    "Only a stopped or partially failed setup can be continued.",
+  "setup-retry-request-missing": FORWARD_REQUEST_MISSING,
+  "setup-retry-ownership-ambiguous": FORWARD_OWNERSHIP_AMBIGUOUS,
+  "setup-continue-not-available":
+    "This setup is not waiting at a stop that Radius can continue from.",
+  "setup-continue-request-missing": FORWARD_REQUEST_MISSING,
+  "setup-continue-ownership-ambiguous": FORWARD_OWNERSHIP_AMBIGUOUS,
+  "setup-continue-rolled-back":
+    "Radius rolled back what this attempt created, so there is nothing left to continue from. Start a new environment setup.",
+  "rollback-not-available":
+    "Only a stopped, partially failed, or unfinished setup can be rolled back.",
+  "rollback-environment-verified":
+    "Credential verification succeeded for this environment, so it is finished setup. Remove it with Delete Environment instead.",
+  "rollback-provenance-incomplete": PROVENANCE_INCOMPLETE,
+  "rollback-nothing-owned":
+    "Radius did not create any resources it can prove it owns in this attempt.",
+  "rollback-already-attempted":
+    "Radius already ran a rollback for this attempt. Use the rollback retry for anything still present.",
+  "cleanup-retry-not-retryable":
+    "The last cleanup attempt did not leave anything Radius can safely retry.",
+  "cleanup-retry-provenance-incomplete": PROVENANCE_INCOMPLETE,
+  "cleanup-retry-nothing-unresolved":
+    "Every resource Radius proved it created has already been removed.",
+  "cleanup-retry-ledger-missing":
+    "Radius has no record of resources it created for this setup.",
+  "exit-environment-ready":
+    "This environment finished setup, so there is nothing to exit. Remove it with Delete Environment instead.",
+  "setup-already-exited": "Radius already closed this setup."
+};
+
 export function retryRefusalMessage(kind: string, code: string): string {
-  const messages: Record<string, string> = {
-    "unknown-operation": "Radius has no record of this operation.",
-    "operation-active":
-      "This setup is still running, so there is nothing to retry yet.",
-    "verification-retry-not-retryable":
-      "This result is not one Radius can fix by checking credentials again.",
-    "verification-provenance-incomplete":
-      "Radius did not save enough of the workflow, branch, and identity details to repeat verification safely.",
-    "setup-retry-not-retryable":
-      "Only a stopped or partially failed setup can be continued.",
-    "setup-retry-request-missing":
-      "Radius no longer holds the environment details needed to continue this setup.",
-    "setup-retry-ownership-ambiguous":
-      "Radius cannot prove what it created during this attempt, so continuing could duplicate a resource. Review the listed resources first.",
-    "setup-continue-not-available":
-      "This setup is not waiting at a stop that Radius can continue from.",
-    "setup-continue-request-missing":
-      "Radius no longer holds the environment details needed to continue this setup.",
-    "setup-continue-ownership-ambiguous":
-      "Radius cannot prove what it created during this attempt, so continuing could duplicate a resource. Review the listed resources first.",
-    "setup-continue-rolled-back":
-      "Radius rolled back what this attempt created, so there is nothing left to continue from. Start a new environment setup.",
-    "rollback-not-available":
-      "Only a stopped, partially failed, or unfinished setup can be rolled back.",
-    "rollback-environment-verified":
-      "Credential verification succeeded for this environment, so it is finished setup. Remove it with Delete Environment instead.",
-    "rollback-provenance-incomplete":
-      "Radius did not save enough about the workflow files it committed to prove they are unchanged, so it will not remove them or anything they depend on.",
-    "rollback-nothing-owned":
-      "Radius did not create any resources it can prove it owns in this attempt.",
-    "rollback-already-attempted":
-      "Radius already ran a rollback for this attempt. Use the rollback retry for anything still present.",
-    "cleanup-retry-not-retryable":
-      "The last cleanup attempt did not leave anything Radius can safely retry.",
-    "cleanup-retry-provenance-incomplete":
-      "Radius did not save enough about the workflow files it committed to prove they are unchanged, so it will not remove them or anything they depend on.",
-    "cleanup-retry-nothing-unresolved":
-      "Every resource Radius proved it created has already been removed.",
-    "cleanup-retry-ledger-missing":
-      "Radius has no record of resources it created for this setup.",
-    "exit-environment-ready":
-      "This environment finished setup, so there is nothing to exit. Remove it with Delete Environment instead.",
-    "setup-already-exited": "Radius already closed this setup."
-  };
   return (
-    messages[code] ||
+    REFUSAL_MESSAGES[code] ||
     `Radius cannot retry ${kind} for this operation (${code}).`
   );
 }

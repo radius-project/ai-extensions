@@ -8,6 +8,10 @@ import type {
   WorkflowRollbackPorts
 } from "./workflow-rollback.js";
 import { createHash } from "node:crypto";
+import {
+  isMergedPullRequestBody,
+  parsePullRequestUrl
+} from "./pull-request-url.js";
 import { shouldRetryWithKeyringCredential } from "./workflow-credential-fallback.js";
 
 // The GitHub half of a post-commit rollback, expressed once over a single
@@ -83,9 +87,6 @@ export function createWorkflowScopeApiCommand(
     return retry.ok ? retry : first;
   };
 }
-
-const PULL_REQUEST_URL_PATTERN =
-  /^https:\/\/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\/pull\/(\d+)$/;
 
 function failureDetail(result: WorkflowRollbackCommandResult): string {
   const detail = (result.stderr || result.stdout || "").trim();
@@ -196,10 +197,8 @@ export function createWorkflowRollbackPorts(
     repo: string;
     pullRequestUrl: string;
   }): Promise<PullRequestState> => {
-    const match = PULL_REQUEST_URL_PATTERN.exec(
-      String(input.pullRequestUrl || "").trim()
-    );
-    if (!match || match[1] !== input.repo) {
+    const reference = parsePullRequestUrl(input.pullRequestUrl, input.repo);
+    if (!reference) {
       return {
         status: "unknown",
         detail:
@@ -207,7 +206,7 @@ export function createWorkflowRollbackPorts(
       };
     }
     const result = await run({
-      args: ["api", `/repos/${match[1]}/pulls/${match[2]}`]
+      args: ["api", `/repos/${reference.repo}/pulls/${reference.number}`]
     });
     if (!result.ok) {
       return { status: "unknown", detail: failureDetail(result) };
@@ -220,7 +219,7 @@ export function createWorkflowRollbackPorts(
         detail: "GitHub returned a pull request Radius could not identify."
       };
     }
-    if (body?.merged === true || readString(body?.merged_at)) {
+    if (isMergedPullRequestBody(body)) {
       return { status: "merged", number };
     }
     return {

@@ -2,6 +2,11 @@
 // it. Kept out of the route so the decision is testable without HTTP and so the
 // route keeps a single narrow port instead of a GitHub client.
 
+import {
+  isMergedPullRequestBody,
+  parsePullRequestUrl
+} from "./pull-request-url.js";
+
 export interface PullRequestJsonResponse {
   ok: boolean;
   json: unknown;
@@ -10,19 +15,6 @@ export interface PullRequestJsonResponse {
 export type PullRequestJsonFetch = (
   apiPath: string
 ) => Promise<PullRequestJsonResponse>;
-
-const PULL_REQUEST_URL_PATTERN =
-  /^https:\/\/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\/pull\/(\d+)$/;
-
-function readMergeState(value: unknown): {
-  merged: unknown;
-  mergedAt: unknown;
-} {
-  if (!value || typeof value !== "object")
-    return { merged: null, mergedAt: null };
-  const detail = value as Record<string, unknown>;
-  return { merged: detail.merged, mergedAt: detail.merged_at };
-}
 
 /**
  * Whether the setup pull request has landed on the target branch.
@@ -37,13 +29,11 @@ export async function isSetupPullRequestMerged(
   pullRequestUrl: string | null | undefined,
   fetchJson: PullRequestJsonFetch
 ): Promise<boolean> {
-  const url = String(pullRequestUrl || "").trim();
-  const match = PULL_REQUEST_URL_PATTERN.exec(url);
-  if (!match) return false;
-  const [, repo, number] = match;
-  if (operationRepo && operationRepo !== repo) return false;
-  const result = await fetchJson(`repos/${repo}/pulls/${number}`);
+  const reference = parsePullRequestUrl(pullRequestUrl, operationRepo);
+  if (!reference) return false;
+  const result = await fetchJson(
+    `repos/${reference.repo}/pulls/${reference.number}`
+  );
   if (!result?.ok) return false;
-  const { merged, mergedAt } = readMergeState(result.json);
-  return merged === true || (mergedAt != null && mergedAt !== "");
+  return isMergedPullRequestBody(result.json);
 }

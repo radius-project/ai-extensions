@@ -753,23 +753,22 @@ describe("client projection", () => {
     });
 
     const view = toClientView(op);
-    expect(view.cleanup.removed).toEqual([
+    expect(view.cleanup.cleaned).toEqual([
       {
-        artifactType: "federated_credential",
+        kind: "federated_credential",
         outcome: "deleted",
         target: "radius-dev @ repo:contoso/store:environment:dev"
       },
       {
-        artifactType: "role_assignment",
+        kind: "role_assignment",
         outcome: "not_found",
         target:
           "Contributor @ /subscriptions/sub/resourceGroups/rg (already absent)"
       }
     ]);
-    expect(view.cleanup.retained).toEqual([
+    expect(view.cleanup.reused).toEqual([
       {
         kind: "azure_app",
-        reason: "reused",
         target: "shared-app (shared-app-id)",
         detail:
           "Radius did not create this App Registration during this attempt, so it is left exactly as it was found."
@@ -819,32 +818,22 @@ describe("client projection", () => {
 
     const view = toClientView(op);
     expect(view.cleanup.rollbackBeforeCommit).toBe(false);
-    expect(view.cleanup.retained).toEqual(
-      expect.arrayContaining([
-        {
-          kind: "azure_app",
-          reason: "retained",
-          target: "radius-deploy-contoso-store (new-app-id)"
-        },
-        {
-          kind: "service_principal",
-          reason: "retained",
-          target:
-            "Service Principal for radius-deploy-contoso-store (new-app-id)"
-        },
-        {
-          kind: "github_environment",
-          reason: "retained",
-          target: "contoso/store:dev"
-        },
-        {
-          kind: "workflow_file",
-          reason: "retained",
-          target:
-            ".github/workflows/radius-verify-credentials.yml on radius/setup-dev"
-        }
-      ])
-    );
+    expect(view.cleanup.retainedArtifacts).toEqual([
+      {
+        kind: "azure_app",
+        target: "radius-deploy-contoso-store (new-app-id)"
+      },
+      {
+        kind: "service_principal",
+        target: "Service Principal for radius-deploy-contoso-store (new-app-id)"
+      },
+      { kind: "github_environment", target: "contoso/store:dev" },
+      {
+        kind: "workflow_file",
+        target:
+          ".github/workflows/radius-verify-credentials.yml on radius/setup-dev"
+      }
+    ]);
     expect(view.cleanup.retry).toEqual({
       startsCleanly: false,
       state: "reuses_retained_artifacts",
@@ -877,22 +866,20 @@ describe("client projection", () => {
 
     const view = toClientView(op);
     expect(view.cleanup.rollbackBeforeCommit).toBe(false);
-    expect(view.cleanup.retained).toEqual(
-      expect.arrayContaining([
-        {
-          kind: "github_environment",
-          reason: "manual_cleanup_required",
-          target: "contoso/store:dev",
-          detail:
-            "Radius cannot prove it created this GitHub environment, so it was left in place. Delete it yourself if this setup should be rolled back."
-        },
-        {
-          kind: "workflow_file",
-          reason: "retained",
-          target: ".github/workflows/radius-verify-credentials.yml on main"
-        }
-      ])
-    );
+    expect(view.cleanup.manualActionRequired).toEqual([
+      {
+        kind: "github_environment",
+        target: "contoso/store:dev",
+        action:
+          "Radius cannot prove it created this GitHub environment, so it was left in place. Delete it yourself if this setup should be rolled back."
+      }
+    ]);
+    expect(view.cleanup.retainedArtifacts).toEqual([
+      {
+        kind: "workflow_file",
+        target: ".github/workflows/radius-verify-credentials.yml on main"
+      }
+    ]);
     expect(view.cleanup.retry).toEqual({
       startsCleanly: false,
       state: "reuses_retained_artifacts",

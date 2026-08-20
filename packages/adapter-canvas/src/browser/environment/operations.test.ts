@@ -65,13 +65,21 @@ function verifyUrl(
   );
 }
 
-function setup() {
+/**
+ * Builds the host page, optionally omitting element IDs entirely so
+ * `dom.byId`/`dom.inputById` genuinely returns null for them. A real host page
+ * can legitimately be missing an element the module treats as optional, and
+ * only the panel itself is a hard requirement.
+ */
+function setupWithout(missingIds: readonly string[] = []) {
   const browser = createFakeBrowser();
   const els: Record<string, FakeElement> = {};
   for (const id of [
     ...Object.values(PROGRESS_IDS),
-    ...Object.values(ROLLBACK_IDS)
+    ...Object.values(ROLLBACK_IDS),
+    ERROR_BANNER_ID
   ]) {
+    if (missingIds.includes(id)) continue;
     // The rollback confirm control is disabled while its request is in
     // flight, so it has to be a real input-like node.
     const el =
@@ -79,49 +87,17 @@ function setup() {
     els[id] = el;
     browser.document.add(el);
   }
-  const errorBanner = createFakeElement(ERROR_BANNER_ID);
-  els[ERROR_BANNER_ID] = errorBanner;
-  browser.document.add(errorBanner);
   const deployButton = createFakeInput(DEPLOY_BUTTON_ID);
   deployButton.disabled = true;
   deployButton.textContent = "Creating…";
-  browser.document.add(deployButton);
+  // Built either way so the handle stays typed, but attached only when the
+  // scenario keeps it, so `dom.inputById` genuinely answers null without it.
+  if (!missingIds.includes(DEPLOY_BUTTON_ID))
+    browser.document.add(deployButton);
   return { ...browser, els, deployButton };
 }
 
-/**
- * Builds a browser like `setup()` but omits the given element IDs entirely,
- * so `dom.byId`/`dom.inputById` genuinely returns null for them. Used to
- * prove the module's optional-DOM guards degrade gracefully — a real host
- * page can legitimately be missing an element the module treats as
- * optional, and only the panel itself is a hard requirement.
- */
-function setupWithout(missingIds: readonly string[]) {
-  const browser = createFakeBrowser();
-  const els: Record<string, FakeElement> = {};
-  for (const id of [
-    ...Object.values(PROGRESS_IDS),
-    ...Object.values(ROLLBACK_IDS)
-  ]) {
-    if (missingIds.includes(id)) continue;
-    const el =
-      id === ROLLBACK_IDS.confirm ? createFakeInput(id) : createFakeElement(id);
-    els[id] = el;
-    browser.document.add(el);
-  }
-  if (!missingIds.includes(ERROR_BANNER_ID)) {
-    const errorBanner = createFakeElement(ERROR_BANNER_ID);
-    els[ERROR_BANNER_ID] = errorBanner;
-    browser.document.add(errorBanner);
-  }
-  if (!missingIds.includes(DEPLOY_BUTTON_ID)) {
-    const deployButton = createFakeInput(DEPLOY_BUTTON_ID);
-    deployButton.disabled = true;
-    deployButton.textContent = "Creating…";
-    browser.document.add(deployButton);
-  }
-  return { ...browser, els };
-}
+const setup = () => setupWithout();
 
 function op(overrides: Record<string, unknown> = {}): {
   operation: Record<string, unknown>;
@@ -248,6 +224,51 @@ function createDeps(overrides: Partial<EnvironmentOperationsDeps> = {}) {
   };
 }
 
+/**
+ * The controller under test, on a freshly built browser. Every scenario needs
+ * one, and the deps harness it does not read is discarded here rather than
+ * re-declared at each call site.
+ */
+function controllerFor(
+  browser: Pick<ReturnType<typeof createFakeBrowser>, "context">,
+  options: {
+    repo?: string;
+    mutationNonce?: string;
+    deps?: EnvironmentOperationsDeps;
+  } = {}
+) {
+  const { repo = REPO, deps = createDeps().deps, ...rest } = options;
+  return initializeEnvironmentOperations(browser.context, {
+    repo,
+    ...rest,
+    deps
+  });
+}
+
+/** Answer the polling route with one operation payload. */
+function serveOperation(
+  browser: ReturnType<typeof setup>,
+  overrides: Record<string, unknown> = {}
+): void {
+  browser.net.handle(operationsUrl(), () => jsonResponse(op(overrides)));
+}
+
+/** An operation parked on one input prompt. */
+function prompt(
+  code: string,
+  extra: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    state: "input_required",
+    inputRequired: {
+      requestedAt: "2024-01-01T00:00:00.000Z",
+      code,
+      checkpoint: {},
+      ...extra
+    }
+  };
+}
+
 async function tickClock(
   clock: { tick(ms: number): void },
   ms: number,
@@ -315,8 +336,6 @@ describe("parseOperationResponse", () => {
       state: "",
       rollbackBeforeCommit: undefined,
       retry: { startsCleanly: false, guidance: "" },
-      removed: [],
-      retained: [],
       warnings: [],
       created: [],
       retainedArtifacts: [],
@@ -346,15 +365,13 @@ describe("parseOperationResponse", () => {
           state: "succeeded_with_warnings",
           rollbackBeforeCommit: false,
           retry: { startsCleanly: true, guidance: "Retry any time." },
-          removed: [
-            { target: "rg-dev" },
+          warnings: ["partial cleanup", "", 7, null],
+          created: [
+            { target: "app-radius-dev" },
             { notATarget: true },
             { target: "" },
             "not-an-entry"
           ],
-          retained: [{ target: "kv-dev" }],
-          warnings: ["partial cleanup", "", 7, null],
-          created: [{ target: "app-radius-dev" }, { target: "" }],
           retainedArtifacts: [{ target: "ghcr package" }],
           reused: [{ target: "existing-sp", detail: "It already existed." }],
           cleaned: [{ target: "federated credential" }],
@@ -371,8 +388,6 @@ describe("parseOperationResponse", () => {
       state: "succeeded_with_warnings",
       rollbackBeforeCommit: false,
       retry: { startsCleanly: true, guidance: "Retry any time." },
-      removed: [{ target: "rg-dev", detail: "" }],
-      retained: [{ target: "kv-dev", detail: "" }],
       warnings: ["partial cleanup"],
       created: [{ target: "app-radius-dev", detail: "" }],
       retainedArtifacts: [{ target: "ghcr package", detail: "" }],
@@ -604,34 +619,22 @@ describe("parseVerifyStatus", () => {
 describe("initializeEnvironmentOperations bootstrap", () => {
   it("returns null when the progress panel is not on the page", () => {
     const browser = createFakeBrowser();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     expect(controller).toBeNull();
   });
 
   it("returns null for a second instance bound to the same context", () => {
     const browser = setup();
-    const first = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const first = controllerFor(browser);
     expect(first).not.toBeNull();
-    const second = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const second = controllerFor(browser);
     expect(second).toBeNull();
     expect(browser.bindings.has(ENVIRONMENT_OPERATIONS_ENTRY_KEY)).toBe(true);
   });
 
   it("hides the panel and stops tracking when the dismiss button is clicked", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     expect(controller).not.toBeNull();
     controller?.renderProgress(record());
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
@@ -648,25 +651,18 @@ describe("initializeEnvironmentOperations bootstrap", () => {
 describe("trackProgress rendering", () => {
   it("renders stage and step lists and clears them on the next render", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
+    const controller = controllerFor(browser);
+    serveOperation(browser, {
+      stages: [
+        { state: "succeeded", label: "Provision" },
+        "not-a-stage",
+        { state: "running", label: "Configure" }
+      ],
+      steps: [
+        { state: "succeeded", label: "Create resource group" },
+        { state: "running", label: "Create key vault" }
+      ]
     });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          stages: [
-            { state: "succeeded", label: "Provision" },
-            "not-a-stage",
-            { state: "running", label: "Configure" }
-          ],
-          steps: [
-            { state: "succeeded", label: "Create resource group" },
-            { state: "running", label: "Create key vault" }
-          ]
-        })
-      )
-    );
 
     controller?.trackProgress("dev", "azure");
     await flushPromises();
@@ -695,10 +691,7 @@ describe("trackProgress rendering", () => {
 
   it("falls back to a default glyph for an unrecognized stage or step state", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(
       record({
         stages: [{ state: "quantum", label: "Provision" }],
@@ -714,10 +707,7 @@ describe("trackProgress rendering", () => {
 
   it("prefers the last running step, then the last step, over the verify activity", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
 
     controller?.renderProgress(
       record({
@@ -743,10 +733,7 @@ describe("trackProgress rendering", () => {
 
   it("shows the verify activity only while on the verify stage with no terminal state", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () =>
       jsonResponse(op({ currentStage: "verify", steps: [] }))
     );
@@ -774,10 +761,7 @@ describe("trackProgress rendering", () => {
 
   it("lets a failure message override the activity line", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(
       record({
         steps: [{ state: "running", label: "Configuring" }],
@@ -796,10 +780,7 @@ describe("trackProgress rendering", () => {
     // the customer to a different page mid-outcome.
     const retiredLink = createFakeElement("env-progress-resume");
     browser.document.add(retiredLink);
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
 
     for (const terminalState of [
       null,
@@ -832,10 +813,7 @@ describe("trackProgress rendering", () => {
 
   it("renders successful completion as a simple OK action", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
 
     controller?.renderProgress(record({ terminalState: null }));
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
@@ -851,10 +829,7 @@ describe("trackProgress rendering", () => {
 
   it("hides stale terminal copy after success", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
 
     controller?.renderProgress(
       record({
@@ -878,10 +853,7 @@ describe("trackProgress rendering", () => {
 
   it("renders nothing and hides the panel for a null operation", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(record());
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
 
@@ -910,10 +882,7 @@ describe("verify status polling", () => {
 
   it("folds pending verify activity into the next render once the operation reappears", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     await primeVerifyPoll(browser, controller);
     // A pending poll with no activity text must not clear or corrupt the
     // (currently empty) tracked verify activity, then continue polling.
@@ -953,10 +922,7 @@ describe("verify status polling", () => {
     "stops polling on a terminal verify state %s (error=%s)",
     async (state, error, expectedActivity) => {
       const browser = setup();
-      const controller = initializeEnvironmentOperations(browser.context, {
-        repo: REPO,
-        deps: createDeps().deps
-      });
+      const controller = controllerFor(browser);
       await primeVerifyPoll(browser, controller);
       browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
         jsonResponse({ state, terminal: state !== "expired", error })
@@ -972,10 +938,7 @@ describe("verify status polling", () => {
 
   it("stops polling once verification exceeds its tracking window", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     await primeVerifyPoll(browser, controller, {
       verification: { dispatchedAt: 1000 }
     });
@@ -997,10 +960,7 @@ describe("verify status polling", () => {
   it("shows a success banner and reloads the table when verification succeeds", async () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     await primeVerifyPoll(browser, controller);
     browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
       jsonResponse({ state: "success" })
@@ -1017,10 +977,7 @@ describe("verify status polling", () => {
   it("defaults the success banner provider to azure when trackProgress was called without one", async () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     browser.net.handle(operationsUrl(), () =>
       jsonResponse(op({ currentStage: "verify", steps: [], provider: "" }))
     );
@@ -1041,10 +998,7 @@ describe("verify status polling", () => {
 
   it("marks the panel failed with the run url when verification fails", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     await primeVerifyPoll(browser, controller);
     browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
       jsonResponse({
@@ -1071,10 +1025,7 @@ describe("verify status polling", () => {
     const browser = setup();
     browser.net.supportsAbort = false;
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     await primeVerifyPoll(browser, controller);
     const verifyResponse = createDeferred<HttpResponse>();
     browser.net.handle(
@@ -1087,15 +1038,11 @@ describe("verify status polling", () => {
     // resolves. Disabling abort support means it is never rejected for the
     // session change, so it reaches pollVerifyStatus's own continuation
     // while genuinely stale.
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          environment: "staging",
-          provider: "aws",
-          summary: "Creating staging…"
-        })
-      )
-    );
+    serveOperation(browser, {
+      environment: "staging",
+      provider: "aws",
+      summary: "Creating staging…"
+    });
     controller?.trackProgress("staging", "aws");
     await flushPromises();
     const timeoutsBeforeStaleSettles = browser.clock.timeouts;
@@ -1112,10 +1059,7 @@ describe("verify status polling", () => {
   it("ignores a stale verify-status rejection that arrives after its session was superseded", async () => {
     const browser = setup();
     browser.net.supportsAbort = false;
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     await primeVerifyPoll(browser, controller);
     const verifyResponse = createDeferred<HttpResponse>();
     browser.net.handle(
@@ -1124,15 +1068,11 @@ describe("verify status polling", () => {
     );
     await tickClock(browser.clock, 1500);
 
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          environment: "staging",
-          provider: "aws",
-          summary: "Creating staging…"
-        })
-      )
-    );
+    serveOperation(browser, {
+      environment: "staging",
+      provider: "aws",
+      summary: "Creating staging…"
+    });
     controller?.trackProgress("staging", "aws");
     await flushPromises();
     const timeoutsBeforeStaleSettles = browser.clock.timeouts;
@@ -1162,10 +1102,7 @@ describe("failure card rendering", () => {
     "summarizes cleanup state %s (rollbackBeforeCommit=%s) as %s",
     (state, rollbackBeforeCommit, expected) => {
       const browser = setup();
-      const controller = initializeEnvironmentOperations(browser.context, {
-        repo: REPO,
-        deps: createDeps().deps
-      });
+      const controller = controllerFor(browser);
       controller?.renderProgress(
         record({
           terminalState: "failed",
@@ -1179,12 +1116,9 @@ describe("failure card rendering", () => {
     }
   );
 
-  it("renders removed, retained, and warning lists and hides empty ones", () => {
+  it("renders the warning list and hides it when nothing was warned about", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(
       record({
         terminalState: "failed_partial",
@@ -1192,8 +1126,6 @@ describe("failure card rendering", () => {
         cleanup: {
           state: "succeeded_with_warnings",
           retry: { startsCleanly: true, guidance: "Retry now." },
-          removed: [{ target: "rg-dev" }],
-          retained: [],
           warnings: ["disk snapshot left behind"]
         }
       })
@@ -1204,22 +1136,15 @@ describe("failure card rendering", () => {
     expect(browser.els[PROGRESS_IDS.retry].textContent).toBe(
       "Retry starts cleanly: Yes. Retry now."
     );
-    expect(browser.els[PROGRESS_IDS.cleanupRemovedBlock].style.display).toBe(
-      ""
-    );
-    expect(
-      browser.els[PROGRESS_IDS.cleanupRemovedList].children.map(
-        (c) => c.textContent
-      )
-    ).toEqual(["rg-dev"]);
-    expect(browser.els[PROGRESS_IDS.cleanupRetainedBlock].style.display).toBe(
-      "none"
-    );
     expect(browser.els[PROGRESS_IDS.cleanupWarningsBlock].style.display).toBe(
       ""
     );
+    expect(
+      browser.els[PROGRESS_IDS.cleanupWarningsList].children.map(
+        (c) => c.textContent
+      )
+    ).toEqual(["disk snapshot left behind"]);
 
-    // Now flip which lists are populated to cover the retained-list branch too.
     controller?.renderProgress(
       record({
         terminalState: "failed_partial",
@@ -1230,8 +1155,6 @@ describe("failure card rendering", () => {
             startsCleanly: false,
             guidance: "Check the deployment logs."
           },
-          removed: [],
-          retained: [{ target: "kv-dev" }],
           warnings: []
         }
       })
@@ -1239,17 +1162,6 @@ describe("failure card rendering", () => {
     expect(browser.els[PROGRESS_IDS.retry].textContent).toBe(
       "Retry starts cleanly: No. Check the deployment logs."
     );
-    expect(browser.els[PROGRESS_IDS.cleanupRemovedBlock].style.display).toBe(
-      "none"
-    );
-    expect(browser.els[PROGRESS_IDS.cleanupRetainedBlock].style.display).toBe(
-      ""
-    );
-    expect(
-      browser.els[PROGRESS_IDS.cleanupRetainedList].children.map(
-        (c) => c.textContent
-      )
-    ).toEqual(["kv-dev"]);
     expect(browser.els[PROGRESS_IDS.cleanupWarningsBlock].style.display).toBe(
       "none"
     );
@@ -1257,10 +1169,7 @@ describe("failure card rendering", () => {
 
   it("clears a previous failure card when the operation is running again", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(
       record({
         terminalState: "failed_partial",
@@ -1268,8 +1177,6 @@ describe("failure card rendering", () => {
         cleanup: {
           state: "succeeded_with_warnings",
           retry: { startsCleanly: false, guidance: "Review first." },
-          removed: [{ target: "rg-dev" }],
-          retained: [{ target: "kv-dev" }],
           warnings: ["A cleanup warning."]
         }
       })
@@ -1287,33 +1194,47 @@ describe("failure card rendering", () => {
     expect(browser.els[PROGRESS_IDS.cleanupWarningsList].children).toHaveLength(
       0
     );
-    expect(browser.els[PROGRESS_IDS.cleanupRemovedList].children).toHaveLength(
-      0
-    );
-    expect(browser.els[PROGRESS_IDS.cleanupRetainedList].children).toHaveLength(
-      0
-    );
   });
+
+  it.each([
+    ["list", PROGRESS_IDS.cleanupWarningsList],
+    ["block", PROGRESS_IDS.cleanupWarningsBlock]
+  ])(
+    "still renders the failure card when the warning %s is absent",
+    (_part, missingId) => {
+      const browser = setupWithout([missingId]);
+      const controller = controllerFor(browser);
+
+      expect(() =>
+        controller?.renderProgress(
+          record({
+            terminalState: "failed_partial",
+            failure: { message: "Setup failed." },
+            cleanup: {
+              state: "succeeded_with_warnings",
+              retry: { startsCleanly: false, guidance: "Review first." },
+              warnings: ["A cleanup warning."]
+            }
+          })
+        )
+      ).not.toThrow();
+
+      expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("");
+      expect(browser.els[PROGRESS_IDS.cleanupStatus].textContent).toBe(
+        "Cleanup finished with warnings."
+      );
+    }
+  );
 
   it("hides the failure card outside the two failed terminal states", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(record({ terminalState: "succeeded" }));
     expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("none");
   });
 });
 
 describe("partial-state inventory", () => {
-  function controllerFor(browser: ReturnType<typeof setup>) {
-    return initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
-  }
-
   it("names each surviving resource group in its own block", () => {
     const browser = setup();
     controllerFor(browser)?.renderProgress(
@@ -1447,11 +1368,7 @@ describe("operation commands", () => {
   };
 
   function commandsController(browser: ReturnType<typeof setup>) {
-    return initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      mutationNonce: "browser-nonce",
-      deps: createDeps().deps
-    });
+    return controllerFor(browser, { mutationNonce: "browser-nonce" });
   }
 
   function buttons(browser: ReturnType<typeof setup>) {
@@ -1639,10 +1556,7 @@ describe("operation commands", () => {
   it("reports a terminal result instead of rejoining the poller", async () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     browser.net.handle(stopAction.path, () =>
       jsonResponse(op({ terminalState: "cancelled", state: "cancelled" }))
     );
@@ -1660,10 +1574,7 @@ describe("operation commands", () => {
 
   it("re-reads the operation directly when there is no repository to track", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: "",
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser, { repo: "" });
     browser.net.handle(stopAction.path, () =>
       jsonResponse({ operation: null })
     );
@@ -1681,10 +1592,7 @@ describe("operation commands", () => {
 
   it("says nothing about a direct re-read the server refused", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: "",
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser, { repo: "" });
     browser.net.handle(stopAction.path, () =>
       jsonResponse({ operation: null })
     );
@@ -1701,10 +1609,7 @@ describe("operation commands", () => {
 
   it("keeps a rejected re-read out of the panel", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: "",
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser, { repo: "" });
     browser.net.handle(stopAction.path, () =>
       jsonResponse({ operation: null })
     );
@@ -1734,10 +1639,7 @@ describe("operation commands", () => {
       PROGRESS_IDS.commandStatus,
       PROGRESS_IDS.commandError
     ]);
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(stopAction.path, () =>
       jsonResponse({ operation: null })
     );
@@ -1753,10 +1655,7 @@ describe("operation commands", () => {
 
   it("still submits when the command container itself is absent", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(stopAction.path, () =>
       jsonResponse({ operation: null })
     );
@@ -1941,10 +1840,7 @@ describe("operation commands", () => {
       PROGRESS_IDS.commandNote,
       PROGRESS_IDS.partialState
     ]);
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
 
     expect(() =>
       controller?.renderProgress(record({ actions: [stopAction] }))
@@ -1953,10 +1849,7 @@ describe("operation commands", () => {
 
   it("skips a partial-state group whose block is missing", () => {
     const browser = setupWithout([PROGRESS_IDS.stateCreatedBlock]);
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(
       record({
         terminalState: "failed",
@@ -2104,10 +1997,7 @@ describe("rollback confirmation", () => {
   };
 
   function open(browser: ReturnType<typeof setup>) {
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(record({ actions: [rollbackAction] }));
     browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
     return controller;
@@ -2160,10 +2050,7 @@ describe("rollback confirmation", () => {
     // the server's wording and the workflow files it names, never a local
     // rebuild of either.
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(
       record({
         actions: [
@@ -2217,10 +2104,7 @@ describe("rollback confirmation", () => {
 
   it("names its own defaults when the server left the wording out", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(
       record({
         actions: [
@@ -2335,10 +2219,7 @@ describe("rollback confirmation", () => {
 
   it("refuses the command outright when there is no confirmation to show", () => {
     const browser = setupWithout([ROLLBACK_IDS.modal]);
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(record({ actions: [rollbackAction] }));
 
     browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
@@ -2435,10 +2316,7 @@ describe("rollback confirmation", () => {
       ROLLBACK_IDS.cancel,
       ROLLBACK_IDS.confirm
     ]);
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(record({ actions: [rollbackAction] }));
 
     browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
@@ -2451,10 +2329,7 @@ describe("rollback confirmation", () => {
 
   it("names a manual preview entry that carries no instruction", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.renderProgress(
       record({
         actions: [
@@ -2515,10 +2390,7 @@ describe("rollback confirmation", () => {
   it("drops a confirmation that raced a command already in flight", async () => {
     const browser = setup();
     const pending = createDeferred<HttpResponse>();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle("/api/operations/op-1/stop", () => pending.promise);
     controller?.renderProgress(
       record({
@@ -2553,13 +2425,6 @@ describe("rollback confirmation", () => {
 });
 
 describe("headline and rollback outcomes", () => {
-  function controllerFor(browser: ReturnType<typeof setup>) {
-    return initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
-  }
-
   it("gives a state that needs its own words a heading and a note", () => {
     const browser = setup();
     controllerFor(browser)?.renderProgress(
@@ -2674,10 +2539,7 @@ describe("headline and rollback outcomes", () => {
   it("says which cancellation this was", () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
 
     controller?.applyTerminal(
       record({
@@ -2699,10 +2561,7 @@ describe("headline and rollback outcomes", () => {
   it("treats an incomplete rollback as a rollback, not a broken setup", () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
 
     controller?.applyTerminal(
       record({
@@ -2730,10 +2589,7 @@ describe("headline and rollback outcomes", () => {
   it("still reports an ordinary partial failure as a failure", () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
 
     controller?.applyTerminal(
       record({
@@ -2756,10 +2612,7 @@ describe("headline and rollback outcomes", () => {
       PROGRESS_IDS.commandGuidance
     ]);
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
 
     expect(() => {
       controller?.renderProgress(
@@ -2812,13 +2665,6 @@ describe("rollback lifecycle presentation", () => {
     pending: false,
     tone: "danger"
   };
-
-  function controllerFor(browser: ReturnType<typeof setup>) {
-    return initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
-  }
 
   // A rollback that is still deleting: the server closes the command list
   // because cleanup has no pause control, and the record is non-terminal.
@@ -3048,31 +2894,23 @@ describe("rollback lifecycle presentation", () => {
     const browser = setup();
     const controller = controllerFor(browser);
     const panel = browser.els[PROGRESS_IDS.panel];
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "running",
-          terminalState: null,
-          activeCommandKind: "rollback",
-          headline: ROLLING_BACK_HEADLINE
-        })
-      )
-    );
+    serveOperation(browser, {
+      state: "running",
+      terminalState: null,
+      activeCommandKind: "rollback",
+      headline: ROLLING_BACK_HEADLINE
+    });
 
     controller?.trackProgress("dev", "azure");
     await flushPromises();
     expect(panel.classList.contains("env-progress--active")).toBe(true);
 
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "cancelled",
-          terminalState: "cancelled",
-          headline: ROLLBACK_COMPLETE_HEADLINE,
-          endedAt: new Date(60000).toISOString()
-        })
-      )
-    );
+    serveOperation(browser, {
+      state: "cancelled",
+      terminalState: "cancelled",
+      headline: ROLLBACK_COMPLETE_HEADLINE,
+      endedAt: new Date(60000).toISOString()
+    });
     await tickClock(browser.clock, 1500);
     await flushPromises();
 
@@ -3129,10 +2967,7 @@ describe("rollback and the stale setup-failure banner", () => {
 
   function start(browser: ReturnType<typeof setup>, action: unknown) {
     const harness = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: harness.deps
-    });
+    const controller = controllerFor(browser, { deps: harness.deps });
     controller?.renderProgress(
       record({
         state: "failed",
@@ -3157,16 +2992,12 @@ describe("rollback and the stale setup-failure banner", () => {
         })
       )
     );
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "running",
-          terminalState: null,
-          activeCommandKind: "rollback",
-          headline: ROLLING_BACK_HEADLINE
-        })
-      )
-    );
+    serveOperation(browser, {
+      state: "running",
+      terminalState: null,
+      activeCommandKind: "rollback",
+      headline: ROLLING_BACK_HEADLINE
+    });
     const { harness } = start(browser, ROLLBACK_ACTION);
 
     browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
@@ -3238,10 +3069,7 @@ describe("rollback and the stale setup-failure banner", () => {
     const browser = setup();
     failedSetup(browser);
     const harness = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: harness.deps
-    });
+    const controller = controllerFor(browser, { deps: harness.deps });
 
     controller?.applyTerminal(
       record({
@@ -3266,10 +3094,7 @@ describe("rollback and the stale setup-failure banner", () => {
     const browser = setup();
     failedSetup(browser);
     const harness = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: harness.deps
-    });
+    const controller = controllerFor(browser, { deps: harness.deps });
 
     controller?.applyTerminal(
       record({
@@ -3301,10 +3126,7 @@ describe("rollback and the stale setup-failure banner", () => {
     const browser = setup();
     failedSetup(browser);
     const harness = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: harness.deps
-    });
+    const controller = controllerFor(browser, { deps: harness.deps });
 
     controller?.applyTerminal(
       record({
@@ -3326,10 +3148,7 @@ describe("rollback and the stale setup-failure banner", () => {
     );
     browser.net.handle(operationsUrl(), () => jsonResponse(op()));
     const harness = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: harness.deps
-    });
+    const controller = controllerFor(browser, { deps: harness.deps });
     controller?.renderProgress(
       record({
         state: "failed",
@@ -3353,10 +3172,7 @@ describe("terminal handling", () => {
   it("marks a succeeded operation and reloads the table", () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     controller?.applyTerminal(
       record({
         terminalState: "succeeded",
@@ -3377,10 +3193,7 @@ describe("terminal handling", () => {
   it("marks succeeded_with_warnings the same as succeeded", () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     controller?.applyTerminal(
       record({ terminalState: "succeeded_with_warnings" })
     );
@@ -3390,10 +3203,7 @@ describe("terminal handling", () => {
   it("shows action-required with the pull request url and warnings", () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     const terminal = { pullRequestUrl: "https://example.test/pr/1" };
     controller?.applyTerminal(
       record({
@@ -3416,10 +3226,7 @@ describe("terminal handling", () => {
   it("clears done/failed classes and reports cancellation", () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     browser.els[PROGRESS_IDS.panel].classList.add("env-progress--done");
     controller?.applyTerminal(record({ terminalState: "cancelled" }));
     expect(
@@ -3433,10 +3240,7 @@ describe("terminal handling", () => {
   it("shows a failure message and marks the panel failed for failed/failed_partial", () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     controller?.applyTerminal(
       record({
         terminalState: "failed",
@@ -3454,10 +3258,7 @@ describe("terminal handling", () => {
   it("falls back to a generic message when a failure has none", () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     controller?.applyTerminal(
       record({ terminalState: "failed_partial", failure: null })
     );
@@ -3496,10 +3297,7 @@ describe("terminal handling", () => {
 describe("malformed, error, and rejected payloads", () => {
   it("retries after a network rejection without crashing", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () =>
       Promise.reject(new Error("offline"))
     );
@@ -3515,10 +3313,7 @@ describe("malformed, error, and rejected payloads", () => {
 
   it("retries when the response body is not JSON", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () => textResponse("not json"));
 
     controller?.trackProgress("dev", "azure");
@@ -3528,10 +3323,7 @@ describe("malformed, error, and rejected payloads", () => {
 
   it("treats a non-object payload as no operation yet and keeps polling", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () => jsonResponse("not an object"));
     browser.els[PROGRESS_IDS.panel].style.display = "marker";
 
@@ -3545,10 +3337,7 @@ describe("malformed, error, and rejected payloads", () => {
 
   it("keeps polling when the verify-status response itself rejects", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () => jsonResponse(op()));
     controller?.trackProgress("dev", "azure");
     await flushPromises();
@@ -3569,10 +3358,7 @@ describe("malformed, error, and rejected payloads", () => {
 describe("stale response ordering and operation identity", () => {
   it("never lets a slow first poll overwrite a newer trackProgress call", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     const first = createDeferred<HttpResponse>();
     const second = createDeferred<HttpResponse>();
     const responses = [first, second];
@@ -3609,24 +3395,10 @@ describe("stale response ordering and operation identity", () => {
   it("ignores a stale resume-prompt resolution once a newer session has started", async () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     const smr = createDeferred<string>();
     deps.deps.promptServiceManagementReference = () => smr.promise;
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    serveOperation(browser, prompt("service-management-reference-required"));
 
     controller?.trackProgress("dev", "azure");
     await flushPromises();
@@ -3648,24 +3420,10 @@ describe("stale response ordering and operation identity", () => {
   it("ignores a stale resume-prompt rejection once a newer session has started", async () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     const smr = createDeferred<string>();
     deps.deps.promptServiceManagementReference = () => smr.promise;
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    serveOperation(browser, prompt("service-management-reference-required"));
 
     controller?.trackProgress("dev", "azure");
     await flushPromises();
@@ -3686,10 +3444,7 @@ describe("stale response ordering and operation identity", () => {
 
   it("discards a first poll response for a different environment or an already-terminal record", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     // The server-side registry can still hold the previous environment's
     // terminal record for a moment after a new setup is requested; the very
     // first poll must not paint that leftover as this session's state.
@@ -3714,10 +3469,7 @@ describe("stale response ordering and operation identity", () => {
   it("ignores a slow poll response that resolves after its session was superseded even when the network cannot abort it", async () => {
     const browser = setup();
     browser.net.supportsAbort = false;
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     const stale = createDeferred<HttpResponse>();
     browser.net.handle(operationsUrl(), () => stale.promise);
 
@@ -3727,15 +3479,11 @@ describe("stale response ordering and operation identity", () => {
     // Disabling abort support means the first poll's request is never
     // rejected by the session change below, so its response reaches
     // tick()'s own continuation while genuinely stale.
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          environment: "staging",
-          provider: "aws",
-          summary: "Creating staging…"
-        })
-      )
-    );
+    serveOperation(browser, {
+      environment: "staging",
+      provider: "aws",
+      summary: "Creating staging…"
+    });
     controller?.trackProgress("staging", "aws");
     await flushPromises();
     expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
@@ -3760,10 +3508,7 @@ describe("stale response ordering and operation identity", () => {
 
   it("keeps polling for the current environment once observed, discarding a null record until it matches", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     // trackProgress is called with an empty environment (mirrors a caller
     // that has not yet resolved a target environment name); the first poll
     // must match on that same empty string to mark the operation observed.
@@ -3796,24 +3541,17 @@ describe("resume flow", () => {
     const deps = createDeps();
     deps.deps.promptServiceManagementReference = () =>
       Promise.resolve("11111111-1111-1111-1111-111111111111");
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
+    const controller = controllerFor(browser, {
       mutationNonce: "browser-nonce",
       deps: deps.deps
     });
     let resumeBody: unknown;
     let resumeHeaders: unknown;
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: { step: 2 }
-          }
-        })
-      )
+    serveOperation(
+      browser,
+      prompt("service-management-reference-required", {
+        checkpoint: { step: 2 }
+      })
     );
     browser.net.handle(
       resumeUrl("op-1", "service-management-reference-required"),
@@ -3849,26 +3587,16 @@ describe("resume flow", () => {
       requestSeen = request;
       return Promise.resolve({ appId: "app-2" });
     };
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     let resumeBody: unknown;
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "app-selection-required",
-            checkpoint: {},
-            metadata: {
-              defaultAppId: "app-2",
-              candidates: [{ appId: "app-1" }, { appId: "app-2" }]
-            }
-          }
-        })
-      )
+    serveOperation(
+      browser,
+      prompt("app-selection-required", {
+        metadata: {
+          defaultAppId: "app-2",
+          candidates: [{ appId: "app-1" }, { appId: "app-2" }]
+        }
+      })
     );
     browser.net.handle(resumeUrl("op-1", "app-selection-required"), (init) => {
       resumeBody = init && init.body ? JSON.parse(init.body) : undefined;
@@ -3892,23 +3620,9 @@ describe("resume flow", () => {
     const browser = setup();
     const deps = createDeps();
     deps.deps.promptAppSelection = () => Promise.resolve({ createNew: true });
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     let resumeBody: unknown;
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "app-selection-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    serveOperation(browser, prompt("app-selection-required"));
     browser.net.handle(resumeUrl("op-1", "app-selection-required"), (init) => {
       resumeBody = init && init.body ? JSON.parse(init.body) : undefined;
       return jsonResponse({ ok: true });
@@ -3923,22 +3637,8 @@ describe("resume flow", () => {
 
   it("does not prompt for an unrecognized input code and keeps polling", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "some-unknown-code",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    const controller = controllerFor(browser);
+    serveOperation(browser, prompt("some-unknown-code"));
 
     controller?.trackProgress("dev", "azure");
     await flushPromises();
@@ -3957,22 +3657,8 @@ describe("resume flow", () => {
       smrCalls += 1;
       return Promise.resolve("11111111-1111-1111-1111-111111111111");
     };
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    const controller = controllerFor(browser, { deps: deps.deps });
+    serveOperation(browser, prompt("service-management-reference-required"));
     browser.net.handle(
       resumeUrl("op-1", "service-management-reference-required"),
       () => jsonResponse({ error: "validation failed" }, false, 422)
@@ -3997,22 +3683,8 @@ describe("resume flow", () => {
       smrCalls += 1;
       return Promise.resolve("11111111-1111-1111-1111-111111111111");
     };
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    const controller = controllerFor(browser, { deps: deps.deps });
+    serveOperation(browser, prompt("service-management-reference-required"));
     // A bare JSON string (not an object) is still valid JSON, so `.json()`
     // resolves without throwing — parseResumeFailure must fall back safely
     // instead of assuming the payload is a record.
@@ -4040,22 +3712,8 @@ describe("resume flow", () => {
       smrCalls += 1;
       return Promise.resolve("11111111-1111-1111-1111-111111111111");
     };
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    const controller = controllerFor(browser, { deps: deps.deps });
+    serveOperation(browser, prompt("service-management-reference-required"));
     // The response's own `.json()` rejects entirely (e.g. an HTML error page
     // from a proxy). The resume handler must fall back to an empty payload
     // instead of letting the parse failure escape as an unhandled rejection.
@@ -4083,22 +3741,8 @@ describe("resume flow", () => {
       smrCalls += 1;
       return Promise.resolve("11111111-1111-1111-1111-111111111111");
     };
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    const controller = controllerFor(browser, { deps: deps.deps });
+    serveOperation(browser, prompt("service-management-reference-required"));
     browser.net.handle(
       resumeUrl("op-1", "service-management-reference-required"),
       () => jsonResponse({ code: "operation-input-expired" }, false, 409)
@@ -4121,22 +3765,8 @@ describe("resume flow", () => {
     const deps = createDeps();
     deps.deps.promptServiceManagementReference = () =>
       Promise.resolve("11111111-1111-1111-1111-111111111111");
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    const controller = controllerFor(browser, { deps: deps.deps });
+    serveOperation(browser, prompt("service-management-reference-required"));
     browser.net.handle(
       resumeUrl("op-1", "service-management-reference-required"),
       () =>
@@ -4166,22 +3796,8 @@ describe("resume flow", () => {
     const deps = createDeps();
     deps.deps.promptServiceManagementReference = () =>
       Promise.resolve("11111111-1111-1111-1111-111111111111");
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    const controller = controllerFor(browser, { deps: deps.deps });
+    serveOperation(browser, prompt("service-management-reference-required"));
     // The record is a genuine expired-input operation (it satisfies
     // isOperationInputExpired), but its operationId is missing, so the
     // record itself fails to parse into a usable OperationRecord.
@@ -4220,25 +3836,13 @@ describe("resume flow", () => {
       });
       return Promise.reject(error);
     };
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
+    const controller = controllerFor(browser, {
       mutationNonce: "browser-nonce",
       deps: deps.deps
     });
     let stopCalled = false;
     let stopHeaders: unknown;
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    serveOperation(browser, prompt("service-management-reference-required"));
     browser.net.handle(stopUrl("op-1"), (init) => {
       stopCalled = true;
       stopHeaders = init?.headers;
@@ -4265,22 +3869,8 @@ describe("resume flow", () => {
       });
       return Promise.reject(error);
     };
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    const controller = controllerFor(browser, { deps: deps.deps });
+    serveOperation(browser, prompt("service-management-reference-required"));
     browser.net.handle(stopUrl("op-1"), () => jsonResponse({}, false, 500));
 
     controller?.trackProgress("dev", "azure");
@@ -4299,22 +3889,8 @@ describe("resume flow", () => {
       });
       return Promise.reject(error);
     };
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    const controller = controllerFor(browser, { deps: deps.deps });
+    serveOperation(browser, prompt("service-management-reference-required"));
     browser.net.handle(stopUrl("op-1"), () =>
       Promise.reject(new Error("offline"))
     );
@@ -4335,22 +3911,8 @@ describe("resume flow", () => {
       });
       return Promise.reject(error);
     };
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    const controller = controllerFor(browser, { deps: deps.deps });
+    serveOperation(browser, prompt("service-management-reference-required"));
     const stopResponse = createDeferred<HttpResponse>();
     browser.net.handle(stopUrl("op-1"), () => stopResponse.promise);
 
@@ -4387,22 +3949,8 @@ describe("resume flow", () => {
         /* never resolves for this test */
       });
     };
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "input_required",
-          inputRequired: {
-            requestedAt: "2024-01-01T00:00:00.000Z",
-            code: "service-management-reference-required",
-            checkpoint: {}
-          }
-        })
-      )
-    );
+    const controller = controllerFor(browser, { deps: deps.deps });
+    serveOperation(browser, prompt("service-management-reference-required"));
 
     controller?.trackProgress("dev", "azure");
     await flushPromises();
@@ -4413,10 +3961,7 @@ describe("resume flow", () => {
 describe("resumeProgress", () => {
   it("does nothing when there is no repo", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: "",
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser, { repo: "" });
     controller?.resumeProgress();
     await flushPromises();
     expect(browser.net.calls).toHaveLength(0);
@@ -4424,10 +3969,7 @@ describe("resumeProgress", () => {
 
   it("rejoins a non-terminal operation and starts tracking it", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () =>
       jsonResponse(op({ environment: "prod" }))
     );
@@ -4444,10 +3986,7 @@ describe("resumeProgress", () => {
     ["a terminal operation", op({ terminalState: "succeeded" })]
   ])("does not start tracking for %s", async (_name, payload) => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () => jsonResponse(payload));
 
     controller?.resumeProgress();
@@ -4458,31 +3997,24 @@ describe("resumeProgress", () => {
 
   it("rebuilds a closed record's panel and controls after a reload", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
+    const controller = controllerFor(browser);
+    serveOperation(browser, {
+      terminalState: "failed_partial",
+      state: "failed_partial",
+      summary: "dev setup stopped",
+      failure: { message: "role assignment failed" },
+      cleanup: { created: [{ target: "app radius-dev" }] },
+      actions: [
+        {
+          id: "retry-setup",
+          kind: "retry_setup",
+          label: "Retry setup",
+          description: "Radius continues from the first unfinished step.",
+          path: "/api/operations/op-1/retry/setup",
+          pending: false
+        }
+      ]
     });
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          terminalState: "failed_partial",
-          state: "failed_partial",
-          summary: "dev setup stopped",
-          failure: { message: "role assignment failed" },
-          cleanup: { created: [{ target: "app radius-dev" }] },
-          actions: [
-            {
-              id: "retry-setup",
-              kind: "retry_setup",
-              label: "Retry setup",
-              description: "Radius continues from the first unfinished step.",
-              path: "/api/operations/op-1/retry/setup",
-              pending: false
-            }
-          ]
-        })
-      )
-    );
 
     controller?.resumeProgress();
     await flushPromises();
@@ -4500,10 +4032,7 @@ describe("resumeProgress", () => {
 
   it("swallows a rejected resume fetch", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () =>
       Promise.reject(new Error("offline"))
     );
@@ -4515,10 +4044,7 @@ describe("resumeProgress", () => {
   it("ignores a resume-progress response that resolves after a newer session has started", async () => {
     const browser = setup();
     browser.net.supportsAbort = false;
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     const resumeResponse = createDeferred<HttpResponse>();
     browser.net.handle(operationsUrl(), () => resumeResponse.promise);
 
@@ -4547,20 +4073,14 @@ describe("resumeProgress", () => {
 describe("syncFailureOperation", () => {
   it("resolves false without a network call when there is no operationId", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     await expect(controller?.syncFailureOperation({})).resolves.toBe(false);
     expect(browser.net.calls).toHaveLength(0);
   });
 
   it("renders the operation, opens details, and hides the error banner on success", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.els[ERROR_BANNER_ID].style.display = "block";
     browser.net.handle(operationUrl("op-9"), () =>
       jsonResponse(op({ operationId: "op-9", terminalState: "failed" }))
@@ -4575,10 +4095,7 @@ describe("syncFailureOperation", () => {
 
   it("also opens details for the failed_partial terminal state", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationUrl("op-10"), () =>
       jsonResponse(
         op({ operationId: "op-10", terminalState: "failed_partial" })
@@ -4593,10 +4110,7 @@ describe("syncFailureOperation", () => {
 
   it("resolves false when the response is not ok, missing an operation, or rejects", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationUrl("not-ok"), () =>
       jsonResponse({}, false, 404)
     );
@@ -4622,10 +4136,7 @@ describe("syncFailureOperation", () => {
 describe("timer uniqueness and elapsed rendering", () => {
   it("owns exactly one elapsed interval and one progress timeout at a time", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () => jsonResponse(op()));
 
     controller?.trackProgress("dev", "azure");
@@ -4641,10 +4152,7 @@ describe("timer uniqueness and elapsed rendering", () => {
   it("still tracks progress when the network port cannot create an abort handle", async () => {
     const browser = setup();
     browser.net.supportsAbort = false;
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     // Observe a running record first so the poller does not treat the
     // terminal response below as a stale leftover from a previous run.
     browser.net.handle(operationsUrl(), () => jsonResponse(op()));
@@ -4664,10 +4172,7 @@ describe("timer uniqueness and elapsed rendering", () => {
 
   it("renders the elapsed time from clock ticks and from the operation record", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () =>
       jsonResponse(op({ startedAt: new Date(0).toISOString() }))
     );
@@ -4683,10 +4188,7 @@ describe("timer uniqueness and elapsed rendering", () => {
 
   it("uses the ended-at time once the record reports an end", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     const startedAt = new Date(0).toISOString();
     const endedAt = new Date(7000).toISOString();
     // First observe a running record for this environment so the terminal
@@ -4705,10 +4207,7 @@ describe("timer uniqueness and elapsed rendering", () => {
 
   it("ignores a malformed startedAt instead of corrupting the elapsed time", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () =>
       jsonResponse(op({ startedAt: "not-a-date" }))
     );
@@ -4741,10 +4240,7 @@ describe("graceful degradation when optional DOM elements are missing", () => {
       ERROR_BANNER_ID,
       DEPLOY_BUTTON_ID
     ]);
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     expect(controller).not.toBeNull();
 
     expect(() =>
@@ -4757,8 +4253,6 @@ describe("graceful degradation when optional DOM elements are missing", () => {
             state: "succeeded",
             rollbackBeforeCommit: true,
             retry: { startsCleanly: true, guidance: "Retry any time." },
-            removed: [{ target: "rg-dev" }],
-            retained: [],
             warnings: []
           }
         })
@@ -4788,10 +4282,7 @@ describe("graceful degradation when optional DOM elements are missing", () => {
 
   it("drops the bottom controls rather than throwing when their row is missing", () => {
     const browser = setupWithout([PROGRESS_IDS.bottomButtons]);
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
 
     expect(() =>
       controller?.renderProgress(
@@ -4811,10 +4302,7 @@ describe("graceful degradation when optional DOM elements are missing", () => {
 
   it("skips opening details and hiding the error banner when both are missing", async () => {
     const browser = setupWithout([PROGRESS_IDS.details, ERROR_BANNER_ID]);
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationUrl("op-9"), () =>
       jsonResponse(op({ operationId: "op-9", terminalState: "failed" }))
     );
@@ -4824,31 +4312,6 @@ describe("graceful degradation when optional DOM elements are missing", () => {
     ).resolves.toBe(true);
   });
 
-  it("returns early from the cleanup list helper when its list or block element is missing", () => {
-    const browser = setupWithout([PROGRESS_IDS.cleanupRemovedBlock]);
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
-
-    expect(() =>
-      controller?.renderProgress(
-        record({
-          terminalState: "failed",
-          cleanup: {
-            state: "succeeded",
-            rollbackBeforeCommit: true,
-            retry: { startsCleanly: true, guidance: "Retry any time." },
-            removed: [{ target: "rg-dev" }],
-            retained: [],
-            warnings: []
-          }
-        })
-      )
-    ).not.toThrow();
-    expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("");
-  });
-
   it("skips the expired and failed verify activity/details updates, and the elapsed tick, when absent", async () => {
     const missingIds = [
       PROGRESS_IDS.activity,
@@ -4856,10 +4319,7 @@ describe("graceful degradation when optional DOM elements are missing", () => {
       PROGRESS_IDS.elapsed
     ];
     const browser = setupWithout(missingIds);
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     browser.net.handle(operationsUrl(), () =>
       jsonResponse(op({ currentStage: "verify", steps: [] }))
     );
@@ -4943,10 +4403,7 @@ describe("graceful degradation when optional DOM elements are missing", () => {
 describe("focus and dismiss", () => {
   it("focuses the panel and scrolls smoothly by default", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     controller?.focusPanel();
     expect(browser.els[PROGRESS_IDS.panel].focusCount).toBe(1);
     expect(browser.els[PROGRESS_IDS.panel].scrollCount).toBe(1);
@@ -4955,10 +4412,7 @@ describe("focus and dismiss", () => {
   it("scrolls without animation when the dependency reports reduced motion", () => {
     const browser = setup();
     const deps = createDeps({ prefersReducedMotion: () => true });
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: deps.deps
-    });
+    const controller = controllerFor(browser, { deps: deps.deps });
     controller?.focusPanel();
     expect(browser.els[PROGRESS_IDS.panel].focusCount).toBe(1);
   });
@@ -4967,10 +4421,7 @@ describe("focus and dismiss", () => {
 describe("hostile values", () => {
   it("renders hostile labels and messages as literal text through textContent, never innerHTML", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     const hostileLabel = "<img src=x onerror=alert(1)>";
     const hostileSummary =
       "\"><script>document.location='https://evil.test'</script>";
@@ -4998,10 +4449,7 @@ describe("hostile values", () => {
 describe("idempotence", () => {
   it("allows hideProgress and stopProgress to be called with nothing running", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     expect(() => controller?.stopProgress()).not.toThrow();
     expect(() => controller?.hideProgress()).not.toThrow();
     expect(() => controller?.hideProgress()).not.toThrow();
@@ -5009,10 +4457,7 @@ describe("idempotence", () => {
 
   it("allows teardown to be called more than once", () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     expect(() => controller?.teardown()).not.toThrow();
     expect(() => controller?.teardown()).not.toThrow();
   });
@@ -5021,10 +4466,7 @@ describe("idempotence", () => {
 describe("teardown", () => {
   it("stops timers, releases the binding, and prevents a late response from painting", async () => {
     const browser = setup();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const controller = controllerFor(browser);
     const pending = createDeferred<HttpResponse>();
     browser.net.handle(operationsUrl(), () => pending.promise);
 
@@ -5044,10 +4486,7 @@ describe("teardown", () => {
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("marker");
 
     // A new instance can now claim the same entry key.
-    const revived = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: createDeps().deps
-    });
+    const revived = controllerFor(browser);
     expect(revived).not.toBeNull();
   });
 });
@@ -5073,10 +4512,7 @@ describe("exiting a setup", () => {
     overrides: Record<string, unknown> = {}
   ) {
     const harness = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: harness.deps
-    });
+    const controller = controllerFor(browser, { deps: harness.deps });
     controller?.renderProgress(
       record({
         state: "failed_partial",
@@ -5270,10 +4706,7 @@ describe("exiting a setup", () => {
     const browser = setup();
     browser.net.handle(operationsUrl(), () => jsonResponse(exited()));
     const harness = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: harness.deps
-    });
+    const controller = controllerFor(browser, { deps: harness.deps });
 
     controller?.resumeProgress();
     await flushPromises();
@@ -5287,10 +4720,7 @@ describe("exiting a setup", () => {
   it("keeps the acknowledgement alone for an outcome that is already settled", () => {
     const browser = setup();
     const harness = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: harness.deps
-    });
+    const controller = controllerFor(browser, { deps: harness.deps });
 
     controller?.renderProgress(
       record({
@@ -5340,18 +4770,15 @@ describe("acknowledging a finished deletion pass", () => {
     });
   }
 
-  function controllerFor(browser: ReturnType<typeof setup>) {
+  function controllerWithHarness(browser: ReturnType<typeof setup>) {
     const harness = createDeps();
-    const controller = initializeEnvironmentOperations(browser.context, {
-      repo: REPO,
-      deps: harness.deps
-    });
+    const controller = controllerFor(browser, { deps: harness.deps });
     return { controller, harness };
   }
 
   it("asks the picker once for a completed rollback and nothing more on OK", () => {
     const browser = setup();
-    const { controller, harness } = controllerFor(browser);
+    const { controller, harness } = controllerWithHarness(browser);
 
     // The sequence the poller drives: the terminal record is rendered, then
     // applied.
@@ -5375,7 +4802,7 @@ describe("acknowledging a finished deletion pass", () => {
   it("asks the picker once for an exited setup and closes the panel outright", () => {
     const browser = setup();
     browser.els[ERROR_BANNER_ID].style.display = "flex";
-    const { controller, harness } = controllerFor(browser);
+    const { controller, harness } = controllerWithHarness(browser);
 
     const exited = record({
       state: "failed_partial",
@@ -5394,17 +4821,13 @@ describe("acknowledging a finished deletion pass", () => {
 
   it("re-renders a completed rollback on reload without reopening the setup", async () => {
     const browser = setup();
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "cancelled",
-          terminalState: "cancelled",
-          actions: [],
-          headline: ROLLBACK_COMPLETE_HEADLINE
-        })
-      )
-    );
-    const { controller, harness } = controllerFor(browser);
+    serveOperation(browser, {
+      state: "cancelled",
+      terminalState: "cancelled",
+      actions: [],
+      headline: ROLLBACK_COMPLETE_HEADLINE
+    });
+    const { controller, harness } = controllerWithHarness(browser);
 
     controller?.resumeProgress();
     await flushPromises();
@@ -5421,17 +4844,13 @@ describe("acknowledging a finished deletion pass", () => {
 
   it("keeps an exited setup off the page on reload", async () => {
     const browser = setup();
-    browser.net.handle(operationsUrl(), () =>
-      jsonResponse(
-        op({
-          state: "failed_partial",
-          terminalState: "failed_partial",
-          actions: [],
-          headline: EXITED_HEADLINE
-        })
-      )
-    );
-    const { controller, harness } = controllerFor(browser);
+    serveOperation(browser, {
+      state: "failed_partial",
+      terminalState: "failed_partial",
+      actions: [],
+      headline: EXITED_HEADLINE
+    });
+    const { controller, harness } = controllerWithHarness(browser);
 
     controller?.resumeProgress();
     await flushPromises();
@@ -5442,7 +4861,7 @@ describe("acknowledging a finished deletion pass", () => {
 
   it("still offers the way out of a stopped setup, and refreshes the listing", () => {
     const browser = setup();
-    const { controller, harness } = controllerFor(browser);
+    const { controller, harness } = controllerWithHarness(browser);
 
     const stopped = record({
       state: "cancelled",
