@@ -351,7 +351,7 @@ export function addDeleteStateCheck(yaml: string): string {
   addForceLocalOnlyWorkflowInput(lines);
 
   const checkoutIndex = lines.findIndex(
-    (line, index) => index > jobIndex && /^\s{6}- name: Checkout\s*$/.test(line)
+    (line, index) => index > jobIndex && /^ {6}- name: Checkout\s*$/.test(line)
   );
   if (checkoutIndex === -1) {
     throw new Error(
@@ -385,7 +385,7 @@ export function addDeleteStateCheck(yaml: string): string {
               summary "$message"
               return
             fi
-            message="Persisted Radius state is absent. This does not prove cloud mutation never began; re-run with force_local_only=true only after confirming no cloud resources need teardown."
+            message="Persisted Radius state is absent. This does not prove cloud mutation never began; dispatch again with force_local_only set to true only after confirming no cloud resources need teardown."
             echo "::error::$message"
             summary "$message"
             echo "$message" >&2
@@ -476,11 +476,9 @@ export function addDeleteStateCheck(yaml: string): string {
         "Azure delete workflow before applying the persisted-state gate."
     );
   }
-  lines.splice(insertAt, 0, ...stateCheckStep.split("\n"));
-  addStateGateToDeleteSteps(
-    lines,
-    insertAt + stateCheckStep.split("\n").length
-  );
+  const stateCheckLines = stateCheckStep.split("\n");
+  lines.splice(insertAt, 0, ...stateCheckLines);
+  addStateGateToDeleteSteps(lines, insertAt + stateCheckLines.length);
   return lines.join("\n");
 }
 
