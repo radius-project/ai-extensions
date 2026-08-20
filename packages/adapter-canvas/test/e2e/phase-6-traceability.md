@@ -1,6 +1,6 @@
 # Phase 6 Chromium evidence
 
-This branch establishes the browser component, critical journey, keyboard and accessibility foundations for Phase 6, but it does not complete Phase 6. The P1-A browser-functional suite specified by the test architecture is not present, and the remaining credential save, selection and deletion transitions are owned by lower-level suites rather than a complete Chromium journey. Phase 6 remains open until the distinct browser-functional evidence exists.
+This branch establishes the browser component, critical journey, keyboard and accessibility foundations for Phase 6, but it does not complete Phase 6. The P1-A browser-functional suite specified by the test architecture is not present, credential-save submission is still not driven in Chromium, and the remaining credential selection and deletion transitions are owned by lower-level suites rather than a complete Chromium journey. Phase 6 remains open until the distinct browser-functional evidence exists.
 
 The browser component half of P1-A is `packages/adapter-canvas/test/component/`, run by Vitest Browser Mode with the Playwright Chromium provider. The current critical journey, keyboard and accessibility evidence for P1-B and P1-C is `packages/adapter-canvas/test/e2e/canvas-chromium.test.ts`, run by Playwright.
 

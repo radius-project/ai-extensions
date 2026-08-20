@@ -447,6 +447,9 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#cred-verify-status")).toContainText(
       'Run "az login --use-device-code" in your terminal, then click Verify Credentials again.'
     );
+    await expect(
+      page.getByRole("button", { name: "Verify Credentials" })
+    ).toBeEnabled();
     expect(bodyFor(canvas, "/api/verify-azure-login")).toEqual({
       tenantId: VALID_TENANT_ID,
       subscriptionId: VALID_SUBSCRIPTION_ID
@@ -576,7 +579,9 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(bodyFor(canvas, "/api/operations")).toMatchObject({
       repo: REPOSITORY,
       environment: "fixture-environment",
-      branch: WORKTREE_BRANCH
+      branch: WORKTREE_BRANCH,
+      resourceGroup: "fixture-resource-group",
+      cluster: "fixture-cluster"
     });
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
   });
