@@ -87,10 +87,7 @@ import {
   disabledOperationStore
 } from "./operation-store.js";
 import { configureCredentialProvenanceStore } from "./credential-provenance.js";
-import {
-  createFileCredentialProvenanceStore,
-  disabledCredentialProvenanceStore
-} from "./credential-provenance-store.js";
+import { createFileCredentialProvenanceStore } from "./credential-provenance-store.js";
 import { radiusAppBicepSkill } from "./skill.js";
 import { createGeneratorVersionReader } from "./generator-version.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
@@ -199,12 +196,6 @@ const dependencies: RadiusExtensionDependencies = {
   withGhcrDockerConfig
 };
 
-const radiusExtension = await bootstrapRadiusExtension(dependencies, {
-  createCanvas,
-  joinSession: async (declaration) =>
-    (await joinSession(declaration)) as unknown as SessionPort
-});
-
 const reportOperationStore = (diagnostic: {
   code: string;
   message: string;
@@ -214,6 +205,31 @@ const reportOperationStore = (diagnostic: {
   } catch {}
 };
 try {
+  await configureCredentialProvenanceStore(
+    createFileCredentialProvenanceStore({
+      directory: join(
+        process.env.USERPROFILE || os.homedir(),
+        ".copilot",
+        "radius",
+        "credential-provenance"
+      ),
+      report: reportOperationStore
+    })
+  );
+} catch (error) {
+  reportOperationStore({
+    code: "credential-provenance-unavailable",
+    message: `Durable credential provenance is unavailable, so credential setup and cleanup will fail closed: ${String(error)}`
+  });
+}
+
+const radiusExtension = await bootstrapRadiusExtension(dependencies, {
+  createCanvas,
+  joinSession: async (declaration) =>
+    (await joinSession(declaration)) as unknown as SessionPort
+});
+
+try {
   const operationSessionId = await resolvePersistedSessionId();
   if (!operationSessionId) {
     reportOperationStore({
@@ -222,9 +238,6 @@ try {
         "Durable operation recovery is disabled because no verified Copilot session directory was found."
     });
     await configureOperationStore(disabledOperationStore());
-    await configureCredentialProvenanceStore(
-      disabledCredentialProvenanceStore()
-    );
   } else {
     const operationsDir = join(
       process.env.USERPROFILE || os.homedir(),
@@ -240,12 +253,6 @@ try {
         report: reportOperationStore
       })
     );
-    await configureCredentialProvenanceStore(
-      createFileCredentialProvenanceStore({
-        filePath: join(operationsDir, "credential-provenance.json"),
-        report: reportOperationStore
-      })
-    );
   }
 } catch (error) {
   reportOperationStore({
@@ -253,7 +260,6 @@ try {
     message: `Durable operation recovery is disabled: ${String(error)}`
   });
   await configureOperationStore(disabledOperationStore());
-  await configureCredentialProvenanceStore(disabledCredentialProvenanceStore());
 }
 
 onOperationTerminal((op: any) => {

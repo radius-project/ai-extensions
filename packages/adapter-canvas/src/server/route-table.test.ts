@@ -258,7 +258,12 @@ const productionHandlers = {
     resolveEnvDeployment: () => Promise.resolve(null),
     logError: () => {},
     discoverEnvironmentTarget: () =>
-      Promise.resolve({ provider: "", clientId: "" }),
+      Promise.resolve({
+        provider: "",
+        clientId: "",
+        tenantId: "",
+        repoId: 1
+      }),
     createOperation: () => ({ operationId: "op", currentStage: null }),
     buildDeleteStages: () => [],
     startOperation: () => ({

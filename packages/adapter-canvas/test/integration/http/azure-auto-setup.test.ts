@@ -168,6 +168,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
 
   it("completes setup over the typed table without reaching unmatched routing", async () => {
     const unmatchedCalls: string[] = [];
+    let credentialContents = "";
     const operation: AzureAutoSetupOperation = {
       operationId: "op-http-success",
       repo: "octo/app",
@@ -203,6 +204,17 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       if (line.includes("federated-credential create")) {
         return { code: 0, stdout: "", stderr: "" };
       }
+      if (line.includes("federated-credential show")) {
+        const contents = JSON.parse(credentialContents);
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            id: "fic-dev",
+            ...contents
+          }),
+          stderr: ""
+        };
+      }
       if (line.startsWith("role assignment create ")) {
         return { code: 0, stdout: "", stderr: "" };
       }
@@ -237,7 +249,9 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       },
       tempFile: {
         createPath: () => "C:\\temp\\fic.json",
-        write: () => {},
+        write: (_path, contents) => {
+          credentialContents = contents;
+        },
         remove: () => {}
       },
       ensureServicePrincipal: async () => ({

@@ -223,8 +223,10 @@ import { createPlannedGraphRecoveryService } from "./server/services/deploy-plan
 import { runEnvironmentDeletion } from "./server/services/environment-deletion.js";
 import {
   recordCredentialProvenance,
-  listCredentialProvenance,
-  clearCredentialProvenance
+  listCredentialProvenanceForClient,
+  removeCredentialProvenance,
+  clearEnvironmentCredentialProvenance,
+  withCredentialProvenanceLock
 } from "./credential-provenance.js";
 import { classifyCompletedDeleteEnvRun } from "./server/services/delete-env-run-classifier.js";
 import type {
@@ -654,6 +656,7 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
       }
     },
     artifacts: {
+      withCredentialProvenanceLock,
       recordAzureApp: (operation, patch) => {
         recordAzureApp(operation, patch);
       },
@@ -662,23 +665,16 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
       },
       recordCreatedFederatedCredential: (operation, entry) => {
         recordCreatedFederatedCredential(operation, entry);
-        // Durable provenance (issue #331): record proof that Radius created
-        // this credential, keyed by repo + environment so it survives operation
-        // pruning and restart. Only "created" credentials are ever eligible for
-        // automatic reclamation when the environment is deleted.
-        if (entry.clientId) {
-          recordCredentialProvenance({
-            repo: String(operation.repo || ""),
-            environment: String(operation.environment || ""),
-            clientId: entry.clientId,
-            name: entry.name,
-            subject: entry.subject,
-            origin: "created",
-            issuer: entry.issuer,
-            audiences: entry.audiences,
-            repoId: entry.repoId,
-            operationId: String(operation.operationId || "") || undefined
-          });
+      },
+      recordFederatedCredentialProvenance: async (operation, entry) => {
+        const recorded = await recordCredentialProvenance({
+          ...entry,
+          operationId: String(operation.operationId || "")
+        });
+        if (!recorded) {
+          throw new Error(
+            `Invalid provenance for federated credential ${entry.name}.`
+          );
         }
       },
       recordCreatedRoleAssignment: (operation, entry) => {
@@ -929,7 +925,12 @@ const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
 async function discoverEnvironmentTarget(
   repo: string,
   environment: string
-): Promise<{ provider: string; clientId: string }> {
+): Promise<{
+  provider: string;
+  clientId: string;
+  tenantId: string;
+  repoId: number;
+}> {
   const out = await runCommand(
     "gh",
     [
@@ -955,7 +956,24 @@ async function discoverEnvironmentTarget(
   let provider = "";
   if (/AZURE_/.test(names)) provider = "azure";
   else if (/AWS_/.test(names)) provider = "aws";
-  return { provider, clientId: vars.AZURE_CLIENT_ID || "" };
+  let repoId = 0;
+  if (provider === "azure") {
+    const repoIdOutput = await runCommand(
+      "gh",
+      ["api", `/repos/${repo}`, "--jq", ".id"],
+      { timeout: 15000 }
+    );
+    repoId = Number(repoIdOutput.trim());
+    if (!Number.isFinite(repoId) || repoId <= 0) {
+      throw new Error("GitHub returned an invalid repository id.");
+    }
+  }
+  return {
+    provider,
+    clientId: vars.AZURE_CLIENT_ID || "",
+    tenantId: vars.AZURE_TENANT_ID || "",
+    repoId
+  };
 }
 
 // route, `POST /api/create-environment`, is large enough to own a separate
@@ -4005,12 +4023,51 @@ function createInstanceRequestCoordinator(
             onHeartbeat
           ),
         runAz: (args) => runCliCommand("az", args),
+        readAzureIdentity: async (clientId) => {
+          const tenant = await runCliCommand("az", [
+            "account",
+            "show",
+            "--query",
+            "tenantId",
+            "-o",
+            "tsv"
+          ]);
+          if (tenant.code !== 0 || !tenant.stdout.trim()) {
+            throw new Error(
+              tenant.stderr || "Could not resolve the active Entra tenant."
+            );
+          }
+          const application = await runCliCommand("az", [
+            "ad",
+            "app",
+            "show",
+            "--id",
+            clientId,
+            "--query",
+            "id",
+            "-o",
+            "tsv"
+          ]);
+          if (application.code !== 0 || !application.stdout.trim()) {
+            throw new Error(
+              application.stderr ||
+                "Could not resolve the App Registration object id."
+            );
+          }
+          return {
+            tenantId: tenant.stdout.trim(),
+            applicationObjectId: application.stdout.trim()
+          };
+        },
         deleteGitHubEnvironment: (input) =>
           deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
-        readCredentialProvenance: (repo, environment) =>
-          listCredentialProvenance(repo, environment),
-        clearCredentialProvenance: (repo, environment) =>
-          clearCredentialProvenance(repo, environment),
+        withCredentialProvenanceLock,
+        readCredentialProvenance: (clientId) =>
+          listCredentialProvenanceForClient(clientId),
+        removeCredentialProvenance: (clientId, credentialId) =>
+          removeCredentialProvenance(clientId, credentialId),
+        clearEnvironmentCredentialProvenance: (repoId, environment) =>
+          clearEnvironmentCredentialProvenance(repoId, environment),
         persist: () => operations.persist(),
         errorMessage,
         log: (message) => console.error(message)

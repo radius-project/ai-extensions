@@ -120,7 +120,12 @@ export interface EnvironmentsDependencies {
   discoverEnvironmentTarget(
     repo: string,
     environment: string
-  ): Promise<{ provider: string; clientId: string }>;
+  ): Promise<{
+    provider: string;
+    clientId: string;
+    tenantId: string;
+    repoId: number;
+  }>;
   // Async delete-operation lifecycle (issue #303). Shares the create flow's
   // OperationRecord registry, persistence, and server-owned task scheduler.
   createOperation(input: unknown): DeleteOperationRecord;

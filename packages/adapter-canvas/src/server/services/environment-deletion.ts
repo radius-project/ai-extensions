@@ -108,6 +108,7 @@ export interface EnvironmentDeletionPorts {
   ): Promise<RadiusEnvDeletionOutcome>;
   // Run an `az` command. Never throws; a spawn failure surfaces as a result.
   runAz(args: string[]): Promise<DeletionCommandResult>;
+  withCredentialProvenanceLock<T>(work: () => Promise<T>): Promise<T>;
   // Delete the GitHub environment (idempotent).
   deleteGitHubEnvironment(input: {
     repo: string;
@@ -117,12 +118,20 @@ export interface EnvironmentDeletionPorts {
   // to prove Radius created a live federated credential before deleting it. An
   // empty list means "no proof", which the plan treats as retain (fail-safe).
   readCredentialProvenance(
-    repo: string,
+    clientId: string
+  ): CredentialProvenanceRecord[] | Promise<CredentialProvenanceRecord[]>;
+  readAzureIdentity(clientId: string): Promise<{
+    tenantId: string;
+    applicationObjectId: string;
+  }>;
+  removeCredentialProvenance(
+    clientId: string,
+    credentialId: string
+  ): Promise<void>;
+  clearEnvironmentCredentialProvenance(
+    repoId: number,
     environment: string
-  ): CredentialProvenanceRecord[];
-  // Forget the provenance for a repo + environment once its credentials have
-  // been reclaimed, so a later re-setup starts from a clean slate.
-  clearCredentialProvenance(repo: string, environment: string): Promise<void>;
+  ): Promise<void>;
   // Durably record the operation after each state transition.
   persist(): Promise<void>;
   errorMessage(error: unknown): string;
@@ -137,6 +146,8 @@ interface DeletionOperation {
   stages: Array<{ id: string; state: string }>;
   request?: {
     clientId?: string;
+    tenantId?: string;
+    repoId?: number;
     appDisplayName?: string;
     deleteAppRegistration?: boolean;
     [key: string]: unknown;
@@ -144,6 +155,16 @@ interface DeletionOperation {
   inputRequired?: unknown;
   state?: string;
   [key: string]: unknown;
+}
+
+function parseFederatedCredentialObject(
+  stdout: string
+): ReturnType<typeof parseFederatedCredentials>[number] | null {
+  try {
+    return parseFederatedCredentials([JSON.parse(stdout)])[0] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function stageState(op: DeletionOperation, stageId: string): string | null {
@@ -284,58 +305,93 @@ export async function runEnvironmentDeletion(
 
   // Stage 2 — remove the per-environment Azure federated credential(s).
   const clientId = String(op.request?.clientId || "");
+  const tenantId = String(op.request?.tenantId || "");
+  const repoId = Number(op.request?.repoId);
   if (stagePending(op, STAGE_DELETE_CREDENTIAL)) {
     enterStage(op, STAGE_DELETE_CREDENTIAL);
     await ports.persist();
-    await deleteEnvironmentCredentials(op, ports, {
-      repo,
-      environment,
-      clientId
-    });
-    await ports.persist();
-  }
-
-  // Stage 3 — delete the GitHub environment.
-  if (stagePending(op, STAGE_DELETE_GITHUB_ENV)) {
-    enterStage(op, STAGE_DELETE_GITHUB_ENV);
-    addStep(op, {
-      stage: STAGE_DELETE_GITHUB_ENV,
-      kind: "mutation",
-      label: "Deleting the GitHub environment",
-      state: "running"
-    });
-    await ports.persist();
-    let ghOutcome: GitHubEnvDeletionOutcome;
+    let credentialStageComplete: boolean | void;
     try {
-      ghOutcome = await ports.deleteGitHubEnvironment({ repo, environment });
+      credentialStageComplete = await ports.withCredentialProvenanceLock(() =>
+        deleteEnvironmentCredentials(op, ports, {
+          repo,
+          environment,
+          clientId,
+          tenantId,
+          repoId
+        }).then(async (complete) => {
+          if (complete !== false) {
+            await ports.persist();
+            await deleteGitHubEnvironmentStage(
+              op,
+              ports,
+              repo,
+              environment,
+              repoId
+            );
+          }
+          return complete;
+        })
+      );
     } catch (error) {
-      ghOutcome = { outcome: "failed", detail: ports.errorMessage(error) };
-    }
-    if (ghOutcome.outcome === "failed") {
       addStep(op, {
-        stage: STAGE_DELETE_GITHUB_ENV,
+        stage: STAGE_DELETE_CREDENTIAL,
         kind: "warning",
-        label: "Could not delete the GitHub environment",
+        label: "Could not lock credential ownership records",
         warning: {
-          code: "github-env-delete-failed",
-          message: ghOutcome.detail || "The GitHub environment delete failed.",
-          impact: "The GitHub environment may still exist. Retry the deletion."
+          code: "credential-provenance-lock-unavailable",
+          message: ports.errorMessage(error),
+          impact: "Radius did not mutate credentials without an exclusive lock."
         }
       });
-      setStageState(op, STAGE_DELETE_GITHUB_ENV, "warning");
-    } else {
-      addStep(op, {
-        stage: STAGE_DELETE_GITHUB_ENV,
-        kind: "mutation",
-        label:
-          ghOutcome.outcome === "not_found" ?
-            "No GitHub environment to delete"
-          : "Deleted the GitHub environment",
-        state: "succeeded"
-      });
-      setStageState(op, STAGE_DELETE_GITHUB_ENV, "succeeded");
+      credentialStageComplete = stopCredentialCleanup(
+        op,
+        "credential-provenance-lock-unavailable",
+        "Radius could not lock the credential ownership records. The GitHub environment was kept so deletion can be retried."
+      );
     }
     await ports.persist();
+    if (credentialStageComplete === false) return;
+  }
+
+  // Stage 3 — delete the GitHub environment. Azure recovery can resume here
+  // after a restart, so reacquire the same lock setup uses before finishing.
+  if (stagePending(op, STAGE_DELETE_GITHUB_ENV)) {
+    if (op.provider === "azure") {
+      try {
+        await ports.withCredentialProvenanceLock(() =>
+          deleteGitHubEnvironmentStage(op, ports, repo, environment, repoId)
+        );
+      } catch (error) {
+        addStep(op, {
+          stage: STAGE_DELETE_GITHUB_ENV,
+          kind: "warning",
+          label: "Could not lock credential ownership records",
+          warning: {
+            code: "credential-provenance-lock-unavailable",
+            message: ports.errorMessage(error),
+            impact:
+              "The GitHub environment was kept so deletion can be retried."
+          }
+        });
+        setStageState(op, STAGE_DELETE_GITHUB_ENV, "failed");
+        finish(op, "failed_partial", {
+          failure: {
+            code: "credential-provenance-lock-unavailable",
+            stage: STAGE_DELETE_GITHUB_ENV,
+            stepSeq: null,
+            message:
+              "Radius could not lock the credential ownership records. The GitHub environment was kept so deletion can be retried.",
+            classification: "user-fixable",
+            evidence: null
+          }
+        });
+        await ports.persist();
+        return;
+      }
+    } else {
+      await deleteGitHubEnvironmentStage(op, ports, repo, environment, repoId);
+    }
   }
 
   // Stage 4 — review the app registration (Azure only). When it has no
@@ -346,7 +402,27 @@ export async function runEnvironmentDeletion(
   if (stagePending(op, STAGE_REVIEW_APP_REGISTRATION)) {
     enterStage(op, STAGE_REVIEW_APP_REGISTRATION);
     await ports.persist();
-    await reviewAppRegistration(op, ports, clientId);
+    if (op.request?.deleteAppRegistration === true) {
+      try {
+        await ports.withCredentialProvenanceLock(() =>
+          reviewAppRegistration(op, ports, clientId)
+        );
+      } catch (error) {
+        addStep(op, {
+          stage: STAGE_REVIEW_APP_REGISTRATION,
+          kind: "warning",
+          label: "Could not lock the app registration for final review",
+          warning: {
+            code: "app-registration-lock-unavailable",
+            message: ports.errorMessage(error),
+            impact: "The app registration was left in place."
+          }
+        });
+        setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "warning");
+      }
+    } else {
+      await reviewAppRegistration(op, ports, clientId);
+    }
     await ports.persist();
   }
 
@@ -361,6 +437,74 @@ export async function runEnvironmentDeletion(
   await ports.persist();
 }
 
+async function deleteGitHubEnvironmentStage(
+  op: DeletionOperation,
+  ports: EnvironmentDeletionPorts,
+  repo: string,
+  environment: string,
+  repoId: number
+): Promise<void> {
+  if (!stagePending(op, STAGE_DELETE_GITHUB_ENV)) return;
+  enterStage(op, STAGE_DELETE_GITHUB_ENV);
+  addStep(op, {
+    stage: STAGE_DELETE_GITHUB_ENV,
+    kind: "mutation",
+    label: "Deleting the GitHub environment",
+    state: "running"
+  });
+  await ports.persist();
+  let ghOutcome: GitHubEnvDeletionOutcome;
+  try {
+    ghOutcome = await ports.deleteGitHubEnvironment({ repo, environment });
+  } catch (error) {
+    ghOutcome = { outcome: "failed", detail: ports.errorMessage(error) };
+  }
+  if (ghOutcome.outcome === "failed") {
+    addStep(op, {
+      stage: STAGE_DELETE_GITHUB_ENV,
+      kind: "warning",
+      label: "Could not delete the GitHub environment",
+      warning: {
+        code: "github-env-delete-failed",
+        message: ghOutcome.detail || "The GitHub environment delete failed.",
+        impact: "The GitHub environment may still exist. Retry the deletion."
+      }
+    });
+    setStageState(op, STAGE_DELETE_GITHUB_ENV, "warning");
+  } else {
+    addStep(op, {
+      stage: STAGE_DELETE_GITHUB_ENV,
+      kind: "mutation",
+      label:
+        ghOutcome.outcome === "not_found" ?
+          "No GitHub environment to delete"
+        : "Deleted the GitHub environment",
+      state: "succeeded"
+    });
+    setStageState(op, STAGE_DELETE_GITHUB_ENV, "succeeded");
+    if (op.request?.credentialConsumerRetirementReady) {
+      try {
+        await ports.clearEnvironmentCredentialProvenance(repoId, environment);
+      } catch (error) {
+        addStep(op, {
+          stage: STAGE_DELETE_GITHUB_ENV,
+          kind: "warning",
+          label:
+            "Deleted the environment but could not retire its credential record",
+          warning: {
+            code: "credential-provenance-clear-failed",
+            message: ports.errorMessage(error),
+            impact:
+              "A stale local consumer record may cause Radius to retain a shared credential during later cleanup."
+          }
+        });
+        setStageState(op, STAGE_DELETE_GITHUB_ENV, "warning");
+      }
+    }
+  }
+  await ports.persist();
+}
+
 // Prompt/decision handling for the unused app registration. A resumed decision
 // (`op.request.deleteAppRegistration`) short-circuits the provenance probe.
 async function reviewAppRegistration(
@@ -369,6 +513,12 @@ async function reviewAppRegistration(
   clientId: string
 ): Promise<void> {
   const decision = op.request?.deleteAppRegistration;
+  if (
+    decision !== false &&
+    !(await appRegistrationIdentityMatchesRequest(op, ports, clientId))
+  ) {
+    return;
+  }
   if (decision === true) {
     // Re-list the federated credentials immediately before deleting. The prompt
     // may have been open for a while, and a credential added to this app
@@ -482,6 +632,58 @@ async function reviewAppRegistration(
   });
 }
 
+async function appRegistrationIdentityMatchesRequest(
+  op: DeletionOperation,
+  ports: EnvironmentDeletionPorts,
+  clientId: string
+): Promise<boolean> {
+  const expectedTenantId = String(op.request?.tenantId || "");
+  if (!expectedTenantId) {
+    addStep(op, {
+      stage: STAGE_REVIEW_APP_REGISTRATION,
+      kind: "warning",
+      label: "Could not verify the app registration tenant",
+      warning: {
+        code: "app-registration-tenant-unavailable",
+        message:
+          "The deletion request does not contain the tenant identity needed to review the app registration safely.",
+        impact: "The app registration was left in place."
+      }
+    });
+    setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "warning");
+    return false;
+  }
+  try {
+    const identity = await ports.readAzureIdentity(clientId);
+    if (identity.tenantId.toLowerCase() === expectedTenantId.toLowerCase()) {
+      return true;
+    }
+    addStep(op, {
+      stage: STAGE_REVIEW_APP_REGISTRATION,
+      kind: "warning",
+      label: "Left an app registration from another tenant in place",
+      warning: {
+        code: "app-registration-tenant-mismatch",
+        message: `The active Azure tenant is "${identity.tenantId}", but this environment was configured for "${expectedTenantId}".`,
+        impact: "The app registration was not reviewed or deleted."
+      }
+    });
+  } catch (error) {
+    addStep(op, {
+      stage: STAGE_REVIEW_APP_REGISTRATION,
+      kind: "warning",
+      label: "Could not verify the app registration identity",
+      warning: {
+        code: "app-registration-identity-unavailable",
+        message: ports.errorMessage(error),
+        impact: "The app registration was left in place."
+      }
+    });
+  }
+  setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "warning");
+  return false;
+}
+
 // Classify an unused app registration's provenance from its `radius-managed`
 // tag. A not-found app is already gone (idempotent success); an unreadable tag
 // read is "unknown" so the caller stays conservative and never auto-deletes.
@@ -504,25 +706,76 @@ async function deleteEnvironmentCredentials(
   {
     repo,
     environment,
-    clientId
-  }: { repo: string; environment: string; clientId: string }
-): Promise<void> {
-  if (!clientId) {
+    clientId,
+    tenantId,
+    repoId
+  }: {
+    repo: string;
+    environment: string;
+    clientId: string;
+    tenantId: string;
+    repoId: number;
+  }
+): Promise<boolean | void> {
+  if (!clientId || !tenantId || !Number.isFinite(repoId) || repoId <= 0) {
     addStep(op, {
       stage: STAGE_DELETE_CREDENTIAL,
       kind: "warning",
       label:
-        "Skipped removing the federated credential (no app registration id)",
+        "Skipped removing the federated credential (identity evidence incomplete)",
       warning: {
         code: "federated-credential-app-unknown",
         message:
-          "The environment did not record an AZURE_CLIENT_ID, so its federated credential could not be targeted.",
+          "The environment did not record a complete tenant, app registration, and stable repository identity, so its federated credential could not be targeted safely.",
         impact:
           "An orphaned federated credential may remain on the app registration."
       }
     });
-    setStageState(op, STAGE_DELETE_CREDENTIAL, "warning");
-    return;
+    return stopCredentialCleanup(
+      op,
+      "federated-credential-app-unknown",
+      "Radius could not establish the complete credential identity. The GitHub environment was kept so deletion can be retried."
+    );
+  }
+  let liveIdentity: {
+    tenantId: string;
+    applicationObjectId: string;
+  };
+  try {
+    liveIdentity = await ports.readAzureIdentity(clientId);
+  } catch (error) {
+    addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "warning",
+      label: "Could not verify the app registration identity",
+      warning: {
+        code: "federated-credential-identity-unverified",
+        message: ports.errorMessage(error),
+        impact: "The environment's federated credential may still exist."
+      }
+    });
+    return stopCredentialCleanup(
+      op,
+      "federated-credential-identity-unavailable",
+      "Radius could not verify the active Azure identity. The GitHub environment was kept so deletion can be retried."
+    );
+  }
+  if (liveIdentity.tenantId.toLowerCase() !== tenantId.toLowerCase()) {
+    addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "warning",
+      label: "Left federated credentials in place after a tenant mismatch",
+      warning: {
+        code: "federated-credential-tenant-mismatch",
+        message: `The active Entra tenant (${liveIdentity.tenantId}) does not match the environment's recorded tenant (${tenantId}).`,
+        impact: "Radius did not mutate credentials in the unexpected tenant."
+      }
+    });
+    return stopCredentialCleanup(
+      op,
+      "federated-credential-tenant-mismatch",
+      "The active Azure tenant does not match this environment. The GitHub environment was kept so you can switch tenants and retry."
+    );
   }
   const listResult = await ports.runAz(
     buildFederatedCredentialListArgs({ appId: clientId })
@@ -540,8 +793,11 @@ async function deleteEnvironmentCredentials(
         impact: "The environment's federated credential may still exist."
       }
     });
-    setStageState(op, STAGE_DELETE_CREDENTIAL, "warning");
-    return;
+    return stopCredentialCleanup(
+      op,
+      "federated-credential-list-failed",
+      "Radius could not list the app registration's credentials. The GitHub environment was kept so deletion can be retried."
+    );
   }
   if (federatedCredentialListUnreadable(listResult.stdout)) {
     addStep(op, {
@@ -555,21 +811,64 @@ async function deleteEnvironmentCredentials(
         impact: "The environment's federated credential may still exist."
       }
     });
-    setStageState(op, STAGE_DELETE_CREDENTIAL, "warning");
-    return;
+    return stopCredentialCleanup(
+      op,
+      "federated-credential-list-unreadable",
+      "Radius could not read the app registration's credentials. The GitHub environment was kept so deletion can be retried."
+    );
   }
-  const candidates = selectEnvironmentFederatedCredentials(
-    parseFederatedCredentials(listResult.stdout),
-    { repoFullName: repo, envName: environment }
+  let provenance: CredentialProvenanceRecord[];
+  try {
+    provenance = await ports.readCredentialProvenance(clientId);
+  } catch (error) {
+    addStep(op, {
+      stage: STAGE_DELETE_CREDENTIAL,
+      kind: "warning",
+      label: "Could not read credential ownership records",
+      warning: {
+        code: "credential-provenance-unavailable",
+        message: ports.errorMessage(error),
+        impact: "Radius could not prove which credentials are safe to remove."
+      }
+    });
+    return stopCredentialCleanup(
+      op,
+      "credential-provenance-unavailable",
+      "Radius could not read the credential ownership records. The GitHub environment was kept so deletion can be retried."
+    );
+  }
+  const context = {
+    tenantId,
+    clientId,
+    applicationObjectId: liveIdentity.applicationObjectId,
+    repoId,
+    environment
+  };
+  const liveCredentials = parseFederatedCredentials(listResult.stdout);
+  const heuristicCandidateIds = new Set(
+    selectEnvironmentFederatedCredentials(liveCredentials, {
+      repoFullName: repo,
+      envName: environment
+    }).map((credential) => credential.id)
   );
-  // Provenance gate (issue #331): of the credentials that look like they belong
-  // to this environment, delete only the ones Radius can prove it created and
-  // that are unchanged. Everything else — a credential Radius reused, one with
-  // no provenance, or one whose subject drifted since Radius created it — is
-  // retained and surfaced for manual review, so a shared or user-owned
-  // credential is never removed on a name/subject heuristic alone.
-  const provenance = ports.readCredentialProvenance(repo, environment);
-  const plan = planCredentialReclamation(candidates, provenance, clientId);
+  const recordedCandidateIds = new Set(
+    provenance
+      .filter(
+        (record) =>
+          record.tenantId.toLowerCase() === tenantId.toLowerCase() &&
+          record.clientId.toLowerCase() === clientId.toLowerCase() &&
+          record.applicationObjectId === liveIdentity.applicationObjectId &&
+          record.repoId === repoId &&
+          record.environment === environment
+      )
+      .map((record) => record.credentialId)
+  );
+  const candidates = liveCredentials.filter(
+    (credential) =>
+      heuristicCandidateIds.has(credential.id) ||
+      recordedCandidateIds.has(credential.id)
+  );
+  const plan = planCredentialReclamation(candidates, provenance, context);
   if (plan.delete.length === 0 && plan.retain.length === 0) {
     addStep(op, {
       stage: STAGE_DELETE_CREDENTIAL,
@@ -578,15 +877,102 @@ async function deleteEnvironmentCredentials(
       state: "succeeded"
     });
     setStageState(op, STAGE_DELETE_CREDENTIAL, "succeeded");
-    await ports.clearCredentialProvenance(repo, environment);
+    if (op.request) op.request.credentialConsumerRetirementReady = true;
     return;
   }
   let warned = false;
   for (const target of plan.delete) {
+    const showResult = await ports.runAz([
+      "ad",
+      "app",
+      "federated-credential",
+      "show",
+      "--id",
+      clientId,
+      "--federated-credential-id",
+      target.credential.id,
+      "-o",
+      "json"
+    ]);
+    if (
+      !commandSucceeded(showResult) &&
+      isAzResourceNotFound(showResult.stderr)
+    ) {
+      try {
+        await ports.removeCredentialProvenance(clientId, target.credential.id);
+      } catch (error) {
+        warned = true;
+        addStep(op, {
+          stage: STAGE_DELETE_CREDENTIAL,
+          kind: "warning",
+          label:
+            "Credential was already deleted but its provenance could not be cleared",
+          warning: {
+            code: "credential-provenance-clear-failed",
+            message: ports.errorMessage(error),
+            impact:
+              "The stale local record cannot authorize deletion of a replacement because the Entra credential object id is different."
+          }
+        });
+      }
+      addStep(op, {
+        stage: STAGE_DELETE_CREDENTIAL,
+        kind: "observation",
+        label: "Federated credential was already deleted",
+        state: "succeeded"
+      });
+      continue;
+    }
+    const revalidated =
+      commandSucceeded(showResult) ?
+        parseFederatedCredentialObject(showResult.stdout || "")
+      : null;
+    if (!revalidated) {
+      addStep(op, {
+        stage: STAGE_DELETE_CREDENTIAL,
+        kind: "observation",
+        label:
+          "Could not revalidate the federated credential — deletion stopped",
+        state: "failed"
+      });
+      setStageState(op, STAGE_DELETE_CREDENTIAL, "failed");
+      finish(op, "failed_partial", {
+        failure: {
+          code: "federated-credential-revalidation-unavailable",
+          stage: STAGE_DELETE_CREDENTIAL,
+          stepSeq: null,
+          message:
+            "Radius could not re-read the federated credential immediately before deletion. Nothing else was removed; retry the environment deletion.",
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      return false;
+    }
+    const revalidatedPlan = planCredentialReclamation(
+      [revalidated],
+      provenance,
+      context
+    );
+    if (revalidatedPlan.delete[0]?.credential.id !== target.credential.id) {
+      warned = true;
+      addStep(op, {
+        stage: STAGE_DELETE_CREDENTIAL,
+        kind: "warning",
+        label: "Left a changed federated credential in place",
+        warning: {
+          code: "federated-credential-revalidation-failed",
+          message: `Federated credential "${target.credential.name}" changed immediately before deletion.`,
+          impact:
+            "Radius retained the credential because its live identity no longer matched the creation record."
+        }
+      });
+      continue;
+    }
     const result = await ports.runAz(
       buildFederatedCredentialDeleteArgs({
         appId: clientId,
-        name: target.credential.name
+        credentialId: target.credential.id
       })
     );
     if (commandSucceeded(result) || isAzResourceNotFound(result.stderr)) {
@@ -596,21 +982,43 @@ async function deleteEnvironmentCredentials(
         label: "Removed the environment's federated credential",
         state: "succeeded"
       });
+      try {
+        await ports.removeCredentialProvenance(clientId, target.credential.id);
+      } catch (error) {
+        warned = true;
+        addStep(op, {
+          stage: STAGE_DELETE_CREDENTIAL,
+          kind: "warning",
+          label: "Removed the credential but could not clear its provenance",
+          warning: {
+            code: "credential-provenance-clear-failed",
+            message: ports.errorMessage(error),
+            impact:
+              "The stale local record cannot authorize deletion of a replacement because the Entra credential object id is different."
+          }
+        });
+      }
     } else {
-      warned = true;
       addStep(op, {
         stage: STAGE_DELETE_CREDENTIAL,
-        kind: "warning",
-        label: "Could not remove a federated credential",
-        warning: {
+        kind: "observation",
+        label: "Could not remove a federated credential — deletion stopped",
+        state: "failed"
+      });
+      setStageState(op, STAGE_DELETE_CREDENTIAL, "failed");
+      finish(op, "failed_partial", {
+        failure: {
           code: "federated-credential-delete-failed",
+          stage: STAGE_DELETE_CREDENTIAL,
+          stepSeq: null,
           message:
             (result.stderr || "").trim() ||
-            "Deleting the federated credential failed.",
-          impact:
-            "The federated credential may still exist on the app registration."
+            "Deleting the federated credential failed. The GitHub environment was kept so you can retry.",
+          classification: "user-fixable",
+          evidence: null
         }
       });
+      return false;
     }
   }
   for (const retained of plan.retain) {
@@ -629,16 +1037,43 @@ async function deleteEnvironmentCredentials(
       }
     });
   }
+  if (op.request) {
+    op.request.credentialConsumerRetirementReady = plan.retain.every(
+      (retained) =>
+        retained.reason !== "evidence-changed" &&
+        retained.reason !== "shared-custom-subject"
+    );
+  }
   setStageState(op, STAGE_DELETE_CREDENTIAL, warned ? "warning" : "succeeded");
-  // Whether or not everything was reclaimed, this environment's provenance has
-  // served its purpose; drop it so a re-setup does not inherit stale records.
-  await ports.clearCredentialProvenance(repo, environment);
+}
+
+function stopCredentialCleanup(
+  op: DeletionOperation,
+  code: string,
+  message: string
+): false {
+  setStageState(op, STAGE_DELETE_CREDENTIAL, "failed");
+  finish(op, "failed_partial", {
+    failure: {
+      code,
+      stage: STAGE_DELETE_CREDENTIAL,
+      stepSeq: null,
+      message,
+      classification: "user-fixable",
+      evidence: null
+    }
+  });
+  return false;
 }
 
 function retentionWarningCode(reason: CredentialRetentionReason): string {
   switch (reason) {
     case "reused":
       return "federated-credential-retained-reused";
+    case "shared-consumer":
+      return "federated-credential-retained-shared";
+    case "shared-custom-subject":
+      return "federated-credential-retained-custom-subject";
     case "evidence-changed":
       return "federated-credential-retained-changed";
     default:
@@ -655,6 +1090,16 @@ function retentionMessage(
       return (
         `Federated credential "${name}" was already present when Radius set up this ` +
         `environment, so Radius reused it rather than creating it. It is left in place.`
+      );
+    case "shared-consumer":
+      return (
+        `Federated credential "${name}" is also recorded as in use by another ` +
+        `Radius environment, so Radius left it in place.`
+      );
+    case "shared-custom-subject":
+      return (
+        `Federated credential "${name}" uses a custom OIDC subject whose historical ` +
+        `configuration does not prove stable repository and environment exclusivity.`
       );
     case "evidence-changed":
       return (

@@ -83,6 +83,7 @@ export interface AzureAutoSetupOperationProgressPort {
 }
 
 export interface AzureAutoSetupOperationArtifactPort {
+  withCredentialProvenanceLock<T>(work: () => Promise<T>): Promise<T>;
   recordAzureApp(
     operation: AzureAutoSetupOperation,
     patch: Record<string, unknown>
@@ -93,18 +94,26 @@ export interface AzureAutoSetupOperationArtifactPort {
   ): void;
   recordCreatedFederatedCredential(
     operation: AzureAutoSetupOperation,
+    entry: { name: string; subject: string }
+  ): void;
+  recordFederatedCredentialProvenance(
+    operation: AzureAutoSetupOperation,
     entry: {
+      repo: string;
+      repoId: number;
+      environment: string;
+      tenantId: string;
+      clientId: string;
+      applicationObjectId: string;
+      credentialId: string;
       name: string;
       subject: string;
-      // Identity captured for durable provenance (issue #331) so the delete
-      // flow can prove Radius created this credential before removing it. The
-      // pure operation ledger ignores these; the composition root persists them.
-      clientId?: string;
-      issuer?: string;
-      audiences?: string[];
-      repoId?: number;
+      issuer: string;
+      audiences: string[];
+      subjectConfig: ResolveOidcSubjectResult["subjectConfig"];
+      origin: "created" | "reused";
     }
-  ): void;
+  ): Promise<void>;
   recordCreatedRoleAssignment(
     operation: AzureAutoSetupOperation,
     entry: {
@@ -225,12 +234,15 @@ export interface AzureAutoSetupCredentialInput {
       AzureAutoSetupOperationArtifactPort,
       | "recordServicePrincipal"
       | "recordCreatedFederatedCredential"
+      | "recordFederatedCredentialProvenance"
+      | "withCredentialProvenanceLock"
       | "recordCreatedRoleAssignment"
     >;
   };
   oidc: ResolveOidcSubjectResult;
   oidcSuffix: string;
   clientId: string;
+  tenantId: string;
   appName: string;
   subscriptionId: string;
   resourceGroup: string;

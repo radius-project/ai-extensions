@@ -973,7 +973,11 @@ describe("selectMissingFederatedCredentials", () => {
 describe("decideExistingClientId", () => {
   it("falls through when clientId is empty", () => {
     expect(
-      decideExistingClientId({ clientId: "", showStatus: "found", owned: true })
+      decideExistingClientId({
+        clientId: "",
+        showStatus: "found",
+        owned: true
+      })
     ).toEqual({ action: "fallthrough" });
     expect(decideExistingClientId({})).toEqual({ action: "fallthrough" });
   });
@@ -1600,7 +1604,10 @@ describe("federated credential argv builders", () => {
 
   it("builds the delete argv targeting one credential by name", () => {
     expect(
-      buildFederatedCredentialDeleteArgs({ appId: "app-1", name: "cred-a" })
+      buildFederatedCredentialDeleteArgs({
+        appId: "app-1",
+        credentialId: "cred-a"
+      })
     ).toEqual([
       "ad",
       "app",
@@ -1618,19 +1625,31 @@ describe("parseFederatedCredentials", () => {
   it("parses a JSON string array into id/name/subject", () => {
     const creds = parseFederatedCredentials(
       JSON.stringify([
-        { id: "c1", name: "n1", subject: "s1" },
+        {
+          id: "c1",
+          name: "n1",
+          subject: "s1",
+          issuer: "issuer",
+          audiences: ["aud"]
+        },
         { name: "n2", subject: "s2" }
       ])
     );
     expect(creds).toEqual([
-      { id: "c1", name: "n1", subject: "s1" },
-      { id: "n2", name: "n2", subject: "s2" }
+      {
+        id: "c1",
+        name: "n1",
+        subject: "s1",
+        issuer: "issuer",
+        audiences: ["aud"]
+      },
+      { id: "", name: "n2", subject: "s2", issuer: "", audiences: [] }
     ]);
   });
 
   it("accepts an already-parsed array", () => {
     expect(parseFederatedCredentials([{ name: "n", subject: "sub" }])).toEqual([
-      { id: "n", name: "n", subject: "sub" }
+      { id: "", name: "n", subject: "sub", issuer: "", audiences: [] }
     ]);
   });
 
@@ -1650,26 +1669,42 @@ describe("parseFederatedCredentials", () => {
 });
 
 describe("federatedCredentialListUnreadable", () => {
-  it("treats a genuine empty result as readable", () => {
-    expect(federatedCredentialListUnreadable("")).toBe(false);
-    expect(federatedCredentialListUnreadable("   ")).toBe(false);
+  it("treats an explicit empty array and complete identities as readable", () => {
     expect(federatedCredentialListUnreadable("[]")).toBe(false);
-    expect(federatedCredentialListUnreadable(null)).toBe(false);
-    expect(federatedCredentialListUnreadable(undefined)).toBe(false);
     expect(federatedCredentialListUnreadable([])).toBe(false);
-    expect(federatedCredentialListUnreadable([{ name: "n" }])).toBe(false);
+    expect(
+      federatedCredentialListUnreadable([
+        {
+          id: "fic-1",
+          name: "n",
+          subject: "repo:octo/app:environment:dev",
+          issuer: "https://token.actions.githubusercontent.com",
+          audiences: ["api://AzureADTokenExchange"]
+        }
+      ])
+    ).toBe(false);
   });
 
-  it("treats malformed or non-array payloads as unreadable", () => {
+  it("treats missing, malformed, partial, or non-array payloads as unreadable", () => {
+    expect(federatedCredentialListUnreadable("")).toBe(true);
+    expect(federatedCredentialListUnreadable("   ")).toBe(true);
+    expect(federatedCredentialListUnreadable(null)).toBe(true);
+    expect(federatedCredentialListUnreadable(undefined)).toBe(true);
     expect(federatedCredentialListUnreadable("not json")).toBe(true);
     expect(federatedCredentialListUnreadable('{"name":"n"}')).toBe(true);
     expect(federatedCredentialListUnreadable("42")).toBe(true);
     expect(federatedCredentialListUnreadable({ name: "n" })).toBe(true);
+    expect(federatedCredentialListUnreadable([{ name: "n" }])).toBe(true);
   });
 });
 
 describe("selectEnvironmentFederatedCredentials", () => {
   const repoFullName = "octo/app";
+  const live = (credential: { id: string; name: string; subject: string }) => ({
+    ...credential,
+    issuer: "https://token.actions.githubusercontent.com",
+    audiences: ["api://AzureADTokenExchange"]
+  });
   it("matches by subject targeting the environment", () => {
     const creds = [
       {
@@ -1679,7 +1714,7 @@ describe("selectEnvironmentFederatedCredentials", () => {
       },
       { id: "2", name: "other", subject: "repo:octo/app:environment:prod" }
     ];
-    const selected = selectEnvironmentFederatedCredentials(creds, {
+    const selected = selectEnvironmentFederatedCredentials(creds.map(live), {
       repoFullName,
       envName: "dev"
     });
@@ -1693,7 +1728,7 @@ describe("selectEnvironmentFederatedCredentials", () => {
       { id: "3", name: "github-octo-app-dev", subject: "" },
       { id: "4", name: "github-octo-app-prod-mutable", subject: "" }
     ];
-    const selected = selectEnvironmentFederatedCredentials(creds, {
+    const selected = selectEnvironmentFederatedCredentials(creds.map(live), {
       repoFullName,
       envName: "dev"
     });
@@ -1720,7 +1755,7 @@ describe("selectEnvironmentFederatedCredentials", () => {
         subject: "repo:other/repo:environment:dev"
       }
     ];
-    const selected = selectEnvironmentFederatedCredentials(creds, {
+    const selected = selectEnvironmentFederatedCredentials(creds.map(live), {
       repoFullName,
       envName: "dev"
     });
@@ -1735,7 +1770,7 @@ describe("selectEnvironmentFederatedCredentials", () => {
         subject: "repo:octo/app:environment:dev%3Aeast"
       }
     ];
-    const selected = selectEnvironmentFederatedCredentials(creds, {
+    const selected = selectEnvironmentFederatedCredentials(creds.map(live), {
       repoFullName,
       envName: "dev:east"
     });
@@ -1745,7 +1780,13 @@ describe("selectEnvironmentFederatedCredentials", () => {
   it("returns [] when no credentials belong to the environment", () => {
     expect(
       selectEnvironmentFederatedCredentials(
-        [{ id: "1", name: "x", subject: "repo:octo/app:environment:prod" }],
+        [
+          live({
+            id: "1",
+            name: "x",
+            subject: "repo:octo/app:environment:prod"
+          })
+        ],
         { repoFullName, envName: "dev" }
       )
     ).toEqual([]);
@@ -1757,7 +1798,7 @@ describe("selectEnvironmentFederatedCredentials", () => {
     ).toEqual([]);
     expect(
       selectEnvironmentFederatedCredentials(
-        [{ id: "1", name: "x", subject: "" }],
+        [live({ id: "1", name: "x", subject: "" })],
         { repoFullName, envName: "" }
       )
     ).toEqual([]);

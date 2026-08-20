@@ -41,9 +41,11 @@ describe("Azure auto-setup dependency composition", () => {
       resumeAfterInput: vi.fn()
     };
     const artifacts: AzureAutoSetupOperationArtifactPort = {
+      withCredentialProvenanceLock: async (work) => work(),
       recordAzureApp: vi.fn(),
       recordServicePrincipal: vi.fn(),
       recordCreatedFederatedCredential: vi.fn(),
+      recordFederatedCredentialProvenance: vi.fn(async () => {}),
       recordCreatedRoleAssignment: vi.fn()
     };
     const external: AzureAutoSetupExternalPort = {

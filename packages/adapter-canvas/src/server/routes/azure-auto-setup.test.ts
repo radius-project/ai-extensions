@@ -149,8 +149,18 @@ function orchestrationHarness(
           code: 0,
           stdout: JSON.stringify([
             {
+              id: "fic-dev",
               name: "dev",
-              subject: "repo:octo/app:environment:dev"
+              subject: "repo:octo/app:environment:dev",
+              issuer: "https://token.actions.githubusercontent.com",
+              audiences: ["api://AzureADTokenExchange"]
+            },
+            {
+              id: "fic-dev-immutable",
+              name: "dev-immutable",
+              subject: "repo:octo@7/app@5:environment:dev",
+              issuer: "https://token.actions.githubusercontent.com",
+              audiences: ["api://AzureADTokenExchange"]
             }
           ]),
           stderr: ""
@@ -934,6 +944,17 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       }
       if (command.includes("federated-credential create")) {
         return { code: 0, stdout: "", stderr: "" };
+      }
+      if (command.includes("federated-credential show")) {
+        const contents = JSON.parse(written.at(-1) || "{}");
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            id: "fic-dev",
+            ...contents
+          }),
+          stderr: ""
+        };
       }
       if (command.startsWith("role assignment create ")) {
         return { code: 0, stdout: "", stderr: "" };

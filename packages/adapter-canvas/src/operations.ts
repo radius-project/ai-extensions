@@ -1276,8 +1276,11 @@ interface PersistedDeleteRecovery {
   environment?: string;
   provider?: string;
   clientId?: string;
+  tenantId?: string;
+  repoId?: number;
   appDisplayName?: string;
   deleteAppRegistration?: boolean;
+  credentialConsumerRetirementReady?: boolean;
 }
 
 function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
@@ -1288,12 +1291,20 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
     "environment",
     "provider",
     "clientId",
+    "tenantId",
     "appDisplayName"
   ] as const) {
     if (typeof request[key] === "string") out[key] = request[key];
   }
   if (typeof request.deleteAppRegistration === "boolean") {
     out.deleteAppRegistration = request.deleteAppRegistration;
+  }
+  if (typeof request.credentialConsumerRetirementReady === "boolean") {
+    out.credentialConsumerRetirementReady =
+      request.credentialConsumerRetirementReady;
+  }
+  if (typeof request.repoId === "number" && Number.isFinite(request.repoId)) {
+    out.repoId = request.repoId;
   }
   return Object.keys(out).length > 0 ? out : null;
 }

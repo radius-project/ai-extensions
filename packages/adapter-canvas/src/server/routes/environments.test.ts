@@ -519,7 +519,12 @@ describe("environments — delete-environment refusal ladder", () => {
     const toClientView = vi.fn(() => ({ operationId: "op-del-1", view: true }));
     const scheduleEnvironmentOperation = vi.fn(() => true);
     const discoverEnvironmentTarget = vi.fn(() =>
-      Promise.resolve({ provider: "azure", clientId: "app-123" })
+      Promise.resolve({
+        provider: "azure",
+        clientId: "app-123",
+        tenantId: "tenant-1",
+        repoId: 7
+      })
     );
     const { recording, ctx } = context(
       "POST",
@@ -548,7 +553,9 @@ describe("environments — delete-environment refusal ladder", () => {
       repo: "o/r",
       environment: "dev",
       provider: "azure",
-      clientId: "app-123"
+      clientId: "app-123",
+      tenantId: "tenant-1",
+      repoId: 7
     });
     expect(startOperation).toHaveBeenCalledWith(op);
     expect(persistOperations).toHaveBeenCalledOnce();
@@ -584,7 +591,12 @@ describe("environments — delete-environment refusal ladder", () => {
         // Azure provider but no readable AZURE_CLIENT_ID — the credential is most
         // likely orphaned, so the Azure stages must still run (and warn).
         discoverEnvironmentTarget: () =>
-          Promise.resolve({ provider: "azure", clientId: "" }),
+          Promise.resolve({
+            provider: "azure",
+            clientId: "",
+            tenantId: "",
+            repoId: 7
+          }),
         createOperation: () => op,
         buildDeleteStages,
         startOperation,
@@ -600,7 +612,9 @@ describe("environments — delete-environment refusal ladder", () => {
       repo: "o/r",
       environment: "dev",
       provider: "azure",
-      clientId: ""
+      clientId: "",
+      tenantId: "",
+      repoId: 7
     });
     expect(recording.status).toBe(202);
   });
@@ -626,7 +640,12 @@ describe("environments — delete-environment refusal ladder", () => {
         resolveRepoAppName: () => Promise.resolve("app"),
         resolveEnvDeployment: () => Promise.resolve(null),
         discoverEnvironmentTarget: () =>
-          Promise.resolve({ provider: "aws", clientId: "" }),
+          Promise.resolve({
+            provider: "aws",
+            clientId: "",
+            tenantId: "",
+            repoId: 7
+          }),
         createOperation: () => op,
         buildDeleteStages: () => [],
         startOperation
@@ -1931,7 +1950,12 @@ describe("environments — real loopback", () => {
       resolveRepoAppName: () => Promise.resolve("todo-app"),
       resolveEnvDeployment: () => Promise.resolve(null),
       discoverEnvironmentTarget: () =>
-        Promise.resolve({ provider: "azure", clientId: "app-xyz" }),
+        Promise.resolve({
+          provider: "azure",
+          clientId: "app-xyz",
+          tenantId: "tenant-1",
+          repoId: 7
+        }),
       createOperation: () => op,
       buildDeleteStages: () => [{ id: "s", state: "pending" }],
       startOperation: () => ({ ok: true as const, operation: op }),

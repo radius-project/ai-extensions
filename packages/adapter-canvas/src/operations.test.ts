@@ -90,6 +90,8 @@ function newDeleteOp(requestOverrides = {}) {
     environment: op.environment,
     provider: op.provider,
     clientId: "app-1",
+    tenantId: "tenant-1",
+    repoId: 42,
     appDisplayName: "radius-app",
     ...requestOverrides
   };
@@ -1295,15 +1297,21 @@ describe("startup reconciliation", () => {
   });
 
   it("persists a typed delete-recovery request for delete operations only", () => {
-    const del = newDeleteOp({ deleteAppRegistration: true });
+    const del = newDeleteOp({
+      deleteAppRegistration: true,
+      credentialConsumerRetirementReady: true
+    });
     const record = toPersistedOperation(del);
     expect(record.deleteRecovery).toMatchObject({
       repo: "contoso/store",
       environment: "dev",
       provider: "azure",
       clientId: "app-1",
+      tenantId: "tenant-1",
+      repoId: 42,
       appDisplayName: "radius-app",
-      deleteAppRegistration: true
+      deleteAppRegistration: true,
+      credentialConsumerRetirementReady: true
     });
     // The broad, secret-bearing `request` itself is never persisted.
     expect(record.request).toBeUndefined();
@@ -1320,7 +1328,11 @@ describe("startup reconciliation", () => {
     // deleteRecovery survives.
     const restored = fromPersistedOperation(toPersistedOperation(op));
     expect(restored.request).toBeUndefined();
-    expect(restored.deleteRecovery).toMatchObject({ clientId: "app-1" });
+    expect(restored.deleteRecovery).toMatchObject({
+      clientId: "app-1",
+      tenantId: "tenant-1",
+      repoId: 42
+    });
 
     reconcileRestoredOperation(restored);
 
@@ -1328,7 +1340,11 @@ describe("startup reconciliation", () => {
     expect(restored.endedAt).toBeNull();
     expect(restored.recoveryState).toBe("interrupted");
     // The clientId the later stages need is rebuilt from deleteRecovery.
-    expect(restored.request).toMatchObject({ clientId: "app-1" });
+    expect(restored.request).toMatchObject({
+      clientId: "app-1",
+      tenantId: "tenant-1",
+      repoId: 42
+    });
     // The interrupted stage is reset to pending so the resume-safe runner re-runs it.
     expect(
       restored.stages.find((s) => s.id === STAGE_DELETE_CREDENTIAL).state

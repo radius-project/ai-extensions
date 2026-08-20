@@ -189,7 +189,12 @@ export async function handleDeleteEnvironment(
     // registration is left unused — prompts before deleting it. The work runs
     // in the background under the same OperationRecord + progress-panel model as
     // environment creation, so the route only starts it and returns 202.
-    let target: { provider: string; clientId: string };
+    let target: {
+      provider: string;
+      clientId: string;
+      tenantId: string;
+      repoId: number;
+    };
     try {
       target = await dependencies.discoverEnvironmentTarget(repo, envName);
     } catch (e) {
@@ -222,7 +227,14 @@ export async function handleDeleteEnvironment(
       environment: envName,
       stages: dependencies.buildDeleteStages({ includeAzureCleanup })
     });
-    op.request = { repo, environment: envName, provider, clientId };
+    op.request = {
+      repo,
+      repoId: target.repoId,
+      environment: envName,
+      provider,
+      clientId,
+      tenantId: target.tenantId
+    };
     const started = dependencies.startOperation(op);
     if (!started.ok) {
       response.setHeader("Content-Type", "application/json");

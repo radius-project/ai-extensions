@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CREDENTIAL_PROVENANCE_SCHEMA_VERSION,
   GITHUB_ACTIONS_OIDC_ISSUER,
@@ -7,12 +7,14 @@ import {
   planCredentialReclamation,
   configureCredentialProvenanceStore,
   recordCredentialProvenance,
-  listCredentialProvenance,
-  clearCredentialProvenance,
+  listCredentialProvenanceForClient,
+  removeCredentialProvenance,
+  clearEnvironmentCredentialProvenance,
+  withCredentialProvenanceLock,
   allCredentialProvenance,
-  persistCredentialProvenance,
   resetCredentialProvenanceForTest,
-  type CredentialProvenanceRecord
+  type CredentialProvenanceRecord,
+  type CredentialReclamationContext
 } from "./credential-provenance.js";
 import type { CredentialProvenanceStore } from "./credential-provenance-store.js";
 
@@ -24,348 +26,313 @@ function record(
   return {
     schemaVersion: CREDENTIAL_PROVENANCE_SCHEMA_VERSION,
     repo: "octo/app",
+    repoId: 5,
     environment: "dev",
+    tenantId: "tenant-1",
     clientId: "app-1",
+    applicationObjectId: "app-object-1",
+    credentialId: "credential-1",
     name: "github-octo-app-dev-mutable",
     subject: "repo:octo/app:environment:dev",
     issuer: GITHUB_ACTIONS_OIDC_ISSUER,
     audiences: [AZURE_AD_TOKEN_EXCHANGE_AUDIENCE],
+    subjectConfig: { useDefault: true },
     origin: "created",
-    recordedAt: new Date(0).toISOString(),
+    operationId: "op-1",
+    recordedAt: "2026-08-20T00:00:00.000Z",
     ...over
   };
 }
 
 function credential(
-  over: Partial<{ id: string; name: string; subject: string }> = {}
+  over: Partial<{
+    id: string;
+    name: string;
+    subject: string;
+    issuer: string;
+    audiences: string[];
+  }> = {}
 ) {
   return {
-    id: over.id ?? "c1",
-    name: over.name ?? "github-octo-app-dev-mutable",
-    subject: over.subject ?? "repo:octo/app:environment:dev"
+    id: "credential-1",
+    name: "github-octo-app-dev-mutable",
+    subject: "repo:octo/app:environment:dev",
+    issuer: GITHUB_ACTIONS_OIDC_ISSUER,
+    audiences: [AZURE_AD_TOKEN_EXCHANGE_AUDIENCE],
+    ...over
+  };
+}
+
+const context: CredentialReclamationContext = {
+  tenantId: "tenant-1",
+  clientId: "app-1",
+  applicationObjectId: "app-object-1",
+  repoId: 5,
+  environment: "dev"
+};
+
+function memoryStore(initial: unknown[] = []): CredentialProvenanceStore & {
+  values: Map<string, unknown>;
+  write: ReturnType<typeof vi.fn<CredentialProvenanceStore["write"]>>;
+  remove: ReturnType<typeof vi.fn<CredentialProvenanceStore["remove"]>>;
+} {
+  const values = new Map<string, unknown>();
+  return {
+    values,
+    async load() {
+      return [...initial, ...values.values()];
+    },
+    async read(key) {
+      return values.get(key) ?? null;
+    },
+    write: vi.fn(async (key, value) => {
+      values.set(key, value);
+    }),
+    remove: vi.fn(async (keys) => {
+      for (const key of keys) values.delete(key);
+    }),
+    async withLock(work) {
+      return work();
+    }
   };
 }
 
 describe("sanitizeCredentialProvenanceRecord", () => {
-  it("accepts a well-formed record and fills issuer/audiences defaults", () => {
-    const out = sanitizeCredentialProvenanceRecord({
-      schemaVersion: 1,
-      repo: "octo/app",
-      environment: "dev",
-      clientId: "app-1",
-      name: "fic",
-      subject: "s",
-      origin: "created"
+  it("accepts the complete version 2 record", () => {
+    expect(sanitizeCredentialProvenanceRecord(record())).toEqual(record());
+  });
+
+  it.each([
+    null,
+    [],
+    { ...record(), schemaVersion: 1 },
+    { ...record(), repo: "" },
+    { ...record(), repoId: 0 },
+    { ...record(), origin: "unknown" },
+    { ...record(), audiences: [] },
+    { ...record(), audiences: [4] },
+    { ...record(), subjectConfig: null },
+    { ...record(), subjectConfig: { useDefault: "yes" } },
+    {
+      ...record(),
+      subjectConfig: { useDefault: false, includeClaimKeys: [4] }
+    }
+  ])("rejects incomplete or malformed evidence %#", (value) => {
+    expect(sanitizeCredentialProvenanceRecord(value)).toBeNull();
+  });
+
+  it("preserves optional subject configuration evidence", () => {
+    const value = record({
+      subjectConfig: {
+        useDefault: false,
+        includeClaimKeys: ["repository_id", "environment"],
+        useImmutableSubject: true,
+        subClaimPrefix: "octo@7/app@5"
+      }
     });
-    expect(out?.issuer).toBe(GITHUB_ACTIONS_OIDC_ISSUER);
-    expect(out?.audiences).toEqual([AZURE_AD_TOKEN_EXCHANGE_AUDIENCE]);
-    expect(out?.recordedAt).toBe(new Date(0).toISOString());
-  });
-
-  it("preserves optional repoId, operationId, issuer and audiences", () => {
-    const out = sanitizeCredentialProvenanceRecord({
-      schemaVersion: 1,
-      repo: "octo/app",
-      environment: "dev",
-      clientId: "app-1",
-      name: "fic",
-      subject: "s",
-      origin: "reused",
-      issuer: "https://issuer",
-      audiences: ["aud", 5],
-      repoId: 42,
-      operationId: "op_1",
-      recordedAt: "2026-01-01T00:00:00.000Z"
-    });
-    expect(out?.origin).toBe("reused");
-    expect(out?.issuer).toBe("https://issuer");
-    expect(out?.audiences).toEqual(["aud"]);
-    expect(out?.repoId).toBe(42);
-    expect(out?.operationId).toBe("op_1");
-    expect(out?.recordedAt).toBe("2026-01-01T00:00:00.000Z");
-  });
-
-  it("rejects non-objects, wrong schema, unknown origin and missing fields", () => {
-    expect(sanitizeCredentialProvenanceRecord(null)).toBeNull();
-    expect(sanitizeCredentialProvenanceRecord([])).toBeNull();
-    expect(sanitizeCredentialProvenanceRecord({ schemaVersion: 2 })).toBeNull();
-    expect(
-      sanitizeCredentialProvenanceRecord({
-        schemaVersion: 1,
-        repo: "octo/app",
-        environment: "dev",
-        clientId: "app-1",
-        name: "fic",
-        subject: "s",
-        origin: "made-up"
-      })
-    ).toBeNull();
-    expect(
-      sanitizeCredentialProvenanceRecord({
-        schemaVersion: 1,
-        repo: "octo/app",
-        environment: "dev",
-        clientId: "app-1",
-        name: "",
-        subject: "s",
-        origin: "created"
-      })
-    ).toBeNull();
-  });
-
-  it("rejects an object whose required fields are not strings", () => {
-    expect(
-      sanitizeCredentialProvenanceRecord({
-        schemaVersion: 1,
-        repo: 1,
-        environment: 2,
-        clientId: 3,
-        name: 4,
-        subject: 5,
-        origin: "created"
-      })
-    ).toBeNull();
-  });
-
-  it("ignores a non-finite repoId", () => {
-    const out = sanitizeCredentialProvenanceRecord({
-      schemaVersion: 1,
-      repo: "octo/app",
-      environment: "dev",
-      clientId: "app-1",
-      name: "fic",
-      subject: "s",
-      origin: "created",
-      repoId: Number.NaN
-    });
-    expect(out?.repoId).toBeUndefined();
+    expect(sanitizeCredentialProvenanceRecord(value)?.subjectConfig).toEqual(
+      value.subjectConfig
+    );
   });
 });
 
 describe("planCredentialReclamation", () => {
-  it("deletes a created credential whose subject matches", () => {
-    const plan = planCredentialReclamation([credential()], [record()], "app-1");
+  it("deletes only an exact, exclusive, Radius-created live object", () => {
+    const plan = planCredentialReclamation([credential()], [record()], context);
     expect(plan.delete).toHaveLength(1);
-    expect(plan.retain).toHaveLength(0);
-    expect(plan.delete[0].record.origin).toBe("created");
+    expect(plan.retain).toEqual([]);
   });
 
-  it("matches the client id case-insensitively", () => {
-    const plan = planCredentialReclamation(
-      [credential()],
-      [record({ clientId: "APP-1" })],
-      "app-1"
-    );
-    expect(plan.delete).toHaveLength(1);
+  it.each([
+    {
+      name: "reused target",
+      records: [record({ origin: "reused" })],
+      reason: "reused"
+    },
+    {
+      name: "another environment consumes the same object",
+      records: [
+        record(),
+        record({
+          repoId: 9,
+          repo: "other/repo",
+          environment: "prod",
+          origin: "reused"
+        })
+      ],
+      reason: "shared-consumer"
+    },
+    {
+      name: "custom subject lacks stable repository exclusivity",
+      records: [
+        record({
+          subjectConfig: {
+            useDefault: false,
+            includeClaimKeys: ["repository", "environment"],
+            useImmutableSubject: false
+          }
+        })
+      ],
+      reason: "shared-custom-subject"
+    },
+    {
+      name: "no creation record",
+      records: [],
+      reason: "no-provenance"
+    }
+  ])("retains $name", ({ records, reason }) => {
+    const plan = planCredentialReclamation([credential()], records, context);
+    expect(plan.delete).toEqual([]);
+    expect(plan.retain[0].reason).toBe(reason);
   });
 
-  it("retains when there is no matching provenance", () => {
-    const plan = planCredentialReclamation([credential()], [], "app-1");
-    expect(plan.delete).toHaveLength(0);
-    expect(plan.retain[0].reason).toBe("no-provenance");
-  });
-
-  it("retains a reused credential over a created one for the same identity", () => {
-    const plan = planCredentialReclamation(
-      [credential()],
-      [record(), record({ origin: "reused" })],
-      "app-1"
-    );
-    expect(plan.delete).toHaveLength(0);
-    expect(plan.retain[0].reason).toBe("reused");
-  });
-
-  it("retains a created credential whose subject drifted", () => {
-    const plan = planCredentialReclamation(
-      [credential({ subject: "changed" })],
-      [record()],
-      "app-1"
-    );
-    expect(plan.delete).toHaveLength(0);
-    expect(plan.retain[0].reason).toBe("evidence-changed");
-  });
-
-  it("treats non-string record identity fields as empty (no match)", () => {
+  it("allows a custom subject proven stable and environment-exclusive", () => {
     const plan = planCredentialReclamation(
       [credential()],
       [
-        {
-          ...record(),
-          repo: 1 as unknown as string,
-          clientId: 2 as unknown as string
-        }
+        record({
+          subjectConfig: {
+            useDefault: false,
+            includeClaimKeys: ["repository_id", "environment"]
+          }
+        })
       ],
-      "app-1"
+      context
     );
-    expect(plan.delete).toHaveLength(0);
-    expect(plan.retain[0].reason).toBe("no-provenance");
+    expect(plan.delete).toHaveLength(1);
+  });
+
+  it.each([
+    ["credential id", credential({ id: "replacement" })],
+    ["name", credential({ name: "changed" })],
+    ["subject", credential({ subject: "changed" })],
+    ["issuer", credential({ issuer: "https://changed.example" })],
+    ["audience", credential({ audiences: ["changed"] })]
+  ])("retains when the live %s changed", (_name, live) => {
+    const plan = planCredentialReclamation([live], [record()], context);
+    expect(plan.delete).toEqual([]);
+    expect(plan.retain[0].reason).toBe(
+      live.id === "replacement" ? "no-provenance" : "evidence-changed"
+    );
+  });
+
+  it("matches tenant and client ids case-insensitively", () => {
+    const plan = planCredentialReclamation(
+      [credential()],
+      [record({ tenantId: "TENANT-1", clientId: "APP-1" })],
+      context
+    );
+    expect(plan.delete).toHaveLength(1);
+  });
+
+  it("keeps created ownership when a concurrent session also records reuse", () => {
+    const plan = planCredentialReclamation(
+      [credential()],
+      [record(), record({ origin: "reused", operationId: "op-2" })],
+      context
+    );
+    expect(plan.delete).toHaveLength(1);
+    expect(plan.retain).toEqual([]);
   });
 });
 
 describe("credential provenance registry", () => {
-  it("is disabled by default: records in memory without a store", async () => {
-    expect(recordCredentialProvenance(record())).not.toBeNull();
-    expect(listCredentialProvenance("octo/app", "dev")).toHaveLength(1);
-    // A no-op persist is safe when no store is configured.
-    await persistCredentialProvenance();
-  });
-
-  it("rejects an incomplete record input", () => {
-    expect(recordCredentialProvenance({ ...record(), name: "" })).toBeNull();
-    expect(allCredentialProvenance()).toHaveLength(0);
-  });
-
-  it("defaults issuer, audiences and recordedAt when omitted", () => {
-    const out = recordCredentialProvenance({
-      repo: "octo/app",
-      environment: "dev",
-      clientId: "app-1",
-      name: "fic",
-      subject: "s",
-      origin: "created"
-    });
-    expect(out?.issuer).toBe(GITHUB_ACTIONS_OIDC_ISSUER);
-    expect(out?.audiences).toEqual([AZURE_AD_TOKEN_EXCHANGE_AUDIENCE]);
-    expect(typeof out?.recordedAt).toBe("string");
-  });
-
-  it("keeps explicit issuer, audiences, repoId, operationId and origin", () => {
-    const out = recordCredentialProvenance({
-      repo: "octo/app",
-      environment: "dev",
-      clientId: "app-1",
-      name: "fic",
-      subject: "s",
-      origin: "reused",
-      issuer: "https://issuer",
-      audiences: ["aud"],
-      repoId: 7,
-      operationId: "op_9",
-      recordedAt: "2026-02-02T00:00:00.000Z"
-    });
-    expect(out?.origin).toBe("reused");
-    expect(out?.issuer).toBe("https://issuer");
-    expect(out?.audiences).toEqual(["aud"]);
-    expect(out?.repoId).toBe(7);
-    expect(out?.operationId).toBe("op_9");
-    expect(out?.recordedAt).toBe("2026-02-02T00:00:00.000Z");
-  });
-
-  it("upserts by identity and lists by repo + environment", () => {
-    recordCredentialProvenance(record({ subject: "old" }));
-    recordCredentialProvenance(record({ subject: "new" }));
-    const listed = listCredentialProvenance("OCTO/APP", "dev");
-    expect(listed).toHaveLength(1);
-    expect(listed[0].subject).toBe("new");
-    expect(listCredentialProvenance("octo/app", "prod")).toHaveLength(0);
-    // A non-string repo argument normalizes to empty and matches nothing.
-    expect(
-      listCredentialProvenance(0 as unknown as string, "dev")
-    ).toHaveLength(0);
-  });
-
-  it("clears only the targeted repo + environment", async () => {
-    recordCredentialProvenance(record());
-    recordCredentialProvenance(
-      record({ environment: "prod", name: "fic-prod" })
+  it("fails closed when any durable record is invalid", async () => {
+    const store = memoryStore([record(), { invalid: true }]);
+    await expect(configureCredentialProvenanceStore(store)).rejects.toThrow(
+      "Credential provenance is incomplete"
     );
-    await clearCredentialProvenance("octo/app", "dev");
-    expect(listCredentialProvenance("octo/app", "dev")).toHaveLength(0);
-    expect(listCredentialProvenance("octo/app", "prod")).toHaveLength(1);
-    // Clearing a repo/env with nothing to remove is a no-op.
-    await clearCredentialProvenance("octo/app", "dev");
+    await expect(recordCredentialProvenance(record())).rejects.toThrow(
+      "Credential provenance is incomplete"
+    );
   });
 
-  it("hydrates from a store, persists changes and reports write failures", async () => {
-    const saved: unknown[] = [];
-    const diagnostics: string[] = [];
-    let failNextSave = false;
-    const store: CredentialProvenanceStore = {
-      report: (d) => diagnostics.push(d.code),
-      async load() {
-        return {
-          schemaVersion: 1,
-          credentials: [record(), { bogus: true }]
-        };
-      },
-      async save(envelope) {
-        if (failNextSave) throw new Error("disk full");
-        saved.push(envelope.credentials);
-      }
-    };
+  it("refreshes durable records written by another session before planning", async () => {
+    const durable = [record()];
+    await configureCredentialProvenanceStore(memoryStore(durable));
+    durable.push(
+      record({
+        repo: "other/repo",
+        repoId: 9,
+        environment: "prod",
+        origin: "reused"
+      })
+    );
+    expect(await listCredentialProvenanceForClient("app-1")).toHaveLength(2);
+  });
+
+  it("awaits durable writes before publishing records in memory", async () => {
+    const store = memoryStore();
     await configureCredentialProvenanceStore(store);
-    // Only the valid record survived the sanitize pass.
-    expect(listCredentialProvenance("octo/app", "dev")).toHaveLength(1);
-
-    recordCredentialProvenance(record({ name: "fic-2" }));
-    await persistCredentialProvenance();
-    expect(saved.length).toBeGreaterThan(0);
-
-    failNextSave = true;
-    recordCredentialProvenance(record({ name: "fic-3" }));
-    await persistCredentialProvenance();
-    expect(diagnostics).toContain("credential-provenance-write-failed");
+    const written = await recordCredentialProvenance(record());
+    expect(written).toEqual(record());
+    expect(store.write).toHaveBeenCalledOnce();
+    expect(allCredentialProvenance()).toEqual([record()]);
   });
 
-  it("configuring with null disables persistence and clears memory", async () => {
-    recordCredentialProvenance(record());
+  it("keeps created ownership when a later setup reuses the same object", async () => {
+    await configureCredentialProvenanceStore(memoryStore());
+    await recordCredentialProvenance(record());
+    const retained = await recordCredentialProvenance(
+      record({ origin: "reused", operationId: "op-2" })
+    );
+    expect(retained?.origin).toBe("created");
+    expect(allCredentialProvenance()).toHaveLength(1);
+  });
+
+  it("does not change memory when a durable write fails", async () => {
+    const store = memoryStore();
+    store.write.mockRejectedValueOnce(new Error("disk full"));
+    await configureCredentialProvenanceStore(store);
+    await expect(recordCredentialProvenance(record())).rejects.toThrow(
+      "disk full"
+    );
+    expect(allCredentialProvenance()).toEqual([]);
+  });
+
+  it("removes all consumers only after durable credential removal succeeds", async () => {
+    const store = memoryStore();
+    await configureCredentialProvenanceStore(store);
+    await recordCredentialProvenance(record());
+    await recordCredentialProvenance(
+      record({ repoId: 9, repo: "other/repo", environment: "prod" })
+    );
+    store.remove.mockRejectedValueOnce(new Error("locked"));
+    await expect(
+      removeCredentialProvenance("app-1", "credential-1")
+    ).rejects.toThrow("locked");
+    expect(allCredentialProvenance()).toHaveLength(2);
+    await removeCredentialProvenance("app-1", "credential-1");
+    expect(allCredentialProvenance()).toEqual([]);
+  });
+
+  it("clears only one repository environment", async () => {
+    await configureCredentialProvenanceStore(memoryStore());
+    await recordCredentialProvenance(record());
+    await recordCredentialProvenance(
+      record({
+        credentialId: "credential-2",
+        name: "prod",
+        environment: "prod"
+      })
+    );
+    await clearEnvironmentCredentialProvenance(5, "dev");
+    expect(allCredentialProvenance().map((entry) => entry.environment)).toEqual(
+      ["prod"]
+    );
+  });
+
+  it("supports a disabled store", async () => {
     await configureCredentialProvenanceStore(null);
-    expect(allCredentialProvenance()).toHaveLength(0);
+    await expect(recordCredentialProvenance(record())).resolves.toEqual(
+      record()
+    );
   });
 
-  it("ignores an empty store load without throwing", async () => {
-    await configureCredentialProvenanceStore({
-      async load() {
-        return null;
-      },
-      async save() {}
-    });
-    expect(allCredentialProvenance()).toHaveLength(0);
-  });
-
-  it("rejects records whose required fields are not strings", () => {
-    expect(
-      recordCredentialProvenance({
-        ...record(),
-        repo: undefined as unknown as string
-      })
-    ).toBeNull();
-    expect(
-      recordCredentialProvenance({
-        ...record(),
-        environment: 0 as unknown as string
-      })
-    ).toBeNull();
-    expect(
-      recordCredentialProvenance({
-        ...record(),
-        clientId: 5 as unknown as string
-      })
-    ).toBeNull();
-    expect(
-      recordCredentialProvenance({
-        ...record(),
-        name: {} as unknown as string
-      })
-    ).toBeNull();
-    expect(
-      recordCredentialProvenance({
-        ...record(),
-        subject: null as unknown as string
-      })
-    ).toBeNull();
-  });
-
-  it("swallows write failures when the store has no report callback", async () => {
-    await configureCredentialProvenanceStore({
-      async load() {
-        return null;
-      },
-      async save() {
-        throw new Error("disk full");
-      }
-    });
-    recordCredentialProvenance(record());
-    await expect(persistCredentialProvenance()).resolves.toBeUndefined();
+  it("fails closed when a destructive lock has no durable store", async () => {
+    await configureCredentialProvenanceStore(null);
+    await expect(
+      withCredentialProvenanceLock(async () => "unreachable")
+    ).rejects.toThrow("Durable credential provenance is unavailable");
   });
 });

@@ -462,10 +462,10 @@ export function buildFederatedCredentialListArgs({
  */
 export function buildFederatedCredentialDeleteArgs({
   appId,
-  name
+  credentialId
 }: {
   appId: string;
-  name: string;
+  credentialId: string;
 }): string[] {
   return [
     "ad",
@@ -475,7 +475,7 @@ export function buildFederatedCredentialDeleteArgs({
     "--id",
     appId,
     "--federated-credential-id",
-    name
+    credentialId
   ];
 }
 
@@ -483,13 +483,15 @@ export interface AzureFederatedCredential {
   id: string;
   name: string;
   subject: string;
+  issuer: string;
+  audiences: string[];
 }
 
 /**
  * Parse the JSON array emitted by `az ad app federated-credential list` into the
- * `{ id, name, subject }` fields the deletion flow needs. Malformed or non-array
- * output yields an empty list rather than throwing, so a best-effort review can
- * still converge (an unreadable list is treated as "no credentials matched").
+ * identity fields the deletion flow needs. Callers must first use
+ * `federatedCredentialListUnreadable` so malformed or incomplete identity is
+ * never mistaken for an empty credential list.
  */
 export function parseFederatedCredentials(
   stdout: unknown
@@ -511,10 +513,18 @@ export function parseFederatedCredentials(
     const record = entry as Record<string, unknown>;
     const name = typeof record.name === "string" ? record.name : "";
     if (!name) continue;
+    const audiences =
+      Array.isArray(record.audiences) ?
+        record.audiences.filter(
+          (audience): audience is string => typeof audience === "string"
+        )
+      : [];
     creds.push({
-      id: typeof record.id === "string" ? record.id : name,
+      id: typeof record.id === "string" ? record.id : "",
       name,
-      subject: typeof record.subject === "string" ? record.subject : ""
+      subject: typeof record.subject === "string" ? record.subject : "",
+      issuer: typeof record.issuer === "string" ? record.issuer : "",
+      audiences
     });
   }
   return creds;
@@ -530,17 +540,37 @@ export function parseFederatedCredentials(
  * credentials it could not actually read.
  */
 export function federatedCredentialListUnreadable(stdout: unknown): boolean {
-  if (stdout == null) return false;
+  if (stdout == null) return true;
+  let parsed: unknown = stdout;
   if (typeof stdout === "string") {
     const trimmed = stdout.trim();
-    if (!trimmed) return false;
+    if (!trimmed) return true;
     try {
-      return !Array.isArray(JSON.parse(trimmed));
+      parsed = JSON.parse(trimmed);
     } catch {
       return true;
     }
   }
-  return !Array.isArray(stdout);
+  if (!Array.isArray(parsed)) return true;
+  return parsed.some((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      return true;
+    const record = entry as Record<string, unknown>;
+    return (
+      typeof record.id !== "string" ||
+      !record.id ||
+      typeof record.name !== "string" ||
+      !record.name ||
+      typeof record.subject !== "string" ||
+      typeof record.issuer !== "string" ||
+      !record.issuer ||
+      !Array.isArray(record.audiences) ||
+      record.audiences.length === 0 ||
+      record.audiences.some(
+        (audience) => typeof audience !== "string" || !audience
+      )
+    );
+  });
 }
 
 /**
