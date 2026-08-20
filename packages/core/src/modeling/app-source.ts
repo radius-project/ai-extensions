@@ -301,7 +301,7 @@ export function ambiguousAppSourceBrief(
   const lines = [
     "## Where the application lives",
     "",
-    `This repository has ${evaluation.dockerfiles.length} Dockerfile candidate directories:`,
+    `This repository has ${directories.length} Dockerfile candidate ${directories.length === 1 ? "directory" : "directories"}:`,
     "",
     ...shown.map((dir) => `- \`${sanitizeForPrompt(dir)}\``)
   ];

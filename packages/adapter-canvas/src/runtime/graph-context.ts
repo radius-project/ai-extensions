@@ -43,7 +43,8 @@ export interface GraphContextHelpers {
   ): Promise<AppSourceEvaluation>;
   // The raw listing behind evaluateAppSourceForBranch, for a caller that needs
   // more than the classification. Null means the listing could not be
-  // established — never that the repository holds no files.
+  // established — never that the repository holds no files. An empty listing is
+  // normalized to null, so a returned array is always non-empty.
   listSourceTreeForBranch(
     repo: string,
     branch: string,
@@ -100,8 +101,9 @@ export function createGraphContextHelpers(
   // verdict. An empty array here is therefore "could not establish", not "the
   // repository has nothing".
   //
-  // A consumer of the raw listing must preserve that distinction: null or empty
-  // means the signal is unavailable, never that the repository lacks the files.
+  // The returned value carries that distinction rather than leaving it to the
+  // caller: an empty listing is normalized to null below, so null is the single
+  // "could not establish" shape and a non-empty array is always real evidence.
   async function listSourceTreeForBranch(
     repo: string,
     branch: string,
@@ -112,10 +114,16 @@ export function createGraphContextHelpers(
     // remote lister and spend a doomed `gh api /repos//git/trees/` call, and its
     // timeout, to arrive at the same answer.
     if (!repo) return null;
-    return await (
+    const paths = await (
       deps.workspace.isWorkspaceSelection(state, repo, branch) ?
         deps.workspace.fetchWorkspaceTree(state, repo, branch)
       : deps.github.treePaths(repo, branch)).catch(() => null);
+    // Normalized so the contract holds in the returned value, not merely in the
+    // comment: `treePaths` resolves to [] on failure, and a caller reading the
+    // raw listing cannot tell that apart from a real listing that happens to be
+    // empty. Collapsing it to null makes "unavailable" the single shape a caller
+    // has to handle.
+    return paths && paths.length > 0 ? paths : null;
   }
 
   // Classifies a branch's source listing, handing the paths to core, which owns

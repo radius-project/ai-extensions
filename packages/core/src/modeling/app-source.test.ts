@@ -441,6 +441,27 @@ describe("ambiguousAppSourceBrief prompt safety", () => {
     expect(brief?.split("\n").filter((l) => l.startsWith("- ")).length).toBe(2);
   });
 
+  it("counts candidate directories, not Dockerfiles", () => {
+    // Two Dockerfiles in one directory are one candidate location. Counting
+    // paths would announce a number that disagrees with the list below it.
+    const brief = ambiguousAppSourceBrief(
+      evaluateAppSource([
+        "services/api/Dockerfile",
+        "services/api/Dockerfile.dev",
+        "services/web/Dockerfile"
+      ])
+    );
+    expect(brief).toContain("2 Dockerfile candidate directories");
+    expect(brief?.split("\n").filter((l) => l.startsWith("- `")).length).toBe(2);
+  });
+
+  it("uses the singular when several Dockerfiles share one directory", () => {
+    const brief = ambiguousAppSourceBrief(
+      evaluateAppSource(["api/Dockerfile", "api/Dockerfile.dev"])
+    );
+    expect(brief).toContain("1 Dockerfile candidate directory:");
+  });
+
   it("bounds an unreasonable number of candidates and reports the remainder", () => {
     const many = Array.from({ length: 40 }, (_, i) => `svc${i}/Dockerfile`);
     const brief = ambiguousAppSourceBrief(evaluateAppSource(many));
