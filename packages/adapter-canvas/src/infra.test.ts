@@ -397,6 +397,28 @@ jobs:
     );
   });
 
+  it("accepts an upstream Checkout step with a descriptive suffix", () => {
+    const workflow = `on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+permissions:
+  contents: read
+jobs:
+  delete:
+    steps:
+      - name: Checkout state repository
+        uses: actions/checkout@v4
+      - name: Delete Radius resource
+        run: echo delete
+`;
+
+    expect(addDeleteStateCheck(workflow)).toContain(
+      "- name: Detect persisted Radius state"
+    );
+  });
+
   describe("detect-state shell logic", () => {
     // Extracts the actual `run:` script for the delete job's "Detect persisted
     // Radius state" step from the generated workflow, so these tests exercise the

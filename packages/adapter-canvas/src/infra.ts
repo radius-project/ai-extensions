@@ -351,7 +351,7 @@ export function addDeleteStateCheck(yaml: string): string {
   addForceLocalOnlyWorkflowInput(lines);
 
   const checkoutIndex = lines.findIndex(
-    (line, index) => index > jobIndex && /^ {6}- name: Checkout\s*$/.test(line)
+    (line, index) => index > jobIndex && /^ {6}- name: Checkout\b/.test(line)
   );
   if (checkoutIndex === -1) {
     throw new Error(
