@@ -43,7 +43,8 @@ function dependencies(
           dispatched: true,
           workflowFile: "run-rad-commands.yml",
           dispatchedAt: 10,
-          environment: "production"
+          environment: "production",
+          baselineRunId: null
         })
     },
     outcome: {
@@ -322,7 +323,8 @@ describe("deploy monitor stage sequencing", () => {
               dispatched: true,
               workflowFile: "run-rad-commands.yml",
               dispatchedAt: 10,
-              environment: "production"
+              environment: "production",
+              baselineRunId: null
             });
           }
         },
@@ -378,6 +380,42 @@ describe("deploy monitor run discovery", () => {
     expect(logs).toContain(
       "Tracking deploy run: https://github.com/acme/widgets/actions/runs/77"
     );
+  });
+
+  it("passes the dispatch baseline run id to run discovery", async () => {
+    const afterRunIds: (number | string | null | undefined)[] = [];
+    const settle = settleRecorder();
+    const { request: input } = request({ resources: [] });
+    const service = createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: () => Promise.resolve(null) },
+        dispatch: {
+          prepareAndDispatch: () =>
+            Promise.resolve({
+              dispatched: true,
+              workflowFile: "run-rad-commands.yml",
+              dispatchedAt: 10,
+              environment: "production",
+              baselineRunId: 101
+            })
+        },
+        findWorkflowRun: (
+          _repo,
+          _workflowFile,
+          _sinceMs,
+          _knownId,
+          afterRunId
+        ) => {
+          afterRunIds.push(afterRunId);
+          return Promise.resolve(102);
+        },
+        outcome: settle.outcome
+      })
+    );
+
+    await service.run(input);
+
+    expect(afterRunIds).toEqual([101]);
   });
 
   it("marks a run it never found as unconfirmed rather than failed", async () => {
@@ -1179,6 +1217,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
         "run-rad-commands-azure.yml"
       ],
       branchNotPushedKind: "branch-not-pushed",
+      oidcSubjectMissingKind: "oidc-subject-missing",
       getBranchHeadSha: () => {
         record("branch-head-sha");
         return Promise.resolve("sha-1");
@@ -1192,6 +1231,46 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       },
       runGhWithStdin: () => {
         throw new Error("no secret params means no secret write");
+      },
+      runAz: (args) => {
+        record(`az:${args.slice(0, 4).join(" ")}`);
+        return Promise.resolve({
+          code: 0,
+          stdout: JSON.stringify([
+            "repo:acme/widgets:environment:production",
+            "repo:acme@101/widgets@202:environment:production"
+          ]),
+          stderr: ""
+        });
+      },
+      runGitHubJson: (path) => {
+        record(`github-json:${path}`);
+        if (path.includes("/variables/AZURE_CLIENT_ID")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: { value: "client-123" }
+          });
+        }
+        if (path === "/repos/acme/widgets/environments/production") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: { name: "production" }
+          });
+        }
+        if (path === "/repos/acme/widgets") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: {
+              full_name: "acme/widgets",
+              id: 202,
+              owner: { id: 101 }
+            }
+          });
+        }
+        return Promise.resolve({ ok: false, status: 404 });
       },
       readProcessEnv: () => ({}),
       fetchFileForSelection: (_entry, _repo, _branch, repoPath) => {
@@ -1211,6 +1290,10 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       ensureWorkflowsCurrent: () => {
         record("sync-workflows");
         return Promise.resolve({ created: [], failed: [] });
+      },
+      latestWorkflowRunId: () => {
+        record("latest-run-id");
+        return Promise.resolve(76);
       },
       classifyDeployDispatchFailure: () => "run-unconfirmed",
       invalidateDeployListCache: () => record("evict-deploy-listing"),
@@ -1307,9 +1390,15 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       "resolve-recipe-outputs",
       "commit-source-refs",
       "branch-head-sha",
+      "github-json:/repos/acme/widgets/environments/production/variables/AZURE_CLIENT_ID",
+      "github-json:/repos/acme/widgets/environments/production",
+      "github-json:/repos/acme/widgets",
+      "github-json:/repos/acme/widgets/actions/oidc/customization/sub",
+      "az:ad app federated-credential list",
       "fetch-file:.radius/app.bicep",
       "publish-workflows",
       "sync-workflows",
+      "latest-run-id",
       "gh:workflow run run-rad-commands.yml",
       "evict-deploy-listing",
       "find-workflow-run",

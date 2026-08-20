@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { APP_ORIGIN_REPO_PATH, serializeAppOrigin } from "@radius-project/core";
+import {
+  APP_ORIGIN_REPO_PATH,
+  UNIDENTIFIED_APPLICATION_MESSAGE,
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+  serializeAppOrigin
+} from "@radius-project/core";
 import { hashAppBicep } from "../../../src/app-bicep-hash.js";
+import type { RadiusExtension } from "../../../src/runtime/create-radius-extension.js";
 import {
   KEEPALIVE_ACTIVE_WINDOW_MS,
   KEEPALIVE_INTERVAL_MS
@@ -461,6 +467,205 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       })
     ).resolves.toBeUndefined();
     expect(harness.joinSession).toHaveBeenCalledOnce();
+
+    await harness.extension.shutdown("test");
+  });
+});
+
+// Exception 2.1: a repository with no Dockerfile has no containerized workload
+// to model, so both routes into modeling — the tool the agent calls and the hook
+// that auto-triggers it — have to refuse through the real composition, not just
+// in isolation.
+describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
+  const OPEN_GRAPH = {
+    toolName: "open_canvas",
+    toolArgs: {
+      canvasId: "radius",
+      input: { page: "graph", repo: "acme/widgets", branch: "main" }
+    }
+  };
+
+  function generateApp(harness: { extension: RadiusExtension }) {
+    const tool = harness.extension.tools.find(
+      (candidate) => candidate.name === "radius_generate_app"
+    );
+    if (!tool) throw new Error("radius_generate_app not registered");
+    return tool.handler({ repoPath: "/workspace" });
+  }
+
+  it("withholds the authoring instructions and denies the graph on the workspace branch", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json", "README.md"]
+      }
+    });
+
+    const generated = await generateApp(harness);
+    expect(generated).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(harness.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+
+    const denied = await harness.extension.hooks.onPreToolUse(OPEN_GRAPH);
+    expect(denied?.permissionDecision).toBe("deny");
+    expect(denied?.additionalContext).toContain(
+      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+    );
+    expect(denied?.additionalContext).not.toContain("radius_generate_app");
+
+    await harness.extension.shutdown("test");
+  });
+
+  // Several Dockerfiles are the opposite case: not a refusal at all. The
+  // assembled runtime must hand over the authoring instructions AND append the
+  // brief, since the wiring under it — lister selection, branch choice, and the
+  // final tool output — is the seam that can regress without the factory tests
+  // noticing.
+  it("hands over the skill with the ambiguity brief when the worktree builds several images", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": [
+          "services/api/Dockerfile",
+          "services/web/Dockerfile",
+          "services/worker/Dockerfile",
+          "pnpm-workspace.yaml",
+          "src/index.ts"
+        ]
+      }
+    });
+
+    const generated = String(await generateApp(harness));
+
+    // Not a refusal: the skill is still handed over so the services are modeled
+    // as one application.
+    expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+    expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+
+    // The brief reached the tool output, with the question verbatim.
+    expect(generated).toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
+    expect(generated).toContain("ONE application");
+    expect(generated).toContain("`services/api`");
+    expect(generated).toContain("`services/web`");
+    expect(generated).toContain("`services/worker`");
+    expect(generated).toContain("3 Dockerfile candidate directories");
+    // The manifest signal survives the re-read through listSourceTreeForBranch.
+    expect(generated).toContain("`pnpm-workspace.yaml`");
+
+    // And the graph is not denied: this repository is modelable.
+    const decision = await harness.extension.hooks.onPreToolUse(OPEN_GRAPH);
+    expect(decision?.additionalContext).not.toContain(
+      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+    );
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("does not re-ask once the user answers with a directory inside the worktree", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": [
+          "services/api/Dockerfile",
+          "services/web/Dockerfile"
+        ]
+      }
+    });
+
+    const tool = harness.extension.tools.find(
+      (candidate) => candidate.name === "radius_generate_app"
+    );
+    const generated = String(
+      await tool!.handler({ repoPath: "/workspace/services/api" })
+    );
+
+    expect(generated).not.toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
+    expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+      "/workspace/services/api"
+    );
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("denies a repository that is not the workspace's, skipping a vendored Dockerfile the tree listing does not prune", async () => {
+    const harness = await createRuntimeSdkHarness({
+      remoteTreeByRepoBranch: {
+        "other/service@feat": [
+          "src/index.ts",
+          "node_modules/some-pkg/Dockerfile"
+        ]
+      }
+    });
+
+    const denied = await harness.extension.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        input: { page: "graph", repo: "other/service", branch: "feat" }
+      }
+    });
+
+    expect(denied?.permissionDecision).toBe("deny");
+    expect(denied?.additionalContext).toContain(
+      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+    );
+
+    await harness.extension.shutdown("test");
+  });
+
+  // The canvas renders the workspace repository from its checked-out worktree
+  // regardless of the branch a caller names, so judging the named branch would
+  // deny on evidence from a branch the user will never see.
+  it("judges the workspace repository on its worktree, not a caller-named branch", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "Dockerfile"]
+      },
+      remoteTreeByRepoBranch: { "acme/widgets@legacy": ["src/index.ts"] }
+    });
+
+    const decision = await harness.extension.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        input: { page: "graph", repo: "acme/widgets", branch: "legacy" }
+      }
+    });
+
+    expect(decision?.additionalContext).not.toContain(
+      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+    );
+    expect(harness.deps.github.treePaths).not.toHaveBeenCalled();
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("never reports a repository as unsupported when its listing could not be read", async () => {
+    const harness = await createRuntimeSdkHarness();
+    (
+      harness.deps.workspace.fetchWorkspaceTree as ReturnType<typeof vi.fn>
+    ).mockRejectedValue(new Error("permission denied"));
+
+    const generated = await generateApp(harness);
+    expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+
+    const denied = await harness.extension.hooks.onPreToolUse(OPEN_GRAPH);
+    expect(denied?.additionalContext).not.toContain(
+      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+    );
+    expect(denied?.additionalContext).toContain("radius_generate_app");
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("hands over the authoring instructions when the repository does contain a Dockerfile", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile.dev"]
+      }
+    });
+
+    const generated = await generateApp(harness);
+
+    expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
 
     await harness.extension.shutdown("test");
   });

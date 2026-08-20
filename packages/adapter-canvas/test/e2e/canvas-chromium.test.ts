@@ -422,21 +422,53 @@ test.describe("Radius Canvas in Chromium", () => {
     await canvas.setScenario(scenario);
 
     await gotoCanvas(page, canvas, "credentials");
-    const result = await page.evaluate(
-      async ({ tenantId, subscriptionId }) => {
-        const response = await fetch("/api/verify-azure-login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tenantId, subscriptionId })
-        });
-        return (await response.json()) as { error?: string };
-      },
-      { tenantId: VALID_TENANT_ID, subscriptionId: VALID_SUBSCRIPTION_ID }
+    await page.getByRole("button", { name: "New Credential Profile" }).click();
+    await page.getByLabel("Profile Name").fill("failing-azure");
+    await page.getByLabel("Tenant ID").fill(VALID_TENANT_ID);
+    await page.getByLabel("Subscription ID").fill(VALID_SUBSCRIPTION_ID);
+    const verifyResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/verify-azure-login" &&
+        response.request().method() === "POST"
     );
-    expect(result.error).toContain("No active Azure session");
-    expect(JSON.stringify(result)).not.toContain(PLACEHOLDER_SECRET);
+    await page.getByRole("button", { name: "Verify Credentials" }).click();
+    const verifyPayload = await (await verifyResponse).text();
+
+    const assistDialog = page.getByRole("dialog", {
+      name: "Start Azure login?"
+    });
+    await expect(assistDialog).toBeVisible();
+    await assistDialog.getByRole("button", { name: "Cancel" }).click();
+
+    // The guidance half of the message is authored only by the server. The
+    // dialog's own copy also opens with "No active Azure session", so asserting
+    // that prefix alone would still pass if the cancel path stopped carrying
+    // the server's error through to the status line.
+    await expect(page.locator("#cred-verify-status")).toContainText(
+      'Run "az login --use-device-code" in your terminal, then click Verify Credentials again.'
+    );
+    await expect(
+      page.getByRole("button", { name: "Verify Credentials" })
+    ).toBeEnabled();
+    expect(bodyFor(canvas, "/api/verify-azure-login")).toEqual({
+      tenantId: VALID_TENANT_ID,
+      subscriptionId: VALID_SUBSCRIPTION_ID
+    });
+    expect(verifyPayload).not.toContain(PLACEHOLDER_SECRET);
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
-    await canvas.expectCliInvoked("az");
+    // Any `az` call would satisfy expectCliInvoked, including the unmodeled
+    // `az account set` the route makes first and swallows. Pin the command that
+    // actually produces the secret-shaped stderr under test.
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "az" &&
+            JSON.stringify(call.args) ===
+              JSON.stringify(["account", "show", "-o", "json"])
+        )
+      )
+      .toBe(true);
   });
 
   test("validates credential form requirements before any external command runs @safety", async ({
@@ -473,54 +505,42 @@ test.describe("Radius Canvas in Chromium", () => {
     });
 
     await gotoCanvas(page, canvas, "environment");
-    const result = await page.evaluate(
-      async ({ repo, branch, tenantId, subscriptionId, mutationNonce }) => {
-        const readinessResponse = await fetch("/api/github-account", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Radius-Mutation-Nonce": mutationNonce
-          },
-          body: JSON.stringify({
-            login: "acting-user",
-            repo,
-            environment: "fixture-environment"
-          })
-        });
-        const readiness = (await readinessResponse.json()) as {
-          selectionHandle?: string;
-        };
-        const response = await fetch("/api/operations", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Radius-Mutation-Nonce": mutationNonce
-          },
-          body: JSON.stringify({
-            repo,
-            environment: "fixture-environment",
-            provider: "azure",
-            branch,
-            tenantId,
-            subscriptionId,
-            resourceGroup: "fixture-rg",
-            cluster: "fixture-cluster",
-            namespace: "default",
-            profileName: "fixture-profile",
-            selectionHandle: readiness.selectionHandle
-          })
-        });
-        return (await response.json()) as { operationId: string };
-      },
-      {
-        repo: REPOSITORY,
-        branch: WORKTREE_BRANCH,
-        tenantId: VALID_TENANT_ID,
-        subscriptionId: VALID_SUBSCRIPTION_ID,
-        mutationNonce: String(canvas.entry.state.browserMutationNonce || "")
-      }
+    await openEnvironmentWizard(page);
+    const githubReadiness = page.locator("#env-gh-identity-note");
+    await expect(githubReadiness).toContainText(
+      "Ready to configure deployments"
     );
+    await page.getByLabel("Environment name").fill("fixture-environment");
+    await page.getByRole("button", { name: "Re-check" }).click();
+    await expect(githubReadiness).toContainText(
+      "Ready to configure deployments"
+    );
+    await page
+      .getByLabel("Resource Group", { exact: true })
+      .selectOption("__custom__");
+    await page
+      .getByLabel("Resource Group (custom)")
+      .fill("fixture-resource-group");
+    await page
+      .getByLabel("Cluster", { exact: true })
+      .selectOption("__custom__");
+    await page
+      .getByLabel("Cluster (custom)", { exact: true })
+      .fill("fixture-cluster");
+
+    const operationResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/operations" &&
+        response.request().method() === "POST"
+    );
+    const createEnvironment = page.locator("#deploy-btn:not([disabled])");
+    await expect(createEnvironment).toHaveText("Create Environment");
+    await createEnvironment.click();
+    const result = (await (await operationResponse).json()) as {
+      operationId: string;
+    };
     expect(result.operationId).toMatch(/^op_/);
+    await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
 
     await page.goto(
       `${canvas.baseUrl}/?page=environment&operationId=${result.operationId}`
@@ -559,8 +579,11 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(bodyFor(canvas, "/api/operations")).toMatchObject({
       repo: REPOSITORY,
       environment: "fixture-environment",
-      branch: WORKTREE_BRANCH
+      branch: WORKTREE_BRANCH,
+      resourceGroup: "fixture-resource-group",
+      cluster: "fixture-cluster"
     });
+    await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
   });
 
   test("sends the worktree branch the page selected when Deploy is activated @safety", async ({
@@ -648,6 +671,92 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(deploy).toHaveAttribute(
       "title",
       'A deployment of application "radius-app" to environment "fixture-environment" is already in progress. Wait for it to finish before deploying again.'
+    );
+  });
+
+  test("shows deployment-started notification only after workflow confirmation in Chromium", async ({
+    page,
+    canvas
+  }) => {
+    let workflowConfirmed = false;
+    let statusPolls = 0;
+    await page.route("**/api/deploy", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    await page.route("**/api/deploy-status", async (route) => {
+      statusPolls++;
+      const payload =
+        workflowConfirmed ?
+          {
+            status: "in_progress",
+            deployRunUrl: "https://example.test/run/1"
+          }
+        : { status: "in_progress" };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(payload)
+      });
+    });
+
+    await gotoCanvas(page, canvas, "deploying");
+    const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+    await expect(deployNow).toHaveText("Deploy");
+    await deployNow.click();
+
+    await expect.poll(() => statusPolls).toBeGreaterThan(0);
+    const inlineStatus = page.locator("#deploy-inline-status");
+    // Waiting for a status request makes this absence cover the old eager
+    // notification path rather than merely asserting the initial page state.
+    await expect(inlineStatus).not.toContainText("has started");
+    await expect(page.locator("#deploy-progress-modal")).toBeVisible();
+
+    workflowConfirmed = true;
+    await expect.poll(() => statusPolls).toBeGreaterThan(1);
+    await expect(inlineStatus).toContainText("has started");
+    await expect(page.locator("#deploy-progress-modal")).toBeHidden();
+  });
+
+  test("does not show deployment-started notification when workflow startup fails in Chromium", async ({
+    page,
+    canvas
+  }) => {
+    let statusPolls = 0;
+    await page.route("**/api/deploy", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    await page.route("**/api/deploy-status", async (route) => {
+      statusPolls++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          error: "workflow startup failed",
+          deployRunUrl: "https://example.test/run/1"
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "deploying");
+    const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+    await expect(deployNow).toHaveText("Deploy");
+    await deployNow.click();
+
+    await expect.poll(() => statusPolls).toBeGreaterThan(0);
+    await expect(page.locator("#deploy-inline-status")).not.toContainText(
+      "has started"
+    );
+    await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+      "workflow startup failed"
     );
   });
 

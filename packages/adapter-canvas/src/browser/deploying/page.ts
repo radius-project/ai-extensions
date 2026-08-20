@@ -29,7 +29,7 @@ import {
   parseDeploymentListing,
   parseEnvironmentListing
 } from "../repositories.js";
-import type { BrowserTeardown } from "../lifecycle.js";
+import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type {
   AbortHandle,
   BrowserContext,
@@ -796,8 +796,8 @@ export function initializeDeployingPage(
   };
 
   // Switches the deploy modal into a "failed" state. errorKind lets a
-  // well-known failure (an unpushed branch) render a tailored panel instead
-  // of raw workflow error text.
+  // well-known failure (an unpushed branch, a missing OIDC credential) render a
+  // tailored panel instead of raw workflow error text.
   const showDeployFailed = (details: DeployFailureDetails): void => {
     if (progressSpinner) progressSpinner.style.display = "none";
     if (progressFailIcon) progressFailIcon.style.display = "";
@@ -814,6 +814,23 @@ export function initializeDeployingPage(
           `<code style="flex:1; font-family:var(--font-mono, monospace); font-size:12px; color:var(--rad-text); white-space:nowrap; overflow-x:auto;">${escapeBrowserHtml(pushCmd)}</code>` +
           `<button type="button" id="deploy-copy-push" class="rad-btn rad-btn--neutral" style="margin:0; padding:2px 10px; font-size:12px; flex:none;">Copy</button>` +
           `</div>`;
+      }
+    } else if (details.errorKind === "oidc-subject-missing") {
+      // Unlike an unpushed branch there is no command the user can run here:
+      // the fix is an Azure federated credential, which Create Environment
+      // makes for them. Send them straight there rather than leaving raw
+      // preflight text with nothing to act on.
+      if (progressTitle) {
+        progressTitle.innerHTML = "Azure credentials aren't set up yet";
+      }
+      if (progressSubtitle) {
+        progressSubtitle.style.color = "var(--rad-text-secondary)";
+        progressSubtitle.innerHTML =
+          `<div style="color:var(--rad-text);">Environment <strong>${escapeBrowserHtml(details.environment)}</strong> can't sign in to Azure, so deploying <strong>${escapeBrowserHtml(details.app)}</strong> would fail. Nothing was deployed.</div>` +
+          (details.errorText ?
+            `<div style="margin-top:10px; color:var(--rad-text-secondary);">${escapeBrowserHtml(details.errorText)}</div>`
+          : "") +
+          `<div style="margin-top:12px;"><button type="button" id="deploy-fix-credentials" class="rad-btn rad-btn--primary" style="margin:0;">Set up Azure credentials</button></div>`;
       }
     } else {
       if (progressTitle) {
@@ -863,6 +880,12 @@ export function initializeDeployingPage(
             copyButton.textContent = "Copy";
           });
         });
+      });
+    }
+    const fixCredentialsButton = context.dom.byId("deploy-fix-credentials");
+    if (fixCredentialsButton) {
+      bind(copyBindings, fixCredentialsButton, "click", () => {
+        context.nav.assign("/?page=environment&new=1");
       });
     }
     deployBtn.disabled = false;
@@ -989,18 +1012,18 @@ export function initializeDeployingPage(
         "Track progress in the deployments list below.";
     }
     if (progressModal) progressModal.style.display = "flex";
-    showInline(
-      "success",
-      `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> to environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`,
-      true
-    );
-    // Auto-dismiss the transient dialog; the deploy keeps running (tracked in
-    // the list below), so the button returns to normal.
-    const autoHide = entry.after(DEPLOY_AUTO_HIDE_MS, () => {
-      if (progressModal) progressModal.style.display = "none";
-      deployBtn.disabled = false;
-      refreshDeployBtn();
-    });
+    let autoHide: ScopeTimer | null = null;
+    const scheduleAutoHide = (): void => {
+      if (autoHide) return;
+      autoHide = entry.after(DEPLOY_AUTO_HIDE_MS, () => {
+        if (progressModal) progressModal.style.display = "none";
+        deployBtn.disabled = false;
+        refreshDeployBtn();
+      });
+    };
+    const cancelAutoHide = (): void => {
+      if (autoHide) entry.cancel(autoHide);
+    };
 
     let failedPolls = 0;
     let wfTicks = 0;
@@ -1020,12 +1043,20 @@ export function initializeDeployingPage(
     // run that was still starting — and `sameAttempt` cannot catch it, because
     // repo and environment are exactly what a redeploy repeats.
     let dispatchAccepted = false;
+    let startNotified = false;
     const wfPoll = entry.every(DEPLOY_WORKFLOW_POLL_MS, () => {
       wfTicks++;
       if (wfTicks > DEPLOY_WORKFLOW_POLL_LIMIT) {
         entry.cancel(wfPoll);
-        entry.cancel(autoHide);
+        cancelAutoHide();
         overrides.delete(key);
+        if (progressModal) progressModal.style.display = "none";
+        deployBtn.disabled = false;
+        refreshDeployBtn();
+        showInline(
+          "error",
+          "Deployment status is taking longer than expected. Check the deployments list or GitHub Actions for the latest status."
+        );
         void loadDeployments(true);
         return;
       }
@@ -1043,12 +1074,32 @@ export function initializeDeployingPage(
               status.attempt.environment === environment);
           if (!sameAttempt) {
             entry.cancel(wfPoll);
-            entry.cancel(autoHide);
+            cancelAutoHide();
             overrides.delete(key);
+            if (progressModal) progressModal.style.display = "none";
+            deployBtn.disabled = false;
+            refreshDeployBtn();
             void loadDeployments(true);
             return;
           }
+          // The server only supplies a run URL after workflow discovery has
+          // resolved a real GitHub Actions run for this attempt.
+          if (
+            status.status === "in_progress" &&
+            status.deployRunUrl &&
+            !startNotified
+          ) {
+            startNotified = true;
+            showInline(
+              "success",
+              `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> to environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`,
+              true
+            );
+            scheduleAutoHide();
+          }
           if (status.status === "failed") {
+            startNotified = true;
+            cancelAutoHide();
             // Delivery of the repair handoff is asynchronous; keep polling
             // until it lands or the server stops retrying.
             if (
@@ -1069,7 +1120,6 @@ export function initializeDeployingPage(
               return;
             }
             entry.cancel(wfPoll);
-            entry.cancel(autoHide);
             overrides.delete(key);
             showDeployFailed({
               app,
@@ -1087,6 +1137,7 @@ export function initializeDeployingPage(
           if (status.status === "success" || status.status === "complete") {
             entry.cancel(wfPoll);
             overrides.delete(key);
+            scheduleAutoHide();
             void loadDeployments(true);
             return;
           }
@@ -1132,7 +1183,7 @@ export function initializeDeployingPage(
           return;
         }
         entry.cancel(wfPoll);
-        entry.cancel(autoHide);
+        cancelAutoHide();
         overrides.delete(key);
         if (progressModal) progressModal.style.display = "none";
         deployBtn.disabled = false;
@@ -1147,7 +1198,7 @@ export function initializeDeployingPage(
       .catch(() => {
         if (!entry.active) return;
         entry.cancel(wfPoll);
-        entry.cancel(autoHide);
+        cancelAutoHide();
         overrides.delete(key);
         if (progressModal) progressModal.style.display = "none";
         deployBtn.disabled = false;

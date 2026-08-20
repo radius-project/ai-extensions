@@ -15,10 +15,10 @@
 // no template copy, so it would only assert against a fixture we wrote here.
 //
 // This hits the network and depends on an external repo's moving ref, so it is
-// NOT part of the default hermetic suite: it runs only when
-// RUN_LIVE_WORKFLOW_TESTS is set (e.g. locally or in a scheduled job), never in
-// normal CI. Runtime day-to-day protection is the verify-credentials flow, which
-// fails loudly if the FIC does not match; this test catches the drift earlier.
+// NOT part of the default hermetic suite. A separate non-required CI workflow
+// sets RUN_LIVE_WORKFLOW_TESTS on pull requests, pushes to main, and nightly.
+// Runtime day-to-day protection is the verify-credentials flow, which fails
+// loudly if the FIC does not match; this test catches the drift earlier.
 import { describe, it, expect } from "vitest";
 import {
   RADIUS_WORKFLOW_REPO,
@@ -92,6 +92,30 @@ describe.skipIf(!LIVE)(
       expect(
         forwardedEnvironment.test(job),
         `${DEPLOY_DISPATCHER_FILE}: azure job does not forward environment: to the provider workflow`
+      ).toBe(true);
+    }, 30_000);
+
+    // The deploy preflight reads AZURE_CLIENT_ID and AZURE_TENANT_ID as GitHub
+    // Actions variables and treats an empty client id as "Azure login is
+    // deliberately off". All three facts live upstream, so a rename or a change
+    // to the gate would silently turn the preflight into a check of the wrong
+    // thing — reading a variable the workflow no longer uses, or warning about
+    // a non-OIDC cluster on every deploy.
+    it(`${DEPLOY_AZURE_FILE} still gates azure/login on a non-empty vars.AZURE_CLIENT_ID`, async () => {
+      const body = await fetchWorkflow(DEPLOY_AZURE_FILE);
+      const job = jobBlockContaining(body, "azure/login");
+      expect(job, `${DEPLOY_AZURE_FILE}: no job runs azure/login`).not.toBe("");
+      expect(
+        /if:\s*\$\{\{\s*vars\.AZURE_CLIENT_ID\s*!=\s*''\s*\}\}/.test(job),
+        `${DEPLOY_AZURE_FILE}: azure/login is no longer gated on vars.AZURE_CLIENT_ID != ''`
+      ).toBe(true);
+      expect(
+        job.includes("${{ vars.AZURE_CLIENT_ID }}"),
+        `${DEPLOY_AZURE_FILE}: azure/login no longer reads vars.AZURE_CLIENT_ID`
+      ).toBe(true);
+      expect(
+        job.includes("${{ vars.AZURE_TENANT_ID }}"),
+        `${DEPLOY_AZURE_FILE}: azure/login no longer reads vars.AZURE_TENANT_ID`
       ).toBe(true);
     }, 30_000);
   }
