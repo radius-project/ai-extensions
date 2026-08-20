@@ -35,6 +35,7 @@ afterEach(async () => {
 interface PipelineScript {
   selections: Record<string, AppBicepSelection>;
   compiled: Record<string, CanvasGraphResource[]>;
+  branchPaths?: string[];
   afterCompile?: () => void;
 }
 
@@ -102,6 +103,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         readInstanceEntry: () => (entryMissing ? undefined : { state }),
         pipeline,
         triggerAppBicepHandoff: () => {},
+        listBranchPaths: () => Promise.resolve(active.branchPaths ?? []),
         prepareSourceRefResources,
         setSourceRefResources,
         isCurrentSourceRefToken,

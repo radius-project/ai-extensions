@@ -17,6 +17,8 @@ import { formatGraphElapsed, GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import {
+  GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+  GRAPH_APP_BICEP_TIMEOUT_MS,
   GRAPH_PAGE_STATE_ID,
   GRAPH_PROGRESS_MS,
   GRAPH_RETRY_MS,
@@ -945,6 +947,73 @@ describe("initializeGraphPage", () => {
         `${GRAPH_STAGE_LABELS.checking_model}:running`,
         `${GRAPH_STAGE_LABELS.creating_model}:running`
       ]);
+    });
+
+    it("gives up on the app.bicep wait once it exceeds the timeout", async () => {
+      const setError = vi.fn();
+      const { browser, progressHost, status } = fixture({ loaded: false });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        return jsonResponse({ needsAppBicep: true });
+      });
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      // Nothing reports back when the modeling skill refuses a repository it
+      // cannot model, so the wait has to end on its own instead of polling for
+      // a file that will never arrive.
+      const attempts = Math.ceil(GRAPH_APP_BICEP_TIMEOUT_MS / GRAPH_RETRY_MS);
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        browser.clock.tick(GRAPH_RETRY_MS);
+        await flushPromises();
+      }
+      const settled = calls;
+      browser.clock.tick(GRAPH_RETRY_MS * 5);
+      await flushPromises();
+
+      expect(calls).toBe(settled);
+      expect(setError).toHaveBeenCalledWith(
+        "graph-container",
+        GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+      );
+      expect(status?.textContent).toBe(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
+      expect(graphProgressStages(progressHost)).toContain(
+        `${GRAPH_STAGE_LABELS.creating_model}:failed`
+      );
+    });
+
+    it("stops immediately when the server says the skill cannot model the repo", async () => {
+      const setError = vi.fn();
+      const { browser, status } = fixture({ loaded: false });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        return jsonResponse({
+          error: "octo/app has no Dockerfile on main.",
+          appBicepUnsupported: true
+        });
+      });
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      browser.clock.tick(GRAPH_RETRY_MS * 5);
+      await flushPromises();
+
+      expect(calls).toBe(1);
+      expect(setError).toHaveBeenCalledWith(
+        "graph-container",
+        "octo/app has no Dockerfile on main."
+      );
+      expect(status?.textContent).toBe(
+        "Error: octo/app has no Dockerfile on main."
+      );
     });
 
     it("surfaces a regeneration failure on the graph surface", async () => {

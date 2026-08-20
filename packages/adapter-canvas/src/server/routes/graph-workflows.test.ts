@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { computeGraphDiff } from "@radius-project/core";
 import {
+  appBicepNoDockerfileMessage,
   createGraphPlanningWorkflows,
+  isDockerfilePath,
   type GraphPlanningWorkflows,
   type GraphWorkflowDependencies,
   type GraphWorkflowOutcome
@@ -65,6 +67,9 @@ interface PipelineScript {
   recipePackThrows?: Error;
   recipeOutputsThrows?: Error;
   selectThrows?: Record<string, Error>;
+  // Every path on a branch, keyed by branch. Empty models a tree that could not
+  // be read, which is what the default leaves in place.
+  branchPaths?: Record<string, string[]>;
   compileThrows?: Record<string, Error>;
   stageLogs?: Record<string, string>;
   compileLogs?: Record<string, string>;
@@ -194,6 +199,8 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     triggerAppBicepHandoff: (handoffEntry, repo, branches, page) => {
       handoffs.push({ repo, branches, page, hasEntry: !!handoffEntry });
     },
+    listBranchPaths: (_entry, _repo, branch) =>
+      Promise.resolve(harnessScript.branchPaths?.[branch] ?? []),
     prepareSourceRefResources,
     setSourceRefResources,
     isCurrentSourceRefToken,
@@ -256,6 +263,23 @@ function stages(state: CanvasState): string[] {
   );
 }
 
+describe("isDockerfilePath", () => {
+  it.each([
+    ["Dockerfile", true],
+    ["dockerfile", true],
+    ["Dockerfile.dev", true],
+    ["services/api/Dockerfile", true],
+    ["build/api.Dockerfile", true],
+    ["build/api.dockerfile", true],
+    ["docs/Dockerfile-notes.md", false],
+    ["src/dockerfiles.ts", false],
+    ["not-a-dockerfile.txt", false],
+    ["", false]
+  ])("classifies %s as %s", (path, expected) => {
+    expect(isDockerfilePath(path)).toBe(expected);
+  });
+});
+
 describe("graph planning workflows", () => {
   describe("POST /api/load-graph", () => {
     it("answers 400 with the parse failure for a malformed body", async () => {
@@ -316,6 +340,48 @@ describe("graph planning workflows", () => {
         "Checking octo/app for .radius/app.bicep.",
         "No application model exists yet.",
         "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
+      ]);
+    });
+
+    it("still hands off when the branch tree cannot be read", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchPaths: { main: [] }
+      });
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
+    it("hands off when the branch has a Dockerfile the skill can build from", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchPaths: { main: ["README.md", "services/api/Dockerfile"] }
+      });
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
+    it("refuses instead of handing off when the branch has no Dockerfile", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchPaths: { main: ["README.md", "src/index.ts"] }
+      });
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(outcome.status).toBe(200);
+      expect(outcome.payload).toEqual({
+        error: appBicepNoDockerfileMessage("octo/app", "main"),
+        appBicepUnsupported: true,
+        repo: "octo/app",
+        branch: "main"
+      });
+      expect(harness.handoffs).toEqual([]);
+      expect(messages(harness.state)).toEqual([
+        "Checking octo/app for .radius/app.bicep.",
+        "No application model exists yet.",
+        "Copilot is creating .radius/app.bicep with the Radius app-bicep skill.",
+        appBicepNoDockerfileMessage("octo/app", "main")
       ]);
     });
 
@@ -632,6 +698,24 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs[0]?.page).toBe("graph");
     });
 
+    it("refuses the plan when the branch has no Dockerfile", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchPaths: { main: ["README.md"] }
+      });
+
+      const outcome = await harness.run("planGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toEqual({
+        error: appBicepNoDockerfileMessage("octo/app", "main"),
+        appBicepUnsupported: true,
+        repo: "octo/app",
+        branch: "main"
+      });
+      expect(harness.handoffs).toEqual([]);
+      expect(stages(harness.state)).toContain("creating_model:failed");
+    });
+
     it("resolves recipes for the default provider and records the planned view", async () => {
       const harness = start({
         selections: { main: selectionOf() },
@@ -894,6 +978,53 @@ describe("graph planning workflows", () => {
         }
       ]);
       expect(harness.order).toEqual(["select:main", "select:feature/x"]);
+    });
+
+    it("still hands both branches off when only one side lacks a Dockerfile", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main", content: null }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        },
+        branchPaths: {
+          main: ["README.md"],
+          "feature/x": ["README.md", "Dockerfile"]
+        }
+      });
+
+      const outcome = await harness.run("diffBranches", diffBody);
+
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
+    it("refuses the diff when neither branch has a Dockerfile", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main", content: null }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        },
+        branchPaths: {
+          main: ["README.md"],
+          "feature/x": ["README.md", "src/index.ts"]
+        }
+      });
+
+      const outcome = await harness.run("diffBranches", diffBody);
+
+      expect(outcome.status).toBe(200);
+      expect(outcome.payload).toEqual({
+        error: appBicepNoDockerfileMessage("octo/app", "feature/x"),
+        appBicepUnsupported: true,
+        repo: "octo/app"
+      });
+      expect(harness.handoffs).toEqual([]);
+      expect(stages(harness.state)).toEqual([
+        "checking_model:running",
+        "checking_model:succeeded",
+        "creating_model:running",
+        "creating_model:failed"
+      ]);
     });
 
     it("stages both branches before compiling either", async () => {

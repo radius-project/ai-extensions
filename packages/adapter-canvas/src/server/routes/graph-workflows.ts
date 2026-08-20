@@ -68,6 +68,14 @@ export interface GraphWorkflowDependencies<
     branches: string | string[],
     page: string
   ): void;
+  // Every path on a branch, used to answer the one prerequisite the app-bicep
+  // modeling skill enforces before it will model anything. Resolves empty when
+  // the tree cannot be read.
+  listBranchPaths(
+    entry: TEntry,
+    repo: string,
+    branch: string
+  ): Promise<string[]>;
   prepareSourceRefResources(
     entry: TEntry,
     view: GraphView,
@@ -132,6 +140,20 @@ function bare(
 
 const MISSING_ENTRY_OUTCOME = bare(503, MISSING_ENTRY_PAYLOAD);
 
+// The skill matches `Dockerfile`, `Dockerfile.*` and `*.Dockerfile`
+// case-insensitively, anywhere in the repository.
+export function isDockerfilePath(path: string): boolean {
+  const name = path.split("/").pop() ?? "";
+  return /^dockerfile(\..+)?$/i.test(name) || /^.+\.dockerfile$/i.test(name);
+}
+
+export function appBicepNoDockerfileMessage(
+  repo: string,
+  branch: string
+): string {
+  return `${repo} has no Dockerfile on ${branch}, so the Radius app-bicep skill cannot model it: it builds the application image from one. Add a Dockerfile for the application service, then try again.`;
+}
+
 function beginGraphProgress(state: CanvasState): number {
   const generation = (state.graphProgressGeneration || 0) + 1;
   state.graphProgressGeneration = generation;
@@ -184,11 +206,59 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
 ): GraphPlanningWorkflows {
   const { pipeline } = dependencies;
 
-  function appBicepHandoffOutcome(
+  // The app-bicep modeling skill refuses outright — before writing anything —
+  // any repository without a Dockerfile, because it builds the application's
+  // own image from one. That refusal is delivered to the user in the Copilot
+  // conversation and never reaches this server, so handing off regardless would
+  // leave the page waiting for a file that is never going to be written.
+  // Answering here turns an unbounded wait into an actionable error.
+  async function appBicepRefusalReason(
     entry: TEntry,
     repo: string,
     branch: string
-  ): GraphWorkflowOutcome {
+  ): Promise<string | null> {
+    const paths = await dependencies.listBranchPaths(entry, repo, branch);
+    // Fail open. An unreadable tree resolves empty, which is not evidence that
+    // the repository lacks a Dockerfile, so the handoff still happens and the
+    // page falls back to waiting.
+    if (paths.length === 0) return null;
+    if (paths.some(isDockerfilePath)) return null;
+    return appBicepNoDockerfileMessage(repo, branch);
+  }
+
+  // The diff spans two branches, so it is only unsupported when neither side
+  // could host the skill's output. A single readable Dockerfile-less branch is
+  // not enough to refuse.
+  async function diffAppBicepRefusalReason(
+    entry: TEntry,
+    repo: string,
+    base: string,
+    head: string
+  ): Promise<string | null> {
+    const [baseReason, headReason] = await Promise.all([
+      appBicepRefusalReason(entry, repo, base),
+      appBicepRefusalReason(entry, repo, head)
+    ]);
+    if (!baseReason || !headReason) return null;
+    return headReason;
+  }
+
+  async function appBicepHandoffOutcome(
+    entry: TEntry,
+    repo: string,
+    branch: string,
+    reportRefusal: (detail: string) => void
+  ): Promise<GraphWorkflowOutcome> {
+    const refusal = await appBicepRefusalReason(entry, repo, branch);
+    if (refusal) {
+      reportRefusal(refusal);
+      return json(200, {
+        error: refusal,
+        appBicepUnsupported: true,
+        repo,
+        branch
+      });
+    }
     // Both single-branch routes hand off as the "graph" page. plan-graph doing
     // so is pre-existing and load-bearing: the handoff dedupe key derives from
     // the page, so changing it here would re-trigger a handoff already made.
@@ -272,7 +342,9 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "running",
           "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
         );
-        return appBicepHandoffOutcome(entry, repo, branch);
+        return await appBicepHandoffOutcome(entry, repo, branch, (detail) =>
+          addEvent("creating_model", "failed", detail)
+        );
       }
 
       const graphJsonPath = pipeline.graphJsonPathFor(entry, selection);
@@ -437,7 +509,9 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "running",
           "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
         );
-        return appBicepHandoffOutcome(entry, repo, branch);
+        return await appBicepHandoffOutcome(entry, repo, branch, (detail) =>
+          addEvent("creating_model", "failed", detail)
+        );
       }
       addEvent("checking_model", "succeeded", "Found the application model.");
 
@@ -623,6 +697,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "running",
           "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
         );
+        const diffRefusal = await diffAppBicepRefusalReason(
+          entry,
+          repo,
+          data.base,
+          data.head
+        );
+        if (diffRefusal) {
+          addEvent("creating_model", "failed", diffRefusal);
+          return json(200, {
+            error: diffRefusal,
+            appBicepUnsupported: true,
+            repo
+          });
+        }
         dependencies.triggerAppBicepHandoff(
           entry,
           repo,

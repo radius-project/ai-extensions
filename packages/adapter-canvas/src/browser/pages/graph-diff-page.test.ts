@@ -297,6 +297,41 @@ describe("initializeGraphDiffPage", () => {
     );
   });
 
+  it("shows the refusal verbatim when the skill cannot model the repo", async () => {
+    const { browser, head, status } = fixture();
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({
+        error: "octo/app has no Dockerfile on feature/x.",
+        appBicepUnsupported: true
+      })
+    );
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(status.textContent).toBe("octo/app has no Dockerfile on feature/x.");
+  });
+
+  it("falls back to a generic refusal message without an error string", async () => {
+    const { browser, head, status } = fixture();
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({ appBicepUnsupported: true })
+    );
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(status.textContent).toBe(
+      "The Radius app-bicep skill cannot model this repository."
+    );
+  });
+
   it("surfaces a diff computation error", async () => {
     const { browser, head, status } = fixture();
     browser.net.handle("/api/diff-branches", () =>

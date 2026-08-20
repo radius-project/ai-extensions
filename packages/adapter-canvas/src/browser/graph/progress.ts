@@ -62,6 +62,34 @@ const STAGE_GLYPH: Readonly<Record<GraphBuildEventState, string>> = {
   failed: "✗"
 };
 
+// Fold a server snapshot into the stages already on screen. The snapshot
+// decides which stages exist; the panel's memory only decides how far each of
+// them has already got.
+//
+// A stage never walks backwards. The server restarts its event stream for every
+// request, so while the page waits for Copilot to author a model each retry
+// replays "checking_model running" after that stage already succeeded.
+// Replaying it would flip the row from done back to running every few seconds,
+// which reads as a stuck build rather than a wait. A stage the current attempt
+// already saw finish cannot un-finish, so a later `running` for it is dropped.
+function applyGraphSnapshot(
+  current: readonly GraphBuildEvent[],
+  incoming: readonly GraphBuildEvent[]
+): GraphBuildEvent[] {
+  const previous = new Map<GraphBuildStage, GraphBuildEvent>();
+  for (const event of current) previous.set(event.stage, event);
+  const byStage = new Map<GraphBuildStage, GraphBuildEvent>();
+  for (const event of incoming) {
+    const prior = previous.get(event.stage);
+    const regressing =
+      prior !== undefined &&
+      prior.state !== "running" &&
+      event.state === "running";
+    byStage.set(event.stage, regressing ? prior : event);
+  }
+  return [...byStage.values()];
+}
+
 function isStage(value: string): value is GraphBuildStage {
   return Object.prototype.hasOwnProperty.call(GRAPH_STAGE_LABELS, value);
 }
@@ -146,6 +174,15 @@ export function createGraphProgress(
   const startedAtMs = context.clock.now();
 
   let events: GraphBuildEvent[] = [];
+  // The most recently applied event, which is what the activity line describes.
+  // It is tracked separately because merging keeps each stage in its original
+  // position, so the newest event is not necessarily the last row.
+  let latestEvent: GraphBuildEvent | null = null;
+  // What the panel currently shows. Polling repeats the same snapshot several
+  // times per stage, and rebuilding identical markup would replace the live
+  // region on every poll, making a screen reader re-announce an unchanged stage
+  // and the panel visibly repaint.
+  let renderedSignature: string | null = null;
   let appliedGeneration = 0;
   let appliedSequence = 0;
   // A locally appended event carries a sequence the server never issued, so an
@@ -162,17 +199,20 @@ export function createGraphProgress(
   const elapsedText = (): string =>
     formatGraphElapsed(context.clock.now() - startedAtMs);
 
-  const render = (): void => {
+  const render = (force = false): void => {
+    const signature = JSON.stringify([
+      events.map((event) => [event.stage, event.state]),
+      latestEvent?.detail ?? ""
+    ]);
+    if (!force && signature === renderedSignature) return;
     const container = host();
     if (!container) return;
-    const latest = events.at(-1) ?? null;
+    renderedSignature = signature;
+    const latest = latestEvent;
     // One row per stage, showing that stage's most recent state, in the order
     // the build first reached them.
-    const latestByStage = new Map<GraphBuildStage, GraphBuildEvent>();
-    for (const event of events) latestByStage.set(event.stage, event);
-
     const stages: ElementSpec[] = [];
-    for (const [stage, event] of latestByStage) {
+    for (const event of events) {
       stages.push({
         tag: "li",
         className: `rad-graph-progress__stage rad-graph-progress__stage--${event.state}`,
@@ -183,7 +223,10 @@ export function createGraphProgress(
             attrs: { "aria-hidden": "true" },
             text: STAGE_GLYPH[event.state]
           },
-          { tag: "span", text: `${GRAPH_STAGE_LABELS[stage]} — ${event.state}` }
+          {
+            tag: "span",
+            text: `${GRAPH_STAGE_LABELS[event.stage]} — ${event.state}`
+          }
         ]
       });
     }
@@ -273,14 +316,17 @@ export function createGraphProgress(
       }
       localAhead = false;
       appliedSequence = nextSequence;
-      events = parsed;
+      events = applyGraphSnapshot(events, parsed);
+      if (parsed.length > 0) latestEvent = parsed[parsed.length - 1];
       render();
     },
     append(stage, state, detail) {
       if (stopped) return;
       const sequence =
         events.reduce((max, event) => Math.max(max, event.sequence), 0) + 1;
-      events = [...events, { sequence, stage, state, detail }];
+      const event: GraphBuildEvent = { sequence, stage, state, detail };
+      events = applyGraphSnapshot(events, [...events, event]);
+      latestEvent = event;
       appliedSequence = sequence;
       localAhead = true;
       render();
@@ -292,7 +338,9 @@ export function createGraphProgress(
     },
     remount() {
       if (stopped) return;
-      render();
+      // The host element was replaced, so an unchanged panel still has to be
+      // drawn again.
+      render(true);
     },
     get stopped() {
       return stopped;
@@ -304,6 +352,7 @@ export function createGraphProgress(
 
   if (options.initial) {
     events = [options.initial];
+    latestEvent = options.initial;
     appliedSequence = options.initial.sequence;
     localAhead = true;
   }

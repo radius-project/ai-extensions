@@ -135,7 +135,14 @@ export function initializeGraphDiffPage(
       .then((payload) => {
         if (requestGeneration !== generation) return;
         stopProgress();
-        if (readBoolean(payload, "needsAppBicep")) {
+        if (readBoolean(payload, "appBicepUnsupported")) {
+          showStatus(
+            context,
+            readString(payload, "error") ||
+              "The Radius app-bicep skill cannot model this repository.",
+            "error"
+          );
+        } else if (readBoolean(payload, "needsAppBicep")) {
           showStatus(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.",
