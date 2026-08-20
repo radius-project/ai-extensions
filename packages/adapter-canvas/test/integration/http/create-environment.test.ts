@@ -59,6 +59,7 @@ interface Script {
     number?: number;
     stderr?: string;
   };
+  continuedOperation?: boolean;
   persistRejectsAfter?: number;
 }
 
@@ -174,7 +175,10 @@ function start(script: Script = {}): Harness {
 
     // --- admission ---
     isValidRepoSlug,
-    getOperation: () => null,
+    getOperation: (operationId) =>
+      script.continuedOperation && operationId === operation.operationId ?
+        operation
+      : null,
     isStale: () => false,
     createOperation: () => operation,
     buildStages: () => [],
@@ -633,6 +637,52 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
             userMessage: payload.verifySkipReason
           }
         }
+      }
+    ]);
+  });
+
+  it("skips immediate verification after creating Azure Contributor access", async () => {
+    const harness = start({ continuedOperation: true });
+    harness.operation.setupArtifacts = {
+      roleAssignments: [
+        {
+          role: "Contributor",
+          scope: "/subscriptions/s/resourceGroups/rg"
+        }
+      ]
+    };
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "dev",
+      operationId: "op-http",
+      subscriptionId: "s",
+      resourceGroup: "rg"
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      success: true,
+      actionRequired: false,
+      verifySkipped: true,
+      verifyRunUrl: ""
+    });
+    expect(String(payload.verifySkipReason)).toContain(
+      "Azure Contributor access was just granted"
+    );
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("workflow run "))
+    ).toBe(false);
+    expect(harness.steps).toContain(
+      "⏭️ Skipping immediate credential verification while Azure role assignments propagate."
+    );
+    expect(harness.journal).toContain(`setStageState:${STAGE_VERIFY}:skipped`);
+    expect(harness.finished).toEqual([
+      {
+        state: "succeeded_with_warnings",
+        options: {}
       }
     ]);
   });

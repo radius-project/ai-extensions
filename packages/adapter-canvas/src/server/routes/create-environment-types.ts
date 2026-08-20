@@ -69,6 +69,12 @@ export interface CreateEnvironmentOperation {
   // from being narrower than what `operations.ts` actually writes.
   inputRequired?: unknown;
   verification?: unknown;
+  setupArtifacts?: {
+    roleAssignments?: readonly {
+      role?: unknown;
+      scope?: unknown;
+    }[];
+  };
 }
 
 export interface OperationStartConflict {

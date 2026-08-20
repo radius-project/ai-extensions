@@ -208,6 +208,21 @@ export interface CreateEnvironmentDependencies
   now(): number;
 }
 
+function hasCreatedAzureContributorRoleAssignment(
+  operation: CreateEnvironmentOperation,
+  subscriptionId: string,
+  resourceGroup: string
+): boolean {
+  if (!subscriptionId || !resourceGroup) return false;
+  const expectedScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
+  return (
+    operation.setupArtifacts?.roleAssignments?.some(
+      (assignment) =>
+        assignment.role === "Contributor" && assignment.scope === expectedScope
+    ) ?? false
+  );
+}
+
 export async function handleCreateEnvironment(
   context: CanvasRequestContext,
   dependencies: CreateEnvironmentDependencies
@@ -466,6 +481,17 @@ export async function handleCreateEnvironment(
     // reason so the response can signal the client to skip polling
     // /api/verify-status, which would otherwise spin until the timeout.
     let verifySkipReason = "";
+    let skipImmediateVerifyForAzureRolePropagation = false;
+    if (provider === "azure" && credentialsComplete) {
+      const azureCredential = dependencies.azureCredential();
+      skipImmediateVerifyForAzureRolePropagation =
+        hasCreatedAzureContributorRoleAssignment(
+          operation,
+          dependencies.optionalString(data.subscriptionId) ||
+            dependencies.optionalString(azureCredential.subscriptionId),
+          dependencies.optionalString(data.resourceGroup)
+        );
+    }
 
     // Steps 3, 4 and 4b: publish the verify, deploy and delete workflow files.
     // `gate` is this use case's own `checkpoint`, passed in so the gates fire at
@@ -593,6 +619,17 @@ export async function handleCreateEnvironment(
       steps.push(
         "⏭️ Skipping credential verification — cloud credentials are not fully configured. " +
           missingCredNote
+      );
+    } else if (skipImmediateVerifyForAzureRolePropagation) {
+      // Azure RBAC can take several minutes to propagate to service principals.
+      // When this setup operation just created the Contributor grant, immediate
+      // verification can fail in azure/login with "No subscriptions found" even
+      // though the intended permission now exists.
+      verifySkipReason =
+        "Azure Contributor access was just granted for this environment. Azure RBAC can take a few minutes to propagate, so Radius skipped the immediate credentials verification run.";
+      steps.push("⚠️ " + verifySkipReason);
+      steps.push(
+        "⏭️ Skipping immediate credential verification while Azure role assignments propagate."
       );
     } else {
       if (verifyPlan.ref)
@@ -733,6 +770,25 @@ export async function handleCreateEnvironment(
               }" to finish setup.`
         }
       });
+      await dependencies.persistBestEffort({
+        operation,
+        persist: () => dependencies.persistOperations(),
+        report: (diagnostic) =>
+          dependencies.reportOperationDiagnostic(diagnostic)
+      });
+    } else if (skipImmediateVerifyForAzureRolePropagation) {
+      dependencies.recordCommitState(operation, {
+        mode: prState ? "pull_request" : "default_branch",
+        branch: prState?.branch || defaultBranch,
+        baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
+        pullRequestUrl: pullRequestUrl || null
+      });
+      dependencies.setStageState(
+        operation,
+        dependencies.stageVerify,
+        "skipped"
+      );
+      dependencies.finish(operation, "succeeded_with_warnings", {});
       await dependencies.persistBestEffort({
         operation,
         persist: () => dependencies.persistOperations(),
