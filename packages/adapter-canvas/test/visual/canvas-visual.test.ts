@@ -35,6 +35,9 @@ const require = createRequire(import.meta.url);
 const VISUAL_FONT_PATH =
   require.resolve("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2");
 const VISUAL_FONT = fs.readFile(VISUAL_FONT_PATH, "base64");
+const AZURE_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
+const AZURE_RESOURCE_GROUP = "fixture-resource-group";
+const AZURE_CLUSTER = "fixture-aks";
 
 const GRAPH_RESOURCES: CanvasGraphResource[] = [
   {
@@ -130,7 +133,69 @@ async function seed(
     "export const fixture = true;\n",
     "utf8"
   );
-  await canvas.setScenario(defaultFakeCliScenario());
+  const fakeCli = defaultFakeCliScenario();
+  fakeCli.commands.push(
+    {
+      tool: "az",
+      args: ["account", "set", "--subscription", AZURE_SUBSCRIPTION_ID],
+      stdout: ""
+    },
+    {
+      tool: "az",
+      args: [
+        "aks",
+        "list",
+        "--query",
+        "[].{id:name, name:name, resourceGroup:resourceGroup}",
+        "-o",
+        "json",
+        "--subscription",
+        AZURE_SUBSCRIPTION_ID
+      ],
+      stdout: JSON.stringify([
+        {
+          id: AZURE_CLUSTER,
+          name: AZURE_CLUSTER,
+          resourceGroup: AZURE_RESOURCE_GROUP
+        }
+      ])
+    },
+    {
+      tool: "az",
+      args: [
+        "group",
+        "list",
+        "--query",
+        "[].{id:name, name:name}",
+        "-o",
+        "json",
+        "--subscription",
+        AZURE_SUBSCRIPTION_ID
+      ],
+      stdout: JSON.stringify([
+        { id: AZURE_RESOURCE_GROUP, name: AZURE_RESOURCE_GROUP }
+      ])
+    },
+    {
+      tool: "az",
+      args: [
+        "aks",
+        "get-credentials",
+        "--name",
+        AZURE_CLUSTER,
+        "--resource-group",
+        AZURE_RESOURCE_GROUP,
+        "--overwrite-existing"
+      ],
+      stdout: ""
+    },
+    {
+      tool: "kubectl",
+      args: ["get", "namespaces", "-o", "jsonpath={.items[*].metadata.name}"],
+      stdout: "default radius-system"
+    }
+  );
+  await canvas.setScenario(fakeCli);
   await canvas.seedState({
     ...baseCanvasState(canvas.workspacePath),
     ...state
@@ -476,6 +541,20 @@ test.describe("Radius Canvas visual baselines", () => {
       await seed(canvas, { activeSubtab: "environments" });
       await gotoVisual(page, canvas, "environment", theme);
       await openEnvironmentCreateForm(page);
+      await expect(page.locator("#azure-discover-status")).toHaveText(
+        "Found 1 cluster(s), 1 resource group(s)"
+      );
+      await page.locator("#azure-rg-select").selectOption(AZURE_RESOURCE_GROUP);
+      await page.locator("#azure-cluster-select").selectOption(AZURE_CLUSTER);
+      await expect(page.locator("#azure-rg-select")).toHaveValue(
+        AZURE_RESOURCE_GROUP
+      );
+      await expect(page.locator("#azure-cluster-select")).toHaveValue(
+        AZURE_CLUSTER
+      );
+      await expect(page.locator("#azure-namespace-select")).toHaveValue(
+        "default"
+      );
       await screenshot(page, `vi-06-environment-create-${theme}.png`);
       const deploy = page.locator("#deploy-btn");
       await deploy.scrollIntoViewIfNeeded();

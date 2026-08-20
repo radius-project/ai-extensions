@@ -3,6 +3,8 @@
 name: Canvas Functional Tests
 
 on:
+  # GitHub can disable scheduled workflows after 60 days without repository
+  # activity. A manual dispatch or repository update re-enables the schedule.
   schedule:
     # Three hermetic visual comparison runs per day.
     - cron: "17 */8 * * *"
