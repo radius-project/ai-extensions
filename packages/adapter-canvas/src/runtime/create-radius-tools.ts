@@ -17,8 +17,12 @@ interface ToolArgs {
 }
 
 export function createRadiusTools(deps: RadiusExtensionDependencies) {
-  const { workspaceState, fetchBicepForBranch, evaluateAppSourceForBranch, listSourceTreeForBranch } =
-    createGraphContextHelpers(deps);
+  const {
+    workspaceState,
+    fetchBicepForBranch,
+    evaluateAppSourceForBranch,
+    listSourceTreeForBranch
+  } = createGraphContextHelpers(deps);
   const declarationByName = new Map(
     RADIUS_TOOL_DECLARATIONS.map((decl) => [decl.name, decl])
   );

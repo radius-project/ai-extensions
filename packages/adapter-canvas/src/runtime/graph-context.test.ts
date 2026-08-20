@@ -475,7 +475,7 @@ describe("listSourceTreeForBranch", () => {
 
   it("returns null when the lister rejects", async () => {
     const { listSourceTreeForBranch, deps } = helpers();
-    deps.workspace.fetchWorkspaceTree.mockRejectedValueOnce(
+    vi.mocked(deps.workspace.fetchWorkspaceTree).mockRejectedValueOnce(
       new Error("permission denied")
     );
     expect(

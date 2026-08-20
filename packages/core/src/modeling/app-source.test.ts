@@ -241,7 +241,10 @@ describe("dockerfileDirectories", () => {
 
   it("derives the owning directory of each Dockerfile", () => {
     expect(
-      dockerfileDirectories(["services/api/Dockerfile", "services/web/Dockerfile"])
+      dockerfileDirectories([
+        "services/api/Dockerfile",
+        "services/web/Dockerfile"
+      ])
     ).toEqual(["services/api", "services/web"]);
   });
 
@@ -264,13 +267,17 @@ describe("dockerfileDirectories", () => {
   it("returns nothing for a missing or non-array input", () => {
     for (const input of [undefined, null, "Dockerfile" as unknown]) {
       expect(
-        dockerfileDirectories(input as ReadonlyArray<unknown> | null | undefined)
+        dockerfileDirectories(
+          input as ReadonlyArray<unknown> | null | undefined
+        )
       ).toEqual([]);
     }
   });
 
   it("ignores non-string entries", () => {
-    expect(dockerfileDirectories([42, null, "api/Dockerfile"])).toEqual(["api"]);
+    expect(dockerfileDirectories([42, null, "api/Dockerfile"])).toEqual([
+      "api"
+    ]);
   });
 });
 
@@ -452,7 +459,9 @@ describe("ambiguousAppSourceBrief prompt safety", () => {
       ])
     );
     expect(brief).toContain("2 Dockerfile candidate directories");
-    expect(brief?.split("\n").filter((l) => l.startsWith("- `")).length).toBe(2);
+    expect(brief?.split("\n").filter((l) => l.startsWith("- `")).length).toBe(
+      2
+    );
   });
 
   it("uses the singular when several Dockerfiles share one directory", () => {

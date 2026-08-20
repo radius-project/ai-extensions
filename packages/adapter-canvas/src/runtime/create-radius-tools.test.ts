@@ -298,7 +298,10 @@ describe("RU-07b: radius_generate_app with several Dockerfiles", () => {
   });
 
   it("does not re-ask when the answer is a dot-relative path inside the tree", async () => {
-    const { result } = await generateFor(MICROSERVICES, "/workspace/./services/api");
+    const { result } = await generateFor(
+      MICROSERVICES,
+      "/workspace/./services/api"
+    );
     expect(result).not.toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
   });
 
@@ -333,7 +336,7 @@ describe("RU-07b: radius_generate_app with several Dockerfiles", () => {
     const { tools, deps } = setup({
       remoteTreeByRepoBranch: { "acme/widgets@main": MICROSERVICES }
     });
-    deps.workspace.isWorkspaceSelection.mockReturnValue(false);
+    vi.mocked(deps.workspace.isWorkspaceSelection).mockReturnValue(false);
 
     const result = String(
       await findTool(tools, "radius_generate_app").handler({
@@ -352,9 +355,9 @@ describe("RU-07b: radius_generate_app with several Dockerfiles", () => {
     const { tools, deps } = setup({
       workspaceTreeByRepoBranch: { "acme/widgets@main": MICROSERVICES }
     });
-    deps.workspace.fetchWorkspaceTree.mockImplementationOnce(
-      async () => MICROSERVICES
-    ).mockRejectedValueOnce(new Error("permission denied"));
+    vi.mocked(deps.workspace.fetchWorkspaceTree)
+      .mockImplementationOnce(async () => MICROSERVICES)
+      .mockRejectedValueOnce(new Error("permission denied"));
 
     const result = String(
       await findTool(tools, "radius_generate_app").handler({
