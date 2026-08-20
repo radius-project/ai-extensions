@@ -57,7 +57,8 @@ export interface DeployMonitorDependencies {
     repo: string,
     workflowFile: string,
     sinceMs: number,
-    knownId: number | string | null
+    knownId: number | string | null,
+    afterRunId?: number | string | null
   ): Promise<number | string | null>;
   getRunDetail(
     repo: string,
@@ -224,7 +225,7 @@ export function createDeployMonitorService(
         log
       });
       if (!dispatched.dispatched) return;
-      const { workflowFile, dispatchedAt } = dispatched;
+      const { workflowFile, dispatchedAt, baselineRunId } = dispatched;
 
       log("Waiting for the deploy workflow to start...");
       let dRunId: number | string | null = null;
@@ -237,7 +238,8 @@ export function createDeployMonitorService(
           repo,
           workflowFile,
           dispatchedAt,
-          null
+          null,
+          baselineRunId
         );
         if (!dRunId) await dependencies.sleep(POLL_INTERVAL_MS);
       }
