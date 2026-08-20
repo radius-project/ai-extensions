@@ -111,6 +111,10 @@ function fixture(options: FixtureOptions = {}) {
     () => jsonResponse(envPayload)
   );
   browser.net.handle("/api/deploy", () => jsonResponse({}));
+  // The page polls progress as soon as it starts a plan, so every scenario
+  // reaches this route whether or not it is what the scenario is about. A test
+  // that cares overrides it.
+  browser.net.handle("/api/progress", () => jsonResponse({}));
 
   return {
     browser,
@@ -369,7 +373,7 @@ describe("initializePlannedGraphPage", () => {
     expect(container.innerHTML).toBe("");
   });
 
-  it("polls progress and ignores a late progress message", async () => {
+  it("polls progress immediately and then per interval, ignoring a late message", async () => {
     const { browser, status } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
@@ -381,11 +385,15 @@ describe("initializePlannedGraphPage", () => {
     browser.clock.tick(0);
     await flushPromises();
 
+    // A plan already in flight is adopted without waiting out an interval.
+    expect(
+      browser.net.calls.filter((call) => call.url === "/api/progress")
+    ).toHaveLength(1);
     browser.clock.tick(PLAN_PROGRESS_MS);
     await flushPromises();
     expect(
       browser.net.calls.filter((call) => call.url === "/api/progress")
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(status.textContent).toBe("Drafting .radius/app.bicep");
 
     plan.resolve(jsonResponse({ reload: true }));

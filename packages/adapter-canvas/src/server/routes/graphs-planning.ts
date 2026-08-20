@@ -76,6 +76,8 @@ export interface GraphsPlanningReadsDependencies {
   record(value: unknown): Record<string, unknown>;
   errorMessage(error: unknown): string;
   repoMatchesWorkspace(state: CanvasState, repo: string): boolean;
+  // Wall clock for the build record's elapsed time.
+  now(): number;
 }
 
 // Graph workflows publish typed events. Keep legacy messages for deployed-graph
@@ -98,6 +100,18 @@ export function handleProgress(
   if (state?.graphBuildEvents) {
     payload.events = state.graphBuildEvents;
     payload.generation = state.graphProgressGeneration || 0;
+    // The record's own view of itself: whether work is still in flight, which
+    // graph it belongs to, and how long it has been running. A page mounted
+    // after the build started — or re-mounted when the user navigates back —
+    // adopts these rather than measuring from the moment it happened to load.
+    payload.active = state.graphProgressActive === true;
+    payload.view = state.graphProgressView || "";
+    if (typeof state.graphProgressStartedAtMs === "number") {
+      payload.elapsedMs = Math.max(
+        0,
+        dependencies.now() - state.graphProgressStartedAtMs
+      );
+    }
   }
   response.setHeader("Content-Type", "application/json");
   response.writeHead(200);

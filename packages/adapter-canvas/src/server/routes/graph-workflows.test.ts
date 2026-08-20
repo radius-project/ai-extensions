@@ -94,6 +94,7 @@ interface Harness {
   plannedOutputs: unknown[];
   workflows: GraphPlanningWorkflows;
   setEntryMissing(missing: boolean): void;
+  advanceClock(ms: number): void;
   run(
     workflow: keyof GraphPlanningWorkflows,
     body: string
@@ -122,6 +123,10 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   const state: CanvasState = {};
   const entry: GraphInstanceEntry = { state };
   let entryMissing = false;
+  // A controllable clock, so a build record's elapsed time is asserted rather
+  // than observed. Starts at a non-zero instant so a record that failed to
+  // capture a start time is distinguishable from one that started at 0.
+  let clockMs = 1_000;
   const order: string[] = [];
   const handoffs: HandoffCall[] = [];
   const recipePackCalls: string[] = [];
@@ -226,7 +231,8 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       computeGraphDiff(baseResources, headResources) as CanvasGraphResource[],
     record,
     optionalString,
-    errorMessage
+    errorMessage,
+    now: () => clockMs
   };
 
   const workflows = createGraphPlanningWorkflows(dependencies);
@@ -237,6 +243,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     dependencies,
     workflows,
     script: harnessScript,
+    advanceClock(ms: number) {
+      clockMs += ms;
+    },
     order,
     handoffs,
     recipePackCalls,
@@ -1331,6 +1340,117 @@ describe("graph planning workflows", () => {
 
       expect(outcome.status).toBe(400);
       expect(outcome.payload).toEqual({ error: "recipe pack offline" });
+    });
+  });
+
+  // The build record is what survives the page. A user can leave a graph page
+  // mid-build and come back, and the app.bicep wait runs entirely outside the
+  // panel, so the server owns when the build started, whether it is still
+  // running, and which view it belongs to.
+  describe("build record lifecycle", () => {
+    function successHarness(): Harness {
+      return start({
+        selections: { main: selectionOf({}) },
+        staged: { main: { dir: "/ws/.radius", remote: false } },
+        compiled: { main: [{ id: "res-a" } as CanvasGraphResource] }
+      });
+    }
+
+    it("opens a record naming the view and the instant work began", async () => {
+      const harness = successHarness();
+      harness.advanceClock(4_000);
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(harness.state.graphProgressView).toBe("graph");
+      expect(harness.state.graphProgressStartedAtMs).toBe(5_000);
+    });
+
+    it("closes the record once the build finishes", async () => {
+      const harness = successHarness();
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(harness.state.graphProgressActive).toBe(false);
+      // The stages stay readable: a page that returns after the build ended
+      // should see what happened rather than an empty panel.
+      expect(stages(harness.state).length).toBeGreaterThan(0);
+    });
+
+    it("closes the record when the build fails", async () => {
+      const harness = start({
+        selections: { main: selectionOf({}) },
+        staged: { main: { dir: "/ws/.radius", remote: false } },
+        compileThrows: { main: new Error("the compiler is unavailable") }
+      });
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.status).toBe(400);
+      expect(harness.state.graphProgressActive).toBe(false);
+    });
+
+    // The wait for Copilot to author .radius/app.bicep genuinely continues off
+    // page, so the record stays open and keeps narrating it.
+    it("leaves the record open while app.bicep is being authored", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(harness.state.graphProgressActive).toBe(true);
+      expect(harness.state.graphProgressView).toBe("graph");
+    });
+
+    // The page polls for the model every few seconds. Each poll used to open a
+    // fresh record, which reset the elapsed clock to zero and discarded the
+    // stages already reported — the reset a user sees on returning to the page.
+    it("continues the open record instead of restarting it on a repeat request", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+      const generation = harness.state.graphProgressGeneration;
+      const startedAt = harness.state.graphProgressStartedAtMs;
+      const reported = stages(harness.state);
+      harness.advanceClock(10_000);
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(harness.state.graphProgressGeneration).toBe(generation);
+      expect(harness.state.graphProgressStartedAtMs).toBe(startedAt);
+      expect(stages(harness.state)).toEqual(reported);
+    });
+
+    it("starts a new record when another view takes over an open build", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+      const generation = harness.state.graphProgressGeneration ?? 0;
+      harness.advanceClock(10_000);
+
+      await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"main"}'
+      );
+
+      expect(harness.state.graphProgressGeneration).toBe(generation + 1);
+      expect(harness.state.graphProgressStartedAtMs).toBe(11_000);
+      expect(harness.state.graphProgressView).toBe("diff");
+    });
+
+    it("names the planned view for a plan request", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+
+      await harness.run("planGraph", '{"repo":"octo/app"}');
+
+      expect(harness.state.graphProgressView).toBe("planned");
     });
   });
 });

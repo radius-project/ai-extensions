@@ -133,6 +133,7 @@ describe("canvas pages over real loopback HTTP", () => {
         "delete-dialog",
         "heartbeat",
         "operation-chip",
+        "graph-chip",
         pageEntry
       ] as const) {
         expect(
@@ -157,6 +158,7 @@ describe("canvas pages over real loopback HTTP", () => {
       "delete-dialog",
       "heartbeat",
       "operation-chip",
+      "graph-chip",
       "deploy-result-page"
     ] as const) {
       expect(

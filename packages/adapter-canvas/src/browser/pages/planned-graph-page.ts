@@ -157,7 +157,7 @@ export function initializePlannedGraphPage(
       }
     });
     progressView = view;
-    progress = entry.every(PLAN_PROGRESS_MS, () => {
+    const pollProgress = (): void => {
       void context.net
         .fetch("/api/progress")
         .then((response) => response.json())
@@ -165,7 +165,11 @@ export function initializePlannedGraphPage(
           if (!current()) return;
           const events = readArray(payload, "events");
           if (events.length > 0) {
-            view.sync(events, readNumber(payload, "generation") ?? 0);
+            view.sync(
+              events,
+              readNumber(payload, "generation") ?? 0,
+              readNumber(payload, "elapsedMs")
+            );
             return;
           }
           const messages = readArray(payload, "messages").filter(
@@ -178,7 +182,13 @@ export function initializePlannedGraphPage(
           if (!current()) return;
           context.logger.error("Radius planned graph progress failed.", error);
         });
-    });
+    };
+    progress = entry.every(PLAN_PROGRESS_MS, pollProgress);
+    // Poll once immediately rather than waiting a full interval. A build that is
+    // already in flight — one this page did not start, or one it started before
+    // the user navigated away — is adopted straight away instead of showing an
+    // empty panel reading 0:00 until the first tick.
+    pollProgress();
     return context.net
       .fetch("/api/plan-graph", {
         method: "POST",

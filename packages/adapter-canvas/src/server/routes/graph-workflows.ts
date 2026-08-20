@@ -1,9 +1,11 @@
 import { appBicepRefusalReason } from "../../app-bicep-support.js";
+import { recordGraphBuildEvent } from "../../shared.js";
 import type {
   CanvasGraphResource,
   CanvasState,
   GraphBuildEvent,
   GraphBuildStage,
+  GraphProgressView,
   GraphView,
   SourceRefContext
 } from "../../shared.js";
@@ -123,6 +125,8 @@ export interface GraphWorkflowDependencies<
   record(value: unknown): Record<string, unknown>;
   optionalString(value: unknown): string;
   errorMessage(error: unknown): string;
+  // Wall clock for the build record's elapsed time.
+  now(): number;
 }
 
 function json(
@@ -141,10 +145,25 @@ function bare(
 
 const MISSING_ENTRY_OUTCOME = bare(503, MISSING_ENTRY_PAYLOAD);
 
-function beginGraphProgress(state: CanvasState): number {
+function beginGraphProgress(
+  state: CanvasState,
+  view: GraphProgressView,
+  nowMs: number
+): number {
+  // A build that is already in flight for this view is continued rather than
+  // restarted. The app.bicep wait re-issues its request every few seconds, and
+  // a fresh record each time would reset the elapsed clock and discard the
+  // stages already reported — exactly the reset a user sees when they leave the
+  // page and come back.
+  if (state.graphProgressActive && state.graphProgressView === view) {
+    return state.graphProgressGeneration || 0;
+  }
   const generation = (state.graphProgressGeneration || 0) + 1;
   state.graphProgressGeneration = generation;
   state.graphBuildEvents = [];
+  state.graphProgressStartedAtMs = nowMs;
+  state.graphProgressActive = true;
+  state.graphProgressView = view;
   return generation;
 }
 
@@ -155,19 +174,39 @@ function isCurrentGraphProgress(
   return state.graphProgressGeneration === generation;
 }
 
+// Close the record so nothing still claims to be in flight. The stages stay
+// readable: a page that returns after the build finished sees what happened
+// rather than an empty panel.
+function endGraphProgress(
+  state: CanvasState | undefined,
+  generation: number | undefined
+): void {
+  if (!state || generation === undefined) return;
+  if (!isCurrentGraphProgress(state, generation)) return;
+  state.graphProgressActive = false;
+}
+
+// Close the record for every outcome except the app.bicep handoff. That build
+// genuinely continues off-page while Copilot authors the model, so it stays in
+// flight and keeps narrating the wait to whichever page is looking.
+function settleGraphProgress(
+  state: CanvasState,
+  generation: number | undefined,
+  outcome: GraphWorkflowOutcome
+): GraphWorkflowOutcome {
+  if (outcome.payload.needsAppBicep !== true) {
+    endGraphProgress(state, generation);
+  }
+  return outcome;
+}
+
 function appendGraphEvent(
   state: CanvasState,
   stage: GraphBuildStage,
   eventState: GraphBuildEvent["state"],
   detail: string
 ): void {
-  if (!state.graphBuildEvents) state.graphBuildEvents = [];
-  state.graphBuildEvents.push({
-    sequence: state.graphBuildEvents.length + 1,
-    stage,
-    state: eventState,
-    detail
-  });
+  recordGraphBuildEvent(state, { stage, state: eventState, detail });
 }
 
 function failRunningGraphEvent(
@@ -192,6 +231,34 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
   dependencies: GraphWorkflowDependencies<TEntry>
 ): GraphPlanningWorkflows {
   const { pipeline } = dependencies;
+
+  // Run one workflow and close its build record exactly once, whichever way it
+  // ends. Settling at a single point rather than at each `return` is what makes
+  // "a record is in flight only while work is actually happening" true by
+  // construction — a future early return cannot forget to close it and leave
+  // the nav chip claiming a build that ended minutes ago.
+  async function settleWorkflow(
+    run: () => Promise<GraphWorkflowOutcome>,
+    hooks: {
+      state: () => CanvasState | undefined;
+      progressGeneration: () => number | undefined;
+      onError: (error: string) => void;
+    }
+  ): Promise<GraphWorkflowOutcome> {
+    let outcome: GraphWorkflowOutcome;
+    try {
+      outcome = await run();
+    } catch (e) {
+      const error = dependencies.errorMessage(e);
+      hooks.onError(error);
+      outcome = json(400, { error });
+    }
+    const state = hooks.state();
+    if (state) {
+      settleGraphProgress(state, hooks.progressGeneration(), outcome);
+    }
+    return outcome;
+  }
 
   // The app-bicep modeling skill refuses outright — before writing anything —
   // any repository without a Dockerfile, because it builds the application's
@@ -264,7 +331,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     let activeState: CanvasState | undefined;
     let activeGeneration: number | undefined;
     let activeProgressGeneration: number | undefined;
-    try {
+    const run = async (): Promise<GraphWorkflowOutcome> => {
       const data = JSON.parse(body);
       const repo = data.repo || "";
       const entry = dependencies.readInstanceEntry(instanceId);
@@ -283,7 +350,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "graph",
         { repo, branch }
       );
-      const progressGeneration = beginGraphProgress(state);
+      const progressGeneration = beginGraphProgress(
+        state,
+        "graph",
+        dependencies.now()
+      );
       activeProgressGeneration = progressGeneration;
 
       // Every event is gated on the generation, so a superseded request stops
@@ -414,13 +485,16 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         state.graphDefinitionHash = definitionHash;
       }
       return json(200, { reload: !data.refresh, resources });
-    } catch (e) {
-      const error = dependencies.errorMessage(e);
-      if (activeState?.graphBuildGeneration === activeGeneration) {
-        failRunningGraphEvent(activeState, activeProgressGeneration, error);
+    };
+    return await settleWorkflow(run, {
+      state: () => activeState,
+      progressGeneration: () => activeProgressGeneration,
+      onError: (error) => {
+        if (activeState?.graphBuildGeneration === activeGeneration) {
+          failRunningGraphEvent(activeState, activeProgressGeneration, error);
+        }
       }
-      return json(400, { error });
-    }
+    });
   }
 
   // The planned graph: the modeled application projected through a provider's
@@ -433,7 +507,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     let activeState: CanvasState | undefined;
     let activeGeneration: number | undefined;
     let activeProgressGeneration: number | undefined;
-    try {
+    const run = async (): Promise<GraphWorkflowOutcome> => {
       const data = JSON.parse(body);
       const repo = data.repo || "";
       const entry = dependencies.readInstanceEntry(instanceId);
@@ -453,7 +527,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "planned",
         { repo, branch }
       );
-      const progressGeneration = beginGraphProgress(state);
+      const progressGeneration = beginGraphProgress(
+        state,
+        "planned",
+        dependencies.now()
+      );
       activeProgressGeneration = progressGeneration;
 
       const addEvent = (
@@ -522,13 +600,12 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
 
       // Resolve recipes from the default recipe pack
       // (radius-project/resource-types-contrib).
-      let recipes: unknown[] = [];
       addEvent(
         "resolving_recipes",
         "running",
         `Resolving ${provider} recipes for the planned resources.`
       );
-      recipes = await dependencies.fetchRecipePack(provider);
+      const recipes: unknown[] = await dependencies.fetchRecipePack(provider);
 
       // Surface pack recipes we couldn't map to a concrete resource so the gap
       // is visible (rather than silently rendering the abstract type). Empty
@@ -595,17 +672,23 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         state.activeGraphView = "planned";
       }
       return json(200, { reload: true });
-    } catch (e) {
-      const error = dependencies.errorMessage(e);
-      if (
-        activeState &&
-        activeGeneration !== undefined &&
-        dependencies.isCurrentPlannedGraphRequest(activeState, activeGeneration)
-      ) {
-        failRunningGraphEvent(activeState, activeProgressGeneration, error);
+    };
+    return await settleWorkflow(run, {
+      state: () => activeState,
+      progressGeneration: () => activeProgressGeneration,
+      onError: (error) => {
+        if (
+          activeState &&
+          activeGeneration !== undefined &&
+          dependencies.isCurrentPlannedGraphRequest(
+            activeState,
+            activeGeneration
+          )
+        ) {
+          failRunningGraphEvent(activeState, activeProgressGeneration, error);
+        }
       }
-      return json(400, { error });
-    }
+    });
   }
 
   // The branch comparison. Both sides run the full pipeline independently and
@@ -619,14 +702,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     // Declared outside the `try` so the catch can tell whether the failure
     // belongs to the selection still on screen before it writes `diffError`.
     let sourceRefContext: SourceRefContext | null = null;
+    let activeState: CanvasState | undefined;
     let activeProgressGeneration: number | undefined;
-    try {
+    const run = async (): Promise<GraphWorkflowOutcome> => {
       const data = JSON.parse(body);
       const repo = data.repo || "";
       const entry = dependencies.readInstanceEntry(instanceId);
       if (!entry) return MISSING_ENTRY_OUTCOME;
       const state = entry.state;
-      const progressGeneration = beginGraphProgress(state);
+      activeState = state;
+      const progressGeneration = beginGraphProgress(
+        state,
+        "diff",
+        dependencies.now()
+      );
       activeProgressGeneration = progressGeneration;
       const addEvent = (
         stage: GraphBuildStage,
@@ -806,26 +895,29 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         message: `Comparing ${data.base} → ${data.head}`,
         reload: true
       });
-    } catch (e) {
-      // The entry is re-read rather than reused: the failure may have happened
-      // before one was ever resolved.
-      const entry = dependencies.readInstanceEntry(instanceId);
-      const error = dependencies.errorMessage(e);
-      if (
-        entry &&
-        activeProgressGeneration !== undefined &&
-        isCurrentGraphProgress(entry.state, activeProgressGeneration) &&
-        dependencies.isCurrentSourceRefToken(
-          entry.state,
-          "diff",
-          sourceRefContext?.token || ""
-        )
-      ) {
-        entry.state.diffError = error;
-        failRunningGraphEvent(entry.state, activeProgressGeneration, error);
+    };
+    return await settleWorkflow(run, {
+      state: () => activeState,
+      progressGeneration: () => activeProgressGeneration,
+      onError: (error) => {
+        // The entry is re-read rather than reused: the failure may have
+        // happened before one was ever resolved.
+        const entry = dependencies.readInstanceEntry(instanceId);
+        if (
+          entry &&
+          activeProgressGeneration !== undefined &&
+          isCurrentGraphProgress(entry.state, activeProgressGeneration) &&
+          dependencies.isCurrentSourceRefToken(
+            entry.state,
+            "diff",
+            sourceRefContext?.token || ""
+          )
+        ) {
+          entry.state.diffError = error;
+          failRunningGraphEvent(entry.state, activeProgressGeneration, error);
+        }
       }
-      return json(400, { error });
-    }
+    });
   }
 
   return { loadGraph, planGraph, diffBranches };

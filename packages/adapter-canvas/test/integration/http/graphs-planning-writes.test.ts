@@ -43,6 +43,7 @@ interface Harness {
   state: CanvasState;
   script: PipelineScript;
   setEntryMissing(missing: boolean): void;
+  advanceClock(ms: number): void;
 }
 
 function selectionOf(
@@ -59,6 +60,7 @@ function selectionOf(
 function start(script: Partial<PipelineScript> = {}): Harness {
   const state: CanvasState = {};
   let entryMissing = false;
+  let nowMs = 1_000;
   const active: PipelineScript = {
     selections: {},
     compiled: {},
@@ -131,7 +133,8 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         },
         optionalString: (value) => (typeof value === "string" ? value : ""),
         errorMessage: (error) =>
-          error instanceof Error ? error.message : String(error)
+          error instanceof Error ? error.message : String(error),
+        now: () => nowMs
       })
     })
   );
@@ -161,6 +164,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     script: active,
     setEntryMissing(missing) {
       entryMissing = missing;
+    },
+    advanceClock(ms) {
+      nowMs += ms;
     }
   };
 }

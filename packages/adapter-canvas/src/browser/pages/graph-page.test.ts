@@ -13,7 +13,8 @@ import {
   graphProgressElapsed,
   graphProgressStages
 } from "../../../test/support/browser/graph-progress.js";
-import { formatGraphElapsed, GRAPH_STAGE_LABELS } from "../graph/progress.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
+import { formatElapsed } from "../progress-format.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import {
@@ -90,6 +91,10 @@ function fixture(options: FixtureOptions = {}) {
     `/api/list-environments?repo=${encodeURIComponent(repo)}`,
     () => jsonResponse({ environments: [] })
   );
+  // The page polls progress as soon as it starts a build, so every scenario
+  // reaches this route whether or not it is what the scenario is about. A test
+  // that cares overrides it.
+  browser.net.handle("/api/progress", () => jsonResponse({}));
   return {
     browser,
     state,
@@ -185,7 +190,7 @@ describe("initializeGraphPage", () => {
     expect(branch.listenerCount()).toBe(0);
   });
 
-  it("polls progress once per interval and ignores a late response", async () => {
+  it("polls progress immediately and then once per interval, ignoring a late response", async () => {
     const { browser } = fixture({ loaded: false });
     browser.net.supportsAbort = false;
     const load = createDeferred<HttpResponse>();
@@ -196,11 +201,16 @@ describe("initializeGraphPage", () => {
     const teardown = initializeGraphPage(browser.context, globals());
     await flushPromises();
 
+    // A build already in flight is adopted without waiting out an interval, so
+    // a user returning to this page does not watch an empty panel first.
+    expect(
+      browser.net.calls.filter((call) => call.url === "/api/progress")
+    ).toHaveLength(1);
     browser.clock.tick(GRAPH_PROGRESS_MS);
     await flushPromises();
     expect(
       browser.net.calls.filter((call) => call.url === "/api/progress")
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     teardown();
     load.resolve(jsonResponse({ reload: true }));
     await flushPromises();
@@ -639,15 +649,22 @@ describe("initializeGraphPage", () => {
   it("ignores a stale progress response superseded by a branch change", async () => {
     const { browser, branch, status } = fixture({ loaded: false });
     const load = createDeferred<HttpResponse>();
-    const progress = createDeferred<HttpResponse>();
+    const stale = createDeferred<HttpResponse>();
+    let polls = 0;
     browser.net.handle("/api/load-graph", () => load.promise);
-    browser.net.handle("/api/progress", () => progress.promise);
+    // Only the first poll is the stale one. Later polls belong to the request
+    // the branch change started and never settle, so the assertion can only be
+    // satisfied by the guard rejecting the superseded response.
+    browser.net.handle("/api/progress", () => {
+      polls++;
+      return polls === 1 ? stale.promise : new Promise<HttpResponse>(() => {});
+    });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
-    browser.clock.tick(GRAPH_PROGRESS_MS);
     branch.dispatch("change");
-    progress.resolve(jsonResponse({ messages: ["late message"] }));
+    await flushPromises();
+    stale.resolve(jsonResponse({ messages: ["late message"] }));
     await flushPromises();
 
     expect(status?.textContent).not.toBe("late message");
@@ -849,15 +866,21 @@ describe("initializeGraphPage", () => {
   it("ignores a stale progress failure superseded by a branch change", async () => {
     const { browser, branch } = fixture({ loaded: false });
     const load = createDeferred<HttpResponse>();
-    const progress = createDeferred<HttpResponse>();
+    const stale = createDeferred<HttpResponse>();
+    let polls = 0;
     browser.net.handle("/api/load-graph", () => load.promise);
-    browser.net.handle("/api/progress", () => progress.promise);
+    // Only the first poll fails, and it belongs to the superseded request; the
+    // polls the branch change starts never settle.
+    browser.net.handle("/api/progress", () => {
+      polls++;
+      return polls === 1 ? stale.promise : new Promise<HttpResponse>(() => {});
+    });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
-    browser.clock.tick(GRAPH_PROGRESS_MS);
     branch.dispatch("change");
-    progress.reject(new Error("stale progress failure"));
+    await flushPromises();
+    stale.reject(new Error("stale progress failure"));
     await flushPromises();
 
     expect(browser.logger.errors).toHaveLength(0);
@@ -984,7 +1007,7 @@ describe("initializeGraphPage", () => {
       // The retry reuses the running panel, so the clock reflects the whole
       // wait rather than restarting at zero on every poll.
       expect(graphProgressElapsed(progressHost)).toBe(
-        formatGraphElapsed(GRAPH_RETRY_MS)
+        formatElapsed(GRAPH_RETRY_MS)
       );
       expect(stageText(progressHost)).toEqual([
         `${GRAPH_STAGE_LABELS.checking_model}:running`,

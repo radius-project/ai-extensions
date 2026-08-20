@@ -77,6 +77,10 @@ function fixture(options: FixtureOptions = {}) {
       workspaceBranch: "feature"
     })
   );
+  // The page polls progress as soon as it starts a comparison, so every
+  // scenario reaches this route whether or not it is what the scenario is
+  // about. A test that cares overrides it.
+  browser.net.handle("/api/progress", () => jsonResponse({}));
 
   return {
     browser,
@@ -498,9 +502,9 @@ describe("initializeGraphDiffPage", () => {
       head.dispatch("change");
       browser.clock.tick(DIFF_DEBOUNCE_MS);
       await flushPromises();
-      browser.clock.tick(DIFF_PROGRESS_MS);
-      await flushPromises();
 
+      // The comparison polls immediately, and that first reply carries no typed
+      // stages, so the panel still shows only the stage it opened with.
       expect(stageText(progressHost)).toEqual([
         `${GRAPH_STAGE_LABELS.building_base_graph}:running`
       ]);
@@ -633,7 +637,14 @@ describe("initializeGraphDiffPage", () => {
         "/api/diff-branches",
         () => createDeferred<HttpResponse>().promise
       );
-      browser.net.handle("/api/progress", () => progress);
+      // Only the first poll gets the scripted promise. Later polls belong to
+      // whatever comparison supersedes this one and never settle, so a guard
+      // test can only pass by actually rejecting the superseded reply.
+      let polls = 0;
+      browser.net.handle("/api/progress", () => {
+        polls++;
+        return polls === 1 ? progress : new Promise<HttpResponse>(() => {});
+      });
       const teardown = initializeGraphDiffPage(browser.context, {
         radiusRenderGraph: vi.fn()
       });

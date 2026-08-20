@@ -11,6 +11,7 @@ export type BrowserEntryName =
   | "delete-dialog"
   | "heartbeat"
   | "operation-chip"
+  | "graph-chip"
   | "deploy-result-page"
   | "environment-page"
   | "deploying-page"
@@ -62,6 +63,12 @@ export const BROWSER_ENTRIES: readonly BrowserEntrySpec<BrowserEntryName>[] = [
     name: "operation-chip",
     file: "./entries/operation-chip.ts",
     initializer: "installOperationChipEntry",
+    globals: []
+  },
+  {
+    name: "graph-chip",
+    file: "./entries/graph-chip.ts",
+    initializer: "installGraphChipEntry",
     globals: []
   },
   {

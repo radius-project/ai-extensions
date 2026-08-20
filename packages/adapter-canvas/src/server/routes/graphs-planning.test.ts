@@ -151,6 +151,9 @@ const KNOWN_STATE_FIELDS: readonly (keyof CanvasState)[] = [
   "graphResources",
   "graphBuildEvents",
   "graphProgressGeneration",
+  "graphProgressActive",
+  "graphProgressView",
+  "graphProgressStartedAtMs",
   "progressMessages"
 ];
 
@@ -177,6 +180,7 @@ interface FakeOptions {
   };
   graphThrows?: Error;
   progressThrows?: Error;
+  nowMs?: number;
 }
 
 // Key derivation shared by the `deployStatusKeys` fake and the two map-builder
@@ -217,6 +221,7 @@ function fakes(
   // builds from its source text.
   const entry = state === undefined ? undefined : { state };
   const reader = { ...DEFAULT_READER, ...(options.reader ?? {}) };
+  const nowMs = options.nowMs ?? 0;
   const deps: GraphsPlanningReadsDependencies = {
     readInstanceEntry: (instanceId) => {
       calls.log.push(`readInstanceEntry(${instanceId})`);
@@ -308,7 +313,8 @@ function fakes(
     repoMatchesWorkspace: (current, repo) => {
       calls.log.push(`repoMatchesWorkspace(${current.workspaceRepo}|${repo})`);
       return !!current.workspaceRepo && current.workspaceRepo === repo;
-    }
+    },
+    now: () => nowMs
   };
   return { deps, state };
 }
@@ -433,6 +439,8 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(JSON.parse(recording.body)).toEqual({
       messages: ["diagnostic"],
       generation: 0,
+      active: false,
+      view: "",
       events: [
         {
           sequence: 1,
@@ -442,6 +450,83 @@ describe("graphs-planning read routes (SU-09)", () => {
         }
       ]
     });
+  });
+
+  // A build outlives the page that started it: the user can navigate away and
+  // come back, and the app.bicep handoff runs entirely outside the panel. The
+  // record therefore reports its own liveness, owner and age, and a returning
+  // page adopts those instead of restarting its clock at zero.
+  it("reports the record as live, its owning view, and real elapsed time", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      nowMs: 61_000,
+      state: {
+        graphProgressActive: true,
+        graphProgressView: "diff",
+        graphProgressStartedAtMs: 1_000,
+        graphBuildEvents: [
+          {
+            sequence: 1,
+            stage: "building_graph",
+            state: "running",
+            detail: "Building graph."
+          }
+        ]
+      }
+    });
+    const recording = await run("/api/progress", handleProgress, deps);
+    const payload = JSON.parse(recording.body) as Record<string, unknown>;
+    expect(payload.active).toBe(true);
+    expect(payload.view).toBe("diff");
+    expect(payload.elapsedMs).toBe(60_000);
+  });
+
+  // A record that settled still carries its stages so the page can render the
+  // finished checklist, but it must not claim to still be running.
+  it("reports a settled record as no longer in flight", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      nowMs: 5_000,
+      state: {
+        graphProgressActive: false,
+        graphProgressView: "graph",
+        graphProgressStartedAtMs: 2_000,
+        graphBuildEvents: [
+          {
+            sequence: 1,
+            stage: "building_graph",
+            state: "succeeded",
+            detail: ""
+          }
+        ]
+      }
+    });
+    const payload = JSON.parse(
+      (await run("/api/progress", handleProgress, deps)).body
+    ) as Record<string, unknown>;
+    expect(payload.active).toBe(false);
+    expect(payload.view).toBe("graph");
+    expect(payload.elapsedMs).toBe(3_000);
+  });
+
+  // A clock that jumped backwards must not produce a negative age, which would
+  // render as a nonsense elapsed time.
+  it("clamps elapsed time when the clock moves backwards", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      nowMs: 500,
+      state: {
+        graphProgressActive: true,
+        graphProgressStartedAtMs: 4_000,
+        graphBuildEvents: [
+          { sequence: 1, stage: "building_graph", state: "running", detail: "" }
+        ]
+      }
+    });
+    const payload = JSON.parse(
+      (await run("/api/progress", handleProgress, deps)).body
+    ) as Record<string, unknown>;
+    expect(payload.elapsedMs).toBe(0);
   });
 
   it("identifies the owning stream so a reader can reject a stale snapshot", async () => {

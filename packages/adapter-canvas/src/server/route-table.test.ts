@@ -165,7 +165,8 @@ const productionHandlers = {
     applyDeployMessages: () => {},
     record: () => ({}),
     errorMessage: (error) => String(error),
-    repoMatchesWorkspace: () => false
+    repoMatchesWorkspace: () => false,
+    now: () => 0
   }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
@@ -222,7 +223,8 @@ const productionHandlers = {
       computeGraphDiff: () => [],
       record: () => ({}),
       optionalString: () => "",
-      errorMessage: (error) => String(error)
+      errorMessage: (error) => String(error),
+      now: () => 0
     })
   }),
   ...createEnvironmentsRoutes({

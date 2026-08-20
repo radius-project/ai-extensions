@@ -67,7 +67,18 @@ export function topNav(active: string): string {
     ` aria-live="polite" title="View environment setup">` +
     `<span class="rad-opchip__dot" id="rad-opchip-dot" aria-hidden="true"></span>` +
     `<span class="rad-opchip__label" id="rad-opchip-label"></span></a>`;
-  return `<nav class="rad-topnav">${items}${chip}</nav>`;
+  // A second chip, so an environment setup and a graph build running at the
+  // same time each keep their own ambient surface instead of evicting one
+  // another from a single slot.
+  const graphChip =
+    `<a class="rad-opchip" id="rad-graphchip" href="/?page=graph" hidden` +
+    ` aria-live="polite" title="View graph progress">` +
+    `<span class="rad-opchip__dot" id="rad-graphchip-dot" aria-hidden="true"></span>` +
+    `<span class="rad-opchip__label" id="rad-graphchip-label"></span></a>`;
+  return (
+    `<nav class="rad-topnav">${items}` +
+    `<span class="rad-topnav__chips">${graphChip}${chip}</span></nav>`
+  );
 }
 
 // Underlined sub-tabs (e.g. Modeled / Planned / Deployed / Diff).

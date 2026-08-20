@@ -139,6 +139,45 @@ export interface GraphBuildEvent {
   detail: string;
 }
 
+// Which graph view a build belongs to. The record is view-scoped so a returning
+// page only adopts progress that describes the graph it is showing, and so the
+// nav chip can link back to the page doing the work.
+export type GraphProgressView = "graph" | "planned" | "diff";
+
+// Append one event to the instance's build record.
+//
+// A build that waits for Copilot to author .radius/app.bicep re-issues its
+// request every few seconds, and each attempt replays the stages it already
+// reported. Two rules keep that replay out of the record.
+//
+// A stage never walks backwards: a `running` event for a stage that already
+// settled would flip it from done back to running, which reads as a stuck build
+// rather than a wait.
+//
+// A stage never repeats itself verbatim: an event identical to that stage's
+// most recent one says nothing the record does not already show, and appending
+// it would grow a duplicate tail on the checklist with every poll. A repeat
+// that carries new detail is real narration and is kept.
+export function recordGraphBuildEvent(
+  state: CanvasState,
+  event: Omit<GraphBuildEvent, "sequence">
+): void {
+  if (!state.graphBuildEvents) state.graphBuildEvents = [];
+  const events = state.graphBuildEvents;
+  const forStage = events.filter((recorded) => recorded.stage === event.stage);
+  const settled = forStage.some((recorded) => recorded.state !== "running");
+  if (settled && event.state === "running") return;
+  const latest = forStage[forStage.length - 1];
+  if (
+    latest &&
+    latest.state === event.state &&
+    latest.detail === event.detail
+  ) {
+    return;
+  }
+  events.push({ sequence: events.length + 1, ...event });
+}
+
 export interface CanvasState {
   [key: string]: unknown;
   graphResources?: CanvasGraphResource[] | null;
@@ -148,6 +187,13 @@ export interface CanvasState {
   graphLoaded?: boolean;
   graphBuildEvents?: GraphBuildEvent[];
   graphProgressGeneration?: number;
+  // When the current build record started, whether it is still in flight, and
+  // which view it belongs to. The server owns these so the elapsed clock and
+  // the reported stages survive the user navigating away and back — the page
+  // that started the build is no longer the only thing that knows about it.
+  graphProgressStartedAtMs?: number;
+  graphProgressActive?: boolean;
+  graphProgressView?: GraphProgressView;
   plannedRepo?: string;
   plannedProvider?: string;
   plannedResources?: CanvasGraphResource[] | null;

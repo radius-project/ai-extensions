@@ -117,11 +117,19 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     background: transparent;
   }
   .rad-topnav__label { white-space: nowrap; }
-  /* Ambient operation chip. Sits at the far end of the nav bar, deliberately
-     quiet: it is a signal, not a summons. Nothing here moves the page or takes
-     focus. */
-  .rad-opchip {
+  /* Ambient progress chips. They sit at the far end of the nav bar,
+     deliberately quiet: they are a signal, not a summons. Nothing here moves
+     the page or takes focus. The row holds the alignment so a second chip
+     appearing beside the first does not push it away. */
+  .rad-topnav__chips {
     margin-left: auto;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .rad-opchip {
     align-self: center;
     display: inline-flex;
     align-items: center;

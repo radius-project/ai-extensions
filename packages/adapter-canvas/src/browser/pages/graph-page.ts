@@ -164,6 +164,11 @@ export function initializeGraphPage(
     progress = entry.every(GRAPH_PROGRESS_MS, () =>
       pollProgress(requestGeneration, view)
     );
+    // Poll once immediately rather than waiting a full interval. A build that is
+    // already in flight — one this page did not start, or one it started before
+    // the user navigated away — is adopted straight away instead of showing an
+    // empty panel reading 0:00 until the first tick.
+    pollProgress(requestGeneration, view);
   };
 
   const stopRequest = (): void => {
@@ -205,7 +210,11 @@ export function initializeGraphPage(
         if (!entry.active || requestGeneration !== generation) return;
         const events = readArray(payload, "events");
         if (events.length > 0) {
-          view.sync(events, readNumber(payload, "generation") ?? 0);
+          view.sync(
+            events,
+            readNumber(payload, "generation") ?? 0,
+            readNumber(payload, "elapsedMs")
+          );
           return;
         }
         // Workflows that report no typed stages still append diagnostic prose,

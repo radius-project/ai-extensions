@@ -14,6 +14,7 @@
 
 import { buildElement } from "../dom.js";
 import { isRecord, readNumber, readString } from "../json.js";
+import { formatElapsed, stageGlyph } from "../progress-format.js";
 import type { ElementSpec } from "../dom.js";
 import type { EntryScope } from "../lifecycle.js";
 import type { BrowserContext, DomElement } from "../ports.js";
@@ -54,12 +55,6 @@ export const GRAPH_STAGE_LABELS: Readonly<Record<GraphBuildStage, string>> = {
   loading_deployment: "Load deployed resources",
   comparing_graphs: "Compare application graphs",
   rendering_graph: "Render the application graph"
-};
-
-const STAGE_GLYPH: Readonly<Record<GraphBuildEventState, string>> = {
-  running: "◐",
-  succeeded: "✓",
-  failed: "✗"
 };
 
 // Fold a server snapshot into the stages already on screen. The snapshot
@@ -125,15 +120,6 @@ export function parseGraphBuildEvents(
   return events;
 }
 
-// Elapsed time is shown the way environment setup shows it: a plain m:ss clock
-// of time actually spent, never an estimate of time remaining.
-export function formatGraphElapsed(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
-}
-
 // Remove the panel from its host. A page that reports a terminal outcome in its
 // own error surface clears the panel first, so the failure is stated once
 // rather than repeated by a frozen panel sitting underneath it.
@@ -147,8 +133,13 @@ export function clearGraphProgress(
 
 export interface GraphProgressView {
   // Apply a server snapshot. `generation` identifies the stream that produced
-  // it; snapshots from a superseded stream are ignored.
-  sync(events: readonly unknown[], generation: number): void;
+  // it; snapshots from a superseded stream are ignored. `elapsedMs`, when the
+  // server reports it, rebaselines the clock — see adoptElapsed().
+  sync(
+    events: readonly unknown[],
+    generation: number,
+    elapsedMs?: number | null
+  ): void;
   // Record a stage the client observed directly, such as the terminal outcome
   // carried by the workflow response rather than by the progress stream.
   append(
@@ -186,7 +177,15 @@ export function createGraphProgress(
 ): GraphProgressView {
   const hostId = options.hostId ?? GRAPH_PROGRESS_STEPS_ID;
   const title = options.title ?? "Generating application graph";
-  const startedAtMs = context.clock.now();
+  // The clock is expressed as an offset from a baseline rather than from a
+  // fixed client start time, so the server can correct it. A build outlives the
+  // page that started it: navigating away and back mounts a brand new panel
+  // onto a build that may already be minutes old, and a clock that restarted at
+  // 0:00 would be reporting the age of the panel rather than of the work. The
+  // environment progress panel corrects its clock from the operation record the
+  // same way.
+  let baselineElapsedMs = 0;
+  let baselineAtMs = context.clock.now();
 
   let events: GraphBuildEvent[] = [];
   // The most recently applied event, which is what the activity line describes.
@@ -212,7 +211,18 @@ export function createGraphProgress(
   const host = (): DomElement | null => context.dom.byId(hostId);
 
   const elapsedText = (): string =>
-    formatGraphElapsed(context.clock.now() - startedAtMs);
+    formatElapsed(baselineElapsedMs + (context.clock.now() - baselineAtMs));
+
+  // Adopt the server's measurement of how long this build has been running.
+  // Only a finite, non-negative number is accepted: a payload without the field
+  // leaves the local clock alone rather than snapping it to zero.
+  const adoptElapsed = (elapsedMs: number | null | undefined): void => {
+    if (typeof elapsedMs !== "number") return;
+    if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return;
+    baselineElapsedMs = elapsedMs;
+    baselineAtMs = context.clock.now();
+    if (elapsedElement) elapsedElement.textContent = elapsedText();
+  };
 
   const render = (force = false): void => {
     const signature = JSON.stringify([
@@ -236,7 +246,7 @@ export function createGraphProgress(
             tag: "span",
             className: "rad-graph-progress__glyph",
             attrs: { "aria-hidden": "true" },
-            text: STAGE_GLYPH[event.state]
+            text: stageGlyph(event.state)
           },
           {
             tag: "span",
@@ -328,7 +338,7 @@ export function createGraphProgress(
   };
 
   const view: GraphProgressView = {
-    sync(nextEvents, generation) {
+    sync(nextEvents, generation, elapsedMs) {
       if (stopped) return;
       const parsed = parseGraphBuildEvents(nextEvents);
       const nextSequence = parsed.reduce(
@@ -350,6 +360,7 @@ export function createGraphProgress(
         // the panel back to a stage the build has already left.
         return;
       }
+      adoptElapsed(elapsedMs);
       localAhead = false;
       appliedSequence = nextSequence;
       events = applyGraphSnapshot(events, parsed);

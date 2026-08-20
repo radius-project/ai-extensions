@@ -29,6 +29,7 @@ interface Harness {
   reader: ReaderScript;
   readerOptions: DeployedGraphReaderOptions[];
   setEntryMissing(missing: boolean): void;
+  advanceClock(ms: number): void;
 }
 
 // Real helpers wherever the projection is pure, so the wire payload is the one
@@ -45,6 +46,7 @@ function start(): Harness {
   const reader: ReaderScript = {};
   const readerOptions: DeployedGraphReaderOptions[] = [];
   let entryMissing = false;
+  let nowMs = 0;
 
   const routes = createTestRouteTable(
     createGraphsPlanningRoutes({
@@ -112,7 +114,8 @@ function start(): Harness {
       errorMessage: (error) =>
         error instanceof Error ? error.message : String(error),
       repoMatchesWorkspace: (current, repo) =>
-        !!current.workspaceRepo && current.workspaceRepo === repo
+        !!current.workspaceRepo && current.workspaceRepo === repo,
+      now: () => nowMs
     })
   );
 
@@ -142,6 +145,9 @@ function start(): Harness {
     readerOptions,
     setEntryMissing(missing) {
       entryMissing = missing;
+    },
+    advanceClock(ms) {
+      nowMs += ms;
     }
   };
 }
@@ -151,6 +157,9 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     const harness = start();
     harness.state.progressMessages = ["deployed diagnostic"];
     harness.state.graphProgressGeneration = 7;
+    harness.state.graphProgressActive = true;
+    harness.state.graphProgressView = "graph";
+    harness.state.graphProgressStartedAtMs = 1_000;
     harness.state.graphBuildEvents = [
       {
         sequence: 1,
@@ -160,6 +169,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       }
     ];
     const entry = await container!.getOrCreate("panel-a");
+    harness.advanceClock(5_000);
 
     const response = await fetch(`${entry.baseUrl}/api/progress`);
 
@@ -168,7 +178,12 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     expect(await response.json()).toEqual({
       messages: ["deployed diagnostic"],
       generation: 7,
-      events: harness.state.graphBuildEvents
+      events: harness.state.graphBuildEvents,
+      active: true,
+      view: "graph",
+      // The server measures the build's age, so a client whose clock disagrees
+      // still reports the time the build has actually been running.
+      elapsedMs: 4_000
     });
   });
 

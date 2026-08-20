@@ -9,7 +9,6 @@
 import { describe, it, expect } from "vitest";
 import {
   createGraphProgress,
-  formatGraphElapsed,
   GRAPH_PROGRESS_STEPS_ID,
   GRAPH_PROGRESS_TICK_MS,
   GRAPH_STAGE_LABELS,
@@ -73,20 +72,6 @@ function elapsedText(host: FakeElement): string {
 function detailElement(host: FakeElement): FakeElement | null {
   return graphProgressActivity(host);
 }
-describe("formatGraphElapsed", () => {
-  it.each([
-    [0, "0:00"],
-    [999, "0:00"],
-    [1000, "0:01"],
-    [59_000, "0:59"],
-    [60_000, "1:00"],
-    [125_000, "2:05"],
-    [-5000, "0:00"]
-  ])("renders %ims as %s", (ms, expected) => {
-    expect(formatGraphElapsed(ms)).toBe(expected);
-  });
-});
-
 describe("parseGraphBuildEvent", () => {
   it("accepts a complete typed event", () => {
     expect(
@@ -609,5 +594,84 @@ describe("createGraphProgress without a host element", () => {
 
     expect(view.stopped).toBe(false);
     expect(view.events()).toHaveLength(1);
+  });
+});
+
+// A build outlives the page that started it: the user can navigate away and
+// come back, and the app.bicep wait continues entirely off-page. The server
+// owns how long the build has been running, so the panel adopts that rather
+// than measuring from the moment it happened to mount.
+describe("adopting the server's elapsed time", () => {
+  it("rebaselines the clock from the reported elapsed time", () => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope);
+
+    view.sync(
+      [serverEvent(1, "building_graph", "running", "Working.")],
+      1,
+      95_000
+    );
+
+    expect(elapsedText(host)).toBe("1:35");
+  });
+
+  it("keeps ticking forward from the adopted baseline", () => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope);
+
+    view.sync([serverEvent(1, "building_graph", "running", "")], 1, 60_000);
+    browser.clock.tick(5_000);
+
+    expect(elapsedText(host)).toBe("1:05");
+  });
+
+  it.each([
+    ["an absent measurement", undefined],
+    ["a null measurement", null],
+    ["a negative measurement", -1_000],
+    ["a measurement that is not finite", Number.POSITIVE_INFINITY],
+    ["a measurement that is not a number", Number.NaN]
+  ])("leaves the local clock alone for %s", (_case, elapsed) => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope);
+    browser.clock.tick(3_000);
+
+    view.sync(
+      [serverEvent(1, "building_graph", "running", "")],
+      1,
+      elapsed as number | null | undefined
+    );
+
+    expect(elapsedText(host)).toBe("0:03");
+  });
+
+  // The Deployed page mounts its panel lazily, so a poll can land before the
+  // host exists. Adopting the measurement must not depend on having somewhere
+  // to paint it yet.
+  it("adopts a measurement that arrives before the panel has a host", () => {
+    const browser = createFakeBrowser();
+    const scope = beginEntry(browser.context, "graph-progress-hostless");
+    if (!scope) throw new Error("The lifecycle refused a fresh entry scope.");
+    const view = createGraphProgress(browser.context, scope);
+
+    view.sync([serverEvent(1, "building_graph", "running", "")], 1, 60_000);
+    const host = createFakeElement(GRAPH_PROGRESS_STEPS_ID);
+    browser.document.add(host);
+    browser.clock.tick(5_000);
+    view.sync([serverEvent(2, "building_graph", "running", "Still going.")], 1);
+
+    expect(elapsedText(host)).toBe("1:05");
+  });
+
+  // The generation guard runs first: a snapshot from a superseded build carries
+  // that build's age, and adopting it would show the wrong duration entirely.
+  it("ignores the elapsed time on a snapshot it rejects", () => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope);
+    view.sync([serverEvent(2, "building_graph", "running", "")], 4, 10_000);
+
+    view.sync([serverEvent(1, "checking_model", "running", "")], 3, 900_000);
+
+    expect(elapsedText(host)).toBe("0:10");
   });
 });

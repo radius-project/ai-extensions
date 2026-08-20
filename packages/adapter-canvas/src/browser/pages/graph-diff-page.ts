@@ -94,7 +94,11 @@ export function initializeGraphDiffPage(
         if (!entry.active || requestGeneration !== generation) return;
         const events = readArray(payload, "events");
         if (events.length > 0) {
-          view.sync(events, readNumber(payload, "generation") ?? 0);
+          view.sync(
+            events,
+            readNumber(payload, "generation") ?? 0,
+            readNumber(payload, "elapsedMs")
+          );
         }
       })
       .catch((error: unknown) => {
@@ -124,6 +128,11 @@ export function initializeGraphDiffPage(
       }
     });
     progressView = view;
+    // Poll once immediately rather than waiting a full interval. A build that is
+    // already in flight — one this page did not start, or one it started before
+    // the user navigated away — is adopted straight away instead of showing an
+    // empty panel reading 0:00 until the first tick.
+    pollProgress(requestGeneration, view);
     progress = entry.every(DIFF_PROGRESS_MS, () =>
       pollProgress(requestGeneration, view)
     );

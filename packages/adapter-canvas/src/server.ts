@@ -31,7 +31,8 @@ import {
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
-  setPreferredGitHubLogin
+  setPreferredGitHubLogin,
+  recordGraphBuildEvent
 } from "./shared.js";
 import type {
   CanvasGraphResource,
@@ -729,7 +730,8 @@ const graphsPlanningRoutes = createGraphsPlanningRoutes({
   applyDeployMessages,
   record,
   errorMessage,
-  repoMatchesWorkspace
+  repoMatchesWorkspace,
+  now: () => Date.now()
 });
 
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
@@ -801,7 +803,8 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     computeGraphDiff(baseResources, headResources),
   record,
   optionalString,
-  errorMessage
+  errorMessage,
+  now: () => Date.now()
 });
 
 // The route layer sees exactly one seam: the workflow service above. Parsing
@@ -1153,11 +1156,7 @@ export function addGraphProgress(
   event: Omit<GraphBuildEvent, "sequence">
 ): boolean {
   if (!state || state.graphBuildGeneration !== generation) return false;
-  if (!state.graphBuildEvents) state.graphBuildEvents = [];
-  state.graphBuildEvents.push({
-    sequence: state.graphBuildEvents.length + 1,
-    ...event
-  });
+  recordGraphBuildEvent(state, event);
   return true;
 }
 
