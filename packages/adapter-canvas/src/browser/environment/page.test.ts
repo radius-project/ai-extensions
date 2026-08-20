@@ -16,7 +16,10 @@ import {
   OPERATIONS_PATH,
   PROGRESS_IDS
 } from "./operations.js";
-import { PROFILES_PANEL_ENTRY_KEY } from "./profiles.js";
+import {
+  GITHUB_ACCOUNT_ENDPOINT,
+  PROFILES_PANEL_ENTRY_KEY
+} from "./profiles.js";
 import {
   CREATE_ENVIRONMENT_OPERATION_PATH,
   ENVIRONMENT_PAGE_ENTRY_KEY,
@@ -178,7 +181,8 @@ function fixture(
   stateElement.textContent = JSON.stringify({
     repo,
     branch,
-    activeSubtab: state.activeSubtab ?? "environments"
+    activeSubtab: state.activeSubtab ?? "environments",
+    mutationNonce: "browser-nonce"
   });
   add(stateElement);
   const omitted = new Set(state.omit ?? []);
@@ -224,7 +228,39 @@ function fixture(
   );
   browser.net.handle(
     `${GITHUB_IDENTITY_PATH}?repo=${encodeURIComponent(repo)}`,
-    () => jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
+    () =>
+      jsonResponse({
+        actingLogin: "octocat",
+        displayLogin: "octocat",
+        actingHasPackages: true,
+        accounts: [
+          {
+            login: "octocat",
+            hasWorkflow: true,
+            hasPackages: true,
+            switchable: true
+          }
+        ]
+      })
+  );
+  browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+    jsonResponse({
+      readiness: {
+        ready: true,
+        login: "octocat",
+        credentialSource: "keyring",
+        summary: "Ready to configure deployments",
+        repair: null,
+        checks: {
+          repository: { state: "ready", detail: "ready" },
+          workflow: { state: "ready", detail: "ready" },
+          environment: { state: "ready", detail: "ready" },
+          packages: { state: "ready", detail: "ready" },
+          identity: { state: "ready", detail: "ready" }
+        }
+      },
+      selectionHandle: "selection-handle"
+    })
   );
   return { browser, elements, repo, branch };
 }
@@ -591,6 +627,42 @@ describe("initializeEnvironmentPage", () => {
     expect(page.elements["deploy-status"].textContent).toBe(
       "Please enter an environment name."
     );
+  });
+
+  it("blocks creation when selected-account readiness has not passed", async () => {
+    const page = fixture();
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      jsonResponse({
+        readiness: {
+          ready: false,
+          login: "octocat",
+          credentialSource: "keyring",
+          summary: "Additional GitHub access is required",
+          repair: "Refresh access.",
+          checks: {}
+        }
+      })
+    );
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev";
+
+    page.elements["deploy-btn"].dispatch("click");
+
+    expect(page.elements["deploy-status"].textContent).toBe(
+      "Re-check the selected GitHub account before creating the environment."
+    );
+  });
+
+  it("invalidates account readiness when the environment name changes", async () => {
+    const page = fixture();
+    await openWithProfile(page, "azure");
+    const environment = pageInput(page, "env-name-input");
+    expect(pageInput(page, "deploy-btn").disabled).toBe(false);
+
+    environment.value = "prod";
+    page.elements["env-name-input"].dispatch("input");
+
+    expect(pageInput(page, "deploy-btn").disabled).toBe(true);
   });
 
   it("fails closed when repository identity changes", async () => {

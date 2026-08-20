@@ -3,25 +3,13 @@ import type {
   CreateEnvironmentCliOptions,
   CreateEnvironmentCommandResult
 } from "./create-environment-types.js";
+import type { SelectedGhExecutor } from "../../gh.js";
 
 // Seam 2 of the `POST /api/create-environment` slice: every `gh` invocation the
-// route makes, including the workflow-scope retry.
-//
-// The host often injects GH_TOKEN (an OAuth app token) that lacks the `workflow`
-// scope, which is required to create/update files under .github/workflows/ or to
-// dispatch workflows. The user's stored gh credential (keyring) usually has that
-// scope. For workflow-scoped commands, run normally first; if it fails while an
-// injected token is present, retry with GH_TOKEN/GITHUB_TOKEN stripped so gh
-// falls back to the keyring credential. (A missing `workflow` scope surfaces as
-// either a 403 "without workflow scope" on updates or a bare 404 on creates, so
-// we retry on any failure rather than pattern-matching.)
-//
-// `readProcessEnv` is invoked on the retry path, never at construction. The
-// legacy arm spread the live global (`{ ...process.env }`) at call time, so a
-// token the host injects mid-session must still be observed. The near-identical
-// helper in `deployments.ts` is deliberately NOT shared with this one: it takes
-// an injected environment, and collapsing the two would change which environment
-// each route reads.
+// route makes. Create Environment supplies a selected-account executor, so every
+// command uses one pinned credential and a failure is returned without retrying
+// under ambient or keyring state. The legacy CLI port remains for callers that do
+// not yet supply an executor.
 
 export interface WorkflowScopeGhRunnerPorts {
   cliExec: CreateEnvironmentCliExec;
@@ -66,13 +54,21 @@ export function needsWorkflowScope(stderr?: string): boolean {
 
 export function createWorkflowScopeGhRunner(
   ports: WorkflowScopeGhRunnerPorts,
-  target: WorkflowScopeGhRunnerTarget
+  target: WorkflowScopeGhRunnerTarget,
+  selectedExecutor?: SelectedGhExecutor
 ): WorkflowScopeGhRunner {
   const runGh = (
     args: string[],
     stdin?: string,
     extraOpts: CreateEnvironmentCliOptions = {}
   ): Promise<CreateEnvironmentCommandResult> => {
+    if (selectedExecutor) {
+      return selectedExecutor.run(args, {
+        timeout: 30000,
+        ...extraOpts,
+        ...(stdin === undefined ? {} : { stdin })
+      });
+    }
     return new Promise((resolve) => {
       const child = ports.cliExec(
         "gh",
@@ -130,21 +126,7 @@ export function createWorkflowScopeGhRunner(
   const runGhWorkflow = async (
     args: string[],
     stdin?: string
-  ): Promise<CreateEnvironmentCommandResult> => {
-    const first = await runGh(args, stdin);
-    if (first.code === 0) return first;
-    // Read at call time, never snapshotted at construction.
-    const env = ports.readProcessEnv();
-    const hasInjectedToken = !!(env.GH_TOKEN || env.GITHUB_TOKEN);
-    if (!hasInjectedToken) return first;
-    const fallbackEnv = { ...env };
-    delete fallbackEnv.GH_TOKEN;
-    delete fallbackEnv.GITHUB_TOKEN;
-    const retry = await runGh(args, stdin, { env: fallbackEnv });
-    // Prefer the retry only if it actually succeeded; otherwise keep the
-    // original error, which is usually the more meaningful one.
-    return retry.code === 0 ? retry : first;
-  };
+  ): Promise<CreateEnvironmentCommandResult> => runGh(args, stdin);
 
   return { runGh, runGhOrThrow, setEnvironmentVariable, runGhWorkflow };
 }

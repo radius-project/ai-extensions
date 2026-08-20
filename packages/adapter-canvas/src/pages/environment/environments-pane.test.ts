@@ -48,6 +48,10 @@ describe("environmentsPaneMarkup", () => {
   it("renders one visible section when the environments sub-tab is active", () => {
     const html = environmentsPaneMarkup(baseOptions);
     expect(html).toContain('<section id="pane-environments" style="">');
+    expect(html).toContain(
+      'id="env-gh-fix-access" class="rad-btn rad-btn--ghost"'
+    );
+    expect(html).toContain(">Show how to fix</button>");
     expect(html.trimEnd().endsWith("</section>")).toBe(true);
   });
 

@@ -302,14 +302,28 @@ test.describe("Radius Canvas in Chromium", () => {
 
     const note = page.locator("#env-gh-identity-note");
     await expect(note).toBeVisible();
-    await expect(note).toContainText(
-      "is missing the workflow and write:packages scopes"
+    await expect(note).toContainText("Additional GitHub access is required");
+    await expect(page.locator("#env-gh-technical-details")).toContainText(
+      "workflow: missing"
+    );
+    await expect(page.locator("#env-gh-technical-details")).toContainText(
+      "packages: missing"
     );
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
     await expect(page.locator("#env-gh-account-button")).toHaveAccessibleName(
       "@acting-user"
     );
     await expectNoWcagViolations(page);
+    const showHowToFix = page.getByRole("button", {
+      name: "Show how to fix"
+    });
+    await expect(showHowToFix).toBeVisible();
+    await showHowToFix.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#env-gh-details-panel")).toHaveAttribute(
+      "open",
+      ""
+    );
     await canvas.expectCliInvoked("gh");
   });
 
@@ -323,32 +337,25 @@ test.describe("Radius Canvas in Chromium", () => {
 
     const note = page.locator("#env-gh-identity-note");
     const recheck = page.getByRole("button", { name: "Re-check" });
-    await expect(note).toContainText(
-      "is missing the workflow and write:packages scopes"
-    );
+    await expect(note).toContainText("Additional GitHub access is required");
     await expect(recheck).toBeVisible();
 
     // The keyring account now carries the scopes setup needs.
     await canvas.setGitHubKeyringScopes(["repo", "workflow", "write:packages"]);
-    canvas.setGitHubToken(null);
     await recheck.focus();
     await expect(recheck).toBeFocused();
     await page.keyboard.press("Enter");
 
-    await expect(note).toContainText("Acts as");
-    await expect(note).not.toContainText(
-      "is missing the workflow and write:packages scopes"
-    );
-    await expect(recheck).toBeHidden();
+    await expect(note).toContainText("Ready to configure deployments");
+    await expect(recheck).toBeVisible();
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
     await expectNoWcagViolations(page);
   });
 
-  test("switches GitHub accounts through the real listbox and returns focus to the combo", async ({
+  test("checks GitHub accounts through the real listbox and returns focus to the combo", async ({
     page,
     canvas
   }) => {
-    canvas.setGitHubToken(null);
     await gotoCanvas(page, canvas, "environment");
     await openEnvironmentWizard(page);
 
@@ -370,19 +377,29 @@ test.describe("Radius Canvas in Chromium", () => {
 
     await expect(combo).toHaveAttribute("aria-expanded", "false");
     await expect(combo).toBeFocused();
-    expect(bodyFor(canvas, "/api/github-account")).toEqual({
-      login: "acting-user"
-    });
     await expect
-      .poll(async () =>
-        (await canvas.cliCalls()).some(
-          (call) =>
-            call.tool === "gh" &&
-            JSON.stringify(call.args) ===
-              JSON.stringify(["auth", "switch", "--user", "acting-user"])
-        )
+      .poll(
+        () =>
+          canvas.requests
+            .filter(
+              (request) =>
+                request.method === "POST" &&
+                request.path === "/api/github-account"
+            )
+            .at(-1)?.body
       )
-      .toBe(true);
+      .toMatchObject({
+        login: "acting-user",
+        repo: REPOSITORY
+      });
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.tool === "gh" &&
+          call.args.includes("switch") &&
+          call.args.includes("acting-user")
+      )
+    ).toBe(false);
     await expectNoWcagViolations(page);
   });
 
@@ -457,10 +474,28 @@ test.describe("Radius Canvas in Chromium", () => {
 
     await gotoCanvas(page, canvas, "environment");
     const result = await page.evaluate(
-      async ({ repo, branch, tenantId, subscriptionId }) => {
+      async ({ repo, branch, tenantId, subscriptionId, mutationNonce }) => {
+        const readinessResponse = await fetch("/api/github-account", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Mutation-Nonce": mutationNonce
+          },
+          body: JSON.stringify({
+            login: "acting-user",
+            repo,
+            environment: "fixture-environment"
+          })
+        });
+        const readiness = (await readinessResponse.json()) as {
+          selectionHandle?: string;
+        };
         const response = await fetch("/api/operations", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Mutation-Nonce": mutationNonce
+          },
           body: JSON.stringify({
             repo,
             environment: "fixture-environment",
@@ -471,7 +506,8 @@ test.describe("Radius Canvas in Chromium", () => {
             resourceGroup: "fixture-rg",
             cluster: "fixture-cluster",
             namespace: "default",
-            profileName: "fixture-profile"
+            profileName: "fixture-profile",
+            selectionHandle: readiness.selectionHandle
           })
         });
         return (await response.json()) as { operationId: string };
@@ -480,7 +516,8 @@ test.describe("Radius Canvas in Chromium", () => {
         repo: REPOSITORY,
         branch: WORKTREE_BRANCH,
         tenantId: VALID_TENANT_ID,
-        subscriptionId: VALID_SUBSCRIPTION_ID
+        subscriptionId: VALID_SUBSCRIPTION_ID,
+        mutationNonce: String(canvas.entry.state.browserMutationNonce || "")
       }
     );
     expect(result.operationId).toMatch(/^op_/);

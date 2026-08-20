@@ -5,6 +5,7 @@ import {
   type ServerResponse
 } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 import { createCanvasServer } from "../create-canvas-server.js";
 import { createRequestContext } from "../request-context.js";
 import { createRequestHandler } from "../create-request-handler.js";
@@ -115,6 +116,7 @@ function deps(
     kickoffWorkflowSync: unset("kickoffWorkflowSync") as never,
     now: unset("now") as never,
     getOperation: unset("getOperation") as never,
+    getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
     hasCompleteVerificationIdentity: unset(
       "hasCompleteVerificationIdentity"
     ) as never,
@@ -904,6 +906,78 @@ describe("environments — verify-status", () => {
     });
   });
 
+  it("keeps a pinned operation pending while its executor is being installed", async () => {
+    const operation = {
+      repo: "o/r",
+      environment: "dev",
+      context: { githubLogin: "octocat" },
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "main",
+        environment: "dev",
+        runId: "55"
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
+    );
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => operation,
+        hasCompleteVerificationIdentity: () => true,
+        getSelectedGitHubExecutor: () => undefined
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      state: "pending",
+      runId: "55"
+    });
+  });
+
+  it("uses legacy ambient verification for pre-pinning operations", async () => {
+    const operation = {
+      repo: "o/r",
+      environment: "dev",
+      context: {},
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "main",
+        environment: "dev",
+        runId: null
+      }
+    };
+    const findWorkflowRun = vi.fn(() => Promise.resolve(null));
+    const { recording, ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
+    );
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => operation,
+        hasCompleteVerificationIdentity: () => true,
+        getSelectedGitHubExecutor: () => undefined,
+        findWorkflowRun
+      })
+    );
+    expect(findWorkflowRun).toHaveBeenCalledWith(
+      "o/r",
+      "verify.yml",
+      123,
+      null
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      state: "pending",
+      runId: null
+    });
+  });
+
   it("caches a discovered run id onto instance state when there is no operation", async () => {
     const state: Record<string, unknown> = { deployDispatchedAt: 123 };
     const findWorkflowRun = vi.fn(() => Promise.resolve(555));
@@ -1325,7 +1399,8 @@ describe("environments — real loopback", () => {
         "octo/app",
         "verify.yml",
         123,
-        null
+        null,
+        expect.objectContaining({ login: "octocat" })
       );
       expect(operation.verification).toEqual({
         dispatchedAt: 123,
@@ -1688,6 +1763,7 @@ function createServerRouteTableForTest(): readonly ServerRoute[] {
     path,
     match: "exact",
     bodyPolicy: method === "POST" ? "json" : "none",
+    mutationPolicy: method === "POST" ? "legacy-exempt" : "none",
     owner: "environments",
     handler: registry[`${method} ${path}`]
   });
