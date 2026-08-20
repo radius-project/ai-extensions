@@ -466,7 +466,7 @@ export function addDeleteStateCheck(yaml: string): string {
   while (
     insertAt < lines.length &&
     !/^ {2}\S/.test(lines[insertAt]) &&
-    !/^\s{6}- name:\s/.test(lines[insertAt])
+    !/^ {6}- name:\s/.test(lines[insertAt])
   ) {
     insertAt++;
   }
@@ -584,9 +584,14 @@ function workflowInputEnd(lines: string[], trigger: string): number {
     new RegExp(`^ {2}${trigger}:\\s*$`).test(line)
   );
   if (triggerIndex === -1) return -1;
-  const inputsIndex = lines.findIndex(
-    (line, index) => index > triggerIndex && /^ {4}inputs:\s*$/.test(line)
-  );
+  let inputsIndex = -1;
+  for (let index = triggerIndex + 1; index < lines.length; index++) {
+    if (/^ {2}\S/.test(lines[index]) || /^\S/.test(lines[index])) break;
+    if (/^ {4}inputs:\s*$/.test(lines[index])) {
+      inputsIndex = index;
+      break;
+    }
+  }
   if (inputsIndex === -1) return -1;
   for (let index = inputsIndex + 1; index < lines.length; index++) {
     if (lines[index].trim() && !/^ {6}/.test(lines[index])) return index;
