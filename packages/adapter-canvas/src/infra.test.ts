@@ -205,6 +205,42 @@ const STALE_AZURE_VERIFY =
 const STALE_AWS_VERIFY =
   "name: verify\njobs:\n  v:\n    run: echo STALE ${{ vars.AWS_ROLE_ARN }}\n";
 
+describe("generated workflow YAML validation", () => {
+  beforeEach(() => {
+    h.upstream = { ...BASE_UPSTREAM };
+  });
+
+  it.each([
+    {
+      name: "deploy environment",
+      generate: () => generateDeployWorkflow("it's-prod", ".radius/app.bicep"),
+      context: 'deploy workflow "run-rad-commands.yml"'
+    },
+    {
+      name: "deploy app file",
+      generate: () => generateDeployWorkflow("prod", ".radius/app's.bicep"),
+      context: 'deploy workflow "run-rad-commands-azure.yml"'
+    },
+    {
+      name: "delete environment",
+      generate: () => generateDeleteWorkflow("it's-prod"),
+      context: 'delete workflow "delete-application.yml"'
+    },
+    {
+      name: "verify environment",
+      generate: () => generateVerifyWorkflow("it's-prod", "azure"),
+      context: 'verify workflow "verify-azure.yml"'
+    }
+  ])(
+    "rejects an invalid $name scalar before commit",
+    async ({ generate, context }) => {
+      await expect(generate()).rejects.toThrow(
+        `Generated ${context} is invalid YAML`
+      );
+    }
+  );
+});
+
 describe("GHCR verification probe", () => {
   it("checks push permission with a non-mutating upload session", () => {
     const workflow = configureVerifyGhcrProbe(

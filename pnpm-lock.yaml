@@ -24,6 +24,9 @@ catalogs:
     vitest:
       specifier: ^4.1.10
       version: 4.1.10
+    yaml:
+      specifier: ^2.9.0
+      version: 2.9.0
 
 overrides:
   read-yaml-file@<2: ^2.1.0
@@ -92,6 +95,9 @@ importers:
       '@radius-project/core':
         specifier: workspace:*
         version: link:../core
+      yaml:
+        specifier: 'catalog:'
+        version: 2.9.0
     devDependencies:
       '@github/copilot-sdk':
         specifier: 'catalog:'
@@ -157,6 +163,9 @@ importers:
       vitest:
         specifier: 'catalog:'
         version: 4.1.10(@types/node@24.13.3)(@vitest/browser-playwright@4.1.10)(@vitest/coverage-v8@4.1.10)(vite@8.2.0(@types/node@24.13.3)(esbuild@0.28.2)(yaml@2.9.0))
+      yaml:
+        specifier: 'catalog:'
+        version: 2.9.0
 
   plugins/radius:
     dependencies:

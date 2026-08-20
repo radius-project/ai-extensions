@@ -26,7 +26,8 @@
   },
   "dependencies": {
     "@radius-project/adapter-shared": "workspace:*",
-    "@radius-project/core": "workspace:*"
+    "@radius-project/core": "workspace:*",
+    "yaml": "catalog:"
   },
   "devDependencies": {
     "@github/copilot-sdk": "catalog:",
