@@ -657,3 +657,29 @@ describe("runEnvironmentDeletion — fail-closed default message", () => {
     expect(op.failure?.message).toMatch(/retry the deletion/i);
   });
 });
+
+describe("runEnvironmentDeletion — heartbeat", () => {
+  it("passes a heartbeat that refreshes activity and persists while the run is polled", async () => {
+    const op = makeOp();
+    let heartbeat: (() => void | Promise<void>) | undefined;
+    const deleteRadiusEnvironment = vi.fn(
+      async (_input, onHeartbeat?: () => void | Promise<void>) => {
+        heartbeat = onHeartbeat;
+        return { outcome: "deleted" as const };
+      }
+    );
+    const persist = vi.fn(async () => {});
+    const ports = makePorts({ deleteRadiusEnvironment, persist });
+
+    await runEnvironmentDeletion(op, ports);
+
+    expect(typeof heartbeat).toBe("function");
+    // Simulate a long, quiet poll: force a stale timestamp, then heartbeat.
+    op.lastActivityAt = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const stale = op.lastActivityAt;
+    persist.mockClear();
+    await heartbeat!();
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(Date.parse(op.lastActivityAt)).toBeGreaterThan(Date.parse(stale));
+  });
+});

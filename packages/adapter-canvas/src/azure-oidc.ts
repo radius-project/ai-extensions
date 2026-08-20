@@ -432,13 +432,28 @@ export function buildAppDeleteArgs({ appId }: { appId: string }): string[] {
 /**
  * Argv for `az ad app federated-credential list`, used to enumerate the
  * credentials on an app registration when deciding whether it is now unused.
+ *
+ * `-o json` is passed explicitly so the command emits a JSON array regardless of
+ * the caller's `core.output` config or `AZURE_CORE_OUTPUT` env. Without it, a
+ * machine configured with `core.output=none` returns empty stdout, which the
+ * parse would read as "no credentials" — falsely marking a still-shared app
+ * registration as unused and offering it for deletion.
  */
 export function buildFederatedCredentialListArgs({
   appId
 }: {
   appId: string;
 }): string[] {
-  return ["ad", "app", "federated-credential", "list", "--id", appId];
+  return [
+    "ad",
+    "app",
+    "federated-credential",
+    "list",
+    "--id",
+    appId,
+    "-o",
+    "json"
+  ];
 }
 
 /**

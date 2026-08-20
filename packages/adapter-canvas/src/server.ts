@@ -2281,7 +2281,8 @@ function runGhWithStdinForDeploy(
 // reported as a `failed` outcome the runner records as a warning, never a throw.
 async function deleteRadiusEnvironmentViaWorkflow(
   repo: string,
-  environment: string
+  environment: string,
+  onHeartbeat?: () => void | Promise<void>
 ): Promise<RadiusEnvDeletionOutcome> {
   const sync = await ensureWorkflowsCurrent(repo, environment, "", [
     DELETE_ENV_DISPATCHER_FILE,
@@ -2311,12 +2312,20 @@ async function deleteRadiusEnvironmentViaWorkflow(
     (p) => p.split("/").pop() === DELETE_ENV_DISPATCHER_FILE
   );
   const dispatchedAt = Date.now();
+  // A unique id echoed into the run's display name (via the dispatcher's
+  // `run-name:`) so the specific run this call started can be matched exactly —
+  // never a concurrent or manual deletion of a different environment.
+  const correlationId = `del-${dispatchedAt.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
   const dispatchArgs = [
     "workflow",
     "run",
     DELETE_ENV_DISPATCHER_FILE,
     "-f",
     "environment=" + environment,
+    "-f",
+    "correlation_id=" + correlationId,
     "--repo",
     repo
   ];
@@ -2346,7 +2355,10 @@ async function deleteRadiusEnvironmentViaWorkflow(
       repo,
       DELETE_ENV_DISPATCHER_FILE,
       dispatchedAt,
-      null
+      null,
+      undefined,
+      undefined,
+      correlationId
     );
     if (runId) break;
   }
@@ -2367,6 +2379,13 @@ async function deleteRadiusEnvironmentViaWorkflow(
         detail.steps || []
       );
       return classified;
+    }
+    if (onHeartbeat) {
+      try {
+        await onHeartbeat();
+      } catch {
+        // A heartbeat failure must never abort an in-flight deletion.
+      }
     }
     await sleepMs(Math.min(delayMs, 15000));
     delayMs = Math.min(Math.ceil(delayMs * 1.5), 15000);
@@ -3956,8 +3975,12 @@ function createInstanceRequestCoordinator(
     if (!op) return;
     if (op.kind === "delete") {
       await runEnvironmentDeletion(op, {
-        deleteRadiusEnvironment: (input) =>
-          deleteRadiusEnvironmentViaWorkflow(input.repo, input.environment),
+        deleteRadiusEnvironment: (input, onHeartbeat) =>
+          deleteRadiusEnvironmentViaWorkflow(
+            input.repo,
+            input.environment,
+            onHeartbeat
+          ),
         runAz: (args) => runCliCommand("az", args),
         deleteGitHubEnvironment: (input) =>
           deleteGitHubEnvironmentIdempotent(input.repo, input.environment),

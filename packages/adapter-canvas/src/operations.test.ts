@@ -23,6 +23,7 @@ import {
   requestStop,
   requireInput,
   resumeAfterInput,
+  touchOperation,
   setExecutionActive,
   recordAzureApp,
   recordCommitState,
@@ -1579,6 +1580,36 @@ describe("keepalive predicate", () => {
     op.verification = { dispatchedAt: Date.now() - 20 * 60 * 1000 };
     op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
     expect(isStale(op)).toBe(true);
+  });
+});
+
+describe("touchOperation", () => {
+  it("refreshes lastActivityAt so a heartbeat keeps a live op from going stale", () => {
+    const op = newOp();
+    op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    expect(isStale(op)).toBe(true);
+    touchOperation(op);
+    expect(isStale(op)).toBe(false);
+  });
+
+  it("writes the provided timestamp", () => {
+    const op = newOp();
+    const now = new Date("2026-08-20T12:00:00Z").toISOString();
+    touchOperation(op, now);
+    expect(op.lastActivityAt).toBe(now);
+  });
+
+  it("leaves a terminal record untouched", () => {
+    const op = newOp();
+    finishSucceeded(op);
+    const before = op.lastActivityAt;
+    touchOperation(op, new Date(Date.now() + 60 * 1000).toISOString());
+    expect(op.lastActivityAt).toBe(before);
+  });
+
+  it("is a no-op for a nullish operation", () => {
+    expect(touchOperation(null)).toBeNull();
+    expect(touchOperation(undefined)).toBeUndefined();
   });
 });
 

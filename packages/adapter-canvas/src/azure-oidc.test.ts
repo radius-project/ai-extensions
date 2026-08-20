@@ -1592,7 +1592,9 @@ describe("federated credential argv builders", () => {
       "federated-credential",
       "list",
       "--id",
-      "app-1"
+      "app-1",
+      "-o",
+      "json"
     ]);
   });
 

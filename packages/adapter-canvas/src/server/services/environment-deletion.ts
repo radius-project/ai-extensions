@@ -40,6 +40,7 @@ import {
   finishSucceeded,
   requireInput,
   hasWarnings,
+  touchOperation,
   INPUT_REQUIRED_STATE,
   STAGE_DELETE_RADIUS_ENV,
   STAGE_DELETE_CREDENTIAL,
@@ -89,11 +90,17 @@ export interface GitHubEnvDeletionOutcome {
 // The narrow I/O ports the runner needs. Everything else is a pure import.
 export interface EnvironmentDeletionPorts {
   // Dispatch the delete-environment workflow and wait for the run to finish.
-  deleteRadiusEnvironment(input: {
-    repo: string;
-    environment: string;
-    provider: string;
-  }): Promise<RadiusEnvDeletionOutcome>;
+  // `onHeartbeat`, when provided, is invoked periodically while the run is being
+  // polled so the caller can keep the operation's activity timestamp fresh and
+  // avoid the staleness sweep abandoning a legitimately long-running deletion.
+  deleteRadiusEnvironment(
+    input: {
+      repo: string;
+      environment: string;
+      provider: string;
+    },
+    onHeartbeat?: () => void | Promise<void>
+  ): Promise<RadiusEnvDeletionOutcome>;
   // Run an `az` command. Never throws; a spawn failure surfaces as a result.
   runAz(args: string[]): Promise<DeletionCommandResult>;
   // Delete the GitHub environment (idempotent).
@@ -164,11 +171,21 @@ export async function runEnvironmentDeletion(
     await ports.persist();
     let outcome: RadiusEnvDeletionOutcome;
     try {
-      outcome = await ports.deleteRadiusEnvironment({
-        repo,
-        environment,
-        provider
-      });
+      // Heartbeat while the delete workflow run is polled so the operation is
+      // not swept as stale (and its single-flight lock released) during a run
+      // that can legitimately take much longer than the idle-stale window.
+      const heartbeat = async () => {
+        touchOperation(op);
+        await ports.persist();
+      };
+      outcome = await ports.deleteRadiusEnvironment(
+        {
+          repo,
+          environment,
+          provider
+        },
+        heartbeat
+      );
     } catch (error) {
       outcome = { outcome: "failed", detail: ports.errorMessage(error) };
     }

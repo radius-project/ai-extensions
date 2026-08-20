@@ -183,15 +183,20 @@ jobs:
       - name: List applications in the environment
         id: list_apps
         if: ${{ inputs.resource_type == 'environment' }}
+        env:
+          # Pass the untrusted resource name through the environment rather than
+          # interpolating it into the shell source, so a crafted name cannot
+          # execute commands in this privileged (OIDC + write) job.
+          RESOURCE_NAME: ${{ inputs.name }}
         run: |
           set -euo pipefail
-          echo "Listing applications deployed to environment '${{ inputs.name }}'..."
+          echo "Listing applications deployed to environment '${RESOURCE_NAME}'..."
           if ! apps_json="$(rad application list --output json)"; then
-            echo "::error::Could not list applications in environment '${{ inputs.name }}'. Refusing to delete the environment so a live application is not orphaned; check Radius connectivity and retry."
+            echo "::error::Could not list applications in environment '${RESOURCE_NAME}'. Refusing to delete the environment so a live application is not orphaned; check Radius connectivity and retry."
             exit 1
           fi
           if ! printf '%s' "$apps_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
-            echo "::error::'rad application list' did not return a JSON array for environment '${{ inputs.name }}'. Refusing to delete the environment; check Radius connectivity and retry."
+            echo "::error::'rad application list' did not return a JSON array for environment '${RESOURCE_NAME}'. Refusing to delete the environment; check Radius connectivity and retry."
             exit 1
           fi
           app_count="$(printf '%s' "$apps_json" | jq 'length')"
@@ -200,7 +205,7 @@ jobs:
             echo "app_count=${app_count}"
             echo "app_names=${app_names}"
           } >> "$GITHUB_OUTPUT"
-          echo "Found ${app_count} application(s) in environment '${{ inputs.name }}'."
+          echo "Found ${app_count} application(s) in environment '${RESOURCE_NAME}'."
 
       # The restored state is per-environment, so any application listed above is
       # deployed to the environment being deleted. Deleting the environment out
@@ -213,14 +218,21 @@ jobs:
       # packages/core/src/workflows/delete.ts.
       - name: Guard - environment has no deployed applications
         if: ${{ inputs.resource_type == 'environment' }}
+        env:
+          # Untrusted values (the resource name and the app names discovered on
+          # the cluster) are passed through the environment and quoted, never
+          # interpolated into the shell source.
+          RESOURCE_NAME: ${{ inputs.name }}
+          APP_COUNT: ${{ steps.list_apps.outputs.app_count }}
+          APP_NAMES: ${{ steps.list_apps.outputs.app_names }}
         run: |
           set -euo pipefail
-          app_count="${{ steps.list_apps.outputs.app_count }}"
-          if [ "${app_count:-0}" -gt 0 ]; then
-            echo "::error::Environment '${{ inputs.name }}' still has ${app_count} deployed application(s): ${{ steps.list_apps.outputs.app_names }}. Delete the application(s) first, then delete the environment."
+          app_count="${APP_COUNT:-0}"
+          if [ "${app_count}" -gt 0 ]; then
+            echo "::error::Environment '${RESOURCE_NAME}' still has ${app_count} deployed application(s): ${APP_NAMES}. Delete the application(s) first, then delete the environment."
             exit 1
           fi
-          echo "✅ No applications are deployed to environment '${{ inputs.name }}'; safe to delete."
+          echo "✅ No applications are deployed to environment '${RESOURCE_NAME}'; safe to delete."
 
       - name: Delete Radius resource
         uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}

@@ -49,6 +49,7 @@ interface WorkflowRun {
   createdAt?: string;
   status?: string;
   conclusion?: string | null;
+  displayTitle?: string;
 }
 
 interface WorkflowRunDetail extends WorkflowRun {
@@ -89,7 +90,8 @@ function parseWorkflowRun(value: unknown): WorkflowRun | null {
     conclusion:
       typeof value.conclusion === "string" || value.conclusion === null ?
         value.conclusion
-      : undefined
+      : undefined,
+    displayTitle: stringField(value.displayTitle)
   };
 }
 
@@ -176,9 +178,14 @@ export async function findWorkflowRun(
   sinceMs: number,
   knownId?: number | string | null,
   executor?: SelectedGhExecutor,
-  afterRunId?: number | string | null
+  afterRunId?: number | string | null,
+  correlationId?: string | null
 ): Promise<number | string | null> {
   if (knownId) return knownId;
+  const fields =
+    correlationId ?
+      "databaseId,status,createdAt,displayTitle"
+    : "databaseId,status,createdAt";
   const runs = await ghJson(
     [
       "run",
@@ -187,7 +194,7 @@ export async function findWorkflowRun(
       "--limit",
       "5",
       "--json",
-      "databaseId,status,createdAt",
+      fields,
       "--repo",
       repo
     ],
@@ -195,6 +202,23 @@ export async function findWorkflowRun(
     15000,
     executor
   );
+  return selectWorkflowRunId(runs, sinceMs, correlationId, afterRunId);
+}
+
+/**
+ * Pick the database id of the workflow run this caller dispatched from a
+ * `gh run list` payload. Runs are newest-first; accept the first created within
+ * ~60s before dispatch (clock-skew tolerance) so stale prior runs are ignored.
+ * When a correlation id is supplied the run's display title must also contain it
+ * (the dispatcher echoes it via `run-name:`), so a concurrent or manual deletion
+ * of a different environment is never mistaken for this one.
+ */
+export function selectWorkflowRunId(
+  runs: unknown,
+  sinceMs: number,
+  correlationId?: string | null,
+  afterRunId?: number | string | null
+): number | string | null {
   if (!Array.isArray(runs)) return null;
   // Prefer a monotonic run-id baseline when the caller captured one just before
   // dispatch: accept the smallest run id that exceeds it, which is the first run
@@ -224,7 +248,11 @@ export async function findWorkflowRun(
     const r = parseWorkflowRun(value);
     if (!r) continue;
     const created = Date.parse(r.createdAt || "") || 0;
-    if (created >= cutoff && r.databaseId !== undefined) return r.databaseId;
+    if (created < cutoff || r.databaseId === undefined) continue;
+    if (correlationId && !(r.displayTitle || "").includes(correlationId)) {
+      continue;
+    }
+    return r.databaseId;
   }
   return null;
 }

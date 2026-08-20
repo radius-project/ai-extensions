@@ -15,6 +15,7 @@
 # persists the updated state again. The Radius environment name defaults to the
 # GitHub Environment name, but can be overridden with the environment_name input.
 name: Radius - Delete Environment
+run-name: Radius - Delete Environment ${{ inputs.environment }} ${{ inputs.correlation_id }}
 
 on:
   workflow_dispatch:
@@ -25,6 +26,10 @@ on:
         default: '{{ENV}}'
       environment_name:
         description: 'Radius environment name to delete (defaults to the GitHub Environment name)'
+        required: false
+        default: ''
+      correlation_id:
+        description: 'Opaque id echoed into the run name so the dispatcher can match this exact run'
         required: false
         default: ''
 

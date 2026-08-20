@@ -204,6 +204,24 @@ describe("P0-C built Radius extension artifact", () => {
       expect(existsSync(join(DIST, "CHANGELOG.md"))).toBe(false);
     }
 
+    // The environment-delete workflow (issue #303) is authored statically in
+    // this repo and must ship inside the plugin so an installed extension can
+    // commit it into the target repo. Assert both the dispatcher and its Azure
+    // provider are bundled under dist/workflows/ and match the source of truth.
+    for (const workflowFile of [
+      "delete-environment.yml",
+      "delete-environment-azure.yml"
+    ]) {
+      const bundled = join(DIST, "workflows", workflowFile);
+      expect(existsSync(bundled)).toBe(true);
+      expect(readFileSync(bundled, "utf8")).toBe(
+        readFileSync(
+          join(REPO_ROOT, ".github", "extension", workflowFile),
+          "utf8"
+        )
+      );
+    }
+
     const sourcePackage = JSON.parse(
       readFileSync(join(REPO_ROOT, "plugins", "radius", "package.json"), "utf8")
     ) as Record<string, unknown>;

@@ -380,6 +380,19 @@ export function setStageState(op: any, stageId: any, state: any): any {
   return op;
 }
 
+/**
+ * Refresh a live operation's activity timestamp without recording a step. Used
+ * as a heartbeat while a long-running background workflow (e.g. a 30-minute
+ * environment-delete run) is being polled, so the staleness sweep does not
+ * abandon the operation — and release its single-flight lock — while the
+ * workflow is still legitimately running.
+ */
+export function touchOperation(op: any, now = nowIso()): any {
+  if (!op || isTerminalState(op.state)) return op;
+  op.lastActivityAt = now;
+  return op;
+}
+
 /** Keep a live operation open while the user supplies information needed to continue. */
 export function requireInput(
   op: any,

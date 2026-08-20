@@ -205,6 +205,30 @@ describe("generateDeleteWorkflow", () => {
     expect(files["delete-environment.yml"]).toContain("default: 'staging'");
     expect(files["delete-environment.yml"]).not.toContain("{{ENV}}");
   });
+
+  it("carries a correlation_id input echoed into run-name so the exact run can be matched", async () => {
+    const files = await generateDeleteWorkflow("dev");
+    const dispatcher = files["delete-environment.yml"];
+    expect(dispatcher).toContain("correlation_id:");
+    expect(dispatcher).toContain(
+      "run-name: Radius - Delete Environment ${{ inputs.environment }} ${{ inputs.correlation_id }}"
+    );
+  });
+
+  it("passes untrusted inputs to shell via env vars, not inline interpolation", async () => {
+    const provider = (await generateDeleteWorkflow("dev"))[
+      "delete-environment-azure.yml"
+    ];
+    // The hardened steps read RESOURCE_NAME/APP_* from `env:` rather than
+    // interpolating `${{ inputs.name }}` / step outputs into shell source.
+    expect(provider).toContain("RESOURCE_NAME: ${{ inputs.name }}");
+    expect(provider).toContain(
+      "APP_NAMES: ${{ steps.list_apps.outputs.app_names }}"
+    );
+    expect(provider).toContain(
+      "Found ${app_count} application(s) in environment '${RESOURCE_NAME}'."
+    );
+  });
 });
 
 describe("GHCR verification probe", () => {
