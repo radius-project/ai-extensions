@@ -274,9 +274,7 @@ describe("parseDeployProgressArtifact", () => {
       )
     ).toBeNull();
     expect(
-      parseDeployProgressArtifact(
-        progressPayload({ sequence: "1" as any })
-      )
+      parseDeployProgressArtifact(progressPayload({ sequence: "1" as any }))
     ).toBeNull();
     expect(
       parseDeployProgressArtifact(progressPayload({ sequence: 0 }))
