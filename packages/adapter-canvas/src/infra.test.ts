@@ -170,7 +170,13 @@ describe("generateDeleteWorkflow", () => {
       addDeleteStateCheck(workflow).match(/  detect-state:/g)
     ).toHaveLength(1);
   });
-});
+
+  it("returns the original YAML when no delete job exists", () => {
+    const workflow =
+      "name: delete-azure\njobs:\n  some-job:\n    runs-on: ubuntu-24.04\n";
+
+    expect(addDeleteStateCheck(workflow)).toBe(workflow);
+  });
 
 describe("syncRepoWorkflows", () => {
   beforeEach(() => {
