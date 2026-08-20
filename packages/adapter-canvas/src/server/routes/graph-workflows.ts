@@ -223,9 +223,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         // Deliberately *not* best-effort, unlike the stale exit above: a failure
         // here falls into the catch and answers 400. Preserved as-is.
         pipeline.discardStagedArtifacts(staged);
+        // Keep persisted provenance in step with what this response reports, so
+        // a later page render cannot disagree with the page it just answered.
+        state.graphFromWorkspace = selection.fromWorkspace;
         return json(200, {
           reload: false,
           resources: state.graphResources,
+          fromWorkspace: selection.fromWorkspace,
           cached: true
         });
       }
@@ -269,7 +273,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         state.graphLoaded = true;
         state.graphDefinitionHash = definitionHash;
       }
-      return json(200, { reload: !data.refresh, resources });
+      return json(200, {
+        reload: !data.refresh,
+        resources,
+        fromWorkspace: selection.fromWorkspace
+      });
     } catch (e) {
       return json(400, { error: dependencies.errorMessage(e) });
     }
