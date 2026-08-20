@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -10,7 +11,11 @@ import {
   isWorkspaceSelection,
   resolveSessionId,
   resolvePersistedSessionId,
-  workspaceFileExists
+  workspaceFileExists,
+  fetchWorkspaceTree,
+  isWorkspacePath,
+  workspaceHeadCommit,
+  workspaceSourceChangedSince
 } from "./workspace.js";
 
 // The SDK sets session.workspacePath to the per-session STATE directory
@@ -278,5 +283,256 @@ describe("workspaceFileExists", () => {
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// The origin record records the commit a model was generated from, and this
+// is the other half of that comparison. An unresolvable commit must read as
+// "unknown" ("") rather than as drift, because drift triggers a regeneration
+// that overwrites the user's model.
+describe("workspaceHeadCommit", () => {
+  it("resolves the commit the worktree is on", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-head-"));
+    try {
+      const git = (...args: string[]) =>
+        execFileSync("git", args, { cwd: dir });
+      git("init", "--quiet", "--initial-branch", "main");
+      git("config", "user.email", "radius@example.invalid");
+      git("config", "user.name", "Radius Test");
+      await fs.writeFile(path.join(dir, "file.txt"), "content\n");
+      git("add", ".");
+      git("commit", "--quiet", "-m", "first");
+      const expected = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir })
+        .toString()
+        .trim();
+
+      expect(await workspaceHeadCommit(dir)).toBe(expected);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves empty for a directory that is not a checkout", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-head-"));
+    try {
+      expect(await workspaceHeadCommit(dir)).toBe("");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["an empty path", ""],
+    ["a null path", null],
+    ["an undefined path", undefined]
+  ])("resolves empty for %s", async (_label, value) => {
+    expect(await workspaceHeadCommit(value)).toBe("");
+  });
+});
+
+// The freshness check hinges on this: committing a generated model advances HEAD
+// past the commit that model recorded, so a plain commit comparison would mark
+// every committed model stale forever. Only changes OUTSIDE .radius/ count.
+describe("workspaceSourceChangedSince", () => {
+  async function checkout(): Promise<{ dir: string; first: string }> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-drift-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir });
+    git("init", "--quiet", "--initial-branch", "main");
+    git("config", "user.email", "radius@example.invalid");
+    git("config", "user.name", "Radius Test");
+    await fs.mkdir(path.join(dir, "src"), { recursive: true });
+    await fs.writeFile(path.join(dir, "src", "app.js"), "console.log(1)\n");
+    git("add", ".");
+    git("commit", "--quiet", "-m", "source");
+    const first = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir })
+      .toString()
+      .trim();
+    return { dir, first };
+  }
+
+  const commitAll = (dir: string, message: string) => {
+    execFileSync("git", ["add", "."], { cwd: dir });
+    execFileSync("git", ["commit", "--quiet", "-m", message], { cwd: dir });
+  };
+
+  it("is false when the only later commit touched the model directory", async () => {
+    const { dir, first } = await checkout();
+    try {
+      await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+      await fs.writeFile(
+        path.join(dir, ".radius", "app.bicep"),
+        "resource {}\n"
+      );
+      await fs.writeFile(path.join(dir, ".radius", "app.origin.json"), "{}\n");
+      commitAll(dir, "add model");
+
+      expect(await workspaceSourceChangedSince(dir, first)).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is true when application source changed after the recorded commit", async () => {
+    const { dir, first } = await checkout();
+    try {
+      await fs.writeFile(path.join(dir, "src", "app.js"), "console.log(2)\n");
+      commitAll(dir, "change source");
+
+      expect(await workspaceSourceChangedSince(dir, first)).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is true when a source change rides along with a model change", async () => {
+    const { dir, first } = await checkout();
+    try {
+      await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+      await fs.writeFile(
+        path.join(dir, ".radius", "app.bicep"),
+        "resource {}\n"
+      );
+      await fs.writeFile(path.join(dir, "src", "app.js"), "console.log(3)\n");
+      commitAll(dir, "model and source");
+
+      expect(await workspaceSourceChangedSince(dir, first)).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is false when nothing was committed after the recorded commit", async () => {
+    const { dir, first } = await checkout();
+    try {
+      expect(await workspaceSourceChangedSince(dir, first)).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is undefined when git cannot answer, so the caller falls back", async () => {
+    const { dir } = await checkout();
+    try {
+      expect(
+        await workspaceSourceChangedSince(dir, "0".repeat(40))
+      ).toBeUndefined();
+      expect(await workspaceSourceChangedSince("", "abc")).toBeUndefined();
+      expect(await workspaceSourceChangedSince(dir, "")).toBeUndefined();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// The walker prunes directories using the skip list that packages/core owns, so
+// that a vendored Dockerfile is ignored identically here and on the remote tree
+// listing, which prunes nothing of its own. A regression in that shared list
+// would silently make one of the two paths see files the other does not.
+describe("fetchWorkspaceTree", () => {
+  const state = {
+    workspacePath: "",
+    workspaceRepo: "acme/widgets",
+    workspaceBranch: "main",
+    contextRepo: "acme/widgets",
+    contextBranch: "main"
+  };
+
+  it("lists application files and prunes vendored and generated directories", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-tree-"));
+    try {
+      await fs.mkdir(path.join(dir, "services", "api"), { recursive: true });
+      await fs.mkdir(path.join(dir, "node_modules", "pkg"), {
+        recursive: true
+      });
+      await fs.mkdir(path.join(dir, "dist"), { recursive: true });
+      await fs.mkdir(path.join(dir, ".cache"), { recursive: true });
+      await fs.writeFile(path.join(dir, ".cache", "Dockerfile"), "FROM x\n");
+      await fs.writeFile(path.join(dir, ".env"), "TOKEN=x\n");
+      await fs.writeFile(path.join(dir, "Dockerfile"), "FROM scratch\n");
+      await fs.writeFile(
+        path.join(dir, "services", "api", "main.go"),
+        "package main\n"
+      );
+      await fs.writeFile(
+        path.join(dir, "node_modules", "pkg", "Dockerfile"),
+        "FROM scratch\n"
+      );
+      await fs.writeFile(path.join(dir, "dist", "bundle.js"), "//\n");
+
+      const paths = await fetchWorkspaceTree(
+        { ...state, workspacePath: dir },
+        "acme/widgets",
+        "main"
+      );
+
+      expect(paths?.sort()).toEqual([
+        ".env",
+        "Dockerfile",
+        "services/api/main.go"
+      ]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null for a selection that is not the worktree", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-tree-"));
+    try {
+      expect(
+        await fetchWorkspaceTree(
+          { ...state, workspacePath: dir },
+          "acme/widgets",
+          "feat"
+        )
+      ).toBeNull();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null rather than an empty listing when the worktree cannot be walked", async () => {
+    expect(
+      await fetchWorkspaceTree(
+        { ...state, workspacePath: path.join(os.tmpdir(), "rad-tree-absent") },
+        "acme/widgets",
+        "main"
+      )
+    ).toBeNull();
+  });
+});
+
+// Decides whether a worktree listing is evidence about a caller-named target.
+// A prefix match would wrongly claim a sibling directory, and an unresolved
+// compare would let `..` walk out of the tree, so both are covered directly.
+describe("isWorkspacePath", () => {
+  const root = path.resolve("/workspace");
+
+  it.each([
+    ["the root itself", root],
+    ["a trailing slash", `${root}/`],
+    ["a dot form", `${root}/.`],
+    ["a subdirectory", path.join(root, "services", "api")],
+    ["a redundant traversal that stays inside", `${root}/services/../services`]
+  ])("accepts %s", (_label: string, candidate: string) => {
+    expect(isWorkspacePath(root, candidate)).toBe(true);
+  });
+
+  it.each([
+    ["a sibling sharing the root's prefix", `${root}-other`],
+    ["a traversal that escapes", `${root}/../elsewhere`],
+    ["an unrelated absolute path", path.resolve("/somewhere/else")],
+    ["the parent directory", path.dirname(root)]
+  ])("rejects %s", (_label: string, candidate: string) => {
+    expect(isWorkspacePath(root, candidate)).toBe(false);
+  });
+
+  it("rejects when either side is missing", () => {
+    expect(isWorkspacePath("", root)).toBe(false);
+    expect(isWorkspacePath(root, "")).toBe(false);
+    expect(isWorkspacePath(null, undefined)).toBe(false);
+  });
+
+  it("accepts either separator, since the value arrives as agent-authored text", () => {
+    expect(isWorkspacePath("/workspace", "\\workspace\\services")).toBe(true);
   });
 });

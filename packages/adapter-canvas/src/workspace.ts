@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { IGNORED_SOURCE_DIRS } from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 
 export interface CanvasSessionWorkspace {
@@ -28,18 +29,6 @@ export interface WorkspaceGitHub {
   treePaths(requestedRepo: string): Promise<string[]>;
 }
 
-const IGNORED_DIRS = new Set([
-  ".git",
-  "node_modules",
-  "dist",
-  "build",
-  "coverage",
-  ".next",
-  ".turbo",
-  ".venv",
-  "venv"
-]);
-
 function runGit(
   workspacePath: string | null | undefined,
   args: readonly string[]
@@ -55,6 +44,29 @@ function runGit(
       { timeout: 5000, encoding: "utf8" },
       (err, stdout) => {
         resolve(err ? "" : stdout.trim());
+      }
+    );
+  });
+}
+
+// runGit collapses "git failed" and "git printed nothing" into the same empty
+// string, which is fine for a value read but not for a question whose honest
+// answer can be "nothing". This variant keeps the two apart.
+function runGitResult(
+  workspacePath: string | null | undefined,
+  args: readonly string[]
+): Promise<{ ok: boolean; stdout: string }> {
+  return new Promise((resolve) => {
+    if (!workspacePath) {
+      resolve({ ok: false, stdout: "" });
+      return;
+    }
+    execFile(
+      "git",
+      ["-C", workspacePath, ...args],
+      { timeout: 5000, encoding: "utf8" },
+      (err, stdout) => {
+        resolve({ ok: !err, stdout: err ? "" : stdout.trim() });
       }
     );
   });
@@ -272,6 +284,33 @@ export function toSafeRepoRelPath(input: unknown): string {
   return rel;
 }
 
+// Whether a caller-supplied path denotes the worktree or something inside it.
+//
+// Used to decide whether a worktree listing is evidence about the target a
+// caller named. A subdirectory qualifies: if the whole worktree contains no
+// Dockerfile, neither does any directory within it, so the listing answers the
+// question for a subdirectory too.
+//
+// Resolves both sides before comparing, so `..` cannot walk out and a sibling
+// whose name merely starts with the root (`/workspace-other` against
+// `/workspace`) is not mistaken for a child.
+export function isWorkspacePath(
+  workspacePath: string | null | undefined,
+  candidate: string | null | undefined
+): boolean {
+  if (!workspacePath || !candidate) return false;
+  // Accept either separator on either side: the value reaches us as
+  // agent-authored text, and forward slashes resolve correctly on Windows too.
+  const toSlashes = (value: string) => value.replace(/\\/g, "/");
+  try {
+    const root = path.resolve(toSlashes(workspacePath));
+    const resolved = path.resolve(toSlashes(candidate));
+    return resolved === root || resolved.startsWith(root + path.sep);
+  } catch {
+    return false;
+  }
+}
+
 function safeWorkspacePath(
   workspacePath: string | null | undefined,
   repoPath: string | null | undefined
@@ -358,6 +397,49 @@ export async function fetchWorkspaceFile(
   return await readWorkspaceFile(state.workspacePath, repoPath);
 }
 
+// Commit the working tree is currently on. Used to tell whether a generated
+// application model still describes the branch's source. Resolves "" when there
+// is no workspace, no git, or no commit yet. Callers must treat that as "the
+// source revision is unknown" rather than as drift.
+export async function workspaceHeadCommit(
+  workspacePath: string | null | undefined
+): Promise<string> {
+  return await runGit(workspacePath, ["rev-parse", "HEAD"]);
+}
+
+// Paths the generator owns: the `.radius` directory, and the root-level app
+// model and origin record that an older layout keeps beside it. Changes confined
+// to these are not application-source changes, so committing a regenerated model
+// does not read as a reason to regenerate it again.
+const GENERATED_PATHS = [".radius", "app.bicep", "app.origin.json"];
+
+// Whether application source changed between `sinceCommit` and HEAD, ignoring
+// the paths the generator owns. Resolves undefined when git cannot answer (no
+// workspace, unknown commit, shallow clone), so the caller can fall back rather
+// than read silence as "nothing changed".
+//
+// The exclusion is the point: committing a freshly generated model advances HEAD
+// past the commit that model recorded, so a plain commit comparison would make
+// every committed model instantly stale, regenerate it, and stale it again on
+// the next commit. Only .radius/ changed in that commit, so this reports false.
+export async function workspaceSourceChangedSince(
+  workspacePath: string | null | undefined,
+  sinceCommit: string | null | undefined
+): Promise<boolean | undefined> {
+  if (!workspacePath || !sinceCommit) return undefined;
+  const result = await runGitResult(workspacePath, [
+    "diff",
+    "--name-only",
+    sinceCommit,
+    "HEAD",
+    "--",
+    ".",
+    ...GENERATED_PATHS.map((path) => `:(exclude)${path}`)
+  ]);
+  if (!result.ok) return undefined;
+  return result.stdout.length > 0;
+}
+
 // Absolute path to the app-graph.json that should sit next to the given
 // repo-relative app.bicep path inside the local workspace (e.g.
 // `.radius/app.bicep` -> `.radius/app-graph.json`, root `app.bicep` ->
@@ -409,7 +491,7 @@ async function walkWorkspace(
     if (entry.name.startsWith(".") && entry.name !== ".radius") {
       if (entry.isDirectory() && entry.name !== ".github") continue;
     }
-    if (entry.isDirectory() && IGNORED_DIRS.has(entry.name)) continue;
+    if (entry.isDirectory() && IGNORED_SOURCE_DIRS.has(entry.name)) continue;
 
     const rel = dir ? `${dir}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {

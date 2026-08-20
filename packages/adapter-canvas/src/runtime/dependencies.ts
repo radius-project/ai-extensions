@@ -41,8 +41,21 @@ export interface WorkspaceDependencies {
     repo: string,
     branch: string
   ): Promise<string | null>;
+  // Repo-relative paths in the local worktree, or null when the selection is not
+  // the workspace or the tree could not be walked. Null is distinct from an
+  // empty list on purpose: a listing that failed proves nothing about the
+  // repository's contents.
+  fetchWorkspaceTree(
+    state: CanvasState,
+    repo: string | null | undefined,
+    branch: string | null | undefined
+  ): Promise<string[] | null>;
   parseRepoFromRemote(remoteUrl: unknown): string;
   toSafeRepoRelPath(input: unknown): string;
+  isWorkspacePath(
+    workspacePath: string | null | undefined,
+    candidate: string | null | undefined
+  ): boolean;
   workspaceFileExists(worktree: string, relPath: string): Promise<boolean>;
 }
 
@@ -246,6 +259,41 @@ export interface ProcessDependencies {
   ): Promise<{ stdout: string; stderr: string }>;
 }
 
+// Facts needed to decide whether an existing application model still describes
+// the branch it sits on. Grouped into one narrow port so the freshness check has
+// a single seam: a graph open reads an origin record, a head commit, and the installed
+// generator version, and nothing else.
+export interface AppModelDependencies {
+  // Installed generator (radius-app-bicep) version, or "" when unresolvable.
+  generatorVersion(): string;
+  // Commit the local worktree is on. "" when it cannot be resolved.
+  workspaceHeadCommit(
+    workspacePath: string | null | undefined
+  ): Promise<string>;
+  // Whether application source (excluding the model's own directory) changed
+  // between a recorded commit and the worktree head. undefined when git cannot
+  // answer, so the caller falls back instead of reading silence as "unchanged".
+  workspaceSourceChangedSince(
+    workspacePath: string | null | undefined,
+    sinceCommit: string
+  ): Promise<boolean | undefined>;
+  // Head commit of a branch on GitHub. "" when it cannot be resolved.
+  branchHeadCommit(repo: string, branch: string): Promise<string>;
+  // Repo-relative file read from the local worktree, when the selection is it.
+  fetchWorkspaceFile(
+    state: CanvasState,
+    repo: string,
+    branch: string,
+    repoPath: string
+  ): Promise<string | null>;
+  // Repo-relative file read from a branch on GitHub.
+  fetchRepoFile(
+    repo: string,
+    branch: string,
+    repoPath: string
+  ): Promise<string | null>;
+}
+
 export interface OperationsDependencies {
   setupInFlight(): boolean;
   hasActiveEnvironmentTasks(instanceId: string): boolean;
@@ -279,6 +327,7 @@ export interface RadiusExtensionDependencies {
   process: ProcessDependencies;
   deploy: DeployRunnerDependencies;
   operations: OperationsDependencies;
+  appModel: AppModelDependencies;
   radiusAppBicepSkill(repoPath?: string): string;
   renderPrDiffMarkdown(
     resources: CanvasGraphResource[],

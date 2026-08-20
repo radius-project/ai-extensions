@@ -25,6 +25,12 @@ export {
 } from "./graph/index.js";
 export type { DeployStatus } from "./graph/index.js";
 export {
+  APP_ORIGIN_REPO_PATH,
+  APP_ORIGIN_ROOT_PATH,
+  evaluateAppModelFreshness,
+  normalizeAppBicep,
+  parseAppOrigin,
+  serializeAppOrigin,
   RECIPE_PACK_REPO,
   RECIPE_PACK_REF,
   recipePackPathForProvider,
@@ -32,11 +38,25 @@ export {
   normalizeRecipeSource,
   deriveConcreteResource,
   parseRecipePack,
+  IGNORED_SOURCE_DIRS,
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+  evaluateAppSource,
+  findDockerfiles,
+  isDockerfilePath,
+  isIgnoredSourcePath,
+  unsupportedAppSourceReport,
   fetchBicepFromRepo,
   fetchRecipePack,
   resolveRecipeOutputs
 } from "./modeling/index.js";
 export type { ConcreteResource, RecipePackEntry } from "./modeling/index.js";
+export type { AppSourceEvaluation, AppSourceStatus } from "./modeling/index.js";
+export type {
+  AppModelFreshness,
+  AppModelFreshnessInput,
+  AppModelFreshnessStatus,
+  AppOrigin
+} from "./modeling/index.js";
 export {
   getPlatform,
   listPlatforms,

@@ -346,13 +346,13 @@ export function defaultFakeCliScenario(): FakeCliScenario {
     commands: [
       {
         tool: "gh",
-        args: ["auth", "status"],
+        args: ["auth", "status", "--hostname", "github.com"],
         env: { GH_TOKEN: "present" },
         stdout: authStatus("acting-user", "GH_TOKEN", ["repo"])
       },
       {
         tool: "gh",
-        args: ["auth", "status"],
+        args: ["auth", "status", "--hostname", "github.com"],
         env: { GH_TOKEN: "absent" },
         stdout: [
           authStatus("repo-user", "keyring", [
@@ -367,7 +367,43 @@ export function defaultFakeCliScenario(): FakeCliScenario {
           ]).replace("Active account: true", "Active account: false")
         ].join("\n")
       },
+      {
+        tool: "gh",
+        args: [
+          "auth",
+          "token",
+          "--hostname",
+          "github.com",
+          "--user",
+          "repo-user"
+        ],
+        stdout: "fixture-repo-token"
+      },
+      {
+        tool: "gh",
+        args: [
+          "auth",
+          "token",
+          "--hostname",
+          "github.com",
+          "--user",
+          "acting-user"
+        ],
+        stdout: "fixture-acting-token"
+      },
       { tool: "gh", args: ["api", "user"], stdout: '{"login":"acting-user"}' },
+      {
+        tool: "gh",
+        args: ["api", "user", "--jq", ".login"],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: "repo-user"
+      },
+      {
+        tool: "gh",
+        args: ["api", "user", "--jq", ".login"],
+        env: { GH_TOKEN: "fixture-acting-token" },
+        stdout: "acting-user"
+      },
       {
         tool: "gh",
         args: ["api", `repos/${REPOSITORY}`],
@@ -375,12 +411,26 @@ export function defaultFakeCliScenario(): FakeCliScenario {
       },
       {
         tool: "gh",
-        args: ["auth", "switch", "--user", "repo-user"],
+        args: [
+          "auth",
+          "switch",
+          "--hostname",
+          "github.com",
+          "--user",
+          "repo-user"
+        ],
         stdout: ""
       },
       {
         tool: "gh",
-        args: ["auth", "switch", "--user", "acting-user"],
+        args: [
+          "auth",
+          "switch",
+          "--hostname",
+          "github.com",
+          "--user",
+          "acting-user"
+        ],
         stdout: ""
       },
       {
@@ -575,6 +625,37 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function createHarnessFetch(delegate: typeof fetch): typeof fetch {
+  return async (input, init) => {
+    const url =
+      typeof input === "string" ? input
+      : input instanceof URL ? input.href
+      : input.url;
+    if (url.startsWith("https://ghcr.io/token?")) {
+      return new Response(JSON.stringify({ token: "fixture-registry-token" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (url.startsWith("https://ghcr.io/v2/") && init?.method === "POST") {
+      return new Response(null, {
+        status: 202,
+        headers: {
+          Location: "/v2/fixture/radius-app/blobs/uploads/fixture-session"
+        }
+      });
+    }
+    if (
+      url ===
+        "https://ghcr.io/v2/fixture/radius-app/blobs/uploads/fixture-session" &&
+      init?.method === "DELETE"
+    ) {
+      return new Response(null, { status: 204 });
+    }
+    return await delegate(input, init);
+  };
+}
+
 export function replaceSharedCredentials(
   target: SharedCredentials,
   replacement: SharedCredentials = {}
@@ -727,6 +808,7 @@ export class CanvasHarness {
   private readonly originalEnv: Record<string, string | undefined>;
   private readonly serverModule: ServerModule;
   private readonly ghModule: GhModule;
+  private readonly originalFetch: typeof fetch;
 
   private constructor(input: {
     page: Page;
@@ -738,6 +820,7 @@ export class CanvasHarness {
     cliLogPath: string;
     workspacePath: string;
     originalEnv: Record<string, string | undefined>;
+    originalFetch: typeof fetch;
     serverModule: ServerModule;
     ghModule: GhModule;
   }) {
@@ -750,6 +833,7 @@ export class CanvasHarness {
     this.cliLogPath = input.cliLogPath;
     this.workspacePath = input.workspacePath;
     this.originalEnv = input.originalEnv;
+    this.originalFetch = input.originalFetch;
     this.serverModule = input.serverModule;
     this.ghModule = input.ghModule;
   }
@@ -775,6 +859,7 @@ export class CanvasHarness {
     const originalEnv = Object.fromEntries(
       envKeys.map((key) => [key, process.env[key]])
     );
+    const originalFetch = globalThis.fetch;
     let serverModule: ServerModule | undefined;
     let ghModule: GhModule | undefined;
     let sharedModule: SharedModule | undefined;
@@ -813,6 +898,7 @@ export class CanvasHarness {
         : path.join(fakeBin, "rad");
       process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
       process.env.RADIUS_CREDENTIALS_FILE ??= CREDENTIAL_STORE_PATH;
+      globalThis.fetch = createHarnessFetch(originalFetch);
 
       // All process and credential-store isolation is in place before the first
       // production import. shared.ts reads its store at module initialization.
@@ -829,7 +915,6 @@ export class CanvasHarness {
         );
       }
       credentialIsolationVerified = true;
-      ghModule.setPreferredGhLogin("");
       ghModule.resetGhIdentityCache();
       await ghModule.primeGhIdentity().catch(() => undefined);
       replaceSharedCredentials(sharedModule.sharedCredentials, {
@@ -860,6 +945,20 @@ export class CanvasHarness {
         instanceId,
         options.initialPage || "environment"
       );
+      const nonceDeadline = Date.now() + 1000;
+      while (
+        (typeof entry.state.browserMutationNonce !== "string" ||
+          entry.state.browserMutationNonce === "") &&
+        Date.now() < nonceDeadline
+      ) {
+        await delay(10);
+      }
+      if (
+        typeof entry.state.browserMutationNonce !== "string" ||
+        entry.state.browserMutationNonce === ""
+      ) {
+        throw new Error("The Canvas server did not publish a mutation nonce.");
+      }
       Object.assign(entry.state, options.initialState || {});
 
       const harness = new CanvasHarness({
@@ -872,6 +971,7 @@ export class CanvasHarness {
         cliLogPath,
         workspacePath,
         originalEnv,
+        originalFetch,
         serverModule,
         ghModule
       });
@@ -895,7 +995,6 @@ export class CanvasHarness {
                 )
             : undefined,
           resetState: () => {
-            ghModule?.setPreferredGhLogin("");
             ghModule?.resetGhIdentityCache();
             if (sharedModule)
               replaceSharedCredentials(sharedModule.sharedCredentials);
@@ -907,6 +1006,8 @@ export class CanvasHarness {
           "Canvas harness construction and cleanup failed.",
           { cause: cleanupError }
         );
+      } finally {
+        globalThis.fetch = originalFetch;
       }
       throw error;
     }
@@ -917,13 +1018,17 @@ export class CanvasHarness {
   }
 
   async seedState(state: CanvasState): Promise<void> {
+    const browserMutationNonce = this.entry.state.browserMutationNonce;
     for (const key of Object.keys(this.entry.state))
       delete this.entry.state[key];
     Object.assign(this.entry.state, state);
+    this.entry.state.browserMutationNonce = browserMutationNonce;
   }
 
   async setScenario(scenario: FakeCliScenario): Promise<void> {
     await fs.writeFile(this.scenarioPath, JSON.stringify(scenario, null, 2));
+    this.ghModule.resetGhIdentityCache();
+    await this.ghModule.primeGhIdentity().catch(() => undefined);
   }
 
   // Replaces the graph the fake `rad app graph` writes, for a test that needs a
@@ -960,7 +1065,6 @@ export class CanvasHarness {
       process.env.GH_TOKEN = value;
       process.env.GITHUB_TOKEN = value;
     }
-    this.ghModule.setPreferredGhLogin("");
     this.ghModule.resetGhIdentityCache();
   }
 
@@ -976,7 +1080,8 @@ export class CanvasHarness {
     const commands = scenario.commands.map((command) => {
       const isKeyringStatus =
         command.tool === "gh" &&
-        JSON.stringify(command.args) === JSON.stringify(["auth", "status"]) &&
+        JSON.stringify(command.args) ===
+          JSON.stringify(["auth", "status", "--hostname", "github.com"]) &&
         command.env?.GH_TOKEN === "absent";
       if (!isKeyringStatus) return command;
       return {
@@ -991,9 +1096,6 @@ export class CanvasHarness {
       };
     });
     await this.setScenario({ ...scenario, commands });
-    this.ghModule.setPreferredGhLogin("");
-    this.ghModule.resetGhIdentityCache();
-    await this.ghModule.primeGhIdentity().catch(() => undefined);
   }
 
   async cliCalls(): Promise<Array<{ tool: string; args: string[] }>> {
@@ -1051,10 +1153,10 @@ export class CanvasHarness {
     await captureCleanupError(errors, async () => {
       await this.ghModule.primeGhIdentity();
     });
-    this.ghModule.setPreferredGhLogin("");
     this.ghModule.resetGhIdentityCache();
     const sharedModule = await import("../../../src/shared.js");
     replaceSharedCredentials(sharedModule.sharedCredentials);
+    globalThis.fetch = this.originalFetch;
     restoreEnvironment(this.originalEnv);
     await captureCleanupError(errors, () =>
       removeDirectoryWithRetries(this.rootDir)

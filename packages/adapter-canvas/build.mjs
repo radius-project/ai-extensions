@@ -216,25 +216,35 @@ function installToLocal() {
     const noticesTmp = `${noticesTo}.tmp-${process.pid}`;
     copyFileSync(noticesFrom, noticesTmp);
     renameSync(noticesTmp, noticesTo);
-    const checkerFrom = join(
-      distDir,
-      "skills",
-      "radius-app-bicep",
-      "scripts",
-      "validate-bicep.mjs"
-    );
-    if (existsSync(checkerFrom)) {
-      const checkerTo = join(
+    // Copy the whole scripts directory rather than naming files one at a time,
+    // so a script added later is installed without touching this list. The
+    // skill resolves <loaded-skill-base> by probing this directory, so a script
+    // missing here resolves to a path that does not exist.
+    const scriptsFrom = join(distDir, "skills", "radius-app-bicep", "scripts");
+    if (existsSync(scriptsFrom)) {
+      const scriptsTo = join(
         installDir,
         "skills",
         "radius-app-bicep",
-        "scripts",
-        "validate-bicep.mjs"
+        "scripts"
       );
-      mkdirSync(dirname(checkerTo), { recursive: true });
-      const tmp = `${checkerTo}.tmp-${process.pid}`;
-      copyFileSync(checkerFrom, tmp);
-      renameSync(tmp, checkerTo);
+      mkdirSync(scriptsTo, { recursive: true });
+      for (const entry of readdirSync(scriptsFrom)) {
+        const to = join(scriptsTo, entry);
+        const tmp = `${to}.tmp-${process.pid}`;
+        copyFileSync(join(scriptsFrom, entry), tmp);
+        renameSync(tmp, to);
+      }
+    }
+    // The plugin manifest carries the version recorded in each origin record.
+    // Without it a dev install resolves no version and the generator-drift
+    // check silently does nothing.
+    const manifestFrom = join(distDir, "package.json");
+    if (existsSync(manifestFrom)) {
+      const manifestTo = join(installDir, "package.json");
+      const tmp = `${manifestTo}.tmp-${process.pid}`;
+      copyFileSync(manifestFrom, tmp);
+      renameSync(tmp, manifestTo);
     }
     // Remove any legacy `.dev-reload` sentinel from older installs so it can't
     // keep the (now opt-in) self-reloader armed on this machine.

@@ -5,6 +5,7 @@ import type {
   AzureAutoSetupOperationPort,
   AzureAutoSetupTempFilePort
 } from "../../../src/server/routes/azure-auto-setup-types.js";
+import { successfulSelectedGhExecutor } from "./selected-gh.js";
 
 export interface AzureAutoSetupDependencyOverrides extends Omit<
   Partial<AzureAutoSetupDependencies>,
@@ -62,6 +63,7 @@ export function createAzureAutoSetupTestDependencies(
       ...operationOverrides
     },
     external: {
+      getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
       getGitHubIdentity: async () => unexpected("getGitHubIdentity"),
       preflightRepoAdmin: async () => unexpected("preflightRepoAdmin"),
       preflightGhcrPackageWriteAccess: async () =>

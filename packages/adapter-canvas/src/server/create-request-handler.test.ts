@@ -67,6 +67,7 @@ describe("createRequestHandler (SU-03)", () => {
       path: "/api/example",
       match: "exact",
       bodyPolicy: "json",
+      mutationPolicy: "legacy-exempt",
       owner: "liveness-source",
       handler: typedHandler
     };
@@ -139,6 +140,7 @@ describe("createRequestHandler (SU-03)", () => {
       path: "/api/example",
       match: "exact",
       bodyPolicy: "json",
+      mutationPolicy: "legacy-exempt",
       owner: "liveness-source",
       handler: typedHandler
     };
@@ -198,6 +200,71 @@ describe("createRequestHandler (SU-03)", () => {
     expect(typedHandler).toHaveBeenCalledTimes(1);
     expect(canvasEntry.page).toBe("planned");
     expect(canvasEntry.state.activeGraphView).toBe("planned");
+  });
+
+  it("rejects nonce-protected routes centrally before the handler reads the body", async () => {
+    const typedHandler = vi.fn();
+    const route: ServerRoute = {
+      method: "POST",
+      path: "/api/protected",
+      match: "exact",
+      bodyPolicy: "json",
+      mutationPolicy: "nonce-required",
+      owner: "operations-status",
+      handler: typedHandler
+    };
+    const validateBrowserMutation = vi.fn(() => false);
+    const handler = createRequestHandler({
+      instanceId: "panel",
+      instances: new Map([["panel", entry()]]),
+      routes: [route],
+      handleUnmatchedRequest: vi.fn(),
+      markActivity: vi.fn(),
+      validateBrowserMutation
+    });
+    const protectedRequest = request(
+      "/api/protected",
+      "POST",
+      '{"mustNotBeRead":true}'
+    );
+    const response = responseRecorder();
+
+    await handler(protectedRequest, response.response);
+
+    expect(response.recorder.status).toBe(403);
+    expect(JSON.parse(response.recorder.body)).toEqual({
+      error: "This browser mutation request is not trusted.",
+      code: "browser-mutation-validation-failed"
+    });
+    expect(validateBrowserMutation).toHaveBeenCalledTimes(1);
+    expect(typedHandler).not.toHaveBeenCalled();
+    expect(protectedRequest.readableDidRead).toBe(false);
+  });
+
+  it("fails closed when a protected route has no validator", async () => {
+    const route: ServerRoute = {
+      method: "POST",
+      path: "/api/protected",
+      match: "exact",
+      bodyPolicy: "json",
+      mutationPolicy: "nonce-required",
+      owner: "operations-status",
+      handler: vi.fn()
+    };
+
+    const handler = createRequestHandler({
+      instanceId: "panel",
+      instances: new Map([["panel", entry()]]),
+      routes: [route],
+      handleUnmatchedRequest: vi.fn(),
+      markActivity: vi.fn()
+    });
+    const response = responseRecorder();
+
+    await handler(request("/api/protected", "POST"), response.response);
+
+    expect(response.recorder.status).toBe(403);
+    expect(route.handler).not.toHaveBeenCalled();
   });
 
   it("preserves page aliases and active-view updates without normalizing unknown pages", () => {
