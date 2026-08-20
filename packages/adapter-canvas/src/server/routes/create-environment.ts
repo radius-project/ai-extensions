@@ -740,8 +740,7 @@ export async function handleCreateEnvironment(
     const actionRequiredDueToPullRequest = !verifyPlan.shouldDispatch;
     const finishSkippedVerificationActionRequired = async (
       terminal: Record<string, unknown>,
-      commitMode: "default_branch" | "pull_request" = prState ? "pull_request"
-      : "default_branch"
+      commitMode: "default_branch" | "pull_request"
     ): Promise<void> => {
       dependencies.recordCommitState(operation, {
         mode: commitMode,
@@ -789,22 +788,28 @@ export async function handleCreateEnvironment(
         "pull_request"
       );
     } else if (skipVerifyDueToRbacDelay) {
-      await finishSkippedVerificationActionRequired({
-        reason: "azure-rbac-propagation",
-        pullRequestUrl: null,
-        userMessage:
-          "Azure role access was just granted for this environment and may take a few minutes to propagate. Verify credentials again from the Environments list after propagation completes."
-      });
+      await finishSkippedVerificationActionRequired(
+        {
+          reason: "azure-rbac-propagation",
+          pullRequestUrl: null,
+          userMessage:
+            "Azure role access was just granted for this environment and may take a few minutes to propagate. Verify credentials again from the Environments list after propagation completes."
+        },
+        prState ? "pull_request" : "default_branch"
+      );
     } else if (!credentialsComplete) {
       // Verify was deliberately not dispatched because the identifying cloud
       // credentials are incomplete (issue #219). There is no run to wait for, so
       // finish the operation as action_required carrying the reason, rather than
       // leaving it in progress polling a verify run that will never exist.
-      await finishSkippedVerificationActionRequired({
-        reason: "credentials-incomplete",
-        pullRequestUrl: pullRequestUrl || null,
-        userMessage: missingCredNote
-      });
+      await finishSkippedVerificationActionRequired(
+        {
+          reason: "credentials-incomplete",
+          pullRequestUrl: pullRequestUrl || null,
+          userMessage: missingCredNote
+        },
+        prState ? "pull_request" : "default_branch"
+      );
     } else {
       dependencies.recordCommitState(operation, {
         mode: prState ? "pull_request" : "default_branch",
