@@ -6,7 +6,7 @@ import {
   createFakeInput,
   createFakeSelect,
   flushPromises,
-  jsonResponse
+  jsonResponse,
 } from "../../../test/support/browser/fakes.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
@@ -15,7 +15,7 @@ import {
   GRAPH_PROGRESS_MS,
   GRAPH_RETRY_MS,
   GRAPH_STALE_RETRY_MS,
-  initializeGraphPage
+  initializeGraphPage,
 } from "./graph-page.js";
 
 interface FixtureOptions {
@@ -35,10 +35,10 @@ function fixture(options: FixtureOptions = {}) {
     repo = "octo/app",
     branchValue = "feature",
     withStatus = true,
-    withWrapper = true,
+    withWrapper = !loaded,
     withBranchSelect = true,
     withButton = true,
-    stateBranch = "feature"
+    stateBranch = "feature",
   } = options;
   const browser = createFakeBrowser();
   const state = createFakeElement(GRAPH_PAGE_STATE_ID);
@@ -47,7 +47,7 @@ function fixture(options: FixtureOptions = {}) {
     branch: stateBranch,
     resources: loaded ? [{ id: "app/web" }] : [],
     loaded,
-    localSource: true
+    localSource: true,
   });
   const app = createFakeSelect("graph-app");
   const branch = createFakeSelect("graph-branch");
@@ -59,25 +59,24 @@ function fixture(options: FixtureOptions = {}) {
   if (withBranchSelect) elements.push(branch);
   if (withButton) elements.push(button);
   if (withWrapper) elements.push(wrapper);
-  const status =
-    withStatus ?
-      createFakeElement(loaded ? "graph-refresh-status" : "graph-status")
+  const status = withStatus
+    ? createFakeElement(loaded ? "graph-refresh-status" : "graph-status")
     : null;
   if (status) elements.push(status);
   for (const element of elements) browser.document.add(element);
   browser.net.handle(
     `/api/list-applications?repo=${encodeURIComponent(repo)}`,
-    () => jsonResponse({ applications: [{ name: "app" }] })
+    () => jsonResponse({ applications: [{ name: "app" }] }),
   );
   browser.net.handle("/api/discover-branches", () =>
     jsonResponse({
       branches: [{ name: "feature", sha: "worktree" }],
-      workspaceBranch: "feature"
-    })
+      workspaceBranch: "feature",
+    }),
   );
   browser.net.handle(
     `/api/list-environments?repo=${encodeURIComponent(repo)}`,
-    () => jsonResponse({ environments: [] })
+    () => jsonResponse({ environments: [] }),
   );
   return { browser, state, app, branch, button, container, wrapper, status };
 }
@@ -87,7 +86,7 @@ function globals(overrides: Record<string, unknown> = {}) {
     radiusRenderGraph: vi.fn(),
     radiusSetGraphLoading: vi.fn(),
     radiusSetGraphError: vi.fn(),
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -101,7 +100,7 @@ describe("initializeGraphPage", () => {
   it("does not retain the entry binding when required globals are missing", () => {
     const { browser, branch } = fixture();
     expect(() => initializeGraphPage(browser.context, {})).toThrow(
-      'Radius browser global "radiusRenderGraph" is not available.'
+      'Radius browser global "radiusRenderGraph" is not available.',
     );
     const teardown = initializeGraphPage(browser.context, globals());
     expect(teardown).not.toBe(NOOP_TEARDOWN);
@@ -113,14 +112,14 @@ describe("initializeGraphPage", () => {
     const { browser, state, branch } = fixture();
     state.textContent = "{";
     expect(() => initializeGraphPage(browser.context, globals())).toThrow(
-      `Radius browser page state "${GRAPH_PAGE_STATE_ID}" is invalid.`
+      `Radius browser page state "${GRAPH_PAGE_STATE_ID}" is invalid.`,
     );
     state.textContent = JSON.stringify({
       repo: "octo/app",
       branch: "feature",
       resources: [],
       loaded: false,
-      localSource: true
+      localSource: true,
     });
     const teardown = initializeGraphPage(browser.context, globals());
     expect(branch.listenerCount("change")).toBe(1);
@@ -130,18 +129,18 @@ describe("initializeGraphPage", () => {
   it("renders a persisted worktree graph and refreshes it", async () => {
     const { browser, branch } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
-      jsonResponse({ resources: [{ id: "app/refreshed" }] })
+      jsonResponse({ resources: [{ id: "app/refreshed" }] }),
     );
     const render = vi.fn();
     const teardown = initializeGraphPage(
       browser.context,
       globals({
-        radiusRenderGraph: render
-      })
+        radiusRenderGraph: render,
+      }),
     );
     initializeGraphPage(
       browser.context,
-      globals({ radiusRenderGraph: render })
+      globals({ radiusRenderGraph: render }),
     );
     await flushPromises();
 
@@ -151,13 +150,13 @@ describe("initializeGraphPage", () => {
       [{ id: "app/web" }],
       expect.objectContaining({
         branch: "feature",
-        localSource: true
-      })
+        localSource: true,
+      }),
     );
     expect(render).toHaveBeenLastCalledWith(
       "graph-container",
       [{ id: "app/refreshed" }],
-      expect.any(Object)
+      expect.any(Object),
     );
     expect(branch.listenerCount("change")).toBe(1);
     teardown();
@@ -170,7 +169,7 @@ describe("initializeGraphPage", () => {
     const load = createDeferred<HttpResponse>();
     browser.net.handle("/api/load-graph", () => load.promise);
     browser.net.handle("/api/progress", () =>
-      jsonResponse({ messages: ["Drafting .radius/app.bicep"] })
+      jsonResponse({ messages: ["Drafting .radius/app.bicep"] }),
     );
     const teardown = initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -178,7 +177,7 @@ describe("initializeGraphPage", () => {
     browser.clock.tick(GRAPH_PROGRESS_MS);
     await flushPromises();
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/progress")
+      browser.net.calls.filter((call) => call.url === "/api/progress"),
     ).toHaveLength(1);
     teardown();
     load.resolve(jsonResponse({ reload: true }));
@@ -190,13 +189,13 @@ describe("initializeGraphPage", () => {
   it("keeps external error detail out of user-visible failures", async () => {
     const { browser, status } = fixture({ loaded: false });
     browser.net.handle("/api/load-graph", () =>
-      Promise.reject(new Error("credential-like detail"))
+      Promise.reject(new Error("credential-like detail")),
     );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
     expect(status?.textContent).toBe(
-      "Failed to generate the application graph."
+      "Failed to generate the application graph.",
     );
     expect(status?.textContent).not.toContain("credential-like");
     expect(browser.logger.errors.length).toBeGreaterThan(0);
@@ -205,7 +204,7 @@ describe("initializeGraphPage", () => {
   it("silently skips the status update when no status element exists", async () => {
     const { browser } = fixture({ loaded: false, withStatus: false });
     browser.net.handle("/api/load-graph", () =>
-      Promise.reject(new Error("network down"))
+      Promise.reject(new Error("network down")),
     );
     expect(() => {
       initializeGraphPage(browser.context, globals());
@@ -239,7 +238,7 @@ describe("initializeGraphPage", () => {
   it("skips the automatic load when no branch is selected", async () => {
     const { browser, button } = fixture({ loaded: false, branchValue: "" });
     browser.net.handle("/api/discover-branches", () =>
-      jsonResponse({ branches: [], workspaceBranch: "" })
+      jsonResponse({ branches: [], workspaceBranch: "" }),
     );
     button.disabled = false;
     initializeGraphPage(browser.context, globals());
@@ -247,14 +246,14 @@ describe("initializeGraphPage", () => {
 
     expect(button.disabled).toBe(false);
     expect(
-      browser.net.calls.some((call) => call.url === "/api/load-graph")
+      browser.net.calls.some((call) => call.url === "/api/load-graph"),
     ).toBe(false);
   });
 
   it("skips the automatic branches follow-up load when already loaded", async () => {
     const { browser, button } = fixture({ loaded: true });
     browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
-      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] }),
     );
     button.disabled = true;
     browser.net.handle("/api/load-graph", () => jsonResponse({}));
@@ -270,7 +269,7 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(status?.textContent).toBe(
-      "Select a branch to generate the application graph."
+      "Select a branch to generate the application graph.",
     );
   });
 
@@ -290,40 +289,41 @@ describe("initializeGraphPage", () => {
     let calls = 0;
     browser.net.handle("/api/load-graph", () => {
       calls++;
-      return calls === 1 ?
-          jsonResponse({
+      return calls === 1
+        ? jsonResponse({
             reload: true,
             resources: [{ id: "app/generated" }],
-            fromWorkspace: false
+            fromWorkspace: false,
           })
         : jsonResponse({ needsAppBicep: true });
     });
     initializeGraphPage(
       browser.context,
       globals({
-        radiusRenderGraph: render
-      })
+        radiusRenderGraph: render,
+      }),
     );
     await flushPromises();
 
     expect(browser.nav.reloads).toBe(0);
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/load-graph")
+      browser.net.calls.filter((call) => call.url === "/api/load-graph"),
     ).toHaveLength(1);
     expect(render).toHaveBeenCalledWith(
       "graph-container",
       expect.arrayContaining([
-        expect.objectContaining({ id: "app/generated" })
+        expect.objectContaining({ id: "app/generated" }),
       ]),
       expect.objectContaining({
         branch: "feature",
-        localSource: false
-      })
+        localSource: false,
+      }),
     );
     expect(status?.textContent).toBe("Application graph ready.");
     expect(status?.style.display).toBe("none");
+    expect(wrapper.children[0]?.id).toBe("graph-container");
     expect(wrapper.children[1]?.textContent).toBe(
-      "Click a node to view source code links."
+      "Click a node to view source code links.",
     );
 
     branch.value = "without-model";
@@ -331,7 +331,7 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(status?.textContent).toContain(
-      "Copilot is generating .radius/app.bicep"
+      "Copilot is generating .radius/app.bicep",
     );
     expect(browser.clock.timeouts).toBe(1);
     expect(calls).toBe(2);
@@ -344,25 +344,25 @@ describe("initializeGraphPage", () => {
       jsonResponse({
         reload: true,
         resources: [],
-        fromWorkspace: true
-      })
+        fromWorkspace: true,
+      }),
     );
     initializeGraphPage(
       browser.context,
       globals({
-        radiusRenderGraph: render
-      })
+        radiusRenderGraph: render,
+      }),
     );
     await flushPromises();
 
     expect(render).toHaveBeenCalledWith(
       "graph-container",
       [],
-      expect.objectContaining({ localSource: true })
+      expect.objectContaining({ localSource: true }),
     );
     expect(status?.style.display).toBe("none");
     expect(wrapper.children[1]?.textContent).toBe(
-      "Click a node to view source code links."
+      "Click a node to view source code links.",
     );
   });
 
@@ -377,7 +377,7 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(status?.textContent).toContain(
-      "Copilot is generating .radius/app.bicep"
+      "Copilot is generating .radius/app.bicep",
     );
     expect(browser.clock.timeouts).toBe(1);
     expect(calls).toBe(1);
@@ -398,8 +398,8 @@ describe("initializeGraphPage", () => {
     let calls = 0;
     browser.net.handle("/api/load-graph", () => {
       calls++;
-      return calls === 1 ?
-          jsonResponse({ stale: true })
+      return calls === 1
+        ? jsonResponse({ stale: true })
         : jsonResponse({ reload: true });
     });
     initializeGraphPage(browser.context, globals());
@@ -418,17 +418,17 @@ describe("initializeGraphPage", () => {
     const { browser, status } = fixture({ loaded: false });
     const setError = vi.fn();
     browser.net.handle("/api/load-graph", () =>
-      jsonResponse({ error: "app.bicep is invalid" })
+      jsonResponse({ error: "app.bicep is invalid" }),
     );
     initializeGraphPage(
       browser.context,
-      globals({ radiusSetGraphError: setError })
+      globals({ radiusSetGraphError: setError }),
     );
     await flushPromises();
 
     expect(setError).toHaveBeenCalledWith(
       "graph-container",
-      "app.bicep is invalid"
+      "app.bicep is invalid",
     );
     expect(status?.textContent).toBe("Error: app.bicep is invalid");
   });
@@ -442,7 +442,7 @@ describe("initializeGraphPage", () => {
     branch.value = "another";
     branch.dispatch("change");
     expect(status?.textContent).toContain(
-      "Checking the selected branch for .radius/app.bicep"
+      "Checking the selected branch for .radius/app.bicep",
     );
     await flushPromises();
 
@@ -453,25 +453,24 @@ describe("initializeGraphPage", () => {
     const { browser, branch } = fixture({
       loaded: true,
       withStatus: false,
-      withWrapper: false
     });
     const first = { update: vi.fn(() => first), destroy: vi.fn() };
     const render = vi.fn().mockReturnValueOnce(first);
     let calls = 0;
     browser.net.handle("/api/load-graph", () => {
       calls++;
-      return calls === 1 ?
-          jsonResponse({})
+      return calls === 1
+        ? jsonResponse({})
         : jsonResponse({
             resources: [{ id: "app/remote" }],
-            fromWorkspace: false
+            fromWorkspace: false,
           });
     });
     initializeGraphPage(
       browser.context,
       globals({
-        radiusRenderGraph: render
-      })
+        radiusRenderGraph: render,
+      }),
     );
     await flushPromises();
 
@@ -484,8 +483,8 @@ describe("initializeGraphPage", () => {
       [{ id: "app/remote" }],
       expect.objectContaining({
         branch: "remote",
-        localSource: false
-      })
+        localSource: false,
+      }),
     );
     expect(first.destroy).toHaveBeenCalledTimes(1);
     expect(first.update).not.toHaveBeenCalled();
@@ -495,7 +494,7 @@ describe("initializeGraphPage", () => {
   it("surfaces a regenerate error message returned by the server", async () => {
     const { browser, branch, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
-      jsonResponse({ error: "cannot regenerate" })
+      jsonResponse({ error: "cannot regenerate" }),
     );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -510,7 +509,7 @@ describe("initializeGraphPage", () => {
   it("keeps regenerate error detail out of user-visible failures", async () => {
     const { browser, branch, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
-      Promise.reject(new Error("secret-shaped detail"))
+      Promise.reject(new Error("secret-shaped detail")),
     );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -520,7 +519,7 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(status?.textContent).toBe(
-      "Failed to generate the application graph."
+      "Failed to generate the application graph.",
     );
     expect(status?.textContent).not.toContain("secret-shaped");
     expect(browser.logger.errors.length).toBeGreaterThan(0);
@@ -558,7 +557,7 @@ describe("initializeGraphPage", () => {
     initializeGraphPage(browser.context, globals());
     await flushPromises();
     const callsBeforeChange = browser.net.calls.filter(
-      (call) => call.url === "/api/load-graph"
+      (call) => call.url === "/api/load-graph",
     ).length;
 
     branch.value = "another";
@@ -566,7 +565,7 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/load-graph").length
+      browser.net.calls.filter((call) => call.url === "/api/load-graph").length,
     ).toBe(callsBeforeChange);
   });
 
@@ -574,7 +573,7 @@ describe("initializeGraphPage", () => {
     const { browser, button, app } = fixture({ loaded: false });
     browser.net.handle("/api/load-graph", () => jsonResponse({}));
     browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
-      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] }),
     );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -595,11 +594,11 @@ describe("initializeGraphPage", () => {
     const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
     const render = vi.fn(() => controller);
     browser.net.handle("/api/load-graph", () =>
-      jsonResponse({ resources: [{ id: "app/refreshed" }] })
+      jsonResponse({ resources: [{ id: "app/refreshed" }] }),
     );
     initializeGraphPage(
       browser.context,
-      globals({ radiusRenderGraph: render })
+      globals({ radiusRenderGraph: render }),
     );
     await flushPromises();
 
@@ -617,11 +616,11 @@ describe("initializeGraphPage", () => {
       .mockReturnValueOnce(first)
       .mockReturnValueOnce(second);
     browser.net.handle("/api/load-graph", () =>
-      jsonResponse({ resources: [{ id: "app/refreshed" }] })
+      jsonResponse({ resources: [{ id: "app/refreshed" }] }),
     );
     const teardown = initializeGraphPage(
       browser.context,
-      globals({ radiusRenderGraph: render })
+      globals({ radiusRenderGraph: render }),
     );
     await flushPromises();
 
@@ -632,10 +631,60 @@ describe("initializeGraphPage", () => {
     expect(second.destroy).toHaveBeenCalledTimes(1);
   });
 
+  it("re-renders a refreshed graph when the server reports new provenance", async () => {
+    const { browser } = fixture({ loaded: true });
+    const first = { update: vi.fn(() => first), destroy: vi.fn() };
+    const second = { update: vi.fn(() => second), destroy: vi.fn() };
+    const render = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(second);
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        resources: [{ id: "app/refreshed" }],
+        fromWorkspace: false,
+      }),
+    );
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render }),
+    );
+    await flushPromises();
+
+    // update() keeps the options it was rendered with, so changed provenance
+    // only reaches the source links through a fresh render.
+    expect(first.update).not.toHaveBeenCalled();
+    expect(first.destroy).toHaveBeenCalledTimes(1);
+    expect(render).toHaveBeenLastCalledWith(
+      "graph-container",
+      [{ id: "app/refreshed" }],
+      expect.objectContaining({ localSource: false }),
+    );
+  });
+
+  it("keeps page provenance when a graph response omits it", async () => {
+    const { browser } = fixture({ loaded: false });
+    const render = vi.fn();
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ reload: true, resources: [{ id: "app/generated" }] }),
+    );
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render }),
+    );
+    await flushPromises();
+
+    expect(render).toHaveBeenCalledWith(
+      "graph-container",
+      [{ id: "app/generated" }],
+      expect.objectContaining({ localSource: true }),
+    );
+  });
+
   it("surfaces a needsAppBicep refresh message", async () => {
     const { browser, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
-      jsonResponse({ needsAppBicep: true })
+      jsonResponse({ needsAppBicep: true }),
     );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -646,26 +695,26 @@ describe("initializeGraphPage", () => {
   it("surfaces a refresh error message from the server", async () => {
     const { browser, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
-      jsonResponse({ error: "bad refresh" })
+      jsonResponse({ error: "bad refresh" }),
     );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
     expect(status?.textContent).toBe(
-      "Unable to refresh the application graph: bad refresh"
+      "Unable to refresh the application graph: bad refresh",
     );
   });
 
   it("keeps refresh error detail out of user-visible failures", async () => {
     const { browser, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
-      Promise.reject(new Error("secret-refresh-detail"))
+      Promise.reject(new Error("secret-refresh-detail")),
     );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
     expect(status?.textContent).toBe(
-      "Unable to refresh the application graph."
+      "Unable to refresh the application graph.",
     );
     expect(status?.textContent).not.toContain("secret-refresh-detail");
     expect(browser.logger.errors.length).toBeGreaterThan(0);
@@ -685,14 +734,14 @@ describe("initializeGraphPage", () => {
     // The stale refresh must not have re-armed requestAbort after teardown of
     // its own generation, so a subsequent load should proceed normally.
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/load-graph")
+      browser.net.calls.filter((call) => call.url === "/api/load-graph"),
     ).toHaveLength(2);
   });
 
   it("surfaces an error when branches cannot be loaded", async () => {
     const { browser, status } = fixture({ loaded: false });
     browser.net.handle("/api/discover-branches", () =>
-      Promise.reject(new Error("branches unavailable"))
+      Promise.reject(new Error("branches unavailable")),
     );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -723,7 +772,7 @@ describe("initializeGraphPage", () => {
     const load = createDeferred<HttpResponse>();
     browser.net.handle("/api/load-graph", () => load.promise);
     browser.net.handle("/api/progress", () =>
-      Promise.reject(new Error("progress unavailable"))
+      Promise.reject(new Error("progress unavailable")),
     );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -733,8 +782,8 @@ describe("initializeGraphPage", () => {
 
     expect(
       browser.logger.errors.some(
-        (entry) => entry.message === "Radius graph progress request failed."
-      )
+        (entry) => entry.message === "Radius graph progress request failed.",
+      ),
     ).toBe(true);
   });
 
@@ -791,7 +840,7 @@ describe("initializeGraphPage", () => {
   it("resets the graph container wrapper only when it exists", async () => {
     const { browser, container } = fixture({
       loaded: false,
-      withWrapper: false
+      withWrapper: false,
     });
     browser.net.handle("/api/load-graph", () => jsonResponse({}));
     expect(() => {
@@ -864,12 +913,12 @@ describe("initializeGraphPage", () => {
     const { browser, branch, button } = fixture({ loaded: false });
     browser.net.handle("/api/load-graph", () => jsonResponse({}));
     browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
-      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] }),
     );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
     const callsBefore = browser.net.calls.filter(
-      (call) => call.url === "/api/load-graph"
+      (call) => call.url === "/api/load-graph",
     ).length;
 
     branch.value = "";
@@ -878,7 +927,7 @@ describe("initializeGraphPage", () => {
 
     expect(button.disabled).toBe(true);
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/load-graph").length
+      browser.net.calls.filter((call) => call.url === "/api/load-graph").length,
     ).toBe(callsBefore);
   });
 
