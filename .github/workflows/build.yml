@@ -61,6 +61,9 @@ jobs:
   canvas-chromium:
     name: Canvas Chromium
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
     permissions:
       contents: read
     steps:
@@ -82,27 +85,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Chromium
-        run: pnpm exec playwright install --with-deps chromium
-
       - name: Run Canvas browser component tests
         run: pnpm run test:component
 
       - name: Run Chromium Canvas tests
         run: pnpm run test:chromium
 
-      # Failure-only diagnostics. These are traces for debugging a red run, not
-      # an approved visual baseline; golden screenshot review is Phase 7.
-      - name: Upload Chromium failure traces
-        if: failure()
+      - name: Upload Chromium diagnostics and retry-only reports
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: canvas-chromium-traces
+          name: canvas-playwright-artifacts
           path: |
             packages/adapter-canvas/test-results
             packages/adapter-canvas/playwright-report
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
 
   build:
     name: Build plugin dist

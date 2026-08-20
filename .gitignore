@@ -183,6 +183,7 @@ plugins/radius/dist/
 # Playwright failure-only diagnostics (Phase 6 Chromium gate)
 test-results/
 playwright-report/
+playwright-visual-report/
 .playwright/
 
 # Isolated Chromium journey workspaces (swept by the Playwright global teardown)
