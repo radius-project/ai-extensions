@@ -31,7 +31,7 @@ import {
   parseBranchListing,
   parseEnvironmentListing
 } from "../repositories.js";
-import type { BrowserTeardown } from "../lifecycle.js";
+import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type {
   AbortHandle,
   BrowserContext,
@@ -1004,18 +1004,18 @@ export function initializeDeployingPage(
         "Track progress in the deployments list below.";
     }
     if (progressModal) progressModal.style.display = "flex";
-    showInline(
-      "success",
-      `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> to environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`,
-      true
-    );
-    // Auto-dismiss the transient dialog; the deploy keeps running (tracked in
-    // the list below), so the button returns to normal.
-    const autoHide = entry.after(DEPLOY_AUTO_HIDE_MS, () => {
-      if (progressModal) progressModal.style.display = "none";
-      deployBtn.disabled = false;
-      refreshDeployBtn();
-    });
+    let autoHide: ScopeTimer | null = null;
+    const scheduleAutoHide = (): void => {
+      if (autoHide) return;
+      autoHide = entry.after(DEPLOY_AUTO_HIDE_MS, () => {
+        if (progressModal) progressModal.style.display = "none";
+        deployBtn.disabled = false;
+        refreshDeployBtn();
+      });
+    };
+    const cancelAutoHide = (): void => {
+      if (autoHide) entry.cancel(autoHide);
+    };
 
     let failedPolls = 0;
     let wfTicks = 0;
@@ -1035,12 +1035,20 @@ export function initializeDeployingPage(
     // run that was still starting — and `sameAttempt` cannot catch it, because
     // repo and environment are exactly what a redeploy repeats.
     let dispatchAccepted = false;
+    let startNotified = false;
     const wfPoll = entry.every(DEPLOY_WORKFLOW_POLL_MS, () => {
       wfTicks++;
       if (wfTicks > DEPLOY_WORKFLOW_POLL_LIMIT) {
         entry.cancel(wfPoll);
-        entry.cancel(autoHide);
+        cancelAutoHide();
         overrides.delete(key);
+        if (progressModal) progressModal.style.display = "none";
+        deployBtn.disabled = false;
+        refreshDeployBtn();
+        showInline(
+          "error",
+          "Deployment status is taking longer than expected. Check the deployments list or GitHub Actions for the latest status."
+        );
         void loadDeployments(true);
         return;
       }
@@ -1058,12 +1066,32 @@ export function initializeDeployingPage(
               status.attempt.environment === environment);
           if (!sameAttempt) {
             entry.cancel(wfPoll);
-            entry.cancel(autoHide);
+            cancelAutoHide();
             overrides.delete(key);
+            if (progressModal) progressModal.style.display = "none";
+            deployBtn.disabled = false;
+            refreshDeployBtn();
             void loadDeployments(true);
             return;
           }
+          // The server only supplies a run URL after workflow discovery has
+          // resolved a real GitHub Actions run for this attempt.
+          if (
+            status.status === "in_progress" &&
+            status.deployRunUrl &&
+            !startNotified
+          ) {
+            startNotified = true;
+            showInline(
+              "success",
+              `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> to environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`,
+              true
+            );
+            scheduleAutoHide();
+          }
           if (status.status === "failed") {
+            startNotified = true;
+            cancelAutoHide();
             // Delivery of the repair handoff is asynchronous; keep polling
             // until it lands or the server stops retrying.
             if (
@@ -1084,7 +1112,6 @@ export function initializeDeployingPage(
               return;
             }
             entry.cancel(wfPoll);
-            entry.cancel(autoHide);
             overrides.delete(key);
             showDeployFailed({
               app,
@@ -1102,6 +1129,7 @@ export function initializeDeployingPage(
           if (status.status === "success" || status.status === "complete") {
             entry.cancel(wfPoll);
             overrides.delete(key);
+            scheduleAutoHide();
             void loadDeployments(true);
             return;
           }
@@ -1147,7 +1175,7 @@ export function initializeDeployingPage(
           return;
         }
         entry.cancel(wfPoll);
-        entry.cancel(autoHide);
+        cancelAutoHide();
         overrides.delete(key);
         if (progressModal) progressModal.style.display = "none";
         deployBtn.disabled = false;
@@ -1162,7 +1190,7 @@ export function initializeDeployingPage(
       .catch(() => {
         if (!entry.active) return;
         entry.cancel(wfPoll);
-        entry.cancel(autoHide);
+        cancelAutoHide();
         overrides.delete(key);
         if (progressModal) progressModal.style.display = "none";
         deployBtn.disabled = false;
