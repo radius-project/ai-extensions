@@ -13,6 +13,7 @@ import {
   resolvePersistedSessionId,
   workspaceFileExists,
   fetchWorkspaceTree,
+  isWorkspacePath,
   workspaceHeadCommit,
   workspaceSourceChangedSince
 } from "./workspace.js";
@@ -497,5 +498,41 @@ describe("fetchWorkspaceTree", () => {
         "main"
       )
     ).toBeNull();
+  });
+});
+
+// Decides whether a worktree listing is evidence about a caller-named target.
+// A prefix match would wrongly claim a sibling directory, and an unresolved
+// compare would let `..` walk out of the tree, so both are covered directly.
+describe("isWorkspacePath", () => {
+  const root = path.resolve("/workspace");
+
+  it.each([
+    ["the root itself", root],
+    ["a trailing slash", `${root}/`],
+    ["a dot form", `${root}/.`],
+    ["a subdirectory", path.join(root, "services", "api")],
+    ["a redundant traversal that stays inside", `${root}/services/../services`]
+  ])("accepts %s", (_label: string, candidate: string) => {
+    expect(isWorkspacePath(root, candidate)).toBe(true);
+  });
+
+  it.each([
+    ["a sibling sharing the root's prefix", `${root}-other`],
+    ["a traversal that escapes", `${root}/../elsewhere`],
+    ["an unrelated absolute path", path.resolve("/somewhere/else")],
+    ["the parent directory", path.dirname(root)]
+  ])("rejects %s", (_label: string, candidate: string) => {
+    expect(isWorkspacePath(root, candidate)).toBe(false);
+  });
+
+  it("rejects when either side is missing", () => {
+    expect(isWorkspacePath("", root)).toBe(false);
+    expect(isWorkspacePath(root, "")).toBe(false);
+    expect(isWorkspacePath(null, undefined)).toBe(false);
+  });
+
+  it("accepts either separator, since the value arrives as agent-authored text", () => {
+    expect(isWorkspacePath("/workspace", "\\workspace\\services")).toBe(true);
   });
 });

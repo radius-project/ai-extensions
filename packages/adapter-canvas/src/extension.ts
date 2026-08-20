@@ -38,6 +38,7 @@ import {
   fetchWorkspaceBicep,
   fetchWorkspaceFile,
   fetchWorkspaceTree,
+  isWorkspacePath,
   isWorkspaceSelection,
   parseRepoFromRemote,
   resolvePersistedSessionId,
@@ -121,6 +122,7 @@ const dependencies: RadiusExtensionDependencies = {
     fetchWorkspaceTree,
     parseRepoFromRemote,
     toSafeRepoRelPath,
+    isWorkspacePath,
     workspaceFileExists
   },
   github,

@@ -52,6 +52,10 @@ export interface WorkspaceDependencies {
   ): Promise<string[] | null>;
   parseRepoFromRemote(remoteUrl: unknown): string;
   toSafeRepoRelPath(input: unknown): string;
+  isWorkspacePath(
+    workspacePath: string | null | undefined,
+    candidate: string | null | undefined
+  ): boolean;
   workspaceFileExists(worktree: string, relPath: string): Promise<boolean>;
 }
 

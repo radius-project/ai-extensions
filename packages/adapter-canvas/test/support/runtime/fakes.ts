@@ -29,6 +29,7 @@ import {
   resolveRadiusArtifactTarget,
   validateGhcrTargetForRepo
 } from "../../../src/publish-targets.js";
+import { isWorkspacePath } from "../../../src/workspace.js";
 import { renderPrDiffMarkdown } from "../../../src/pr-diff-markdown.js";
 import { createSessionHolder } from "../../../src/runtime/session.js";
 import type { SessionPort } from "../../../src/runtime/session.js";
@@ -211,7 +212,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         if (!raw || raw.includes("..")) throw new Error("invalid path");
         return raw.replace(/^\/+/, "");
       }),
-      workspaceFileExists: vi.fn(async () => true)
+      workspaceFileExists: vi.fn(async () => true),
+      // Real implementation: path confinement is exactly the behavior the gate
+      // depends on, so a hand-rolled fake would test the wrong thing.
+      isWorkspacePath: vi.fn(isWorkspacePath)
     },
     github: {
       getContent: vi.fn(async () => null),

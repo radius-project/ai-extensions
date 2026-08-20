@@ -13,21 +13,6 @@ interface ToolArgs {
   [key: string]: unknown;
 }
 
-// Whether a caller-supplied repository path denotes the workspace the extension
-// can enumerate. Absent means the workspace by default, which is how the tool is
-// invoked in practice. Compared loosely (separator- and trailing-slash-
-// insensitive) because the value reaches us as agent-authored prose.
-function targetsWorkspace(
-  repoPath: string | undefined,
-  workspacePath: string | null | undefined
-): boolean {
-  if (!repoPath) return true;
-  if (!workspacePath) return false;
-  const normalize = (value: string) =>
-    value.replace(/\\/g, "/").replace(/\/+$/, "");
-  return normalize(repoPath) === normalize(workspacePath);
-}
-
 export function createRadiusTools(deps: RadiusExtensionDependencies) {
   const { workspaceState, fetchBicepForBranch, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
@@ -55,11 +40,16 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
       handler: async (args: ToolArgs) => {
         const repoPath = args.repoPath as string | undefined;
         const state = await workspaceState().catch(() => null);
-        // The listing this check can obtain describes the workspace. A caller
-        // naming some other directory is asking about a target the extension
-        // cannot enumerate, and the workspace's contents say nothing about it,
-        // so there is no evidence to refuse on.
-        if (state && targetsWorkspace(repoPath, state.workspacePath)) {
+        // The listing this check can obtain describes the worktree, so it is
+        // evidence about the worktree and anything inside it — a subdirectory
+        // of a tree with no Dockerfile has none either. A caller naming some
+        // other location is asking about a target the extension cannot
+        // enumerate, and there is no evidence to refuse on. An omitted path
+        // means the workspace, which is how the tool is invoked in practice.
+        const targetsWorkspace =
+          !repoPath ||
+          deps.workspace.isWorkspacePath(state?.workspacePath, repoPath);
+        if (state && targetsWorkspace) {
           const source = await evaluateAppSourceForBranch(
             state.contextRepo || "",
             state.contextBranch || "",

@@ -139,6 +139,26 @@ describe("RU-07: radius_generate_app", () => {
     expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
   });
 
+  // A sibling whose name merely starts with the workspace root is not inside
+  // it, and neither is a path that walks back out of it.
+  it.each([
+    ["a sibling with a shared prefix", "/workspace-other"],
+    ["a path that escapes upward", "/workspace/../elsewhere"]
+  ])("does not gate %s", async (_label, repoPath) => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath
+    });
+
+    expect(result).toBe(`SKILL.md content for ${repoPath}`);
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(repoPath);
+  });
+
   // The listing the check can obtain describes the workspace, so it is not
   // evidence about some other directory the caller named.
   it("does not refuse a target outside the workspace on the workspace's contents", async () => {
@@ -160,7 +180,10 @@ describe("RU-07: radius_generate_app", () => {
 
   it.each([
     ["a trailing slash", "/workspace/"],
-    ["Windows separators", "\\workspace"]
+    ["Windows separators", "\\workspace"],
+    ["a dot form", "/workspace/."],
+    ["a subdirectory", "/workspace/services/api"],
+    ["a nested dot form", "/workspace/services/../services/api"]
   ])("still gates the workspace named with %s", async (_label, repoPath) => {
     const { tools, deps } = setup({
       workspaceTreeByRepoBranch: {
