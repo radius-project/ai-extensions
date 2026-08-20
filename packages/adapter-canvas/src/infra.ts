@@ -22,6 +22,7 @@ import {
   DELETE_AWS_FILE
 } from "@radius-project/core";
 import type { DeployWorkflowOptions } from "@radius-project/core";
+import { parse as parseYaml } from "yaml";
 import {
   fetchFileFromRepoResult,
   fetchFileFromRepo,
@@ -84,6 +85,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function assertValidWorkflowYaml(workflow: string, context: string): void {
+  try {
+    parseYaml(workflow);
+  } catch (error) {
+    throw new Error(
+      `Generated ${context} is invalid YAML: ${errorMessage(error)}`,
+      { cause: error }
+    );
+  }
+}
+
 export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
 export { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE };
 
@@ -139,9 +151,11 @@ export async function generateVerifyWorkflow(
   if (!fileName)
     throw new Error(`No verify template for provider "${provider}".`);
   const upstream = await fetchRadiusTemplate(fileName);
-  return configureVerifyGhcrProbe(
+  const workflow = configureVerifyGhcrProbe(
     coreGenerateVerifyWorkflow(env, platform, upstream)
   );
+  assertValidWorkflowYaml(workflow, `verify workflow "${fileName}"`);
+  return workflow;
 }
 
 /**
@@ -238,6 +252,9 @@ export async function generateDeployWorkflow(
       generated[DEPLOY_DISPATCHER_FILE]
     );
   }
+  for (const [file, workflow] of Object.entries(generated)) {
+    assertValidWorkflowYaml(workflow, `deploy workflow "${file}"`);
+  }
   return generated;
 }
 
@@ -270,6 +287,9 @@ export async function generateDeleteWorkflow(
     generated[DELETE_APP_DISPATCHER_FILE] = stripAwsDispatcherJob(
       generated[DELETE_APP_DISPATCHER_FILE]
     );
+  }
+  for (const [file, workflow] of Object.entries(generated)) {
+    assertValidWorkflowYaml(workflow, `delete workflow "${file}"`);
   }
   return generated;
 }
