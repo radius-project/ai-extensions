@@ -117,6 +117,69 @@ function addSafeResumeRequest(op) {
   return op;
 }
 
+// The ledger writes these scenarios repeat. Each names the artifact and how the
+// attempt came by it, so a case states only the part it is about.
+function ledgerAzureApp(op, state, overrides = {}) {
+  recordAzureApp(op, { state, appId: "app-1", ...overrides });
+  return op;
+}
+
+function ledgerEnvironment(op, state, overrides = {}) {
+  recordGitHubEnvironment(op, {
+    state,
+    repo: "contoso/store",
+    name: "dev",
+    ...overrides
+  });
+  return op;
+}
+
+/** Verification handed back for the customer to merge the setup pull request. */
+function requireMerge(op) {
+  finish(op, "action_required", {
+    terminal: { reason: "pr-merge-required" }
+  });
+  return op;
+}
+
+/** Every artifact type a completed rollback reports it removed. */
+function recordEverythingDeleted(op) {
+  for (const artifactType of [
+    "github_environment",
+    "role_assignment",
+    "federated_credential",
+    "service_principal",
+    "azure_app"
+  ]) {
+    recordCleanupDeletion(op, { artifactType });
+  }
+  return op;
+}
+
+/** The command a stopped setup accepts when the customer continues it. */
+function acceptContinuation(op) {
+  return acceptCommand(op, {
+    kind: "continue_setup",
+    attempt: 2,
+    target: "continue"
+  });
+}
+
+// One cleanup pass, whose results all belong to the attempt that ran it.
+function recordCleanupPass(op, state, results = []) {
+  recordCleanupState(op, {
+    state,
+    attempts: 1,
+    results: results.map((result) => ({ attempt: 1, ...result }))
+  });
+  return op;
+}
+
+/** The common shape: a pass that finished but left something behind. */
+function warnedCleanup(op, results) {
+  return recordCleanupPass(op, "succeeded_with_warnings", results);
+}
+
 // A committed workflow file recorded with the provenance a post-commit rollback
 // requires: the branch, the commit, the blob GitHub produced, and the digest of
 // the bytes Radius sent.
@@ -2175,9 +2238,7 @@ describe("schema version 2 migration", () => {
 describe("retry eligibility", () => {
   it("classifies only the failures this code produces as retryable", () => {
     const merge = verifiableOp();
-    finish(merge, "action_required", {
-      terminal: { reason: "pr-merge-required" }
-    });
+    requireMerge(merge);
     expect(classifyVerificationRetry(merge)).toBe(
       "workflow-installation-pending"
     );
@@ -2206,9 +2267,7 @@ describe("retry eligibility", () => {
 
   it("allows verification retry only with complete saved provenance", () => {
     const op = verifiableOp();
-    finish(op, "action_required", {
-      terminal: { reason: "pr-merge-required" }
-    });
+    requireMerge(op);
     expect(canRetryVerification(op)).toMatchObject({
       ok: true,
       classification: "workflow-installation-pending",
@@ -2218,9 +2277,7 @@ describe("retry eligibility", () => {
 
     const noIdentity = verifiableOp();
     noIdentity.verification.workflow = "";
-    finish(noIdentity, "action_required", {
-      terminal: { reason: "pr-merge-required" }
-    });
+    requireMerge(noIdentity);
     expect(canRetryVerification(noIdentity)).toMatchObject({
       ok: false,
       code: "verification-provenance-incomplete"
@@ -2229,9 +2286,7 @@ describe("retry eligibility", () => {
     const noCloudIdentity = verifiableOp();
     noCloudIdentity.setupArtifacts.azureApp.appId = null;
     noCloudIdentity.setupArtifacts.servicePrincipal.appId = null;
-    finish(noCloudIdentity, "action_required", {
-      terminal: { reason: "pr-merge-required" }
-    });
+    requireMerge(noCloudIdentity);
     expect(canRetryVerification(noCloudIdentity).ok).toBe(false);
 
     expect(canRetryVerification(null)).toMatchObject({
@@ -2288,19 +2343,14 @@ describe("retry eligibility", () => {
   it("refuses to continue past a cleanup target it could not identify", () => {
     const op = newOp();
     addSafeResumeRequest(op);
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "role_assignment",
-          target: "Contributor @ /subscriptions/sub",
-          outcome: "skipped",
-          detail: "Missing the Service Principal object id."
-        }
-      ]
-    });
+    warnedCleanup(op, [
+      {
+        artifactType: "role_assignment",
+        target: "Contributor @ /subscriptions/sub",
+        outcome: "skipped",
+        detail: "Missing the Service Principal object id."
+      }
+    ]);
     finish(op, "failed_partial", { failure: { code: "x" } });
     expect(ambiguousSetupOwnership(op.setupArtifacts)).toContain(
       "Service Principal object id"
@@ -2345,40 +2395,32 @@ describe("retry eligibility", () => {
       repo: "contoso/store",
       name: "dev"
     });
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "azure_app",
-          target: "radius (app-1)",
-          outcome: "warning",
-          detail: "Azure CLI returned 429."
-        },
-        {
-          attempt: 1,
-          artifactType: "github_environment",
-          target: "contoso/store:dev",
-          outcome: "warning",
-          detail: "Reused environment."
-        },
-        {
-          attempt: 1,
-          artifactType: "role_assignment",
-          target: "Contributor @ /subs",
-          outcome: "skipped",
-          detail: "Missing object id."
-        },
-        {
-          attempt: 1,
-          artifactType: "service_principal",
-          target: "sp",
-          outcome: "deleted",
-          detail: null
-        }
-      ]
-    });
+    warnedCleanup(op, [
+      {
+        artifactType: "azure_app",
+        target: "radius (app-1)",
+        outcome: "warning",
+        detail: "Azure CLI returned 429."
+      },
+      {
+        artifactType: "github_environment",
+        target: "contoso/store:dev",
+        outcome: "warning",
+        detail: "Reused environment."
+      },
+      {
+        artifactType: "role_assignment",
+        target: "Contributor @ /subs",
+        outcome: "skipped",
+        detail: "Missing object id."
+      },
+      {
+        artifactType: "service_principal",
+        target: "sp",
+        outcome: "deleted",
+        detail: null
+      }
+    ]);
     finish(op, "failed_partial", { failure: { code: "x" } });
     expect(unresolvedCleanupTargets(op)).toEqual([
       {
@@ -2403,19 +2445,14 @@ describe("retry eligibility", () => {
       mode: "default_branch",
       branch: "main"
     });
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "azure_app",
-          target: "radius (app-1)",
-          outcome: "warning",
-          detail: "failed"
-        }
-      ]
-    });
+    warnedCleanup(op, [
+      {
+        artifactType: "azure_app",
+        target: "radius (app-1)",
+        outcome: "warning",
+        detail: "failed"
+      }
+    ]);
     finish(op, "failed_partial", { failure: { code: "x" } });
     expect(canRetryCleanup(op)).toMatchObject({
       ok: false,
@@ -2426,20 +2463,15 @@ describe("retry eligibility", () => {
   it("offers the rollback retry for a workflow file a blocked pass could not read", () => {
     const op = newOp();
     recordCommittedWorkflowFile(op, provenWorkflowFile());
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "workflow_file",
-          target: ".github/workflows/radius-verify-credentials.yml on main",
-          identity: "main:.github/workflows/radius-verify-credentials.yml",
-          outcome: "warning",
-          detail: "Radius could not read the file from GitHub: HTTP 500"
-        }
-      ]
-    });
+    warnedCleanup(op, [
+      {
+        artifactType: "workflow_file",
+        target: ".github/workflows/radius-verify-credentials.yml on main",
+        identity: "main:.github/workflows/radius-verify-credentials.yml",
+        outcome: "warning",
+        detail: "Radius could not read the file from GitHub: HTTP 500"
+      }
+    ]);
     finish(op, "failed_partial", {
       failure: { code: "setup-rollback-blocked" }
     });
@@ -2461,20 +2493,15 @@ describe("retry eligibility", () => {
   it("drops a workflow retry target the ledger no longer holds", () => {
     const op = newOp();
     recordCommittedWorkflowFile(op, provenWorkflowFile());
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "workflow_file",
-          target: ".github/workflows/radius-deploy.yml on main",
-          identity: "main:.github/workflows/radius-deploy.yml",
-          outcome: "warning",
-          detail: "HTTP 500"
-        }
-      ]
-    });
+    warnedCleanup(op, [
+      {
+        artifactType: "workflow_file",
+        target: ".github/workflows/radius-deploy.yml on main",
+        identity: "main:.github/workflows/radius-deploy.yml",
+        outcome: "warning",
+        detail: "HTTP 500"
+      }
+    ]);
     finish(op, "failed_partial", {
       failure: { code: "setup-rollback-blocked" }
     });
@@ -2486,20 +2513,15 @@ describe("retry eligibility", () => {
     const op = newOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });
     recordCommittedWorkflowFile(op, provenWorkflowFile());
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "azure_app",
-          target: "radius (app-1)",
-          identity: "app-1",
-          outcome: "warning",
-          detail: "Azure CLI returned 429."
-        }
-      ]
-    });
+    warnedCleanup(op, [
+      {
+        artifactType: "azure_app",
+        target: "radius (app-1)",
+        identity: "app-1",
+        outcome: "warning",
+        detail: "Azure CLI returned 429."
+      }
+    ]);
     finish(op, "failed_partial", { failure: { code: "x" } });
     expect(canRetryCleanup(op)).toMatchObject({
       ok: true,
@@ -2510,19 +2532,14 @@ describe("retry eligibility", () => {
   it("refuses cleanup retry when nothing is unresolved", () => {
     const op = newOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });
-    recordCleanupState(op, {
-      state: "succeeded",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "azure_app",
-          target: "radius (app-1)",
-          outcome: "deleted",
-          detail: null
-        }
-      ]
-    });
+    recordCleanupPass(op, "succeeded", [
+      {
+        artifactType: "azure_app",
+        target: "radius (app-1)",
+        outcome: "deleted",
+        detail: null
+      }
+    ]);
     finish(op, "failed_partial", { failure: { code: "x" } });
     expect(canRetryCleanup(op)).toMatchObject({
       ok: false,
@@ -2538,9 +2555,7 @@ describe("retry eligibility", () => {
 describe("retry transitions", () => {
   it("keeps the prior verdict in history while reopening the record", () => {
     const op = verifiableOp();
-    finish(op, "action_required", {
-      terminal: { reason: "pr-merge-required" }
-    });
+    requireMerge(op);
     const attempt = beginRetryAttempt(op, "verification");
     expect(attempt).toBe(1);
     expect(op.state).toBe("running");
@@ -2610,9 +2625,7 @@ describe("action projection", () => {
 
   it("offers verification retry after a pull-request handoff", () => {
     const op = verifiableOp();
-    finish(op, "action_required", {
-      terminal: { reason: "pr-merge-required" }
-    });
+    requireMerge(op);
     const actions = projectOperationActions(op);
     expect(actions.map((action) => action.id)).toEqual([
       "retry-verification",
@@ -2630,19 +2643,14 @@ describe("action projection", () => {
     const op = newOp();
     addSafeResumeRequest(op);
     recordAzureApp(op, { state: "created", appId: "app-1" });
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "azure_app",
-          target: "radius (app-1)",
-          outcome: "warning",
-          detail: "Azure CLI returned 429."
-        }
-      ]
-    });
+    warnedCleanup(op, [
+      {
+        artifactType: "azure_app",
+        target: "radius (app-1)",
+        outcome: "warning",
+        detail: "Azure CLI returned 429."
+      }
+    ]);
     finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
     expect(projectOperationActions(op).map((action) => action.id)).toEqual([
       "retry-setup",
@@ -2698,24 +2706,15 @@ describe("partial-state summary", () => {
       scope: "/subscriptions/sub",
       principalObjectId: "sp-1"
     });
-    recordGitHubEnvironment(op, {
-      state: "created_candidate",
-      repo: "contoso/store",
-      name: "dev"
-    });
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "role_assignment",
-          target: "Contributor @ /subscriptions/sub",
-          outcome: "deleted",
-          detail: null
-        }
-      ]
-    });
+    ledgerEnvironment(op, "created_candidate");
+    warnedCleanup(op, [
+      {
+        artifactType: "role_assignment",
+        target: "Contributor @ /subscriptions/sub",
+        outcome: "deleted",
+        detail: null
+      }
+    ]);
     requestStop(op);
     stopAtBoundary(op, "after-role-assignment");
     const summary = projectCleanupSummary(op);
@@ -2985,11 +2984,7 @@ function stoppedWithReusedIdentity(overrides = {}) {
     scope: "/subscriptions/s1",
     principalObjectId: "sp-1"
   });
-  recordGitHubEnvironment(op, {
-    state: "created_candidate",
-    repo: "contoso/store",
-    name: "dev"
-  });
+  ledgerEnvironment(op, "created_candidate");
   requestStop(op);
   stopAtBoundary(op, "after_environment");
   return op;
@@ -3053,11 +3048,7 @@ describe("stopped operations offer continuing and rolling back", () => {
 
     // The customer continued, and that continuation is what failed.
     beginRetryAttempt(stopped, "setup");
-    acceptCommand(stopped, {
-      kind: "continue_setup",
-      attempt: 2,
-      target: "continue"
-    });
+    acceptContinuation(stopped);
     finish(stopped, "failed_partial", {
       failure: { code: "azure-cli-failed", message: "az returned 1" }
     });
@@ -3082,20 +3073,15 @@ describe("stopped operations offer continuing and rolling back", () => {
     const op = stoppedWithCreatedResources();
     beginRetryAttempt(op, "cleanup");
     acceptCommand(op, { kind: "rollback", attempt: 1, target: "cleanup#abc" });
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "azure_app",
-          target: "radius-deploy (app-1)",
-          identity: "app-1",
-          outcome: "warning",
-          detail: "Azure CLI returned 429."
-        }
-      ]
-    });
+    warnedCleanup(op, [
+      {
+        artifactType: "azure_app",
+        target: "radius-deploy (app-1)",
+        identity: "app-1",
+        outcome: "warning",
+        detail: "Azure CLI returned 429."
+      }
+    ]);
     finish(op, "failed_partial", {
       failure: { code: "setup-cleanup-incomplete" }
     });
@@ -3156,11 +3142,7 @@ describe("rollback eligibility", () => {
     const op = addSafeResumeRequest(newOp());
     recordAzureApp(op, { state: "reused", appId: "app-existing" });
     recordServicePrincipal(op, { state: "reused", appId: "app-existing" });
-    recordGitHubEnvironment(op, {
-      state: "created_candidate",
-      repo: "contoso/store",
-      name: "dev"
-    });
+    ledgerEnvironment(op, "created_candidate");
     requestStop(op);
     stopAtBoundary(op, "after_environment");
 
@@ -3258,20 +3240,15 @@ describe("rollback eligibility", () => {
 
   it("offers the rollback retry, not a second first rollback, once cleanup ran", () => {
     const op = stoppedWithCreatedResources();
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "azure_app",
-          target: "radius-deploy (app-1)",
-          identity: "app-1",
-          outcome: "warning",
-          detail: "Azure CLI returned 429."
-        }
-      ]
-    });
+    warnedCleanup(op, [
+      {
+        artifactType: "azure_app",
+        target: "radius-deploy (app-1)",
+        identity: "app-1",
+        outcome: "warning",
+        detail: "Azure CLI returned 429."
+      }
+    ]);
     expect(canStartRollback(op)).toMatchObject({
       ok: false,
       code: "rollback-already-attempted"
@@ -3281,16 +3258,8 @@ describe("rollback eligibility", () => {
 
   it("stops offering to continue once a rollback removed everything", () => {
     const op = stoppedWithCreatedResources();
-    recordCleanupState(op, { state: "succeeded", attempts: 1, results: [] });
-    for (const artifactType of [
-      "github_environment",
-      "role_assignment",
-      "federated_credential",
-      "service_principal",
-      "azure_app"
-    ]) {
-      recordCleanupDeletion(op, { artifactType });
-    }
+    recordCleanupPass(op, "succeeded");
+    recordEverythingDeleted(op);
     expect(provenOwnedCleanupTargets(op)).toEqual([]);
     expect(canContinueSetup(op)).toMatchObject({
       ok: false,
@@ -3397,11 +3366,7 @@ describe("a running rollback owns the operation", () => {
   it("names a running continuation without hiding its resume point", () => {
     const op = stoppedWithCreatedResources();
     beginRetryAttempt(op, "setup");
-    const accepted = acceptCommand(op, {
-      kind: "continue_setup",
-      attempt: 2,
-      target: "continue"
-    });
+    const accepted = acceptContinuation(op);
     setCommandState(op, accepted.command.commandId, "running");
     op.resumeFrom = "workflow_commit";
     expect(projectNextTransition(op)).toEqual({
@@ -3420,16 +3385,8 @@ describe("a running rollback owns the operation", () => {
 
   it("reports a completed rollback as a rollback, not as a bare stop", () => {
     const op = rollbackRunning();
-    for (const artifactType of [
-      "github_environment",
-      "role_assignment",
-      "federated_credential",
-      "service_principal",
-      "azure_app"
-    ]) {
-      recordCleanupDeletion(op, { artifactType });
-    }
-    recordCleanupState(op, { state: "succeeded", attempts: 1, results: [] });
+    recordEverythingDeleted(op);
+    recordCleanupPass(op, "succeeded");
     finish(op, "cancelled", { terminal: { reason: "rollback-complete" } });
     expect(projectOperationHeadline(op)).toMatchObject({
       code: "rollback-complete",
@@ -3458,11 +3415,7 @@ describe("command and projection guards", () => {
   it("finds only the active command of the kinds a route may absorb", () => {
     const op = stoppedWithCreatedResources();
     beginRetryAttempt(op, "setup");
-    const forward = acceptCommand(op, {
-      kind: "continue_setup",
-      attempt: 2,
-      target: "continue"
-    });
+    const forward = acceptContinuation(op);
 
     // A continuation in flight is not a cleanup a rollback request may join.
     expect(findActiveCommand(op, ["rollback", "retry_cleanup"])).toBe(null);
@@ -3532,11 +3485,7 @@ describe("a closed operation never looks like work in progress", () => {
   it("closes any command still open when the operation reaches a terminal state", () => {
     const op = stoppedWithCreatedResources();
     beginRetryAttempt(op, "setup");
-    const accepted = acceptCommand(op, {
-      kind: "continue_setup",
-      attempt: 2,
-      target: "continue"
-    });
+    const accepted = acceptContinuation(op);
     setCommandState(op, accepted.command.commandId, "running");
 
     finish(op, "failed_partial", { failure: { code: "azure-cli-failed" } });
@@ -3564,11 +3513,7 @@ describe("a closed operation never looks like work in progress", () => {
     // be work Radius accepts rather than a silent duplicate.
     const op = stoppedWithCreatedResources();
     beginRetryAttempt(op, "setup");
-    const accepted = acceptCommand(op, {
-      kind: "continue_setup",
-      attempt: 2,
-      target: "continue"
-    });
+    const accepted = acceptContinuation(op);
     setCommandState(op, accepted.command.commandId, "running");
     // A crash mid-continuation: the command is saved as running, the record is
     // latched terminal on restore without the runner ever closing it.
@@ -3594,20 +3539,15 @@ describe("an interrupted rollback still offers a way out", () => {
     // The rollback removed the environment, then the process went away before
     // the attempt could be closed.
     recordCleanupDeletion(op, { artifactType: "github_environment" });
-    recordCleanupState(op, {
-      state: "running",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "github_environment",
-          target: "contoso/store:dev",
-          identity: "contoso/store:dev",
-          outcome: "deleted",
-          detail: null
-        }
-      ]
-    });
+    recordCleanupPass(op, "running", [
+      {
+        artifactType: "github_environment",
+        target: "contoso/store:dev",
+        identity: "contoso/store:dev",
+        outcome: "deleted",
+        detail: null
+      }
+    ]);
 
     // Neither the cleanup retry (which only repeats a finished attempt that
     // warned) nor a completed-attempt check owns this record, so the first
@@ -4001,20 +3941,15 @@ describe("a rollback that removed nothing", () => {
       attempt: 1,
       target: rollback.target
     });
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "workflow_file",
-          target: ".github/workflows/radius-verify-credentials.yml on main",
-          identity: "main:.github/workflows/radius-verify-credentials.yml",
-          outcome: "skipped",
-          detail: "The file changed since Radius committed it."
-        }
-      ]
-    });
+    warnedCleanup(op, [
+      {
+        artifactType: "workflow_file",
+        target: ".github/workflows/radius-verify-credentials.yml on main",
+        identity: "main:.github/workflows/radius-verify-credentials.yml",
+        outcome: "skipped",
+        detail: "The file changed since Radius committed it."
+      }
+    ]);
     finish(op, "failed_partial", {
       failure: {
         code: "setup-rollback-blocked",
@@ -4102,11 +4037,7 @@ describe("exiting a setup", () => {
     const op = reusedOnlyFailure();
     // Radius cannot prove it created this one, so it never deletes it — which
     // is exactly why the customer has to be told it is there.
-    recordGitHubEnvironment(op, {
-      state: "created_candidate",
-      repo: "contoso/store",
-      name: "dev"
-    });
+    ledgerEnvironment(op, "created_candidate");
 
     expect(hasSurvivingCreatedArtifacts(op)).toBe(true);
     expect(summarize(op)).toBe(
@@ -4252,20 +4183,15 @@ describe("exiting a setup", () => {
       attempt: 1,
       target: "cleanup#abc"
     });
-    recordCleanupState(op, {
-      state: "succeeded_with_warnings",
-      attempts: 1,
-      results: [
-        {
-          attempt: 1,
-          artifactType: "azure_app",
-          target: "radius-deploy (app-1)",
-          identity: "app-1",
-          outcome: "warning",
-          detail: "Azure CLI returned 429."
-        }
-      ]
-    });
+    warnedCleanup(op, [
+      {
+        artifactType: "azure_app",
+        target: "radius-deploy (app-1)",
+        identity: "app-1",
+        outcome: "warning",
+        detail: "Azure CLI returned 429."
+      }
+    ]);
     setCommandState(op, accepted.command.commandId, "finished", "warnings");
     finish(op, "failed_partial", {
       failure: { code: "setup-cleanup-incomplete" }
@@ -4333,10 +4259,8 @@ describe("exiting a setup", () => {
 describe("artifact provenance never weakens", () => {
   it("keeps a created App Registration created when a later pass reuses it", () => {
     const op = newOp();
-    recordAzureApp(op, {
-      state: "created",
+    ledgerAzureApp(op, "created", {
       origin: "this_operation",
-      appId: "app-1",
       displayName: "radius-deploy"
     });
 
@@ -4381,19 +4305,9 @@ describe("artifact provenance never weakens", () => {
 
   it("keeps a created GitHub environment created when the next pass finds it present", () => {
     const op = newOp();
-    recordGitHubEnvironment(op, {
-      state: "created",
-      origin: "this_operation",
-      repo: "contoso/store",
-      name: "dev"
-    });
+    ledgerEnvironment(op, "created", { origin: "this_operation" });
 
-    recordGitHubEnvironment(op, {
-      state: "reused",
-      origin: "pre_existing",
-      repo: "contoso/store",
-      name: "dev"
-    });
+    ledgerEnvironment(op, "reused", { origin: "pre_existing" });
 
     expect(op.setupArtifacts.githubEnvironment).toMatchObject({
       state: "created",
@@ -4403,29 +4317,16 @@ describe("artifact provenance never weakens", () => {
 
   it("keeps an unprovable candidate out of reach of a later reuse", () => {
     const op = newOp();
-    recordGitHubEnvironment(op, {
-      state: "created_candidate",
-      repo: "contoso/store",
-      name: "dev"
-    });
+    ledgerEnvironment(op, "created_candidate");
 
-    recordGitHubEnvironment(op, {
-      state: "reused",
-      origin: "pre_existing",
-      repo: "contoso/store",
-      name: "dev"
-    });
+    ledgerEnvironment(op, "reused", { origin: "pre_existing" });
 
     expect(op.setupArtifacts.githubEnvironment.state).toBe("created_candidate");
   });
 
   it("records a genuinely pre-existing resource as reused", () => {
     const op = newOp();
-    recordAzureApp(op, {
-      state: "reused",
-      origin: "pre_existing",
-      appId: "app-1"
-    });
+    ledgerAzureApp(op, "reused", { origin: "pre_existing" });
     expect(op.setupArtifacts.azureApp).toMatchObject({
       state: "reused",
       origin: "pre_existing"
@@ -4459,30 +4360,18 @@ describe("artifact provenance never weakens", () => {
 
   it("lets a rebuilt resource take over a rolled-back slot", () => {
     const op = newOp();
-    recordAzureApp(op, {
-      state: "created",
-      origin: "this_operation",
-      appId: "app-1"
-    });
+    ledgerAzureApp(op, "created", { origin: "this_operation" });
     recordCleanupDeletion(op, { artifactType: "azure_app", identity: "app-1" });
     expect(op.setupArtifacts.azureApp.state).toBe("deleted");
 
-    recordAzureApp(op, {
-      state: "reused",
-      origin: "pre_existing",
-      appId: "app-1"
-    });
+    ledgerAzureApp(op, "reused", { origin: "pre_existing" });
 
     expect(op.setupArtifacts.azureApp.state).toBe("reused");
   });
 
   it("upgrades a reuse to a Radius-earlier-setup reuse but never back", () => {
     const op = newOp();
-    recordAzureApp(op, {
-      state: "reused",
-      origin: "pre_existing",
-      appId: "app-1"
-    });
+    ledgerAzureApp(op, "reused", { origin: "pre_existing" });
     recordAzureApp(op, {
       state: "reused",
       origin: "radius_earlier_setup",
@@ -4490,21 +4379,13 @@ describe("artifact provenance never weakens", () => {
     });
     expect(op.setupArtifacts.azureApp.origin).toBe("radius_earlier_setup");
 
-    recordAzureApp(op, {
-      state: "reused",
-      origin: "pre_existing",
-      appId: "app-1"
-    });
+    ledgerAzureApp(op, "reused", { origin: "pre_existing" });
     expect(op.setupArtifacts.azureApp.origin).toBe("radius_earlier_setup");
   });
 
   it("ignores an empty patch and an operation with no record", () => {
     const op = newOp();
-    recordAzureApp(op, {
-      state: "created",
-      origin: "this_operation",
-      appId: "app-1"
-    });
+    ledgerAzureApp(op, "created", { origin: "this_operation" });
     recordAzureApp(op, null);
     recordServicePrincipal(op, null);
     recordGitHubEnvironment(op, null);
@@ -4528,11 +4409,7 @@ describe("artifact provenance never weakens", () => {
 describe("proving the GitHub environment this setup created", () => {
   function candidate() {
     const op = newOp();
-    recordGitHubEnvironment(op, {
-      state: "created_candidate",
-      repo: "contoso/store",
-      name: "dev"
-    });
+    ledgerEnvironment(op, "created_candidate");
     return op;
   }
 
@@ -4680,17 +4557,11 @@ describe("provenance survives an extension restart", () => {
     const store = envelopeStore();
     const op = newOp();
     addSafeResumeRequest(op);
-    recordAzureApp(op, {
-      state: "created",
+    ledgerAzureApp(op, "created", {
       origin: "this_operation",
-      appId: "app-1",
       displayName: "radius-deploy"
     });
-    recordGitHubEnvironment(op, {
-      state: "created_candidate",
-      repo: "contoso/store",
-      name: "dev"
-    });
+    ledgerEnvironment(op, "created_candidate");
     promoteCreatedGitHubEnvironment(op, {
       repo: "contoso/store",
       name: "dev"
@@ -4798,10 +4669,8 @@ describe("provenance survives an extension restart", () => {
 describe("an unprovable Service Principal", () => {
   function racedServicePrincipal() {
     const op = addSafeResumeRequest(newOp());
-    recordAzureApp(op, {
-      state: "created",
+    ledgerAzureApp(op, "created", {
       origin: "this_operation",
-      appId: "app-1",
       displayName: "radius-deploy"
     });
     recordServicePrincipal(op, {
@@ -4921,12 +4790,7 @@ describe("reuse is explained in the customer's terms", () => {
 
   it("explains a retained resource the confirmed command leaves alone", () => {
     const op = newOp();
-    recordGitHubEnvironment(op, {
-      state: "created",
-      origin: "this_operation",
-      repo: "contoso/store",
-      name: "dev"
-    });
+    ledgerEnvironment(op, "created", { origin: "this_operation" });
     recordCommittedWorkflowFile(op, {
       path: ".github/workflows/radius-verify-credentials.yml",
       mode: "default_branch",

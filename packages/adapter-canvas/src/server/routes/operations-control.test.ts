@@ -20,38 +20,27 @@ import {
 import { routeKey } from "../route-table.js";
 import {
   beginRetryAttempt,
-  buildStages,
-  createOperation,
-  enterStage,
   finish,
   finishSucceeded,
   onOperationTerminal,
   recordAzureApp,
   recordCleanupState,
-  recordCommitState,
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
-  recordServicePrincipal,
   requestStop,
   requireInput,
   stopAtBoundary,
-  STAGE_VERIFY,
-  type OperationControlRecord
+  STAGE_VERIFY
 } from "../../operations.js";
-import type { OperationRecord } from "./operations-status.js";
+import {
+  mergeHandoff,
+  newOperation,
+  retryableSetup,
+  reusedOnlyFailure,
+  stoppedSetup,
+  type OperationFixture
+} from "../../../test/support/server/operation-fixtures.js";
 import type { CanvasServerEntry } from "../types.js";
-
-// `OperationRecord` stays a broad pass-through type (see operations-status.ts),
-// but this suite reads `control`, `journey`, and `failure` back off records it
-// created itself with the real `createOperation`/`finish` functions, so those
-// fields are genuinely present at runtime. Widening the type here — rather than
-// reaching for `as any`/`as unknown as` at each call site — keeps the access
-// typed without loosening the shared route contract.
-type OperationFixture = OperationRecord & {
-  control: OperationControlRecord;
-  journey: { notifiedAt: string | null; [key: string]: unknown };
-  failure: { code: string | null; [key: string]: unknown } | null;
-};
 
 // The terminal announcement is a single process-wide listener, so every test
 // that touches it registers its own and clears it afterwards.
@@ -119,13 +108,6 @@ type ControlHandler = (
   dependencies: OperationsControlDependencies
 ) => Promise<void>;
 
-/**
- * Drive one control handler over a fresh recorder and hand back the recording.
- *
- * Every scenario arranges a saved record, invokes exactly one handler, and
- * reads the status and payload back, so the plumbing is written once and each
- * test keeps only the arrangement and the assertions that make it distinct.
- */
 /** The control path for one action on a saved record. */
 function controlPath(op: { operationId: string }, action: string): string {
   return `/api/operations/${op.operationId}/${action}`;
@@ -140,6 +122,25 @@ async function call(
   const out = recorder();
   await handler(postContext(path, out.response, instanceId), deps);
   return out;
+}
+
+/**
+ * Drive one control handler over a saved record and hand back the recording
+ * with the journal the run wrote.
+ *
+ * Every scenario arranges a record, invokes exactly one handler, and reads the
+ * status, payload, and journal back, so the plumbing is written once and each
+ * test keeps only the arrangement and the assertions that make it distinct.
+ */
+async function drive(
+  handler: ControlHandler,
+  op: OperationFixture,
+  action: string,
+  overrides: Partial<OperationsControlDependencies> = {}
+): Promise<ReturnType<typeof recorder> & { journal: Journal }> {
+  const deps = dependencies({ get: () => op, ...overrides });
+  const out = await call(handler, controlPath(op, action), deps);
+  return Object.assign(out, { journal: deps.journal });
 }
 
 interface Journal {
@@ -184,66 +185,6 @@ function dependencies(
   return Object.assign(base, overrides, { journal });
 }
 
-function newOperation(repo = "contoso/store"): OperationFixture {
-  return createOperation({
-    provider: "azure",
-    repo,
-    environment: "dev",
-    stages: buildStages({ includeIdentity: true })
-  }) as OperationFixture;
-}
-
-function retryableSetup(repo = "contoso/store"): OperationFixture {
-  const op = newOperation(repo);
-  op.resumeRequest = {
-    needsAzureCredentials: true,
-    azure: {},
-    environment: { repo, environment: "dev", provider: "azure" }
-  };
-  recordAzureApp(op, {
-    state: "created",
-    appId: "app-1",
-    displayName: "radius-app"
-  });
-  finish(op, "failed_partial", {
-    failure: { code: "operation-stalled", message: "lost contact" }
-  });
-  return op;
-}
-
-function mergeHandoff({
-  repo = "contoso/store",
-  pullRequestUrl = "https://github.com/contoso/store/pull/7"
-}: { repo?: string; pullRequestUrl?: string | null } = {}): OperationRecord {
-  const op = newOperation(repo);
-  recordAzureApp(op, { state: "created", appId: "app-1" });
-  recordServicePrincipal(op, { state: "created", appId: "app-1" });
-  recordCommittedWorkflowFile(op, {
-    path: ".github/workflows/radius-verify-credentials.yml",
-    mode: "pull_request",
-    branch: "radius-setup"
-  });
-  recordCommitState(op, {
-    mode: "pull_request",
-    branch: "radius-setup",
-    baseBranch: "main",
-    pullRequestUrl
-  });
-  enterStage(op, STAGE_VERIFY);
-  op.verification = {
-    dispatchedAt: Date.now(),
-    workflow: "radius-verify-credentials.yml",
-    ref: "main",
-    environment: "dev",
-    runId: null,
-    runUrl: null
-  };
-  finish(op, "action_required", {
-    terminal: { reason: "pr-merge-required", pullRequestUrl }
-  });
-  return op;
-}
-
 describe("the route registry", () => {
   it("claims exactly the five declared control routes", () => {
     const registry = createOperationsControlRoutes(dependencies());
@@ -258,42 +199,33 @@ describe("the route registry", () => {
     );
   });
 
-  it("dispatches each declared key to its own handler", async () => {
+  // Each declared key must reach the handler that answers for it. The record is
+  // running, so only the stop has anything to accept; the other three refuse it
+  // on their own terms, which is what proves the key was not mis-wired.
+  it.each([
+    [STOP_OPERATION_ROUTE, "stop", "operation-stop-pending"],
+    [RETRY_OPERATION_ROUTE, "retry/setup", "operation-active"],
+    [CONTINUE_OPERATION_ROUTE, "continue", "operation-active"],
+    [ROLLBACK_OPERATION_ROUTE, "rollback", "operation-active"]
+  ])("dispatches %s to its own handler", async (route, action, code) => {
     const op = newOperation();
-    const deps = dependencies({ get: () => op });
-    const registry = createOperationsControlRoutes(deps);
-    const stop = recorder();
-    await registry[`POST ${STOP_OPERATION_ROUTE}`](
-      postContext(controlPath(op, "stop"), stop.response)
+    const registry = createOperationsControlRoutes(
+      dependencies({ get: () => op })
     );
-    expect(stop.payload().code).toBe("operation-stop-pending");
+    const out = recorder();
 
-    const retry = recorder();
-    await registry[`POST ${RETRY_OPERATION_ROUTE}`](
-      postContext(controlPath(op, "retry/setup"), retry.response)
+    await registry[`POST ${route}`](
+      postContext(controlPath(op, action), out.response)
     );
-    // The same record is now running, so a setup retry has nothing to continue.
-    expect(retry.payload().code).toBe("operation-active");
 
-    const continued = recorder();
-    await registry[`POST ${CONTINUE_OPERATION_ROUTE}`](
-      postContext(controlPath(op, "continue"), continued.response)
-    );
-    expect(continued.payload().code).toBe("operation-active");
-
-    const rolledBack = recorder();
-    await registry[`POST ${ROLLBACK_OPERATION_ROUTE}`](
-      postContext(controlPath(op, "rollback"), rolledBack.response)
-    );
-    expect(rolledBack.payload().code).toBe("operation-active");
+    expect(out.payload().code).toBe(code);
   });
 });
 
 describe("POST /api/operations/{id}/stop", () => {
   it("records a stop for a running operation and reports it as pending", async () => {
     const op = newOperation();
-    const deps = dependencies({ get: () => op });
-    const out = await call(handleStopOperation, controlPath(op, "stop"), deps);
+    const out = await drive(handleStopOperation, op, "stop");
 
     expect(out.recording.status).toBe(202);
     expect(out.recording.headers["Cache-Control"]).toBe("no-store");
@@ -304,7 +236,7 @@ describe("POST /api/operations/{id}/stop", () => {
     expect(payload.operation.stop.requested).toBe(true);
     expect(payload.operation.nextTransition.code).toBe("stopping");
     // Durable before the caller hears it was accepted.
-    expect(deps.journal.persistCalls).toBe(1);
+    expect(out.journal.persistCalls).toBe(1);
     expect(op.control.stop.requestedAt).toBeTruthy();
   });
 
@@ -315,8 +247,7 @@ describe("POST /api/operations/{id}/stop", () => {
       code: "app-selection-required",
       message: "Choose an identity."
     });
-    const deps = dependencies({ get: () => op });
-    const out = await call(handleStopOperation, controlPath(op, "stop"), deps);
+    const out = await drive(handleStopOperation, op, "stop");
 
     expect(out.recording.status).toBe(200);
     const payload = out.payload();
@@ -333,16 +264,9 @@ describe("POST /api/operations/{id}/stop", () => {
     requireInput(op, { code: "app-selection-required", message: "Choose." });
     const deps = dependencies({ get: () => op });
 
-    const first = await call(
-      handleStopOperation,
-      controlPath(op, "stop"),
-      deps
-    );
-    const second = await call(
-      handleStopOperation,
-      controlPath(op, "stop"),
-      deps
-    );
+    const path = controlPath(op, "stop");
+    const first = await call(handleStopOperation, path, deps);
+    const second = await call(handleStopOperation, path, deps);
 
     expect(first.recording.status).toBe(200);
     expect(second.recording.status).toBe(200);
@@ -354,23 +278,20 @@ describe("POST /api/operations/{id}/stop", () => {
   it("refuses to stop an operation that already finished", async () => {
     const op = newOperation();
     finish(op, "succeeded");
-    const deps = dependencies({ get: () => op });
-    const out = await call(handleStopOperation, controlPath(op, "stop"), deps);
+    const out = await drive(handleStopOperation, op, "stop");
 
     expect(out.recording.status).toBe(409);
     expect(out.payload().code).toBe("operation-already-terminal");
-    expect(deps.journal.persistCalls).toBe(0);
+    expect(out.journal.persistCalls).toBe(0);
   });
 
   it("puts the record back and reports the failure when the stop cannot be saved", async () => {
     watchAnnouncements();
     const op = newOperation();
     requireInput(op, { code: "app-selection-required", message: "Choose." });
-    const deps = dependencies({
-      get: () => op,
+    const out = await drive(handleStopOperation, op, "stop", {
       persistOperations: () => Promise.reject(new Error("disk gone"))
     });
-    const out = await call(handleStopOperation, controlPath(op, "stop"), deps);
 
     expect(out.recording.status).toBe(500);
     expect(out.payload()).toMatchObject({
@@ -436,12 +357,7 @@ describe("POST /api/operations/{id}/stop", () => {
 describe("POST /api/operations/{id}/retry/{kind}", () => {
   it("continues an interrupted setup from the first unfinished step", async () => {
     const op = retryableSetup();
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/setup"),
-      deps
-    );
+    const out = await drive(handleRetryOperation, op, "retry/setup");
 
     expect(out.recording.status).toBe(202);
     const payload = out.payload();
@@ -455,7 +371,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     // The ledger already proves the App Registration, so the retry resumes past
     // it rather than creating a second one.
     expect(op.resumeFrom).toBe("service_principal");
-    expect(deps.journal.scheduled).toEqual([
+    expect(out.journal.scheduled).toEqual([
       {
         kind: "setup_continuation",
         instanceId: "panel-a",
@@ -463,7 +379,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       }
     ]);
     // Saved before any work was scheduled.
-    expect(deps.journal.persistCalls).toBe(1);
+    expect(out.journal.persistCalls).toBe(1);
   });
 
   it("refuses a setup retry whose ownership the ledger cannot prove", async () => {
@@ -473,12 +389,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       repo: "contoso/store",
       name: "dev"
     });
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/setup"),
-      deps
-    );
+    const out = await drive(handleRetryOperation, op, "retry/setup");
 
     expect(out.recording.status).toBe(409);
     const payload = out.payload();
@@ -487,24 +398,18 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     expect(payload.detail).toContain("without proven ownership");
     // Refusing never reopens the record or schedules work.
     expect(op.state).toBe("failed_partial");
-    expect(deps.journal.scheduled).toEqual([]);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("refuses verification retry while the setup pull request is still open", async () => {
     const op = mergeHandoff();
     const asked: Array<string | null> = [];
-    const deps = dependencies({
-      get: () => op,
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
       isPullRequestMerged: (_operation, pullRequestUrl) => {
         asked.push(pullRequestUrl);
         return Promise.resolve(false);
       }
     });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/verification"),
-      deps
-    );
 
     expect(out.recording.status).toBe(409);
     expect(out.payload()).toMatchObject({
@@ -513,20 +418,14 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     });
     expect(asked).toEqual(["https://github.com/contoso/store/pull/7"]);
     expect(op.state).toBe("action_required");
-    expect(deps.journal.scheduled).toEqual([]);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("repeats verification once the setup pull request has merged", async () => {
     const op = mergeHandoff();
-    const deps = dependencies({
-      get: () => op,
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
       isPullRequestMerged: () => Promise.resolve(true)
     });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/verification"),
-      deps
-    );
 
     expect(out.recording.status).toBe(202);
     const payload = out.payload();
@@ -542,7 +441,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
         code: "pr-merge-required"
       })
     ]);
-    expect(deps.journal.scheduled).toEqual([
+    expect(out.journal.scheduled).toEqual([
       {
         kind: "verification_retry",
         instanceId: "panel-a",
@@ -559,19 +458,14 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     op.state = "failed_partial";
     op.terminal = null;
     op.failure = { code: "verify-run-failed", message: "role not ready" };
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/verification"),
-      deps
-    );
+    const out = await drive(handleRetryOperation, op, "retry/verification");
 
     expect(out.recording.status).toBe(202);
     const payload = out.payload();
     expect(payload.commandId).toBe(
       `${op.operationId}:retry_verification:1:verification`
     );
-    expect(deps.journal.scheduled).toEqual([
+    expect(out.journal.scheduled).toEqual([
       {
         kind: "verification_retry",
         instanceId: "panel-a",
@@ -582,23 +476,17 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
 
   it("refuses when the record changed while the pull request was checked", async () => {
     const op = mergeHandoff();
-    const deps = dependencies({
-      get: () => op,
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
       isPullRequestMerged: () => {
         // A concurrent retry reopened the record while GitHub was answering.
         beginRetryAttempt(op, "verification");
         return Promise.resolve(true);
       }
     });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/verification"),
-      deps
-    );
 
     expect(out.recording.status).toBe(409);
     expect(out.payload().code).toBe("operation-active");
-    expect(deps.journal.scheduled).toEqual([]);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("fails closed when the saved record names no pull request", async () => {
@@ -606,18 +494,12 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     // checked, so the retry must refuse rather than proceed on an unverifiable
     // claim.
     const op = mergeHandoff({ pullRequestUrl: null });
-    const deps = dependencies({
-      get: () => op,
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
       isPullRequestMerged: (_operation, pullRequestUrl) => {
         expect(pullRequestUrl).toBeNull();
         return Promise.resolve(false);
       }
     });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/verification"),
-      deps
-    );
 
     expect(out.recording.status).toBe(409);
     expect(out.payload()).toMatchObject({
@@ -629,18 +511,12 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
   it("names no repository rather than the word undefined in a lock conflict", async () => {
     const op = retryableSetup();
     delete op.repo;
-    const deps = dependencies({
-      get: () => op,
+    const out = await drive(handleRetryOperation, op, "retry/setup", {
       acquireForRetry: () => ({
         ok: false,
         conflict: { operationId: "op_live" }
       })
     });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/setup"),
-      deps
-    );
 
     expect(out.recording.status).toBe(409);
     expect(out.payload().error).toBe("Another setup is already running for .");
@@ -652,12 +528,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     finish(op, "failed_partial", {
       failure: { code: "who-knows", message: "unclassified" }
     });
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/verification"),
-      deps
-    );
+    const out = await drive(handleRetryOperation, op, "retry/verification");
 
     expect(out.recording.status).toBe(409);
     expect(out.payload()).toMatchObject({
@@ -685,17 +556,12 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       ]
     });
     finish(op, "failed_partial", { failure: { code: "setup-failed" } });
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/cleanup"),
-      deps
-    );
+    const out = await drive(handleRetryOperation, op, "retry/cleanup");
 
     expect(out.recording.status).toBe(202);
     const payload = out.payload();
     expect(payload.commandId).toBe(`${op.operationId}:retry_cleanup:1:cleanup`);
-    expect(deps.journal.scheduled).toEqual([
+    expect(out.journal.scheduled).toEqual([
       {
         kind: "cleanup_retry",
         instanceId: "panel-a",
@@ -708,20 +574,13 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     const op = retryableSetup();
     const deps = dependencies({ get: () => op });
 
-    const first = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/setup"),
-      deps
-    );
+    const path = controlPath(op, "retry/setup");
+    const first = await call(handleRetryOperation, path, deps);
     // The second submission arrives before the first attempt finished, so the
     // attempt counter has already advanced and the derived id is the same.
     finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
     op.control.attempts.setup = 1;
-    const second = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/setup"),
-      deps
-    );
+    const second = await call(handleRetryOperation, path, deps);
 
     expect(first.payload().duplicate).toBeUndefined();
     expect(second.recording.status).toBe(202);
@@ -737,19 +596,13 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
   it("closes a reopened operation no runner accepted", async () => {
     const op = retryableSetup();
     const persists: string[] = [];
-    const deps = dependencies({
-      get: () => op,
+    const out = await drive(handleRetryOperation, op, "retry/setup", {
       persistOperations: () => {
         persists.push("persist");
         return Promise.resolve();
       },
       schedule: () => false
     });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/setup"),
-      deps
-    );
 
     // The 202 is already on the wire and cannot be recalled, so the failure has
     // to be observable through the status the client is polling.
@@ -766,8 +619,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
   it("keeps the terminal record when the scheduling-failure write also fails", async () => {
     const op = retryableSetup();
     let calls = 0;
-    const deps = dependencies({
-      get: () => op,
+    const out = await drive(handleRetryOperation, op, "retry/setup", {
       persistOperations: () => {
         calls += 1;
         return calls === 1 ?
@@ -776,11 +628,6 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       },
       schedule: () => false
     });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/setup"),
-      deps
-    );
 
     expect(out.recording.status).toBe(202);
     expect(op.state).toBe("failed");
@@ -789,12 +636,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
 
   it("refuses a retry kind it does not implement", async () => {
     const op = retryableSetup();
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRetryOperation,
-      controlPath(op, "retry/everything"),
-      deps
-    );
+    const out = await drive(handleRetryOperation, op, "retry/everything");
 
     expect(out.recording.status).toBe(400);
     expect(out.payload()).toMatchObject({ code: "unsupported-retry" });
@@ -845,33 +687,10 @@ describe("retryRefusalMessage", () => {
 // ledger proves this attempt created, and neither can start while the other
 // owns the record.
 
-function stoppedSetup(repo = "contoso/store"): OperationFixture {
-  const op = newOperation(repo);
-  op.resumeRequest = {
-    needsAzureCredentials: true,
-    azure: {},
-    environment: { repo, environment: "dev", provider: "azure" }
-  };
-  recordAzureApp(op, {
-    state: "created",
-    appId: "app-1",
-    displayName: "radius-deploy"
-  });
-  recordServicePrincipal(op, { state: "created", appId: "app-1" });
-  requestStop(op);
-  stopAtBoundary(op, "after_service_principal");
-  return op;
-}
-
 describe("POST /api/operations/{id}/continue", () => {
   it("continues a stopped setup from the first unfinished step", async () => {
     const op = stoppedSetup();
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleContinueOperation,
-      controlPath(op, "continue"),
-      deps
-    );
+    const out = await drive(handleContinueOperation, op, "continue");
 
     expect(out.recording.status).toBe(202);
     const payload = out.payload();
@@ -881,7 +700,7 @@ describe("POST /api/operations/{id}/continue", () => {
     expect(payload.attempt).toBe(2);
     expect(payload.operation.state).toBe("running");
     expect(op.resumeFrom).toBe("federated_credentials");
-    expect(deps.journal.scheduled).toEqual([
+    expect(out.journal.scheduled).toEqual([
       {
         kind: "setup_continuation",
         instanceId: "panel-a",
@@ -889,7 +708,7 @@ describe("POST /api/operations/{id}/continue", () => {
       }
     ]);
     // The command is saved before any work is handed to a runner.
-    expect(deps.journal.persistCalls).toBe(1);
+    expect(out.journal.persistCalls).toBe(1);
   });
 
   it("refuses to continue a setup whose ownership the ledger cannot prove", async () => {
@@ -899,12 +718,7 @@ describe("POST /api/operations/{id}/continue", () => {
       repo: "contoso/store",
       name: "dev"
     });
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleContinueOperation,
-      controlPath(op, "continue"),
-      deps
-    );
+    const out = await drive(handleContinueOperation, op, "continue");
 
     expect(out.recording.status).toBe(409);
     expect(out.payload()).toMatchObject({
@@ -912,33 +726,23 @@ describe("POST /api/operations/{id}/continue", () => {
       detail: "A GitHub environment may exist without proven ownership."
     });
     expect(op.state).toBe("cancelled");
-    expect(deps.journal.scheduled).toEqual([]);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("refuses to continue a running operation", async () => {
     const op = newOperation();
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleContinueOperation,
-      controlPath(op, "continue"),
-      deps
-    );
+    const out = await drive(handleContinueOperation, op, "continue");
 
     expect(out.recording.status).toBe(409);
     expect(out.payload().code).toBe("operation-active");
-    expect(deps.journal.scheduled).toEqual([]);
+    expect(out.journal.scheduled).toEqual([]);
   });
 });
 
 describe("POST /api/operations/{id}/rollback", () => {
   it("accepts a rollback for a stopped attempt and schedules it once", async () => {
     const op = stoppedSetup();
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRollbackOperation,
-      controlPath(op, "rollback"),
-      deps
-    );
+    const out = await drive(handleRollbackOperation, op, "rollback");
 
     expect(out.recording.status).toBe(202);
     const payload = out.payload();
@@ -948,8 +752,8 @@ describe("POST /api/operations/{id}/rollback", () => {
     expect(payload.commandId).toMatch(
       new RegExp(`^${op.operationId}:rollback:1:cleanup#[0-9a-f]{16}$`)
     );
-    expect(deps.journal.persistCalls).toBe(1);
-    expect(deps.journal.scheduled).toEqual([
+    expect(out.journal.persistCalls).toBe(1);
+    expect(out.journal.scheduled).toEqual([
       { kind: "rollback", instanceId: "panel-a", commandId: payload.commandId }
     ]);
   });
@@ -963,12 +767,7 @@ describe("POST /api/operations/{id}/rollback", () => {
       mode: "default_branch",
       branch: "main"
     });
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRollbackOperation,
-      controlPath(op, "rollback"),
-      deps
-    );
+    const out = await drive(handleRollbackOperation, op, "rollback");
 
     expect(out.recording.status).toBe(409);
     expect(out.payload()).toMatchObject({
@@ -976,7 +775,7 @@ describe("POST /api/operations/{id}/rollback", () => {
       error:
         "Radius did not save enough about the workflow files it committed to prove they are unchanged, so it will not remove them or anything they depend on."
     });
-    expect(deps.journal.scheduled).toEqual([]);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("accepts a post-commit rollback whose workflow provenance is complete", async () => {
@@ -990,15 +789,10 @@ describe("POST /api/operations/{id}/rollback", () => {
       contentSha256: "d".repeat(64),
       previousBlobSha: null
     });
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRollbackOperation,
-      controlPath(op, "rollback"),
-      deps
-    );
+    const out = await drive(handleRollbackOperation, op, "rollback");
 
     expect(out.recording.status).toBe(202);
-    expect(deps.journal.scheduled).toEqual([
+    expect(out.journal.scheduled).toEqual([
       {
         kind: "rollback",
         instanceId: "panel-a",
@@ -1011,18 +805,13 @@ describe("POST /api/operations/{id}/rollback", () => {
     const op = newOperation();
     recordAzureApp(op, { state: "created", appId: "app-1" });
     finishSucceeded(op);
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRollbackOperation,
-      controlPath(op, "rollback"),
-      deps
-    );
+    const out = await drive(handleRollbackOperation, op, "rollback");
 
     expect(out.recording.status).toBe(409);
     expect(out.payload()).toMatchObject({
       code: "rollback-environment-verified"
     });
-    expect(deps.journal.scheduled).toEqual([]);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("refuses a rollback when the attempt created nothing it can prove it owns", async () => {
@@ -1034,38 +823,27 @@ describe("POST /api/operations/{id}/rollback", () => {
     });
     requestStop(op);
     stopAtBoundary(op, "after_environment");
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRollbackOperation,
-      controlPath(op, "rollback"),
-      deps
-    );
+    const out = await drive(handleRollbackOperation, op, "rollback");
 
     expect(out.recording.status).toBe(409);
     expect(out.payload().code).toBe("rollback-nothing-owned");
-    expect(deps.journal.scheduled).toEqual([]);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("refuses a rollback while the operation is still running", async () => {
     const op = newOperation();
     recordAzureApp(op, { state: "created", appId: "app-1" });
-    const deps = dependencies({ get: () => op });
-    const out = await call(
-      handleRollbackOperation,
-      controlPath(op, "rollback"),
-      deps
-    );
+    const out = await drive(handleRollbackOperation, op, "rollback");
 
     expect(out.recording.status).toBe(409);
     expect(out.payload().code).toBe("operation-active");
-    expect(deps.journal.scheduled).toEqual([]);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("still restores the decision when the follow-up write also fails", async () => {
     const op = stoppedSetup();
     let allowFirstWrite = true;
-    const deps = dependencies({
-      get: () => op,
+    const out = await drive(handleRollbackOperation, op, "rollback", {
       schedule: () => false,
       persistOperations: () => {
         if (allowFirstWrite) {
@@ -1075,11 +853,6 @@ describe("POST /api/operations/{id}/rollback", () => {
         return Promise.reject(new Error("store offline"));
       }
     });
-    const out = await call(
-      handleRollbackOperation,
-      controlPath(op, "rollback"),
-      deps
-    );
 
     // The durable write is best effort here: the in-memory record is already
     // back on the stopped decision, so polling reports the truth either way.
@@ -1090,31 +863,9 @@ describe("POST /api/operations/{id}/rollback", () => {
 });
 
 describe("POST /api/operations/{id}/exit", () => {
-  // The reported scenario: setup reused an App Registration and a Service
-  // Principal that already existed, then failed. Nothing here is Radius's to
-  // remove.
-  function reusedOnlyFailure(repo = "contoso/store"): OperationFixture {
-    const op = newOperation(repo);
-    recordAzureApp(op, {
-      state: "reused",
-      appId: "app-1",
-      displayName: "radius-deploy"
-    });
-    recordServicePrincipal(op, {
-      state: "reused",
-      appId: "app-1",
-      objectId: "sp-1"
-    });
-    finish(op, "failed_partial", {
-      failure: { code: "github-environment-failed", message: "gh returned 1" }
-    });
-    return op;
-  }
-
   it("closes a setup that owns nothing without scheduling any deletion", async () => {
     const op = reusedOnlyFailure();
-    const deps = dependencies({ get: () => op });
-    const out = await call(handleExitOperation, controlPath(op, "exit"), deps);
+    const out = await drive(handleExitOperation, op, "exit");
 
     expect(out.recording.status).toBe(200);
     expect(out.payload()).toMatchObject({
@@ -1122,10 +873,10 @@ describe("POST /api/operations/{id}/exit", () => {
       removed: false,
       statusUrl: `/api/operations/${op.operationId}`
     });
-    expect(deps.journal.scheduled).toEqual([]);
+    expect(out.journal.scheduled).toEqual([]);
     // Durable before the caller heard it was accepted, and recorded as a
     // finished command so a reload reads the same decision back.
-    expect(deps.journal.persistCalls).toBe(1);
+    expect(out.journal.persistCalls).toBe(1);
     expect(op.control.commands).toEqual([
       expect.objectContaining({
         kind: "exit_setup",
@@ -1140,7 +891,7 @@ describe("POST /api/operations/{id}/exit", () => {
       code: "setup-exited"
     });
     expect(out.payload().operation.actions).toEqual([]);
-    expect(deps.journal.invalidatedListings).toEqual(["contoso/store"]);
+    expect(out.journal.invalidatedListings).toEqual(["contoso/store"]);
   });
 
   it("schedules the disposal when the ledger proves this attempt created something", async () => {
@@ -1150,15 +901,14 @@ describe("POST /api/operations/{id}/exit", () => {
       repo: "contoso/store",
       name: "dev"
     });
-    const deps = dependencies({ get: () => op });
-    const out = await call(handleExitOperation, controlPath(op, "exit"), deps);
+    const out = await drive(handleExitOperation, op, "exit");
 
     expect(out.recording.status).toBe(202);
     const payload = out.payload();
     expect(payload.commandId).toMatch(
       new RegExp(`^${op.operationId}:exit_setup:1:cleanup#[0-9a-f]{16}$`)
     );
-    expect(deps.journal.scheduled).toEqual([
+    expect(out.journal.scheduled).toEqual([
       {
         kind: "exit_setup",
         instanceId: "panel-a",
@@ -1167,7 +917,7 @@ describe("POST /api/operations/{id}/exit", () => {
     ]);
     // The deletion is the runner's to report, so nothing is invalidated here:
     // the pass drops the listing when it proves the environment is gone.
-    expect(deps.journal.invalidatedListings).toEqual([]);
+    expect(out.journal.invalidatedListings).toEqual([]);
     expect(op.state).toBe("running");
   });
 
@@ -1175,8 +925,7 @@ describe("POST /api/operations/{id}/exit", () => {
     const op = newOperation();
     recordAzureApp(op, { state: "created", appId: "app-1" });
     finishSucceeded(op);
-    const deps = dependencies({ get: () => op });
-    const out = await call(handleExitOperation, controlPath(op, "exit"), deps);
+    const out = await drive(handleExitOperation, op, "exit");
 
     expect(out.recording.status).toBe(409);
     expect(out.payload()).toMatchObject({
@@ -1184,8 +933,8 @@ describe("POST /api/operations/{id}/exit", () => {
       error:
         "This environment finished setup, so there is nothing to exit. Remove it with Delete Environment instead."
     });
-    expect(deps.journal.scheduled).toEqual([]);
-    expect(deps.journal.invalidatedListings).toEqual([]);
+    expect(out.journal.scheduled).toEqual([]);
+    expect(out.journal.invalidatedListings).toEqual([]);
   });
 
   it("refuses a second exit for a setup the customer already closed", async () => {
@@ -1213,11 +962,9 @@ describe("POST /api/operations/{id}/exit", () => {
 
   it("leaves the setup open and the listing cached when the close cannot be saved", async () => {
     const op = reusedOnlyFailure();
-    const deps = dependencies({
-      get: () => op,
+    const out = await drive(handleExitOperation, op, "exit", {
       persistOperations: () => Promise.reject(new Error("disk full"))
     });
-    const out = await call(handleExitOperation, controlPath(op, "exit"), deps);
 
     expect(out.recording.status).toBe(500);
     expect(out.payload()).toMatchObject({
@@ -1229,7 +976,7 @@ describe("POST /api/operations/{id}/exit", () => {
     // Nothing was written, so nothing is remembered: the exit command is gone
     // and the panel still offers the way out.
     expect(op.control.commands).toEqual([]);
-    expect(deps.journal.invalidatedListings).toEqual([]);
+    expect(out.journal.invalidatedListings).toEqual([]);
   });
 });
 
@@ -1289,7 +1036,7 @@ describe("contracts shared by every control route", () => {
       name: "continue",
       path: (id: string) => `/api/operations/${id}/continue`,
       handler: handleContinueOperation,
-      operation: stoppedSetup,
+      operation: () => stoppedSetup(),
       restoredState: "cancelled",
       attemptKind: "setup",
       restoredAttempt: 1,
@@ -1301,7 +1048,7 @@ describe("contracts shared by every control route", () => {
       name: "rollback",
       path: (id: string) => `/api/operations/${id}/rollback`,
       handler: handleRollbackOperation,
-      operation: stoppedSetup,
+      operation: () => stoppedSetup(),
       restoredState: "cancelled",
       attemptKind: "cleanup",
       restoredAttempt: 0,
@@ -1313,7 +1060,7 @@ describe("contracts shared by every control route", () => {
       name: "exit",
       path: (id: string) => `/api/operations/${id}/exit`,
       handler: handleExitOperation,
-      operation: stoppedSetup,
+      operation: () => stoppedSetup(),
       restoredState: "cancelled",
       attemptKind: "cleanup",
       restoredAttempt: 0,

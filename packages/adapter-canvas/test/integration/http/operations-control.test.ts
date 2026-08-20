@@ -7,8 +7,13 @@ import { createOperationsControlRoutes } from "../../../src/server/routes/operat
 import { createOperationsStatusRoutes } from "../../../src/server/routes/operations-status.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import {
-  buildStages,
-  createOperation,
+  newOperation,
+  retryableSetup,
+  reusedOnlyFailure,
+  stoppedSetup,
+  type OperationFixture
+} from "../../support/server/operation-fixtures.js";
+import {
   enterStage,
   finish,
   isTerminalState,
@@ -17,7 +22,6 @@ import {
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
   recordServicePrincipal,
-  requestStop,
   stopAtBoundary,
   toClientView,
   INPUT_REQUIRED_STATE,
@@ -32,7 +36,10 @@ import type {
 // Cooperative controls over a real loopback socket. Every external seam is an
 // in-memory double — including the pull-request merge proof, so this suite never
 // reaches GitHub — while the eligibility rules, command identity, and retry
-// snapshot are the real production functions.
+// snapshot are the real production functions. The eligibility, persistence, and
+// scheduling branches themselves belong to the route unit suite; what is proven
+// here is the socket: framing, the nonce, the receiving instance, and the
+// journeys a panel actually walks.
 
 let container: CanvasServerContainer | undefined;
 
@@ -46,40 +53,32 @@ afterEach(async () => {
 interface Harness {
   records: Map<string, OperationRecord>;
   invalidatedListings: string[];
-  lock: { conflict: { operationId: string } | null };
-  merged: { value: boolean };
-  persistError: { value: Error | null };
   persistCalls: string[];
   scheduled: Array<{ kind: string; instanceId: string; commandId: string }>;
-  schedulerAccepts: { value: boolean };
 }
 
 function start(): Harness {
   const records = new Map<string, OperationRecord>();
-  const lock: Harness["lock"] = { conflict: null };
-  const merged = { value: false };
-  const persistError: { value: Error | null } = { value: null };
   const persistCalls: string[] = [];
   const scheduled: Harness["scheduled"] = [];
-  const schedulerAccepts = { value: true };
   const invalidatedListings: string[] = [];
 
   const persistOperations = () => {
     persistCalls.push("persist");
-    return persistError.value ?
-        Promise.reject(persistError.value)
-      : Promise.resolve();
+    return Promise.resolve();
   };
 
   const routes = createTestRouteTable({
     ...createOperationsControlRoutes({
       get: (operationId) => records.get(operationId) ?? null,
-      acquireForRetry: () =>
-        lock.conflict ? { ok: false, conflict: lock.conflict } : { ok: true },
+      acquireForRetry: () => ({ ok: true }),
       persistOperations,
-      isPullRequestMerged: () => Promise.resolve(merged.value),
+      // Merge-proof eligibility is the route unit suite's to decide; no journey
+      // here may reach GitHub for it, so the port refuses rather than answers.
+      isPullRequestMerged: () => {
+        throw new Error("isPullRequestMerged must not run over the socket");
+      },
       schedule: ({ kind, instanceId, commandId }) => {
-        if (!schedulerAccepts.value) return false;
         scheduled.push({ kind, instanceId, commandId });
         return true;
       },
@@ -165,108 +164,11 @@ function start(): Harness {
     prepareIdentity: () => {}
   });
 
-  return {
-    records,
-    lock,
-    merged,
-    persistError,
-    persistCalls,
-    scheduled,
-    schedulerAccepts,
-    invalidatedListings
-  };
+  return { records, persistCalls, scheduled, invalidatedListings };
 }
 
-function seed(harness: Harness, repo = "contoso/store"): OperationRecord {
-  const op = createOperation({
-    provider: "azure",
-    repo,
-    environment: "dev",
-    stages: buildStages({ includeIdentity: true })
-  }) as OperationRecord;
+function seed(harness: Harness, op: OperationFixture): OperationFixture {
   harness.records.set(op.operationId, op);
-  return op;
-}
-
-function retryableSetup(harness: Harness): OperationRecord {
-  const op = seed(harness);
-  op.resumeRequest = {
-    needsAzureCredentials: true,
-    azure: {},
-    environment: {
-      repo: "contoso/store",
-      environment: "dev",
-      provider: "azure"
-    }
-  };
-  recordAzureApp(op, { state: "created", appId: "app-1" });
-  finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
-  return op;
-}
-
-function mergeHandoff(harness: Harness): OperationRecord {
-  const op = seed(harness);
-  recordAzureApp(op, { state: "created", appId: "app-1" });
-  recordServicePrincipal(op, { state: "created", appId: "app-1" });
-  recordCommittedWorkflowFile(op, {
-    path: ".github/workflows/radius-verify-credentials.yml",
-    mode: "pull_request",
-    branch: "radius-setup"
-  });
-  recordCommitState(op, {
-    mode: "pull_request",
-    branch: "radius-setup",
-    baseBranch: "main",
-    pullRequestUrl: "https://github.com/contoso/store/pull/7"
-  });
-  enterStage(op, STAGE_VERIFY);
-  op.verification = {
-    dispatchedAt: Date.now(),
-    workflow: "radius-verify-credentials.yml",
-    ref: "main",
-    environment: "dev",
-    runId: null,
-    runUrl: null
-  };
-  finish(op, "action_required", {
-    terminal: {
-      reason: "pr-merge-required",
-      pullRequestUrl: "https://github.com/contoso/store/pull/7"
-    }
-  });
-  return op;
-}
-
-// A setup the customer deliberately stopped, with resources this attempt
-// created and can prove it owns.
-function stoppedSetup(harness: Harness): OperationRecord {
-  const op = seed(harness);
-  op.resumeRequest = {
-    needsAzureCredentials: true,
-    azure: {},
-    environment: {
-      repo: "contoso/store",
-      environment: "dev",
-      provider: "azure"
-    }
-  };
-  recordAzureApp(op, {
-    state: "created",
-    appId: "app-1",
-    displayName: "radius-deploy"
-  });
-  recordServicePrincipal(op, {
-    state: "created",
-    appId: "app-1",
-    objectId: "sp-1"
-  });
-  recordGitHubEnvironment(op, {
-    state: "created",
-    repo: "contoso/store",
-    name: "dev"
-  });
-  requestStop(op);
-  stopAtBoundary(op, "after_environment");
   return op;
 }
 
@@ -293,11 +195,76 @@ function browserHeaders(baseUrl: string): Readonly<Record<string, string>> {
   };
 }
 
+interface PreviewEntry {
+  kind: string;
+  target: string;
+}
+
+interface ProjectedAction {
+  id: string;
+  label: string;
+  path: string;
+  placement: string;
+  scope: string;
+  tone: string;
+  requiresConfirmation: boolean;
+  confirmLabel: string;
+  cancelLabel: string;
+  preview: { removes: PreviewEntry[]; keeps: PreviewEntry[] };
+}
+
+interface ProjectedOperation {
+  state: string;
+  terminalState: string;
+  currentStage: string;
+  summary: string;
+  headline: { code: string; title: string };
+  guidance: unknown[];
+  actions: ProjectedAction[];
+  stop: { requested: boolean };
+  nextTransition: { code: string; message: string };
+}
+
+// Every control answers with the same envelope, and the by-id read answers with
+// the projection inside it, so the shapes are declared once here rather than
+// re-cast at each assertion.
+interface ControlBody {
+  code: string;
+  operationId: string;
+  commandId: string;
+  attempt: number;
+  duplicate?: boolean;
+  removed: boolean;
+  statusUrl: string;
+  operation: ProjectedOperation;
+}
+
+async function body(response: Response): Promise<ControlBody> {
+  return (await response.json()) as ControlBody;
+}
+
+/** The projection a polling panel reads back over the same socket. */
+async function poll(
+  baseUrl: string,
+  statusPath: string
+): Promise<ProjectedOperation> {
+  const response = await fetch(`${baseUrl}${statusPath}`);
+  expect(response.status).toBe(200);
+  return (await body(response)).operation;
+}
+
+function action(
+  operation: ProjectedOperation,
+  id: string
+): ProjectedAction | undefined {
+  return operation.actions.find((entry) => entry.id === id);
+}
+
 describe("operation controls real-loopback HIT", () => {
   it("accepts a stop over the socket and shows it on the status route", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
-    const op = seed(harness);
+    const op = seed(harness, newOperation());
 
     const response = await post(
       entry.baseUrl,
@@ -307,32 +274,21 @@ describe("operation controls real-loopback HIT", () => {
     expect(response.status).toBe(202);
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(response.headers.get("cache-control")).toBe("no-store");
-    const body = (await response.json()) as {
-      code: string;
-      statusUrl: string;
-      operation: { stop: { requested: boolean } };
-    };
-    expect(body.code).toBe("operation-stop-pending");
-    expect(body.operation.stop.requested).toBe(true);
+    const accepted = await body(response);
+    expect(accepted.code).toBe("operation-stop-pending");
+    expect(accepted.operation.stop.requested).toBe(true);
     expect(harness.persistCalls).toEqual(["persist"]);
 
     // The status URL the response hands back reports the same pending stop.
-    const polled = await fetch(`${entry.baseUrl}${body.statusUrl}`);
-    expect(polled.status).toBe(200);
-    const polledBody = (await polled.json()) as {
-      operation: {
-        stop: { requested: boolean };
-        nextTransition: { code: string };
-      };
-    };
-    expect(polledBody.operation.stop.requested).toBe(true);
-    expect(polledBody.operation.nextTransition.code).toBe("stopping");
+    const polled = await poll(entry.baseUrl, accepted.statusUrl);
+    expect(polled.stop.requested).toBe(true);
+    expect(polled.nextTransition.code).toBe("stopping");
   });
 
   it("continues an interrupted setup and schedules it on the receiving instance", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-b");
-    const op = retryableSetup(harness);
+    const op = seed(harness, retryableSetup());
 
     const response = await post(
       entry.baseUrl,
@@ -340,48 +296,15 @@ describe("operation controls real-loopback HIT", () => {
     );
 
     expect(response.status).toBe(202);
-    const body = (await response.json()) as {
-      attempt: number;
-      commandId: string;
-      operation: { state: string };
-    };
-    expect(body.attempt).toBe(2);
-    expect(body.commandId).toBe(`${op.operationId}:retry_setup:2:setup`);
-    expect(body.operation.state).toBe("running");
+    const accepted = await body(response);
+    expect(accepted.attempt).toBe(2);
+    expect(accepted.commandId).toBe(`${op.operationId}:retry_setup:2:setup`);
+    expect(accepted.operation.state).toBe("running");
     expect(harness.scheduled).toEqual([
       {
         kind: "setup_continuation",
         instanceId: "panel-b",
-        commandId: body.commandId
-      }
-    ]);
-  });
-
-  it("repeats verification once the pull request has merged", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    const op = mergeHandoff(harness);
-    harness.merged.value = true;
-
-    const response = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/retry/verification`
-    );
-
-    expect(response.status).toBe(202);
-    const body = (await response.json()) as {
-      commandId: string;
-      operation: { currentStage: string };
-    };
-    expect(body.commandId).toBe(
-      `${op.operationId}:retry_verification:1:verification`
-    );
-    expect(body.operation.currentStage).toBe(STAGE_VERIFY);
-    expect(harness.scheduled).toEqual([
-      {
-        kind: "verification_retry",
-        instanceId: "panel-a",
-        commandId: body.commandId
+        commandId: accepted.commandId
       }
     ]);
   });
@@ -389,7 +312,7 @@ describe("operation controls real-loopback HIT", () => {
   it("leaves the family's other sub-routes to their own handlers", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
-    const op = seed(harness);
+    const op = seed(harness, newOperation());
 
     // Abandon and resume sit one segment away from stop and retry. They must
     // reach the operations-status handlers — which refuse this record on their
@@ -399,18 +322,14 @@ describe("operation controls real-loopback HIT", () => {
       `/api/operations/${op.operationId}/abandon`
     );
     expect(abandon.status).toBe(409);
-    expect(((await abandon.json()) as { code: string }).code).toBe(
-      "operation-abandon-mismatch"
-    );
+    expect((await body(abandon)).code).toBe("operation-abandon-mismatch");
 
     const resume = await post(
       entry.baseUrl,
       `/api/operations/${op.operationId}/resume/app-selection-required`
     );
     expect(resume.status).toBe(409);
-    expect(((await resume.json()) as { code: string }).code).toBe(
-      "operation-resume-mismatch"
-    );
+    expect((await body(resume)).code).toBe("operation-resume-mismatch");
 
     // A path this family never declared still falls through to the unmatched
     // handler instead of being swallowed by a neighbouring template.
@@ -425,7 +344,7 @@ describe("operation controls real-loopback HIT", () => {
   it("refuses a control request that cannot prove it came from the panel", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
-    const op = seed(harness);
+    const op = seed(harness, newOperation());
 
     for (const path of [
       `/api/operations/${op.operationId}/stop`,
@@ -437,7 +356,7 @@ describe("operation controls real-loopback HIT", () => {
       });
 
       expect(response.status).toBe(403);
-      expect(((await response.json()) as { code: string }).code).toBe(
+      expect((await body(response)).code).toBe(
         "browser-mutation-validation-failed"
       );
     }
@@ -455,7 +374,7 @@ describe("stop, then continue or roll back, over the socket", () => {
   it("stops a running operation and then continues it from the saved resume point", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
-    const op = seed(harness);
+    const op = seed(harness, newOperation());
     op.resumeRequest = {
       needsAzureCredentials: true,
       azure: {},
@@ -477,41 +396,29 @@ describe("stop, then continue or roll back, over the socket", () => {
     stopAtBoundary(op, "after_service_principal");
 
     // 2. The stopped record projects both paths, forward first.
-    const polled = await fetch(
-      `${entry.baseUrl}/api/operations/${op.operationId}`
-    );
-    const view = (await polled.json()) as {
-      operation: {
-        terminalState: string;
-        headline: { title: string };
-        actions: Array<{ id: string; label: string; path: string }>;
-      };
-    };
-    expect(view.operation.terminalState).toBe("cancelled");
-    expect(view.operation.headline.title).toBe("Environment setup stopped");
-    expect(view.operation.actions.map((entry) => entry.label)).toEqual([
+    const view = await poll(entry.baseUrl, `/api/operations/${op.operationId}`);
+    expect(view.terminalState).toBe("cancelled");
+    expect(view.headline.title).toBe("Environment setup stopped");
+    expect(view.actions.map((entry) => entry.label)).toEqual([
       "Continue setup",
       "Roll back created resources",
       "Exit setup"
     ]);
 
     // 3. Continuing reuses the same operation id and the retained ledger.
-    const continuePath = view.operation.actions[0].path;
-    const continued = await post(entry.baseUrl, continuePath);
+    const continued = await post(entry.baseUrl, view.actions[0].path);
     expect(continued.status).toBe(202);
-    const body = (await continued.json()) as {
-      operationId: string;
-      commandId: string;
-      operation: { state: string };
-    };
-    expect(body.operationId).toBe(op.operationId);
-    expect(body.commandId).toBe(`${op.operationId}:continue_setup:2:continue`);
-    expect(body.operation.state).toBe("running");
+    const accepted = await body(continued);
+    expect(accepted.operationId).toBe(op.operationId);
+    expect(accepted.commandId).toBe(
+      `${op.operationId}:continue_setup:2:continue`
+    );
+    expect(accepted.operation.state).toBe("running");
     expect(harness.scheduled).toEqual([
       {
         kind: "setup_continuation",
         instanceId: "panel-a",
-        commandId: body.commandId
+        commandId: accepted.commandId
       }
     ]);
   });
@@ -519,25 +426,10 @@ describe("stop, then continue or roll back, over the socket", () => {
   it("stops a running operation and then rolls it back through the same record", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-b");
-    const op = stoppedSetup(harness);
+    const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
 
-    const polled = await fetch(
-      `${entry.baseUrl}/api/operations/${op.operationId}`
-    );
-    const view = (await polled.json()) as {
-      operation: {
-        actions: Array<{
-          id: string;
-          path: string;
-          tone: string;
-          requiresConfirmation: boolean;
-          preview: { removes: Array<{ kind: string }> };
-        }>;
-      };
-    };
-    const rollback = view.operation.actions.find(
-      (entry) => entry.id === "rollback"
-    )!;
+    const view = await poll(entry.baseUrl, `/api/operations/${op.operationId}`);
+    const rollback = action(view, "rollback")!;
     expect(rollback.tone).toBe("danger");
     expect(rollback.requiresConfirmation).toBe(true);
     // The preview the dialog renders is the server's own, in deletion order.
@@ -549,26 +441,16 @@ describe("stop, then continue or roll back, over the socket", () => {
 
     const response = await post(entry.baseUrl, rollback.path);
     expect(response.status).toBe(202);
-    const body = (await response.json()) as {
-      operationId: string;
-      commandId: string;
-      statusUrl: string;
-    };
-    expect(body.operationId).toBe(op.operationId);
+    const accepted = await body(response);
+    expect(accepted.operationId).toBe(op.operationId);
     expect(harness.scheduled).toEqual([
-      { kind: "rollback", instanceId: "panel-b", commandId: body.commandId }
+      { kind: "rollback", instanceId: "panel-b", commandId: accepted.commandId }
     ]);
 
     // While cleanup owns the record, no forward retry and no stop are offered.
-    const during = await fetch(`${entry.baseUrl}${body.statusUrl}`);
-    const duringBody = (await during.json()) as {
-      operation: {
-        actions: unknown[];
-        nextTransition: { code: string; message: string };
-      };
-    };
-    expect(duringBody.operation.actions).toEqual([]);
-    expect(duringBody.operation.nextTransition).toEqual({
+    const during = await poll(entry.baseUrl, accepted.statusUrl);
+    expect(during.actions).toEqual([]);
+    expect(during.nextTransition).toEqual({
       code: "rolling-back",
       message: "Rolling back created resources…"
     });
@@ -577,16 +459,14 @@ describe("stop, then continue or roll back, over the socket", () => {
   it("accepts a second continue after the customer stops the continuation", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
-    const op = stoppedSetup(harness);
+    const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
 
     const first = await post(
       entry.baseUrl,
       `/api/operations/${op.operationId}/continue`
     );
     expect(first.status).toBe(202);
-    expect((await first.json()) as { duplicate?: boolean }).not.toMatchObject({
-      duplicate: true
-    });
+    expect(await body(first)).not.toMatchObject({ duplicate: true });
 
     // The customer stops the continuation, then decides to continue again. The
     // saved command from the first attempt must not swallow the second click.
@@ -597,14 +477,12 @@ describe("stop, then continue or roll back, over the socket", () => {
     );
 
     expect(second.status).toBe(202);
-    const body = (await second.json()) as {
-      duplicate?: boolean;
-      commandId: string;
-      attempt: number;
-    };
-    expect(body.duplicate).toBeUndefined();
-    expect(body.attempt).toBe(3);
-    expect(body.commandId).toBe(`${op.operationId}:continue_setup:3:continue`);
+    const accepted = await body(second);
+    expect(accepted.duplicate).toBeUndefined();
+    expect(accepted.attempt).toBe(3);
+    expect(accepted.commandId).toBe(
+      `${op.operationId}:continue_setup:3:continue`
+    );
     expect(harness.scheduled).toHaveLength(2);
   });
 
@@ -615,7 +493,7 @@ describe("stop, then continue or roll back, over the socket", () => {
     // The journey the product model names: workflows committed, verification
     // dispatched, the run failed at Azure Login. The environment is unfinished,
     // so both choices are on offer over the same socket.
-    const op = seed(harness, "contoso/store");
+    const op = seed(harness, newOperation());
     recordAzureApp(op, {
       state: "created",
       appId: "app-1",
@@ -658,29 +536,16 @@ describe("stop, then continue or roll back, over the socket", () => {
       }
     });
 
-    const view = (await (
-      await fetch(`${entry.baseUrl}/api/operations/${op.operationId}`)
-    ).json()) as {
-      operation: {
-        actions: Array<{
-          id: string;
-          label: string;
-          scope?: string;
-          preview?: { removes: Array<{ kind: string; target: string }> };
-        }>;
-      };
-    };
-    expect(view.operation.actions.map((action) => action.id)).toEqual([
+    const view = await poll(entry.baseUrl, `/api/operations/${op.operationId}`);
+    expect(view.actions.map((entry) => entry.id)).toEqual([
       "retry-verification",
       "rollback",
       "exit-setup"
     ]);
-    const rollback = view.operation.actions.find(
-      (action) => action.id === "rollback"
-    );
+    const rollback = action(view, "rollback");
     expect(rollback?.label).toBe("Roll back environment setup");
     expect(rollback?.scope).toBe("post_commit");
-    expect(rollback?.preview?.removes[0]).toEqual({
+    expect(rollback?.preview.removes[0]).toEqual({
       kind: "workflow_file",
       target: ".github/workflows/radius-verify-credentials.yml on main"
     });
@@ -699,56 +564,18 @@ describe("stop, then continue or roll back, over the socket", () => {
 // to close without deleting anything, and the one where this attempt added a
 // GitHub environment that would otherwise stay in the environment list.
 describe("exiting a setup over the socket", () => {
-  function reusedOnlyFailure(harness: Harness): OperationRecord {
-    const op = seed(harness);
-    recordAzureApp(op, {
-      state: "reused",
-      appId: "app-1",
-      displayName: "radius-deploy"
-    });
-    recordServicePrincipal(op, {
-      state: "reused",
-      appId: "app-1",
-      objectId: "sp-1"
-    });
-    finish(op, "failed_partial", {
-      failure: {
-        code: "github-environment-failed",
-        message: "GitHub returned 403."
-      }
-    });
-    return op;
-  }
-
   it("closes a reused-only failure without deleting anything and refreshes the listing", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
-    const op = reusedOnlyFailure(harness);
+    const op = seed(harness, reusedOnlyFailure());
 
     // 1. The headline does not claim resources exist, because none of the ones
     //    that do belong to this attempt.
-    const polled = await fetch(
-      `${entry.baseUrl}/api/operations/${op.operationId}`
-    );
-    const view = (await polled.json()) as {
-      operation: {
-        summary: string;
-        actions: Array<{
-          id: string;
-          label: string;
-          placement: string;
-          requiresConfirmation: boolean;
-          path: string;
-          preview: { removes: unknown[]; keeps: Array<{ target: string }> };
-        }>;
-      };
-    };
-    expect(view.operation.summary).toBe(
+    const view = await poll(entry.baseUrl, `/api/operations/${op.operationId}`);
+    expect(view.summary).toBe(
       'Creating environment "dev" failed partway through.'
     );
-    const exit = view.operation.actions.find(
-      (action) => action.id === "exit-setup"
-    );
+    const exit = action(view, "exit-setup");
     expect(exit).toMatchObject({
       label: "Exit setup",
       placement: "bottom",
@@ -764,73 +591,41 @@ describe("exiting a setup over the socket", () => {
     // 2. Exiting answers immediately: there is no deletion to schedule.
     const response = await post(entry.baseUrl, exit!.path);
     expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      code: string;
-      removed: boolean;
-      operation: { headline: { code: string }; actions: unknown[] };
-    };
-    expect(body.code).toBe("setup-exited");
-    expect(body.removed).toBe(false);
-    expect(body.operation.headline.code).toBe("setup-exited");
-    expect(body.operation.actions).toEqual([]);
+    const closed = await body(response);
+    expect(closed.code).toBe("setup-exited");
+    expect(closed.removed).toBe(false);
+    expect(closed.operation.headline.code).toBe("setup-exited");
+    expect(closed.operation.actions).toEqual([]);
     expect(harness.scheduled).toEqual([]);
     expect(harness.invalidatedListings).toEqual(["contoso/store"]);
 
     // 3. The decision survives the poll the browser makes next, so a reload
     //    cannot put the abandoned attempt back on the page.
-    const after = await fetch(
-      `${entry.baseUrl}/api/operations/${op.operationId}`
+    const after = await poll(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}`
     );
-    const afterView = (await after.json()) as {
-      operation: {
-        headline: { code: string; title: string };
-        actions: unknown[];
-        guidance: unknown[];
-      };
-    };
-    expect(afterView.operation.headline).toMatchObject({
+    expect(after.headline).toMatchObject({
       code: "setup-exited",
       title: "Environment setup closed"
     });
-    expect(afterView.operation.actions).toEqual([]);
-    expect(afterView.operation.guidance).toEqual([]);
+    expect(after.actions).toEqual([]);
+    expect(after.guidance).toEqual([]);
 
     // 4. A repeated request is refused rather than closing the record twice.
     const repeat = await post(entry.baseUrl, exit!.path);
     expect(repeat.status).toBe(409);
-    expect((await repeat.json()) as { code: string }).toMatchObject({
-      code: "setup-already-exited"
-    });
+    expect(await body(repeat)).toMatchObject({ code: "setup-already-exited" });
   });
 
   it("confirms and schedules the disposal when this attempt created the environment", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
-    const op = stoppedSetup(harness);
+    const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
 
-    const polled = await fetch(
-      `${entry.baseUrl}/api/operations/${op.operationId}`
-    );
-    const view = (await polled.json()) as {
-      operation: {
-        summary: string;
-        actions: Array<{
-          id: string;
-          placement: string;
-          requiresConfirmation: boolean;
-          confirmLabel: string;
-          cancelLabel: string;
-          path: string;
-          preview: { removes: Array<{ kind: string; target: string }> };
-        }>;
-      };
-    };
-    expect(view.operation.summary).toBe(
-      'Creating environment "dev" was stopped.'
-    );
-    const exit = view.operation.actions.find(
-      (action) => action.id === "exit-setup"
-    );
+    const view = await poll(entry.baseUrl, `/api/operations/${op.operationId}`);
+    expect(view.summary).toBe('Creating environment "dev" was stopped.');
+    const exit = action(view, "exit-setup");
     // A deletion is confirmed against the server's own preview before it runs.
     expect(exit).toMatchObject({
       placement: "bottom",
@@ -845,52 +640,26 @@ describe("exiting a setup over the socket", () => {
 
     const response = await post(entry.baseUrl, exit!.path);
     expect(response.status).toBe(202);
-    const body = (await response.json()) as {
-      commandId: string;
-      operation: { state: string };
-    };
+    const accepted = await body(response);
     expect(harness.scheduled).toEqual([
       {
         kind: "exit_setup",
         instanceId: "panel-a",
-        commandId: body.commandId
+        commandId: accepted.commandId
       }
     ]);
     // The listing is dropped by the deletion pass, which is the only thing that
     // can prove the environment is gone.
     expect(harness.invalidatedListings).toEqual([]);
-    expect(body.operation.state).toBe("running");
+    expect(accepted.operation.state).toBe("running");
 
     // A second press while the pass is in flight resolves to the same command.
     const repeat = await post(entry.baseUrl, exit!.path);
     expect(repeat.status).toBe(202);
-    expect(
-      (await repeat.json()) as { duplicate: boolean; commandId: string }
-    ).toMatchObject({ duplicate: true, commandId: body.commandId });
+    expect(await body(repeat)).toMatchObject({
+      duplicate: true,
+      commandId: accepted.commandId
+    });
     expect(harness.scheduled).toHaveLength(1);
-  });
-
-  it("puts the customer back on the decision when no runner accepts the exit", async () => {
-    const harness = start();
-    const entry = await container!.getOrCreate("panel-a");
-    const op = stoppedSetup(harness);
-    harness.schedulerAccepts.value = false;
-
-    const response = await post(
-      entry.baseUrl,
-      `/api/operations/${op.operationId}/exit`
-    );
-
-    expect(response.status).toBe(503);
-    const body = (await response.json()) as {
-      code: string;
-      operation: { state: string; actions: Array<{ id: string }> };
-    };
-    expect(body.code).toBe("operation-command-unscheduled");
-    expect(body.operation.state).toBe("cancelled");
-    expect(body.operation.actions.map((action) => action.id)).toContain(
-      "exit-setup"
-    );
-    expect(harness.invalidatedListings).toEqual([]);
   });
 });

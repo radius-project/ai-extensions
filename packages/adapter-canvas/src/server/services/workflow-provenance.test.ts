@@ -59,12 +59,21 @@ const present = (
 const VERIFY_KEY =
   "main:.github/workflows/radius-verify-credentials.yml" as const;
 
+// One saved record, verified against one scripted repository state. Only the
+// pair a scenario is about differs, so the request is built once here.
+function verifyOne(
+  state: RepositoryFileState | null,
+  overrides: Partial<WorkflowProvenanceRecord> = {}
+) {
+  return verifyWorkflowProvenance(
+    { repo: "contoso/store", files: [record(overrides)] },
+    ports(state ? { files: { [VERIFY_KEY]: state } } : {})
+  );
+}
+
 describe("verifyWorkflowProvenance", () => {
   it("clears a file whose blob and content both still match", async () => {
-    const verdict = await verifyWorkflowProvenance(
-      { repo: "contoso/store", files: [record()] },
-      ports({ files: { [VERIFY_KEY]: present() } })
-    );
+    const verdict = await verifyOne(present());
 
     expect(verdict.blocked).toBe(false);
     expect(verdict.reasons).toEqual([]);
@@ -76,20 +85,14 @@ describe("verifyWorkflowProvenance", () => {
   });
 
   it("treats an absent file as already reverted rather than as a mismatch", async () => {
-    const verdict = await verifyWorkflowProvenance(
-      { repo: "contoso/store", files: [record()] },
-      ports({ files: { [VERIFY_KEY]: { status: "absent" } } })
-    );
+    const verdict = await verifyOne({ status: "absent" });
 
     expect(verdict.blocked).toBe(false);
     expect(verdict.files[0]?.state).toBe("already_absent");
   });
 
   it("blocks a file whose blob changed since Radius committed it", async () => {
-    const verdict = await verifyWorkflowProvenance(
-      { repo: "contoso/store", files: [record()] },
-      ports({ files: { [VERIFY_KEY]: present({ blobSha: "e".repeat(40) }) } })
-    );
+    const verdict = await verifyOne(present({ blobSha: "e".repeat(40) }));
 
     expect(verdict.blocked).toBe(true);
     expect(verdict.files[0]?.state).toBe("changed");
@@ -101,12 +104,7 @@ describe("verifyWorkflowProvenance", () => {
   it("blocks a file whose contents changed even when the blob id matches", async () => {
     // A blob id that matches while the bytes do not can only come from a
     // rewritten or spoofed answer, so the second identity is checked too.
-    const verdict = await verifyWorkflowProvenance(
-      { repo: "contoso/store", files: [record()] },
-      ports({
-        files: { [VERIFY_KEY]: present({ contentSha256: "f".repeat(64) }) }
-      })
-    );
+    const verdict = await verifyOne(present({ contentSha256: "f".repeat(64) }));
 
     expect(verdict.blocked).toBe(true);
     expect(verdict.reasons[0]).toContain(
@@ -115,15 +113,12 @@ describe("verifyWorkflowProvenance", () => {
   });
 
   it("blocks a record that never saved an identity to compare", async () => {
-    const verdict = await verifyWorkflowProvenance(
-      {
-        repo: "contoso/store",
-        files: [record({ blobSha: null, contentSha256: null })]
-      },
-      // No read is scripted: a record with nothing to compare must be refused
-      // before GitHub is asked at all.
-      ports({})
-    );
+    // No read is scripted: a record with nothing to compare must be refused
+    // before GitHub is asked at all.
+    const verdict = await verifyOne(null, {
+      blobSha: null,
+      contentSha256: null
+    });
 
     expect(verdict.blocked).toBe(true);
     expect(verdict.files[0]?.state).toBe("unverifiable");
@@ -131,14 +126,10 @@ describe("verifyWorkflowProvenance", () => {
   });
 
   it("blocks a file GitHub could not be read for", async () => {
-    const verdict = await verifyWorkflowProvenance(
-      { repo: "contoso/store", files: [record()] },
-      ports({
-        files: {
-          [VERIFY_KEY]: { status: "unreadable", detail: "HTTP 500" }
-        }
-      })
-    );
+    const verdict = await verifyOne({
+      status: "unreadable",
+      detail: "HTTP 500"
+    });
 
     expect(verdict.blocked).toBe(true);
     expect(verdict.files[0]?.state).toBe("unverifiable");
@@ -146,13 +137,8 @@ describe("verifyWorkflowProvenance", () => {
   });
 
   it("blocks a file GitHub answered for with no comparable identity", async () => {
-    const verdict = await verifyWorkflowProvenance(
-      { repo: "contoso/store", files: [record()] },
-      ports({
-        files: {
-          [VERIFY_KEY]: present({ blobSha: null, contentSha256: null })
-        }
-      })
+    const verdict = await verifyOne(
+      present({ blobSha: null, contentSha256: null })
     );
 
     expect(verdict.blocked).toBe(true);
@@ -161,10 +147,9 @@ describe("verifyWorkflowProvenance", () => {
   });
 
   it("clears a file when only one identity is comparable and it matches", async () => {
-    const verdict = await verifyWorkflowProvenance(
-      { repo: "contoso/store", files: [record({ contentSha256: null })] },
-      ports({ files: { [VERIFY_KEY]: present({ contentSha256: null }) } })
-    );
+    const verdict = await verifyOne(present({ contentSha256: null }), {
+      contentSha256: null
+    });
 
     expect(verdict.blocked).toBe(false);
     expect(verdict.files[0]?.state).toBe("unchanged");
@@ -197,13 +182,11 @@ describe("verifyWorkflowProvenance", () => {
   });
 
   it("names a file with no saved branch without printing an empty one", async () => {
-    const verdict = await verifyWorkflowProvenance(
-      {
-        repo: "contoso/store",
-        files: [record({ branch: "", blobSha: null, contentSha256: null })]
-      },
-      ports({})
-    );
+    const verdict = await verifyOne(null, {
+      branch: "",
+      blobSha: null,
+      contentSha256: null
+    });
 
     expect(verdict.reasons[0]).toBe(
       'Radius did not save what it committed for ".github/workflows/radius-verify-credentials.yml", so it cannot prove the file is unchanged.'
