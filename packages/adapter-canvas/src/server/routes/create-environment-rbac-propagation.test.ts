@@ -182,6 +182,42 @@ describe("shouldDeferAzureCredentialVerificationForRbacPropagation", () => {
     ).toBe(false);
   });
 
+  // Clock boundaries for the dispatch guard: a timestamp that cannot be parsed
+  // and a timestamp ahead of the observed clock are both untrustworthy, while
+  // the window itself is inclusive at its far edge.
+  it.each([
+    ["a malformed timestamp", "not-a-timestamp", false],
+    ["a future timestamp", new Date(NOW + 1).toISOString(), false],
+    ["a timestamp exactly at the window edge", null, true],
+    [
+      "a timestamp recorded at the observed instant",
+      new Date(NOW).toISOString(),
+      true
+    ]
+  ])("handles %s", (_name, createdAt, expected) => {
+    const stamp =
+      createdAt ??
+      new Date(NOW - AZURE_RBAC_PROPAGATION_WINDOW_MS).toISOString();
+
+    expect(
+      shouldDefer(
+        operation({
+          setupArtifacts: {
+            servicePrincipal: { appId: "client-1", objectId: "principal-1" },
+            roleAssignments: [
+              {
+                role: "Contributor",
+                scope: "/subscriptions/sub-1/resourceGroups/rg-1",
+                principalObjectId: "principal-1",
+                createdAt: stamp
+              }
+            ]
+          }
+        })
+      )
+    ).toBe(expected);
+  });
+
   it("rejects role, subscription and resource-group mismatches independently", () => {
     expect(
       shouldDefer(

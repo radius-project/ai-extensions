@@ -670,6 +670,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     const response = await post({
       repo: "octo/app",
       environment: "dev",
+      resourceGroup: "rg",
       operationId: "op-http"
     });
 
@@ -1148,6 +1149,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
 
     const response = await post({
       repo: "octo/app",
+      resourceGroup: "rg",
       operationId: "op-http"
     });
 

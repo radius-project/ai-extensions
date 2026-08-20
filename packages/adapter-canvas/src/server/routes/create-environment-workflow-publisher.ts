@@ -65,9 +65,12 @@ export function resolveAzureProviderConfiguration(
     tenantId: data.tenantId || optionalString(azureCreds.tenantId),
     subscriptionId:
       data.subscriptionId || optionalString(azureCreds.subscriptionId),
-    resourceGroup:
-      data.resourceGroup || optionalString(azureCreds.resourceGroup),
-    cluster: data.cluster || optionalString(azureCreds.cluster),
+    // `resourceGroup` and `cluster` are per-environment values that are not
+    // part of the shared Azure credential contract (`CloudCredential`), so they
+    // come from the request alone; falling back to a persisted record could
+    // configure the environment with another environment's values.
+    resourceGroup: data.resourceGroup || "",
+    cluster: data.cluster || "",
     location: data.location,
     namespace: data.namespace
   };

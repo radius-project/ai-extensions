@@ -69,7 +69,10 @@ describe("applyProviderConfiguration", () => {
     ]);
   });
 
-  it("falls back to the shared azure credential for values the request omits", async () => {
+  // The shared credential carries the identity (client/tenant/subscription)
+  // only; the resource group and cluster are environment-scoped request values,
+  // so a persisted record must never supply them.
+  it("falls back to the shared azure credential for identity values the request omits", async () => {
     const { ports, variables } = configurationRecorder({
       azureCredential: () => ({
         clientId: "shared-client",
@@ -86,8 +89,8 @@ describe("applyProviderConfiguration", () => {
       ["AZURE_CLIENT_ID", "shared-client"],
       ["AZURE_TENANT_ID", "shared-tenant"],
       ["AZURE_SUBSCRIPTION_ID", "shared-sub"],
-      ["AZURE_RESOURCE_GROUP", "shared-rg"],
-      ["AZURE_AKS_CLUSTER_NAME", "shared-aks"]
+      ["AZURE_RESOURCE_GROUP", ""],
+      ["AZURE_AKS_CLUSTER_NAME", ""]
     ]);
   });
 

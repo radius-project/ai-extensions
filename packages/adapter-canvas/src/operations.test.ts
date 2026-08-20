@@ -174,6 +174,31 @@ describe("record shape", () => {
     });
   });
 
+  // The RBAC propagation guard in `create-environment` only defers verification
+  // for a grant it can date, so this recorder must always stamp the artifact.
+  it("stamps every recorded role assignment with a creation timestamp", () => {
+    const op = newOp();
+
+    recordCreatedRoleAssignment(op, {
+      role: "Contributor",
+      scope: "/subscriptions/sub/resourceGroups/rg",
+      principalObjectId: "sp-1",
+      createdAt: "2026-08-20T17:00:00.000Z"
+    });
+    recordCreatedRoleAssignment(op, {
+      role: "Owner",
+      scope: "/subscriptions/sub",
+      principalObjectId: "sp-1"
+    });
+
+    const [explicit, defaulted] = op.setupArtifacts.roleAssignments;
+    expect(explicit.createdAt).toBe("2026-08-20T17:00:00.000Z");
+    expect(Number.isFinite(Date.parse(defaulted.createdAt))).toBe(true);
+    expect(defaulted.createdAt).toBe(
+      new Date(defaulted.createdAt).toISOString()
+    );
+  });
+
   it("keeps setup artifact mutations alive across operation-id lookups", () => {
     const reg = createRegistry();
     const op = newOp();
