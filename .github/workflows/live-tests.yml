@@ -3,10 +3,10 @@
 name: Live upstream tests
 
 # Runs the opt-in `*.live.test.ts` suites that fetch the real workflow templates
-# from radius-project/radius at runtime and assert the extension still renders
-# them into valid, correctly-shaped output. A failure means an upstream template
-# change broke what the extension generates (e.g. the invalid-YAML deploy
-# regression in #407).
+# from radius-project/radius at runtime and assert YAML validity plus the OIDC
+# environment-binding contract. A failure means an upstream template change
+# broke what the extension generates (e.g. the invalid-YAML deploy regression
+# in #407).
 #
 # This is a SEPARATE workflow from the hermetic Build suite (build.yml), which
 # stays fully offline and deterministic. These live suites are intentionally
