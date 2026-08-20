@@ -483,14 +483,13 @@ export async function handleCreateEnvironment(
     let verifySkipReason = "";
     let skipVerifyDueToRbacDelay = false;
     if (provider === "azure" && credentialsComplete) {
-      const azureCredential = dependencies.azureCredential();
-      skipVerifyDueToRbacDelay =
-        hasCreatedAzureContributorRoleAssignment(
-          operation,
-          dependencies.optionalString(data.subscriptionId) ||
-            dependencies.optionalString(azureCredential.subscriptionId),
-          dependencies.optionalString(data.resourceGroup)
-        );
+      const azureCredential = dependencies.azureCredential() || {};
+      skipVerifyDueToRbacDelay = hasCreatedAzureContributorRoleAssignment(
+        operation,
+        dependencies.optionalString(data.subscriptionId) ||
+          dependencies.optionalString(azureCredential.subscriptionId),
+        dependencies.optionalString(data.resourceGroup)
+      );
     }
 
     // Steps 3, 4 and 4b: publish the verify, deploy and delete workflow files.
