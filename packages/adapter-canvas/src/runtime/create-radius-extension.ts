@@ -379,7 +379,7 @@ export function createRadiusExtension(
     hooks: {
       // Guards the graph-generating tool calls: denies the call and instructs
       // the agent to author + SAVE .radius/app.bicep via the radius-app-bicep
-      // skill first when no bicep exists. Fails open on any hook error.
+      // skill first when no bicep exists. It fails open on any hook error.
       onPreToolUse: async (input) => {
         try {
           const graphDecision = await evaluateAppBicepHook(
