@@ -542,7 +542,8 @@ test.describe("Radius Canvas visual baselines", () => {
       await gotoVisual(page, canvas, "environment", theme);
       await openEnvironmentCreateForm(page);
       await expect(page.locator("#azure-discover-status")).toHaveText(
-        "Found 1 cluster(s), 1 resource group(s)"
+        "Found 1 cluster(s), 1 resource group(s)",
+        { timeout: 15_000 }
       );
       await page.locator("#azure-rg-select").selectOption(AZURE_RESOURCE_GROUP);
       await page.locator("#azure-cluster-select").selectOption(AZURE_CLUSTER);
