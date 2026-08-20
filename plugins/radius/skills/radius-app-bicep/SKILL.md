@@ -23,6 +23,8 @@ This skill currently supports only repositories that already contain a Dockerfil
 
 The extension normally screens this out before handing over the skill, so re-running that check is not your job. If you do find the application has no Dockerfile, stop: generate nothing, write nothing, and report this to the user verbatim.
 
+A Dockerfile means a file named `Dockerfile`, `Dockerfile.<suffix>`, or `<prefix>.Dockerfile`, matched case-insensitively on the file name, at the repository root or in a service subdirectory, and outside vendored or generated directories such as `node_modules`.
+
 > I could not find a Dockerfile in this repository. I can only create application definitions for containerized applications. Add a Dockerfile first, then I can create an application definition.
 
 ## Response

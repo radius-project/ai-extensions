@@ -124,19 +124,22 @@ describe("RU-07: radius_generate_app", () => {
     expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
   });
 
-  it("reports no repository by name when the workspace has no repo or branch context", async () => {
+  // Without a repository the worktree predicate is fail-closed, so nothing can
+  // be listed and no verdict is available. The gate must hand over the skill
+  // rather than refuse, and must not spend a doomed remote lookup to get there.
+  it("hands over the skill, without listing, when the workspace has no repo context", async () => {
     const { tools, deps } = setup({
-      workspaceContext: { workspacePath: "/workspace", repo: "", branch: "" },
-      workspaceTreeByRepoBranch: { "@": ["src/index.ts", "package.json"] }
+      workspaceContext: { workspacePath: "/workspace", repo: "", branch: "" }
     });
 
     const result = await findTool(tools, "radius_generate_app").handler({
       repoPath: "/workspace"
     });
 
-    expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
-    expect(result).toContain("Application modeling stopped before it began");
-    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+    expect(deps.github.treePaths).not.toHaveBeenCalled();
+    expect(deps.workspace.fetchWorkspaceTree).not.toHaveBeenCalled();
   });
 
   // A sibling whose name merely starts with the workspace root is not inside

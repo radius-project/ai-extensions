@@ -29,7 +29,10 @@ import {
   resolveRadiusArtifactTarget,
   validateGhcrTargetForRepo
 } from "../../../src/publish-targets.js";
-import { isWorkspacePath } from "../../../src/workspace.js";
+import {
+  isWorkspacePath,
+  isWorkspaceSelection
+} from "../../../src/workspace.js";
 import { renderPrDiffMarkdown } from "../../../src/pr-diff-markdown.js";
 import { createSessionHolder } from "../../../src/runtime/session.js";
 import type { SessionPort } from "../../../src/runtime/session.js";
@@ -184,12 +187,11 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       defaultBranchForState: vi.fn(
         (state) => (state?.contextBranch as string) || "main"
       ),
-      isWorkspaceSelection: vi.fn(
-        (state, repo, branch) =>
-          !!state?.workspacePath &&
-          repo === workspaceContext.repo &&
-          branch === workspaceContext.branch
-      ),
+      // Real implementation, not a restatement. This predicate is fail-closed on
+      // an empty repo or branch, and the "never a false unsupported" argument
+      // rests on it, so a hand-synced copy that drifted looser would let tests
+      // assert behavior production cannot produce.
+      isWorkspaceSelection: vi.fn(isWorkspaceSelection),
       fetchWorkspaceBicep: vi.fn(
         async (_state, repo: string, branch: string) =>
           bicepByRepoBranch[`workspace:${repo}@${branch}`] ?? null

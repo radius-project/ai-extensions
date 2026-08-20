@@ -517,6 +517,18 @@ describe("evaluateAppSourceForBranch", () => {
     ).toEqual({ status: "unknown", dockerfiles: [] });
   });
 
+  // The worktree predicate is fail-closed on an empty repo, so without this the
+  // call falls through to the remote lister and waits out a doomed request.
+  it("reports unknown without listing anything when there is no repository", async () => {
+    const { evaluateAppSourceForBranch, deps } = helpers();
+
+    expect(
+      await evaluateAppSourceForBranch("", "main", WORKSPACE_STATE)
+    ).toEqual({ status: "unknown", dockerfiles: [] });
+    expect(deps.github.treePaths).not.toHaveBeenCalled();
+    expect(deps.workspace.fetchWorkspaceTree).not.toHaveBeenCalled();
+  });
+
   it("reports unknown when the repository tree listing fails or is empty", async () => {
     const { evaluateAppSourceForBranch, deps } = helpers();
     (deps.github.treePaths as ReturnType<typeof vi.fn>).mockRejectedValueOnce(

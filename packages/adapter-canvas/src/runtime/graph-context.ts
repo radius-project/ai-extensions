@@ -96,6 +96,11 @@ export function createGraphContextHelpers(
     branch: string,
     state: CanvasState
   ): Promise<AppSourceEvaluation> {
+    // Without a repository there is nothing to list. The worktree predicate is
+    // fail-closed on an empty repo, so this would otherwise fall through to the
+    // remote lister and spend a doomed `gh api /repos//git/trees/` call, and its
+    // timeout, to arrive at the same answer.
+    if (!repo) return evaluateAppSource(null);
     const paths = await (
       deps.workspace.isWorkspaceSelection(state, repo, branch) ?
         deps.workspace.fetchWorkspaceTree(state, repo, branch)

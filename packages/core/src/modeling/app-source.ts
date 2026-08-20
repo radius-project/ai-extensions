@@ -41,6 +41,11 @@ export const IGNORED_SOURCE_DIRS: ReadonlySet<string> = new Set([
 // it has no Dockerfile. Exactly one copy exists so the tool that refuses to hand
 // over the authoring instructions and the hook that denies a graph view cannot
 // drift into telling the user two different things.
+//
+// Wording is fixed by exception 2.1 of the exception-scenarios design note, which
+// defines what the user sees; change it there first:
+// docs/design/2026-07-radius-copilot-app-exception-scenarios.md ("Exception 2.1:
+// No Dockerfile present" → "What the user sees").
 export const UNSUPPORTED_NO_DOCKERFILE_MESSAGE =
   "I could not find a Dockerfile in this repository. I can only create " +
   "application definitions for containerized applications. Add a Dockerfile " +
