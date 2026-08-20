@@ -180,17 +180,20 @@ describe("createEnvironmentConfirmDialog", () => {
   ])("dismisses without acting on %s", (_name, dismiss) => {
     const { dialog, elements, browser } = openDialog();
     const onConfirm = vi.fn();
+    const onCancel = vi.fn();
     dialog.show({
       title: "Delete environment?",
       message: "This deletes the GitHub environment.",
       confirmLabel: "Delete environment",
-      onConfirm
+      onConfirm,
+      onCancel
     });
 
     dismiss(elements, browser);
 
     expect(elements["env-confirm-modal"].style.display).toBe("none");
     expect(onConfirm).not.toHaveBeenCalled();
+    expect(onCancel).toHaveBeenCalledOnce();
     // The dismissed action stays dismissed even if the confirm button is
     // somehow clicked afterwards.
     elements["env-confirm-ok"].dispatch("click");

@@ -1295,7 +1295,6 @@ describe("initializeEnvironmentPage", () => {
 
   it("confirms an app-registration delete prompt through the dialog seam", async () => {
     const page = fixture();
-    page.browser.dialogs.nextConfirmation = true;
     const remove = createFakeInput("delete-row");
     remove.setAttribute("data-env", "dev");
     page.browser.document.addSelectorAll(".js-delete-env", [remove]);
@@ -1352,11 +1351,18 @@ describe("initializeEnvironmentPage", () => {
     await flushPromises();
     await flushPromises();
 
-    // The wired dialog seam surfaced the prompt message, and the confirmed
-    // decision was posted back to the resume endpoint.
-    expect(page.browser.dialogs.confirmations).toContain(
+    expect(page.elements["env-confirm-modal"].style.display).toBe("flex");
+    expect(page.elements["env-confirm-title"].textContent).toBe(
+      "Delete unused app registration?"
+    );
+    expect(page.elements["env-confirm-message"].textContent).toBe(
       'Delete app registration "radius-deploy-octo-app"?'
     );
+    expect(page.elements["env-confirm-ok"].textContent).toBe(
+      "Delete App Registration"
+    );
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
     expect(resumeBody).toMatchObject({ deleteAppRegistration: true });
 
     teardown();

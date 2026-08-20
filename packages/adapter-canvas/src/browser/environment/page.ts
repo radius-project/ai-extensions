@@ -296,8 +296,24 @@ export function initializeEnvironmentPage(
       promptServiceManagementReference:
         discovery.promptServiceManagementReference,
       promptAppSelection: discovery.promptAppSelection,
-      confirmDeleteAppRegistration: ({ message }) =>
-        Promise.resolve(context.dialogs.confirm(message))
+      confirmDeleteAppRegistration: ({ appDisplayName, message }) =>
+        new Promise<boolean>((resolve) => {
+          if (!confirmDialog) {
+            resolve(false);
+            return;
+          }
+          confirmDialog.show({
+            title: "Delete unused app registration?",
+            message,
+            usageLabel: "App registration",
+            usage: appDisplayName ? [appDisplayName] : undefined,
+            confirmLabel: "Delete App Registration",
+            cancelLabel: "Keep",
+            confirmVariant: "danger",
+            onConfirm: () => resolve(true),
+            onCancel: () => resolve(false)
+          });
+        })
     }
   });
 

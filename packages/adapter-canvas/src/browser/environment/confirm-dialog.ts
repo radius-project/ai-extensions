@@ -14,6 +14,7 @@ export interface EnvironmentConfirmOptions {
   readonly cancelLabel?: string;
   readonly confirmVariant?: "danger" | "primary";
   readonly onConfirm: () => void;
+  readonly onCancel?: () => void;
 }
 
 export interface EnvironmentConfirmDialog {
@@ -54,6 +55,7 @@ export function createEnvironmentConfirmDialog(
 
   const registrations: Registration[] = [];
   let pendingConfirm: (() => void) | null = null;
+  let pendingCancel: (() => void) | null = null;
   let restoreFocusTo: DomElement | null = null;
   const bind = (
     target: DomEventTarget,
@@ -67,13 +69,19 @@ export function createEnvironmentConfirmDialog(
   const close = (): void => {
     modal.style.display = "none";
     pendingConfirm = null;
+    pendingCancel = null;
     // Return focus to whatever opened the dialog, so keyboard users are not
     // dropped at the top of the document once it closes.
     const restore = restoreFocusTo;
     restoreFocusTo = null;
     context.focus.focus(restore);
   };
-  bind(cancel, "click", close);
+  const cancelPending = (): void => {
+    const run = pendingCancel;
+    close();
+    run?.();
+  };
+  bind(cancel, "click", cancelPending);
   bind(confirm, "click", () => {
     const run = pendingConfirm;
     close();
@@ -82,7 +90,7 @@ export function createEnvironmentConfirmDialog(
   bind(context.dom.document, "keydown", (event) => {
     if (!isOpen()) return;
     if (event.key === "Escape") {
-      close();
+      cancelPending();
       return;
     }
     if (event.key !== "Tab") return;
@@ -105,6 +113,7 @@ export function createEnvironmentConfirmDialog(
     show(options) {
       if (!isOpen()) restoreFocusTo = context.focus.active();
       pendingConfirm = options.onConfirm;
+      pendingCancel = options.onCancel ?? null;
       title.textContent = options.title;
       message.textContent = options.message;
       confirm.textContent = options.confirmLabel;
