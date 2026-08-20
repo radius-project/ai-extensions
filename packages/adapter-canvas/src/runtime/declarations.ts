@@ -242,12 +242,17 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         manifestPath: {
           type: "string",
           description:
-            "Path to the resource-type manifest, relative to the workspace .radius/ directory. Defaults to .radius/custom-types.yaml."
+            "Path to the resource-type manifest, relative to the workspace .radius/ directory. Defaults to .radius/custom-types.yaml, or to the staging directory when stagingDir is given."
         },
         targetPath: {
           type: "string",
           description:
-            "Path for the compiled extension package (.tgz), relative to the workspace .radius/ directory. Defaults to .radius/custom-types.tgz."
+            "Path for the compiled extension package (.tgz), relative to the workspace .radius/ directory. Defaults to .radius/custom-types.tgz, or to the staging directory when stagingDir is given."
+        },
+        stagingDir: {
+          type: "string",
+          description:
+            "Staging directory of the modeling run, relative to the workspace .radius/ directory (for example .staging-<runId>). Pass the directory promote-app-model.mjs --begin printed so the published package lands with the rest of the run instead of in .radius/."
         }
       }
     }

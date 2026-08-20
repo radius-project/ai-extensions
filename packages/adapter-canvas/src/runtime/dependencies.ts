@@ -200,6 +200,10 @@ export interface PublishTargetsDependencies {
     value: unknown,
     fallback: string | null | undefined
   ): string;
+  resolveStagingDirPrefix(
+    workspacePath: string | null | undefined,
+    value: unknown
+  ): string;
   validateGhcrTargetForRepo(
     target: unknown,
     workspaceRepo: string | null | undefined

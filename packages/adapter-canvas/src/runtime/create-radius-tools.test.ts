@@ -542,6 +542,40 @@ describe("RU-09: radius_publish_custom_type_extension", () => {
     expect(result).toContain("escapes the workspace");
   });
 
+  // A modeling run writes into `.radius/.staging-<runId>/` and publishes only
+  // once it is complete, so the package this tool produces has to land in the
+  // run's directory rather than where the product reads it.
+  it("defaults into the run's staging directory when one is given", async () => {
+    const { tools, deps } = setup();
+    await findTool(tools, "radius_publish_custom_type_extension").handler({
+      stagingDir: ".staging-run-42"
+    });
+    expect(
+      deps.publishTargets.resolveExistingRadiusArtifact
+    ).toHaveBeenCalledWith(
+      "/workspace",
+      undefined,
+      ".radius/.staging-run-42/custom-types.yaml"
+    );
+    expect(
+      deps.publishTargets.resolveRadiusArtifactTarget
+    ).toHaveBeenCalledWith(
+      "/workspace",
+      undefined,
+      ".radius/.staging-run-42/custom-types.tgz"
+    );
+  });
+
+  it("rejects a staging directory that is not a staging directory", async () => {
+    const { tools, deps } = setup();
+    const result = await findTool(
+      tools,
+      "radius_publish_custom_type_extension"
+    ).handler({ stagingDir: "../../etc" });
+    expect(result).toContain("Could not publish the custom-type extension");
+    expect(deps.rad.runRadBicepPublishExtension).not.toHaveBeenCalled();
+  });
+
   it("surfaces a publish failure as a friendly warning", async () => {
     const { tools, deps } = setup();
     (

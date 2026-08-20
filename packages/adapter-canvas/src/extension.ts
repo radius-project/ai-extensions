@@ -94,6 +94,7 @@ import { withGhcrDockerConfig } from "./ghcr.js";
 import {
   resolveExistingRadiusArtifact,
   resolveRadiusArtifactTarget,
+  resolveStagingDirPrefix,
   validateGhcrTargetForRepo
 } from "./publish-targets.js";
 import { createSessionHolder } from "./runtime/session.js";
@@ -160,6 +161,7 @@ const dependencies: RadiusExtensionDependencies = {
   publishTargets: {
     resolveExistingRadiusArtifact,
     resolveRadiusArtifactTarget,
+    resolveStagingDirPrefix,
     validateGhcrTargetForRepo
   },
   hostCallbacks: {

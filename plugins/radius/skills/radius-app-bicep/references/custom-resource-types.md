@@ -4,7 +4,7 @@ Use this when the application genuinely needs a backing service that has NO matc
 
 Custom types are generated automatically as part of modeling. Do not ask the user whether to generate one; decide from the source's actual dependency. The initial scope is backing services that Radius can provision on **Azure**. If the required service is not provisionable on Azure, do NOT invent a type: report the unsupported dependency and stop for that resource.
 
-Every generated artifact lives in `.radius/`, co-located with `app.bicep` and `bicepconfig.json`, and is written and staged with the same behavior as the rest of the model (see the [Response](../SKILL.md#response) section). Publishing an extension or recipe to a registry is an OCI push, not a git push.
+Every generated artifact lives in `.radius/`, co-located with `app.bicep` and `bicepconfig.json`. Like the rest of the model it is written into the run's staging directory and published from there once the run completes (see [Staged runs](../SKILL.md#staged-runs)); the paths below name where each artifact ends up, not where you write it during the run. Publishing an extension or recipe to a registry is an OCI push, not a git push.
 
 Author every artifact from the templates below: copy the skeleton and fill only the marked `<placeholders>`. The surrounding structure, resource types, API versions, and wiring keys are fixed and must not be changed or renamed.
 
@@ -80,7 +80,7 @@ Rules:
 
 ### 2. Publish the extension locally: call `radius_publish_custom_type_extension`
 
-Compile the manifest into a local Bicep extension co-located with `app.bicep` by calling the `radius_publish_custom_type_extension` tool (never invoke `rad` directly). By default it reads `.radius/custom-types.yaml` and writes `.radius/custom-types.tgz`; pass `manifestPath` / `targetPath` only if you used different names.
+Compile the manifest into a local Bicep extension co-located with `app.bicep` by calling the `radius_publish_custom_type_extension` tool (never invoke `rad` directly). Pass `stagingDir` with the run's staging directory so it reads `custom-types.yaml` from there and writes `custom-types.tgz` beside it; pass `manifestPath` / `targetPath` only if you used different names.
 
 Re-run this tool after ANY edit to `custom-types.yaml` — the compiled `custom-types.tgz` is what `app.bicep` validates against, so a schema change (for example adding `codeReference` to a type that predates that rule) has no effect until the extension is republished.
 

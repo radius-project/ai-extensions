@@ -39,12 +39,33 @@ export {
   evaluateAppSource,
   findWorkspaceManifests,
   unsupportedAppSourceReport,
+  CONCURRENT_EDIT_MESSAGE,
+  CUSTOM_TYPE_STAGED_FILES,
+  REQUIRED_STAGED_FILES,
+  STAGING_DIR_PREFIX,
+  STAGING_IGNORE_PATTERN,
+  STAGING_RUN_RECORD,
+  classifyModelingFailure,
+  evaluateStagedRun,
+  isStagingDirName,
+  modelingFailureReport,
+  publishableFiles,
+  requiredStagedFiles,
+  sanitizeRunId,
+  stagingDirName,
   fetchBicepFromRepo,
   fetchRecipePack,
   resolveRecipeOutputs
 } from "./modeling/index.js";
 export type { ConcreteResource, RecipePackEntry } from "./modeling/index.js";
 export type { AppSourceEvaluation, AppSourceStatus } from "./modeling/index.js";
+export type {
+  ModelingFailureInput,
+  ModelingFailureKind,
+  StagedRunEvaluation,
+  StagedRunInput,
+  StagedRunStatus
+} from "./modeling/index.js";
 export type {
   AppModelFreshness,
   AppModelFreshnessInput,
