@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildFederatedCredentialListArgs,
   createDeployDispatchService,
   type DeployCommandOptions,
   type DeployCommandResult,
@@ -7,6 +8,7 @@ import {
 } from "./deploy-dispatch.js";
 import type { BicepParam } from "../../bicep.js";
 import type { CanvasState } from "../../shared.js";
+import type { GitHubJsonResponse, GitHubJsonRunner } from "../../azure-oidc.js";
 
 const OK: DeployCommandResult = { code: 0, stdout: "", stderr: "" };
 
@@ -23,6 +25,7 @@ function dependencies(
     deployWorkflowFile: "run-rad-commands.yml",
     deployWorkflowFiles: ["run-rad-commands.yml", "run-rad-commands-azure.yml"],
     branchNotPushedKind: "branch-not-pushed",
+    oidcSubjectMissingKind: "oidc-subject-missing",
     getBranchHeadSha: () => Promise.resolve("sha-1"),
     getDefaultBranch: () => {
       throw new Error("getDefaultBranch not stubbed");
@@ -30,6 +33,12 @@ function dependencies(
     runGh: () => Promise.resolve(OK),
     runGhWithStdin: () => {
       throw new Error("runGhWithStdin not stubbed");
+    },
+    runAz: () => {
+      throw new Error("runAz not stubbed");
+    },
+    runGitHubJson: () => {
+      throw new Error("runGitHubJson not stubbed");
     },
     readProcessEnv: () => ({}),
     fetchFileForSelection: () => Promise.resolve(null),
@@ -60,7 +69,7 @@ function request(state: CanvasState = {}) {
       entry: { state },
       repo: "acme/widgets",
       branch: "feat",
-      provider: "azure",
+      provider: "aws",
       requestedEnvironment: "production",
       log: (message: string) => logs.push(message)
     }
@@ -88,6 +97,106 @@ function recordingGh(results: DeployCommandResult[] = []) {
   };
 }
 
+const DEFAULT_OIDC_CUSTOMIZATION: GitHubJsonResponse = {
+  ok: false,
+  status: 404
+};
+
+function oidcGitHubRunner(
+  customization: GitHubJsonResponse = DEFAULT_OIDC_CUSTOMIZATION
+): GitHubJsonRunner {
+  return (path) => {
+    if (path === "/repos/acme/widgets") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: {
+          full_name: "acme/widgets",
+          id: 202,
+          owner: { id: 101 }
+        }
+      });
+    }
+    if (path === "/repos/acme/widgets/actions/oidc/customization/sub") {
+      return Promise.resolve(customization);
+    }
+    throw new Error(`unexpected GitHub JSON path: ${path}`);
+  };
+}
+
+interface AzurePreflightOptions {
+  customization?: GitHubJsonResponse;
+  environmentLookup?: GitHubJsonResponse;
+  environmentVariable?: GitHubJsonResponse;
+  oidcError?: Error;
+  repositoryVariable?: GitHubJsonResponse;
+  runAz?: (args: string[]) => Promise<DeployCommandResult>;
+  subjects?: unknown;
+  variableError?: Error;
+}
+
+const ABSENT: GitHubJsonResponse = { ok: false, status: 404 };
+
+function azurePreflight(options: AzurePreflightOptions = {}) {
+  const azCalls: string[][] = [];
+  const githubJsonCalls: string[] = [];
+  return {
+    azCalls,
+    githubJsonCalls,
+    runGitHubJson: (path: string) => {
+      githubJsonCalls.push(path);
+      if (
+        path.startsWith("/repos/acme/widgets/environments/") &&
+        path.endsWith("/variables/AZURE_CLIENT_ID")
+      ) {
+        if (options.variableError) throw options.variableError;
+        return Promise.resolve(
+          options.environmentVariable ?? {
+            ok: true,
+            status: 200,
+            json: { value: "client-123" }
+          }
+        );
+      }
+      if (path === "/repos/acme/widgets/actions/variables/AZURE_CLIENT_ID") {
+        return Promise.resolve(options.repositoryVariable ?? ABSENT);
+      }
+      if (path.startsWith("/repos/acme/widgets/environments/")) {
+        // GitHub echoes the environment's stored name, which is what the
+        // subject must be built from.
+        const requested = decodeURIComponent(
+          path.slice("/repos/acme/widgets/environments/".length)
+        );
+        return Promise.resolve(
+          options.environmentLookup ?? {
+            ok: true,
+            status: 200,
+            json: { name: requested }
+          }
+        );
+      }
+      if (options.oidcError) throw options.oidcError;
+      return oidcGitHubRunner(
+        options.customization ?? DEFAULT_OIDC_CUSTOMIZATION
+      )(path);
+    },
+    runAz:
+      options.runAz ??
+      ((args: string[]) => {
+        azCalls.push(args);
+        return Promise.resolve({
+          ...OK,
+          stdout: JSON.stringify(
+            options.subjects ?? [
+              "repo:acme/widgets:environment:production",
+              "repo:acme@101/widgets@202:environment:production"
+            ]
+          )
+        });
+      })
+  };
+}
+
 const SECRET_PARAM: BicepParam = {
   name: "dbPassword",
   type: "string",
@@ -112,6 +221,8 @@ describe("deploy dispatch construction", () => {
     "getDefaultBranch",
     "runGh",
     "runGhWithStdin",
+    "runAz",
+    "runGitHubJson",
     "readProcessEnv",
     "fetchFileForSelection",
     "appParams",
@@ -161,6 +272,44 @@ describe("deploy dispatch construction", () => {
     expect(() => createDeployDispatchService(empty)).toThrow(
       "createDeployDispatchService is missing required dependencies: branchNotPushedKind"
     );
+  });
+
+  it("refuses to construct without the OIDC-subject-missing error kind", () => {
+    const missing: Partial<DeployDispatchDependencies> = dependencies();
+    delete missing.oidcSubjectMissingKind;
+    expect(() =>
+      createDeployDispatchService(missing as DeployDispatchDependencies)
+    ).toThrow(
+      "createDeployDispatchService is missing required dependencies: oidcSubjectMissingKind"
+    );
+    const empty = dependencies();
+    Object.defineProperty(empty, "oidcSubjectMissingKind", { value: "" });
+    expect(() => createDeployDispatchService(empty)).toThrow(
+      "createDeployDispatchService is missing required dependencies: oidcSubjectMissingKind"
+    );
+  });
+});
+
+describe("federated credential list arguments", () => {
+  it("passes only --id and global arguments az accepts", () => {
+    const args = buildFederatedCredentialListArgs("client-123");
+
+    expect(args).toEqual([
+      "ad",
+      "app",
+      "federated-credential",
+      "list",
+      "--id",
+      "client-123",
+      "--query",
+      "[].subject",
+      "-o",
+      "json"
+    ]);
+    // `az ad app federated-credential list` rejects any scoping flag with
+    // "unrecognized arguments", which would make the preflight a no-op.
+    expect(args).not.toContain("--tenant");
+    expect(args).not.toContain("--subscription");
   });
 });
 
@@ -270,6 +419,603 @@ describe("deploy dispatch environment and branch preflight", () => {
       "--repo",
       "acme/widgets"
     ]);
+  });
+
+  it("fails fast when no Azure federated credential covers the target environment and truncates near matches", async () => {
+    const { input, state } = request();
+    input.provider = "azure";
+    const gh = recordingGh();
+    const preflight = azurePreflight({
+      subjects: ["dev", "test", "staging", "preview"].map(
+        (environment) => `repo:acme/widgets:environment:${environment}`
+      )
+    });
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        ...preflight
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployStatus).toBe("failed");
+    // Marked so the repair loop stays shut: no model edit can add a federated
+    // credential in Azure.
+    expect(state.deployErrorKind).toBe("oidc-subject-missing");
+    expect(state.deployError).toContain(
+      '"repo:acme/widgets:environment:production" or "repo:acme@101/widgets@202:environment:production"'
+    );
+    expect(state.deployError).toContain("expected one of");
+    expect(state.deployError).toContain(
+      "repo:acme/widgets:environment:dev, repo:acme/widgets:environment:test, repo:acme/widgets:environment:staging, ..."
+    );
+    expect(state.deployError).not.toContain(
+      "repo:acme/widgets:environment:preview"
+    );
+    expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(false);
+    expect(preflight.azCalls).toEqual([
+      [
+        "ad",
+        "app",
+        "federated-credential",
+        "list",
+        "--id",
+        "client-123",
+        "--query",
+        "[].subject",
+        "-o",
+        "json"
+      ]
+    ]);
+  });
+
+  it("never passes a scoping flag az would reject", async () => {
+    const { input } = request();
+    input.provider = "azure";
+    const preflight = azurePreflight();
+    const service = createDeployDispatchService(
+      dependencies({ ...recordingGh(), ...preflight })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+    // `az ad app federated-credential list` exits with "unrecognized
+    // arguments" for --tenant, which would make every check unverified and the
+    // whole preflight a no-op.
+    expect(preflight.azCalls[0]).toEqual([
+      "ad",
+      "app",
+      "federated-credential",
+      "list",
+      "--id",
+      "client-123",
+      "--query",
+      "[].subject",
+      "-o",
+      "json"
+    ]);
+  });
+
+  it("skips the check when the environment deliberately disables Azure login", async () => {
+    const { input, state, logs } = request();
+    input.provider = "azure";
+    const gh = recordingGh();
+    const preflight = azurePreflight({
+      environmentVariable: { ok: true, status: 200, json: { value: "  " } }
+    });
+    const service = createDeployDispatchService(
+      dependencies({ ...gh, ...preflight })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+    expect(state.deployStatus).not.toBe("failed");
+    // The upstream workflow gates azure/login on `vars.AZURE_CLIENT_ID != ''`,
+    // so a blank value means there is no login to fail — not broken config.
+    expect(
+      logs.some(
+        (line) =>
+          line.startsWith("• ") && line.includes("Azure login is disabled")
+      )
+    ).toBe(true);
+    expect(
+      logs.some((line) => line.includes("federated credential coverage"))
+    ).toBe(false);
+    expect(preflight.azCalls).toEqual([]);
+  });
+
+  it("builds the subject from the environment name GitHub reports, not the requested spelling", async () => {
+    const { input } = request();
+    input.provider = "azure";
+    input.requestedEnvironment = "dev";
+    const preflight = azurePreflight({
+      environmentLookup: { ok: true, status: 200, json: { name: "Dev" } },
+      subjects: [
+        "repo:acme/widgets:environment:Dev",
+        "repo:acme@101/widgets@202:environment:Dev"
+      ]
+    });
+    const service = createDeployDispatchService(
+      dependencies({ ...recordingGh(), ...preflight })
+    );
+
+    // GitHub resolves the environment case-insensitively but Entra compares the
+    // subject case-sensitively, so the requested spelling would wrongly block a
+    // deploy that works today.
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+  });
+
+  it("ignores credentials that report no subject instead of disabling the check", async () => {
+    const { input } = request();
+    input.provider = "azure";
+    const preflight = azurePreflight({
+      // Entra flexible federated credentials match on claimsMatchingExpression
+      // and report a null subject.
+      subjects: [
+        null,
+        "repo:acme/widgets:environment:production",
+        "repo:acme@101/widgets@202:environment:production"
+      ]
+    });
+    const service = createDeployDispatchService(
+      dependencies({ ...recordingGh(), ...preflight })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+  });
+
+  it("lists immutable-form subjects as near matches when the credential is missing", async () => {
+    const { input, state } = request();
+    input.provider = "azure";
+    const service = createDeployDispatchService(
+      dependencies({
+        ...recordingGh(),
+        ...azurePreflight({
+          subjects: ["repo:acme@101/widgets@202:environment:staging"]
+        })
+      })
+    );
+
+    await service.prepareAndDispatch(input);
+
+    // A prefix filter built from the mutable spelling would hide these exactly
+    // when the user most needs to see how close the credential was.
+    expect(state.deployError).toContain(
+      "Existing credential subjects on the app: repo:acme@101/widgets@202:environment:staging."
+    );
+  });
+
+  it("reports an unpushed branch before spending the Azure preflight", async () => {
+    const { input, state } = request();
+    input.provider = "azure";
+    const preflight = azurePreflight();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...recordingGh(),
+        ...preflight,
+        getBranchHeadSha: () => Promise.resolve(null),
+        getDefaultBranch: () => Promise.resolve("main")
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployErrorKind).toBe("branch-not-pushed");
+    expect(preflight.azCalls).toEqual([]);
+    expect(preflight.githubJsonCalls).toEqual([]);
+  });
+
+  it.each([
+    {
+      name: "default compatibility pair",
+      environment: "production",
+      customization: DEFAULT_OIDC_CUSTOMIZATION,
+      subjects: [
+        "repo:acme/widgets:environment:production",
+        "repo:acme@101/widgets@202:environment:production"
+      ]
+    },
+    {
+      name: "immutable-only subject",
+      environment: "production",
+      customization: {
+        ok: true,
+        status: 200,
+        json: { use_default: true, use_immutable_subject: true }
+      },
+      subjects: ["repo:acme@101/widgets@202:environment:production"]
+    },
+    {
+      name: "custom subject",
+      environment: "production",
+      customization: {
+        ok: true,
+        status: 200,
+        json: {
+          use_default: false,
+          include_claim_keys: ["repository_owner", "repository", "environment"],
+          use_immutable_subject: false
+        }
+      },
+      subjects: [
+        "repository_owner:acme:repository:acme/widgets:environment:production"
+      ]
+    },
+    {
+      name: "colon-escaped environment subjects",
+      environment: "prod:west",
+      customization: DEFAULT_OIDC_CUSTOMIZATION,
+      subjects: [
+        "repo:acme/widgets:environment:prod%3Awest",
+        "repo:acme@101/widgets@202:environment:prod%3Awest"
+      ]
+    }
+  ])("continues with a covered $name", async (scenario) => {
+    const { input } = request();
+    input.provider = "azure";
+    input.requestedEnvironment = scenario.environment;
+    const gh = recordingGh();
+    const preflight = azurePreflight({
+      customization: scenario.customization,
+      subjects: scenario.subjects.map((subject) => `  ${subject}  `)
+    });
+    const service = createDeployDispatchService(
+      dependencies({ ...gh, ...preflight })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+    expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(true);
+  });
+
+  it.each([
+    {
+      name: "only the mutable form",
+      present: "repo:acme/widgets:environment:production",
+      missing: "repo:acme@101/widgets@202:environment:production"
+    },
+    {
+      name: "only the immutable form",
+      present: "repo:acme@101/widgets@202:environment:production",
+      missing: "repo:acme/widgets:environment:production"
+    }
+  ])(
+    "warns but still deploys when the default compatibility pair has $name",
+    async (scenario) => {
+      const { input, state, logs } = request();
+      input.provider = "azure";
+      const gh = recordingGh();
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          ...azurePreflight({ subjects: [scenario.present] })
+        })
+      );
+
+      // Only one of the pair is ever presented and the resolver could not tell
+      // which, so holding the other half is not proof the deploy is doomed.
+      expect(await service.prepareAndDispatch(input)).toMatchObject({
+        dispatched: true
+      });
+      expect(state.deployStatus).not.toBe("failed");
+      const warning = logs.find((line) => line.startsWith("⚠ "));
+      expect(warning).toContain(`"${scenario.missing}"`);
+      expect(warning).not.toContain(`"${scenario.present}"`);
+      expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(true);
+    }
+  );
+
+  it("lists near matches without an ellipsis when three or fewer exist", async () => {
+    const { input, state } = request();
+    input.provider = "azure";
+    const service = createDeployDispatchService(
+      dependencies({
+        ...recordingGh(),
+        ...azurePreflight({
+          subjects: ["dev", "test"].map(
+            (environment) => `repo:acme/widgets:environment:${environment}`
+          )
+        })
+      })
+    );
+
+    await service.prepareAndDispatch(input);
+
+    expect(state.deployError).toContain(
+      "Existing credential subjects on the app: repo:acme/widgets:environment:dev, repo:acme/widgets:environment:test."
+    );
+    expect(state.deployError).not.toContain("...");
+  });
+
+  it("reports a missing subject without inventing near matches", async () => {
+    const { input, state } = request();
+    input.provider = "azure";
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        ...azurePreflight({
+          subjects: []
+        })
+      })
+    );
+
+    await service.prepareAndDispatch(input);
+
+    expect(state.deployError).not.toContain("Existing credential subjects");
+  });
+
+  it("uses a repository-scoped client id when the environment variable is absent", async () => {
+    const { input } = request();
+    input.provider = "azure";
+    const gh = recordingGh();
+    const preflight = azurePreflight({
+      environmentVariable: { ok: false, status: 404 },
+      repositoryVariable: {
+        ok: true,
+        status: 200,
+        json: { value: "repo-client-456" }
+      }
+    });
+    const service = createDeployDispatchService(
+      dependencies({ ...gh, ...preflight })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+    expect(preflight.githubJsonCalls.slice(0, 2)).toEqual([
+      "/repos/acme/widgets/environments/production/variables/AZURE_CLIENT_ID",
+      "/repos/acme/widgets/actions/variables/AZURE_CLIENT_ID"
+    ]);
+    expect(preflight.azCalls[0]).toContain("repo-client-456");
+  });
+
+  it.each([
+    {
+      name: "GitHub environment lookup failure",
+      options: {
+        environmentVariable: {
+          ok: false,
+          status: 403,
+          stderr: "environment unavailable"
+        }
+      },
+      message:
+        'GitHub environment "production" AZURE_CLIENT_ID lookup failed (environment unavailable)'
+    },
+    {
+      name: "GitHub lookup rejection",
+      options: { variableError: new Error("GitHub process failed") },
+      message: "GitHub variable lookup failed (GitHub process failed)"
+    },
+    {
+      name: "GitHub environment lookup failure without diagnostics",
+      options: {
+        environmentVariable: { ok: false, status: 503 }
+      },
+      message:
+        'GitHub environment "production" AZURE_CLIENT_ID lookup failed (HTTP 503)'
+    },
+    {
+      name: "GitHub environment lookup failure without status",
+      options: {
+        environmentVariable: { ok: false }
+      },
+      message:
+        'GitHub environment "production" AZURE_CLIENT_ID lookup failed (HTTP unknown)'
+    },
+    {
+      name: "invalid environment client id",
+      options: {
+        environmentVariable: {
+          ok: true,
+          status: 200,
+          json: { value: 42 }
+        }
+      },
+      message: 'GitHub environment "production" has an invalid AZURE_CLIENT_ID'
+    },
+    {
+      name: "environment name lookup failure",
+      options: {
+        environmentLookup: {
+          ok: false,
+          status: 403,
+          stderr: "environment unavailable"
+        }
+      },
+      message:
+        'GitHub environment "production" lookup failed (environment unavailable)'
+    },
+    {
+      name: "environment name lookup failure without diagnostics",
+      options: {
+        environmentLookup: { ok: false, status: 503 }
+      },
+      message: 'GitHub environment "production" lookup failed (HTTP 503)'
+    },
+    {
+      name: "environment name lookup failure without a status",
+      options: {
+        environmentLookup: { ok: false }
+      },
+      message: 'GitHub environment "production" lookup failed (HTTP unknown)'
+    },
+    {
+      name: "environment name missing from the lookup",
+      options: {
+        environmentLookup: { ok: true, status: 200, json: { name: "  " } }
+      },
+      message: 'GitHub did not report a name for environment "production"'
+    },
+    {
+      name: "missing environment and repository client id",
+      options: {
+        environmentVariable: { ok: false, status: 404 },
+        repositoryVariable: { ok: false, status: 404 }
+      },
+      message:
+        'neither GitHub environment "production" nor repository "acme/widgets" defines AZURE_CLIENT_ID'
+    },
+    {
+      name: "GitHub repository lookup failure",
+      options: {
+        environmentVariable: { ok: false, status: 404 },
+        repositoryVariable: {
+          ok: false,
+          status: 403,
+          stderr: "repository unavailable"
+        }
+      },
+      message:
+        'GitHub repository "acme/widgets" AZURE_CLIENT_ID lookup failed (repository unavailable)'
+    },
+    {
+      name: "GitHub repository lookup failure without diagnostics",
+      options: {
+        environmentVariable: { ok: false, status: 404 },
+        repositoryVariable: { ok: false }
+      },
+      message:
+        'GitHub repository "acme/widgets" AZURE_CLIENT_ID lookup failed (HTTP unknown)'
+    },
+    {
+      name: "invalid repository client id",
+      options: {
+        environmentVariable: { ok: false, status: 404 },
+        repositoryVariable: {
+          ok: true,
+          status: 200,
+          json: { value: 42 }
+        }
+      },
+      message: 'GitHub repository "acme/widgets" has an invalid AZURE_CLIENT_ID'
+    },
+    {
+      name: "GitHub OIDC resolution failure",
+      options: { oidcError: new Error("GitHub timed out") },
+      message: "GitHub OIDC subject resolution failed (GitHub timed out)"
+    },
+    {
+      name: "Azure CLI timeout",
+      options: {
+        runAz: () =>
+          Promise.resolve({
+            code: "ETIMEDOUT",
+            stdout: "",
+            stderr: "command timed out"
+          })
+      },
+      message: "Azure federated credential lookup failed (command timed out)"
+    },
+    {
+      name: "Azure CLI failure without diagnostics",
+      options: {
+        runAz: () => Promise.resolve({ code: 1, stdout: "", stderr: "" })
+      },
+      message: "Azure federated credential lookup failed (unknown error)"
+    },
+    {
+      name: "Azure CLI cancellation",
+      options: {
+        runAz: () => Promise.reject(new Error("command cancelled"))
+      },
+      message: "Azure federated credential lookup failed (command cancelled)"
+    },
+    {
+      name: "malformed Azure JSON",
+      options: {
+        runAz: () => Promise.resolve({ ...OK, stdout: "not json" })
+      },
+      message: "returned malformed JSON"
+    },
+    {
+      name: "empty Azure output",
+      options: {
+        runAz: () => Promise.resolve({ ...OK, stdout: "" })
+      },
+      message: "returned malformed JSON"
+    },
+    {
+      name: "non-array Azure JSON",
+      options: {
+        runAz: () => Promise.resolve({ ...OK, stdout: '{"subject":"value"}' })
+      },
+      message: "returned an invalid subject list"
+    },
+    {
+      name: "partially covered subject pair",
+      options: {
+        runAz: () =>
+          Promise.resolve({
+            ...OK,
+            stdout: JSON.stringify([
+              "repo:acme/widgets:environment:production",
+              null
+            ])
+          })
+      },
+      // Null subjects come from flexible credentials and are skipped, leaving
+      // only the mutable half of the pair — indeterminate, so a warning.
+      message:
+        'covers only part of the subject pair GitHub may mint (no credential for "repo:acme@101/widgets@202:environment:production")'
+    }
+  ])(
+    "warns and still deploys when coverage cannot be verified: $name",
+    async (scenario) => {
+      const { input, state, logs } = request();
+      input.provider = "azure";
+      const gh = recordingGh();
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          ...azurePreflight(scenario.options)
+        })
+      );
+
+      // `az` and Graph access are not otherwise required to deploy — the
+      // workflow authenticates in Actions — so an unusable local check must not
+      // become a deploy blocker.
+      expect(await service.prepareAndDispatch(input)).toMatchObject({
+        dispatched: true
+      });
+      expect(state.deployStatus).not.toBe("failed");
+      const warning = logs.find((line) => line.startsWith("⚠ "));
+      expect(warning).toContain(scenario.message);
+      expect(warning).toContain("AADSTS700213");
+      expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(true);
+    }
+  );
+
+  it("does not run Azure validation for another provider", async () => {
+    const { input } = request();
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        runAz: () => {
+          throw new Error("non-Azure deploy must not call az");
+        },
+        runGitHubJson: () => {
+          throw new Error("non-Azure deploy must not query OIDC settings");
+        }
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
   });
 });
 
@@ -611,7 +1357,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
 
     expect(order).toEqual([
       "publish:acme/widgets:feat:production",
-      "sync:acme/widgets:production:azure:run-rad-commands.yml+run-rad-commands-azure.yml:feat",
+      "sync:acme/widgets:production:aws:run-rad-commands.yml+run-rad-commands-azure.yml:feat",
       "dispatch"
     ]);
   });

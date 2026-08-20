@@ -811,8 +811,8 @@ export function initializeDeployingPage(
   };
 
   // Switches the deploy modal into a "failed" state. errorKind lets a
-  // well-known failure (an unpushed branch) render a tailored panel instead
-  // of raw workflow error text.
+  // well-known failure (an unpushed branch, a missing OIDC credential) render a
+  // tailored panel instead of raw workflow error text.
   const showDeployFailed = (details: DeployFailureDetails): void => {
     if (progressSpinner) progressSpinner.style.display = "none";
     if (progressFailIcon) progressFailIcon.style.display = "";
@@ -829,6 +829,23 @@ export function initializeDeployingPage(
           `<code style="flex:1; font-family:var(--font-mono, monospace); font-size:12px; color:var(--rad-text); white-space:nowrap; overflow-x:auto;">${escapeBrowserHtml(pushCmd)}</code>` +
           `<button type="button" id="deploy-copy-push" class="rad-btn rad-btn--neutral" style="margin:0; padding:2px 10px; font-size:12px; flex:none;">Copy</button>` +
           `</div>`;
+      }
+    } else if (details.errorKind === "oidc-subject-missing") {
+      // Unlike an unpushed branch there is no command the user can run here:
+      // the fix is an Azure federated credential, which Create Environment
+      // makes for them. Send them straight there rather than leaving raw
+      // preflight text with nothing to act on.
+      if (progressTitle) {
+        progressTitle.innerHTML = "Azure credentials aren't set up yet";
+      }
+      if (progressSubtitle) {
+        progressSubtitle.style.color = "var(--rad-text-secondary)";
+        progressSubtitle.innerHTML =
+          `<div style="color:var(--rad-text);">Environment <strong>${escapeBrowserHtml(details.environment)}</strong> can't sign in to Azure, so deploying <strong>${escapeBrowserHtml(details.app)}</strong> would fail. Nothing was deployed.</div>` +
+          (details.errorText ?
+            `<div style="margin-top:10px; color:var(--rad-text-secondary);">${escapeBrowserHtml(details.errorText)}</div>`
+          : "") +
+          `<div style="margin-top:12px;"><button type="button" id="deploy-fix-credentials" class="rad-btn rad-btn--primary" style="margin:0;">Set up Azure credentials</button></div>`;
       }
     } else {
       if (progressTitle) {
@@ -878,6 +895,12 @@ export function initializeDeployingPage(
             copyButton.textContent = "Copy";
           });
         });
+      });
+    }
+    const fixCredentialsButton = context.dom.byId("deploy-fix-credentials");
+    if (fixCredentialsButton) {
+      bind(copyBindings, fixCredentialsButton, "click", () => {
+        context.nav.assign("/?page=environment&new=1");
       });
     }
     deployBtn.disabled = false;

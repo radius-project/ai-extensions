@@ -126,6 +126,7 @@ function fixture(options: FixtureOptions = {}) {
   // markup renders; production wiring (context.dom.byId) finds it exactly as
   // it would find the real parsed element.
   const copyPushBtn = createFakeInput("deploy-copy-push");
+  const fixCredentialsBtn = createFakeInput("deploy-fix-credentials");
   if (withProgressModal) {
     elements.push(
       progressSpinner,
@@ -136,7 +137,8 @@ function fixture(options: FixtureOptions = {}) {
       progressFailActions,
       failRepairNote,
       backBtn,
-      copyPushBtn
+      copyPushBtn,
+      fixCredentialsBtn
     );
   }
   if (withProgressModalElement) elements.push(progressModal);
@@ -190,6 +192,7 @@ function fixture(options: FixtureOptions = {}) {
     failRepairNote,
     backBtn,
     copyPushBtn,
+    fixCredentialsBtn,
     deleteModal,
     deleteBody,
     deleteApp,
@@ -1603,6 +1606,62 @@ describe("deploy flow", () => {
     expect(page.progressSubtitle.innerHTML).toContain("your branch");
   });
 
+  it("shows the OIDC-credential panel and routes to environment creation", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-missing",
+        error: "no federated credential matching any subject",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(page.progressTitle.innerHTML).toContain(
+      "Azure credentials aren't set up yet"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "no federated credential matching any subject"
+    );
+    // The only fix is an Azure federated credential, which Create Environment
+    // makes, so the button must land there rather than dead-end the user.
+    page.fixCredentialsBtn.dispatch("click");
+    await flushPromises();
+    expect(page.browser.nav.assigned).toContain("/?page=environment&new=1");
+  });
+
+  it("omits the preflight detail from the OIDC panel when the failure carries no text", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-missing",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(page.progressTitle.innerHTML).toContain(
+      "Azure credentials aren't set up yet"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "Set up Azure credentials"
+    );
+  });
+
   it("shows a generic failure with the run link and repair note while repairing", async () => {
     const page = fixture();
     init(page);
@@ -1707,6 +1766,26 @@ describe("deploy flow", () => {
         status: "failed",
         errorKind: "branch-not-pushed",
         errorBranch: "feature",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.deployBtn.disabled).toBe(false);
+  });
+
+  it("runs the OIDC-credential failure flow with no progress-modal chrome present", async () => {
+    const page = fixture({ withProgressModal: false });
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-missing",
+        error: "no federated credential",
         handoff: { pending: false, state: "idle" }
       })
     );

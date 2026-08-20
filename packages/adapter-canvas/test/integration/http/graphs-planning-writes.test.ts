@@ -184,7 +184,7 @@ describe("graphs-planning writes real-loopback HIT", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(await response.text()).toBe(
-      '{"reload":true,"resources":[{"id":"res-a","name":"api"}]}'
+      '{"reload":true,"resources":[{"id":"res-a","name":"api"}],"fromWorkspace":false}'
     );
     expect(harness.state.graphLoaded).toBe(true);
     expect(harness.state.graphTargetRepo).toBe("octo/app");
