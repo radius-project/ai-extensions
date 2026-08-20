@@ -425,25 +425,30 @@ test.describe("Radius Canvas visual baselines", () => {
     await screenshot(page, "vi-01-modeled-graph-dark.png");
   });
 
-  test("VI-02 modeled graph details in light", async ({ page, canvas }) => {
-    await seed(canvas, {
-      graphResources: GRAPH_RESOURCES,
-      graphLoaded: true,
-      graphFromWorkspace: true
+  for (const theme of ["light", "dark"] as const) {
+    test(`VI-02 modeled graph details in ${theme}`, async ({
+      page,
+      canvas
+    }) => {
+      await seed(canvas, {
+        graphResources: GRAPH_RESOURCES,
+        graphLoaded: true,
+        graphFromWorkspace: true
+      });
+      const requests = await routeGraphControls(page, canvas);
+      await gotoVisual(page, canvas, "graph", theme);
+      await expect(page.locator("#graph-app")).toHaveValue("radius-app");
+      await expect(page.locator("#graph-branch")).toHaveValue(WORKTREE_BRANCH);
+      await expectWorktreeBranchRequests(requests.loadGraph);
+      await page
+        .locator(".rad-node")
+        .filter({ hasText: "web" })
+        .getByRole("button", { name: "Show details" })
+        .click();
+      await expect(page.locator("#node-popup")).toBeVisible();
+      await screenshot(page, `vi-02-modeled-graph-details-${theme}.png`);
     });
-    const requests = await routeGraphControls(page, canvas);
-    await gotoVisual(page, canvas, "graph", "light");
-    await expect(page.locator("#graph-app")).toHaveValue("radius-app");
-    await expect(page.locator("#graph-branch")).toHaveValue(WORKTREE_BRANCH);
-    await expectWorktreeBranchRequests(requests.loadGraph);
-    await page
-      .locator(".rad-node")
-      .filter({ hasText: "web" })
-      .getByRole("button", { name: "Show details" })
-      .click();
-    await expect(page.locator("#node-popup")).toBeVisible();
-    await screenshot(page, "vi-02-modeled-graph-details-light.png");
-  });
+  }
 
   for (const theme of ["light", "dark"] as const) {
     test(`VI-03 planned graph unresolved recipe pack in ${theme}`, async ({
@@ -511,20 +516,30 @@ test.describe("Radius Canvas visual baselines", () => {
     });
   }
 
-  test("VI-05 credential profile list in light", async ({ page, canvas }) => {
-    await seed(canvas, { activeSubtab: "credentials" });
-    await gotoVisual(page, canvas, "credentials", "light");
-    await expect(page.getByText(PROFILE_NAME)).toBeVisible();
-    await screenshot(page, "vi-05-credential-profile-list-light.png");
-  });
+  for (const theme of ["light", "dark"] as const) {
+    test(`VI-05 credential profile list in ${theme}`, async ({
+      page,
+      canvas
+    }) => {
+      await seed(canvas, { activeSubtab: "credentials" });
+      await gotoVisual(page, canvas, "credentials", theme);
+      await expect(page.getByText(PROFILE_NAME)).toBeVisible();
+      await screenshot(page, `vi-05-credential-profile-list-${theme}.png`);
+    });
 
-  test("VI-05 credential profile form in light", async ({ page, canvas }) => {
-    await seed(canvas, { activeSubtab: "credentials" });
-    await gotoVisual(page, canvas, "credentials", "light");
-    await page.getByRole("button", { name: "New Credential Profile" }).click();
-    await expect(page.locator("#cred-form")).toBeVisible();
-    await screenshot(page, "vi-05-credential-profile-form-light.png");
-  });
+    test(`VI-05 credential profile form in ${theme}`, async ({
+      page,
+      canvas
+    }) => {
+      await seed(canvas, { activeSubtab: "credentials" });
+      await gotoVisual(page, canvas, "credentials", theme);
+      await page
+        .getByRole("button", { name: "New Credential Profile" })
+        .click();
+      await expect(page.locator("#cred-form")).toBeVisible();
+      await screenshot(page, `vi-05-credential-profile-form-${theme}.png`);
+    });
+  }
 
   for (const theme of ["light", "dark"] as const) {
     test(`VI-06 environment list in ${theme}`, async ({ page, canvas }) => {
@@ -566,19 +581,21 @@ test.describe("Radius Canvas visual baselines", () => {
     });
   }
 
-  for (const status of ["success", "failed"] as const) {
-    test(`VI-07 deploy ${status} in light`, async ({ page, canvas }) => {
-      await seed(canvas);
-      await routeDeployments(page, canvas, status);
-      await gotoVisual(page, canvas, "deploying", "light");
-      await expect(
-        page
-          .locator("#deploy-table-body")
-          .getByText(status === "success" ? "Success" : "Failed", {
-            exact: true
-          })
-      ).toBeVisible();
-      await screenshot(page, `vi-07-deploy-${status}-light.png`);
-    });
+  for (const theme of ["light", "dark"] as const) {
+    for (const status of ["success", "failed"] as const) {
+      test(`VI-07 deploy ${status} in ${theme}`, async ({ page, canvas }) => {
+        await seed(canvas);
+        await routeDeployments(page, canvas, status);
+        await gotoVisual(page, canvas, "deploying", theme);
+        await expect(
+          page
+            .locator("#deploy-table-body")
+            .getByText(status === "success" ? "Success" : "Failed", {
+              exact: true
+            })
+        ).toBeVisible();
+        await screenshot(page, `vi-07-deploy-${status}-${theme}.png`);
+      });
+    }
   }
 });
