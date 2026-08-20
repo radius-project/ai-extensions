@@ -88,6 +88,7 @@ export function createFakeSession(
 
 export interface FakeDependenciesOptions {
   radiusEnabled?: boolean;
+  defaultBranch?: string;
   workspaceContext?: WorkspaceContext;
   bicepByRepoBranch?: Record<string, string | null>;
   // Keyed `workspace:<repo>@<branch>:<repoPath>` / `remote:<repo>@<branch>:<repoPath>`.
@@ -230,7 +231,8 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       treePaths: vi.fn(
         async (requestedRepo: string, branch = "main") =>
           remoteTreeByRepoBranch[`${requestedRepo}@${branch}`] ?? []
-      )
+      ),
+      getDefaultBranch: vi.fn(async () => options.defaultBranch ?? "main")
     },
     core: {
       computeGraphDiff: vi.fn(

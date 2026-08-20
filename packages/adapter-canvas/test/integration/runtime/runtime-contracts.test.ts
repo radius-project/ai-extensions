@@ -105,6 +105,7 @@ describe("P0-A Radius runtime registration contract", () => {
       TOOL_NAMES
     );
     expect(harness.registration.hooks).toEqual([
+      "onPostToolUse",
       "onPreToolUse",
       "onSessionStart"
     ]);
@@ -151,6 +152,105 @@ describe("P0-A Radius runtime registration contract", () => {
 
     await unrelated.extension.shutdown("test");
     await enabled.extension.shutdown("test");
+  });
+
+  it("requires the matching application graph diff and opens the interactive PR diff", async () => {
+    const harness = await createRuntimeSdkHarness({
+      radiusEnabled: true,
+      workspaceContext: {
+        workspacePath: "/worktrees/widgets",
+        repo: "acme/widgets",
+        branch: "feature"
+      },
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "resource app {}",
+        "workspace:acme/widgets@feature": "resource app {}"
+      }
+    });
+    await harness.extension.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+    const pullRequest = {
+      toolName: "create_pull_request",
+      toolArgs: { title: "Add cache", body: "" },
+      workingDirectory: "/worktrees/widgets"
+    };
+
+    const denied = await harness.extension.hooks.onPreToolUse(pullRequest);
+    expect(denied?.permissionDecision).toBe("deny");
+    expect(denied?.additionalContext).toContain("baseBranch `main`");
+    expect(denied?.additionalContext).toContain("headBranch `feature`");
+
+    const diffTool = harness.extension.tools.find(
+      ({ name }) => name === "radius_generate_pr_diff_markdown"
+    );
+    if (!diffTool) throw new Error("PR graph diff tool was not registered");
+    const markdown = await diffTool.handler({
+      repo: "acme/widgets",
+      baseBranch: "main",
+      headBranch: "feature"
+    });
+    if (typeof markdown !== "string") {
+      throw new Error("PR graph diff tool did not return markdown");
+    }
+    await harness.extension.hooks.onPostToolUse({
+      toolName: diffTool.name,
+      toolArgs: {
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "feature"
+      },
+      toolResult: {
+        textResultForLlm: markdown
+      },
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    const allowed = {
+      ...pullRequest,
+      toolArgs: {
+        title: "Add cache",
+        body: `${markdown}\nImplementation details`
+      }
+    };
+    await expect(
+      harness.extension.hooks.onPreToolUse(allowed)
+    ).resolves.toBeUndefined();
+    await expect(
+      harness.extension.hooks.onPostToolUse(allowed)
+    ).resolves.toBeUndefined();
+    expect(harness.routedOpens.at(-1)).toMatchObject({
+      canvasId: "radius",
+      instanceId: "radius-panel",
+      input: {
+        page: "graph-diff",
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "feature"
+      }
+    });
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("leaves unrelated worktree PR creation untouched", async () => {
+    const harness = await createRuntimeSdkHarness();
+    const pullRequest = {
+      toolName: "create_pull_request",
+      toolArgs: { title: "Update documentation", body: "Summary" },
+      workingDirectory: "/worktrees/unrelated"
+    };
+
+    await expect(
+      harness.extension.hooks.onPreToolUse(pullRequest)
+    ).resolves.toBeUndefined();
+    await expect(
+      harness.extension.hooks.onPostToolUse(pullRequest)
+    ).resolves.toBeUndefined();
+    expect(harness.deps.github.getDefaultBranch).not.toHaveBeenCalled();
+    expect(harness.session.rpc.canvas.open).not.toHaveBeenCalled();
+
+    await harness.extension.shutdown("test");
   });
 
   describe("P0-A RU-21 operation-aware keepalive", () => {

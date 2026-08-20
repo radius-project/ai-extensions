@@ -67,6 +67,7 @@ export interface GitHubContentReader {
   getContentBytes(apiPath: string): Promise<Buffer | { tooLarge: true } | null>;
   listNames(apiPath: string): Promise<string[]>;
   treePaths(requestedRepo: string, branch?: string): Promise<string[]>;
+  getDefaultBranch(repo: string): Promise<string>;
 }
 
 export interface CoreGraphDependencies {

@@ -229,6 +229,10 @@
   ],
   "hooks": [
     {
+      "name": "onPostToolUse",
+      "callable": true
+    },
+    {
       "name": "onPreToolUse",
       "callable": true
     },

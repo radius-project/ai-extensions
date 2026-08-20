@@ -22,6 +22,7 @@ import {
   deployRepairHandoffMessage,
   deployFailureNoticeMessage
 } from "./hooks.js";
+import { createPullRequestGraphDiffGuard } from "./pr-graph-diff-guard.js";
 import { errorMessage } from "./util.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { SessionPort } from "./session.js";
@@ -42,6 +43,7 @@ export interface RadiusExtension {
     onPreToolUse: (input: {
       toolName?: unknown;
       toolArgs?: unknown;
+      workingDirectory?: unknown;
     }) => Promise<
       | {
           permissionDecision: "deny";
@@ -50,6 +52,12 @@ export interface RadiusExtension {
         }
       | undefined
     >;
+    onPostToolUse: (input: {
+      toolName?: unknown;
+      toolArgs?: unknown;
+      toolResult?: unknown;
+      workingDirectory?: unknown;
+    }) => Promise<{ additionalContext: string } | undefined>;
     onSessionStart: (input: {
       workingDirectory?: unknown;
     }) => Promise<{ additionalContext: string } | undefined>;
@@ -70,6 +78,24 @@ export function createRadiusExtension(
 ): RadiusExtension {
   const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
+  const pullRequestGraphDiffGuard = createPullRequestGraphDiffGuard({
+    hasRadiusApplicationModel: (workspacePath) =>
+      deps.workspace.hasRadiusApplicationModel(workspacePath),
+    workspaceContext: async () => {
+      const state = await workspaceState();
+      return {
+        repo: state.contextRepo || "",
+        branch: state.contextBranch || ""
+      };
+    },
+    getDefaultBranch: (repo) => deps.github.getDefaultBranch(repo),
+    openGraphDiff: ({ repo, baseBranch, headBranch }) =>
+      deps.session.get().rpc.canvas.open({
+        canvasId: "radius",
+        instanceId: "radius-panel",
+        input: { page: "graph-diff", repo, baseBranch, headBranch }
+      })
+  });
 
   // ─── Host-channel callbacks ────────────────────────────────────────────────
   // Registered immediately (no session required yet): each callback only
@@ -356,7 +382,7 @@ export function createRadiusExtension(
       // skill first when no bicep exists. Fails open on any hook error.
       onPreToolUse: async (input) => {
         try {
-          return await evaluateAppBicepHook(
+          const graphDecision = await evaluateAppBicepHook(
             { toolName: input.toolName, toolArgs: input.toolArgs },
             {
               workspaceState,
@@ -374,23 +400,19 @@ export function createRadiusExtension(
               }
             }
           );
+          if (graphDecision) return graphDecision;
         } catch {
-          return undefined;
+          // Graph generation remains fail-open; the PR guard below owns its
+          // own fail-closed diagnostics once a Radius model is active.
         }
+        return pullRequestGraphDiffGuard.onPreToolUse(input);
       },
+      onPostToolUse: (input) => pullRequestGraphDiffGuard.onPostToolUse(input),
       onSessionStart: async (input) => {
-        const workingDirectory =
-          typeof input.workingDirectory === "string" ?
-            input.workingDirectory
-          : "";
-        if (
-          !workingDirectory ||
-          !(await deps.workspace
-            .hasRadiusApplicationModel(workingDirectory)
-            .catch(() => false))
-        ) {
-          return undefined;
-        }
+        const active = await pullRequestGraphDiffGuard
+          .activateAtSessionStart(input.workingDirectory)
+          .catch(() => false);
+        if (!active) return undefined;
         return { additionalContext: RADIUS_SESSION_START_CONTEXT };
       }
     },
