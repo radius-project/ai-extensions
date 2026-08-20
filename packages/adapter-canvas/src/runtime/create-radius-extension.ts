@@ -66,7 +66,7 @@ export interface RadiusExtension {
 export function createRadiusExtension(
   deps: RadiusExtensionDependencies
 ): RadiusExtension {
-  const { workspaceState, resolveAppModelStatus } =
+  const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
 
   // ─── Host-channel callbacks ────────────────────────────────────────────────
@@ -360,6 +360,7 @@ export function createRadiusExtension(
               workspaceState,
               defaultBranchForState: deps.workspace.defaultBranchForState,
               appModelStatus: resolveAppModelStatus,
+              appSource: evaluateAppSourceForBranch,
               shouldRequestRefresh: (key: string) => {
                 if (requestedRefreshes.has(key)) return false;
                 requestedRefreshes.add(key);

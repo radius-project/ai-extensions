@@ -3,6 +3,7 @@
 // createRadiusCanvas: pure construction, no I/O until a handler is invoked.
 
 import { RADIUS_TOOL_DECLARATIONS } from "./declarations.js";
+import { unsupportedAppSourceReport } from "@radius-project/core";
 import { errorMessage } from "./util.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
@@ -13,7 +14,7 @@ interface ToolArgs {
 }
 
 export function createRadiusTools(deps: RadiusExtensionDependencies) {
-  const { workspaceState, fetchBicepForBranch } =
+  const { workspaceState, fetchBicepForBranch, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
   const declarationByName = new Map(
     RADIUS_TOOL_DECLARATIONS.map((decl) => [decl.name, decl])
@@ -30,8 +31,35 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
   return [
     {
       ...declarationByName.get("radius_generate_app")!,
+      // The Dockerfile requirement is enforced here rather than asked for in the
+      // skill text. Withholding the authoring instructions turns "please stop"
+      // into "there is nothing to act on", which is the only form of the rule an
+      // agent cannot read past. Any failure to establish the repository's
+      // contents hands over the skill as before — the check refuses modeling on
+      // evidence, never on a lookup that did not work.
       handler: async (args: ToolArgs) => {
-        return deps.radiusAppBicepSkill(args.repoPath as string | undefined);
+        const repoPath = args.repoPath as string | undefined;
+        const state = await workspaceState().catch(() => null);
+        // The listing this check can obtain describes the worktree, so it is
+        // evidence about the worktree and anything inside it — a subdirectory
+        // of a tree with no Dockerfile has none either. A caller naming some
+        // other location is asking about a target the extension cannot
+        // enumerate, and there is no evidence to refuse on. An omitted path
+        // means the workspace, which is how the tool is invoked in practice.
+        const targetsWorkspace =
+          !repoPath ||
+          deps.workspace.isWorkspacePath(state?.workspacePath, repoPath);
+        if (state && targetsWorkspace) {
+          const source = await evaluateAppSourceForBranch(
+            state.contextRepo || "",
+            state.contextBranch || "",
+            state
+          ).catch(() => null);
+          if (source?.status === "none") {
+            return unsupportedAppSourceReport(state.contextRepo);
+          }
+        }
+        return deps.radiusAppBicepSkill(repoPath);
       }
     },
     {
