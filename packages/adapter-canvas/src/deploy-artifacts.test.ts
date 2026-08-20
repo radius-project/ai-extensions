@@ -990,16 +990,24 @@ describe("createDeployStatusReader", () => {
   });
 
   it("selects the greatest sequence from environment-only fallbacks", async () => {
+    // Give the lower-sequence artifact the newer `created_at` so it sorts
+    // first and populates `envOnlyMatch`. The higher-sequence artifact then
+    // arrives second and forces the "greater sequence replaces the current
+    // match" branch to actually run — without the newer timestamp the sort
+    // tie-breaker on id would surface the higher-sequence artifact first
+    // and the comparison would never execute.
     const reader = createDeployStatusReader({
       ...baseOptions,
       application: "guessed-name",
       runId: 100,
       listArtifacts: async () => [
         artifact("radius-deploy-status-dev-other-live-100-slot-1", {
-          id: 41
+          id: 41,
+          created_at: "2026-08-10T00:00:02Z"
         }),
         artifact("radius-deploy-status-dev-other-live-100-slot-2", {
-          id: 42
+          id: 42,
+          created_at: "2026-08-10T00:00:01Z"
         })
       ],
       downloadArtifact: async (_repo, candidate) =>
@@ -1119,6 +1127,32 @@ describe("createDeployStatusReader", () => {
     expect(progress?.runId).toBe(200);
     expect(progress?.sequence).toBe(1);
     expect(progress?.state).toBe("succeeded");
+  });
+
+  it("reports missing on a repo-wide read that finds only live slots", async () => {
+    // Producer spec calls out cancellation: a cancelled run can leave live
+    // slots behind without ever publishing a terminal artifact. A repo-wide
+    // read must not fall back to a live slot in that case; sequences from a
+    // cancelled run are not the current deployment state.
+    let downloads = 0;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-0", {
+          id: 61
+        }),
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-1", {
+          id: 62
+        })
+      ],
+      downloadArtifact: async () => {
+        downloads++;
+        return okFiles();
+      }
+    });
+
+    expect(await reader.status()).toBe("missing");
+    expect(downloads).toBe(0);
   });
 
   it("picks the newest terminal artifact across runs on a repo-wide read", async () => {

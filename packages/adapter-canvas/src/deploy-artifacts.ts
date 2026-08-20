@@ -589,11 +589,15 @@ function ghJsonArray(args: string[], timeout = 20000): Promise<unknown> {
  * application that is in fact deployed — the exact symptom this transport
  * exists to eliminate.
  *
- * Paging stops as soon as a page yields an artifact matching `namePrefix`,
- * because the listing is newest-first and nothing better can appear later; it
- * also stops at a short page (end of the list) or the page budget, so a repo
- * with no deploy-status artifact at all costs a bounded number of calls rather
- * than walking its entire artifact history.
+ * Paging stops as soon as a page yields a non-live-slot artifact matching
+ * `namePrefix`, because the listing is newest-first and nothing better can
+ * appear later. Live-slot names are ignored by the stop predicate even though
+ * they carry the prefix: a repo-wide read discards them (their sequences are
+ * only comparable within one run), and stopping on a page that holds only
+ * live slots would hide the previous deploy's terminal artifact sitting on
+ * the next page. Paging also stops at a short page (end of the list) or the
+ * page budget, so a repo with no deploy-status artifact at all costs a
+ * bounded number of calls rather than walking its entire artifact history.
  */
 export const listWorkflowArtifacts: ListArtifacts = async (
   repo,
@@ -623,7 +627,12 @@ export const listWorkflowArtifacts: ListArtifacts = async (
     );
     found.push(...batch);
     if (
-      batch.some((a) => typeof a.name === "string" && a.name.startsWith(prefix))
+      batch.some(
+        (a) =>
+          typeof a.name === "string" &&
+          a.name.startsWith(prefix) &&
+          !isLiveSlotArtifactName(a.name)
+      )
     )
       break;
     if (batch.length < ARTIFACT_PAGE_SIZE) break; // end of the listing
