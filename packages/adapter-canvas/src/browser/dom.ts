@@ -6,7 +6,7 @@
 // `setAttribute`, which removes the HTML-injection sink entirely rather than
 // relying on an escape being remembered at each call site.
 
-import type { DomElement, DomPort } from "./ports.js";
+import type { BrowserContext, DomElement, DomPort } from "./ports.js";
 
 export interface ElementSpec {
   readonly tag: string;
@@ -43,6 +43,24 @@ export function setChildren(
 
 export function clearChildren(host: DomElement): void {
   host.replaceChildren();
+}
+
+// Server-rendered page fragments are trusted extension output. Replacing each
+// parsed script node is required because scripts assigned through innerHTML do
+// not execute.
+export function activateInlineScripts(
+  context: BrowserContext,
+  root: DomElement
+): void {
+  for (const stale of context.dom.all(root, "script")) {
+    const parent = stale.parentNode;
+    if (parent === null) continue;
+    const next = context.dom.createElement("script");
+    const src = stale.getAttribute("src");
+    if (src !== null && src !== "") next.setAttribute("src", src);
+    else next.textContent = stale.textContent;
+    parent.replaceChild(next, stale);
+  }
 }
 
 export function text(value: string, className?: string): ElementSpec {

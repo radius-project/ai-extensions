@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  activateInlineScripts,
   buildElement,
   clearChildren,
   setChildren,
@@ -9,6 +10,7 @@ import {
 import {
   createFakeBrowser,
   createFakeElement,
+  FakeElement,
   fakeText
 } from "../../test/support/browser/fakes.js";
 
@@ -123,6 +125,41 @@ describe("clearChildren", () => {
 
     expect(host.children).toHaveLength(0);
     expect(host.className).toBe("kept");
+  });
+});
+
+describe("activateInlineScripts", () => {
+  it("replaces inline and sourced scripts while ignoring detached nodes", () => {
+    const browser = createFakeBrowser();
+    const root = createFakeElement("root");
+    const inline = createFakeElement("", "script");
+    inline.textContent = "installPage();";
+    const sourced = createFakeElement("", "script");
+    sourced.setAttribute("src", "/vendor.js");
+    const emptySource = createFakeElement("", "script");
+    emptySource.setAttribute("src", "");
+    emptySource.textContent = "installEmptySource();";
+    const detached = createFakeElement("", "script");
+    const replaced: Array<[unknown, unknown]> = [];
+    for (const script of [inline, sourced, emptySource]) {
+      script.parentNode = {
+        replaceChild(next, previous) {
+          replaced.push([next, previous]);
+        }
+      };
+    }
+    root.matches.set("script", [inline, sourced, emptySource, detached]);
+
+    activateInlineScripts(browser.context, root);
+
+    expect(replaced).toHaveLength(3);
+    expect((replaced[0][0] as FakeElement).textContent).toBe("installPage();");
+    expect((replaced[1][0] as FakeElement).getAttribute("src")).toBe(
+      "/vendor.js"
+    );
+    expect((replaced[2][0] as FakeElement).textContent).toBe(
+      "installEmptySource();"
+    );
   });
 });
 

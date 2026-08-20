@@ -5,7 +5,6 @@ import {
   GRAPH_CONTENT_ID,
   GRAPH_NAV_ID,
   GRAPH_PAGE_ATTRIBUTE,
-  GRAPH_PAGES,
   initializeGraphNavigation
 } from "./navigation.js";
 import {
@@ -336,47 +335,7 @@ describe("navigation bindings", () => {
     expect(harness.browser.net.calls).toHaveLength(1);
   });
 
-  it("loads popstate without creating another history entry", async () => {
-    const harness = setup();
-    initializeGraphNavigation(harness.browser.context, harness.navigation);
-    harness.browser.nav.search =
-      "?page=deployed&repo=octo%2Fapp&environment=dev";
-    harness.browser.net.handle(
-      "/?page=deployed&repo=octo%2Fapp&environment=dev",
-      () => textResponse("<html/>")
-    );
-    harness.browser.nav.parsed = () => parsedPage("<div>deployed</div>", null);
-
-    harness.browser.page.dispatch("popstate");
-    await flushPromises();
-
-    expect(harness.content.innerHTML).toContain("deployed");
-    expect(harness.browser.nav.pushed).toEqual([]);
-  });
-
-  it("defaults popstate to modeled and ignores pages it does not own", async () => {
-    const harness = setup();
-    initializeGraphNavigation(harness.browser.context, harness.navigation);
-    harness.browser.net.handle("/?page=graph", () => textResponse("<html/>"));
-    harness.browser.nav.parsed = () => parsedPage("<div>graph</div>", null);
-
-    harness.browser.nav.search = "";
-    harness.browser.page.dispatch("popstate");
-    await flushPromises();
-    harness.browser.nav.search = "?page=environment";
-    harness.browser.page.dispatch("popstate");
-    harness.browser.nav.search = "?page";
-    harness.browser.page.dispatch("popstate");
-    harness.browser.nav.search = "page=environment";
-    harness.browser.page.dispatch("popstate");
-    harness.browser.nav.search = "?repo=octo%2Fapp&page=environment";
-    harness.browser.page.dispatch("popstate");
-
-    expect(harness.browser.net.calls).toHaveLength(1);
-    expect(GRAPH_PAGES).toEqual(["graph", "planned", "graph-diff", "deployed"]);
-  });
-
-  it("binds once and tears down document and page listeners", () => {
+  it("binds once and tears down the document listener", () => {
     const harness = setup();
     const teardown = initializeGraphNavigation(
       harness.browser.context,
@@ -385,10 +344,9 @@ describe("navigation bindings", () => {
     initializeGraphNavigation(harness.browser.context, harness.navigation);
 
     expect(harness.browser.document.listenerCount("click")).toBe(1);
-    expect(harness.browser.page.listenerCount("popstate")).toBe(1);
+    expect(harness.browser.page.listenerCount()).toBe(0);
 
     teardown();
     expect(harness.browser.document.listenerCount()).toBe(0);
-    expect(harness.browser.page.listenerCount()).toBe(0);
   });
 });

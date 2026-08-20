@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SHELL_STYLE_CSS } from "./shell-styles.js";
+import { CRITICAL_SHELL_STYLE_CSS, SHELL_STYLE_CSS } from "./shell-styles.js";
 
 type Rgb = [number, number, number];
 
@@ -63,6 +63,22 @@ const hostStatusColors = {
 } as const;
 
 const statuses = ["success", "warning", "danger"] as const;
+
+describe("document canvas background", () => {
+  it("paints the host background before the full shell stylesheet loads", () => {
+    expect(CRITICAL_SHELL_STYLE_CSS).toContain(
+      "background: var(--background-color-default, Canvas)"
+    );
+  });
+
+  it("paints both document roots with the host background during navigation", () => {
+    const documentRootStyles = SHELL_STYLE_CSS.match(
+      /html, body\s*\{([^}]*)\}/
+    )?.[1];
+
+    expect(documentRootStyles).toContain("background: var(--rad-bg)");
+  });
+});
 
 describe("status color tokens", () => {
   const cases = statuses.flatMap((status) =>

@@ -27,7 +27,11 @@ export interface DomEvent {
   readonly target?: unknown;
   readonly currentTarget?: unknown;
   readonly key?: string;
+  readonly button?: number;
   readonly shiftKey?: boolean;
+  readonly altKey?: boolean;
+  readonly ctrlKey?: boolean;
+  readonly metaKey?: boolean;
   preventDefault(): void;
   stopPropagation(): void;
 }
@@ -168,7 +172,6 @@ export interface NavigationPort {
 }
 
 export type TimerHandle = number;
-
 export interface ClockPort {
   setTimeout(handler: () => void, timeoutMs: number): TimerHandle;
   clearTimeout(handle: TimerHandle): void;

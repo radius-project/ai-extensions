@@ -195,6 +195,96 @@ test.describe("Radius Canvas in Chromium", () => {
     ]);
   });
 
+  test("keeps the document canvas dark while navigating between top-level panes", async ({
+    page,
+    canvas
+  }) => {
+    await gotoCanvas(page, canvas, "graph");
+    await page.evaluate(`
+      document.documentElement.style.setProperty("--color-scheme", "dark");
+      document.documentElement.style.setProperty(
+        "--background-color-default",
+        "#0d1117"
+      );
+      document.documentElement.style.setProperty(
+        "--text-color-default",
+        "#e6edf3"
+      );
+    `);
+    const initialContent = await page
+      .locator("#radius-main-content")
+      .innerHTML();
+    let documentNavigations = 0;
+    page.on("request", (request) => {
+      if (request.isNavigationRequest()) documentNavigations += 1;
+    });
+    let environmentRequests = 0;
+    let releaseEnvironment = (): void => undefined;
+    const environmentGate = new Promise<void>((resolve) => {
+      releaseEnvironment = resolve;
+    });
+    const environmentRoute = /\/\?page=environment$/;
+    await page.route(environmentRoute, async (route) => {
+      environmentRequests += 1;
+      await environmentGate;
+      if (route.request().failure() === null) await route.continue();
+    });
+
+    try {
+      await page.evaluate(`
+        document.querySelector('a[href="/?page=environment"]').click();
+      `);
+      await expect.poll(() => environmentRequests).toBe(1);
+      await expect(page.locator("#radius-main-content")).toHaveJSProperty(
+        "innerHTML",
+        initialContent
+      );
+      await page.evaluate(`
+        document.querySelector('a[href="/?page=deploying"]').click();
+      `);
+      await expect(page).toHaveURL(/page=deploying/);
+      await expect(page.locator("#deploy-table-body")).toBeVisible();
+    } finally {
+      releaseEnvironment();
+    }
+    await page.unroute(environmentRoute);
+
+    const panes = [
+      ["environment", "Environments"],
+      ["deploying", "Deployments"],
+      ["graph", "Applications"]
+    ] as const;
+
+    for (const [canvasPage, linkName] of panes) {
+      await page.getByRole("link", { name: linkName }).click();
+      await expect(page).toHaveURL(new RegExp(`page=${canvasPage}`));
+      await expect(page.locator("html")).toHaveCSS(
+        "background-color",
+        "rgb(13, 17, 23)"
+      );
+      await expect(page.locator("body")).toHaveCSS(
+        "background-color",
+        "rgb(13, 17, 23)"
+      );
+    }
+    const backPanes = [
+      ["deploying", "#deploy-table-body"],
+      ["environment", "#env-subtabs"],
+      ["deploying", "#deploy-table-body"],
+      ["graph", "#graph-page-content"]
+    ] as const;
+    for (const [canvasPage, selector] of backPanes) {
+      await page.goBack();
+      await expect(page).toHaveURL(new RegExp(`page=${canvasPage}`));
+      await expect(page.locator(selector)).toBeVisible();
+      await expect(page.locator("html")).toHaveCSS(
+        "background-color",
+        "rgb(13, 17, 23)"
+      );
+    }
+    expect(documentNavigations).toBe(0);
+  });
+
   test("opens node details from the card by keyboard and returns focus when the panel closes", async ({
     page,
     canvas
