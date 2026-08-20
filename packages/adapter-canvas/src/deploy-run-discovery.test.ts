@@ -78,6 +78,7 @@ describe("findWorkflowRun with a monotonic baseline", () => {
       "run.yml",
       DISPATCH_AT,
       null,
+      undefined,
       100
     );
 
@@ -95,6 +96,7 @@ describe("findWorkflowRun with a monotonic baseline", () => {
       "run.yml",
       DISPATCH_AT,
       null,
+      undefined,
       150
     );
 
@@ -112,6 +114,7 @@ describe("findWorkflowRun with a monotonic baseline", () => {
       "run.yml",
       DISPATCH_AT,
       null,
+      undefined,
       100
     );
 
@@ -129,6 +132,7 @@ describe("findWorkflowRun with a monotonic baseline", () => {
       "run.yml",
       DISPATCH_AT,
       null,
+      undefined,
       100
     );
 
@@ -143,6 +147,7 @@ describe("findWorkflowRun with a monotonic baseline", () => {
       "run.yml",
       DISPATCH_AT,
       null,
+      undefined,
       "100"
     );
 
@@ -157,6 +162,7 @@ describe("findWorkflowRun with a monotonic baseline", () => {
       "run.yml",
       DISPATCH_AT,
       null,
+      undefined,
       0
     );
 
@@ -183,6 +189,7 @@ describe("findWorkflowRun time-window fallback", () => {
         "run.yml",
         DISPATCH_AT,
         null,
+        undefined,
         baseline
       );
 

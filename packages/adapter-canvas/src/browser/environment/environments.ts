@@ -46,6 +46,7 @@ export interface EnvironmentPaneDependencies {
     provider: "azure" | "aws"
   ): void;
   currentInfraSelection?(provider: "azure" | "aws"): EnvironmentInfrastructure;
+  canSubmit?(): boolean;
 }
 
 export interface EnvironmentDecisionPort {
@@ -476,6 +477,9 @@ export function initializeEnvironmentPane(
     dependencies.setPendingInfraSelection?.(null, "azure");
     environmentForm.style.display = "none";
     environmentLanding.style.display = "";
+    // The form's controls are now hidden, so keyboard focus has to come back to
+    // the control that reveals it instead of being dropped onto the document.
+    context.dom.byId("new-env-btn")?.focus();
     loadEnvironmentTable();
   };
 
@@ -503,7 +507,8 @@ export function initializeEnvironmentPane(
     if (!submit) return;
     submit.textContent =
       environmentName.disabled ? "Save Environment" : "Create Environment";
-    submit.disabled = false;
+    submit.disabled =
+      dependencies.canSubmit ? !dependencies.canSubmit() : false;
   };
 
   const switchSubtab = (name: string): void => {

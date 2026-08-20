@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import type { SelectedGhExecutor } from "../../gh.js";
 import type { CanvasState } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
@@ -50,6 +51,9 @@ export interface CreateEnvironmentDependencies
   // Evaluated per request against this instance's server-owned token. Never a
   // construction-time value: the token is a per-instance randomUUID().
   isServerOwnedRequest(instanceId: string, request: IncomingMessage): boolean;
+  getSelectedGitHubExecutor(
+    operationId: string
+  ): SelectedGhExecutor | null | undefined;
   readInstanceEntry(
     instanceId: string
   ): CreateEnvironmentInstanceEntry | undefined;
@@ -76,8 +80,13 @@ export interface CreateEnvironmentDependencies
   ): Promise<Partial<CreateEnvironmentCommandResult>>;
 
   // --- preflight ---
-  preflightRepoAdmin(repo: string): Promise<string>;
-  preflightGhcrPackageWriteAccess(): Promise<GhcrPreflightResult>;
+  preflightRepoAdmin(
+    repo: string,
+    executor?: SelectedGhExecutor
+  ): Promise<string>;
+  preflightGhcrPackageWriteAccess(
+    executor?: SelectedGhExecutor
+  ): Promise<GhcrPreflightResult>;
   bootstrapGHCRStatePackage(input: {
     targetRepository: string;
     registry: string;
@@ -86,15 +95,20 @@ export interface CreateEnvironmentDependencies
   stateRegistryForEnvironment(repo: string, environment: string): string;
 
   // --- committer ports ---
-  getDefaultBranch(repo: string): Promise<string | null | undefined>;
+  getDefaultBranch(
+    repo: string,
+    executor?: SelectedGhExecutor
+  ): Promise<string | null | undefined>;
   getBranchHeadSha(
     repo: string,
-    branch: string
+    branch: string,
+    executor?: SelectedGhExecutor
   ): Promise<string | null | undefined>;
   createBranchRef(
     repo: string,
     branch: string,
-    sha: string
+    sha: string,
+    executor?: SelectedGhExecutor
   ): Promise<{ ok: boolean; stderr: string }>;
   tempFile: WorkflowTempFilePort;
 
@@ -129,13 +143,17 @@ export interface CreateEnvironmentDependencies
     operation: CreateEnvironmentOperation,
     entry: { path: string; branch: string | null; mode: string }
   ): void;
-  deleteLegacyDeployWorkflow(repo: string): Promise<boolean>;
+  deleteLegacyDeployWorkflow(
+    repo: string,
+    executor?: SelectedGhExecutor
+  ): Promise<boolean>;
   createPullRequestApi(
     repo: string,
     head: string,
     base: string,
     title: string,
-    body: string
+    body: string,
+    executor?: SelectedGhExecutor
   ): Promise<CreateEnvironmentPullRequestResult>;
 
   // --- verification ---
@@ -153,7 +171,8 @@ export interface CreateEnvironmentDependencies
   fetchFileFromRepo(
     repo: string,
     path: string,
-    branch: string
+    branch: string,
+    executor?: SelectedGhExecutor
   ): Promise<string | null | undefined>;
   buildVerifyWorkflowDispatchArgs(input: {
     workflowFile: string;
@@ -228,6 +247,15 @@ export async function handleCreateEnvironment(
     const { targetRepo, envName, provider } = admission;
     op = admission.operation;
     const operation = admission.operation;
+    const selectedExecutor = dependencies.getSelectedGitHubExecutor(
+      operation.operationId
+    );
+    if (!selectedExecutor) {
+      throw new Error(
+        "The selected GitHub account executor is unavailable. Re-check the account and retry."
+      );
+    }
+    await selectedExecutor.verifyIdentity();
 
     steps = [];
     const rawPush = steps.push.bind(steps);
@@ -245,7 +273,10 @@ export async function handleCreateEnvironment(
     // Preflight repo access + admin BEFORE any GitHub mutation. Reachable
     // directly when credentials already exist and azure-auto-setup is skipped,
     // so guarding here too is required.
-    const accessMsg = await dependencies.preflightRepoAdmin(targetRepo);
+    const accessMsg = await dependencies.preflightRepoAdmin(
+      targetRepo,
+      selectedExecutor
+    );
     if (accessMsg) {
       const failure = await dependencies.finalizeSetupFailure(operation, {
         status: 403,
@@ -263,10 +294,14 @@ export async function handleCreateEnvironment(
       return;
     }
 
-    const runner = createWorkflowScopeGhRunner(dependencies, {
-      targetRepo,
-      envName
-    });
+    const runner = createWorkflowScopeGhRunner(
+      dependencies,
+      {
+        targetRepo,
+        envName
+      },
+      selectedExecutor
+    );
     const { runGh, runGhOrThrow, setEnvironmentVariable, runGhWorkflow } =
       runner;
 
@@ -312,7 +347,8 @@ export async function handleCreateEnvironment(
       });
 
     const defaultBranch =
-      (await dependencies.getDefaultBranch(targetRepo)) || "main";
+      (await dependencies.getDefaultBranch(targetRepo, selectedExecutor)) ||
+      "main";
     const stateRegistry = dependencies.stateRegistryForEnvironment(
       targetRepo,
       envName
@@ -321,7 +357,8 @@ export async function handleCreateEnvironment(
     steps.push(
       'Creating private GHCR state package "' + stateRegistry + '"...'
     );
-    const ghcrPreflight = await dependencies.preflightGhcrPackageWriteAccess();
+    const ghcrPreflight =
+      await dependencies.preflightGhcrPackageWriteAccess(selectedExecutor);
     if (!ghcrPreflight.ok) {
       await fail(403, ghcrPreflight.error, ghcrPreflight.code, { steps });
       return;
@@ -340,11 +377,12 @@ export async function handleCreateEnvironment(
       {
         runGh: (args) => runGh(args),
         runGhWorkflow: (args) => runGhWorkflow(args),
-        getDefaultBranch: (repo) => dependencies.getDefaultBranch(repo),
+        getDefaultBranch: (repo) =>
+          dependencies.getDefaultBranch(repo, selectedExecutor),
         getBranchHeadSha: (repo, branch) =>
-          dependencies.getBranchHeadSha(repo, branch),
+          dependencies.getBranchHeadSha(repo, branch, selectedExecutor),
         createBranchRef: (repo, branch, sha) =>
-          dependencies.createBranchRef(repo, branch, sha),
+          dependencies.createBranchRef(repo, branch, sha, selectedExecutor),
         tempFile: dependencies.tempFile,
         errorMessage: (error) => dependencies.errorMessage(error),
         pushStep: (message) => {
@@ -445,7 +483,7 @@ export async function handleCreateEnvironment(
         recordCommittedWorkflowFile: (op, entry) =>
           dependencies.recordCommittedWorkflowFile(op, entry),
         deleteLegacyDeployWorkflow: (repo) =>
-          dependencies.deleteLegacyDeployWorkflow(repo),
+          dependencies.deleteLegacyDeployWorkflow(repo, selectedExecutor),
         usingPullRequestBranch: () => Boolean(committer.pullRequestState()),
         pullRequestBranch: prBranch,
         errorMessage: (error) => dependencies.errorMessage(error),
@@ -493,7 +531,8 @@ export async function handleCreateEnvironment(
         prState.branch,
         prState.base,
         prTitle,
-        prBody
+        prBody,
+        selectedExecutor
       );
       if (pr.ok) {
         pullRequestUrl = pr.url || "";
@@ -530,8 +569,9 @@ export async function handleCreateEnvironment(
       prState: prState || null,
       pullRequestUrl,
       fetchFile: (repo, path, branch) =>
-        dependencies.fetchFileFromRepo(repo, path, branch),
-      resolveDefaultBranch: (repo) => dependencies.getDefaultBranch(repo)
+        dependencies.fetchFileFromRepo(repo, path, branch, selectedExecutor),
+      resolveDefaultBranch: (repo) =>
+        dependencies.getDefaultBranch(repo, selectedExecutor)
     });
     pullRequestUrl = verifyPlan.pullRequestUrl;
     if (!verifyPlan.shouldDispatch) {

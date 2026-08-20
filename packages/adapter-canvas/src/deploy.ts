@@ -6,6 +6,7 @@
 // Reads GitHub via the gh CLI; portal links come from ./infra.ts.
 
 import { cliExec } from "./gh.js";
+import type { SelectedGhExecutor } from "./gh.js";
 
 type DeployStatus = "pending" | "in_progress" | "success" | "failed";
 
@@ -95,8 +96,19 @@ function parseWorkflowRun(value: unknown): WorkflowRun | null {
 export function ghJson(
   args: string[],
   fallback: unknown = null,
-  timeout = 15000
+  timeout = 15000,
+  executor?: SelectedGhExecutor
 ): Promise<unknown> {
+  if (executor) {
+    return executor.run(args, { timeout }).then((result) => {
+      if (result.code !== 0) return fallback;
+      try {
+        return JSON.parse(result.stdout.trim());
+      } catch {
+        return fallback;
+      }
+    });
+  }
   return new Promise((resolve) => {
     cliExec("gh", args, { timeout }, (err, stdout) => {
       if (err) {
@@ -163,6 +175,7 @@ export async function findWorkflowRun(
   workflowFile: string,
   sinceMs: number,
   knownId?: number | string | null,
+  executor?: SelectedGhExecutor,
   afterRunId?: number | string | null
 ): Promise<number | string | null> {
   if (knownId) return knownId;
@@ -178,7 +191,9 @@ export async function findWorkflowRun(
       "--repo",
       repo
     ],
-    []
+    [],
+    15000,
+    executor
   );
   if (!Array.isArray(runs)) return null;
   // Prefer a monotonic run-id baseline when the caller captured one just before
@@ -210,7 +225,8 @@ export async function findWorkflowRun(
 
 export async function getRunDetail(
   repo: string,
-  runId: number | string
+  runId: number | string,
+  executor?: SelectedGhExecutor
 ): Promise<WorkflowRunDetail | null> {
   let data = await ghJson(
     [
@@ -222,7 +238,9 @@ export async function getRunDetail(
       "--repo",
       repo
     ],
-    null
+    null,
+    15000,
+    executor
   );
   // The jobs sub-resource (/actions/runs/<id>/jobs) is intermittently flaky
   // (HTTP 503) and, when included, fails the whole `gh run view` call — which
@@ -242,7 +260,9 @@ export async function getRunDetail(
         "--repo",
         repo
       ],
-      null
+      null,
+      15000,
+      executor
     );
     if (!isRecord(data)) return null;
     return {
@@ -278,8 +298,19 @@ export async function getRunDetail(
 
 export function fetchRunLog(
   repo: string,
-  runId: number | string
+  runId: number | string,
+  executor?: SelectedGhExecutor
 ): Promise<string | null> {
+  if (executor) {
+    return executor
+      .run(["run", "view", String(runId), "--log", "--repo", repo], {
+        timeout: 30000,
+        maxBuffer: 1024 * 1024 * 20
+      })
+      .then((result) =>
+        result.code === 0 && result.stdout ? result.stdout : null
+      );
+  }
   return new Promise((resolve) => {
     cliExec(
       "gh",

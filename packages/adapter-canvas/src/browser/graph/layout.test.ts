@@ -7,7 +7,7 @@
 import { describe, it, expect } from "vitest";
 import { GRAPH_NODE_HEIGHT, GRAPH_NODE_WIDTH, layoutGraph } from "./layout.js";
 import { buildGraph, resolveGraphSettings } from "./build.js";
-import { createFakeDagre } from "../../../test/support/browser/graph-fakes.js";
+import { createFakeDagre } from "../../../test/support/browser/graph-vendor.js";
 
 function graph() {
   return buildGraph(resolveGraphSettings(), [

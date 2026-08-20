@@ -170,7 +170,7 @@ export function environmentsPaneMarkup(
     <div class="rad-section">
       <div class="rad-section__title">1 · Name this environment</div>
       <div class="rad-field" style="max-width:420px;">
-        <label>Environment name</label>
+        <label for="env-name-input">Environment name</label>
         <input id="env-name-input" type="text" placeholder="e.g. prod, test, eastus-prod" value="${escapeHtml(
           envName
         )}" />
@@ -201,7 +201,7 @@ export function environmentsPaneMarkup(
             GitHub
           </div>
           <div class="rad-field" id="env-gh-identity-field" style="display:none;">
-            <label>Account</label>
+            <label>GitHub account</label>
             <div class="rad-combo" id="env-gh-account-combo">
               <button type="button" class="rad-combo__button" id="env-gh-account-button" aria-haspopup="listbox" aria-expanded="false">
                 <span class="rad-combo__value" id="env-gh-account-value">Detecting…</span>
@@ -212,9 +212,17 @@ export function environmentsPaneMarkup(
                 <div class="rad-combo__empty" id="env-gh-account-empty" style="display:none;">No GitHub accounts detected.</div>
               </div>
             </div>
-            <div class="rad-field__help" id="env-gh-account-note" style="margin-top:6px;">Choosing a different account runs <code>gh auth switch</code> which changes the active GitHub account for every terminal and tool on this machine, remaining changed even after Radius closes. Switch back anytime with <code>gh auth switch -u &lt;account&gt;</code>.</div>
-            <div id="env-gh-identity-note" style="margin-top:6px; font-size:13px; display:none;"></div>
-            <button type="button" id="env-gh-recheck" style="display:none; margin-top:6px; font-size:12px; padding:2px 10px; cursor:pointer;">Re-check</button>
+            <div class="rad-field__help" id="env-gh-account-note" style="margin-top:6px;">Used to create GitHub Environment.</div>
+            <div id="env-gh-identity-note" role="status" style="margin-top:8px; font-size:13px; display:none;"></div>
+            <div style="display:flex; gap:8px; margin-top:6px;">
+              <button type="button" id="env-gh-fix-access" class="rad-btn rad-btn--ghost" style="display:none; font-size:12px; padding:2px 10px;">Show how to fix</button>
+              <button type="button" id="env-gh-recheck" class="rad-btn rad-btn--ghost" style="display:none; font-size:12px; padding:2px 10px;">Re-check</button>
+            </div>
+            <details id="env-gh-details-panel" style="margin-top:8px; font-size:12px;">
+              <summary>View technical details</summary>
+              <div id="env-gh-technical-details" style="margin-top:6px; line-height:1.5;"></div>
+              <div id="env-gh-repair" style="display:none; margin-top:6px; font-family:monospace; overflow-wrap:anywhere;"></div>
+            </details>
           </div>
         </div>
 
@@ -245,7 +253,7 @@ export function environmentsPaneMarkup(
       <div class="rad-section__title">3 · Deploy identity</div>
       <div class="rad-section__desc">The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets.</div>
       <div class="rad-field" id="env-identity-azure" style="max-width:560px;">
-        <label>Azure app registration</label>
+        <label for="az-app-name-input">Azure app registration</label>
         <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml(
           (ctxRepo || "").replace("/", "-")
         )}" data-default-name="radius-deploy-${escapeHtml(
@@ -277,19 +285,19 @@ export function environmentsPaneMarkup(
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="rad-field">
-            <label>Resource Group</label>
+            <label for="azure-rg-select">Resource Group</label>
             <select id="azure-rg-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-rg-custom" type="text" placeholder="Enter resource group" style="display:none; margin-top:4px;" />
+            <input id="azure-rg-custom" type="text" aria-label="Resource Group (custom)" placeholder="Enter resource group" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Cluster</label>
+            <label for="azure-cluster-select">Cluster</label>
             <select id="azure-cluster-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
+            <input id="azure-cluster-custom" type="text" aria-label="Cluster (custom)" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Namespace</label>
+            <label for="azure-namespace-select">Namespace</label>
             <select id="azure-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <input id="azure-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
           </div>
         </div>
       </div>
@@ -302,24 +310,24 @@ export function environmentsPaneMarkup(
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div class="rad-field">
-            <label>EKS Cluster</label>
+            <label for="aws-cluster-select">EKS Cluster</label>
             <select id="aws-cluster-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-cluster-custom" type="text" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
+            <input id="aws-cluster-custom" type="text" aria-label="EKS Cluster (custom)" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Namespace</label>
+            <label for="aws-namespace-select">Namespace</label>
             <select id="aws-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-namespace-custom" type="text" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <input id="aws-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>VPC</label>
+            <label for="aws-vpc-select">VPC</label>
             <select id="aws-vpc-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-vpc-custom" type="text" placeholder="vpc-xxxxxxxx" style="display:none; margin-top:4px;" />
+            <input id="aws-vpc-custom" type="text" aria-label="VPC (custom)" placeholder="vpc-xxxxxxxx" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label>Subnets</label>
+            <label for="aws-subnets-select">Subnets</label>
             <select id="aws-subnets-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-subnets-custom" type="text" placeholder="subnet-xxx,subnet-yyy" style="display:none; margin-top:4px;" />
+            <input id="aws-subnets-custom" type="text" aria-label="Subnets (custom)" placeholder="subnet-xxx,subnet-yyy" style="display:none; margin-top:4px;" />
           </div>
         </div>
       </div>

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DELETE_DIALOG_CONFIRM_BUTTON_ID,
   DELETE_DIALOG_CONFIRM_INPUT_ID,
+  DELETE_DIALOG_FOCUSABLE_SELECTOR,
   DELETE_DIALOG_IDS,
   DELETE_DIALOG_STEP1_BUTTON_ID,
   DELETE_DIALOG_STEP2_BUTTON_ID,
@@ -11,6 +12,7 @@ import {
   deleteDialogEffectsSpecs,
   deleteDialogIntentSpecs
 } from "./delete-dialog.js";
+import type { DomEvent } from "./ports.js";
 import {
   createFakeBrowser,
   createFakeElement,
@@ -42,6 +44,32 @@ function advanceToConfirmation(browser: ReturnType<typeof setup>) {
     input: fakeInputById(browser.body, DELETE_DIALOG_CONFIRM_INPUT_ID),
     confirm: fakeInputById(browser.body, DELETE_DIALOG_CONFIRM_BUTTON_ID)
   };
+}
+
+function trapControls(browser: ReturnType<typeof setup>) {
+  const first = createFakeElement("del-trap-first", "button");
+  const last = createFakeElement("del-trap-last", "button");
+  browser.modal.matches.set(DELETE_DIALOG_FOCUSABLE_SELECTOR, [first, last]);
+  return [first, last] as const;
+}
+
+function keydown(
+  browser: ReturnType<typeof setup>,
+  key: string,
+  shiftKey = false
+): boolean {
+  let prevented = false;
+  const event: Partial<DomEvent> = Object.assign(
+    {
+      key,
+      preventDefault: () => {
+        prevented = true;
+      }
+    },
+    { shiftKey }
+  );
+  browser.document.dispatch("keydown", event);
+  return prevented;
 }
 
 describe("delete dialog step specs", () => {
@@ -245,6 +273,87 @@ describe("delete deployment dialog", () => {
     dialog?.open("cart", "staging");
     expect(fakeText(browser.body)).toContain("confirm your intention");
     expect(browser.app.textContent).toBe("cart");
+  });
+
+  it("prefers the current step's own controls over the close affordance", () => {
+    const browser = setup();
+    const modalControls = trapControls(browser);
+    const stepControl = createFakeElement("del-step-primary", "button");
+    browser.body.matches.set(DELETE_DIALOG_FOCUSABLE_SELECTOR, [stepControl]);
+    const dialog = createDeleteDeploymentDialog(browser.context);
+
+    dialog?.open("store", "prod");
+
+    expect(stepControl.focusCount).toBe(1);
+    expect(modalControls[0].focusCount).toBe(0);
+  });
+
+  it("focuses the first dialog control when it opens", () => {
+    const browser = setup();
+    const controls = trapControls(browser);
+    const dialog = createDeleteDeploymentDialog(browser.context);
+
+    dialog?.open("store", "prod");
+
+    expect(controls[0].focusCount).toBe(1);
+  });
+
+  it("returns focus to the control that opened it", () => {
+    const browser = setup();
+    const opener = createFakeElement("deploy-delete-open", "button");
+    browser.document.add(opener);
+    browser.document.activeElement = opener;
+    const dialog = createDeleteDeploymentDialog(browser.context);
+
+    dialog?.open("store", "prod");
+    dialog?.close();
+
+    expect(opener.focusCount).toBe(1);
+  });
+
+  it("keeps Tab inside the dialog at both edges", () => {
+    const browser = setup();
+    const controls = trapControls(browser);
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+
+    browser.document.activeElement = controls[0];
+    expect(keydown(browser, "Tab")).toBe(false);
+    expect(controls[1].focusCount).toBe(0);
+
+    browser.document.activeElement = controls[1];
+    expect(keydown(browser, "Tab")).toBe(true);
+    expect(controls[0].focusCount).toBe(2);
+
+    browser.document.activeElement = controls[0];
+    expect(keydown(browser, "Tab", true)).toBe(true);
+    expect(controls[1].focusCount).toBe(1);
+  });
+
+  it("pulls stray focus back into the dialog on Tab", () => {
+    const browser = setup();
+    const controls = trapControls(browser);
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+    browser.document.activeElement = null;
+
+    keydown(browser, "Tab");
+    expect(controls[0].focusCount).toBe(2);
+
+    keydown(browser, "Tab", true);
+    expect(controls[1].focusCount).toBe(1);
+  });
+
+  it("skips disabled controls and tolerates a dialog with none", () => {
+    const browser = setup();
+    const controls = trapControls(browser);
+    Object.assign(controls[0], { disabled: true });
+    const dialog = createDeleteDeploymentDialog(browser.context);
+    dialog?.open("store", "prod");
+    expect(controls[1].focusCount).toBe(1);
+
+    browser.modal.matches.set(DELETE_DIALOG_FOCUSABLE_SELECTOR, []);
+    expect(() => keydown(browser, "Tab")).not.toThrow();
   });
 
   it("drops the previous step's listeners when the step changes", () => {

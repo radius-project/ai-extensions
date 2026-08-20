@@ -1,6 +1,5 @@
 import { createServer } from "node:http";
-import { primeGhIdentity, setPreferredGhLogin } from "../gh.js";
-import { getPreferredGitHubLogin } from "../shared.js";
+import { primeGhIdentity } from "../gh.js";
 import type { CanvasServerDependencies } from "./ports.js";
 
 export type CanvasServerDependencyOverrides = Partial<CanvasServerDependencies>;
@@ -34,8 +33,6 @@ export function createProductionCanvasServerDependencies(
       onStopped: seams.onStopped,
       preferredPort: seams.preferredPort,
       prepareIdentity: () => {
-        const persistedLogin = getPreferredGitHubLogin();
-        if (persistedLogin) setPreferredGhLogin(persistedLogin);
         primeGhIdentity().catch(() => {});
       }
     },

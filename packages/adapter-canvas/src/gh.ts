@@ -28,11 +28,9 @@ interface GhSnapshot {
 
 export interface GhTokenStrategyInput {
   hasToken: boolean;
-  tokenLogin?: string;
   tokenHasWorkflow?: boolean;
   keyringLogin?: string;
   keyringHasWorkflow?: boolean;
-  preferredLogin?: string | null;
 }
 
 export interface GhTokenStrategy {
@@ -54,7 +52,6 @@ export interface GitHubIdentity {
   mismatch: boolean;
   actingHasWorkflow: boolean;
   actingHasPackages: boolean;
-  preferredLogin: string | null;
   reason: string;
   accounts: GitHubIdentityAccount[];
   repoAccess?: string;
@@ -72,6 +69,34 @@ export interface CliOptions extends ExecFileOptions {
 
 export interface CommandOptions extends CliOptions {
   stdin?: string;
+}
+
+export interface SelectedGhCommandResult {
+  code: string | number;
+  stdout: string;
+  stderr: string;
+}
+
+export type SelectedGhCredentialSource = "injected" | "keyring";
+
+export interface SelectedGhExecutor {
+  readonly login: string;
+  readonly credentialSource: SelectedGhCredentialSource;
+  readonly requiresKeyringSwitch: boolean;
+  readonly scopes: readonly string[];
+  run(
+    args: string[],
+    options?: CommandOptions
+  ): Promise<SelectedGhCommandResult>;
+  runOrThrow(
+    args: string[],
+    message: string,
+    options?: CommandOptions
+  ): Promise<SelectedGhCommandResult>;
+  verifyIdentity(): Promise<void>;
+  packageCredentials(): { username: string; token: string };
+  redact(value: string): string;
+  errorMessage(error: unknown): string;
 }
 
 export interface ContentResult {
@@ -109,6 +134,17 @@ export function getInjectedGhToken(
   return env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() || "";
 }
 
+export function parseGhVersion(
+  text: string
+): [major: number, minor: number] | null {
+  const match = text.match(/\bgh version (\d+)\.(\d+)\./i);
+  return match ? [Number(match[1]), Number(match[2])] : null;
+}
+
+export function supportsGhMultiAccount(version: [number, number]): boolean {
+  return version[0] > 2 || (version[0] === 2 && version[1] >= 40);
+}
+
 const MIN_OPAQUE_TOKEN_REDACTION_LENGTH = 12;
 
 // This module is the gh process boundary, so every diagnostic leaving it must
@@ -141,16 +177,11 @@ function errorMessage(error: unknown): string {
 // was rejected with a 403. We therefore resolve a per-process token strategy
 // (see decideGhTokenStrategy): keep the injected token when it already carries
 // `workflow` (so setup acts as the identity the user sees), and fall back to a
-// stored keyring login only when we must for scope — or when the user explicitly
-// picks an account. The snapshot of `gh auth status` is memoized.
+// stored keyring login only when we must for scope. The snapshot of `gh auth
+// status` is memoized.
 function ghExecutable() {
   return process.platform === "win32" ? "gh.exe" : "gh";
 }
-
-// The login the user explicitly chose in the UI (via switchGhAccount). Sticky
-// for the process lifetime and always wins over the scope-based default. null
-// means "no explicit choice — decide automatically".
-let _preferredLogin: string | null = null;
 
 // Memoized snapshot of `gh auth status` (default env + token-stripped env) and
 // the derived token strategy. `_ghSnapshotPromise` is the in-flight/settled
@@ -202,34 +233,22 @@ export function parseGhAuthStatus(text: unknown): GhAccount[] {
 // over-corrected: when the injected token DID have `workflow`, stripping it
 // silently switched the acting identity to whatever keyring account happened to
 // be active (e.g. an enterprise/EMU account that may lack access to the target
-// repo or cloud tenant). We now strip only when we actually must, and an
-// explicit user selection always wins.
+// repo or cloud tenant). We now strip only when we actually must.
 export function decideGhTokenStrategy({
   hasToken,
-  tokenLogin,
   tokenHasWorkflow,
   keyringLogin,
-  keyringHasWorkflow,
-  preferredLogin
+  keyringHasWorkflow
 }: GhTokenStrategyInput): GhTokenStrategy {
-  // 1. An explicit user choice is authoritative. Keep the injected token only
-  //    when the chosen login IS the token account; otherwise strip so gh uses
-  //    the (already switched-to) keyring account.
-  if (preferredLogin) {
-    if (tokenLogin && preferredLogin === tokenLogin) {
-      return { useKeyring: false, reason: "user-selected-token-account" };
-    }
-    return { useKeyring: true, reason: "user-selected-keyring-account" };
-  }
-  // 2. No injected token → the keyring account is all we have.
+  // 1. No injected token → the keyring account is all we have.
   if (!hasToken) return { useKeyring: true, reason: "no-injected-token" };
-  // 3. Injected token already carries `workflow` → keep it (and its identity).
+  // 2. Injected token already carries `workflow` → keep it (and its identity).
   if (tokenHasWorkflow)
     return { useKeyring: false, reason: "token-has-workflow" };
-  // 4. Token lacks `workflow` but a keyring login has it → fall back for scope.
+  // 3. Token lacks `workflow` but a keyring login has it → fall back for scope.
   if (keyringLogin && keyringHasWorkflow)
     return { useKeyring: true, reason: "token-missing-workflow" };
-  // 5. Nothing better available → keep the token; a later 403 explains the gap.
+  // 4. Nothing better available → keep the token; a later 403 explains the gap.
   return { useKeyring: false, reason: "no-workflow-scope-available" };
 }
 
@@ -243,7 +262,7 @@ function ghAuthStatusText(env: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve) => {
     execFile(
       ghExecutable(),
-      ["auth", "status"],
+      ["auth", "status", "--hostname", "github.com"],
       {
         env,
         timeout: 8000,
@@ -299,15 +318,13 @@ async function ensureGhStrategy(): Promise<GhTokenStrategy> {
   const s = await ensureGhSnapshot();
   _ghStrategy = decideGhTokenStrategy({
     hasToken: s.hasToken,
-    tokenLogin: s.tokenAcct ? s.tokenAcct.login : "",
     tokenHasWorkflow: !!(
       s.tokenAcct && s.tokenAcct.scopes.includes("workflow")
     ),
     keyringLogin: s.keyringActive ? s.keyringActive.login : "",
     keyringHasWorkflow: !!(
       s.keyringActive && s.keyringActive.scopes.includes("workflow")
-    ),
-    preferredLogin: _preferredLogin
+    )
   });
   return _ghStrategy;
 }
@@ -332,21 +349,8 @@ export function primeGhIdentity(): Promise<GhTokenStrategy> {
   return ensureGhStrategy();
 }
 
-// Restore a previously chosen account (see server startup). Sets the sticky
-// preference in memory only — persistence is owned by the server/shared layer,
-// so this module stays free of disk I/O. Resets the identity cache so the next
-// resolution honors the restored choice. A blank login clears the preference
-// (back to "decide automatically").
-export function setPreferredGhLogin(login: string): void {
-  const next = (login || "").trim() || null;
-  if (next === _preferredLogin) return;
-  _preferredLogin = next;
-  resetGhIdentityCache();
-}
-
 // Drop the memoized snapshot/strategy so the next gh call re-reads `gh auth
-// status`. Call after anything that changes the active account (a switch). The
-// sticky user preference is intentionally preserved across resets.
+// status`. Call after anything that changes the active account.
 export function resetGhIdentityCache(): void {
   _ghSnapshot = null;
   _ghSnapshotPromise = null;
@@ -460,50 +464,9 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
     mismatch: !!(actingLogin && displayLogin && actingLogin !== displayLogin),
     actingHasWorkflow: !!(actingAcct && actingAcct.hasWorkflow),
     actingHasPackages: !!(actingAcct && actingAcct.hasPackages),
-    preferredLogin: _preferredLogin,
     reason: strat.reason,
     accounts
   };
-}
-
-// Switch the active gh account to `login`. gh auth switch changes the keyring
-// active account; because a present GH_TOKEN would still override it at call
-// time, we also record the preference (so ghChildEnv strips the token when the
-// chosen account is not the token account) and reset the identity cache.
-// Resolves { ok, error } and never rejects.
-export function switchGhAccount(
-  login: string
-): Promise<{ ok: boolean; error?: string }> {
-  return new Promise((resolve) => {
-    if (!login) {
-      resolve({ ok: false, error: "A GitHub account login is required." });
-      return;
-    }
-    const env = { ...process.env };
-    execFile(
-      ghExecutable(),
-      ["auth", "switch", "--user", login],
-      { env, timeout: 15000, windowsHide: true },
-      (err, _stdout, stderr) => {
-        if (err) {
-          resolve({
-            ok: false,
-            error: redactGhCredentials(
-              (
-                (stderr || "").trim() ||
-                err.message ||
-                "gh auth switch failed"
-              ).trim()
-            )
-          });
-          return;
-        }
-        _preferredLogin = login;
-        resetGhIdentityCache();
-        resolve({ ok: true });
-      }
-    );
-  });
 }
 
 // Read the keyring token for a SPECIFIC login without changing the active
@@ -523,6 +486,404 @@ function ghKeyringTokenForUser(login: string): Promise<string> {
       { env, timeout: 8000, windowsHide: true },
       (e, stdout) => {
         resolve(e ? "" : (stdout || "").toString().trim());
+      }
+    );
+  });
+}
+
+function ghVersion(): Promise<[major: number, minor: number] | null> {
+  return new Promise((resolve) => {
+    execFile(
+      ghExecutable(),
+      ["--version"],
+      { timeout: 5000, windowsHide: true },
+      (error, stdout) => {
+        resolve(error ? null : parseGhVersion((stdout || "").toString()));
+      }
+    );
+  });
+}
+
+function selectedCredentialRedactor(token: string): (value: string) => string {
+  return (value) => {
+    const selectedRedacted =
+      token === "" ? value : value.replaceAll(token, "[REDACTED]");
+    return redactGhCredentials(selectedRedacted);
+  };
+}
+
+function selectedErrorMessage(
+  error: unknown,
+  redact: (value: string) => string
+): string {
+  return redact(error instanceof Error ? error.message : String(error));
+}
+
+function selectedExecError(
+  error: ExecFileException,
+  redact: (value: string) => string
+): ExecFileException {
+  const safe = Object.assign(new Error(redact(error.message)), {
+    code: error.code,
+    killed: error.killed,
+    signal: error.signal,
+    cmd: redact(error.cmd || "")
+  });
+  safe.name = error.name;
+  if (error.stack) safe.stack = redact(error.stack);
+  if (error.cause !== undefined) {
+    safe.cause =
+      error.cause instanceof Error ?
+        new Error(selectedErrorMessage(error.cause, redact))
+      : redact(String(error.cause));
+  }
+  return safe;
+}
+
+function pinnedGhExec(
+  token: string,
+  args: string[],
+  options: CliOptions,
+  callback: CliCallback,
+  redact: (value: string) => string
+): ChildProcess {
+  const env = withoutAgentSession(options.env);
+  delete env.GITHUB_TOKEN;
+  delete env.GH_HOST;
+  env.GH_TOKEN = token;
+  const execOptions: ExecFileOptionsWithStringEncoding = {
+    maxBuffer: 10 * 1024 * 1024,
+    windowsHide: true,
+    ...options,
+    env,
+    encoding: "utf8"
+  };
+  return execFile(
+    ghExecutable(),
+    args,
+    execOptions,
+    (error, stdout, stderr) => {
+      callback(
+        error ? selectedExecError(error, redact) : null,
+        redact((stdout || "").toString()),
+        redact((stderr || "").toString())
+      );
+    }
+  );
+}
+
+export async function createSelectedGhExecutor(
+  selectedLogin: string,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<SelectedGhExecutor> {
+  const login = selectedLogin.trim();
+  if (!login) throw new Error("A GitHub account login is required.");
+
+  const snapshot = await ensureGhSnapshot();
+  const injectedToken = getInjectedGhToken(env);
+  const injectedAccount = snapshot.withTokenAccts.find(
+    (account) => account.login === login && /TOKEN/i.test(account.source)
+  );
+  const keyringAccount = snapshot.keyringAccts.find(
+    (account) => account.login === login
+  );
+  const requiredScopeScore = (account: GhAccount | undefined): number =>
+    Number(account?.scopes.includes("workflow") === true) +
+    Number(account?.scopes.includes("write:packages") === true);
+  const keyringToken = keyringAccount ? await ghKeyringTokenForUser(login) : "";
+  if (keyringAccount && !keyringToken) {
+    const version = await ghVersion();
+    if (version && !supportsGhMultiAccount(version)) {
+      throw new Error(
+        `GitHub CLI 2.40 or newer is required to select @${login} without relying on the active account. Upgrade GitHub CLI and retry.`
+      );
+    }
+  }
+  const useInjected =
+    injectedToken !== "" &&
+    snapshot.tokenAcct?.login === login &&
+    (!keyringToken ||
+      requiredScopeScore(injectedAccount) > requiredScopeScore(keyringAccount));
+  const token = useInjected ? injectedToken : keyringToken;
+  if (!token) {
+    throw new Error(
+      `Could not obtain a GitHub credential for @${login}. Authenticate that account with GitHub CLI, then re-check. Note: gh auth login changes the machine-wide active account for github.com.`
+    );
+  }
+  const credentialSource: SelectedGhCredentialSource =
+    useInjected ? "injected" : "keyring";
+  const scopes =
+    credentialSource === "injected" ?
+      snapshot.withTokenAccts.find((account) => account.login === login)
+        ?.scopes || []
+    : snapshot.keyringAccts.find((account) => account.login === login)
+        ?.scopes || [];
+  const redact = selectedCredentialRedactor(token);
+
+  const runRaw = (
+    args: string[],
+    options: CommandOptions = {}
+  ): Promise<SelectedGhCommandResult> => {
+    const { stdin, ...execOptions } = options;
+    return new Promise((resolve) => {
+      const child = pinnedGhExec(
+        token,
+        args,
+        execOptions,
+        (error, stdout, stderr) => {
+          resolve({
+            code: error ? error.code || 1 : 0,
+            stdout,
+            stderr
+          });
+        },
+        redact
+      );
+      if (stdin !== undefined) child.stdin?.end(stdin);
+    });
+  };
+  const verifyIdentityRaw = async (): Promise<void> => {
+    const result = await runRaw(["api", "user", "--jq", ".login"], {
+      timeout: 15000
+    });
+    const actingLogin = result.stdout.trim();
+    if (result.code !== 0) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw new Error(
+        detail ?
+          `GitHub identity verification failed for @${login}: ${detail}`
+        : `GitHub identity verification failed for @${login}.`
+      );
+    }
+    if (actingLogin !== login) {
+      throw new Error(
+        `GitHub identity verification failed: expected @${login}, received @${
+          actingLogin || "unknown"
+        }.`
+      );
+    }
+  };
+  let identityVerification: Promise<void> | null = null;
+  const verifyIdentity = (): Promise<void> => {
+    if (!identityVerification) {
+      identityVerification = verifyIdentityRaw().catch((error) => {
+        identityVerification = null;
+        throw error;
+      });
+    }
+    return identityVerification;
+  };
+  const run = async (
+    args: string[],
+    options: CommandOptions = {}
+  ): Promise<SelectedGhCommandResult> => {
+    await verifyIdentity();
+    return await runRaw(args, options);
+  };
+
+  const runOrThrow = async (
+    args: string[],
+    message: string,
+    options: CommandOptions = {}
+  ): Promise<SelectedGhCommandResult> => {
+    const result = await run(args, options);
+    if (result.code !== 0) {
+      const detail = (result.stderr || result.stdout).trim();
+      throw new Error(detail ? `${message}: ${detail}` : message);
+    }
+    return result;
+  };
+
+  return {
+    login,
+    credentialSource,
+    requiresKeyringSwitch:
+      credentialSource === "keyring" && snapshot.tokenAcct?.login !== login,
+    scopes: [...scopes],
+    run,
+    runOrThrow,
+    verifyIdentity,
+    packageCredentials: () => ({ username: login, token }),
+    redact,
+    errorMessage: (error) => selectedErrorMessage(error, redact)
+  };
+}
+
+export async function selectedGhApiJson(
+  executor: SelectedGhExecutor,
+  apiPath: string
+): Promise<GhApiResult> {
+  const result = await executor.run(["api", apiPath], { timeout: 15000 });
+  let json: unknown = null;
+  if (result.stdout.trim()) {
+    try {
+      json = JSON.parse(result.stdout);
+    } catch {
+      return {
+        ok: false,
+        status: null,
+        json: null,
+        stderr: "GitHub returned an invalid JSON response."
+      };
+    }
+  }
+  const statusMatch = result.stderr.match(/\bHTTP\s+(\d{3})\b/i);
+  return {
+    ok: result.code === 0,
+    status:
+      result.code === 0 ? 200
+      : statusMatch ? Number(statusMatch[1])
+      : null,
+    json,
+    stderr: result.stderr
+  };
+}
+
+export async function selectedFetchFileFromRepo(
+  executor: SelectedGhExecutor,
+  repo: string,
+  path: string,
+  branch = "main"
+): Promise<string | null> {
+  const result = await executor.run(
+    [
+      "api",
+      `/repos/${repo}/contents/${path}?ref=${branch}`,
+      "--jq",
+      ".content"
+    ],
+    { timeout: 15000 }
+  );
+  if (result.code !== 0 || !result.stdout.trim()) return null;
+  return Buffer.from(result.stdout.trim(), "base64").toString("utf8");
+}
+
+export async function selectedGetDefaultBranch(
+  executor: SelectedGhExecutor,
+  repo: string
+): Promise<string> {
+  const result = await executor.run(
+    ["api", `/repos/${repo}`, "--jq", ".default_branch"],
+    { timeout: 15000 }
+  );
+  return result.code === 0 ? result.stdout.trim() : "";
+}
+
+export async function selectedGetBranchHeadSha(
+  executor: SelectedGhExecutor,
+  repo: string,
+  branch: string
+): Promise<string> {
+  const result = await executor.run(
+    [
+      "api",
+      `/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`,
+      "--jq",
+      ".object.sha"
+    ],
+    { timeout: 15000 }
+  );
+  return result.code === 0 ? result.stdout.trim() : "";
+}
+
+export async function selectedCreateBranchRef(
+  executor: SelectedGhExecutor,
+  repo: string,
+  newBranch: string,
+  fromSha: string
+): Promise<BranchRefResult> {
+  const result = await executor.run(
+    ["api", "--method", "POST", `/repos/${repo}/git/refs`, "--input", "-"],
+    {
+      timeout: 20000,
+      stdin: JSON.stringify({
+        ref: `refs/heads/${newBranch}`,
+        sha: fromSha
+      })
+    }
+  );
+  return {
+    ok: result.code === 0,
+    stderr: (result.stderr || result.stdout).trim()
+  };
+}
+
+export async function selectedCreatePullRequest(
+  executor: SelectedGhExecutor,
+  repo: string,
+  head: string,
+  base: string,
+  title: string,
+  prBody: string
+): Promise<PullRequestResult> {
+  const result = await executor.run(
+    ["api", "--method", "POST", `/repos/${repo}/pulls`, "--input", "-"],
+    {
+      timeout: 20000,
+      stdin: JSON.stringify({ title, head, base, body: prBody || "" })
+    }
+  );
+  if (result.code !== 0) {
+    return {
+      ok: false,
+      stderr: (result.stderr || result.stdout).trim()
+    };
+  }
+  try {
+    const parsed = JSON.parse(result.stdout) as {
+      html_url?: unknown;
+      number?: unknown;
+    };
+    return {
+      ok: true,
+      url: typeof parsed.html_url === "string" ? parsed.html_url : undefined,
+      number: typeof parsed.number === "number" ? parsed.number : undefined
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      stderr: `Could not parse PR response: ${executor.errorMessage(error)}`
+    };
+  }
+}
+
+export async function getActiveKeyringLogin(): Promise<string> {
+  resetGhIdentityCache();
+  const snapshot = await ensureGhSnapshot();
+  return snapshot.keyringActive?.login || "";
+}
+
+export function switchGhKeyringAccount(
+  login: string
+): Promise<{ ok: boolean; error?: string }> {
+  const selectedLogin = login.trim();
+  if (!selectedLogin) {
+    return Promise.resolve({
+      ok: false,
+      error: "A GitHub account login is required."
+    });
+  }
+  const env = withoutAgentSession(process.env);
+  delete env.GH_TOKEN;
+  delete env.GITHUB_TOKEN;
+  delete env.GH_HOST;
+  return new Promise((resolve) => {
+    execFile(
+      ghExecutable(),
+      ["auth", "switch", "--hostname", "github.com", "--user", selectedLogin],
+      { env, timeout: 15000, windowsHide: true },
+      (error, _stdout, stderr) => {
+        if (error) {
+          resolve({
+            ok: false,
+            error: redactGhCredentials(
+              (stderr || error.message || "gh auth switch failed").trim()
+            )
+          });
+          return;
+        }
+        resetGhIdentityCache();
+        resolve({ ok: true });
       }
     );
   });
@@ -553,7 +914,7 @@ export async function getGhPackageCredentials(): Promise<{
   const login = id.actingLogin;
   if (!login) {
     throw new Error(
-      "No GitHub account is available for package setup. Sign in with: gh auth login"
+      "No GitHub account is available for package setup. Authenticate with GitHub CLI, then re-check. Note: gh auth login changes the machine-wide active account for github.com."
     );
   }
   const acct = (id.accounts || []).find((a) => a.login === login) || null;
@@ -564,7 +925,7 @@ export async function getGhPackageCredentials(): Promise<{
   const injected = getInjectedGhToken();
   if (injected) return { token: injected, username: login };
   throw new Error(
-    `Could not obtain a GitHub token for @${login}. Sign in with: gh auth login`
+    `Could not obtain a GitHub token for @${login}. Authenticate that account with GitHub CLI, then re-check. Note: gh auth login changes the machine-wide active account for github.com.`
   );
 }
 
