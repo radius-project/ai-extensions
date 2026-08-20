@@ -484,7 +484,7 @@ export function createFakeClock(startMs = 0): FakeClock {
   return clock;
 }
 
-type NetworkHandler = (
+export type NetworkHandler = (
   init?: HttpRequestInit
 ) => HttpResponse | Promise<HttpResponse>;
 

@@ -31,7 +31,10 @@ import {
   jsonResponse,
   textResponse
 } from "../../../test/support/browser/fakes.js";
-import type { FakeElement } from "../../../test/support/browser/fakes.js";
+import type {
+  FakeElement,
+  NetworkHandler
+} from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 
 const REPO = "octo/widgets";
@@ -164,6 +167,42 @@ const EXIT_ACTION_WITH_DELETIONS = {
   }
 };
 
+// Projections more than one suite renders. Each is the server's own wording for
+// a state the panel has to present, so they are declared once here rather than
+// restated per describe.
+const STOP_ACTION = {
+  id: "stop",
+  kind: "stop",
+  label: "Stop setup",
+  description: "Radius finishes the current step and stops.",
+  path: "/api/operations/op-1/stop",
+  pending: false
+};
+
+const RETRY_CLEANUP_ACTION = {
+  id: "retry-cleanup",
+  kind: "retry_cleanup",
+  label: "Retry rollback",
+  description: "Radius tries again to remove what is still present.",
+  path: "/api/operations/op-1/rollback/retry",
+  pending: false,
+  tone: "danger"
+};
+
+const ROLLING_BACK_HEADLINE = {
+  code: "rolling-back",
+  title: "Rolling back created resources…",
+  message:
+    "Radius is removing the resources it proved it created during this attempt."
+};
+
+const ROLLBACK_COMPLETE_HEADLINE = {
+  code: "rollback-complete",
+  title: "Rollback complete",
+  message:
+    "Radius removed the resources it created during this attempt. Anything it reused was left alone."
+};
+
 const EXITED_HEADLINE = {
   code: "setup-exited",
   title: "Environment setup closed",
@@ -242,6 +281,48 @@ function controllerFor(
     ...rest,
     deps
   });
+}
+
+/** A controller wired to a fresh deps harness the scenario can read back. */
+function controllerWithHarness(
+  browser: Pick<ReturnType<typeof createFakeBrowser>, "context">
+) {
+  const harness = createDeps();
+  return {
+    controller: controllerFor(browser, { deps: harness.deps }),
+    harness
+  };
+}
+
+/** Render one projected record on a fresh controller. */
+function renderRecord(
+  browser: Pick<ReturnType<typeof createFakeBrowser>, "context">,
+  overrides: Record<string, unknown> = {}
+) {
+  const controller = controllerFor(browser);
+  controller?.renderProgress(record(overrides));
+  return controller;
+}
+
+/** Whether the panel is carrying one of its lifecycle classes. */
+function panelHasClass(
+  browser: ReturnType<typeof setup>,
+  name: string
+): boolean {
+  return browser.els[PROGRESS_IDS.panel].classList.contains(name);
+}
+
+/** Whether one region of the panel is on screen. */
+function displayOf(browser: ReturnType<typeof setup>, id: string): string {
+  return browser.els[id].style.display;
+}
+
+/** What a rendered list reads out, in order. */
+function textOf(
+  browser: ReturnType<typeof setup>,
+  id: string
+): Array<string | null> {
+  return browser.els[id].children.map((child) => child.textContent);
 }
 
 /** Answer the polling route with one operation payload. */
@@ -1222,43 +1303,43 @@ describe("failure card rendering", () => {
 describe("partial-state inventory", () => {
   it("names each surviving resource group in its own block", () => {
     const browser = setup();
-    controllerFor(browser)?.renderProgress(
-      record({
-        terminalState: "failed_partial",
-        cleanup: {
-          created: [{ target: "app radius-dev" }],
-          retainedArtifacts: [{ target: "ghcr package" }],
-          reused: [
-            {
-              target: "existing service principal",
-              detail: "An earlier Radius setup created it."
-            }
-          ],
-          cleaned: [{ target: "federated credential" }],
-          manualActionRequired: [
-            { target: "role assignment", action: "Remove it in the portal" },
-            { target: "orphaned app" }
-          ]
-        }
-      })
-    );
+    renderRecord(browser, {
+      terminalState: "failed_partial",
+      cleanup: {
+        created: [{ target: "app radius-dev" }],
+        retainedArtifacts: [{ target: "ghcr package" }],
+        reused: [
+          {
+            target: "existing service principal",
+            detail: "An earlier Radius setup created it."
+          }
+        ],
+        cleaned: [{ target: "federated credential" }],
+        manualActionRequired: [
+          { target: "role assignment", action: "Remove it in the portal" },
+          { target: "orphaned app" }
+        ]
+      }
+    });
 
     expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
-    const listed = (id: string): string[] =>
-      browser.els[id].children.map((child) => child.textContent ?? "");
-    expect(listed(PROGRESS_IDS.stateCreatedList)).toEqual(["app radius-dev"]);
-    expect(listed(PROGRESS_IDS.stateRetainedList)).toEqual(["ghcr package"]);
+    expect(textOf(browser, PROGRESS_IDS.stateCreatedList)).toEqual([
+      "app radius-dev"
+    ]);
+    expect(textOf(browser, PROGRESS_IDS.stateRetainedList)).toEqual([
+      "ghcr package"
+    ]);
     // A reused resource carries why it is being kept: without it, a customer who
     // watched Radius create the resource reads the group as a bug.
-    expect(listed(PROGRESS_IDS.stateReusedList)).toEqual([
+    expect(textOf(browser, PROGRESS_IDS.stateReusedList)).toEqual([
       "existing service principal — An earlier Radius setup created it."
     ]);
-    expect(listed(PROGRESS_IDS.stateCleanedList)).toEqual([
+    expect(textOf(browser, PROGRESS_IDS.stateCleanedList)).toEqual([
       "federated credential"
     ]);
     // A manual entry keeps its instruction attached to its resource, and one
     // without an instruction is still named rather than dropped.
-    expect(listed(PROGRESS_IDS.stateManualList)).toEqual([
+    expect(textOf(browser, PROGRESS_IDS.stateManualList)).toEqual([
       "role assignment — Remove it in the portal",
       "orphaned app"
     ]);
@@ -1275,12 +1356,10 @@ describe("partial-state inventory", () => {
 
   it("keeps the inventory out of sight while setup is still running", () => {
     const browser = setup();
-    controllerFor(browser)?.renderProgress(
-      record({
-        terminalState: null,
-        cleanup: { created: [{ target: "app radius-dev" }] }
-      })
-    );
+    renderRecord(browser, {
+      terminalState: null,
+      cleanup: { created: [{ target: "app radius-dev" }] }
+    });
 
     expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
   });
@@ -1292,36 +1371,27 @@ describe("partial-state inventory", () => {
     );
 
     expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
-    expect(browser.els[PROGRESS_IDS.stateCreatedBlock].style.display).toBe(
-      "none"
-    );
+    expect(displayOf(browser, PROGRESS_IDS.stateCreatedBlock)).toBe("none");
   });
 
   it("keeps only the populated groups visible", () => {
     const browser = setup();
-    controllerFor(browser)?.renderProgress(
-      record({
-        terminalState: "failed",
-        cleanup: { reused: [{ target: "existing app" }] }
-      })
-    );
+    renderRecord(browser, {
+      terminalState: "failed",
+      cleanup: { reused: [{ target: "existing app" }] }
+    });
 
     expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
     expect(browser.els[PROGRESS_IDS.stateReusedBlock].style.display).toBe("");
-    expect(browser.els[PROGRESS_IDS.stateCreatedBlock].style.display).toBe(
-      "none"
-    );
+    expect(displayOf(browser, PROGRESS_IDS.stateCreatedBlock)).toBe("none");
   });
 
   it("clears the inventory when the panel is cleared", () => {
     const browser = setup();
-    const controller = controllerFor(browser);
-    controller?.renderProgress(
-      record({
-        terminalState: "failed",
-        cleanup: { created: [{ target: "app radius-dev" }] }
-      })
-    );
+    const controller = renderRecord(browser, {
+      terminalState: "failed",
+      cleanup: { created: [{ target: "app radius-dev" }] }
+    });
     controller?.renderProgress(null);
 
     expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
@@ -1329,12 +1399,10 @@ describe("partial-state inventory", () => {
 
   it("inserts a customer-influenced label as text, never as markup", () => {
     const browser = setup();
-    controllerFor(browser)?.renderProgress(
-      record({
-        terminalState: "failed",
-        cleanup: { created: [{ target: "<img src=x onerror=alert(1)>" }] }
-      })
-    );
+    renderRecord(browser, {
+      terminalState: "failed",
+      cleanup: { created: [{ target: "<img src=x onerror=alert(1)>" }] }
+    });
 
     const list = browser.els[PROGRESS_IDS.stateCreatedList];
     expect(list.innerHTML).toBe("");
@@ -1343,15 +1411,6 @@ describe("partial-state inventory", () => {
 });
 
 describe("operation commands", () => {
-  const stopAction = {
-    id: "stop",
-    kind: "stop",
-    label: "Stop setup",
-    description: "Radius finishes the current step and stops.",
-    path: "/api/operations/op-1/stop",
-    pending: false
-  };
-
   function commandsController(browser: ReturnType<typeof setup>) {
     return controllerFor(browser, { mutationNonce: "browser-nonce" });
   }
@@ -1364,23 +1423,66 @@ describe("operation commands", () => {
     return browser.els[PROGRESS_IDS.bottomButtons].children;
   }
 
+  /** Project a set of actions onto a fresh panel. */
+  function renderActions(
+    browser: ReturnType<typeof setup>,
+    actions: readonly unknown[],
+    overrides: Record<string, unknown> = {}
+  ) {
+    const controller = commandsController(browser);
+    controller?.renderProgress(record({ actions, ...overrides }));
+    return controller;
+  }
+
+  /** Project one action and let the server answer its path. */
+  function renderCommand(
+    browser: ReturnType<typeof setup>,
+    respond: NetworkHandler,
+    options: {
+      action?: Record<string, unknown>;
+      repo?: string;
+      deps?: EnvironmentOperationsDeps;
+    } = {}
+  ) {
+    const { action = STOP_ACTION, ...controllerOptions } = options;
+    const controller = controllerFor(browser, {
+      mutationNonce: "browser-nonce",
+      ...controllerOptions
+    });
+    browser.net.handle(String(action.path), respond);
+    controller?.renderProgress(record({ actions: [action] }));
+    return controller;
+  }
+
+  /**
+   * Render one projected action, press it, and let the request settle. Every
+   * command scenario walks the same path — render, click, await — so each test
+   * states only the action, the server's answer, and what makes it distinct.
+   */
+  async function pressCommand(
+    browser: ReturnType<typeof setup>,
+    respond: NetworkHandler,
+    options: Parameters<typeof renderCommand>[2] = {}
+  ) {
+    const controller = renderCommand(browser, respond, options);
+    buttons(browser)[0].dispatch("click");
+    await flushPromises();
+    return controller;
+  }
+
   it("renders exactly the actions the server projected", () => {
     const browser = setup();
-    commandsController(browser)?.renderProgress(
-      record({
-        actions: [
-          stopAction,
-          {
-            id: "retry-setup",
-            kind: "retry_setup",
-            label: "",
-            description: "",
-            path: "/api/operations/op-1/retry/setup",
-            pending: true
-          }
-        ]
-      })
-    );
+    renderActions(browser, [
+      STOP_ACTION,
+      {
+        id: "retry-setup",
+        kind: "retry_setup",
+        label: "",
+        description: "",
+        path: "/api/operations/op-1/retry/setup",
+        pending: true
+      }
+    ]);
 
     expect(browser.els[PROGRESS_IDS.commands].style.display).toBe("");
     const rendered = buttons(browser);
@@ -1400,22 +1502,20 @@ describe("operation commands", () => {
 
   it("keeps the retry in the command row and Exit setup below the details", () => {
     const browser = setup();
-    commandsController(browser)?.renderProgress(
-      record({
-        state: "failed_partial",
-        terminalState: "failed_partial",
-        actions: [
-          {
-            id: "retry-verification",
-            kind: "retry_verification",
-            label: "Retry verification",
-            description: "Check the same workflow again.",
-            path: "/api/operations/op-1/retry/verification",
-            pending: false
-          },
-          EXIT_ACTION
-        ]
-      })
+    renderActions(
+      browser,
+      [
+        {
+          id: "retry-verification",
+          kind: "retry_verification",
+          label: "Retry verification",
+          description: "Check the same workflow again.",
+          path: "/api/operations/op-1/retry/verification",
+          pending: false
+        },
+        EXIT_ACTION
+      ],
+      { state: "failed_partial", terminalState: "failed_partial" }
     );
 
     expect(buttons(browser).map((button) => button.textContent)).toEqual([
@@ -1435,9 +1535,7 @@ describe("operation commands", () => {
 
   it("drops an action with no path rather than rendering a button that can only fail", () => {
     const browser = setup();
-    commandsController(browser)?.renderProgress(
-      record({ actions: [{ ...stopAction, path: "" }] })
-    );
+    renderActions(browser, [{ ...STOP_ACTION, path: "" }]);
 
     expect(buttons(browser)).toHaveLength(0);
     expect(browser.els[PROGRESS_IDS.commands].style.display).toBe("none");
@@ -1445,12 +1543,9 @@ describe("operation commands", () => {
 
   it("states the automatic next move when there is nothing to press", () => {
     const browser = setup();
-    commandsController(browser)?.renderProgress(
-      record({
-        actions: [],
-        nextTransition: { code: "stopping", message: "Stopping soon…" }
-      })
-    );
+    renderActions(browser, [], {
+      nextTransition: { code: "stopping", message: "Stopping soon…" }
+    });
 
     // A record with no actions still has something to say, so the region
     // stays visible rather than leaving the customer watching a spinner.
@@ -1462,7 +1557,7 @@ describe("operation commands", () => {
 
   it("hides the region when there is neither an action nor anything to say", () => {
     const browser = setup();
-    commandsController(browser)?.renderProgress(record({ actions: [] }));
+    renderActions(browser, []);
 
     expect(browser.els[PROGRESS_IDS.commands].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe("");
@@ -1470,12 +1565,9 @@ describe("operation commands", () => {
 
   it("leads the note with the automatic next move when actions are offered", () => {
     const browser = setup();
-    commandsController(browser)?.renderProgress(
-      record({
-        actions: [stopAction],
-        nextTransition: { code: "stopping", message: "Stopping soon…" }
-      })
-    );
+    renderActions(browser, [STOP_ACTION], {
+      nextTransition: { code: "stopping", message: "Stopping soon…" }
+    });
 
     expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
       "Stopping soon… Radius finishes the current step and stops."
@@ -1484,9 +1576,7 @@ describe("operation commands", () => {
 
   it("announces a stop that the server has already accepted", () => {
     const browser = setup();
-    commandsController(browser)?.renderProgress(
-      record({ actions: [{ ...stopAction, pending: true }] })
-    );
+    renderActions(browser, [{ ...STOP_ACTION, pending: true }]);
 
     expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
       "Stopping after the current step…"
@@ -1495,14 +1585,13 @@ describe("operation commands", () => {
 
   it("clears a stale status and error when a different operation takes over", () => {
     const browser = setup();
-    const controller = commandsController(browser);
-    controller?.renderProgress(
-      record({ actions: [{ ...stopAction, pending: true }] })
-    );
+    const controller = renderActions(browser, [
+      { ...STOP_ACTION, pending: true }
+    ]);
     browser.els[PROGRESS_IDS.commandError].textContent = "old refusal";
 
     controller?.renderProgress(
-      record({ operationId: "op-2", actions: [stopAction] })
+      record({ operationId: "op-2", actions: [STOP_ACTION] })
     );
 
     expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
@@ -1511,18 +1600,12 @@ describe("operation commands", () => {
 
   it("submits the projected path and follows the reopened operation", async () => {
     const browser = setup();
-    const controller = commandsController(browser);
-    browser.net.handle(stopAction.path, () =>
-      jsonResponse(op({ state: "stopping" }))
-    );
     browser.net.handle(operationsUrl(), () => jsonResponse(op()));
-    controller?.renderProgress(record({ actions: [stopAction] }));
 
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
+    await pressCommand(browser, () => jsonResponse(op({ state: "stopping" })));
 
     const submitted = browser.net.calls.find(
-      (call) => call.url === stopAction.path
+      (call) => call.url === STOP_ACTION.path
     );
     expect(submitted?.init?.method).toBe("POST");
     expect(submitted?.init?.body).toBe("{}");
@@ -1541,14 +1624,13 @@ describe("operation commands", () => {
   it("reports a terminal result instead of rejoining the poller", async () => {
     const browser = setup();
     const deps = createDeps();
-    const controller = controllerFor(browser, { deps: deps.deps });
-    browser.net.handle(stopAction.path, () =>
-      jsonResponse(op({ terminalState: "cancelled", state: "cancelled" }))
-    );
-    controller?.renderProgress(record({ actions: [stopAction] }));
 
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
+    await pressCommand(
+      browser,
+      () =>
+        jsonResponse(op({ terminalState: "cancelled", state: "cancelled" })),
+      { deps: deps.deps }
+    );
 
     expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
       "Environment setup cancelled."
@@ -1559,61 +1641,38 @@ describe("operation commands", () => {
 
   it("re-reads the operation directly when there is no repository to track", async () => {
     const browser = setup();
-    const controller = controllerFor(browser, { repo: "" });
-    browser.net.handle(stopAction.path, () =>
-      jsonResponse({ operation: null })
-    );
     browser.net.handle(operationUrl("op-1"), () =>
       jsonResponse(op({ summary: "Stopping dev…" }))
     );
-    controller?.renderProgress(record({ actions: [stopAction] }));
 
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
+    await pressCommand(browser, () => jsonResponse({ operation: null }), {
+      repo: ""
+    });
 
     expect(browser.els[PROGRESS_IDS.title].textContent).toBe("Stopping dev…");
     expect(browser.clock.intervals).toBe(0);
   });
 
-  it("says nothing about a direct re-read the server refused", async () => {
-    const browser = setup();
-    const controller = controllerFor(browser, { repo: "" });
-    browser.net.handle(stopAction.path, () =>
-      jsonResponse({ operation: null })
-    );
-    browser.net.handle(operationUrl("op-1"), () =>
-      jsonResponse({ error: "gone" }, false, 404)
-    );
-    controller?.renderProgress(record({ actions: [stopAction] }));
+  it.each([
+    ["refused", () => jsonResponse({ error: "gone" }, false, 404)],
+    ["rejected", () => Promise.reject(new Error("offline"))]
+  ])(
+    "keeps a direct re-read the server %s out of the panel",
+    async (_label, reread: NetworkHandler) => {
+      const browser = setup();
+      browser.net.handle(operationUrl("op-1"), reread);
 
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
+      await pressCommand(browser, () => jsonResponse({ operation: null }), {
+        repo: ""
+      });
 
-    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
-  });
-
-  it("keeps a rejected re-read out of the panel", async () => {
-    const browser = setup();
-    const controller = controllerFor(browser, { repo: "" });
-    browser.net.handle(stopAction.path, () =>
-      jsonResponse({ operation: null })
-    );
-    browser.net.handle(operationUrl("op-1"), () =>
-      Promise.reject(new Error("offline"))
-    );
-    controller?.renderProgress(record({ actions: [stopAction] }));
-
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
-
-    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
-  });
+      expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
+    }
+  );
 
   it("drops a malformed action entry rather than rendering a broken control", () => {
     const browser = setup();
-    commandsController(browser)?.renderProgress(
-      record({ actions: ["not-an-action", null, stopAction] })
-    );
+    renderActions(browser, ["not-an-action", null, STOP_ACTION]);
 
     expect(buttons(browser)).toHaveLength(1);
     expect(buttons(browser)[0].id).toBe("env-progress-command-stop");
@@ -1624,28 +1683,18 @@ describe("operation commands", () => {
       PROGRESS_IDS.commandStatus,
       PROGRESS_IDS.commandError
     ]);
-    const controller = controllerFor(browser);
-    browser.net.handle(stopAction.path, () =>
-      jsonResponse({ operation: null })
-    );
-    controller?.renderProgress(record({ actions: [stopAction] }));
 
-    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
-    await flushPromises();
+    await pressCommand(browser, () => jsonResponse({ operation: null }));
 
-    expect(browser.net.calls.some((call) => call.url === stopAction.path)).toBe(
-      true
-    );
+    expect(
+      browser.net.calls.some((call) => call.url === STOP_ACTION.path)
+    ).toBe(true);
   });
 
   it("still submits when the command container itself is absent", async () => {
     const browser = setup();
-    const controller = controllerFor(browser);
-    browser.net.handle(stopAction.path, () =>
-      jsonResponse({ operation: null })
-    );
-    controller?.renderProgress(record({ actions: [stopAction] }));
-    const button = browser.els[PROGRESS_IDS.commandButtons].children[0];
+    renderCommand(browser, () => jsonResponse({ operation: null }));
+    const button = buttons(browser)[0];
     // The container can disappear between render and click when the host page
     // re-renders around the panel; the command must still reach the server.
     browser.document.remove(PROGRESS_IDS.commands);
@@ -1653,25 +1702,21 @@ describe("operation commands", () => {
     button.dispatch("click");
     await flushPromises();
 
-    expect(browser.net.calls.some((call) => call.url === stopAction.path)).toBe(
-      true
-    );
+    expect(
+      browser.net.calls.some((call) => call.url === STOP_ACTION.path)
+    ).toBe(true);
   });
 
   it("surfaces the server's own refusal and returns focus to the panel", async () => {
     const browser = setup();
-    const controller = commandsController(browser);
-    browser.net.handle(stopAction.path, () =>
+
+    await pressCommand(browser, () =>
       jsonResponse(
         { error: "operation-already-terminal", ...op({ state: "failed" }) },
         false,
         409
       )
     );
-    controller?.renderProgress(record({ actions: [stopAction] }));
-
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
 
     expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
       "operation-already-terminal"
@@ -1680,44 +1725,29 @@ describe("operation commands", () => {
     expect(browser.els[PROGRESS_IDS.panel].focusCount).toBe(1);
   });
 
-  it("never invents a cause for a refusal the server did not explain", async () => {
-    const browser = setup();
-    const controller = commandsController(browser);
-    browser.net.handle(stopAction.path, () => jsonResponse({}, false, 500));
-    controller?.renderProgress(record({ actions: [stopAction] }));
+  it.each([
+    [
+      "a refusal the server did not explain",
+      () => jsonResponse({}, false, 500)
+    ],
+    ["an unreadable refusal body", () => textResponse("<html>", false)]
+  ])(
+    "never invents a cause for %s",
+    async (_label, respond: NetworkHandler) => {
+      const browser = setup();
 
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
+      await pressCommand(browser, respond);
 
-    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
-      "Radius could not accept that request."
-    );
-  });
-
-  it("treats an unreadable refusal body as an unexplained refusal", async () => {
-    const browser = setup();
-    const controller = commandsController(browser);
-    browser.net.handle(stopAction.path, () => textResponse("<html>", false));
-    controller?.renderProgress(record({ actions: [stopAction] }));
-
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
-
-    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
-      "Radius could not accept that request."
-    );
-  });
+      expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
+        "Radius could not accept that request."
+      );
+    }
+  );
 
   it("reports an unreachable setup service without closing the panel", async () => {
     const browser = setup();
-    const controller = commandsController(browser);
-    browser.net.handle(stopAction.path, () =>
-      Promise.reject(new Error("offline"))
-    );
-    controller?.renderProgress(record({ actions: [stopAction] }));
 
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
+    await pressCommand(browser, () => Promise.reject(new Error("offline")));
 
     expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
       "Radius could not reach the setup service. Try again."
@@ -1727,17 +1757,13 @@ describe("operation commands", () => {
 
   it("disables the controls while a command is in flight and ignores a second press", async () => {
     const browser = setup();
-    const controller = commandsController(browser);
     const pending = createDeferred<HttpResponse>();
     let submissions = 0;
-    browser.net.handle(stopAction.path, () => {
+
+    await pressCommand(browser, () => {
       submissions += 1;
       return pending.promise;
     });
-    controller?.renderProgress(record({ actions: [stopAction] }));
-
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
 
     expect(browser.els[PROGRESS_IDS.commands].getAttribute("aria-busy")).toBe(
       "true"
@@ -1758,61 +1784,36 @@ describe("operation commands", () => {
     );
   });
 
-  it("announces a non-stop command without borrowing the stop wording", async () => {
-    const browser = setup();
-    const controller = commandsController(browser);
-    const pending = createDeferred<HttpResponse>();
-    browser.net.handle(
-      "/api/operations/op-1/retry/setup",
-      () => pending.promise
-    );
-    controller?.renderProgress(
-      record({
-        actions: [
-          {
-            ...stopAction,
-            id: "retry-setup",
-            kind: "retry_setup",
-            label: "Retry setup",
-            path: "/api/operations/op-1/retry/setup"
-          }
-        ]
-      })
-    );
-
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
-
-    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
+  it.each([
+    [
+      "a non-stop command without borrowing the stop wording",
+      {
+        id: "retry-setup",
+        kind: "retry_setup",
+        label: "Retry setup",
+        path: "/api/operations/op-1/retry/setup"
+      },
       "Retrying setup…"
-    );
-    pending.resolve(jsonResponse({ operation: null }));
-    await flushPromises();
-  });
-
-  it("falls back to the general acceptance sentence for an unknown command", async () => {
+    ],
+    [
+      "an unknown command with the general acceptance sentence",
+      {
+        id: "unknown",
+        kind: "something-new",
+        path: "/api/operations/op-1/unknown"
+      },
+      "Radius accepted the request…"
+    ]
+  ])("announces %s", async (_label, overrides, announcement) => {
     const browser = setup();
-    const controller = commandsController(browser);
     const pending = createDeferred<HttpResponse>();
-    browser.net.handle("/api/operations/op-1/unknown", () => pending.promise);
-    controller?.renderProgress(
-      record({
-        actions: [
-          {
-            ...stopAction,
-            id: "unknown",
-            kind: "something-new",
-            path: "/api/operations/op-1/unknown"
-          }
-        ]
-      })
-    );
 
-    buttons(browser)[0].dispatch("click");
-    await flushPromises();
+    await pressCommand(browser, () => pending.promise, {
+      action: { ...STOP_ACTION, ...overrides }
+    });
 
     expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
-      "Radius accepted the request…"
+      announcement
     );
     pending.resolve(jsonResponse({ operation: null }));
     await flushPromises();
@@ -1828,35 +1829,31 @@ describe("operation commands", () => {
     const controller = controllerFor(browser);
 
     expect(() =>
-      controller?.renderProgress(record({ actions: [stopAction] }))
+      controller?.renderProgress(record({ actions: [STOP_ACTION] }))
     ).not.toThrow();
   });
 
   it("skips a partial-state group whose block is missing", () => {
     const browser = setupWithout([PROGRESS_IDS.stateCreatedBlock]);
-    const controller = controllerFor(browser);
-    controller?.renderProgress(
-      record({
-        terminalState: "failed",
-        cleanup: { created: [{ target: "app radius-dev" }] }
-      })
-    );
+    renderRecord(browser, {
+      terminalState: "failed",
+      cleanup: { created: [{ target: "app radius-dev" }] }
+    });
 
     expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
   });
 
   it("releases command button listeners on teardown", () => {
     const browser = setup();
-    const controller = commandsController(browser);
-    controller?.renderProgress(record({ actions: [stopAction] }));
+    const controller = renderActions(browser, [STOP_ACTION]);
     const button = buttons(browser)[0];
     controller?.teardown();
 
     button.dispatch("click");
 
-    expect(browser.net.calls.some((call) => call.url === stopAction.path)).toBe(
-      false
-    );
+    expect(
+      browser.net.calls.some((call) => call.url === STOP_ACTION.path)
+    ).toBe(false);
   });
 
   it.each([
@@ -1866,24 +1863,19 @@ describe("operation commands", () => {
     ["", "rad-btn rad-btn--secondary"]
   ])("renders the %s tone the server chose", (tone, expected) => {
     const browser = setup();
-    commandsController(browser)?.renderProgress(
-      record({ actions: [{ ...stopAction, tone }] })
-    );
+    renderActions(browser, [{ ...STOP_ACTION, tone }]);
 
     expect(buttons(browser)[0].className).toBe(expected);
   });
 
   it("explains why a path the customer might expect is missing", () => {
     const browser = setup();
-    commandsController(browser)?.renderProgress(
-      record({
-        actions: [],
-        guidance: [
-          { code: "commit-point-passed", message: "Rollback is not offered." },
-          { code: "", message: "" }
-        ]
-      })
-    );
+    renderActions(browser, [], {
+      guidance: [
+        { code: "commit-point-passed", message: "Rollback is not offered." },
+        { code: "", message: "" }
+      ]
+    });
 
     const guidance = browser.els[PROGRESS_IDS.commandGuidance];
     expect(guidance.style.display).toBe("");
@@ -1896,18 +1888,12 @@ describe("operation commands", () => {
 
   it("clears the guidance list once the record has nothing left to explain", () => {
     const browser = setup();
-    const controller = commandsController(browser);
-    controller?.renderProgress(
-      record({
-        actions: [],
-        guidance: [{ code: "x", message: "Rollback is not offered." }]
-      })
-    );
+    const controller = renderActions(browser, [], {
+      guidance: [{ code: "x", message: "Rollback is not offered." }]
+    });
     controller?.renderProgress(record({ operationId: "op-2", actions: [] }));
 
-    expect(browser.els[PROGRESS_IDS.commandGuidance].style.display).toBe(
-      "none"
-    );
+    expect(displayOf(browser, PROGRESS_IDS.commandGuidance)).toBe("none");
     expect(browser.els[PROGRESS_IDS.commandGuidance].children).toHaveLength(0);
   });
 });
@@ -1981,11 +1967,37 @@ describe("rollback confirmation", () => {
     }
   };
 
-  function open(browser: ReturnType<typeof setup>) {
+  /** The projected control that opens the confirmation. */
+  function trigger(browser: ReturnType<typeof setup>) {
+    return browser.els[PROGRESS_IDS.commandButtons].children[0];
+  }
+
+  /** Render the destructive action, optionally reworded, and open its dialog. */
+  function open(
+    browser: ReturnType<typeof setup>,
+    overrides: Record<string, unknown> = {}
+  ) {
     const controller = controllerFor(browser);
-    controller?.renderProgress(record({ actions: [rollbackAction] }));
-    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    controller?.renderProgress(
+      record({ actions: [{ ...rollbackAction, ...overrides }] })
+    );
+    trigger(browser).dispatch("click");
     return controller;
+  }
+
+  /** Declare what the dialog exposes to the focus trap. */
+  function focusable(
+    browser: ReturnType<typeof setup>,
+    elements: readonly FakeElement[]
+  ) {
+    browser.els[ROLLBACK_IDS.modal].matches.set(
+      "button:not([disabled])",
+      elements as FakeElement[]
+    );
+  }
+
+  function sentRollback(browser: ReturnType<typeof setup>) {
+    return browser.net.calls.some((call) => call.url === rollbackAction.path);
   }
 
   it("confirms a destructive command before anything is sent", () => {
@@ -2001,32 +2013,20 @@ describe("rollback confirmation", () => {
       "This cannot be undone."
     );
     // Each entry is named in the customer's terms, not the ledger's.
-    expect(
-      browser.els[ROLLBACK_IDS.removeList].children.map(
-        (child) => child.textContent
-      )
-    ).toEqual(["App Registration: radius-dev"]);
-    expect(
-      browser.els[ROLLBACK_IDS.keepList].children.map(
-        (child) => child.textContent
-      )
-    ).toEqual([
+    expect(textOf(browser, ROLLBACK_IDS.removeList)).toEqual([
+      "App Registration: radius-dev"
+    ]);
+    expect(textOf(browser, ROLLBACK_IDS.keepList)).toEqual([
       "Service Principal: existing-sp — It already existed before this attempt started."
     ]);
-    expect(
-      browser.els[ROLLBACK_IDS.manualList].children.map(
-        (child) => child.textContent
-      )
-    ).toEqual(["Role assignment: Contributor — Remove it"]);
+    expect(textOf(browser, ROLLBACK_IDS.manualList)).toEqual([
+      "Role assignment: Contributor — Remove it"
+    ]);
     expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe(
       "Roll back resources"
     );
     expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe("Keep resources");
-    expect(
-      browser.els[PROGRESS_IDS.commandButtons].children[0].getAttribute(
-        "aria-haspopup"
-      )
-    ).toBe("dialog");
+    expect(trigger(browser).getAttribute("aria-haspopup")).toBe("dialog");
   });
 
   it("renders the post-commit rollback in the server's own words", () => {
@@ -2035,38 +2035,27 @@ describe("rollback confirmation", () => {
     // the server's wording and the workflow files it names, never a local
     // rebuild of either.
     const browser = setup();
-    const controller = controllerFor(browser);
-    controller?.renderProgress(
-      record({
-        actions: [
+    open(browser, {
+      label: "Roll back environment setup",
+      confirmTitle: "Roll back this environment setup?",
+      confirmLabel: "Roll back setup",
+      description:
+        "Radius reverts the workflow files it committed with a new commit.",
+      preview: {
+        removes: [
           {
-            ...rollbackAction,
-            label: "Roll back environment setup",
-            confirmTitle: "Roll back this environment setup?",
-            confirmLabel: "Roll back setup",
-            description:
-              "Radius reverts the workflow files it committed with a new commit.",
-            preview: {
-              removes: [
-                {
-                  kind: "workflow_file",
-                  target:
-                    ".github/workflows/radius-verify-credentials.yml on main"
-                },
-                { kind: "github_environment", target: "contoso/store:dev" },
-                { kind: "azure_app", target: "radius-dev" }
-              ],
-              keeps: [],
-              manualActionRequired: []
-            }
-          }
-        ]
-      })
-    );
-    const trigger = browser.els[PROGRESS_IDS.commandButtons].children[0];
-    expect(trigger.textContent).toBe("Roll back environment setup");
-    trigger.dispatch("click");
+            kind: "workflow_file",
+            target: ".github/workflows/radius-verify-credentials.yml on main"
+          },
+          { kind: "github_environment", target: "contoso/store:dev" },
+          { kind: "azure_app", target: "radius-dev" }
+        ],
+        keeps: [],
+        manualActionRequired: []
+      }
+    });
 
+    expect(trigger(browser).textContent).toBe("Roll back environment setup");
     expect(browser.els[ROLLBACK_IDS.title].textContent).toBe(
       "Roll back this environment setup?"
     );
@@ -2074,11 +2063,7 @@ describe("rollback confirmation", () => {
       "Roll back setup"
     );
     // The workflow files are listed first, in the order the server will act.
-    expect(
-      browser.els[ROLLBACK_IDS.removeList].children.map(
-        (child) => child.textContent
-      )
-    ).toEqual([
+    expect(textOf(browser, ROLLBACK_IDS.removeList)).toEqual([
       "Workflow file: .github/workflows/radius-verify-credentials.yml on main",
       "GitHub environment: contoso/store:dev",
       "App Registration: radius-dev"
@@ -2089,21 +2074,12 @@ describe("rollback confirmation", () => {
 
   it("names its own defaults when the server left the wording out", () => {
     const browser = setup();
-    const controller = controllerFor(browser);
-    controller?.renderProgress(
-      record({
-        actions: [
-          {
-            ...rollbackAction,
-            confirmTitle: "",
-            confirmLabel: "",
-            cancelLabel: "",
-            preview: undefined
-          }
-        ]
-      })
-    );
-    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    open(browser, {
+      confirmTitle: "",
+      confirmLabel: "",
+      cancelLabel: "",
+      preview: undefined
+    });
 
     expect(browser.els[ROLLBACK_IDS.title].textContent).toBe(
       "Roll back resources created by this setup?"
@@ -2126,9 +2102,7 @@ describe("rollback confirmation", () => {
     browser.els[ROLLBACK_IDS.confirm].dispatch("click");
     await flushPromises();
 
-    expect(
-      browser.net.calls.some((call) => call.url === rollbackAction.path)
-    ).toBe(true);
+    expect(sentRollback(browser)).toBe(true);
     expect(browser.els[ROLLBACK_IDS.modal].style.display).toBe("none");
     expect(Reflect.get(browser.els[ROLLBACK_IDS.confirm], "disabled")).toBe(
       true
@@ -2144,9 +2118,7 @@ describe("rollback confirmation", () => {
     expect(browser.els[ROLLBACK_IDS.modal].style.display).toBe("none");
     expect(browser.net.calls).toHaveLength(0);
     // Focus goes back to the control that opened the dialog.
-    expect(
-      browser.els[PROGRESS_IDS.commandButtons].children[0].focusCount
-    ).toBe(1);
+    expect(trigger(browser).focusCount).toBe(1);
   });
 
   it("ignores a confirmation that no longer has a pending command", () => {
@@ -2164,7 +2136,7 @@ describe("rollback confirmation", () => {
     const dialog = browser.els[ROLLBACK_IDS.modal];
     const cancel = browser.els[ROLLBACK_IDS.cancel];
     const confirm = browser.els[ROLLBACK_IDS.confirm];
-    dialog.matches.set("button:not([disabled])", [cancel, confirm]);
+    focusable(browser, [cancel, confirm]);
     open(browser);
 
     browser.document.activeElement = confirm;
@@ -2184,7 +2156,7 @@ describe("rollback confirmation", () => {
 
   it("leaves a Tab alone when the dialog exposes nothing focusable", () => {
     const browser = setup();
-    browser.els[ROLLBACK_IDS.modal].matches.set("button:not([disabled])", []);
+    focusable(browser, []);
     open(browser);
 
     expect(() =>
@@ -2204,10 +2176,7 @@ describe("rollback confirmation", () => {
 
   it("refuses the command outright when there is no confirmation to show", () => {
     const browser = setupWithout([ROLLBACK_IDS.modal]);
-    const controller = controllerFor(browser);
-    controller?.renderProgress(record({ actions: [rollbackAction] }));
-
-    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    open(browser);
 
     expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
       "Radius could not open the rollback confirmation."
@@ -2229,7 +2198,7 @@ describe("rollback confirmation", () => {
     const browser = setup();
     const controller = open(browser);
     browser.els[ROLLBACK_IDS.cancel].dispatch("click");
-    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    trigger(browser).dispatch("click");
     controller?.teardown();
 
     browser.document.dispatch("keydown", { key: "Escape" });
@@ -2242,11 +2211,7 @@ describe("rollback confirmation", () => {
     const cancel = browser.els[ROLLBACK_IDS.cancel];
     const confirm = browser.els[ROLLBACK_IDS.confirm];
     const middle = createFakeElement("env-rollback-extra");
-    browser.els[ROLLBACK_IDS.modal].matches.set("button:not([disabled])", [
-      cancel,
-      middle,
-      confirm
-    ]);
+    focusable(browser, [cancel, middle, confirm]);
     open(browser);
 
     browser.document.activeElement = middle;
@@ -2259,12 +2224,8 @@ describe("rollback confirmation", () => {
 
   it("wraps a Shift+Tab that starts with nothing focused", () => {
     const browser = setup();
-    const cancel = browser.els[ROLLBACK_IDS.cancel];
     const confirm = browser.els[ROLLBACK_IDS.confirm];
-    browser.els[ROLLBACK_IDS.modal].matches.set("button:not([disabled])", [
-      cancel,
-      confirm
-    ]);
+    focusable(browser, [browser.els[ROLLBACK_IDS.cancel], confirm]);
     open(browser);
 
     browser.document.activeElement = null;
@@ -2285,7 +2246,7 @@ describe("rollback confirmation", () => {
     browser.els[ROLLBACK_IDS.confirm].dispatch("click");
     await flushPromises();
 
-    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    trigger(browser).dispatch("click");
     await flushPromises();
 
     expect(submissions).toBe(1);
@@ -2301,10 +2262,7 @@ describe("rollback confirmation", () => {
       ROLLBACK_IDS.cancel,
       ROLLBACK_IDS.confirm
     ]);
-    const controller = controllerFor(browser);
-    controller?.renderProgress(record({ actions: [rollbackAction] }));
-
-    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    open(browser);
 
     expect(browser.els[ROLLBACK_IDS.modal].style.display).toBe("flex");
     expect(() =>
@@ -2314,30 +2272,19 @@ describe("rollback confirmation", () => {
 
   it("names a manual preview entry that carries no instruction", () => {
     const browser = setup();
-    const controller = controllerFor(browser);
-    controller?.renderProgress(
-      record({
-        actions: [
-          {
-            ...rollbackAction,
-            preview: {
-              removes: [],
-              keeps: [],
-              manualActionRequired: [
-                { kind: "role_assignment", target: "Contributor" }
-              ]
-            }
-          }
+    open(browser, {
+      preview: {
+        removes: [],
+        keeps: [],
+        manualActionRequired: [
+          { kind: "role_assignment", target: "Contributor" }
         ]
-      })
-    );
-    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+      }
+    });
 
-    expect(
-      browser.els[ROLLBACK_IDS.manualList].children.map(
-        (child) => child.textContent
-      )
-    ).toEqual(["Role assignment: Contributor"]);
+    expect(textOf(browser, ROLLBACK_IDS.manualList)).toEqual([
+      "Role assignment: Contributor"
+    ]);
   });
 
   it("keeps one key trap when the dialog is reopened without closing", () => {
@@ -2345,7 +2292,7 @@ describe("rollback confirmation", () => {
     const controller = open(browser);
     // Reopening replaces the pending command; it must not stack a second
     // document-level key listener that would then survive teardown.
-    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    trigger(browser).dispatch("click");
     controller?.teardown();
 
     browser.document.dispatch("keydown", { key: "Escape" });
@@ -2367,9 +2314,7 @@ describe("rollback confirmation", () => {
     confirm.dispatch("click");
     await flushPromises();
 
-    expect(
-      browser.net.calls.some((call) => call.url === rollbackAction.path)
-    ).toBe(true);
+    expect(sentRollback(browser)).toBe(true);
   });
 
   it("drops a confirmation that raced a command already in flight", async () => {
@@ -2394,16 +2339,14 @@ describe("rollback confirmation", () => {
     );
     // Open the destructive confirmation, then let the non-destructive command
     // start underneath it.
-    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    trigger(browser).dispatch("click");
     browser.els[PROGRESS_IDS.commandButtons].children[1].dispatch("click");
     await flushPromises();
 
     browser.els[ROLLBACK_IDS.confirm].dispatch("click");
     await flushPromises();
 
-    expect(
-      browser.net.calls.some((call) => call.url === rollbackAction.path)
-    ).toBe(false);
+    expect(sentRollback(browser)).toBe(false);
     pending.resolve(jsonResponse({ operation: null }));
     await flushPromises();
   });
@@ -2412,17 +2355,15 @@ describe("rollback confirmation", () => {
 describe("headline and rollback outcomes", () => {
   it("gives a state that needs its own words a heading and a note", () => {
     const browser = setup();
-    controllerFor(browser)?.renderProgress(
-      record({
-        summary: "Creating dev…",
-        headline: {
-          code: "rolling-back",
-          title: "Rolling back created resources…",
-          message: "Radius is removing what it created."
-        },
-        activeCommandKind: "rollback"
-      })
-    );
+    renderRecord(browser, {
+      summary: "Creating dev…",
+      headline: {
+        code: "rolling-back",
+        title: "Rolling back created resources…",
+        message: "Radius is removing what it created."
+      },
+      activeCommandKind: "rollback"
+    });
 
     expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
       "Rolling back created resources…"
@@ -2431,11 +2372,7 @@ describe("headline and rollback outcomes", () => {
       "Radius is removing what it created."
     );
     expect(browser.els[PROGRESS_IDS.headlineNote].style.display).toBe("");
-    expect(
-      browser.els[PROGRESS_IDS.panel].classList.contains(
-        "env-progress--cleaning"
-      )
-    ).toBe(true);
+    expect(panelHasClass(browser, "env-progress--cleaning")).toBe(true);
   });
 
   it("keeps the plain summary and hides the note when there is no headline", () => {
@@ -2446,11 +2383,7 @@ describe("headline and rollback outcomes", () => {
 
     expect(browser.els[PROGRESS_IDS.title].textContent).toBe("Creating dev…");
     expect(browser.els[PROGRESS_IDS.headlineNote].style.display).toBe("none");
-    expect(
-      browser.els[PROGRESS_IDS.panel].classList.contains(
-        "env-progress--cleaning"
-      )
-    ).toBe(false);
+    expect(panelHasClass(browser, "env-progress--cleaning")).toBe(false);
   });
 
   it("clears the headline with the panel", () => {
@@ -2467,17 +2400,15 @@ describe("headline and rollback outcomes", () => {
 
   it("names the failure card after the outcome the customer reached", () => {
     const browser = setup();
-    controllerFor(browser)?.renderProgress(
-      record({
-        terminalState: "failed_partial",
-        failure: { message: "boom" },
-        headline: {
-          code: "rollback-incomplete",
-          title: "Rollback incomplete",
-          message: "Some resources are still present."
-        }
-      })
-    );
+    renderRecord(browser, {
+      terminalState: "failed_partial",
+      failure: { message: "boom" },
+      headline: {
+        code: "rollback-incomplete",
+        title: "Rollback incomplete",
+        message: "Some resources are still present."
+      }
+    });
 
     expect(browser.els[PROGRESS_IDS.failureTitle].textContent).toBe(
       "Rollback incomplete"
@@ -2486,21 +2417,19 @@ describe("headline and rollback outcomes", () => {
 
   it("titles a blocked rollback as one that removed nothing", () => {
     const browser = setup();
-    controllerFor(browser)?.renderProgress(
-      record({
-        terminalState: "failed_partial",
-        failure: {
-          message:
-            "Radius could not prove every committed workflow file is still the file it wrote."
-        },
-        headline: {
-          code: "rollback-blocked",
-          title: "Rollback stopped before removing anything",
-          message:
-            "The committed workflow files are no longer exactly what Radius wrote."
-        }
-      })
-    );
+    renderRecord(browser, {
+      terminalState: "failed_partial",
+      failure: {
+        message:
+          "Radius could not prove every committed workflow file is still the file it wrote."
+      },
+      headline: {
+        code: "rollback-blocked",
+        title: "Rollback stopped before removing anything",
+        message:
+          "The committed workflow files are no longer exactly what Radius wrote."
+      }
+    });
 
     expect(browser.els[PROGRESS_IDS.failureTitle].textContent).toBe(
       "Rollback stopped before removing anything"
@@ -2523,8 +2452,7 @@ describe("headline and rollback outcomes", () => {
 
   it("says which cancellation this was", () => {
     const browser = setup();
-    const deps = createDeps();
-    const controller = controllerFor(browser, { deps: deps.deps });
+    const { controller, harness: deps } = controllerWithHarness(browser);
 
     controller?.applyTerminal(
       record({
@@ -2545,8 +2473,7 @@ describe("headline and rollback outcomes", () => {
 
   it("treats an incomplete rollback as a rollback, not a broken setup", () => {
     const browser = setup();
-    const deps = createDeps();
-    const controller = controllerFor(browser, { deps: deps.deps });
+    const { controller, harness: deps } = controllerWithHarness(browser);
 
     controller?.applyTerminal(
       record({
@@ -2566,15 +2493,12 @@ describe("headline and rollback outcomes", () => {
     // No error banner: the customer's setup did not break, the rollback did
     // not finish.
     expect(deps.errors).toEqual([]);
-    expect(
-      browser.els[PROGRESS_IDS.panel].classList.contains("env-progress--failed")
-    ).toBe(true);
+    expect(panelHasClass(browser, "env-progress--failed")).toBe(true);
   });
 
   it("still reports an ordinary partial failure as a failure", () => {
     const browser = setup();
-    const deps = createDeps();
-    const controller = controllerFor(browser, { deps: deps.deps });
+    const { controller, harness: deps } = controllerWithHarness(browser);
 
     controller?.applyTerminal(
       record({
@@ -2596,8 +2520,7 @@ describe("headline and rollback outcomes", () => {
       PROGRESS_IDS.title,
       PROGRESS_IDS.commandGuidance
     ]);
-    const deps = createDeps();
-    const controller = controllerFor(browser, { deps: deps.deps });
+    const { controller, harness: deps } = controllerWithHarness(browser);
 
     expect(() => {
       controller?.renderProgress(
@@ -2624,33 +2547,11 @@ describe("headline and rollback outcomes", () => {
 });
 
 describe("rollback lifecycle presentation", () => {
-  const ROLLING_BACK_HEADLINE = {
-    code: "rolling-back",
-    title: "Rolling back created resources…",
-    message:
-      "Radius is removing the resources it proved it created during this attempt."
-  };
-  const ROLLBACK_COMPLETE_HEADLINE = {
-    code: "rollback-complete",
-    title: "Rollback complete",
-    message:
-      "Radius removed the resources it created during this attempt. Anything it reused was left alone."
-  };
   const ROLLBACK_INCOMPLETE_HEADLINE = {
     code: "rollback-incomplete",
     title: "Rollback finished with items still present",
     message: "The resources below are still present."
   };
-  const RETRY_CLEANUP_ACTION = {
-    id: "retry-cleanup",
-    kind: "retry_cleanup",
-    label: "Retry rollback",
-    description: "Radius tries again to remove what is still present.",
-    path: "/api/operations/op-1/rollback/retry",
-    pending: false,
-    tone: "danger"
-  };
-
   // A rollback that is still deleting: the server closes the command list
   // because cleanup has no pause control, and the record is non-terminal.
   function rollbackRunning(): OperationRecord {
@@ -2697,12 +2598,6 @@ describe("rollback lifecycle presentation", () => {
     });
   }
 
-  function buttonLabels(browser: ReturnType<typeof setup>): string[] {
-    return browser.els[PROGRESS_IDS.commandButtons].children.map(
-      (child) => child.textContent ?? ""
-    );
-  }
-
   it("takes the resource inventory away as soon as the rollback starts deleting", () => {
     const browser = setup();
     const controller = controllerFor(browser);
@@ -2743,7 +2638,7 @@ describe("rollback lifecycle presentation", () => {
     const browser = setup();
     controllerFor(browser)?.renderProgress(rollbackComplete());
 
-    expect(buttonLabels(browser)).toEqual([]);
+    expect(textOf(browser, PROGRESS_IDS.commandButtons)).toEqual([]);
     expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
@@ -2762,7 +2657,7 @@ describe("rollback lifecycle presentation", () => {
     const browser = setup();
     controllerFor(browser)?.renderProgress(rollbackRunning());
 
-    expect(buttonLabels(browser)).toEqual([]);
+    expect(textOf(browser, PROGRESS_IDS.commandButtons)).toEqual([]);
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
   });
@@ -2771,7 +2666,9 @@ describe("rollback lifecycle presentation", () => {
     const browser = setup();
     controllerFor(browser)?.renderProgress(rollbackIncomplete());
 
-    expect(buttonLabels(browser)).toEqual(["Retry rollback"]);
+    expect(textOf(browser, PROGRESS_IDS.commandButtons)).toEqual([
+      "Retry rollback"
+    ]);
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
     // The customer still has a decision to make here, so the inventory that
@@ -2782,26 +2679,20 @@ describe("rollback lifecycle presentation", () => {
 
   it("offers Exit setup below the details for a stop that was never rolled back", () => {
     const browser = setup();
-    controllerFor(browser)?.renderProgress(
-      record({
-        state: "cancelled",
-        terminalState: "cancelled",
-        actions: [EXIT_ACTION],
-        headline: {
-          code: "stopped",
-          title: "Environment setup stopped",
-          message: "Radius stopped before the next setup step."
-        },
-        cleanup: { created: [{ target: "app radius-dev" }] }
-      })
-    );
+    renderRecord(browser, {
+      state: "cancelled",
+      terminalState: "cancelled",
+      actions: [EXIT_ACTION],
+      headline: {
+        code: "stopped",
+        title: "Environment setup stopped",
+        message: "Radius stopped before the next setup step."
+      },
+      cleanup: { created: [{ target: "app radius-dev" }] }
+    });
 
-    expect(buttonLabels(browser)).toEqual([]);
-    expect(
-      browser.els[PROGRESS_IDS.bottomButtons].children.map(
-        (child) => child.textContent
-      )
-    ).toEqual(["Exit setup"]);
+    expect(textOf(browser, PROGRESS_IDS.commandButtons)).toEqual([]);
+    expect(textOf(browser, PROGRESS_IDS.bottomButtons)).toEqual(["Exit setup"]);
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
   });
@@ -2911,11 +2802,6 @@ describe("rollback lifecycle presentation", () => {
 // and the environment rows behind it are being removed, so both the banner and
 // the listing have to follow the rollback rather than the failure.
 describe("rollback and the stale setup-failure banner", () => {
-  const ROLLING_BACK_HEADLINE = {
-    code: "rolling-back",
-    title: "Rolling back created resources…",
-    message: "Radius is removing the resources it created."
-  };
   const ROLLBACK_ACTION = {
     id: "rollback",
     kind: "rollback",
@@ -2926,23 +2812,18 @@ describe("rollback and the stale setup-failure banner", () => {
     tone: "danger",
     requiresConfirmation: true
   };
-  const RETRY_CLEANUP_ACTION = {
-    id: "retry-cleanup",
-    kind: "retry_cleanup",
-    label: "Retry rollback",
-    description: "Radius tries again to remove what is still present.",
-    path: "/api/operations/op-1/rollback/retry",
-    pending: false,
-    tone: "danger"
-  };
-  const STOP_ACTION = {
-    id: "stop",
-    kind: "stop",
-    label: "Stop setup",
-    description: "Radius finishes the current step and stops.",
-    path: "/api/operations/op-1/stop",
-    pending: false
-  };
+  function start(browser: ReturnType<typeof setup>, actions: unknown[]) {
+    const { controller, harness } = controllerWithHarness(browser);
+    controller?.renderProgress(
+      record({
+        state: "failed",
+        terminalState: "failed",
+        failure: { message: "role assignment failed" },
+        actions
+      })
+    );
+    return { controller, harness };
+  }
 
   function failedSetup(browser: ReturnType<typeof setup>): void {
     // The state a rollback is reached from: the setup failed, so the landing
@@ -2950,40 +2831,22 @@ describe("rollback and the stale setup-failure banner", () => {
     browser.els[ERROR_BANNER_ID].style.display = "flex";
   }
 
-  function start(browser: ReturnType<typeof setup>, action: unknown) {
-    const harness = createDeps();
-    const controller = controllerFor(browser, { deps: harness.deps });
-    controller?.renderProgress(
-      record({
-        state: "failed",
-        terminalState: "failed",
-        failure: { message: "role assignment failed" },
-        actions: [action]
-      })
-    );
-    return { controller, harness };
-  }
-
   it("takes the banner down and refreshes the listing as soon as the rollback is accepted", async () => {
     const browser = setup();
     failedSetup(browser);
-    browser.net.handle(ROLLBACK_ACTION.path, () =>
-      jsonResponse(
-        op({
-          state: "running",
-          terminalState: null,
-          activeCommandKind: "rollback",
-          headline: ROLLING_BACK_HEADLINE
-        })
-      )
-    );
-    serveOperation(browser, {
+    // The command answers with the running rollback, and the poller that picks
+    // the record up next answers with the same record.
+    const rollingBack = {
       state: "running",
       terminalState: null,
       activeCommandKind: "rollback",
       headline: ROLLING_BACK_HEADLINE
-    });
-    const { harness } = start(browser, ROLLBACK_ACTION);
+    };
+    browser.net.handle(ROLLBACK_ACTION.path, () =>
+      jsonResponse(op(rollingBack))
+    );
+    serveOperation(browser, rollingBack);
+    const { harness } = start(browser, [ROLLBACK_ACTION]);
 
     browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
     browser.els[ROLLBACK_IDS.confirm].dispatch("click");
@@ -3005,7 +2868,7 @@ describe("rollback and the stale setup-failure banner", () => {
       jsonResponse({ operation: null })
     );
     browser.net.handle(operationsUrl(), () => jsonResponse(op()));
-    const { harness } = start(browser, RETRY_CLEANUP_ACTION);
+    const { harness } = start(browser, [RETRY_CLEANUP_ACTION]);
 
     browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
     await flushPromises();
@@ -3020,7 +2883,7 @@ describe("rollback and the stale setup-failure banner", () => {
     browser.net.handle(ROLLBACK_ACTION.path, () =>
       jsonResponse({ error: "operation-already-terminal" }, false, 409)
     );
-    const { harness } = start(browser, ROLLBACK_ACTION);
+    const { harness } = start(browser, [ROLLBACK_ACTION]);
 
     browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
     browser.els[ROLLBACK_IDS.confirm].dispatch("click");
@@ -3041,7 +2904,7 @@ describe("rollback and the stale setup-failure banner", () => {
       jsonResponse(op({ state: "stopping" }))
     );
     browser.net.handle(operationsUrl(), () => jsonResponse(op()));
-    const { harness } = start(browser, STOP_ACTION);
+    const { harness } = start(browser, [STOP_ACTION]);
 
     browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
     await flushPromises();
@@ -3053,8 +2916,7 @@ describe("rollback and the stale setup-failure banner", () => {
   it("keeps the banner down and reloads the listing when the rollback completes", () => {
     const browser = setup();
     failedSetup(browser);
-    const harness = createDeps();
-    const controller = controllerFor(browser, { deps: harness.deps });
+    const { controller, harness } = controllerWithHarness(browser);
 
     controller?.applyTerminal(
       record({
@@ -3078,8 +2940,7 @@ describe("rollback and the stale setup-failure banner", () => {
   it("keeps the banner down when the rollback finishes with items still present", () => {
     const browser = setup();
     failedSetup(browser);
-    const harness = createDeps();
-    const controller = controllerFor(browser, { deps: harness.deps });
+    const { controller, harness } = controllerWithHarness(browser);
 
     controller?.applyTerminal(
       record({
@@ -3101,17 +2962,14 @@ describe("rollback and the stale setup-failure banner", () => {
     expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
       "Two resources are still present."
     );
-    expect(
-      browser.els[PROGRESS_IDS.panel].classList.contains("env-progress--failed")
-    ).toBe(true);
+    expect(panelHasClass(browser, "env-progress--failed")).toBe(true);
     expect(harness.reloadCount).toBe(1);
   });
 
   it("raises the banner again when the setup itself fails after a rollback", () => {
     const browser = setup();
     failedSetup(browser);
-    const harness = createDeps();
-    const controller = controllerFor(browser, { deps: harness.deps });
+    const { controller, harness } = controllerWithHarness(browser);
 
     controller?.applyTerminal(
       record({
@@ -3132,8 +2990,7 @@ describe("rollback and the stale setup-failure banner", () => {
       jsonResponse({ operation: null })
     );
     browser.net.handle(operationsUrl(), () => jsonResponse(op()));
-    const harness = createDeps();
-    const controller = controllerFor(browser, { deps: harness.deps });
+    const { controller, harness } = controllerWithHarness(browser);
     controller?.renderProgress(
       record({
         state: "failed",
@@ -4496,8 +4353,7 @@ describe("exiting a setup", () => {
     actions: readonly unknown[],
     overrides: Record<string, unknown> = {}
   ) {
-    const harness = createDeps();
-    const controller = controllerFor(browser, { deps: harness.deps });
+    const { controller, harness } = controllerWithHarness(browser);
     controller?.renderProgress(
       record({
         state: "failed_partial",
@@ -4535,16 +4391,10 @@ describe("exiting a setup", () => {
       EXIT_ACTION
     ]);
 
-    expect(
-      browser.els[PROGRESS_IDS.commandButtons].children.map(
-        (child) => child.textContent
-      )
-    ).toEqual(["Retry setup"]);
-    expect(
-      browser.els[PROGRESS_IDS.bottomButtons].children.map(
-        (child) => child.textContent
-      )
-    ).toEqual(["Exit setup"]);
+    expect(textOf(browser, PROGRESS_IDS.commandButtons)).toEqual([
+      "Retry setup"
+    ]);
+    expect(textOf(browser, PROGRESS_IDS.bottomButtons)).toEqual(["Exit setup"]);
     // The command note describes the row's choices; the exit stands on its own
     // sentence in the dialog it opens or in the button itself.
     expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
@@ -4587,16 +4437,12 @@ describe("exiting a setup", () => {
     expect(browser.els[ROLLBACK_IDS.title].textContent).toBe(
       "Exit setup and remove what Radius created?"
     );
-    expect(
-      browser.els[ROLLBACK_IDS.removeList].children.map(
-        (child) => child.textContent
-      )
-    ).toEqual(["GitHub environment: octo/widgets:dev"]);
-    expect(
-      browser.els[ROLLBACK_IDS.keepList].children.map(
-        (child) => child.textContent
-      )
-    ).toEqual(["App Registration: radius-deploy (app-1)"]);
+    expect(textOf(browser, ROLLBACK_IDS.removeList)).toEqual([
+      "GitHub environment: octo/widgets:dev"
+    ]);
+    expect(textOf(browser, ROLLBACK_IDS.keepList)).toEqual([
+      "App Registration: radius-deploy (app-1)"
+    ]);
     expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe("Exit setup");
     expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe(
       "Keep this setup"
@@ -4690,8 +4536,7 @@ describe("exiting a setup", () => {
   it("never renders a setup the customer already closed", async () => {
     const browser = setup();
     browser.net.handle(operationsUrl(), () => jsonResponse(exited()));
-    const harness = createDeps();
-    const controller = controllerFor(browser, { deps: harness.deps });
+    const { controller } = controllerWithHarness(browser);
 
     controller?.resumeProgress();
     await flushPromises();
@@ -4704,8 +4549,7 @@ describe("exiting a setup", () => {
 
   it("keeps the acknowledgement alone for an outcome that is already settled", () => {
     const browser = setup();
-    const harness = createDeps();
-    const controller = controllerFor(browser, { deps: harness.deps });
+    const { controller } = controllerWithHarness(browser);
 
     controller?.renderProgress(
       record({
@@ -4735,11 +4579,6 @@ describe("exiting a setup", () => {
 // rollback that still put its environment back on the page — Pending, as its
 // unfinished verify run left it — is the regression these cases hold closed.
 describe("acknowledging a finished deletion pass", () => {
-  const ROLLBACK_COMPLETE_HEADLINE = {
-    code: "rollback-complete",
-    title: "Rollback complete",
-    message: "Radius removed the resources it created during this attempt."
-  };
   const STOPPED_HEADLINE = {
     code: "stopped",
     title: "Environment setup stopped",
@@ -4753,12 +4592,6 @@ describe("acknowledging a finished deletion pass", () => {
       actions: [],
       headline: ROLLBACK_COMPLETE_HEADLINE
     });
-  }
-
-  function controllerWithHarness(browser: ReturnType<typeof setup>) {
-    const harness = createDeps();
-    const controller = controllerFor(browser, { deps: harness.deps });
-    return { controller, harness };
   }
 
   it("asks the picker once for a completed rollback and nothing more on OK", () => {
@@ -4862,11 +4695,7 @@ describe("acknowledging a finished deletion pass", () => {
     // inventory stays, and the customer still has the exit rather than a bare
     // acknowledgement.
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
-    expect(
-      browser.els[PROGRESS_IDS.bottomButtons].children.map(
-        (child) => child.textContent
-      )
-    ).toEqual(["Exit setup"]);
+    expect(textOf(browser, PROGRESS_IDS.bottomButtons)).toEqual(["Exit setup"]);
     expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("");
     expect(harness.reloadCount).toBe(1);
   });

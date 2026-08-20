@@ -31,8 +31,15 @@ function harness(script: Script) {
   return { ports, calls };
 }
 
-const CONTENTS_PATH =
-  "api /repos/contoso/store/contents/.github/workflows/verify.yml?ref=main";
+const REPO = "contoso/store";
+const WORKFLOW_PATH = ".github/workflows/verify.yml";
+const CONTENTS_PATH = `api /repos/${REPO}/contents/${WORKFLOW_PATH}?ref=main`;
+
+// Every read in this suite asks about the same workflow file on the same
+// branch, so only the scripted answer differs from scenario to scenario.
+function readVerify(ports: ReturnType<typeof harness>["ports"]) {
+  return ports.readFile({ repo: REPO, path: WORKFLOW_PATH, ref: "main" });
+}
 
 describe("decodeContentDigest", () => {
   it("digests the bytes a base64 payload carries, ignoring line wrapping", () => {
@@ -59,13 +66,7 @@ describe("reading a workflow file", () => {
       }
     });
 
-    await expect(
-      ports.readFile({
-        repo: "contoso/store",
-        path: ".github/workflows/verify.yml",
-        ref: "main"
-      })
-    ).resolves.toEqual({
+    await expect(readVerify(ports)).resolves.toEqual({
       status: "present",
       blobSha: "blob-1",
       contentSha256:
@@ -78,13 +79,7 @@ describe("reading a workflow file", () => {
       [CONTENTS_PATH]: { ok: false, status: 404, stderr: "Not Found" }
     });
 
-    await expect(
-      ports.readFile({
-        repo: "contoso/store",
-        path: ".github/workflows/verify.yml",
-        ref: "main"
-      })
-    ).resolves.toEqual({ status: "absent" });
+    await expect(readVerify(ports)).resolves.toEqual({ status: "absent" });
   });
 
   it.each([
@@ -101,13 +96,10 @@ describe("reading a workflow file", () => {
   ])("reports %s as unreadable", async (_label, result, detail) => {
     const { ports } = harness({ [CONTENTS_PATH]: result });
 
-    await expect(
-      ports.readFile({
-        repo: "contoso/store",
-        path: ".github/workflows/verify.yml",
-        ref: "main"
-      })
-    ).resolves.toEqual({ status: "unreadable", detail });
+    await expect(readVerify(ports)).resolves.toEqual({
+      status: "unreadable",
+      detail
+    });
   });
 
   it.each([
@@ -120,13 +112,9 @@ describe("reading a workflow file", () => {
     async (_label, stdout) => {
       const { ports } = harness({ [CONTENTS_PATH]: { stdout } });
 
-      await expect(
-        ports.readFile({
-          repo: "contoso/store",
-          path: ".github/workflows/verify.yml",
-          ref: "main"
-        })
-      ).resolves.toMatchObject({ status: "unreadable" });
+      await expect(readVerify(ports)).resolves.toMatchObject({
+        status: "unreadable"
+      });
     }
   );
 
@@ -140,13 +128,7 @@ describe("reading a workflow file", () => {
       }
     });
 
-    await expect(
-      ports.readFile({
-        repo: "contoso/store",
-        path: ".github/workflows/verify.yml",
-        ref: "main"
-      })
-    ).resolves.toEqual({
+    await expect(readVerify(ports)).resolves.toEqual({
       status: "unreadable",
       detail: "upstream unavailable"
     });
@@ -157,13 +139,7 @@ describe("reading a workflow file", () => {
       [CONTENTS_PATH]: { ok: false, status: null, stderr: "", stdout: "" }
     });
 
-    await expect(
-      ports.readFile({
-        repo: "contoso/store",
-        path: ".github/workflows/verify.yml",
-        ref: "main"
-      })
-    ).resolves.toEqual({
+    await expect(readVerify(ports)).resolves.toEqual({
       status: "unreadable",
       detail: "The GitHub API request failed."
     });
@@ -293,20 +269,28 @@ describe("reading a saved blob", () => {
 });
 
 describe("writing the revert", () => {
-  it("deletes a file through the contents API with its blob id and branch", async () => {
-    const args =
-      "api --method DELETE /repos/contoso/store/contents/.github/workflows/verify.yml --input -";
-    const { ports, calls } = harness({ [args]: {} });
+  const DELETE_FILE = `api --method DELETE /repos/${REPO}/contents/${WORKFLOW_PATH} --input -`;
+  const PUT_FILE = `api --method PUT /repos/${REPO}/contents/${WORKFLOW_PATH} --input -`;
+  const DELETE_BRANCH = `api --method DELETE /repos/${REPO}/git/refs/heads/radius%2Fsetup`;
 
-    await expect(
-      ports.deleteFile({
-        repo: "contoso/store",
-        path: ".github/workflows/verify.yml",
-        branch: "main",
-        blobSha: "blob-1",
-        message: "Roll back"
-      })
-    ).resolves.toEqual({ ok: true });
+  function deleteVerify(ports: ReturnType<typeof harness>["ports"]) {
+    return ports.deleteFile({
+      repo: REPO,
+      path: WORKFLOW_PATH,
+      branch: "main",
+      blobSha: "blob-1",
+      message: "Roll back"
+    });
+  }
+
+  function deleteSetupBranch(ports: ReturnType<typeof harness>["ports"]) {
+    return ports.deleteBranch({ repo: REPO, branch: "radius/setup" });
+  }
+
+  it("deletes a file through the contents API with its blob id and branch", async () => {
+    const { ports, calls } = harness({ [DELETE_FILE]: {} });
+
+    await expect(deleteVerify(ports)).resolves.toEqual({ ok: true });
     expect(JSON.parse(calls[0]?.stdin ?? "{}")).toEqual({
       message: "Roll back",
       sha: "blob-1",
@@ -315,13 +299,11 @@ describe("writing the revert", () => {
   });
 
   it("restores a file by putting the previous content back", async () => {
-    const args =
-      "api --method PUT /repos/contoso/store/contents/.github/workflows/verify.yml --input -";
-    const { ports, calls } = harness({ [args]: {} });
+    const { ports, calls } = harness({ [PUT_FILE]: {} });
 
     await ports.restoreFile({
-      repo: "contoso/store",
-      path: ".github/workflows/verify.yml",
+      repo: REPO,
+      path: WORKFLOW_PATH,
       branch: "main",
       blobSha: "blob-1",
       contentBase64: "cHJldmlvdXM=",
@@ -337,65 +319,50 @@ describe("writing the revert", () => {
   });
 
   it("surfaces a refused write instead of reporting success", async () => {
-    const args =
-      "api --method DELETE /repos/contoso/store/contents/.github/workflows/verify.yml --input -";
     const { ports } = harness({
-      [args]: { ok: false, status: 409, stderr: "conflict" }
+      [DELETE_FILE]: { ok: false, status: 409, stderr: "conflict" }
     });
 
-    await expect(
-      ports.deleteFile({
-        repo: "contoso/store",
-        path: ".github/workflows/verify.yml",
-        branch: "main",
-        blobSha: "blob-1",
-        message: "Roll back"
-      })
-    ).resolves.toEqual({ ok: false, detail: "conflict" });
+    await expect(deleteVerify(ports)).resolves.toEqual({
+      ok: false,
+      detail: "conflict"
+    });
   });
 
   it("closes a pull request by state alone", async () => {
-    const args = "api --method PATCH /repos/contoso/store/pulls/7 --input -";
-    const { ports, calls } = harness({ [args]: {} });
+    const { ports, calls } = harness({
+      [`api --method PATCH /repos/${REPO}/pulls/7 --input -`]: {}
+    });
 
     await expect(
-      ports.closePullRequest({ repo: "contoso/store", number: 7 })
+      ports.closePullRequest({ repo: REPO, number: 7 })
     ).resolves.toEqual({ ok: true });
     expect(JSON.parse(calls[0]?.stdin ?? "{}")).toEqual({ state: "closed" });
   });
 
   it("deletes a branch ref, treating an already absent branch as done", async () => {
-    const args =
-      "api --method DELETE /repos/contoso/store/git/refs/heads/radius%2Fsetup";
     const { ports } = harness({
-      [args]: { ok: false, status: 404, stderr: "Not Found" }
+      [DELETE_BRANCH]: { ok: false, status: 404, stderr: "Not Found" }
     });
 
-    await expect(
-      ports.deleteBranch({ repo: "contoso/store", branch: "radius/setup" })
-    ).resolves.toEqual({ ok: true });
+    await expect(deleteSetupBranch(ports)).resolves.toEqual({ ok: true });
   });
 
   it("surfaces a refused branch deletion", async () => {
-    const args =
-      "api --method DELETE /repos/contoso/store/git/refs/heads/radius%2Fsetup";
     const { ports } = harness({
-      [args]: { ok: false, status: 422, stderr: "protected" }
+      [DELETE_BRANCH]: { ok: false, status: 422, stderr: "protected" }
     });
 
-    await expect(
-      ports.deleteBranch({ repo: "contoso/store", branch: "radius/setup" })
-    ).resolves.toEqual({ ok: false, detail: "protected" });
+    await expect(deleteSetupBranch(ports)).resolves.toEqual({
+      ok: false,
+      detail: "protected"
+    });
   });
 
   it("deletes a branch when GitHub accepts it", async () => {
-    const args =
-      "api --method DELETE /repos/contoso/store/git/refs/heads/radius%2Fsetup";
-    const { ports, calls } = harness({ [args]: {} });
+    const { ports, calls } = harness({ [DELETE_BRANCH]: {} });
 
-    await expect(
-      ports.deleteBranch({ repo: "contoso/store", branch: "radius/setup" })
-    ).resolves.toEqual({ ok: true });
+    await expect(deleteSetupBranch(ports)).resolves.toEqual({ ok: true });
     expect(calls[0]?.stdin).toBeUndefined();
   });
 });

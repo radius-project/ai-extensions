@@ -6,6 +6,8 @@ import {
   type PullRequestState,
   type WorkflowRollbackCommitState,
   type WorkflowRollbackFile,
+  type WorkflowRollbackInput,
+  type WorkflowRollbackOutcome,
   type WorkflowRollbackPorts
 } from "./workflow-rollback.js";
 import type {
@@ -136,6 +138,24 @@ const unchanged: RepositoryFileState = {
   contentSha256: DIGEST
 };
 
+// One repository, one attempt, one recorded file unless a scenario says
+// otherwise, so each test states only the part of the request it is about.
+function rollback(
+  ports: WorkflowRollbackPorts,
+  input: Partial<WorkflowRollbackInput> = {}
+): Promise<WorkflowRollbackOutcome> {
+  return runWorkflowRollback(
+    {
+      repo: "contoso/store",
+      attempt: 1,
+      commit: commit(),
+      files: [file()],
+      ...input
+    },
+    ports
+  );
+}
+
 describe("selectWorkflowRollbackMode", () => {
   const prFile = file({ mode: "pull_request", branch: "radius/setup" });
   const prCommit = commit({
@@ -262,12 +282,7 @@ describe("resolveWorkflowRollbackRef", () => {
 describe("runWorkflowRollback", () => {
   it("does nothing, and blocks nothing, when no file was committed", async () => {
     const { ports: p } = ports({});
-    await expect(
-      runWorkflowRollback(
-        { repo: "contoso/store", attempt: 1, commit: commit(), files: [] },
-        p
-      )
-    ).resolves.toEqual({
+    await expect(rollback(p, { files: [] })).resolves.toEqual({
       results: [],
       warnings: [],
       steps: [],
@@ -283,15 +298,10 @@ describe("runWorkflowRollback", () => {
       }
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 2,
-        commit: commit(),
-        files: [file(), file({ path: DEPLOY_PATH })]
-      },
-      p
-    );
+    const outcome = await rollback(p, {
+      attempt: 2,
+      files: [file(), file({ path: DEPLOY_PATH })]
+    });
 
     expect(outcome.blocked).toBe(false);
     expect(journal.deleted).toEqual([
@@ -324,15 +334,9 @@ describe("runWorkflowRollback", () => {
       blobs: { "old-blob": "cHJldmlvdXM=" }
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: commit(),
-        files: [file({ previousBlobSha: "old-blob" })]
-      },
-      p
-    );
+    const outcome = await rollback(p, {
+      files: [file({ previousBlobSha: "old-blob" })]
+    });
 
     expect(outcome.blocked).toBe(false);
     expect(journal.deleted).toEqual([]);
@@ -349,15 +353,9 @@ describe("runWorkflowRollback", () => {
       }
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: commit(),
-        files: [file(), file({ path: DEPLOY_PATH })]
-      },
-      p
-    );
+    const outcome = await rollback(p, {
+      files: [file(), file({ path: DEPLOY_PATH })]
+    });
 
     expect(outcome.blocked).toBe(true);
     // Nothing is written at all: the verified file is kept too, because a
@@ -379,10 +377,7 @@ describe("runWorkflowRollback", () => {
       }
     });
 
-    const outcome = await runWorkflowRollback(
-      { repo: "contoso/store", attempt: 1, commit: commit(), files: [file()] },
-      p
-    );
+    const outcome = await rollback(p);
 
     expect(outcome.blocked).toBe(true);
     expect(outcome.results[0]?.outcome).toBe("warning");
@@ -393,21 +388,16 @@ describe("runWorkflowRollback", () => {
       pullRequest: { status: "merged", number: 7 }
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        // A merged pull request with no saved base branch: the file is
-        // somewhere, but not somewhere Radius can name.
-        commit: commit({
-          mode: "pull_request",
-          branch: "radius/setup",
-          pullRequestUrl: "https://github.com/contoso/store/pull/7"
-        }),
-        files: [file({ mode: "pull_request", branch: "radius/setup" })]
-      },
-      p
-    );
+    const outcome = await rollback(p, {
+      // A merged pull request with no saved base branch: the file is somewhere,
+      // but not somewhere Radius can name.
+      commit: commit({
+        mode: "pull_request",
+        branch: "radius/setup",
+        pullRequestUrl: "https://github.com/contoso/store/pull/7"
+      }),
+      files: [file({ mode: "pull_request", branch: "radius/setup" })]
+    });
 
     expect(outcome.blocked).toBe(true);
     expect(outcome.results[0]?.detail).toContain("cannot tell where");
@@ -416,15 +406,10 @@ describe("runWorkflowRollback", () => {
   it("blocks the whole pass when only one file cannot be located", async () => {
     const { ports: p, journal } = ports({});
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: commit({ branch: null }),
-        files: [file(), file({ path: DEPLOY_PATH, branch: "" })]
-      },
-      p
-    );
+    const outcome = await rollback(p, {
+      commit: commit({ branch: null }),
+      files: [file(), file({ path: DEPLOY_PATH, branch: "" })]
+    });
 
     expect(outcome.blocked).toBe(true);
     expect(journal.deleted).toEqual([]);
@@ -440,15 +425,7 @@ describe("runWorkflowRollback", () => {
     // contents API call that would act on the wrong version — or on none.
     const { ports: p, journal } = ports({});
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: commit(),
-        files: [file({ blobSha: null })]
-      },
-      p
-    );
+    const outcome = await rollback(p, { files: [file({ blobSha: null })] });
 
     expect(outcome.blocked).toBe(true);
     expect(journal.deleted).toEqual([]);
@@ -460,15 +437,7 @@ describe("runWorkflowRollback", () => {
       files: { [`main:${VERIFY_PATH}`]: unchanged }
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: commit(),
-        files: [file({ identity: "" })]
-      },
-      p
-    );
+    const outcome = await rollback(p, { files: [file({ identity: "" })] });
 
     expect(outcome.results[0]?.identity).toBeNull();
   });
@@ -478,10 +447,7 @@ describe("runWorkflowRollback", () => {
       files: { [`main:${VERIFY_PATH}`]: { status: "absent" } }
     });
 
-    const outcome = await runWorkflowRollback(
-      { repo: "contoso/store", attempt: 1, commit: commit(), files: [file()] },
-      p
-    );
+    const outcome = await rollback(p);
 
     expect(outcome.blocked).toBe(false);
     expect(journal.deleted).toEqual([]);
@@ -494,10 +460,7 @@ describe("runWorkflowRollback", () => {
       deleteFails: VERIFY_PATH
     });
 
-    const outcome = await runWorkflowRollback(
-      { repo: "contoso/store", attempt: 1, commit: commit(), files: [file()] },
-      p
-    );
+    const outcome = await rollback(p);
 
     expect(outcome.blocked).toBe(true);
     expect(outcome.results[0]).toMatchObject({
@@ -511,15 +474,9 @@ describe("runWorkflowRollback", () => {
       files: { [`main:${VERIFY_PATH}`]: unchanged }
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: commit(),
-        files: [file({ previousBlobSha: "old-blob" })]
-      },
-      p
-    );
+    const outcome = await rollback(p, {
+      files: [file({ previousBlobSha: "old-blob" })]
+    });
 
     expect(outcome.blocked).toBe(true);
     expect(outcome.results[0]?.detail).toContain("no blob old-blob");
@@ -532,15 +489,9 @@ describe("runWorkflowRollback", () => {
       restoreFails: VERIFY_PATH
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: commit(),
-        files: [file({ previousBlobSha: "old-blob" })]
-      },
-      p
-    );
+    const outcome = await rollback(p, {
+      files: [file({ previousBlobSha: "old-blob" })]
+    });
 
     expect(outcome.blocked).toBe(true);
     expect(outcome.results[0]?.outcome).toBe("warning");
@@ -566,18 +517,17 @@ describe("runWorkflowRollback on an unmerged setup branch", () => {
     });
   }
 
+  function rollbackBranch(
+    p: WorkflowRollbackPorts,
+    commitState: WorkflowRollbackCommitState = setupCommit
+  ): Promise<WorkflowRollbackOutcome> {
+    return rollback(p, { commit: commitState, files: [setupFile] });
+  }
+
   it("closes the pull request and deletes the branch it wrote", async () => {
     const { ports: p, journal } = branchScript();
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: setupCommit,
-        files: [setupFile]
-      },
-      p
-    );
+    const outcome = await rollbackBranch(p);
 
     expect(outcome.blocked).toBe(false);
     expect(journal.closed).toEqual([7]);
@@ -594,15 +544,10 @@ describe("runWorkflowRollback on an unmerged setup branch", () => {
       heads: { "radius/setup": { status: "present", sha: "head-1" } }
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: { ...setupCommit, pullRequestUrl: null },
-        files: [setupFile]
-      },
-      p
-    );
+    const outcome = await rollbackBranch(p, {
+      ...setupCommit,
+      pullRequestUrl: null
+    });
 
     expect(outcome.blocked).toBe(false);
     expect(journal.closed).toEqual([]);
@@ -614,15 +559,7 @@ describe("runWorkflowRollback on an unmerged setup branch", () => {
       pullRequest: { status: "closed", number: 7 }
     });
 
-    await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: setupCommit,
-        files: [setupFile]
-      },
-      p
-    );
+    await rollbackBranch(p);
 
     expect(journal.closed).toEqual([]);
     expect(journal.branches).toEqual(["radius/setup"]);
@@ -633,15 +570,7 @@ describe("runWorkflowRollback on an unmerged setup branch", () => {
     // refused close is narrated rather than treated as a failed rollback.
     const { ports: p, journal } = branchScript({ closeFails: true });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: setupCommit,
-        files: [setupFile]
-      },
-      p
-    );
+    const outcome = await rollbackBranch(p);
 
     expect(outcome.blocked).toBe(false);
     expect(journal.branches).toEqual(["radius/setup"]);
@@ -653,15 +582,7 @@ describe("runWorkflowRollback on an unmerged setup branch", () => {
       heads: { "radius/setup": { status: "present", sha: "head-2" } }
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: setupCommit,
-        files: [setupFile]
-      },
-      p
-    );
+    const outcome = await rollbackBranch(p);
 
     expect(outcome.blocked).toBe(true);
     expect(journal.branches).toEqual([]);
@@ -670,20 +591,10 @@ describe("runWorkflowRollback on an unmerged setup branch", () => {
 
   it("refuses to delete a branch whose head could not be read", async () => {
     const { ports: p, journal } = branchScript({
-      heads: {
-        "radius/setup": { status: "unreadable", detail: "HTTP 500" }
-      }
+      heads: { "radius/setup": { status: "unreadable", detail: "HTTP 500" } }
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: setupCommit,
-        files: [setupFile]
-      },
-      p
-    );
+    const outcome = await rollbackBranch(p);
 
     expect(outcome.blocked).toBe(true);
     expect(journal.branches).toEqual([]);
@@ -695,15 +606,7 @@ describe("runWorkflowRollback on an unmerged setup branch", () => {
       heads: { "radius/setup": { status: "absent" } }
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: setupCommit,
-        files: [setupFile]
-      },
-      p
-    );
+    const outcome = await rollbackBranch(p);
 
     expect(outcome.blocked).toBe(false);
     expect(journal.branches).toEqual([]);
@@ -713,15 +616,7 @@ describe("runWorkflowRollback on an unmerged setup branch", () => {
   it("blocks when the branch deletion is refused", async () => {
     const { ports: p } = branchScript({ deleteBranchFails: true });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: setupCommit,
-        files: [setupFile]
-      },
-      p
-    );
+    const outcome = await rollbackBranch(p);
 
     expect(outcome.blocked).toBe(true);
     expect(outcome.results[0]).toMatchObject({
@@ -736,15 +631,7 @@ describe("runWorkflowRollback on an unmerged setup branch", () => {
       pullRequest: { status: "merged", number: 7 }
     });
 
-    const outcome = await runWorkflowRollback(
-      {
-        repo: "contoso/store",
-        attempt: 1,
-        commit: setupCommit,
-        files: [setupFile]
-      },
-      p
-    );
+    const outcome = await rollbackBranch(p);
 
     expect(outcome.blocked).toBe(false);
     // The file lives on the base branch now, and a git blob id is content
