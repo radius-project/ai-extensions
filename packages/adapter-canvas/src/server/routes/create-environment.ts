@@ -481,10 +481,10 @@ export async function handleCreateEnvironment(
     // reason so the response can signal the client to skip polling
     // /api/verify-status, which would otherwise spin until the timeout.
     let verifySkipReason = "";
-    let skipImmediateVerifyForAzureRolePropagation = false;
+    let skipVerifyDueToRbacDelay = false;
     if (provider === "azure" && credentialsComplete) {
       const azureCredential = dependencies.azureCredential();
-      skipImmediateVerifyForAzureRolePropagation =
+      skipVerifyDueToRbacDelay =
         hasCreatedAzureContributorRoleAssignment(
           operation,
           dependencies.optionalString(data.subscriptionId) ||
@@ -620,7 +620,7 @@ export async function handleCreateEnvironment(
         "⏭️ Skipping credential verification — cloud credentials are not fully configured. " +
           missingCredNote
       );
-    } else if (skipImmediateVerifyForAzureRolePropagation) {
+    } else if (skipVerifyDueToRbacDelay) {
       // Azure RBAC can take several minutes to propagate to service principals.
       // When this setup operation just created the Contributor grant, immediate
       // verification can fail in azure/login with "No subscriptions found" even
@@ -776,7 +776,7 @@ export async function handleCreateEnvironment(
         report: (diagnostic) =>
           dependencies.reportOperationDiagnostic(diagnostic)
       });
-    } else if (skipImmediateVerifyForAzureRolePropagation) {
+    } else if (skipVerifyDueToRbacDelay) {
       dependencies.recordCommitState(operation, {
         mode: prState ? "pull_request" : "default_branch",
         branch: prState?.branch || defaultBranch,
