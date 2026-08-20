@@ -6,9 +6,13 @@ import {
   APP_ORIGIN_REPO_PATH,
   APP_ORIGIN_ROOT_PATH,
   evaluateAppModelFreshness,
+  evaluateAppSource,
   parseAppOrigin
 } from "@radius-project/core";
-import type { AppModelFreshness } from "@radius-project/core";
+import type {
+  AppModelFreshness,
+  AppSourceEvaluation
+} from "@radius-project/core";
 import { hashAppBicep } from "../app-bicep-hash.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasState } from "../shared.js";
@@ -32,6 +36,11 @@ export interface GraphContextHelpers {
     branch: string,
     state: CanvasState
   ): Promise<string | null>;
+  evaluateAppSourceForBranch(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<AppSourceEvaluation>;
   resolveAppModelStatus(
     repo: string,
     branch: string,
@@ -68,6 +77,35 @@ export function createGraphContextHelpers(
       if (local) return local;
     }
     return await deps.core.fetchBicepFromRepo(deps.github, repo, branch);
+  }
+
+  // Picks the lister that can actually see the branch — the local worktree for
+  // the workspace selection, the repository's git tree for any other branch —
+  // and hands the paths to core, which owns what counts as application source.
+  // This adapter's only job is producing the list; it holds no filename rule.
+  //
+  // A lookup that did not happen must never read as a repository with no
+  // Dockerfile, and the two listers fail differently: the local one rejects or
+  // resolves null, while the remote one resolves an empty array on any error
+  // rather than throwing. Catching to null covers the first, and core mapping an
+  // empty listing to `unknown` covers the second, so neither failure reaches a
+  // verdict. An empty array here is therefore "could not establish", not "the
+  // repository has nothing".
+  async function evaluateAppSourceForBranch(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<AppSourceEvaluation> {
+    // Without a repository there is nothing to list. The worktree predicate is
+    // fail-closed on an empty repo, so this would otherwise fall through to the
+    // remote lister and spend a doomed `gh api /repos//git/trees/` call, and its
+    // timeout, to arrive at the same answer.
+    if (!repo) return evaluateAppSource(null);
+    const paths = await (
+      deps.workspace.isWorkspaceSelection(state, repo, branch) ?
+        deps.workspace.fetchWorkspaceTree(state, repo, branch)
+      : deps.github.treePaths(repo, branch)).catch(() => null);
+    return evaluateAppSource(paths);
   }
 
   // The model itself is read from `.radius/app.bicep` or, for older layouts, a
@@ -157,5 +195,10 @@ export function createGraphContextHelpers(
     };
   }
 
-  return { workspaceState, fetchBicepForBranch, resolveAppModelStatus };
+  return {
+    workspaceState,
+    fetchBicepForBranch,
+    evaluateAppSourceForBranch,
+    resolveAppModelStatus
+  };
 }
