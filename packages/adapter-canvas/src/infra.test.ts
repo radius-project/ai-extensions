@@ -1,4 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import * as yaml from "js-yaml";
+import { execFileSync } from "node:child_process";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  chmodSync
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 interface RecordedCommit {
   path: string;
@@ -38,8 +49,73 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
       "name: deploy-azure\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
     "delete-application.yml":
       "name: delete\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n",
-    "delete-azure.yml":
-      "name: delete-azure\njobs:\n  delete:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Azure Login (OIDC)\n        uses: azure/login@abc\n      - name: Delete Radius resource\n        uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
+    // A trimmed but structurally faithful copy of the real upstream
+    // radius-project/radius/.github/extension/delete-azure.yml: job-level
+    // `environment:`/`env:` between `  delete:` and its `steps:`, the
+    // `AZURE_CLIENT_ID`-gated Azure Login, and the GHCR docker/login-action
+    // used later for the restore/teardown actions. This is the shape
+    // `addDeleteStateCheck` actually patches in production, so a wrong
+    // injection point here would fail these tests too.
+    "delete-azure.yml": `name: Radius - Delete (Azure)
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      resource_type:
+        type: string
+        required: true
+      name:
+        type: string
+        required: true
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+env:
+  ENVIRONMENT: \${{ inputs.environment }}
+jobs:
+  delete:
+    name: Delete with Radius
+    runs-on: ubuntu-24.04
+    environment: \${{ inputs.environment }}
+    env:
+      RADIUS_STATE_BACKEND: \${{ vars.RADIUS_STATE_BACKEND }}
+      RADIUS_STATE_REGISTRY: \${{ vars.RADIUS_STATE_REGISTRY }}
+      RADIUS_STATE_ARCHIVE: \${{ vars.RADIUS_STATE_ARCHIVE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - name: Azure Login (OIDC)
+        if: \${{ vars.AZURE_CLIENT_ID != '' }}
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        with:
+          client-id: \${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: \${{ vars.AZURE_TENANT_ID }}
+          subscription-id: \${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to GHCR for the state archive
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: \${{ github.actor }}
+          password: \${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore Radius state
+        uses: radius-project/radius/.github/extension/actions/restore-state@{{RADIUS_REF}}
+
+      - name: Delete Radius resource
+        uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}
+        with:
+          resource-type: \${{ inputs.resource_type }}
+          name: \${{ inputs.name }}
+
+      - name: Teardown
+        if: always()
+        uses: radius-project/radius/.github/extension/actions/teardown@{{RADIUS_REF}}
+`
   };
   return {
     BASE_UPSTREAM,
@@ -162,6 +238,27 @@ describe("generateDeleteWorkflow", () => {
     expect(cloudDelete).toContain("Azure Login (OIDC)");
   });
 
+  it("produces a workflow that parses as valid YAML with the expected job graph", async () => {
+    const workflows = await generateDeleteWorkflow("dev");
+    const azure = workflows["delete-azure.yml"];
+    // Confirms the splice produces YAML GitHub will accept, not just a string
+    // that happens to contain the right substrings.
+    const parsed = yaml.load(azure) as {
+      jobs: Record<string, { needs?: string; if?: string; steps: unknown[] }>;
+    };
+    expect(Object.keys(parsed.jobs)).toEqual(
+      expect.arrayContaining(["detect-state", "delete"])
+    );
+    expect(parsed.jobs.delete.needs).toBe("detect-state");
+    expect(parsed.jobs.delete.if).toBe(
+      "${{ needs.detect-state.outputs.has_state == 'true' }}"
+    );
+    expect(Array.isArray(parsed.jobs["detect-state"].steps)).toBe(true);
+    // The original job's own steps (Azure Login, restore-state, delete,
+    // teardown) must survive the splice untouched.
+    expect(parsed.jobs.delete.steps).toHaveLength(6);
+  });
+
   it("does not duplicate the state check when the upstream template provides it", () => {
     const workflow =
       "name: delete-azure\njobs:\n  detect-state:\n    runs-on: ubuntu-24.04\n  delete:\n    runs-on: ubuntu-24.04\n";
@@ -171,12 +268,275 @@ describe("generateDeleteWorkflow", () => {
     ).toHaveLength(1);
   });
 
-  it("returns the original YAML when no delete job exists", () => {
+  it("throws (rather than silently no-opping) when no delete job exists", () => {
     const workflow =
       "name: delete-azure\njobs:\n  some-job:\n    runs-on: ubuntu-24.04\n";
 
-    expect(addDeleteStateCheck(workflow)).toBe(workflow);
+    // A renamed/reshaped upstream `delete:` job must fail loudly instead of
+    // committing a workflow that silently lost its state gate.
+    expect(() => addDeleteStateCheck(workflow)).toThrow(
+      /expected a top-level "  delete:" job/
+    );
   });
+
+  it("throws when the delete job key appears only inside a comment or nested mapping", () => {
+    // A "  delete:" substring indented differently, or preceded by other
+    // characters, must not be treated as the job anchor.
+    const workflow =
+      "name: delete-azure\njobs:\n  some-job:\n    # not a real   delete: job\n    runs-on: ubuntu-24.04\n";
+
+    expect(() => addDeleteStateCheck(workflow)).toThrow();
+  });
+
+  describe("detect-state shell logic", () => {
+    // Extracts the actual `run:` script for the "Detect persisted Radius
+    // state" step from the generated workflow, so these tests exercise the
+    // real shell logic (parsed out of real YAML) rather than a hand-copied
+    // stand-in that could drift from production.
+    function detectStateScript(azureYaml: string): string {
+      const parsed = yaml.load(azureYaml) as {
+        jobs: {
+          "detect-state": {
+            steps: Array<{ id?: string; run?: string }>;
+          };
+        };
+      };
+      const step = parsed.jobs["detect-state"].steps.find(
+        (s) => s.id === "state"
+      );
+      if (!step?.run) throw new Error("detect-state script step not found");
+      return step.run;
+    }
+
+    interface RunResult {
+      status: number;
+      output: Record<string, string>;
+      summary: string;
+    }
+
+    // Runs the extracted script under bash with a stubbed `curl`/`git` on
+    // PATH, capturing $GITHUB_OUTPUT and $GITHUB_STEP_SUMMARY like the real
+    // runner would. `binScripts` maps a binary name (e.g. "curl") to the body
+    // of a stub script placed ahead of the real binary on PATH.
+    function runDetectState(
+      script: string,
+      env: Record<string, string>,
+      binScripts: Record<string, string> = {}
+    ): RunResult {
+      const dir = mkdtempSync(join(tmpdir(), "detect-state-"));
+      const binDir = join(dir, "bin");
+      mkdirSync(binDir, { recursive: true });
+      for (const [name, body] of Object.entries(binScripts)) {
+        const binPath = join(binDir, name);
+        writeFileSync(binPath, body);
+        chmodSync(binPath, 0o755);
+      }
+      const outputFile = join(dir, "output");
+      const summaryFile = join(dir, "summary");
+      writeFileSync(outputFile, "");
+      writeFileSync(summaryFile, "");
+      let status = 0;
+      try {
+        execFileSync("bash", ["-c", script], {
+          env: {
+            PATH: `${binDir}:${process.env.PATH}`,
+            GITHUB_OUTPUT: outputFile,
+            GITHUB_STEP_SUMMARY: summaryFile,
+            ...env
+          },
+          stdio: ["ignore", "pipe", "pipe"]
+        });
+      } catch (err) {
+        status = (err as { status?: number }).status ?? 1;
+      }
+      const output: Record<string, string> = {};
+      for (const line of readFileSync(outputFile, "utf8").split("\n")) {
+        const [key, ...rest] = line.split("=");
+        if (key) output[key] = rest.join("=");
+      }
+      return { status, output, summary: readFileSync(summaryFile, "utf8") };
+    }
+
+    const CURL_STUB = `#!/usr/bin/env bash
+set -euo pipefail
+url="\${@: -1}"
+if [[ "$url" == *"/token"* ]]; then
+  echo '{"token":"mock-token"}'
+  exit 0
+fi
+out_file=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-o" ]]; then
+    out_file="$arg"
+  fi
+  prev="$arg"
+done
+echo -n "\${MOCK_MANIFEST_BODY:-}" > "$out_file"
+echo -n "\${MOCK_MANIFEST_STATUS:-200}"
+`;
+
+    function gitStub(exitCode: number): string {
+      return `#!/usr/bin/env bash\nexit ${exitCode}\n`;
+    }
+
+    let script: string;
+    beforeEach(async () => {
+      const workflows = await generateDeleteWorkflow("dev");
+      script = detectStateScript(workflows["delete-azure.yml"]);
+    });
+
+    it("reports has_state=true when the GHCR manifest is present (HTTP 200)", () => {
+      const result = runDetectState(
+        script,
+        {
+          STATE_BACKEND: "oci",
+          STATE_REGISTRY: "ghcr.io/acme/app-radius-state-dev-abc123",
+          STATE_ARCHIVE: "radius-state",
+          GHCR_ACTOR: "actor",
+          GHCR_TOKEN: "token",
+          MOCK_MANIFEST_STATUS: "200"
+        },
+        { curl: CURL_STUB }
+      );
+      expect(result.status).toBe(0);
+      expect(result.output.has_state).toBe("true");
+    });
+
+    it("reports has_state=false when GHCR confirms the manifest is absent (HTTP 404)", () => {
+      const result = runDetectState(
+        script,
+        {
+          STATE_BACKEND: "oci",
+          STATE_REGISTRY: "ghcr.io/acme/app-radius-state-dev-abc123",
+          STATE_ARCHIVE: "radius-state",
+          GHCR_ACTOR: "actor",
+          GHCR_TOKEN: "token",
+          MOCK_MANIFEST_STATUS: "404"
+        },
+        { curl: CURL_STUB }
+      );
+      expect(result.status).toBe(0);
+      expect(result.output.has_state).toBe("false");
+    });
+
+    it("reports has_state=false when GHCR denies a never-created package (HTTP 401 NAME_UNKNOWN)", () => {
+      const result = runDetectState(
+        script,
+        {
+          STATE_BACKEND: "oci",
+          STATE_REGISTRY: "ghcr.io/acme/app-radius-state-dev-abc123",
+          STATE_ARCHIVE: "radius-state",
+          GHCR_ACTOR: "actor",
+          GHCR_TOKEN: "token",
+          MOCK_MANIFEST_STATUS: "401",
+          MOCK_MANIFEST_BODY:
+            '{"errors":[{"code":"NAME_UNKNOWN","message":"repository name not known to registry"}]}'
+        },
+        { curl: CURL_STUB }
+      );
+      expect(result.status).toBe(0);
+      expect(result.output.has_state).toBe("false");
+    });
+
+    it("reports has_state=false when GHCR denies access to a package with a missing tag (HTTP 403 MANIFEST_UNKNOWN)", () => {
+      const result = runDetectState(
+        script,
+        {
+          STATE_BACKEND: "oci",
+          STATE_REGISTRY: "ghcr.io/acme/app-radius-state-dev-abc123",
+          STATE_ARCHIVE: "radius-state",
+          GHCR_ACTOR: "actor",
+          GHCR_TOKEN: "token",
+          MOCK_MANIFEST_STATUS: "403",
+          MOCK_MANIFEST_BODY:
+            '{"errors":[{"code":"MANIFEST_UNKNOWN","message":"manifest unknown"}]}'
+        },
+        { curl: CURL_STUB }
+      );
+      expect(result.status).toBe(0);
+      expect(result.output.has_state).toBe("false");
+    });
+
+    it("fails closed on an inconclusive registry response (HTTP 500)", () => {
+      const result = runDetectState(
+        script,
+        {
+          STATE_BACKEND: "oci",
+          STATE_REGISTRY: "ghcr.io/acme/app-radius-state-dev-abc123",
+          STATE_ARCHIVE: "radius-state",
+          GHCR_ACTOR: "actor",
+          GHCR_TOKEN: "token",
+          MOCK_MANIFEST_STATUS: "500",
+          MOCK_MANIFEST_BODY: "internal error"
+        },
+        { curl: CURL_STUB }
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.output.has_state).toBeUndefined();
+    });
+
+    it("fails closed on a 401/403 that doesn't carry NAME_UNKNOWN/MANIFEST_UNKNOWN", () => {
+      const result = runDetectState(
+        script,
+        {
+          STATE_BACKEND: "oci",
+          STATE_REGISTRY: "ghcr.io/acme/app-radius-state-dev-abc123",
+          STATE_ARCHIVE: "radius-state",
+          GHCR_ACTOR: "actor",
+          GHCR_TOKEN: "token",
+          MOCK_MANIFEST_STATUS: "403",
+          MOCK_MANIFEST_BODY: '{"errors":[{"code":"UNAUTHORIZED"}]}'
+        },
+        { curl: CURL_STUB }
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.output.has_state).toBeUndefined();
+    });
+
+    it("fails closed when RADIUS_STATE_REGISTRY is not configured", () => {
+      const result = runDetectState(script, {
+        STATE_BACKEND: "oci",
+        STATE_REGISTRY: "",
+        STATE_ARCHIVE: "radius-state",
+        GHCR_ACTOR: "actor",
+        GHCR_TOKEN: "token"
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.output.has_state).toBeUndefined();
+    });
+
+    it("reports has_state=true when the radius-state git branch exists", () => {
+      const result = runDetectState(
+        script,
+        { STATE_BACKEND: "git" },
+        { git: gitStub(0) }
+      );
+      expect(result.status).toBe(0);
+      expect(result.output.has_state).toBe("true");
+    });
+
+    it("reports has_state=false when git ls-remote confirms the branch is absent (exit 2)", () => {
+      const result = runDetectState(
+        script,
+        { STATE_BACKEND: "git" },
+        { git: gitStub(2) }
+      );
+      expect(result.status).toBe(0);
+      expect(result.output.has_state).toBe("false");
+    });
+
+    it("fails closed on any other non-zero git ls-remote status", () => {
+      const result = runDetectState(
+        script,
+        { STATE_BACKEND: "git" },
+        { git: gitStub(128) }
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.output.has_state).toBeUndefined();
+    });
+  });
+});
 
 describe("syncRepoWorkflows", () => {
   beforeEach(() => {

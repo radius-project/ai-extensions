@@ -281,17 +281,49 @@ export async function generateDeleteWorkflow(
 
 /**
  * Keep the cloud delete job from requiring cloud OIDC when the environment has
- * never persisted Radius state. A missing state tag proves no prior deploy
- * reached teardown, so succeeding with the cloud job skipped lets the canvas
- * remove its GitHub-side records. Unexpected registry failures remain failures.
+ * never persisted Radius state. A confirmed-absent state archive/branch proves
+ * no prior deploy reached teardown, so succeeding with the cloud job skipped
+ * lets the canvas remove its GitHub-side records. Only positive "confirmed
+ * absent" signals (git ref missing, GHCR manifest missing/never created) skip
+ * cloud deletion; an unconfigured backend or an inconclusive registry response
+ * fails the job closed rather than risk orphaning live cloud resources.
+ *
+ * The GHCR check queries the registry's HTTP API directly (token exchange +
+ * `GET /v2/.../manifests/...`, branching on status code) instead of shelling
+ * out to `docker manifest inspect` and pattern-matching its stderr. The state
+ * archive is written by `rad shutdown` via ORAS and may use an OCI artifact
+ * manifest media type the Docker CLI doesn't understand, and GHCR reports a
+ * never-created package as `denied`/`name unknown`, not `manifest unknown` --
+ * neither is safe to detect by scraping CLI error text.
+ *
+ * The job requires the `  delete:` job to exist as a literal top-level key
+ * (matched the same way `stripAwsDispatcherJob` locates `  aws:`). If the
+ * upstream template shape changes such that that anchor no longer matches, we
+ * throw rather than silently returning the workflow unpatched -- a delete
+ * workflow that quietly lost its state gate is the failure mode hardest to
+ * notice.
  */
 export function addDeleteStateCheck(yaml: string): string {
-  const job = "  delete:";
-  const index = yaml.indexOf(job);
-  if (index < 0 || yaml.includes("  detect-state:")) return yaml;
-  const stateCheck = `  detect-state:
+  const lines = yaml.split("\n");
+  const jobIndex = lines.findIndex((l) => /^ {2}delete:\s*$/.test(l));
+  if (jobIndex === -1) {
+    throw new Error(
+      'addDeleteStateCheck: expected a top-level "  delete:" job in the ' +
+        "generated Azure delete workflow. The upstream template shape has " +
+        "changed and the persisted-state gate could not be applied."
+    );
+  }
+  if (lines.some((l) => /^ {2}detect-state:\s*$/.test(l))) return yaml;
+
+  const stateCheckJob = `  detect-state:
     name: Detect persisted Radius state
     runs-on: ubuntu-24.04
+    # Bound to the same GitHub Environment as \`delete\` below so vars.* (state
+    # backend/registry/archive) resolve here. GitHub evaluates environment
+    # protection rules per job, not per workflow run, so environments with
+    # required reviewers are gated twice per delete: once here, once on
+    # \`delete\`. See plugins/radius/skills/radius-delete/SKILL.md for the
+    # trade-off and alternatives.
     environment: \${{ inputs.environment }}
     outputs:
       has_state: \${{ steps.state.outputs.has_state }}
@@ -300,14 +332,6 @@ export function addDeleteStateCheck(yaml: string): string {
         if: \${{ vars.RADIUS_STATE_BACKEND == 'git' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
-      - name: Log in to GHCR for the state archive
-        if: \${{ vars.RADIUS_STATE_BACKEND != 'git' && vars.RADIUS_STATE_REGISTRY != '' }}
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: \${{ github.actor }}
-          password: \${{ secrets.GITHUB_TOKEN }}
-
       - name: Detect persisted Radius state
         id: state
         shell: bash
@@ -315,53 +339,96 @@ export function addDeleteStateCheck(yaml: string): string {
           STATE_BACKEND: \${{ vars.RADIUS_STATE_BACKEND }}
           STATE_REGISTRY: \${{ vars.RADIUS_STATE_REGISTRY }}
           STATE_ARCHIVE: \${{ vars.RADIUS_STATE_ARCHIVE }}
+          GHCR_ACTOR: \${{ github.actor }}
+          GHCR_TOKEN: \${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          backend="\${STATE_BACKEND:-oci}"
+          archive="\${STATE_ARCHIVE:-radius-state}"
+          summary() {
+            echo "backend=$backend, registry=\${STATE_REGISTRY:-<git branch>}, archive=$archive: $1" >> "$GITHUB_STEP_SUMMARY"
+          }
           no_state() {
             echo "has_state=false" >> "$GITHUB_OUTPUT"
-            echo "No persisted Radius state was found; skipping cloud deletion. No cloud resources were touched." | tee -a "$GITHUB_STEP_SUMMARY"
+            summary "no persisted Radius state found; skipping cloud deletion. No cloud resources were touched."
           }
-          if [[ "\${STATE_BACKEND:-oci}" == "git" ]]; then
+
+          if [[ "$backend" == "git" ]]; then
             set +e
             git ls-remote --exit-code origin refs/heads/radius-state >/dev/null 2>&1
             status=$?
             set -e
             if [[ "$status" == "0" ]]; then
               echo "has_state=true" >> "$GITHUB_OUTPUT"
+              summary "radius-state branch found; running cloud deletion."
             elif [[ "$status" == "2" ]]; then
               no_state
             else
-              echo "Could not determine whether persisted Radius state exists." >&2
+              summary "could not confirm whether the radius-state branch exists (git ls-remote exit $status)."
+              echo "Could not determine whether persisted Radius state exists (git ls-remote exit $status)." >&2
               exit "$status"
             fi
             exit 0
           fi
 
-          if [[ -z "$STATE_REGISTRY" ]]; then
-            echo "RADIUS_STATE_REGISTRY is not configured; cannot determine whether persisted Radius state exists." | tee -a "$GITHUB_STEP_SUMMARY" >&2
+          if [[ -z "\${STATE_REGISTRY:-}" ]]; then
+            summary "RADIUS_STATE_REGISTRY is not configured; cannot confirm whether persisted Radius state exists."
+            echo "RADIUS_STATE_REGISTRY is not configured; cannot determine whether persisted Radius state exists." >&2
             exit 1
           fi
 
-          archive="\${STATE_ARCHIVE:-radius-state}"
-          if output="$(docker manifest inspect "$STATE_REGISTRY:$archive" 2>&1)"; then
-            echo "has_state=true" >> "$GITHUB_OUTPUT"
-          elif grep -qiE 'manifest unknown|not found|no such manifest' <<< "$output"; then
-            no_state
-          else
-            echo "Could not determine whether persisted Radius state exists:" >&2
-            echo "$output" >&2
+          repo_path="\${STATE_REGISTRY#ghcr.io/}"
+          token_response="$(curl -sS -u "\${GHCR_ACTOR}:\${GHCR_TOKEN}" "https://ghcr.io/token?scope=repository:\${repo_path}:pull&service=ghcr.io")"
+          token="$(echo "$token_response" | jq -r '.token // empty')"
+          if [[ -z "$token" ]]; then
+            summary "could not obtain a GHCR pull token to check the state archive."
+            echo "Could not obtain a GHCR pull token to check for persisted Radius state:" >&2
+            echo "$token_response" >&2
             exit 1
           fi
+
+          response_file="$(mktemp)"
+          auth_header="$(printf 'Authorization: %s %s' 'Bearer' "$token")"
+          http_status="$(curl -sS -o "$response_file" -w '%{http_code}' \\
+            -H "$auth_header" \\
+            -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json" \\
+            "https://ghcr.io/v2/\${repo_path}/manifests/$archive")"
+
+          case "$http_status" in
+            200)
+              echo "has_state=true" >> "$GITHUB_OUTPUT"
+              summary "manifest found (HTTP 200); running cloud deletion."
+              ;;
+            404)
+              no_state
+              ;;
+            401 | 403)
+              # GHCR reports both "package never created" and "package exists,
+              # tag missing" as 401/403 with NAME_UNKNOWN/MANIFEST_UNKNOWN,
+              # rather than a 404 -- treat those as confirmed-absent too.
+              if grep -qiE 'NAME_UNKNOWN|MANIFEST_UNKNOWN' "$response_file"; then
+                no_state
+              else
+                summary "GHCR denied access to the state archive (HTTP $http_status); cannot confirm absence."
+                echo "Could not determine whether persisted Radius state exists (HTTP $http_status):" >&2
+                cat "$response_file" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              summary "unexpected GHCR response (HTTP $http_status); cannot confirm absence."
+              echo "Could not determine whether persisted Radius state exists (HTTP $http_status):" >&2
+              cat "$response_file" >&2
+              exit 1
+              ;;
+          esac
 
   delete:
     needs: detect-state
     if: \${{ needs.detect-state.outputs.has_state == 'true' }}
 `;
-  return (
-    yaml.slice(0, index) +
-    stateCheck +
-    yaml.slice(index + job.length).replace(/^\n/, "")
-  );
+  lines.splice(jobIndex, 1, stateCheckJob.replace(/\n$/, ""));
+  return lines.join("\n");
 }
 
 /**
