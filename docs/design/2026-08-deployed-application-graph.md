@@ -78,7 +78,7 @@ Both predate this design and are fixed alongside it.
 
 The Radius deploy action publishes changed per-resource snapshots through an eight-slot run-scoped artifact ring while `rad deploy` executes. Each successful upload increments the payload `sequence`; the fixed-name terminal artifact uses the next sequence and adds the deployed graph and diagnostics.
 
-The consumer polls on a timer while a run is in progress, downloads only newly observed artifact IDs, rejects explicit run mismatches, and selects the greatest valid sequence independent of artifact list order or ring slot. Existing final-only artifacts remain supported.
+The consumer polls on a timer while a run is in progress, downloads only newly observed artifact IDs, rejects explicit run mismatches, and selects the greatest valid `sequence` within that run — independent of artifact list order or ring slot. Because `sequence` restarts at 1 per run, repo-wide reads (no active run) instead drop live-slot candidates and take the newest-listed fixed-name terminal artifact, so a cancelled run's higher-sequenced slot cannot beat a newer completed run's terminal artifact. Payloads without a positive-integer `sequence` are rejected as malformed. Existing final-only artifacts remain supported.
 
 The refresh interval is 15 seconds and is stated in the UI. An artifact upload takes several seconds, so a faster poll returns identical bytes; saying so means a graph that has not changed reads as "no new data yet" rather than "broken". The deploy log below the graph keeps its 1.5-second stream and carries the moment-to-moment liveness.
 

@@ -42,6 +42,17 @@ export const DEPLOY_STATUS_FILES = {
   controlPlane: "deploy-controlplane.log"
 } as const;
 
+// A run-scoped live-slot artifact name ends with `-live-<runId>-slot-<0..7>`.
+// Live-slot sequences are only comparable within a single run, so a repo-wide
+// read (which is not scoped to any run) has to exclude them; otherwise a
+// cancelled run's higher-sequenced slot can beat a newer completed run's
+// fixed-name terminal artifact.
+const LIVE_SLOT_NAME_PATTERN = /-live-\d+-slot-\d+$/;
+
+export function isLiveSlotArtifactName(name?: string | null): boolean {
+  return typeof name === "string" && LIVE_SLOT_NAME_PATTERN.test(name);
+}
+
 // The literal prefix every deploy-status artifact name starts with. The
 // producer appends a sanitized "<environment>-<app>".
 export const DEPLOY_STATUS_ARTIFACT_PREFIX = "radius-deploy-status-";
@@ -253,10 +264,17 @@ export function parseDeployProgressArtifact(
   if (typeof parsed.environment !== "string" || !parsed.environment)
     return null;
   if (!Array.isArray(parsed.resources)) return null;
-  const sequence =
-    typeof parsed.sequence === "number" && Number.isFinite(parsed.sequence) ?
-      parsed.sequence
-    : 0;
+  // The producer contract starts sequences at 1 and increments by 1. Rejecting
+  // missing, non-numeric, zero, negative, and fractional values keeps a
+  // malformed payload from winning the greatest-sequence selection against a
+  // legitimate terminal artifact (which publishes sequence 1 at minimum).
+  if (
+    typeof parsed.sequence !== "number" ||
+    !Number.isInteger(parsed.sequence) ||
+    parsed.sequence < 1
+  )
+    return null;
+  const sequence = parsed.sequence;
   const resources: DeployProgressResource[] = [];
   for (const raw of parsed.resources) {
     if (!isRecord(raw)) continue;
@@ -751,15 +769,34 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     } catch (e) {
       return empty(errorCode(e) === "GH_ARTIFACT_AUTH" ? "auth" : "error", e);
     }
-    const candidates = selectDeployStatusArtifacts(artifacts, environment);
+    let candidates = selectDeployStatusArtifacts(artifacts, environment);
     if (candidates.length === 0) return empty("missing");
+
+    const expectedRunId = Number(runId);
+    const hasExpectedRunId =
+      Number.isFinite(expectedRunId) && expectedRunId > 0;
+    // A repo-wide read is not scoped to any run, and `sequence` restarts at 1
+    // for every run. Live-slot artifacts must therefore be excluded from that
+    // path — otherwise a cancelled run's higher-sequenced slot could beat a
+    // newer completed run's fixed-name terminal artifact.
+    if (!hasExpectedRunId) {
+      candidates = candidates.filter((a) => !isLiveSlotArtifactName(a.name));
+      if (candidates.length === 0) return empty("missing");
+    }
+    // Ring slots overwrite by uploading with new artifact IDs, so an ID that
+    // dropped out of the listing never comes back. Prune the cache to the
+    // current listing so a long-running deploy cannot accumulate payloads that
+    // will never be referenced again.
+    if (inspectedArtifacts.size > 0) {
+      const listedIds = new Set(candidates.map((c) => c.id));
+      for (const cachedId of [...inspectedArtifacts.keys()]) {
+        if (!listedIds.has(cachedId)) inspectedArtifacts.delete(cachedId);
+      }
+    }
 
     let sawMalformed = false;
     let exactMatch: ReadResult | null = null;
     let envOnlyMatch: ReadResult | null = null;
-    const expectedRunId = Number(runId);
-    const hasExpectedRunId =
-      Number.isFinite(expectedRunId) && expectedRunId > 0;
     for (const artifact of candidates) {
       let result =
         hasExpectedRunId ? inspectedArtifacts.get(artifact.id) : undefined;
@@ -815,11 +852,18 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       )
         continue;
       if (confirmArtifactIdentity(progress, { environment, application })) {
-        if (
-          !exactMatch ||
-          progress.sequence > (exactMatch.progress?.sequence ?? -1)
-        )
+        // Within an active run, sequences are comparable and pick the freshest
+        // snapshot regardless of artifact list order. Across runs (repo-wide),
+        // sequences restart at 1, so the first (newest by list order) match
+        // wins instead.
+        if (!exactMatch) {
           exactMatch = result;
+        } else if (
+          hasExpectedRunId &&
+          progress.sequence > (exactMatch.progress?.sequence ?? -1)
+        ) {
+          exactMatch = result;
+        }
         continue;
       }
       // Right environment, different application. Hold it as a fallback rather
@@ -829,11 +873,14 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       // to the repository's short name when app.bicep cannot be read), so
       // treating a mismatch as fatal would blank the tab over a name this side
       // never actually knew.
-      if (
-        !envOnlyMatch ||
-        progress.sequence > (envOnlyMatch.progress?.sequence ?? -1)
-      )
+      if (!envOnlyMatch) {
         envOnlyMatch = result;
+      } else if (
+        hasExpectedRunId &&
+        progress.sequence > (envOnlyMatch.progress?.sequence ?? -1)
+      ) {
+        envOnlyMatch = result;
+      }
     }
     if (exactMatch) return exactMatch;
     if (envOnlyMatch) return envOnlyMatch;

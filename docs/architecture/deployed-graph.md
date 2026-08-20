@@ -50,7 +50,7 @@ The two sanitizer implementations agree on multi-byte input even though `sed` co
 | `deploy-controlplane.log` | Best effort  | Control-plane / recipe output                          |
 | `deploy-activity.log`     | Best effort  | `rad` command result envelope. Not read by the canvas. |
 
-Live uploads carry `deploy-progress.json` with state `in_progress`. The fixed-name terminal upload carries the complete file set and a sequence one greater than the last successful live upload, or sequence 1 when no live upload succeeded.
+Live uploads carry `deploy-progress.json` with state `in_progress`. The fixed-name terminal upload carries the complete file set and a sequence one greater than the last successful live upload, or sequence 1 when no live upload succeeded. `sequence` is always a positive integer; the reader rejects a payload without one.
 
 `application` and `environment` inside the payload are the **raw** values, not sanitized: a run in environment `My Env/Prod` emits `"environment": "My Env/Prod"` while the artifact name carries `my-env-prod`. Confirmation sanitizes both sides, so the asymmetry is not a mismatch.
 
@@ -121,14 +121,14 @@ The one exception is `schemaVersion`. An unrecognized version is rejected outrig
 `createDeployStatusReader` in [`packages/adapter-canvas/src/deploy-artifacts.ts`](../../packages/adapter-canvas/src/deploy-artifacts.ts):
 
 1. List artifacts — scoped to the run being monitored when there is one, else newest-first repo-wide.
-2. Select up to nine candidates by the two-tier prefix match: eight live slots plus the fixed terminal artifact.
+2. Select up to nine candidates by the two-tier prefix match: eight live slots plus the fixed terminal artifact. Repo-wide reads drop live-slot candidates first, because `sequence` restarts at 1 for every run and a cancelled run's higher-sequenced slot would otherwise beat a newer completed run's terminal artifact.
 3. Download uninspected artifact IDs with `gh run download`, validate application and environment identity, and reject an explicit `runId` that differs from the active run.
-4. Select the numerically greatest valid `sequence`, independent of artifact list order or slot number.
+4. Select the numerically greatest valid `sequence` within an active run; on a repo-wide read (where sequences are only comparable within one run), the newest-listed terminal artifact wins instead.
 5. Classify the outcome as `ok`, `missing`, `malformed`, `auth`, `error`, or `stale`.
 
 The repo-wide listing is paginated, which matters more than it appears. One page covers the newest 100 artifacts in the **entire repository**, and a repository whose CI uploads test reports or build output on every push can produce that many between two deploys. Reading only the first page would push the deploy-status artifact off the end and render "Nothing deployed yet" for an application that is in fact deployed — the exact symptom this transport exists to eliminate. Paging stops as soon as a page yields a match (the listing is newest-first, so nothing better appears later), at a short page, or at a five-page budget, so a repository with no deploy-status artifact costs a bounded number of calls rather than a walk of its whole history.
 
-Reads are cached for a short TTL and de-duplicated with single-flight, so the deploy monitor and a concurrent `/api/deployed-graph` request share one fetch. Active-run readers also cache inspected immutable artifact IDs, so each poll downloads only newly published slots. Payloads are accepted in monotonic `sequence` order per run, so a stale read — one served just after an overwrite, or arriving out of order — is reported as `stale` and can never roll the graph backwards.
+Reads are cached for a short TTL and de-duplicated with single-flight, so the deploy monitor and a concurrent `/api/deployed-graph` request share one fetch. Active-run readers also cache inspected immutable artifact IDs, so each poll downloads only newly published slots. The cache is pruned to the current listing on every poll, because ring slots overwrite by uploading with new IDs and an ID that drops out never returns. Payloads are accepted in monotonic `sequence` order per run, so a stale read — one served just after an overwrite, or arriving out of order — is reported as `stale` and can never roll the graph backwards.
 
 ## Rendering
 
