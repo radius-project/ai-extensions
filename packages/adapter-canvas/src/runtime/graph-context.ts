@@ -12,6 +12,11 @@ export interface GraphContextHelpers {
     branch: string,
     state: CanvasState
   ): Promise<string | null>;
+  listBranchPaths(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<string[]>;
 }
 
 export function createGraphContextHelpers(
@@ -45,5 +50,24 @@ export function createGraphContextHelpers(
     return await deps.core.fetchBicepFromRepo(deps.github, repo, branch);
   }
 
-  return { workspaceState, fetchBicepForBranch };
+  // Every path on a branch, resolved through the same workspace-or-remote rule
+  // as fetchBicepForBranch so the answer describes the tree the graph would be
+  // built from. Resolves empty when the tree cannot be read.
+  async function listBranchPaths(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<string[]> {
+    if (deps.workspace.isWorkspaceSelection(state, repo, branch)) {
+      const local = await deps.workspace.fetchWorkspaceTree(
+        state,
+        repo,
+        branch
+      );
+      if (local) return local;
+    }
+    return await deps.github.treePaths(repo, branch);
+  }
+
+  return { workspaceState, fetchBicepForBranch, listBranchPaths };
 }

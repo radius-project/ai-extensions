@@ -41,6 +41,11 @@ export interface WorkspaceDependencies {
     repo: string,
     branch: string
   ): Promise<string | null>;
+  fetchWorkspaceTree(
+    state: CanvasState,
+    repo: string,
+    branch: string
+  ): Promise<string[] | null>;
   parseRepoFromRemote(remoteUrl: unknown): string;
   toSafeRepoRelPath(input: unknown): string;
   workspaceFileExists(worktree: string, relPath: string): Promise<boolean>;

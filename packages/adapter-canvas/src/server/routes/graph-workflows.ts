@@ -1,3 +1,4 @@
+import { appBicepRefusalReason } from "../../app-bicep-support.js";
 import type {
   CanvasGraphResource,
   CanvasState,
@@ -140,20 +141,6 @@ function bare(
 
 const MISSING_ENTRY_OUTCOME = bare(503, MISSING_ENTRY_PAYLOAD);
 
-// The skill matches `Dockerfile`, `Dockerfile.*` and `*.Dockerfile`
-// case-insensitively, anywhere in the repository.
-export function isDockerfilePath(path: string): boolean {
-  const name = path.split("/").pop() ?? "";
-  return /^dockerfile(\..+)?$/i.test(name) || /^.+\.dockerfile$/i.test(name);
-}
-
-export function appBicepNoDockerfileMessage(
-  repo: string,
-  branch: string
-): string {
-  return `${repo} has no Dockerfile on ${branch}, so the Radius app-bicep skill cannot model it: it builds the application image from one. Add a Dockerfile for the application service, then try again.`;
-}
-
 function beginGraphProgress(state: CanvasState): number {
   const generation = (state.graphProgressGeneration || 0) + 1;
   state.graphProgressGeneration = generation;
@@ -212,18 +199,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
   // conversation and never reaches this server, so handing off regardless would
   // leave the page waiting for a file that is never going to be written.
   // Answering here turns an unbounded wait into an actionable error.
-  async function appBicepRefusalReason(
+  async function branchRefusalReason(
     entry: TEntry,
     repo: string,
     branch: string
   ): Promise<string | null> {
     const paths = await dependencies.listBranchPaths(entry, repo, branch);
-    // Fail open. An unreadable tree resolves empty, which is not evidence that
-    // the repository lacks a Dockerfile, so the handoff still happens and the
-    // page falls back to waiting.
-    if (paths.length === 0) return null;
-    if (paths.some(isDockerfilePath)) return null;
-    return appBicepNoDockerfileMessage(repo, branch);
+    return appBicepRefusalReason(paths, repo, branch);
   }
 
   // The diff spans two branches, so it is only unsupported when neither side
@@ -236,8 +218,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     head: string
   ): Promise<string | null> {
     const [baseReason, headReason] = await Promise.all([
-      appBicepRefusalReason(entry, repo, base),
-      appBicepRefusalReason(entry, repo, head)
+      branchRefusalReason(entry, repo, base),
+      branchRefusalReason(entry, repo, head)
     ]);
     if (!baseReason || !headReason) return null;
     return headReason;
@@ -249,7 +231,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     branch: string,
     reportRefusal: (detail: string) => void
   ): Promise<GraphWorkflowOutcome> {
-    const refusal = await appBicepRefusalReason(entry, repo, branch);
+    const refusal = await branchRefusalReason(entry, repo, branch);
     if (refusal) {
       reportRefusal(refusal);
       return json(200, {

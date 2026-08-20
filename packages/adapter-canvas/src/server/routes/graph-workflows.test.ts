@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { computeGraphDiff } from "@radius-project/core";
 import {
-  appBicepNoDockerfileMessage,
   createGraphPlanningWorkflows,
-  isDockerfilePath,
   type GraphPlanningWorkflows,
   type GraphWorkflowDependencies,
   type GraphWorkflowOutcome
 } from "./graph-workflows.js";
+import { appBicepNoDockerfileMessage } from "../../app-bicep-support.js";
 import type {
   AppBicepSelection,
   CompileResourcesInput,
@@ -262,23 +261,6 @@ function stages(state: CanvasState): string[] {
     (event) => `${event.stage}:${event.state}`
   );
 }
-
-describe("isDockerfilePath", () => {
-  it.each([
-    ["Dockerfile", true],
-    ["dockerfile", true],
-    ["Dockerfile.dev", true],
-    ["services/api/Dockerfile", true],
-    ["build/api.Dockerfile", true],
-    ["build/api.dockerfile", true],
-    ["docs/Dockerfile-notes.md", false],
-    ["src/dockerfiles.ts", false],
-    ["not-a-dockerfile.txt", false],
-    ["", false]
-  ])("classifies %s as %s", (path, expected) => {
-    expect(isDockerfilePath(path)).toBe(expected);
-  });
-});
 
 describe("graph planning workflows", () => {
   describe("POST /api/load-graph", () => {

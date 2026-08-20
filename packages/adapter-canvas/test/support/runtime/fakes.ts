@@ -85,6 +85,9 @@ export function createFakeSession(
 export interface FakeDependenciesOptions {
   workspaceContext?: WorkspaceContext;
   bicepByRepoBranch?: Record<string, string | null>;
+  // Keyed the same way as bicepByRepoBranch: `workspace:owner/repo@branch` and
+  // `remote:owner/repo@branch`. An absent key means the tree could not be read.
+  pathsByRepoBranch?: Record<string, string[]>;
 }
 
 // Builds a complete RadiusExtensionDependencies fake. `servers` is a real Map
@@ -101,6 +104,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   };
 
   const bicepByRepoBranch = options.bicepByRepoBranch ?? {};
+  const pathsByRepoBranch = options.pathsByRepoBranch ?? {};
 
   const getOrCreateServer = vi.fn(
     async (instanceId: string, page?: string): Promise<CanvasServerEntry> => {
@@ -167,6 +171,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         async (_state, repo: string, branch: string) =>
           bicepByRepoBranch[`workspace:${repo}@${branch}`] ?? null
       ),
+      fetchWorkspaceTree: vi.fn(
+        async (_state, repo: string, branch: string) =>
+          pathsByRepoBranch[`workspace:${repo}@${branch}`] ?? null
+      ),
       parseRepoFromRemote: vi.fn((url: unknown) => {
         const match = String(url || "").match(
           /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/
@@ -184,7 +192,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       getContent: vi.fn(async () => null),
       getContentBytes: vi.fn(async () => null),
       listNames: vi.fn(async () => []),
-      treePaths: vi.fn(async () => [])
+      treePaths: vi.fn(
+        async (repo: string, branch?: string) =>
+          pathsByRepoBranch[`remote:${repo}@${branch ?? ""}`] ?? []
+      )
     },
     core: {
       computeGraphDiff: vi.fn(

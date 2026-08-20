@@ -19,6 +19,7 @@ import {
   appBicepHandoffMessage
 } from "./hooks.js";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
+import { appBicepRefusalReason } from "../app-bicep-support.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasServerEntry } from "../server.js";
@@ -49,7 +50,7 @@ function isCurrentSourceRefToken(
 // over `deps` instead of module-level imports of server.ts/gh.ts/workspace.ts.
 export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
   const closeGenerations = new Map<string, number>();
-  const { workspaceState, fetchBicepForBranch } =
+  const { workspaceState, fetchBicepForBranch, listBranchPaths } =
     createGraphContextHelpers(deps);
 
   // When a graph canvas is opened but no .radius/app.bicep exists, hand the
@@ -95,6 +96,23 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
         })
       );
       if (found.some(Boolean)) return;
+
+      // The skill refuses a repository with no Dockerfile before writing
+      // anything, and reports that only in the conversation. Handing off anyway
+      // would leave the view waiting for a file that is never written, so ask
+      // the same question the graph routes ask and stay silent when every
+      // branch would be refused.
+      const refusals = await Promise.all(
+        branches.map(async (branch) => {
+          try {
+            const paths = await listBranchPaths(repo, branch as string, state);
+            return appBicepRefusalReason(paths, repo, branch as string);
+          } catch {
+            return null;
+          }
+        })
+      );
+      if (refusals.every(Boolean)) return;
 
       try {
         const session = deps.session.get();

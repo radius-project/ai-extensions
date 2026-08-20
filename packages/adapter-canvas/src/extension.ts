@@ -36,6 +36,7 @@ import {
   defaultBranchForState,
   detectWorkspaceContext,
   fetchWorkspaceBicep,
+  fetchWorkspaceTree,
   isWorkspaceSelection,
   parseRepoFromRemote,
   resolvePersistedSessionId,
@@ -112,6 +113,7 @@ const dependencies: RadiusExtensionDependencies = {
     defaultBranchForState,
     isWorkspaceSelection,
     fetchWorkspaceBicep,
+    fetchWorkspaceTree,
     parseRepoFromRemote,
     toSafeRepoRelPath,
     workspaceFileExists

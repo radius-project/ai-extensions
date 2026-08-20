@@ -622,6 +622,121 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(session.send).toHaveBeenCalledOnce();
   });
 
+  it("stays silent when the branch has no Dockerfile for the skill to build from", async () => {
+    const { canvas, deps } = setup({
+      pathsByRepoBranch: {
+        "remote:other/repo@main": ["README.md", "src/index.ts"]
+      }
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "main"
+      })
+    );
+
+    // The skill would refuse this repository outright and say so only in the
+    // conversation, so handing off would leave the view waiting forever.
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
+  it("hands off when the branch has a Dockerfile", async () => {
+    const { canvas, deps } = setup({
+      pathsByRepoBranch: {
+        "remote:other/repo@main": ["README.md", "services/api/Dockerfile"]
+      }
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands off a diff when only one branch would be refused", async () => {
+    const { canvas, deps } = setup({
+      pathsByRepoBranch: {
+        "remote:other/repo@main": ["README.md"],
+        "remote:other/repo@feature": ["Dockerfile"]
+      }
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "other/repo",
+        baseBranch: "main",
+        headBranch: "feature"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands off when the branch tree cannot be read", async () => {
+    const { canvas, deps } = setup();
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "main"
+      })
+    );
+
+    // An unreadable tree resolves empty, which is not evidence of absence.
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands off when listing the branch tree throws", async () => {
+    const { canvas, deps } = setup();
+    const session = deps.session.get();
+    (deps.github.treePaths as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("tree unavailable")
+    );
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays silent for the workspace branch when the worktree has no Dockerfile", async () => {
+    const { canvas, deps } = setup({
+      pathsByRepoBranch: {
+        "workspace:acme/widgets@main": ["README.md", "src/index.ts"]
+      }
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).not.toHaveBeenCalled();
+    expect(deps.github.treePaths).not.toHaveBeenCalled();
+  });
+
   it("never blocks or fails canvas open when session.send throws", async () => {
     const { canvas, deps } = setup();
     const session = deps.session.get();
