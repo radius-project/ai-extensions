@@ -1393,6 +1393,21 @@ describe("triggerDeployRepairHandoff", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("does not hand off an oidc-subject-missing refusal, which lives in cloud configuration", () => {
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+    });
+    // The remedy is a federated credential in Azure, so a repair loop could only
+    // burn its attempts redeploying an unchanged, still-doomed configuration.
+    expect(
+      triggerDeployRepairHandoff(
+        failedEntry({ deployErrorKind: "oidc-subject-missing" })
+      )
+    ).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
   it("does not hand off unless the deploy actually failed", () => {
     const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
