@@ -328,7 +328,8 @@ describe("graph planning workflows", () => {
       expect(outcome.kind).toBe("json");
       expect(outcome.payload).toEqual({
         reload: true,
-        resources: [{ id: "res-a" }]
+        resources: [{ id: "res-a" }],
+        fromWorkspace: true
       });
       expect(harness.order).toEqual([
         "select:feature/x",
@@ -363,7 +364,8 @@ describe("graph planning workflows", () => {
       );
       expect(outcome.payload).toEqual({
         reload: false,
-        resources: []
+        resources: [],
+        fromWorkspace: false
       });
     });
 
@@ -418,6 +420,7 @@ describe("graph planning workflows", () => {
         graphLoaded: true,
         graphTargetRepo: "octo/app",
         graphBranch: "main",
+        graphFromWorkspace: true,
         graphDefinitionHash: "hash-a",
         graphResources: [{ id: "cached" }] as CanvasGraphResource[]
       });
@@ -431,8 +434,12 @@ describe("graph planning workflows", () => {
       expect(outcome.payload).toEqual({
         reload: false,
         resources: [{ id: "cached" }],
+        fromWorkspace: false,
         cached: true
       });
+      // Persisted provenance follows the response, so the next page render
+      // cannot contradict what this request just reported.
+      expect(harness.state.graphFromWorkspace).toBe(false);
       // The compile is skipped entirely, which is the point of the cache.
       expect(harness.order).toEqual([
         "select:main",
