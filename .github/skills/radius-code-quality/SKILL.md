@@ -9,23 +9,9 @@ user-invocable: true
 
 Apply this skill to every production TypeScript or JavaScript change in this repository. A code change is incomplete until its behavior is covered by unit tests, every delivered boundary it affects has the appropriate integration or browser evidence, and the production design follows the repository architecture.
 
-The proposed [Radius Canvas test architecture and plan](https://github.com/radius-project/ai-extensions/pull/282) define the intended layer names, requirement IDs, inventories, and remaining rollout. Their phase tables are historical and are not present on `main`; determine current availability from the merged tree, package scripts, test configs, CI workflows, and checked-in traceability. Never use an unmerged stacked pull request as evidence of current `main` behavior.
+This skill is normative: it states the rules a change must satisfy. It is deliberately not a status report. Determine which suites and gates exist right now from the repository itself — root and package `package.json` scripts, the Vitest and Playwright configs, `.github/workflows/build.yml`, and checked-in traceability notes such as `packages/adapter-canvas/test/e2e/phase-6-traceability.md`. Those sources are authoritative because CI executes them; never treat an unmerged pull request as evidence of current `main` behavior.
 
-## Current delivery state
-
-| Phase | Current state | Delivered evidence                                                                                                                                                     |
-|-------|---------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 0–4   | Complete      | Compatibility and coverage records; runtime, server, page, and browser seams; every declared route singly owned with no legacy fallback; importable browser TypeScript |
-| 5     | Complete      | Permanent runtime integration, HTTP integration, and built-extension artifact suites run in the pull-request gates                                                     |
-| 6     | Complete      | PR #411 added the real Chromium browser-component, critical-journey, accessibility, and keyboard gates plus the production loopback-server harness                     |
-| 7     | Not delivered | No approved visual baselines or scheduled reliability matrix; failure screenshots are diagnostics only                                                                 |
-| 8     | Not delivered | No supported-host installation, discovery, panel-lifecycle, reopen, or reconnect qualification                                                                         |
-
-The delivered Phase 6 scope is the browser-component suite plus the Playwright critical-journey, accessibility, and keyboard gates. A separate browser-functional directory is not a current required gate; the remaining real-form-submission journeys are tracked as follow-up work in issue #412. `packages/adapter-canvas/test/e2e/phase-6-traceability.md` and `packages/adapter-canvas/MANUAL-TESTING.md` were written against the narrower foundations scope and still describe that layer as outstanding; this skill records the gates CI actually enforces today. Do not treat the absent browser-functional layer as evidence that already ran, and do not describe loopback HTTP as real-host coverage.
-
-Phase 7 visual and Phase 8 host suites are not delivered. Do not create them speculatively or claim their evidence; add them only when their phase is approved and implemented, then refresh this skill.
-
-After each remaining automation phase completes, refresh this skill in a separate signed-off pull request so its available suites and required gates never lag implementation. Base the refresh on the phase branch when the delivery is still stacked and unmerged, or on the newly updated `main` after merge.
+The Radius Canvas testability work lands in numbered phases, and later phases are still outstanding. There is no delivered visual-baseline, scheduled-reliability, or supported-host qualification gate. Do not create those suites speculatively, do not claim their evidence, and do not describe loopback HTTP as real-host coverage. When a phase adds or changes a required gate, update this skill in the same change or an immediately following one so its normative requirements never lag the code.
 
 ## Required workflow
 
@@ -50,6 +36,7 @@ After each remaining automation phase completes, refresh this skill in a separat
 - Construct one complete typed production dependency object at the composition root. Give route families and services narrowed dependency views. Missing dependencies fail during construction; never install a silent success-shaped default.
 - Keep one route table as the source of truth for method, path, matching, body policy, and handler. Every route has exactly one owner.
 - Keep route handlers thin: parse HTTP input, call a use-case service, and serialize its result. Multi-stage setup, graph, environment, deployment, operation, cache, or workflow behavior belongs in independently testable services with narrow ports.
+- Keep server modules decomposed. Route family names assign ownership and do not justify one large file per family.
 - Keep page responsibilities split across the shared shell, graph pages, environment and credential pages, and deployment pages. Preserve stable markup, serialized state, escaping, theme tokens, URLs, operation states, and accessibility semantics.
 - Put executable browser behavior in importable TypeScript under `src/browser/`. Expose explicit initialization and teardown with narrow ports for network, navigation, clocks, external opening, and DOM access.
 - Compile browser modules in memory into deterministic self-contained inline scripts. Do not commit generated JavaScript, maintain behavior as source strings, duplicate it in templates, or fetch extension-owned browser modules at runtime.
@@ -67,6 +54,7 @@ After each remaining automation phase completes, refresh this skill in a separat
 - Escape rendered HTML, JavaScript strings, URLs, and serialized state for their output context.
 - Pass command arguments as an argv array. Never interpolate user-controlled values into a shell command or enable shell execution for them.
 - Tests and diagnostics must not use personal credentials, inherited tokens, live cloud resources, mutable remote repositories, public CDNs, or secret-shaped fixture values.
+- Do not reach GitHub, GHCR, cloud APIs, public CDNs, user storage, local CLI login, or the internet from pull-request tests. A suite that passes only because the developer's `gh` was already authenticated is a broken suite.
 
 ## TypeScript and JavaScript rules
 
@@ -83,7 +71,7 @@ After each remaining automation phase completes, refresh this skill in a separat
 - Follow the repository ESLint, TypeScript, and Prettier configuration. Use two-space indentation, double quotes, semicolons, no trailing commas, and LF endings as configured.
 - Add comments only for non-obvious invariants, safety constraints, or architectural intent.
 
-## Delivered test layers
+## Test layers
 
 | Layer                                         | Location and configuration                                                                                                                                        | Command and current CI gate                                                                        |
 |-----------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
@@ -95,7 +83,7 @@ After each remaining automation phase completes, refresh this skill in a separat
 | Critical journey, accessibility, and keyboard | `packages/adapter-canvas/test/e2e/canvas-chromium.test.ts`, support harness, and `playwright.config.ts`; Playwright and `@axe-core/playwright`                    | `pnpm run test:chromium`; `canvas-chromium` job                                                    |
 | Windows process integration                   | `packages/adapter-canvas/src/gh.windows.test.ts`                                                                                                                  | `pnpm run test:integration:windows-process`; `windows-process-integration` job on `windows-latest` |
 
-The regular Canvas Vitest config includes collocated tests, coverage-summary checks, Chromium harness unit tests, runtime integration, and HTTP integration with a 15-second timeout. Core and shared-adapter unit configs use Vitest's default 5-second timeout. The artifact config uses 30 seconds, the browser-component config uses 10 seconds, and Playwright uses 30 seconds per case. No separate browser-functional gate is required by current CI. Do not invent a visual, scheduled-reliability, or host directory until its phase delivers and wires one into a script and CI.
+Each layer sets its own timeout in its own config: `packages/adapter-canvas/vitest.config.ts` covers collocated Canvas tests, coverage-summary checks, Chromium harness unit tests, runtime integration, and HTTP integration; `vitest.artifact.config.ts`, `vitest.component.config.ts`, and `playwright.config.ts` cover the remaining layers; `packages/core` and `packages/adapter-shared` use Vitest's default. Read the config for the current value rather than assuming one. Never raise a timeout to paper over a slow or flaky test — fix the test or the production path. Do not invent a visual, scheduled-reliability, or host directory until its phase delivers one and wires it into a script and CI.
 
 ### Chromium harness contract
 
@@ -111,6 +99,8 @@ The regular Canvas Vitest config includes collocated tests, coverage-summary che
 ### Test design and placement
 
 - Collocate unit tests beside production as `*.test.ts`. Put non-unit Canvas suites and support under `packages/adapter-canvas/test/`; production code must never import test support.
+- A new suite directory only runs once it is added to `packages/adapter-canvas/vitest.config.ts` or a dedicated config such as `vitest.artifact.config.ts`, with a matching package script. Wire it up in the same change; these configs use explicit `include` allowlists, so an unwired directory silently never runs in CI.
+- Use real deterministic core functions in adapter tests where practical. Do not duplicate core's unit tests in the Canvas package.
 - Keep deterministic reusable data under `test/fixtures/` and shared fakes and harnesses under `test/support/` or the owning suite's `support/` directory.
 - Test observable behavior, not implementation text. Narrow source assertions may protect a build contract but cannot replace executable behavior.
 - Use descriptive behavior-oriented names and table-driven cases only for genuine input matrices.
@@ -124,11 +114,11 @@ The regular Canvas Vitest config includes collocated tests, coverage-summary che
 
 ### Retry and diagnostic policy
 
-Vitest layers do not configure retries. In Playwright, `@safety` cases run in the `canvas-safety` project with zero retries; all other current Chromium cases run in the `canvas` project with one diagnostic retry. Safety, destructive, branch-selection, path-confinement, and redaction coverage must never pass through a retry.
+Vitest layers do not configure retries. Playwright splits Chromium into a `canvas-safety` project for `@safety` cases and a `canvas` project for the rest, with retries configured per project in `packages/adapter-canvas/playwright.config.ts`; the safety project runs without retries by design. Safety, destructive, branch-selection, path-confinement, and redaction coverage must never pass through a retry.
 
 The Playwright list reporter and HTML result classify a retry-only pass as flaky, so the original failure remains visible in the run output. The workflow uploads `test-results` and `playwright-report` only when the final Chromium job fails; a retry-only passing CI job therefore remains visible in the job log but does not receive an uploaded artifact. Report every retry-only pass as a flake and investigate it rather than rerunning or summarizing the gate as clean.
 
-Failure traces use `retain-on-failure`, screenshots use `only-on-failure`, video is off, and the HTML report never opens automatically. These diagnostics are not Phase 7 visual baselines.
+Failure traces use `retain-on-failure`, screenshots use `only-on-failure`, video is off, and the HTML report never opens automatically. These diagnostics are not approved visual baselines.
 
 ## Required test level by change
 
@@ -139,10 +129,10 @@ Failure traces use `retain-on-failure`, screenshots use `only-on-failure`, video
 | Page renderer or served page contract                                                             | Renderer tests for markup, state, escaping, IDs, and accessibility semantics plus HTTP integration proving the page is served            |
 | Browser entry, helper, form, polling, navigation, focus, or teardown                              | Importable browser unit tests plus browser component or current Playwright evidence when real DOM or cross-boundary behavior is affected |
 | Build, packaging, exports, dependencies, generated inputs, or structural completion               | Built-extension smoke against the real production build                                                                                  |
-| Supported multi-page or browser-and-server workflow already represented in Phase 6                | Critical journey in the real Chromium harness                                                                                            |
+| Supported multi-page or browser-and-server workflow already represented in the Chromium suite     | Critical journey in the real Chromium harness                                                                                            |
 | Accessibility or keyboard behavior in a represented material state                                | Real Chromium keyboard assertions and `@axe-core/playwright` checks                                                                      |
 | Windows command resolution, quoting, or argv behavior                                             | Windows process integration on a real Windows runner                                                                                     |
-| Stable visual behavior                                                                            | No automated gate exists yet; do not create or approve a baseline outside Phase 7                                                        |
+| Stable visual behavior                                                                            | No automated gate exists yet; do not create or approve a baseline until that gate is delivered                                           |
 | Real host installation, discovery, or panel lifecycle                                             | No automated gate exists yet; loopback and emulated contracts must not be reported as host coverage                                      |
 
 Choose the cheapest faithful layer, but do not stop at unit tests when the changed contract crosses a delivered boundary. Higher layers complement unit tests and never excuse missing focused unit coverage.
@@ -208,4 +198,4 @@ pnpm run test:integration:runtime
 pnpm run test:integration:http
 ```
 
-Do not require absent Phase 7 visual or scheduled-reliability commands or Phase 8 host commands. Before finishing, confirm all affected delivered layers ran, architecture and safety contracts remain intact, coverage floors did not regress, retry-only Chromium passes are reported as flakes, and every acquired resource is cleaned up.
+Do not require absent visual, scheduled-reliability, or supported-host commands. Before finishing, confirm all affected layers ran, architecture and safety contracts remain intact, coverage floors did not regress, retry-only Chromium passes are reported as flakes, and every acquired resource is cleaned up.
