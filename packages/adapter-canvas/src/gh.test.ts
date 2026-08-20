@@ -1111,3 +1111,65 @@ describe.sequential("getGhPackageCredentials", () => {
     );
   });
 });
+
+// A branch's file listing is the evidence the modeling gate refuses on, so it
+// must contain only real files and must never present a partial answer as a
+// complete one. Every failure resolves to an empty array, which callers read as
+// "could not establish" rather than "the repository has nothing".
+describe.sequential("fetchRepoTree", () => {
+  afterEach(() => {
+    restorePlatform();
+    vi.clearAllMocks();
+  });
+
+  it("requests blobs only and carries the truncation flag", async () => {
+    const { fetchRepoTree } = await loadGh("linux", {
+      commandResult: {
+        stdout: JSON.stringify({
+          truncated: false,
+          paths: ["Dockerfile", "src/index.ts"]
+        })
+      }
+    });
+
+    expect(await fetchRepoTree("acme/widgets", "main")).toEqual([
+      "Dockerfile",
+      "src/index.ts"
+    ]);
+    const args = childProcess.execFile.mock.calls.at(-1)?.[1] as string[];
+    expect(args.join(" ")).toContain('select(.type == "blob")');
+    expect(args.join(" ")).toContain("/repos/acme/widgets/git/trees/main");
+  });
+
+  it("discards a truncated listing rather than reporting a partial tree", async () => {
+    const { fetchRepoTree } = await loadGh("linux", {
+      commandResult: {
+        stdout: JSON.stringify({ truncated: true, paths: ["src/index.ts"] })
+      }
+    });
+
+    expect(await fetchRepoTree("acme/widgets", "main")).toEqual([]);
+  });
+
+  it.each([
+    ["a command failure", { error: "gh unavailable" }],
+    ["unparsable output", { stdout: "not json" }],
+    ["a non-object payload", { stdout: "[]" }],
+    ["a null payload", { stdout: "null" }],
+    ["a missing paths field", { stdout: JSON.stringify({ truncated: false }) }]
+  ])("resolves empty for %s", async (_label, commandResult) => {
+    const { fetchRepoTree } = await loadGh("linux", { commandResult });
+
+    expect(await fetchRepoTree("acme/widgets", "main")).toEqual([]);
+  });
+
+  it("drops non-string entries", async () => {
+    const { fetchRepoTree } = await loadGh("linux", {
+      commandResult: {
+        stdout: JSON.stringify({ truncated: false, paths: ["a.ts", 7, null] })
+      }
+    });
+
+    expect(await fetchRepoTree("acme/widgets", "main")).toEqual(["a.ts"]);
+  });
+});
