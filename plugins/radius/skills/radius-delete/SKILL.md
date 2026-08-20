@@ -20,7 +20,7 @@ Two distinct teardown flows are available from the Radius canvas:
 Before invoking this skill:
 
 1. A GitHub deploy environment configured with cloud credentials → use the `radius-environment` skill if missing.
-2. For a deployment delete with cloud resources: the application was deployed to that environment at least once (the delete restores persisted state to know what to remove). Before authenticating to Azure, the workflow first confirms whether persisted Radius state exists: it needs a GitHub-issued GHCR pull credential (`GITHUB_TOKEN`) to query the state archive over the registry's HTTP API, or `contents: read` to check the `radius-state` git branch, but **no Azure/cloud credential**. If that check confirms no state was ever persisted, the workflow completes as a local-only delete without cloud authentication or resource changes. If the check itself fails (GHCR unreachable, misconfigured backend, unexpected registry response), the whole delete fails closed rather than risk skipping a cloud teardown that should have run.
+2. For a deployment delete with cloud resources: the application was deployed to that environment at least once (the delete restores persisted state to know what to remove). Before authenticating to Azure, the workflow checks persisted Radius state using a GitHub-issued GHCR pull credential (`GITHUB_TOKEN`) or `contents: read` for the `radius-state` git branch; it needs **no Azure/cloud credential** for this check. An absent archive is not proof that cloud resources were never created, so the delete fails closed unless an operator explicitly selects the warned `force_local_only` option.
 3. Authenticated `gh` CLI access to dispatch workflows. The extension shells out to `gh`, which uses your stored GitHub credential (the keyring credential from `gh auth token`) and falls back to it when an injected token lacks the `workflow` scope — there is no separate extension-managed PAT to configure.
 
 ## How to invoke
@@ -36,12 +36,10 @@ The extension keeps the committed delete workflow files current before dispatchi
 ## What the deployment-delete workflow does
 
 1. Commits/updates the application-delete workflow files if they've changed — the `delete-application.yml` dispatcher plus the `delete-azure.yml` provider workflow. The extension commits only the Azure provider workflow and strips the dispatcher's `aws:` job.
-2. A `detect-state` job runs first and checks whether persisted Radius state exists — a GHCR HTTP manifest check (git backend: `git ls-remote` against the `radius-state` branch). This needs a GitHub-issued GHCR pull credential (`GITHUB_TOKEN`) or `contents: read`, but **no Azure/cloud credential**. Three outcomes:
-   - **State confirmed present** → the cloud `delete` job runs (Azure OIDC, AKS, recipe deletes) as described below.
-   - **State confirmed absent** (GHCR reports the manifest/package never existed, or the git branch is missing) → the cloud `delete` job is skipped; the run succeeds as a local-only delete and the workflow summary records that no cloud resources were touched.
-   - **Detection inconclusive** (unconfigured backend, GHCR error other than "not found", network failure) → `detect-state` fails closed and the cloud `delete` job never runs, rather than risk silently skipping a teardown that should have happened. A green run always means one of the first two cases, never the third.
-
-   `detect-state` is bound to the same GitHub Environment as the cloud `delete` job so `vars.*` resolve; environments with required reviewers are gated once for each job, so a delete can prompt for approval twice.
+2. The existing environment-bound `delete` job checks persisted Radius state before Azure OIDC — a GHCR HTTP manifest check (git backend: `git ls-remote` against the `radius-state` branch). This needs a GitHub-issued GHCR pull credential (`GITHUB_TOKEN`) or `contents: read`, but **no Azure/cloud credential**. The job crosses environment protection only once.
+   - **State confirmed present** → Azure OIDC and cloud teardown run.
+   - **State confirmed absent** → the workflow fails closed by default because a failed or cancelled prior teardown may have left cloud resources without an archive. An operator who has independently confirmed there are no resources to tear down can dispatch with `force_local_only=true`; that skips cloud steps and records an orphaning warning in the workflow summary.
+   - **Detection inconclusive** (unconfigured backend, GHCR error other than "not found", network failure) → the workflow fails closed.
 3. When state exists, it authenticates to the cloud via OIDC and connects to the target AKS cluster.
 4. Installs `k3d` + the `rad` CLI + Terraform and installs Radius on the ephemeral control plane wired to the target cluster (same setup as deploy).
 5. Projects GitHub OIDC tokens into the pods and registers the cloud identity with `rad credential register`, so recipe deletes can reach the target cluster and cloud.

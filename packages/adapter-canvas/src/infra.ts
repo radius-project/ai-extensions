@@ -287,6 +287,9 @@ export async function generateDeleteWorkflow(
     generated[DELETE_APP_DISPATCHER_FILE] = stripAwsDispatcherJob(
       generated[DELETE_APP_DISPATCHER_FILE]
     );
+    generated[DELETE_APP_DISPATCHER_FILE] = addForceLocalOnlyInput(
+      generated[DELETE_APP_DISPATCHER_FILE]
+    );
   }
   if (generated && typeof generated[DELETE_AZURE_FILE] === "string") {
     generated[DELETE_AZURE_FILE] = addDeleteStateCheck(
@@ -301,12 +304,15 @@ export async function generateDeleteWorkflow(
 
 /**
  * Keep the cloud delete job from requiring cloud OIDC when the environment has
- * never persisted Radius state. A confirmed-absent state archive/branch proves
- * no prior deploy reached teardown, so succeeding with the cloud job skipped
- * lets the canvas remove its GitHub-side records. Only positive "confirmed
- * absent" signals (git ref missing, GHCR manifest missing/never created) skip
- * cloud deletion; an unconfigured backend or an inconclusive registry response
- * fails the job closed rather than risk orphaning live cloud resources.
+ * never persisted Radius state. The check runs inside the existing
+ * environment-bound delete job, rather than in a second job, so protected
+ * environments require approval only once.
+ *
+ * A missing archive alone is not evidence that a deployment never mutated the
+ * cloud: teardown can fail or be interrupted before publishing it. Therefore,
+ * absent state fails closed by default. An operator may explicitly set
+ * `force_local_only` on the dispatch workflow to acknowledge that risk and
+ * remove only GitHub-side records.
  *
  * The GHCR check queries the registry's HTTP API directly (token exchange +
  * `GET /v2/.../manifests/...`, branching on status code) instead of shelling
@@ -333,32 +339,32 @@ export function addDeleteStateCheck(yaml: string): string {
         "changed and the persisted-state gate could not be applied."
     );
   }
-  if (lines.some((l) => /^ {2}detect-state:\s*$/.test(l))) return yaml;
+  if (lines.some((l) => /^ {2}detect-state:\s*$/.test(l))) {
+    throw new Error(
+      'addDeleteStateCheck: upstream includes a separate "detect-state" job; ' +
+        "refusing to combine it with the single-approval state gate."
+    );
+  }
+  addForceLocalOnlyWorkflowInput(lines);
 
-  const stateCheckJob = `  detect-state:
-    name: Detect persisted Radius state
-    runs-on: ubuntu-24.04
-    # Bound to the same GitHub Environment as \`delete\` below so vars.* (state
-    # backend/registry/archive) resolve here. GitHub evaluates environment
-    # protection rules per job, not per workflow run, so environments with
-    # required reviewers are gated twice per delete: once here, once on
-    # \`delete\`. See plugins/radius/skills/radius-delete/SKILL.md for the
-    # trade-off and alternatives.
-    environment: \${{ inputs.environment }}
-    outputs:
-      has_state: \${{ steps.state.outputs.has_state }}
-    steps:
-      - name: Checkout state repository
-        if: \${{ vars.RADIUS_STATE_BACKEND == 'git' }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+  const checkoutIndex = lines.findIndex(
+    (line, index) => index > jobIndex && /^\s{6}- name: Checkout\s*$/.test(line)
+  );
+  if (checkoutIndex === -1) {
+    throw new Error(
+      'addDeleteStateCheck: expected a "Checkout" step in the generated Azure ' +
+        "delete workflow before applying the persisted-state gate."
+    );
+  }
 
-      - name: Detect persisted Radius state
+  const stateCheckStep = `      - name: Detect persisted Radius state
         id: state
         shell: bash
         env:
           STATE_BACKEND: \${{ vars.RADIUS_STATE_BACKEND }}
           STATE_REGISTRY: \${{ vars.RADIUS_STATE_REGISTRY }}
           STATE_ARCHIVE: \${{ vars.RADIUS_STATE_ARCHIVE }}
+          FORCE_LOCAL_ONLY: \${{ inputs.force_local_only }}
           GHCR_ACTOR: \${{ github.actor }}
           GHCR_TOKEN: \${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -368,9 +374,15 @@ export function addDeleteStateCheck(yaml: string): string {
           summary() {
             echo "backend=$backend, registry=\${STATE_REGISTRY:-<git branch>}, archive=$archive: $1" >> "$GITHUB_STEP_SUMMARY"
           }
-          no_state() {
-            echo "has_state=false" >> "$GITHUB_OUTPUT"
-            summary "no persisted Radius state found; skipping cloud deletion. No cloud resources were touched."
+          absent_state() {
+            if [[ "$FORCE_LOCAL_ONLY" == "true" ]]; then
+              echo "has_state=false" >> "$GITHUB_OUTPUT"
+              summary "::warning::State is confirmed absent; force_local_only was selected. Cloud resources may remain if an earlier deployment was interrupted before state was persisted."
+              return
+            fi
+            summary "::error::State is confirmed absent, but this does not prove cloud mutation never began. Re-run with force_local_only=true only after confirming no cloud resources need teardown."
+            echo "Persisted Radius state is absent. Refusing to skip cloud deletion without explicit force_local_only=true." >&2
+            exit 1
           }
 
           if [[ "$backend" == "git" ]]; then
@@ -382,7 +394,7 @@ export function addDeleteStateCheck(yaml: string): string {
               echo "has_state=true" >> "$GITHUB_OUTPUT"
               summary "radius-state branch found; running cloud deletion."
             elif [[ "$status" == "2" ]]; then
-              no_state
+              absent_state
             else
               summary "could not confirm whether the radius-state branch exists (git ls-remote exit $status)."
               echo "Could not determine whether persisted Radius state exists (git ls-remote exit $status)." >&2
@@ -420,14 +432,14 @@ export function addDeleteStateCheck(yaml: string): string {
               summary "manifest found (HTTP 200); running cloud deletion."
               ;;
             404)
-              no_state
+              absent_state
               ;;
             401 | 403)
               # GHCR reports both "package never created" and "package exists,
               # tag missing" as 401/403 with NAME_UNKNOWN/MANIFEST_UNKNOWN,
               # rather than a 404 -- treat those as confirmed-absent too.
               if grep -qiE 'NAME_UNKNOWN|MANIFEST_UNKNOWN' "$response_file"; then
-                no_state
+                absent_state
               else
                 summary "GHCR denied access to the state archive (HTTP $http_status); cannot confirm absence."
                 echo "Could not determine whether persisted Radius state exists (HTTP $http_status):" >&2
@@ -442,13 +454,111 @@ export function addDeleteStateCheck(yaml: string): string {
               exit 1
               ;;
           esac
-
-  delete:
-    needs: detect-state
-    if: \${{ needs.detect-state.outputs.has_state == 'true' }}
 `;
-  lines.splice(jobIndex, 1, stateCheckJob.replace(/\n$/, ""));
+  let insertAt = checkoutIndex + 1;
+  while (insertAt < lines.length && !/^\s{6}- name:\s/.test(lines[insertAt])) {
+    insertAt++;
+  }
+  lines.splice(insertAt, 0, ...stateCheckStep.split("\n"));
+  addStateGateToDeleteSteps(
+    lines,
+    insertAt + stateCheckStep.split("\n").length
+  );
   return lines.join("\n");
+}
+
+function addStateGateToDeleteSteps(lines: string[], start: number): void {
+  for (let index = start; index < lines.length; index++) {
+    if (/^ {2}\S/.test(lines[index])) break;
+    if (!/^ {6}- name:\s/.test(lines[index])) continue;
+
+    let end = index + 1;
+    while (
+      end < lines.length &&
+      !/^ {6}- name:\s/.test(lines[end]) &&
+      !/^ {2}\S/.test(lines[end])
+    ) {
+      end++;
+    }
+    const ifIndex = lines.findIndex(
+      (line, candidate) =>
+        candidate > index && candidate < end && /^ {8}if:\s/.test(line)
+    );
+    const gate = "steps.state.outputs.has_state == 'true'";
+    if (ifIndex === -1) {
+      lines.splice(index + 1, 0, `        if: \${{ ${gate} }}`);
+      end++;
+    } else {
+      const rawExpression = lines[ifIndex].replace(/^ {8}if:\s*/, "");
+      const expression =
+        rawExpression.match(/^\${{\s*(.*?)\s*}}$/)?.[1] ?? rawExpression;
+      lines[ifIndex] = `        if: \${{ ${gate} && (${expression}) }}`;
+    }
+    index = end - 1;
+  }
+}
+
+function addForceLocalOnlyInput(yaml: string): string {
+  if (yaml.includes("force_local_only:")) return yaml;
+  const lines = yaml.split("\n");
+  const azureIndex = lines.findIndex((line) => /^ {2}azure:\s*$/.test(line));
+  if (azureIndex === -1) {
+    throw new Error(
+      'addForceLocalOnlyInput: expected a top-level "azure" job in the delete dispatcher.'
+    );
+  }
+  const nextJob = lines.findIndex(
+    (line, index) => index > azureIndex && /^ {2}\S/.test(line)
+  );
+  const azureEnd = nextJob === -1 ? lines.length : nextJob;
+  const withIndex = lines.findIndex(
+    (line, index) =>
+      index > azureIndex && index < azureEnd && /^ {4}with:\s*$/.test(line)
+  );
+  if (withIndex === -1) {
+    throw new Error(
+      'addForceLocalOnlyInput: expected a "with" block in the Azure delete dispatcher job.'
+    );
+  }
+  lines.splice(
+    withIndex + 1,
+    0,
+    "      force_local_only: ${{ inputs.force_local_only }}"
+  );
+  const jobsIndex = lines.findIndex((line) => /^jobs:\s*$/.test(line));
+  if (jobsIndex === -1) {
+    throw new Error(
+      "addForceLocalOnlyInput: expected a jobs mapping in the delete dispatcher."
+    );
+  }
+  const input = `      force_local_only:
+        description: 'Skip cloud teardown only when state is absent (may orphan cloud resources)'
+        type: boolean
+        required: false
+        default: false
+`.split("\n");
+  lines.splice(jobsIndex, 0, ...input);
+  return lines.join("\n");
+}
+
+function addForceLocalOnlyWorkflowInput(lines: string[]): void {
+  if (lines.some((line) => /^ {6}force_local_only:\s*$/.test(line))) return;
+  const permissionsIndex = lines.findIndex((line) =>
+    /^permissions:\s*$/.test(line)
+  );
+  if (permissionsIndex === -1) {
+    throw new Error(
+      "addDeleteStateCheck: expected permissions after workflow_call inputs."
+    );
+  }
+  lines.splice(
+    permissionsIndex,
+    0,
+    "      force_local_only:",
+    "        type: boolean",
+    "        required: false",
+    "        default: false"
+  );
 }
 
 /**

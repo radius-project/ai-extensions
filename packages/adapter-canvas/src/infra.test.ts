@@ -47,8 +47,22 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
       "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n",
     "run-rad-commands-azure.yml":
       "name: deploy-azure\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
-    "delete-application.yml":
-      "name: delete\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n",
+    "delete-application.yml": `name: delete
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        default: '{{ENV}}'
+      application:
+        required: true
+jobs:
+  azure:
+    uses: ./.github/workflows/delete-azure.yml
+    with:
+      environment: \${{ inputs.environment }}
+      resource_type: application
+      name: \${{ inputs.application }}
+`,
     // A trimmed but structurally faithful copy of the real upstream
     // radius-project/radius/.github/extension/delete-azure.yml: job-level
     // `environment:`/`env:` between `  delete:` and its `steps:`, the
@@ -257,21 +271,21 @@ describe("GHCR verification probe", () => {
 });
 
 describe("generateDeleteWorkflow", () => {
-  it("skips Azure OIDC when no persisted state archive exists", async () => {
+  it("detects state inside the existing delete job before Azure OIDC", async () => {
     const workflows = await generateDeleteWorkflow("dev");
     const azure = workflows["delete-azure.yml"];
-    const stateCheck = workflowJob(azure, "detect-state");
     const cloudDelete = workflowJob(azure, "delete");
 
-    expect(stateCheck).toContain("runs-on: ubuntu-24.04");
-    expect(stateCheck).toContain(
-      "has_state: ${{ steps.state.outputs.has_state }}"
-    );
-    expect(cloudDelete).toContain("needs: detect-state");
+    expect(workflowJob(azure, "detect-state")).toBe("");
+    expect(cloudDelete).toContain("id: state");
     expect(cloudDelete).toContain(
-      "if: ${{ needs.detect-state.outputs.has_state == 'true' }}"
+      "if: ${{ steps.state.outputs.has_state == 'true' }}"
     );
     expect(cloudDelete).toContain("Azure Login (OIDC)");
+    expect(workflows["delete-application.yml"]).toContain("force_local_only:");
+    expect(workflows["delete-application.yml"]).toContain(
+      "force_local_only: ${{ inputs.force_local_only }}"
+    );
   });
 
   it("produces a workflow that parses as valid YAML with the expected job graph", async () => {
@@ -280,28 +294,37 @@ describe("generateDeleteWorkflow", () => {
     // Confirms the splice produces YAML GitHub will accept, not just a string
     // that happens to contain the right substrings.
     const parsed = yaml.load(azure) as {
-      jobs: Record<string, { needs?: string; if?: string; steps: unknown[] }>;
+      jobs: Record<string, { steps: Array<{ name?: string; if?: string }> }>;
     };
     expect(Object.keys(parsed.jobs)).toEqual(
-      expect.arrayContaining(["detect-state", "delete"])
+      expect.arrayContaining(["delete"])
     );
-    expect(parsed.jobs.delete.needs).toBe("detect-state");
-    expect(parsed.jobs.delete.if).toBe(
-      "${{ needs.detect-state.outputs.has_state == 'true' }}"
+    expect(parsed.jobs["detect-state"]).toBeUndefined();
+    expect(parsed.jobs.delete.steps[1]).toMatchObject({
+      name: "Detect persisted Radius state"
+    });
+    expect(
+      parsed.jobs.delete.steps.find(
+        (step) => step.name === "Azure Login (OIDC)"
+      )?.if
+    ).toBe(
+      "${{ steps.state.outputs.has_state == 'true' && (vars.AZURE_CLIENT_ID != '') }}"
     );
-    expect(Array.isArray(parsed.jobs["detect-state"].steps)).toBe(true);
+    expect(
+      parsed.jobs.delete.steps.find((step) => step.name === "Teardown")?.if
+    ).toBe("${{ steps.state.outputs.has_state == 'true' && (always()) }}");
     // The original job's own steps (Azure Login, restore-state, delete,
     // teardown) must survive the splice untouched.
-    expect(parsed.jobs.delete.steps).toHaveLength(6);
+    expect(parsed.jobs.delete.steps).toHaveLength(7);
   });
 
-  it("does not duplicate the state check when the upstream template provides it", () => {
+  it("rejects an upstream preflight job that would reintroduce a second approval", () => {
     const workflow =
       "name: delete-azure\njobs:\n  detect-state:\n    runs-on: ubuntu-24.04\n  delete:\n    runs-on: ubuntu-24.04\n";
 
-    expect(
-      addDeleteStateCheck(workflow).match(/  detect-state:/g)
-    ).toHaveLength(1);
+    expect(() => addDeleteStateCheck(workflow)).toThrow(
+      /upstream includes a separate "detect-state" job/
+    );
   });
 
   it("throws (rather than silently no-opping) when no delete job exists", () => {
@@ -325,21 +348,19 @@ describe("generateDeleteWorkflow", () => {
   });
 
   describe("detect-state shell logic", () => {
-    // Extracts the actual `run:` script for the "Detect persisted Radius
-    // state" step from the generated workflow, so these tests exercise the
+    // Extracts the actual `run:` script for the delete job's "Detect persisted
+    // Radius state" step from the generated workflow, so these tests exercise the
     // real shell logic (parsed out of real YAML) rather than a hand-copied
     // stand-in that could drift from production.
     function detectStateScript(azureYaml: string): string {
       const parsed = yaml.load(azureYaml) as {
         jobs: {
-          "detect-state": {
+          delete: {
             steps: Array<{ id?: string; run?: string }>;
           };
         };
       };
-      const step = parsed.jobs["detect-state"].steps.find(
-        (s) => s.id === "state"
-      );
+      const step = parsed.jobs.delete.steps.find((s) => s.id === "state");
       if (!step?.run) throw new Error("detect-state script step not found");
       return step.run;
     }
@@ -439,7 +460,7 @@ echo -n "\${MOCK_MANIFEST_STATUS:-200}"
       expect(result.output.has_state).toBe("true");
     });
 
-    it("reports has_state=false when GHCR confirms the manifest is absent (HTTP 404)", () => {
+    it("fails closed when GHCR confirms the manifest is absent without an explicit override", () => {
       const result = runDetectState(
         script,
         {
@@ -452,11 +473,11 @@ echo -n "\${MOCK_MANIFEST_STATUS:-200}"
         },
         { curl: CURL_STUB }
       );
-      expect(result.status).toBe(0);
-      expect(result.output.has_state).toBe("false");
+      expect(result.status).not.toBe(0);
+      expect(result.output.has_state).toBeUndefined();
     });
 
-    it("reports has_state=false when GHCR denies a never-created package (HTTP 401 NAME_UNKNOWN)", () => {
+    it("allows a confirmed-absent GHCR package only with force_local_only", () => {
       const result = runDetectState(
         script,
         {
@@ -465,6 +486,7 @@ echo -n "\${MOCK_MANIFEST_STATUS:-200}"
           STATE_ARCHIVE: "radius-state",
           GHCR_ACTOR: "actor",
           GHCR_TOKEN: "token",
+          FORCE_LOCAL_ONLY: "true",
           MOCK_MANIFEST_STATUS: "401",
           MOCK_MANIFEST_BODY:
             '{"errors":[{"code":"NAME_UNKNOWN","message":"repository name not known to registry"}]}'
@@ -475,7 +497,7 @@ echo -n "\${MOCK_MANIFEST_STATUS:-200}"
       expect(result.output.has_state).toBe("false");
     });
 
-    it("reports has_state=false when GHCR denies access to a package with a missing tag (HTTP 403 MANIFEST_UNKNOWN)", () => {
+    it("allows a confirmed-absent GHCR tag only with force_local_only", () => {
       const result = runDetectState(
         script,
         {
@@ -484,6 +506,7 @@ echo -n "\${MOCK_MANIFEST_STATUS:-200}"
           STATE_ARCHIVE: "radius-state",
           GHCR_ACTOR: "actor",
           GHCR_TOKEN: "token",
+          FORCE_LOCAL_ONLY: "true",
           MOCK_MANIFEST_STATUS: "403",
           MOCK_MANIFEST_BODY:
             '{"errors":[{"code":"MANIFEST_UNKNOWN","message":"manifest unknown"}]}'
@@ -552,14 +575,24 @@ echo -n "\${MOCK_MANIFEST_STATUS:-200}"
       expect(result.output.has_state).toBe("true");
     });
 
-    it("reports has_state=false when git ls-remote confirms the branch is absent (exit 2)", () => {
+    it("allows a confirmed-absent git state branch only with force_local_only", () => {
+      const result = runDetectState(
+        script,
+        { STATE_BACKEND: "git", FORCE_LOCAL_ONLY: "true" },
+        { git: gitStub(2) }
+      );
+      expect(result.status).toBe(0);
+      expect(result.output.has_state).toBe("false");
+    });
+
+    it("fails closed when a git state branch is absent without force_local_only", () => {
       const result = runDetectState(
         script,
         { STATE_BACKEND: "git" },
         { git: gitStub(2) }
       );
-      expect(result.status).toBe(0);
-      expect(result.output.has_state).toBe("false");
+      expect(result.status).not.toBe(0);
+      expect(result.output.has_state).toBeUndefined();
     });
 
     it("fails closed on any other non-zero git ls-remote status", () => {
