@@ -94,5 +94,29 @@ describe.skipIf(!LIVE)(
         `${DEPLOY_DISPATCHER_FILE}: azure job does not forward environment: to the provider workflow`
       ).toBe(true);
     }, 30_000);
+
+    // The deploy preflight reads AZURE_CLIENT_ID and AZURE_TENANT_ID as GitHub
+    // Actions variables and treats an empty client id as "Azure login is
+    // deliberately off". All three facts live upstream, so a rename or a change
+    // to the gate would silently turn the preflight into a check of the wrong
+    // thing — reading a variable the workflow no longer uses, or warning about
+    // a non-OIDC cluster on every deploy.
+    it(`${DEPLOY_AZURE_FILE} still gates azure/login on a non-empty vars.AZURE_CLIENT_ID`, async () => {
+      const body = await fetchWorkflow(DEPLOY_AZURE_FILE);
+      const job = jobBlockContaining(body, "azure/login");
+      expect(job, `${DEPLOY_AZURE_FILE}: no job runs azure/login`).not.toBe("");
+      expect(
+        /if:\s*\$\{\{\s*vars\.AZURE_CLIENT_ID\s*!=\s*''\s*\}\}/.test(job),
+        `${DEPLOY_AZURE_FILE}: azure/login is no longer gated on vars.AZURE_CLIENT_ID != ''`
+      ).toBe(true);
+      expect(
+        job.includes("${{ vars.AZURE_CLIENT_ID }}"),
+        `${DEPLOY_AZURE_FILE}: azure/login no longer reads vars.AZURE_CLIENT_ID`
+      ).toBe(true);
+      expect(
+        job.includes("${{ vars.AZURE_TENANT_ID }}"),
+        `${DEPLOY_AZURE_FILE}: azure/login no longer reads vars.AZURE_TENANT_ID`
+      ).toBe(true);
+    }, 30_000);
   }
 );

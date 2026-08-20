@@ -1,5 +1,11 @@
 import type { BicepParam } from "../../bicep.js";
+import {
+  resolveOidcSubject,
+  type GitHubJsonRunner,
+  type ResolveOidcSubjectResult
+} from "../../azure-oidc.js";
 import type { CanvasState, DeployErrorKind } from "../../shared.js";
+import { buildEnvironmentSuffix } from "@radius-project/core/platforms";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 
 // Second runtime stage of a background deploy: everything between "we have a
@@ -37,6 +43,9 @@ export interface DeployDispatchDependencies {
   // branch it runs from.
   deployWorkflowFiles: readonly string[];
   branchNotPushedKind: DeployErrorKind;
+  // Marks the Azure OIDC preflight refusal below, so the repair guard can tell
+  // it apart from a failure the agent could fix by editing the model.
+  oidcSubjectMissingKind: DeployErrorKind;
   getBranchHeadSha(repo: string, branch: string): Promise<string | null>;
   getDefaultBranch(repo: string): Promise<string | null>;
   // Resolves rather than rejects on a non-zero exit, so the caller can inspect
@@ -52,6 +61,8 @@ export interface DeployDispatchDependencies {
     stdin: string,
     options?: DeployCommandOptions
   ): Promise<DeployCommandResult>;
+  runAz(args: string[]): Promise<DeployCommandResult>;
+  runGitHubJson: GitHubJsonRunner;
   readProcessEnv(): NodeJS.ProcessEnv;
   fetchFileForSelection(
     entry: DeployDispatchInstanceEntry,
@@ -134,6 +145,8 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployDispatchDependencies)[] = [
   "getDefaultBranch",
   "runGh",
   "runGhWithStdin",
+  "runAz",
+  "runGitHubJson",
   "readProcessEnv",
   "fetchFileForSelection",
   "appParams",
@@ -151,6 +164,25 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployDispatchDependencies)[] = [
   "now"
 ];
 
+// Exported so the opt-in `az` contract test can drive the real argument list.
+// `az ad app federated-credential list` accepts only `--id` plus global args —
+// adding a scoping flag such as `--tenant` makes it exit with "unrecognized
+// arguments", which would silently turn the preflight into a permanent no-op.
+export function buildFederatedCredentialListArgs(clientId: string): string[] {
+  return [
+    "ad",
+    "app",
+    "federated-credential",
+    "list",
+    "--id",
+    clientId,
+    "--query",
+    "[].subject",
+    "-o",
+    "json"
+  ];
+}
+
 export function createDeployDispatchService(
   dependencies: DeployDispatchDependencies
 ): DeployDispatchService {
@@ -167,6 +199,15 @@ export function createDeployDispatchService(
   if (!dependencies.branchNotPushedKind) {
     throw new Error(
       "createDeployDispatchService is missing required dependencies: branchNotPushedKind"
+    );
+  }
+  // Not covered by REQUIRED_DEPENDENCIES because it is a string rather than a
+  // function. Omitting it would leave deployErrorKind undefined on a preflight
+  // refusal, and the repair guard would open a repair loop on a failure no model
+  // edit can fix — the exact outcome this kind exists to prevent.
+  if (!dependencies.oidcSubjectMissingKind) {
+    throw new Error(
+      "createDeployDispatchService is missing required dependencies: oidcSubjectMissingKind"
     );
   }
   if (
@@ -366,6 +407,268 @@ export function createDeployDispatchService(
     return !!repoDefault;
   };
 
+  // The preflight answers one of four things, and the difference matters more
+  // than the check itself:
+  //
+  // - "covered": every subject GitHub could mint has a federated credential.
+  // - "skipped": the environment deliberately has no Azure login to check.
+  // - "missing": we got a definitive answer from GitHub and Azure and NOT ONE of
+  //   the possible subjects is present. The workflow could only fail its login,
+  //   so refusing here is strictly better than a late AADSTS700213 (also written
+  //   AADSTS7002138 in some Entra responses).
+  // - "unverified": we could not complete the check, or coverage is partial.
+  //   This dispatches with a warning rather than blocking. Blocking here would
+  //   regress every user whose deploy works today but whose machine cannot run
+  //   the check — `az` is not otherwise required to deploy, since the workflow
+  //   authenticates in Actions, not locally. Partial coverage is in the same
+  //   bucket: when GitHub's effective default subject format is indeterminate
+  //   the resolver returns both the mutable and immutable forms, and only one of
+  //   them will ever be presented, so holding just one is not proof of failure.
+  type AzureFederatedCredentialValidation =
+    | { status: "covered" }
+    | { status: "skipped"; message: string }
+    | { status: "missing"; message: string }
+    | { status: "unverified"; message: string };
+
+  const validationUnverified = (
+    environment: string,
+    reason: string
+  ): AzureFederatedCredentialValidation => ({
+    status: "unverified",
+    message:
+      `Could not verify Azure federated credential coverage for environment "${environment}": ${reason}. ` +
+      "Deploying anyway — if the workflow fails to log in to Azure with AADSTS700213, re-run Create Environment with Azure auto-setup."
+  });
+
+  type GitHubVariableLookup =
+    | { kind: "value"; value: string }
+    | { kind: "blank" }
+    | { kind: "absent" }
+    | { kind: "error"; reason: string };
+
+  // GitHub Actions resolves a variable from the environment first and falls back
+  // to the repository only when the environment does not define it, so the
+  // preflight has to read them in that order to see what the workflow will see.
+  // A variable that exists with an empty value still shadows the repository one,
+  // so only "absent" falls through.
+  const readGitHubActionsVariable = async (
+    repo: string,
+    environment: string,
+    name: string
+  ): Promise<GitHubVariableLookup> => {
+    const envPath = `/repos/${repo}/environments/${encodeURIComponent(
+      environment
+    )}/variables/${name}`;
+    const repoPath = `/repos/${repo}/actions/variables/${name}`;
+    const read = async (
+      path: string,
+      scope: string
+    ): Promise<GitHubVariableLookup> => {
+      const response = await dependencies.runGitHubJson(path);
+      if (!response.ok) {
+        if (response.status === 404) return { kind: "absent" };
+        return {
+          kind: "error",
+          reason: `GitHub ${scope} ${name} lookup failed (${response.stderr || `HTTP ${response.status ?? "unknown"}`})`
+        };
+      }
+      const value = response.json?.value;
+      if (typeof value !== "string") {
+        return {
+          kind: "error",
+          reason: `GitHub ${scope} has an invalid ${name}`
+        };
+      }
+      if (!value.trim()) return { kind: "blank" };
+      return { kind: "value", value: value.trim() };
+    };
+    const environmentValue = await read(
+      envPath,
+      `environment "${environment}"`
+    );
+    if (environmentValue.kind !== "absent") return environmentValue;
+    return read(repoPath, `repository "${repo}"`);
+  };
+
+  // Entra compares the OIDC subject case-sensitively, but GitHub resolves an
+  // environment by name case-insensitively — so deploying "dev" against an
+  // environment stored as "Dev" reads its variables fine while the token carries
+  // "environment:Dev". Building the subject from the requested spelling would
+  // hard-block that working deploy, so the name GitHub reports wins.
+  const readCanonicalEnvironmentName = async (
+    repo: string,
+    environment: string
+  ): Promise<
+    { kind: "name"; name: string } | { kind: "error"; reason: string }
+  > => {
+    const response = await dependencies.runGitHubJson(
+      `/repos/${repo}/environments/${encodeURIComponent(environment)}`
+    );
+    if (!response.ok) {
+      return {
+        kind: "error",
+        reason: `GitHub environment "${environment}" lookup failed (${response.stderr || `HTTP ${response.status ?? "unknown"}`})`
+      };
+    }
+    const name = response.json?.name;
+    if (typeof name !== "string" || !name.trim()) {
+      return {
+        kind: "error",
+        reason: `GitHub did not report a name for environment "${environment}"`
+      };
+    }
+    return { kind: "name", name: name.trim() };
+  };
+
+  const validateAzureFederatedCredential = async (
+    repo: string,
+    environment: string
+  ): Promise<AzureFederatedCredentialValidation> => {
+    let clientId: string;
+    try {
+      const clientIdLookup = await readGitHubActionsVariable(
+        repo,
+        environment,
+        "AZURE_CLIENT_ID"
+      );
+      if (clientIdLookup.kind === "error") {
+        return validationUnverified(environment, clientIdLookup.reason);
+      }
+      if (clientIdLookup.kind === "blank") {
+        // The upstream provider workflow gates azure/login on
+        // `vars.AZURE_CLIENT_ID != ''`, so an empty value is the documented way
+        // to run a non-OIDC cluster. There is no login to fail and nothing to
+        // check — warning here would send someone off to "fix" a variable that
+        // is deliberately blank.
+        return {
+          status: "skipped",
+          message: `Azure login is disabled for environment "${environment}" (AZURE_CLIENT_ID is empty) — skipping the federated credential check.`
+        };
+      }
+      if (clientIdLookup.kind === "absent") {
+        return validationUnverified(
+          environment,
+          `neither GitHub environment "${environment}" nor repository "${repo}" defines AZURE_CLIENT_ID`
+        );
+      }
+      clientId = clientIdLookup.value;
+    } catch (error) {
+      return validationUnverified(
+        environment,
+        `GitHub variable lookup failed (${dependencies.errorMessage(error)})`
+      );
+    }
+
+    let envName: string;
+    let resolved: ResolveOidcSubjectResult;
+    try {
+      const canonical = await readCanonicalEnvironmentName(repo, environment);
+      if (canonical.kind === "error") {
+        return validationUnverified(environment, canonical.reason);
+      }
+      envName = canonical.name;
+      resolved = await resolveOidcSubject(
+        {
+          targetRepo: repo,
+          envName,
+          suffix: buildEnvironmentSuffix(envName)
+        },
+        dependencies.runGitHubJson
+      );
+    } catch (error) {
+      return validationUnverified(
+        environment,
+        `GitHub OIDC subject resolution failed (${dependencies.errorMessage(error)})`
+      );
+    }
+    const expectedSubjects = resolved.federatedCredentials.map(
+      (credential) => credential.subject
+    );
+
+    let listResult: DeployCommandResult;
+    try {
+      // No `--tenant`: `az ad app federated-credential list` does not accept it
+      // and exits with "unrecognized arguments", which would make this check a
+      // permanent no-op. A signed-in context in the wrong tenant simply fails
+      // the read and lands in the same warn bucket.
+      listResult = await dependencies.runAz(
+        buildFederatedCredentialListArgs(clientId)
+      );
+    } catch (error) {
+      return validationUnverified(
+        environment,
+        `Azure federated credential lookup failed (${dependencies.errorMessage(error)})`
+      );
+    }
+    if (listResult.code !== 0) {
+      return validationUnverified(
+        environment,
+        `Azure federated credential lookup failed (${(listResult.stderr || "").trim() || "unknown error"})`
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(listResult.stdout || "");
+    } catch (error) {
+      return validationUnverified(
+        environment,
+        `Azure federated credential lookup returned malformed JSON (${dependencies.errorMessage(error)})`
+      );
+    }
+    if (!Array.isArray(parsed)) {
+      return validationUnverified(
+        environment,
+        "Azure federated credential lookup returned an invalid subject list"
+      );
+    }
+    // Flexible federated credentials match on `claimsMatchingExpression` and
+    // report a null subject, so entries without one are skipped rather than
+    // disabling the check for every ordinary credential beside them.
+    const subjects = parsed
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    const missingSubjects = expectedSubjects.filter(
+      (subject) => !subjects.includes(subject)
+    );
+    if (missingSubjects.length === 0) return { status: "covered" };
+
+    if (missingSubjects.length < expectedSubjects.length) {
+      // Partial coverage of the indeterminate mutable/immutable pair. Only one
+      // form is ever presented and we cannot tell which, so this is a warning.
+      const missingSubjectText = missingSubjects
+        .map((subject) => `"${subject}"`)
+        .join(" and ");
+      return validationUnverified(
+        environment,
+        `App Registration ${clientId} covers only part of the subject pair GitHub may mint (no credential for ${missingSubjectText})`
+      );
+    }
+
+    // Every subject on the app is a near match worth showing: on a repository
+    // covered by GitHub's immutable-default rollout the existing subjects carry
+    // `owner@id/name@id`, and a prefix filter built from the mutable spelling
+    // would hide them exactly when the user most needs to see how close the
+    // credential was.
+    const nearMatchNote =
+      subjects.length > 0 ?
+        ` Existing credential subjects on the app: ${subjects
+          .slice(0, 3)
+          .join(", ")}${subjects.length > 3 ? ", ..." : ""}.`
+      : "";
+    const expectedSubjectText = expectedSubjects
+      .map((subject) => `"${subject}"`)
+      .join(" or ");
+    return {
+      status: "missing",
+      message:
+        `Azure deploy to environment "${envName}" is blocked because App Registration ${clientId} ` +
+        `has no federated credential matching any subject GitHub could present for it (expected one of ${expectedSubjectText}).` +
+        nearMatchNote +
+        " Re-run Create Environment with Azure auto-setup (or create the credential manually) before deploying."
+    };
+  };
+
   return {
     async prepareAndDispatch(request) {
       const { entry, repo, branch, provider, requestedEnvironment, log } =
@@ -405,6 +708,25 @@ export function createDeployDispatchService(
         entry.state.deployErrorBranch = deployRef;
         entry.state.deployStatus = "failed";
         return { dispatched: false };
+      }
+
+      // After the branch check on purpose: an unpushed branch is the cheaper,
+      // more local failure, and reporting federated credentials first would name
+      // the wrong blocker.
+      if (provider === "azure") {
+        const validation = await validateAzureFederatedCredential(
+          repo,
+          envForDeploy
+        );
+        if (validation.status === "missing") {
+          log("❌ " + validation.message);
+          entry.state.deployError = validation.message;
+          entry.state.deployErrorKind = dependencies.oidcSubjectMissingKind;
+          entry.state.deployStatus = "failed";
+          return { dispatched: false };
+        }
+        if (validation.status === "unverified") log("⚠ " + validation.message);
+        if (validation.status === "skipped") log("• " + validation.message);
       }
 
       const dispatchArgs = [
