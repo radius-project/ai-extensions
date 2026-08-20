@@ -31,6 +31,10 @@ import { homedir } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "../..");
+const yamlBrowserEntry = resolve(
+  dirname(fileURLToPath(import.meta.resolve("yaml"))),
+  "../browser/index.js"
+);
 
 // .node-version is the one place the supported Node major is declared; deriving
 // the compile target from it keeps them from drifting apart.
@@ -351,6 +355,9 @@ const options = {
   format: "esm",
   platform: "node",
   target,
+  // yaml's Node entry is CommonJS and leaves a dynamic require("process") in
+  // the ESM bundle. Its browser entry is equivalent pure ESM parser code.
+  alias: { yaml: yamlBrowserEntry },
   // The runtime is known to be Node, so emit UTF-8 rather than \uXXXX escapes.
   charset: "utf8",
   minify: true,
