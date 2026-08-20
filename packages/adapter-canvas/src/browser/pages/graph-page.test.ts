@@ -209,18 +209,45 @@ describe("initializeGraphPage", () => {
   });
 
   it("keeps external error detail out of user-visible failures", async () => {
+    const setError = vi.fn();
     const { browser, status } = fixture({ loaded: false });
     browser.net.handle("/api/load-graph", () =>
       Promise.reject(new Error("credential-like detail"))
     );
-    initializeGraphPage(browser.context, globals());
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
     await flushPromises();
 
-    expect(status?.textContent).toBe(
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
       "Failed to generate the application graph."
     );
-    expect(status?.textContent).not.toContain("credential-like");
+    expect(setError.mock.calls[0]?.[1]).not.toContain("credential-like");
+    // Reported once: the strip above the surface is cleared rather than
+    // repeating the same error in a second box.
+    expect(status?.textContent).toBe("");
     expect(browser.logger.errors.length).toBeGreaterThan(0);
+  });
+
+  it("reports a failure once instead of in both error surfaces", async () => {
+    const setError = vi.fn();
+    const { browser, status } = fixture({ loaded: false });
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ error: "app.bicep is invalid" })
+    );
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
+    await flushPromises();
+
+    // The strip sits directly above the graph surface, so leaving the message
+    // in both renders the same error twice.
+    expect(setError).toHaveBeenCalledTimes(1);
+    expect(status?.textContent).toBe("");
+    expect(status?.style.display).toBe("none");
   });
 
   it("silently skips the status update when no status element exists", async () => {
@@ -369,7 +396,7 @@ describe("initializeGraphPage", () => {
       "graph-container",
       "app.bicep is invalid"
     );
-    expect(status?.textContent).toBe("Error: app.bicep is invalid");
+    expect(status?.textContent).toBe("");
   });
 
   it("regenerates the graph for a newly selected branch and reloads", async () => {
@@ -387,34 +414,50 @@ describe("initializeGraphPage", () => {
   });
 
   it("surfaces a regenerate error message returned by the server", async () => {
+    const setError = vi.fn();
     const { browser, branch, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
       jsonResponse({ error: "cannot regenerate" })
     );
-    initializeGraphPage(browser.context, globals());
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
     await flushPromises();
 
     branch.value = "another";
     branch.dispatch("change");
     await flushPromises();
 
-    expect(status?.textContent).toBe("Error: cannot regenerate");
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "cannot regenerate"
+    );
+    expect(status?.textContent).toBe("");
   });
 
   it("keeps regenerate error detail out of user-visible failures", async () => {
+    const setError = vi.fn();
     const { browser, branch, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
       Promise.reject(new Error("secret-shaped detail"))
     );
-    initializeGraphPage(browser.context, globals());
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
     await flushPromises();
 
     branch.value = "another";
     branch.dispatch("change");
     await flushPromises();
 
-    expect(status?.textContent).toBe("Failed to regenerate graph.");
-    expect(status?.textContent).not.toContain("secret-shaped");
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "Failed to regenerate graph."
+    );
+    expect(setError.mock.calls[0]?.[1]).not.toContain("secret-shaped");
+    expect(status?.textContent).toBe("");
     expect(browser.logger.errors.length).toBeGreaterThan(0);
   });
 
@@ -980,7 +1023,7 @@ describe("initializeGraphPage", () => {
         "graph-container",
         GRAPH_APP_BICEP_TIMEOUT_MESSAGE
       );
-      expect(status?.textContent).toBe(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
+      expect(status?.textContent).toBe("");
       expect(graphProgressStages(progressHost)).toContain(
         `${GRAPH_STAGE_LABELS.creating_model}:failed`
       );
@@ -1011,9 +1054,7 @@ describe("initializeGraphPage", () => {
         "graph-container",
         "octo/app has no Dockerfile on main."
       );
-      expect(status?.textContent).toBe(
-        "Error: octo/app has no Dockerfile on main."
-      );
+      expect(status?.textContent).toBe("");
     });
 
     it("surfaces a regeneration failure on the graph surface", async () => {
@@ -1036,7 +1077,7 @@ describe("initializeGraphPage", () => {
         "graph-container",
         "branch missing"
       );
-      expect(status?.textContent).toBe("Error: branch missing");
+      expect(status?.textContent).toBe("");
     });
   });
   describe("graph build progress defaults", () => {

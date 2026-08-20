@@ -56,18 +56,32 @@ function parseState(context: BrowserContext): GraphPageState {
   };
 }
 
+function statusElement(context: BrowserContext) {
+  return (
+    context.dom.byId("graph-status") ?? context.dom.byId("graph-refresh-status")
+  );
+}
+
 function showStatus(
   context: BrowserContext,
   message: string,
   tone: "info" | "error"
 ): void {
-  const status =
-    context.dom.byId("graph-status") ??
-    context.dom.byId("graph-refresh-status");
+  const status = statusElement(context);
   if (!status) return;
   status.style.display = "";
   status.className = `status ${tone}`;
   status.textContent = message;
+}
+
+// The status strip sits directly above the graph surface, so a failure written
+// to both renders as two identical error boxes. Clearing the strip leaves the
+// surface itself as the single place a failure is reported.
+function hideStatus(context: BrowserContext): void {
+  const status = statusElement(context);
+  if (!status) return;
+  status.style.display = "none";
+  status.textContent = "";
 }
 
 export function initializeGraphPage(
@@ -84,6 +98,12 @@ export function initializeGraphPage(
     "radiusSetGraphLoading"
   );
   const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
+  // Report a failure once, on the graph surface. The surface owns the content
+  // area, so writing there also clears whatever loading state was showing.
+  const showFailure = (message: string): void => {
+    setError("graph-container", message);
+    hideStatus(context);
+  };
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
   let generation = 0;
@@ -259,8 +279,7 @@ export function initializeGraphPage(
               GRAPH_APP_BICEP_TIMEOUT_MESSAGE
             );
             stopProgress();
-            setError("graph-container", GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
-            showStatus(context, GRAPH_APP_BICEP_TIMEOUT_MESSAGE, "error");
+            showFailure(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
             return;
           }
           showStatus(
@@ -294,25 +313,14 @@ export function initializeGraphPage(
         }
         stopProgress();
         const error = readString(payload, "error");
-        if (error) {
-          setError("graph-container", error);
-          showStatus(context, `Error: ${error}`, "error");
-        }
+        if (error) showFailure(error);
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
         appBicepWaitStartedAtMs = null;
         stopProgress();
         context.logger.error("Radius graph request failed.", error);
-        setError(
-          "graph-container",
-          "Failed to generate the application graph."
-        );
-        showStatus(
-          context,
-          "Failed to generate the application graph.",
-          "error"
-        );
+        showFailure("Failed to generate the application graph.");
       })
       .then(() => {
         if (requestGeneration === generation) {
@@ -350,18 +358,14 @@ export function initializeGraphPage(
         if (readBoolean(payload, "reload")) context.nav.reload();
         else {
           const error = readString(payload, "error");
-          if (error) {
-            setError("graph-container", error);
-            showStatus(context, `Error: ${error}`, "error");
-          }
+          if (error) showFailure(error);
         }
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
         stopProgress();
         context.logger.error("Radius graph regeneration failed.", error);
-        setError("graph-container", "Failed to regenerate graph.");
-        showStatus(context, "Failed to regenerate graph.", "error");
+        showFailure("Failed to regenerate graph.");
       })
       .then(() => {
         if (requestGeneration === generation) {
