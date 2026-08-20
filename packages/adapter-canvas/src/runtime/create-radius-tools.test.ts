@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { UNSUPPORTED_NO_DOCKERFILE_MESSAGE } from "@radius-project/core";
 import { createRadiusTools } from "./create-radius-tools.js";
 import {
   createFakeDependencies,
@@ -46,6 +47,179 @@ describe("RU-07: radius_generate_app", () => {
     const result = await findTool(tools, "radius_generate_app").handler({});
     expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(undefined);
     expect(result).toBe("SKILL.md content for .");
+  });
+
+  it("withholds the skill and reports the unsupported repository when it has no Dockerfile", async () => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(result).toContain("acme/widgets");
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+  });
+
+  it("hands over the skill when the repository has a Dockerfile", async () => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+  });
+
+  it("hands over the skill when the repository cannot be listed", async () => {
+    const { tools, deps } = setup();
+    (
+      deps.workspace.fetchWorkspaceTree as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error("permission denied"));
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+  });
+
+  it("hands over the skill when the workspace context cannot be resolved", async () => {
+    const { tools, deps } = setup();
+    (
+      deps.workspace.detectWorkspaceContext as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error("no session"));
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+  });
+
+  it("hands over the skill when deciding which listing to use throws", async () => {
+    const { tools, deps } = setup();
+    (
+      deps.workspace.isWorkspaceSelection as ReturnType<typeof vi.fn>
+    ).mockImplementationOnce(() => {
+      throw new Error("selection unavailable");
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+  });
+
+  // Without a repository the worktree predicate is fail-closed, so nothing can
+  // be listed and no verdict is available. The gate must hand over the skill
+  // rather than refuse, and must not spend a doomed remote lookup to get there.
+  it("hands over the skill, without listing, when the workspace has no repo context", async () => {
+    const { tools, deps } = setup({
+      workspaceContext: { workspacePath: "/workspace", repo: "", branch: "" }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+    expect(deps.github.treePaths).not.toHaveBeenCalled();
+    expect(deps.workspace.fetchWorkspaceTree).not.toHaveBeenCalled();
+  });
+
+  // A sibling whose name merely starts with the workspace root is not inside
+  // it, and neither is a path that walks back out of it.
+  it.each([
+    ["a sibling with a shared prefix", "/workspace-other"],
+    ["a path that escapes upward", "/workspace/../elsewhere"]
+  ])("does not gate %s", async (_label, repoPath) => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath
+    });
+
+    expect(result).toBe(`SKILL.md content for ${repoPath}`);
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(repoPath);
+  });
+
+  // The listing the check can obtain describes the workspace, so it is not
+  // evidence about some other directory the caller named.
+  it("does not refuse a target outside the workspace on the workspace's contents", async () => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/elsewhere/other-repo"
+    });
+
+    expect(result).toBe("SKILL.md content for /elsewhere/other-repo");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+      "/elsewhere/other-repo"
+    );
+  });
+
+  it.each([
+    ["a trailing slash", "/workspace/"],
+    ["Windows separators", "\\workspace"],
+    ["a dot form", "/workspace/."],
+    ["a subdirectory", "/workspace/services/api"],
+    ["a nested dot form", "/workspace/services/../services/api"]
+  ])("still gates the workspace named with %s", async (_label, repoPath) => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath
+    });
+
+    expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+  });
+
+  it("does not gate when the workspace path itself is unknown", async () => {
+    const { tools, deps } = setup({
+      workspaceContext: {
+        workspacePath: "",
+        repo: "acme/widgets",
+        branch: "main"
+      },
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
   });
 });
 
