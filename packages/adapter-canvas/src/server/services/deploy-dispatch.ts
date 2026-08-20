@@ -46,6 +46,9 @@ export interface DeployDispatchDependencies {
   // Marks the Azure OIDC preflight refusal below, so the repair guard can tell
   // it apart from a failure the agent could fix by editing the model.
   oidcSubjectMissingKind: DeployErrorKind;
+  // A case-only mismatch needs different remediation from a genuinely absent
+  // subject: recreating the environment preserves the wrong spelling.
+  oidcSubjectCaseMismatchKind: DeployErrorKind;
   getBranchHeadSha(repo: string, branch: string): Promise<string | null>;
   getDefaultBranch(repo: string): Promise<string | null>;
   // Resolves rather than rejects on a non-zero exit, so the caller can inspect
@@ -208,6 +211,11 @@ export function createDeployDispatchService(
   if (!dependencies.oidcSubjectMissingKind) {
     throw new Error(
       "createDeployDispatchService is missing required dependencies: oidcSubjectMissingKind"
+    );
+  }
+  if (!dependencies.oidcSubjectCaseMismatchKind) {
+    throw new Error(
+      "createDeployDispatchService is missing required dependencies: oidcSubjectCaseMismatchKind"
     );
   }
   if (
@@ -407,7 +415,7 @@ export function createDeployDispatchService(
     return !!repoDefault;
   };
 
-  // The preflight answers one of four things, and the difference matters more
+  // The preflight answers one of five things, and the difference matters more
   // than the check itself:
   //
   // - "covered": every subject GitHub could mint has a federated credential.
@@ -416,6 +424,9 @@ export function createDeployDispatchService(
   //   the possible subjects is present. The workflow could only fail its login,
   //   so refusing here is strictly better than a late AADSTS700213 (also written
   //   AADSTS7002138 in some Entra responses).
+  // - "case-mismatch": no exact subject exists, but a credential differs only by
+  //   casing. Re-running environment creation preserves that mismatch, so this
+  //   needs distinct manual remediation.
   // - "unverified": we could not complete the check, or coverage is partial.
   //   This dispatches with a warning rather than blocking. Blocking here would
   //   regress every user whose deploy works today but whose machine cannot run
@@ -428,6 +439,7 @@ export function createDeployDispatchService(
     | { status: "covered" }
     | { status: "skipped"; message: string }
     | { status: "missing"; message: string }
+    | { status: "case-mismatch"; message: string }
     | { status: "unverified"; message: string };
 
   const validationUnverified = (
@@ -645,6 +657,32 @@ export function createDeployDispatchService(
       );
     }
 
+    const caseMismatch = expectedSubjects
+      .map((expected) => ({
+        expected,
+        existing: subjects.find(
+          (existing) => existing.toLowerCase() === expected.toLowerCase()
+        )
+      }))
+      .find(
+        (
+          match
+        ): match is {
+          expected: string;
+          existing: string;
+        } => match.existing !== undefined
+      );
+    if (caseMismatch) {
+      return {
+        status: "case-mismatch",
+        message:
+          `Azure deploy to environment "${envName}" is blocked because App Registration ${clientId} has a federated credential subject that differs from GitHub's subject only by letter casing. ` +
+          `AADSTS700213: No matching federated identity record found for presented assertion subject '${caseMismatch.expected}'. Please note that matching is done using a case-sensitive comparison. Check your federated identity credential Subject, Audience, and Issuer against the presented assertion. ` +
+          `Expected subject: "${caseMismatch.expected}". Existing credential subject: "${caseMismatch.existing}". ` +
+          "Update the existing federated credential subject in Microsoft Entra before deploying."
+      };
+    }
+
     // Every subject on the app is a near match worth showing: on a repository
     // covered by GitHub's immutable-default rollout the existing subjects carry
     // `owner@id/name@id`, and a prefix filter built from the mutable spelling
@@ -722,6 +760,14 @@ export function createDeployDispatchService(
           log("❌ " + validation.message);
           entry.state.deployError = validation.message;
           entry.state.deployErrorKind = dependencies.oidcSubjectMissingKind;
+          entry.state.deployStatus = "failed";
+          return { dispatched: false };
+        }
+        if (validation.status === "case-mismatch") {
+          log("❌ " + validation.message);
+          entry.state.deployError = validation.message;
+          entry.state.deployErrorKind =
+            dependencies.oidcSubjectCaseMismatchKind;
           entry.state.deployStatus = "failed";
           return { dispatched: false };
         }

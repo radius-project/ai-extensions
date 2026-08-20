@@ -26,6 +26,7 @@ function dependencies(
     deployWorkflowFiles: ["run-rad-commands.yml", "run-rad-commands-azure.yml"],
     branchNotPushedKind: "branch-not-pushed",
     oidcSubjectMissingKind: "oidc-subject-missing",
+    oidcSubjectCaseMismatchKind: "oidc-subject-case-mismatch",
     getBranchHeadSha: () => Promise.resolve("sha-1"),
     getDefaultBranch: () => {
       throw new Error("getDefaultBranch not stubbed");
@@ -288,6 +289,21 @@ describe("deploy dispatch construction", () => {
       "createDeployDispatchService is missing required dependencies: oidcSubjectMissingKind"
     );
   });
+
+  it("refuses to construct without the OIDC-subject-case-mismatch error kind", () => {
+    const missing: Partial<DeployDispatchDependencies> = dependencies();
+    delete missing.oidcSubjectCaseMismatchKind;
+    expect(() =>
+      createDeployDispatchService(missing as DeployDispatchDependencies)
+    ).toThrow(
+      "createDeployDispatchService is missing required dependencies: oidcSubjectCaseMismatchKind"
+    );
+    const empty = dependencies();
+    Object.defineProperty(empty, "oidcSubjectCaseMismatchKind", { value: "" });
+    expect(() => createDeployDispatchService(empty)).toThrow(
+      "createDeployDispatchService is missing required dependencies: oidcSubjectCaseMismatchKind"
+    );
+  });
 });
 
 describe("federated credential list arguments", () => {
@@ -469,6 +485,66 @@ describe("deploy dispatch environment and branch preflight", () => {
         "json"
       ]
     ]);
+  });
+
+  it("fails fast with the expected and existing spellings when a subject differs only by case", async () => {
+    const { input, state } = request();
+    input.provider = "azure";
+    const gh = recordingGh();
+    const preflight = azurePreflight({
+      subjects: ["repo:Acme/Widgets:environment:Production"]
+    });
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        ...preflight
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployErrorKind).toBe("oidc-subject-case-mismatch");
+    expect(state.deployError).toContain(
+      "AADSTS700213: No matching federated identity record found for presented assertion subject 'repo:acme/widgets:environment:production'."
+    );
+    expect(state.deployError).toContain(
+      "Please note that matching is done using a case-sensitive comparison. Check your federated identity credential Subject, Audience, and Issuer against the presented assertion."
+    );
+    expect(state.deployError).toContain(
+      'Expected subject: "repo:acme/widgets:environment:production".'
+    );
+    expect(state.deployError).toContain(
+      'Existing credential subject: "repo:Acme/Widgets:environment:Production".'
+    );
+    expect(state.deployError).not.toContain("Create Environment");
+    expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(false);
+  });
+
+  it("identifies a case-only mismatch against the immutable subject candidate", async () => {
+    const { input, state } = request();
+    input.provider = "azure";
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        ...azurePreflight({
+          subjects: ["repo:Acme@101/Widgets@202:environment:Production"]
+        })
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployErrorKind).toBe("oidc-subject-case-mismatch");
+    expect(state.deployError).toContain(
+      'Expected subject: "repo:acme@101/widgets@202:environment:production".'
+    );
+    expect(state.deployError).toContain(
+      'Existing credential subject: "repo:Acme@101/Widgets@202:environment:Production".'
+    );
   });
 
   it("never passes a scoping flag az would reject", async () => {
@@ -1519,7 +1595,11 @@ describe("deploy dispatch workflow publication and dispatch", () => {
   it("hints at the missing workflow scope for a scope failure", async () => {
     const { input, state } = request();
     const gh = recordingGh([
-      { code: 1, stderr: "the token is missing the workflow scope", stdout: "" }
+      {
+        code: 1,
+        stderr: "the token is missing the workflow scope",
+        stdout: ""
+      }
     ]);
     const service = createDeployDispatchService(dependencies({ ...gh }));
 

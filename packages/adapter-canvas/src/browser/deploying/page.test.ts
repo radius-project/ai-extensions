@@ -1637,6 +1637,38 @@ describe("deploy flow", () => {
     expect(page.browser.nav.assigned).toContain("/?page=environment&new=1");
   });
 
+  it("shows a case-sensitive OIDC mismatch without routing to environment creation", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-case-mismatch",
+        error:
+          'Expected subject: "repo:acme/widgets:environment:production". Existing credential subject: "repo:Acme/Widgets:environment:Production".',
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(page.progressTitle.innerHTML).toContain("Deployment of");
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "repo:acme/widgets:environment:production"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "repo:Acme/Widgets:environment:Production"
+    );
+    expect(page.progressSubtitle.innerHTML).not.toContain(
+      "Set up Azure credentials"
+    );
+    expect(page.browser.nav.assigned).toEqual([]);
+  });
+
   it("omits the preflight detail from the OIDC panel when the failure carries no text", async () => {
     const page = fixture();
     init(page);
