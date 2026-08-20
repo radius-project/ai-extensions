@@ -56,6 +56,7 @@ function input(context: BrowserContext, id: string): DomInputElement | null {
 }
 
 function optimisticOperation(
+  kind: string,
   environment: string,
   provider: string,
   now: number,
@@ -63,6 +64,7 @@ function optimisticOperation(
 ): OperationRecord {
   return {
     operationId: "pending",
+    kind,
     environment,
     provider,
     state: "running",
@@ -192,6 +194,37 @@ export function initializeEnvironmentPage(
   // explicit without installing a silent nullable fallback.
   let environments: EnvironmentPaneController;
   let operations: EnvironmentOperationsController;
+
+  // Terminal behavior for a delete operation, shared by the start path
+  // (startDeleteProgress) and the rejoin path (resumeProgress), so the user
+  // sees the same acknowledgement whether they stay on the panel or return to
+  // it while the delete is still running.
+  const handleDeleteTerminal = (op: OperationRecord): void => {
+    environments.loadEnvironmentTable();
+    const succeeded =
+      op.terminalState === "succeeded" ||
+      op.terminalState === "succeeded_with_warnings";
+    // Azure environments own a Microsoft Entra app registration that Radius
+    // never deletes automatically (it may be shared). Tell the user it was left
+    // behind so they can remove it in Azure if they want to.
+    if (!succeeded || op.provider !== "azure" || !confirmDialog) return;
+    const withWarnings = op.terminalState === "succeeded_with_warnings";
+    const outcome =
+      withWarnings ?
+        `The environment "${op.environment}" was deleted, but some cleanup steps reported warnings — check the progress panel for details.`
+      : `The environment "${op.environment}" was deleted.`;
+    confirmDialog.show({
+      title:
+        withWarnings ?
+          "Environment deleted with warnings"
+        : "Environment deleted",
+      message: `${outcome}\n\nIts Microsoft Entra app registration was not deleted — Radius never removes app registrations automatically because they can be shared by other environments or services. If you no longer need it, delete it yourself in the Azure portal.`,
+      confirmLabel: "Done",
+      confirmVariant: "primary",
+      hideCancel: true,
+      onConfirm: () => {}
+    });
+  };
   const credentials = initializeCredentialsPane(
     context,
     {
@@ -259,6 +292,7 @@ export function initializeEnvironmentPage(
         operations.stopProgress();
         operations.renderProgress(
           optimisticOperation(
+            "delete",
             environment,
             provider,
             context.clock.now(),
@@ -266,25 +300,7 @@ export function initializeEnvironmentPage(
           )
         );
         operations.focusPanel();
-        operations.trackProgress(environment, provider, (op) => {
-          environments.loadEnvironmentTable();
-          const succeeded =
-            op.terminalState === "succeeded" ||
-            op.terminalState === "succeeded_with_warnings";
-          // Azure environments own a Microsoft Entra app registration that
-          // Radius never deletes automatically (it may be shared). Tell the user
-          // it was left behind so they can remove it in Azure if they want to.
-          if (succeeded && provider === "azure" && confirmDialog) {
-            confirmDialog.show({
-              title: "Environment deleted",
-              message: `The environment "${environment}" was deleted.\n\nIts Microsoft Entra app registration was not deleted — Radius never removes app registrations automatically because they can be shared by other environments or services. If you no longer need it, delete it yourself in the Azure portal.`,
-              confirmLabel: "Done",
-              confirmVariant: "primary",
-              hideCancel: true,
-              onConfirm: () => {}
-            });
-          }
-        });
+        operations.trackProgress(environment, provider, handleDeleteTerminal);
       }
     }
   );
@@ -309,6 +325,7 @@ export function initializeEnvironmentPage(
       showError: environments.showError,
       reloadEnvironmentsTable: environments.loadEnvironmentTable,
       resetSubmitButton: environments.resetSubmitButton,
+      onDeleteTerminal: handleDeleteTerminal,
       promptServiceManagementReference:
         discovery.promptServiceManagementReference,
       promptAppSelection: discovery.promptAppSelection
@@ -456,6 +473,7 @@ export function initializeEnvironmentPage(
     operations.stopProgress();
     operations.renderProgress(
       optimisticOperation(
+        "create",
         environment,
         provider,
         context.clock.now(),

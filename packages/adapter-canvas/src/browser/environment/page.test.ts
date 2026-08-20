@@ -1320,10 +1320,11 @@ describe("initializeEnvironmentPage", () => {
         return jsonResponse({
           operation: {
             operationId: "del-1",
+            kind: "delete",
             environment: "dev",
             provider: "azure",
-            state: terminal ? "succeeded_with_warnings" : "running",
-            terminalState: terminal ? "succeeded_with_warnings" : null,
+            state: terminal ? "succeeded" : "running",
+            terminalState: terminal ? "succeeded" : null,
             summary: "Deleting dev…"
           }
         });
@@ -1347,6 +1348,9 @@ describe("initializeEnvironmentPage", () => {
     expect(page.elements["env-confirm-title"].textContent).toBe(
       "Environment deleted"
     );
+    expect(page.elements["env-confirm-message"].textContent).not.toContain(
+      "reported warnings"
+    );
     expect(page.elements["env-confirm-message"].textContent).toContain(
       "Microsoft Entra app registration was not deleted"
     );
@@ -1360,6 +1364,124 @@ describe("initializeEnvironmentPage", () => {
     page.elements["env-confirm-ok"].dispatch("click");
     await flushPromises();
     expect(page.elements["env-confirm-modal"].style.display).toBe("none");
+
+    teardown();
+  });
+
+  it("uses warning-aware wording when an azure delete succeeds with warnings", async () => {
+    const page = fixture();
+    const remove = createFakeInput("delete-row");
+    remove.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-delete-env", [remove]);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "azure" }]
+        })
+    );
+    let deleteRequested = false;
+    let operationPolls = 0;
+    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
+      deleteRequested = true;
+      return jsonResponse({ success: true }, true, 202);
+    });
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        if (!deleteRequested) return jsonResponse({ operation: null });
+        operationPolls += 1;
+        const terminal = operationPolls >= 2;
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            kind: "delete",
+            environment: "dev",
+            provider: "azure",
+            state: terminal ? "succeeded_with_warnings" : "running",
+            terminalState: terminal ? "succeeded_with_warnings" : null,
+            summary: "Deleting dev…"
+          }
+        });
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    remove.dispatch("click");
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+
+    // A warnings outcome does not claim a clean deletion: the title and body
+    // both flag that some cleanup steps reported warnings.
+    expect(page.elements["env-confirm-modal"].style.display).toBe("flex");
+    expect(page.elements["env-confirm-title"].textContent).toBe(
+      "Environment deleted with warnings"
+    );
+    expect(page.elements["env-confirm-message"].textContent).toContain(
+      "reported warnings"
+    );
+    expect(page.elements["env-confirm-message"].textContent).toContain(
+      "Microsoft Entra app registration was not deleted"
+    );
+
+    teardown();
+  });
+
+  it("shows the acknowledgement dialog when rejoining a running azure delete", async () => {
+    const page = fixture();
+    page.browser.document.addSelectorAll(".js-delete-env", []);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "azure" }]
+        })
+    );
+    // The operation is already running when the panel loads (resume path) and
+    // then terminates while we poll.
+    let operationPolls = 0;
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        operationPolls += 1;
+        const terminal = operationPolls >= 3;
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            kind: "delete",
+            environment: "dev",
+            provider: "azure",
+            state: terminal ? "succeeded" : "running",
+            terminalState: terminal ? "succeeded" : null,
+            summary: "Deleting dev…"
+          }
+        });
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+
+    // Even though the user never clicked delete this session, rejoining a
+    // delete operation still surfaces the app-registration acknowledgement.
+    expect(page.elements["env-confirm-modal"].style.display).toBe("flex");
+    expect(page.elements["env-confirm-title"].textContent).toBe(
+      "Environment deleted"
+    );
+    expect(page.elements["env-confirm-message"].textContent).toContain(
+      "Microsoft Entra app registration was not deleted"
+    );
 
     teardown();
   });

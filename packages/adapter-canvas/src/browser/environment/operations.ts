@@ -159,6 +159,7 @@ export type OperationTerminalPayload = Readonly<Record<string, unknown>>;
 
 export interface OperationRecord {
   readonly operationId: string;
+  readonly kind: string;
   readonly environment: string;
   readonly provider: string;
   readonly state: string;
@@ -197,6 +198,11 @@ export interface EnvironmentOperationsDeps {
   showError(message: string): void;
   reloadEnvironmentsTable(): void;
   resetSubmitButton?(): void;
+  // Terminal handler for a resumed delete operation. The page owns the delete
+  // acknowledgement UI (the confirm dialog it renders), so resume routes a
+  // delete op's terminal state here instead of the setup-oriented
+  // `applyTerminal`, keeping the start and rejoin paths consistent.
+  onDeleteTerminal?(op: OperationRecord): void;
   promptServiceManagementReference(): Promise<string>;
   promptAppSelection(request: AppPickerRequest): Promise<AppPickerChoice>;
   prefersReducedMotion?(): boolean;
@@ -357,8 +363,10 @@ function parseOperationRecord(
   const operationId = readString(raw, "operationId");
   if (operationId === "") return null;
   const endedAt = readString(raw, "endedAt");
+  const kind = readString(raw, "kind");
   return {
     operationId,
+    kind: kind === "" ? "create" : kind,
     environment: readString(raw, "environment"),
     provider: readString(raw, "provider"),
     state: readString(raw, "state"),
@@ -1085,7 +1093,11 @@ export function initializeEnvironmentOperations(
         const op = parseOperationResponse(payload);
         if (!op || op.terminalState !== null) return;
         renderProgress(op);
-        trackProgress(op.environment, op.provider, applyTerminal);
+        const onTerminal =
+          op.kind === "delete" && deps.onDeleteTerminal ?
+            deps.onDeleteTerminal
+          : applyTerminal;
+        trackProgress(op.environment, op.provider, onTerminal);
       })
       .catch(() => {
         /* nothing to resume */
