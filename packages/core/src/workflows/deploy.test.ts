@@ -287,13 +287,7 @@ describe("generateDeployWorkflow YAML validity", () => {
     expect(azure.env.APP_FILE).toBe(".radius/app.bicep");
   });
 
-  // Negative regression guard: this is exactly the #407 bug. When the arch
-  // scalar is SINGLE-quoted (as the radius templates were before #12721), the
-  // single-quoted default inside the injected GHA expression nests and YAML
-  // terminates the scalar early, so the rendered file is invalid YAML. This test
-  // locks in WHY the scalar must be double-quoted: if someone reintroduces the
-  // single-quoted scalar (or an injected value that nests quotes), it fails.
-  it("produces invalid YAML when an arch scalar is single-quoted (issue #407)", () => {
+  it("repairs a single-quoted arch scalar before injecting a GitHub expression", () => {
     const broken = {
       ...REALISTIC_TEMPLATES,
       [DEPLOY_AZURE_FILE]: REALISTIC_TEMPLATES[DEPLOY_AZURE_FILE].replace(
@@ -301,10 +295,13 @@ describe("generateDeployWorkflow YAML validity", () => {
         "TARGET_CLUSTER_ARCH_MODE: '{{TARGET_CLUSTER_ARCH_MODE}}'"
       )
     };
-    // Substitution still succeeds (no unresolved placeholder), so generation
-    // does not throw — the breakage only surfaces when the YAML is parsed.
     const files = generateDeployWorkflow("prod", ".radius/app.bicep", broken);
+    const azure = parseYaml(files[DEPLOY_AZURE_FILE]) as {
+      env: Record<string, string>;
+    };
 
-    expect(() => parseYaml(files[DEPLOY_AZURE_FILE])).toThrow();
+    expect(azure.env.TARGET_CLUSTER_ARCH_MODE).toBe(
+      `\${{ vars.${RADIUS_BUILD_ARCH_MODE_VAR} || '${DEFAULT_TARGET_CLUSTER_ARCH_MODE}' }}`
+    );
   });
 });
