@@ -56,9 +56,11 @@ export default class RetryOnlyReporter implements Reporter {
   private async annotate(): Promise<void> {
     if (this.passes.length === 0) return;
     for (const pass of this.passes) {
-      console.log(
-        `::warning title=Retry-only pass::${pass.title} passed on retry ${pass.retry}`
-      );
+      const message = `${pass.title} passed on retry ${pass.retry}`
+        .replaceAll("%", "%25")
+        .replaceAll("\r", "%0D")
+        .replaceAll("\n", "%0A");
+      console.log(`::warning title=Retry-only pass::${message}`);
     }
     const summaryFile = process.env.GITHUB_STEP_SUMMARY;
     if (!summaryFile) return;
