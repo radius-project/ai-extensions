@@ -81,6 +81,9 @@ interface TemplateCacheEntry {
   body: string;
 }
 
+const FORCE_LOCAL_ONLY_DESCRIPTION =
+  "Skip cloud teardown only when state is absent (may orphan cloud resources)";
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -460,10 +463,14 @@ export function addDeleteStateCheck(yaml: string): string {
           esac
 `;
   let insertAt = checkoutIndex + 1;
-  while (insertAt < lines.length && !/^\s{6}- name:\s/.test(lines[insertAt])) {
+  while (
+    insertAt < lines.length &&
+    !/^ {2}\S/.test(lines[insertAt]) &&
+    !/^\s{6}- name:\s/.test(lines[insertAt])
+  ) {
     insertAt++;
   }
-  if (insertAt === lines.length) {
+  if (insertAt === lines.length || /^ {2}\S/.test(lines[insertAt])) {
     throw new Error(
       'addDeleteStateCheck: expected a step after "Checkout" in the generated ' +
         "Azure delete workflow before applying the persisted-state gate."
@@ -490,10 +497,13 @@ function addStateGateToDeleteSteps(lines: string[], start: number): void {
     ) {
       end++;
     }
-    const ifIndex = lines.findIndex(
-      (line, candidate) =>
-        candidate > index && candidate < end && /^ {8}if:\s/.test(line)
-    );
+    let ifIndex = -1;
+    for (let candidate = index + 1; candidate < end; candidate++) {
+      if (/^ {8}if:\s/.test(lines[candidate])) {
+        ifIndex = candidate;
+        break;
+      }
+    }
     const gate = "steps.state.outputs.has_state == 'true'";
     if (ifIndex === -1) {
       lines.splice(index + 1, 0, `        if: \${{ ${gate} }}`);
@@ -541,12 +551,13 @@ function addForceLocalOnlyInput(yaml: string): string {
       "addForceLocalOnlyInput: expected workflow_dispatch inputs in the delete dispatcher."
     );
   }
-  const input = `      force_local_only:
-        description: 'Skip cloud teardown only when state is absent (may orphan cloud resources)'
-        type: boolean
-        required: false
-        default: false
-`.split("\n");
+  const input = [
+    "      force_local_only:",
+    `        description: '${FORCE_LOCAL_ONLY_DESCRIPTION}'`,
+    "        type: boolean",
+    "        required: false",
+    "        default: false"
+  ];
   lines.splice(inputEnd, 0, ...input);
   return lines.join("\n");
 }
@@ -563,7 +574,7 @@ function addForceLocalOnlyWorkflowInput(lines: string[]): void {
     inputEnd,
     0,
     "      force_local_only:",
-    "        description: 'Allow local-only delete when state is absent'",
+    `        description: '${FORCE_LOCAL_ONLY_DESCRIPTION}'`,
     "        type: boolean",
     "        required: false",
     "        default: false"

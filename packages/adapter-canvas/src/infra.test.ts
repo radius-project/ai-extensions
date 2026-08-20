@@ -375,6 +375,28 @@ jobs:
     );
   });
 
+  it("throws when Checkout is followed by another job instead of a delete step", () => {
+    const workflow = `on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+permissions:
+  contents: read
+jobs:
+  delete:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+  another-job:
+    runs-on: ubuntu-24.04
+`;
+
+    expect(() => addDeleteStateCheck(workflow)).toThrow(
+      /expected a step after "Checkout"/
+    );
+  });
+
   describe("detect-state shell logic", () => {
     // Extracts the actual `run:` script for the delete job's "Detect persisted
     // Radius state" step from the generated workflow, so these tests exercise the
