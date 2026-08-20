@@ -3,6 +3,7 @@ import {
   DELETE_DIALOG_CONFIRM_BUTTON_ID,
   DELETE_DIALOG_CONFIRM_INPUT_ID,
   DELETE_DIALOG_FOCUSABLE_SELECTOR,
+  DELETE_DIALOG_FORCE_LOCAL_ONLY_ID,
   DELETE_DIALOG_IDS,
   DELETE_DIALOG_STEP1_BUTTON_ID,
   DELETE_DIALOG_STEP2_BUTTON_ID,
@@ -131,9 +132,10 @@ describe("delete deployment dialog", () => {
 
   it("requires all three steps before confirming", () => {
     const browser = setup();
-    const confirmed: Array<[string, string]> = [];
+    const confirmed: Array<[string, string, boolean]> = [];
     const dialog = createDeleteDeploymentDialog(browser.context, {
-      onConfirm: (app, environment) => confirmed.push([app, environment])
+      onConfirm: (app, environment, forceLocalOnly) =>
+        confirmed.push([app, environment, forceLocalOnly])
     });
 
     dialog?.open("store", "prod");
@@ -156,7 +158,7 @@ describe("delete deployment dialog", () => {
     expect(confirm.disabled).toBe(false);
     confirm.dispatch("click");
 
-    expect(confirmed).toEqual([["store", "prod"]]);
+    expect(confirmed).toEqual([["store", "prod", false]]);
     expect(browser.modal.style.display).toBe("none");
     expect(browser.body.children).toHaveLength(0);
   });
@@ -174,6 +176,29 @@ describe("delete deployment dialog", () => {
     input.value = "  store/prod  ";
     input.dispatch("input");
     expect(confirm.disabled).toBe(false);
+  });
+
+  it("passes a selected force-local-only acknowledgement to the delete callback", () => {
+    const browser = setup();
+    const confirmed: boolean[] = [];
+    const dialog = createDeleteDeploymentDialog(browser.context, {
+      onConfirm: (_app, _environment, forceLocalOnly) =>
+        confirmed.push(forceLocalOnly)
+    });
+    dialog?.open("store", "prod");
+    const { input, confirm } = advanceToConfirmation(browser);
+    const forceLocalOnly = fakeInputById(
+      browser.body,
+      DELETE_DIALOG_FORCE_LOCAL_ONLY_ID
+    );
+
+    expect(fakeText(browser.body)).toContain("leave cloud resources orphaned");
+    input.value = "store/prod";
+    input.dispatch("input");
+    forceLocalOnly.checked = true;
+    confirm.dispatch("click");
+
+    expect(confirmed).toEqual([true]);
   });
 
   it("confirms on Enter only when the token matches", () => {

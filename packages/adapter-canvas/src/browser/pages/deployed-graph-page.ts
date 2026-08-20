@@ -561,7 +561,11 @@ export function initializeDeployedGraphPage(
         markEnvironmentsUnavailable(error);
       });
 
-  const runDelete = (application: string, environment: string): void => {
+  const runDelete = (
+    application: string,
+    environment: string,
+    forceLocalOnly: boolean
+  ): void => {
     const modal = context.dom.byId("deployed-deleting-modal");
     const text = context.dom.byId("deployed-deleting-text");
     if (text) {
@@ -575,7 +579,8 @@ export function initializeDeployedGraphPage(
         body: JSON.stringify({
           repo: page.repo,
           environment,
-          application
+          application,
+          forceLocalOnly
         })
       })
       .then((response) =>

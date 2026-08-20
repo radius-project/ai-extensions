@@ -468,6 +468,7 @@ export async function handleDeleteDeployment(
     const repo = data.repo || "";
     const environment = data.environment || "";
     const application = data.application || "";
+    const forceLocalOnly = data.forceLocalOnly === true;
     if (!repo || !environment || !application) {
       respond(400, {
         error: "repo, environment, and application are required."
@@ -615,6 +616,7 @@ export async function handleDeleteDeployment(
       "environment=" + environment,
       "-f",
       "application=" + application,
+      ...(forceLocalOnly ? ["-f", "force_local_only=true"] : []),
       "--repo",
       repo
     ];

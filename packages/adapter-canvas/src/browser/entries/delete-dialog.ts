@@ -18,8 +18,8 @@ function readOptions(value: unknown): DeleteDialogOptions {
     closeId: readString(value, "closeId") || undefined,
     onConfirm:
       isCallable(onConfirm) ?
-        (app, environment) => {
-          onConfirm(app, environment);
+        (app, environment, forceLocalOnly) => {
+          onConfirm(app, environment, forceLocalOnly);
         }
       : undefined
   };

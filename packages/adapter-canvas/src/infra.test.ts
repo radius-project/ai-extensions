@@ -178,6 +178,7 @@ const {
   generateDeployWorkflow,
   generateDeleteWorkflow,
   addDeleteStateCheck,
+  addForceLocalOnlyInput,
   configureVerifyGhcrProbe
 } = await import("./infra.js");
 
@@ -271,6 +272,64 @@ describe("GHCR verification probe", () => {
 });
 
 describe("generateDeleteWorkflow", () => {
+  const dispatcher = `on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+jobs:
+  azure:
+    uses: ./.github/workflows/delete-azure.yml
+    with:
+      environment: \${{ inputs.environment }}
+`;
+
+  it("adds a missing dispatcher input when Azure already passes it through", () => {
+    const workflow = dispatcher.replace(
+      "      environment: ${{ inputs.environment }}",
+      "      force_local_only: ${{ inputs.force_local_only }}\n      environment: ${{ inputs.environment }}"
+    );
+
+    expect(addForceLocalOnlyInput(workflow)).toContain(
+      "      force_local_only:\n        description:"
+    );
+  });
+
+  it("adds a missing Azure pass-through when the dispatcher input already exists", () => {
+    const workflow = dispatcher.replace(
+      "jobs:",
+      `      force_local_only:
+        description: 'Skip cloud teardown only when state is absent (may orphan cloud resources)'
+        type: boolean
+        required: false
+        default: false
+jobs:`
+    );
+
+    expect(addForceLocalOnlyInput(workflow)).toContain(
+      "      force_local_only: ${{ inputs.force_local_only }}"
+    );
+  });
+
+  it.each([
+    ["type", "        type: string\n        default: false"],
+    ["default", "        type: boolean\n        default: true"]
+  ])(
+    "rejects an incompatible pre-existing force-local-only input %s",
+    (_field, configuration) => {
+      const workflow = dispatcher.replace(
+        "jobs:",
+        `      force_local_only:
+${configuration}
+jobs:`
+      );
+
+      expect(() => addForceLocalOnlyInput(workflow)).toThrow(
+        /incompatible force_local_only input/
+      );
+    }
+  );
+
   it("detects state inside the existing delete job before Azure OIDC", async () => {
     const workflows = await generateDeleteWorkflow("dev");
     const azure = workflows["delete-azure.yml"];

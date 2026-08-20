@@ -175,21 +175,26 @@ function globals(overrides: Record<string, unknown> = {}) {
 // plain object (rather than a reassigned `let`) sidesteps the closure and
 // avoids relying on non-null assertions to invoke it later.
 function createConfirmingDialog() {
-  const holder: { confirmed: (() => void) | null; opened: boolean } = {
+  const holder: {
+    confirmed: ((forceLocalOnly: boolean) => void) | null;
+    opened: boolean;
+  } = {
     confirmed: null,
     opened: false
   };
   const createDialog = vi.fn(
-    (options: { onConfirm: (a: string, e: string) => void }) => ({
+    (options: { onConfirm: (a: string, e: string, f: boolean) => void }) => ({
       open: (application: string, environment: string) => {
         holder.opened = true;
-        holder.confirmed = () => options.onConfirm(application, environment);
+        holder.confirmed = (forceLocalOnly) =>
+          options.onConfirm(application, environment, forceLocalOnly);
       }
     })
   );
   return {
     createDialog,
-    confirm: (): void => holder.confirmed?.(),
+    confirm: (forceLocalOnly = false): void =>
+      holder.confirmed?.(forceLocalOnly),
     wasOpened: (): boolean => holder.opened
   };
 }
@@ -1512,6 +1517,39 @@ describe("initializeDeployedGraphPage", () => {
 
     expect(browser.nav.assigned).toEqual(["/?page=deploying"]);
     expect(modal.style.display).toBe("none");
+    expect(
+      browser.net.calls.find((call) => call.url === "/api/delete-deployment")
+        ?.init?.body
+    ).toBe(
+      JSON.stringify({
+        repo: "octo/app",
+        environment: "dev",
+        application: "app",
+        forceLocalOnly: false
+      })
+    );
+  });
+
+  it("forwards the dialog's force-local-only acknowledgement", async () => {
+    const { browser, action, appSelect, envSelect } = fixture();
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/delete-deployment", () => jsonResponse({}));
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    confirm(true);
+    await flushPromises();
+
+    expect(
+      browser.net.calls.find((call) => call.url === "/api/delete-deployment")
+        ?.init?.body
+    ).toContain('"forceLocalOnly":true');
   });
 
   it("surfaces a delete failure returned by the server", async () => {

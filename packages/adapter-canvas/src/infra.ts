@@ -516,8 +516,7 @@ function addStateGateToDeleteSteps(lines: string[], start: number): void {
   }
 }
 
-function addForceLocalOnlyInput(yaml: string): string {
-  if (yaml.includes("force_local_only:")) return yaml;
+export function addForceLocalOnlyInput(yaml: string): string {
   const lines = yaml.split("\n");
   const azureIndex = lines.findIndex((line) => /^ {2}azure:\s*$/.test(line));
   if (azureIndex === -1) {
@@ -538,11 +537,48 @@ function addForceLocalOnlyInput(yaml: string): string {
       'addForceLocalOnlyInput: expected a "with" block in the Azure delete dispatcher job.'
     );
   }
-  lines.splice(
-    withIndex + 1,
-    0,
-    "      force_local_only: ${{ inputs.force_local_only }}"
+  const argumentIndex = lines.findIndex(
+    (line, index) =>
+      index > withIndex &&
+      index < azureEnd &&
+      /^ {6}force_local_only:\s*/.test(line)
   );
+  if (argumentIndex !== -1) {
+    if (
+      lines[argumentIndex].trim() !==
+      "force_local_only: ${{ inputs.force_local_only }}"
+    ) {
+      throw new Error(
+        "addForceLocalOnlyInput: the Azure dispatcher has an incompatible " +
+          "force_local_only argument."
+      );
+    }
+  } else {
+    lines.splice(
+      withIndex + 1,
+      0,
+      "      force_local_only: ${{ inputs.force_local_only }}"
+    );
+  }
+  const inputIndex = workflowInputIndex(
+    lines,
+    "workflow_dispatch",
+    "force_local_only"
+  );
+  if (inputIndex !== -1) {
+    const inputEnd = workflowInputEntryEnd(lines, inputIndex);
+    const input = lines.slice(inputIndex + 1, inputEnd);
+    if (
+      !input.some((line) => /^ {8}type:\s*boolean\s*$/.test(line)) ||
+      !input.some((line) => /^ {8}default:\s*false\s*$/.test(line))
+    ) {
+      throw new Error(
+        "addForceLocalOnlyInput: workflow_dispatch has an incompatible " +
+          "force_local_only input."
+      );
+    }
+    return lines.join("\n");
+  }
   const inputEnd = workflowInputEnd(lines, "workflow_dispatch");
   if (inputEnd === -1) {
     throw new Error(
@@ -595,6 +631,41 @@ function workflowInputEnd(lines: string[], trigger: string): number {
   if (inputsIndex === -1) return -1;
   for (let index = inputsIndex + 1; index < lines.length; index++) {
     if (lines[index].trim() && !/^ {6}/.test(lines[index])) return index;
+  }
+  return lines.length;
+}
+
+function workflowInputIndex(
+  lines: string[],
+  trigger: string,
+  input: string
+): number {
+  const triggerIndex = lines.findIndex((line) =>
+    new RegExp(`^ {2}${trigger}:\\s*$`).test(line)
+  );
+  if (triggerIndex === -1) return -1;
+  const inputsIndex = lines.findIndex(
+    (line, index) =>
+      index > triggerIndex &&
+      /^ {4}inputs:\s*$/.test(line) &&
+      !lines
+        .slice(triggerIndex + 1, index)
+        .some((candidate) => /^ {2}\S/.test(candidate))
+  );
+  if (inputsIndex === -1) return -1;
+  return lines.findIndex(
+    (line, index) =>
+      index > inputsIndex &&
+      new RegExp(`^ {6}${input}:\\s*$`).test(line) &&
+      !lines
+        .slice(inputsIndex + 1, index)
+        .some((candidate) => /^ {4}\S/.test(candidate))
+  );
+}
+
+function workflowInputEntryEnd(lines: string[], inputIndex: number): number {
+  for (let index = inputIndex + 1; index < lines.length; index++) {
+    if (lines[index].trim() && !/^ {8}/.test(lines[index])) return index;
   }
   return lines.length;
 }

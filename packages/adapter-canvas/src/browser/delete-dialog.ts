@@ -29,6 +29,7 @@ export const DELETE_DIALOG_STEP1_BUTTON_ID = "del-step1-btn";
 export const DELETE_DIALOG_STEP2_BUTTON_ID = "del-step2-btn";
 export const DELETE_DIALOG_CONFIRM_INPUT_ID = "del-confirm-input";
 export const DELETE_DIALOG_CONFIRM_BUTTON_ID = "del-confirm-btn";
+export const DELETE_DIALOG_FORCE_LOCAL_ONLY_ID = "del-force-local-only";
 
 export interface DeleteDialogOptions {
   modalId?: string;
@@ -36,7 +37,11 @@ export interface DeleteDialogOptions {
   appId?: string;
   envId?: string;
   closeId?: string;
-  onConfirm?: (app: string, environment: string) => void;
+  onConfirm?: (
+    app: string,
+    environment: string,
+    forceLocalOnly: boolean
+  ) => void;
 }
 
 export interface DeleteDialogHandle {
@@ -152,6 +157,21 @@ export function deleteDialogConfirmSpecs(
       }
     },
     {
+      tag: "label",
+      className: "rad-ddlg__confirm-label",
+      children: [
+        {
+          tag: "input",
+          id: DELETE_DIALOG_FORCE_LOCAL_ONLY_ID,
+          attrs: { type: "checkbox" }
+        },
+        {
+          tag: "span",
+          text: "Skip cloud teardown if Radius state is missing. This can leave cloud resources orphaned."
+        }
+      ]
+    },
+    {
       tag: "button",
       id: DELETE_DIALOG_CONFIRM_BUTTON_ID,
       className: "rad-ddlg__delete",
@@ -238,9 +258,9 @@ export function createDeleteDeploymentDialog(
     if (invoker) context.focus.focus(invoker);
   };
 
-  const confirmNow = (target: DeleteTarget): void => {
+  const confirmNow = (target: DeleteTarget, forceLocalOnly: boolean): void => {
     close();
-    options.onConfirm?.(target.app, target.environment);
+    options.onConfirm?.(target.app, target.environment, forceLocalOnly);
   };
 
   const showIntent = (target: DeleteTarget): void => {
@@ -263,17 +283,25 @@ export function createDeleteDeploymentDialog(
     const nodes = renderStep(deleteDialogConfirmSpecs(target));
     const token = deleteDialogConfirmToken(target.app, target.environment);
     const input = asInput(nodes[1]);
-    const confirm = asInput(nodes[2]);
+    const forceLocalOnlyElement = nodes[2].querySelector("input");
+    if (!forceLocalOnlyElement) {
+      throw new Error(
+        "Radius delete dialog could not find the force-local-only checkbox input."
+      );
+    }
+    const forceLocalOnly = asInput(forceLocalOnlyElement);
+    const confirm = asInput(nodes[3]);
     confirm.disabled = true;
     const matches = (): boolean => input.value.trim() === token;
     bind(stepBindings, input, "input", () => {
       confirm.disabled = !matches();
     });
     bind(stepBindings, input, "keydown", (event) => {
-      if (event.key === "Enter" && matches()) confirmNow(target);
+      if (event.key === "Enter" && matches())
+        confirmNow(target, forceLocalOnly.checked === true);
     });
     bind(stepBindings, confirm, "click", () => {
-      if (matches()) confirmNow(target);
+      if (matches()) confirmNow(target, forceLocalOnly.checked === true);
     });
     input.focus();
   };

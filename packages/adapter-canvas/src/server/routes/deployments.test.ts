@@ -1503,6 +1503,29 @@ describe("deployments routes (SU-06)", () => {
       expect(cache.has("octo/todolist")).toBe(false);
     });
 
+    it("passes force_local_only only when the Canvas request confirms it", async () => {
+      const body = JSON.stringify({
+        repo: "octo/todolist",
+        environment: "dev",
+        application: "todolist",
+        forceLocalOnly: true
+      });
+      const { recording, context: ctx } = deleteContext(body);
+      const dispatched: string[][] = [];
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          runGh: (args) => {
+            dispatched.push(args);
+            return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+          }
+        })
+      );
+
+      expect(recording.status).toBe(200);
+      expect(dispatched[0]).toContain("force_local_only=true");
+    });
+
     it("reports an empty run URL when the run cannot be resolved", async () => {
       const { recording, context: ctx } = deleteContext();
       await handleDeleteDeployment(
