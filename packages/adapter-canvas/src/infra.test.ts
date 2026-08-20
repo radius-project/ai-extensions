@@ -286,6 +286,12 @@ describe("generateDeleteWorkflow", () => {
     expect(workflows["delete-application.yml"]).toContain(
       "force_local_only: ${{ inputs.force_local_only }}"
     );
+    const dispatcher = yaml.load(workflows["delete-application.yml"]) as {
+      on: { workflow_dispatch: { inputs: Record<string, unknown> } };
+    };
+    expect(dispatcher.on.workflow_dispatch.inputs).toHaveProperty(
+      "force_local_only"
+    );
   });
 
   it("produces a workflow that parses as valid YAML with the expected job graph", async () => {

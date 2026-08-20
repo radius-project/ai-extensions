@@ -548,7 +548,7 @@ function addForceLocalOnlyWorkflowInput(lines: string[]): void {
   );
   if (permissionsIndex === -1) {
     throw new Error(
-      "addDeleteStateCheck: expected permissions after workflow_call inputs."
+      "addForceLocalOnlyWorkflowInput: expected permissions after workflow_call inputs."
     );
   }
   lines.splice(
