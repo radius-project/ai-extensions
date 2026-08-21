@@ -104,8 +104,7 @@ export function generateDeployWorkflow(
     APP_FILE: appFile,
     RADIUS_REF
   };
-  const fill = (file: string): string =>
-    fillTemplate(pick(file), templateVars);
+  const fill = (file: string): string => fillTemplate(pick(file), templateVars);
   const files: DeployWorkflowFiles = {
     [DEPLOY_DISPATCHER_FILE]: fill(DEPLOY_DISPATCHER_FILE),
     [DEPLOY_AZURE_FILE]: fill(DEPLOY_AZURE_FILE),

@@ -107,3 +107,37 @@ jobs:
     steps:
       - uses: radius-project/radius/.github/actions/delete-resource@{{RADIUS_REF}}
 `;
+
+// The environment-delete dispatcher and its Azure provider are static
+// ai-extensions assets (not fetched from radius-project/radius), so the fixtures
+// mirror their shape: the dispatcher only fills `{{ENV}}`, and the provider
+// carries the ai-extensions-owned guard step alongside a `{{RADIUS_REF}}`-pinned
+// composite action.
+export const DELETE_ENV_DISPATCHER_TEMPLATE = `name: Delete environment
+${DISPATCH_HEADER}
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      provider: \${{ steps.detect.outputs.provider }}
+    steps:
+      - id: detect
+        run: echo "provider=azure" >> "$GITHUB_OUTPUT"
+  azure:
+    needs: detect
+    if: needs.detect.outputs.provider == 'azure'
+    uses: ./.github/workflows/delete-environment-azure.yml
+`;
+
+export const DELETE_ENV_PROVIDER_TEMPLATE = `name: Delete environment on Azure
+on:
+  workflow_call:
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    environment: "{{ENV}}"
+    steps:
+      - uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}
+      - name: Guard - environment has no deployed applications
+        run: rad application list --output json
+`;
