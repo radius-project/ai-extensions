@@ -94,6 +94,34 @@ describe("listWorkflowArtifacts", () => {
     expect(childProcess.execFile).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps paging past a page that only holds live-slot artifacts", async () => {
+    // Live-slot names carry the deploy-status prefix but are dropped from
+    // repo-wide reads (their sequences are only comparable within one run).
+    // Stopping on a page that holds only live slots would hide the previous
+    // deploy's terminal artifact on the next page and render "Nothing
+    // deployed yet" for an application that is actually deployed.
+    serve([
+      page([
+        "radius-deploy-status-dev-todolist-live-100-slot-0",
+        "radius-deploy-status-dev-todolist-live-100-slot-1",
+        ...noise(ARTIFACT_PAGE_SIZE - 2)
+      ]),
+      page([
+        "radius-deploy-status-dev-todolist",
+        ...noise(ARTIFACT_PAGE_SIZE - 1, 100)
+      ])
+    ]);
+    const found = await listWorkflowArtifacts(
+      "octo/app",
+      null,
+      "radius-deploy-status-dev-"
+    );
+    expect(
+      found.some((a) => a.name === "radius-deploy-status-dev-todolist")
+    ).toBe(true);
+    expect(childProcess.execFile).toHaveBeenCalledTimes(2);
+  });
+
   it("stops at a short page rather than requesting past the end", async () => {
     serve([page(noise(3))]);
     await listWorkflowArtifacts("octo/app", null, "radius-deploy-status-dev-");

@@ -444,6 +444,46 @@ describe("fetchBicepForBranch", () => {
   });
 });
 
+describe("listSourceTreeForBranch", () => {
+  it("returns the worktree listing when the selection is the workspace", async () => {
+    const { listSourceTreeForBranch } = helpers({
+      workspaceTreeByRepoBranch: { "acme/widgets@main": ["Dockerfile"] }
+    });
+    expect(
+      await listSourceTreeForBranch("acme/widgets", "main", WORKSPACE_STATE)
+    ).toEqual(["Dockerfile"]);
+  });
+
+  it("normalizes an empty listing to null so it cannot read as absent files", async () => {
+    // `treePaths` resolves to [] on failure, which a caller reading the raw
+    // listing could otherwise misread as "this repository has no manifests".
+    const { listSourceTreeForBranch } = helpers({
+      remoteTreeByRepoBranch: { "acme/widgets@feat": [] }
+    });
+    expect(
+      await listSourceTreeForBranch("acme/widgets", "feat", WORKSPACE_STATE)
+    ).toBeNull();
+  });
+
+  it("returns null without listing when there is no repository", async () => {
+    const { listSourceTreeForBranch, deps } = helpers();
+    expect(
+      await listSourceTreeForBranch("", "main", WORKSPACE_STATE)
+    ).toBeNull();
+    expect(deps.github.treePaths).not.toHaveBeenCalled();
+  });
+
+  it("returns null when the lister rejects", async () => {
+    const { listSourceTreeForBranch, deps } = helpers();
+    vi.mocked(deps.workspace.fetchWorkspaceTree).mockRejectedValueOnce(
+      new Error("permission denied")
+    );
+    expect(
+      await listSourceTreeForBranch("acme/widgets", "main", WORKSPACE_STATE)
+    ).toBeNull();
+  });
+});
+
 describe("evaluateAppSourceForBranch", () => {
   it("classifies the workspace branch from the worktree listing", async () => {
     const { evaluateAppSourceForBranch, deps } = helpers({
