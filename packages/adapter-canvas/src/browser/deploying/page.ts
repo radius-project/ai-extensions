@@ -847,6 +847,23 @@ export function initializeDeployingPage(
           : "") +
           `<div style="margin-top:12px;"><button type="button" id="deploy-fix-credentials" class="rad-btn rad-btn--primary" style="margin:0;">Set up Azure credentials</button></div>`;
       }
+    } else if (details.errorKind === "oidc-subject-case-mismatch") {
+      // Refused at the same point as the missing-subject panel, so this must
+      // read as "nothing ran" rather than as a workflow that failed. It gets
+      // its own panel instead of that one because Create Environment cannot
+      // fix a credential that differs only by casing — it would rebuild the
+      // same spelling — so the preflight's `az` remediation is the only route.
+      if (progressTitle) {
+        progressTitle.innerHTML = "Azure credentials don't match GitHub";
+      }
+      if (progressSubtitle) {
+        progressSubtitle.style.color = "var(--rad-text-secondary)";
+        progressSubtitle.innerHTML =
+          `<div style="color:var(--rad-text);">Environment <strong>${escapeBrowserHtml(details.environment)}</strong> has an Azure federated credential whose subject differs from GitHub's only by letter casing, so signing in to deploy <strong>${escapeBrowserHtml(details.app)}</strong> would be rejected. Nothing was deployed.</div>` +
+          (details.errorText ?
+            `<div style="margin-top:10px; color:var(--rad-text-secondary);">${escapeBrowserHtml(details.errorText)}</div>`
+          : "");
+      }
     } else {
       if (progressTitle) {
         progressTitle.innerHTML = `Deployment of <strong>${escapeBrowserHtml(details.app)}</strong> to <strong>${escapeBrowserHtml(details.environment)}</strong> failed`;

@@ -42,6 +42,7 @@ import {
   triggerDeployFailureNotice,
   classifyDeployDispatchFailure,
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
+  DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
   DEPLOY_RUN_UNCONFIRMED_KIND
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
@@ -1438,6 +1439,21 @@ describe("triggerDeployRepairHandoff", () => {
     expect(
       triggerDeployRepairHandoff(
         failedEntry({ deployErrorKind: "oidc-subject-missing" })
+      )
+    ).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does not hand off an OIDC subject case mismatch", () => {
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+    });
+    expect(
+      triggerDeployRepairHandoff(
+        failedEntry({
+          deployErrorKind: DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND
+        })
       )
     ).toBe(false);
     expect(calls).toHaveLength(0);

@@ -281,12 +281,15 @@ export interface CanvasState {
 }
 
 // Why a deploy failed, in the one dimension the repair guard cares about:
-// "branch-not-pushed", "run-unconfirmed" and "oidc-subject-missing" all mean an
-// automatic repair must not redeploy, so these strings are matched across
-// server, tests and client. A union rather than string makes a typo in any of
-// them a compile error instead of a guard that silently never fires.
+// the kinds below all mean an automatic repair must not redeploy, so these
+// strings are matched across server, tests and client. A union rather than
+// string makes a typo in any of them a compile error instead of a guard that
+// silently never fires.
 export type DeployErrorKind =
-  "branch-not-pushed" | "run-unconfirmed" | "oidc-subject-missing";
+  | "branch-not-pushed"
+  | "run-unconfirmed"
+  | "oidc-subject-missing"
+  | "oidc-subject-case-mismatch";
 
 export function escapeHtml(str: unknown): string {
   if (!str) return "";
