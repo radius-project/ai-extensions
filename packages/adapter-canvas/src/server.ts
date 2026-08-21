@@ -1349,6 +1349,17 @@ const envListCache = new Map<string, CachedPayload>();
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map<string, CachedPayload>();
 
+// Both listing caches are module-scoped, so they outlive any single canvas
+// server instance. Callers that must not observe a listing captured under
+// different external state clear them wholesale through this seam.
+export function resetListingCaches(
+  environments: { clear(): void } = envListCache,
+  deployments: { clear(): void } = deployListCache
+): void {
+  environments.clear();
+  deployments.clear();
+}
+
 // A deploy request resolves branch and GitHub state asynchronously before
 // beginDeployAttempt marks the canvas state in progress. Reserve that window so
 // two near-simultaneous requests cannot both pass the conflict check and start.

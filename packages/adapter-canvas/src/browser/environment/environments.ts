@@ -93,16 +93,15 @@ export function providerLabel(provider: string): string {
 }
 
 export function environmentStatusMarkup(status: string): string {
-  const mapped: Record<string, readonly [string, string]> = {
-    success: ["success", "Success"],
-    verified: ["success", "Verified"],
-    failed: ["failed", "Failed"],
-    pending: ["pending", "Pending"],
-    unverified: ["pending", "Unverified"],
-    unknown: ["success", "Available"]
+  const labels: Record<string, string> = {
+    success: "Success",
+    verified: "Verified",
+    failed: "Failed",
+    pending: "Pending",
+    unverified: "Unverified",
+    unknown: "Available"
   };
-  const [tone, label] = mapped[status] ?? mapped.pending;
-  return `<span class="rad-dot rad-dot--${tone}"></span><span class="rad-status-label">${label}</span>`;
+  return labels[status] ?? labels.pending;
 }
 
 export function parseEnvironmentRecords(payload: unknown): EnvironmentRecord[] {
