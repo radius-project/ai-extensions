@@ -10,6 +10,7 @@ import {
   DEPLOY_STATUS_ARTIFACT_PREFIX,
   DEPLOY_STATUS_FILES,
   deployStatusArtifactPrefix,
+  isLiveSlotArtifactName,
   MAX_ARTIFACT_CANDIDATES,
   normalizeProvisioningState,
   parseDeployProgressArtifact,
@@ -101,6 +102,30 @@ describe("deployStatusArtifactPrefix", () => {
     expect(deployStatusArtifactPrefix("///")).toBe(
       DEPLOY_STATUS_ARTIFACT_PREFIX
     );
+  });
+});
+
+describe("isLiveSlotArtifactName", () => {
+  it("matches the eight run-scoped live-slot names", () => {
+    for (let slot = 0; slot < 8; slot++) {
+      expect(
+        isLiveSlotArtifactName(
+          `radius-deploy-status-dev-todolist-live-100-slot-${slot}`
+        )
+      ).toBe(true);
+    }
+  });
+
+  it("does not match the fixed-name terminal artifact", () => {
+    expect(isLiveSlotArtifactName("radius-deploy-status-dev-todolist")).toBe(
+      false
+    );
+  });
+
+  it("does not match an unrelated artifact name", () => {
+    expect(isLiveSlotArtifactName("build-logs")).toBe(false);
+    expect(isLiveSlotArtifactName(null)).toBe(false);
+    expect(isLiveSlotArtifactName(undefined)).toBe(false);
   });
 });
 
@@ -239,11 +264,38 @@ describe("parseDeployProgressArtifact", () => {
     expect(parsed?.resources[0].status).toBeUndefined();
   });
 
-  it("defaults a missing sequence to 0 rather than rejecting the payload", () => {
-    const parsed = parseDeployProgressArtifact(
-      progressPayload({ sequence: undefined as any })
-    );
-    expect(parsed?.sequence).toBe(0);
+  it("rejects a payload without a finite positive-integer sequence", () => {
+    // The producer contract starts sequences at 1 and increments by 1.
+    // Accepting a bogus value would let malformed uploads win the
+    // greatest-sequence selection against a legitimate terminal artifact.
+    expect(
+      parseDeployProgressArtifact(
+        progressPayload({ sequence: undefined as any })
+      )
+    ).toBeNull();
+    expect(
+      parseDeployProgressArtifact(progressPayload({ sequence: "1" as any }))
+    ).toBeNull();
+    expect(
+      parseDeployProgressArtifact(progressPayload({ sequence: 0 }))
+    ).toBeNull();
+    expect(
+      parseDeployProgressArtifact(progressPayload({ sequence: -1 }))
+    ).toBeNull();
+    expect(
+      parseDeployProgressArtifact(progressPayload({ sequence: 1.5 }))
+    ).toBeNull();
+    expect(
+      parseDeployProgressArtifact(progressPayload({ sequence: Number.NaN }))
+    ).toBeNull();
+    expect(
+      parseDeployProgressArtifact(
+        progressPayload({ sequence: Number.POSITIVE_INFINITY })
+      )
+    ).toBeNull();
+    expect(
+      parseDeployProgressArtifact(progressPayload({ sequence: 1 }))?.sequence
+    ).toBe(1);
   });
 });
 
@@ -870,6 +922,296 @@ describe("createDeployStatusReader", () => {
       downloadArtifact: async (_repo, a) => (a.id === 2 ? null : okFiles())
     });
     expect(await reader.status()).toBe("ok");
+  });
+
+  it("selects the greatest valid sequence independent of artifact order", async () => {
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-1", {
+          id: 31,
+          created_at: "2026-08-06T00:00:03Z"
+        }),
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-7", {
+          id: 32,
+          created_at: "2026-08-06T00:00:01Z"
+        }),
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-4", {
+          id: 33,
+          created_at: "2026-08-06T00:00:02Z"
+        })
+      ],
+      downloadArtifact: async (_repo, candidate) =>
+        okFiles({ sequence: candidate.id === 32 ? 8 : candidate.id - 29 })
+    });
+
+    expect((await reader.progress())?.sequence).toBe(8);
+  });
+
+  it("hands off from live slots to the higher-sequence terminal artifact", async () => {
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-7", {
+          id: 51,
+          created_at: "2026-08-06T00:00:03Z"
+        }),
+        artifact("radius-deploy-status-dev-todolist", {
+          id: 52,
+          created_at: "2026-08-06T00:00:02Z"
+        })
+      ],
+      downloadArtifact: async (_repo, candidate) =>
+        okFiles({
+          sequence: candidate.id === 52 ? 9 : 8,
+          state: candidate.id === 52 ? "succeeded" : "in_progress"
+        })
+    });
+
+    const progress = await reader.progress();
+    expect(progress?.sequence).toBe(9);
+    expect(progress?.state).toBe("succeeded");
+  });
+
+  it("rejects a payload whose runId differs from the active run", async () => {
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-0")
+      ],
+      downloadArtifact: async () => okFiles({ runId: 999, sequence: 9 })
+    });
+
+    expect(await reader.status()).toBe("missing");
+    expect(await reader.progress()).toBeNull();
+  });
+
+  it("selects the greatest sequence from environment-only fallbacks", async () => {
+    // Give the lower-sequence artifact the newer `created_at` so it sorts
+    // first and populates `envOnlyMatch`. The higher-sequence artifact then
+    // arrives second and forces the "greater sequence replaces the current
+    // match" branch to actually run — without the newer timestamp the sort
+    // tie-breaker on id would surface the higher-sequence artifact first
+    // and the comparison would never execute.
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      application: "guessed-name",
+      runId: 100,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-other-live-100-slot-1", {
+          id: 41,
+          created_at: "2026-08-10T00:00:02Z"
+        }),
+        artifact("radius-deploy-status-dev-other-live-100-slot-2", {
+          id: 42,
+          created_at: "2026-08-10T00:00:01Z"
+        })
+      ],
+      downloadArtifact: async (_repo, candidate) =>
+        okFiles({ application: "other", sequence: candidate.id - 38 })
+    });
+
+    expect((await reader.progress())?.sequence).toBe(4);
+  });
+
+  it("downloads an immutable artifact ID only once across polls", async () => {
+    let downloads = 0;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      ttlMs: 0,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-0")
+      ],
+      downloadArtifact: async () => {
+        downloads++;
+        return okFiles();
+      }
+    });
+
+    await reader.read();
+    await reader.read();
+    expect(downloads).toBe(1);
+  });
+
+  it("does not redownload a malformed artifact ID during an active run", async () => {
+    let downloads = 0;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      ttlMs: 0,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-0")
+      ],
+      downloadArtifact: async () => {
+        downloads++;
+        return { [DEPLOY_STATUS_FILES.progress]: "{not json" };
+      }
+    });
+
+    expect(await reader.status()).toBe("malformed");
+    expect(await reader.status()).toBe("malformed");
+    expect(downloads).toBe(1);
+  });
+
+  it("prunes cached artifact IDs that drop out of the listing", async () => {
+    // Ring slots overwrite by uploading with new artifact IDs. Without
+    // pruning, a long-running deploy would retain every payload it has ever
+    // downloaded even though the older IDs will never be listed again.
+    const downloadedIds: number[] = [];
+    let listing: WorkflowArtifact[] = [
+      artifact("radius-deploy-status-dev-todolist-live-100-slot-0", { id: 71 })
+    ];
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      ttlMs: 0,
+      listArtifacts: async () => listing,
+      downloadArtifact: async (_repo, candidate) => {
+        downloadedIds.push(candidate.id);
+        return okFiles({ sequence: candidate.id - 70 });
+      }
+    });
+
+    await reader.read();
+    expect(downloadedIds).toEqual([71]);
+
+    // Slot rotates: old ID gone, new ID present. Cache must forget 71.
+    listing = [
+      artifact("radius-deploy-status-dev-todolist-live-100-slot-1", { id: 72 })
+    ];
+    await reader.read();
+    expect(downloadedIds).toEqual([71, 72]);
+
+    // Old ID re-appearing (would not happen in practice, but proves 71 was
+    // dropped from the cache — otherwise we would see no third download).
+    listing = [
+      artifact("radius-deploy-status-dev-todolist-live-100-slot-0", { id: 71 })
+    ];
+    await reader.read();
+    expect(downloadedIds).toEqual([71, 72, 71]);
+  });
+
+  it("excludes live-slot artifacts from repo-wide reads", async () => {
+    // `sequence` restarts at 1 for each run, so a cancelled run's higher-
+    // sequenced live slot must not beat a newer completed run's terminal
+    // artifact when the reader is not scoped to any run.
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      listArtifacts: async () => [
+        // Newer completed run: terminal artifact only, sequence 1.
+        artifact("radius-deploy-status-dev-todolist", {
+          id: 81,
+          created_at: "2026-08-10T00:00:02Z",
+          workflow_run: { id: 200 }
+        }),
+        // Older cancelled run: live slot with a higher sequence.
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-7", {
+          id: 82,
+          created_at: "2026-08-10T00:00:01Z",
+          workflow_run: { id: 100 }
+        })
+      ],
+      downloadArtifact: async (_repo, candidate) =>
+        okFiles({
+          runId: candidate.id === 81 ? 200 : 100,
+          sequence: candidate.id === 81 ? 1 : 9,
+          state: candidate.id === 81 ? "succeeded" : "in_progress"
+        })
+    });
+
+    const progress = await reader.progress();
+    expect(progress?.runId).toBe(200);
+    expect(progress?.sequence).toBe(1);
+    expect(progress?.state).toBe("succeeded");
+  });
+
+  it("reports missing on a repo-wide read that finds only live slots", async () => {
+    // Producer spec calls out cancellation: a cancelled run can leave live
+    // slots behind without ever publishing a terminal artifact. A repo-wide
+    // read must not fall back to a live slot in that case; sequences from a
+    // cancelled run are not the current deployment state.
+    let downloads = 0;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-0", {
+          id: 61
+        }),
+        artifact("radius-deploy-status-dev-todolist-live-100-slot-1", {
+          id: 62
+        })
+      ],
+      downloadArtifact: async () => {
+        downloads++;
+        return okFiles();
+      }
+    });
+
+    expect(await reader.status()).toBe("missing");
+    expect(downloads).toBe(0);
+  });
+
+  it("picks the newest terminal artifact across runs on a repo-wide read", async () => {
+    // Two completed runs' fixed-name terminal artifacts. Sequences restart at
+    // 1 per run, so `created_at` (list order) picks the newer deployment
+    // instead of the greater sequence from an older one.
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist", {
+          id: 91,
+          created_at: "2026-08-11T00:00:00Z",
+          workflow_run: { id: 300 }
+        }),
+        artifact("radius-deploy-status-dev-todolist", {
+          id: 92,
+          created_at: "2026-08-10T00:00:00Z",
+          workflow_run: { id: 200 }
+        })
+      ],
+      downloadArtifact: async (_repo, candidate) =>
+        okFiles({
+          runId: candidate.id === 91 ? 300 : 200,
+          sequence: candidate.id === 91 ? 1 : 9
+        })
+    });
+
+    const progress = await reader.progress();
+    expect(progress?.runId).toBe(300);
+    expect(progress?.sequence).toBe(1);
+  });
+
+  it("picks the newest environment-only terminal fallback on a repo-wide read", async () => {
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      application: "guessed-name",
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-other", {
+          id: 93,
+          created_at: "2026-08-12T00:00:00Z",
+          workflow_run: { id: 500 }
+        }),
+        artifact("radius-deploy-status-dev-other", {
+          id: 94,
+          created_at: "2026-08-11T00:00:00Z",
+          workflow_run: { id: 400 }
+        })
+      ],
+      downloadArtifact: async (_repo, candidate) =>
+        okFiles({
+          application: "other",
+          runId: candidate.id === 93 ? 500 : 400,
+          sequence: candidate.id === 93 ? 1 : 9
+        })
+    });
+
+    const progress = await reader.progress();
+    expect(progress?.runId).toBe(500);
+    expect(progress?.sequence).toBe(1);
   });
 
   it("caches within the TTL and refetches after it expires", async () => {
