@@ -15,8 +15,7 @@ interface DeploymentRecord {
   state: string;
   description: string;
   runUrl: string;
-  isDeploy: boolean;
-  isDelete: boolean;
+  workflow: "deploy" | "delete" | "unrelated" | "unknown";
   runStatus: string;
   runConclusion: string;
 }
@@ -53,7 +52,7 @@ export async function resolveEnvironmentDeployment(
   appName: string,
   dependencies: DeploymentResolverDependencies
 ): Promise<DeploymentRow | null> {
-  const resolvedAppName = appName || repo.split("/").pop() || repo;
+  const resolvedAppName = appName || repo.slice(repo.lastIndexOf("/") + 1);
   let provider = "";
   try {
     const varsRaw = await dependencies.ghOrThrow([
@@ -87,13 +86,28 @@ export async function resolveEnvironmentDeployment(
   );
 
   const resolveRecord = async (id: string): Promise<DeploymentRecord> => {
-    const statusRaw = await dependencies.ghOrThrow([
+    const latestStatusRaw = await dependencies.ghOrThrow([
       "api",
-      `/repos/${repo}/deployments/${id}/statuses?per_page=100`,
+      `/repos/${repo}/deployments/${id}/statuses?per_page=1`,
       "--jq",
-      '(.[0].state // "") + "\\t" + ([.[] | (.log_url // .target_url // "") | select(. != "")][0] // "") + "\\t" + (.[0].description // "")'
+      '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "") + "\\t" + (.[0].description // "")'
     ]);
-    const [state = "", logUrl = "", description = ""] = statusRaw.split("\t");
+    const [state = "", latestLogUrl = "", description = ""] =
+      latestStatusRaw.split("\t");
+    let logUrl = latestLogUrl;
+    if (
+      !logUrl &&
+      !(
+        state === "inactive" && description === ABANDONED_DEPLOYMENT_DESCRIPTION
+      )
+    ) {
+      logUrl = await dependencies.ghOrThrow([
+        "api",
+        `/repos/${repo}/deployments/${id}/statuses?per_page=100`,
+        "--jq",
+        '[.[] | (.log_url // .target_url // "") | select(. != "")][0] // ""'
+      ]);
+    }
     let runUrl = "";
     const match = /actions\/runs\/(\d+)/.exec(logUrl);
     if (match) {
@@ -114,14 +128,18 @@ export async function resolveEnvironmentDeployment(
       ]);
       [runPath = "", runStatus = "", runConclusion = ""] = runInfo.split("\t");
     }
+    const workflow =
+      !match || !runPath ? "unknown"
+      : deployWorkflow.test(runPath) ? "deploy"
+      : deleteWorkflow.test(runPath) ? "delete"
+      : "unrelated";
 
     return {
       id,
       state,
       description,
       runUrl,
-      isDeploy: deployWorkflow.test(runPath),
-      isDelete: deleteWorkflow.test(runPath),
+      workflow,
       runStatus,
       runConclusion
     };
@@ -134,11 +152,18 @@ export async function resolveEnvironmentDeployment(
     ) {
       return null;
     }
-    if (!record.isDeploy && !record.isDelete) return "skip";
+    if (record.workflow === "unknown") {
+      throw new Error(
+        `Could not identify GitHub deployment ${record.id} for environment ${environment}.`
+      );
+    }
+    if (record.workflow === "unrelated") return "skip";
     if (record.state === "inactive") return null;
-    if (record.isDelete && record.runConclusion === "success") return null;
+    if (record.workflow === "delete" && record.runConclusion === "success") {
+      return null;
+    }
     if (
-      record.isDelete &&
+      record.workflow === "delete" &&
       record.runConclusion &&
       record.runConclusion !== "success"
     ) {
@@ -148,7 +173,8 @@ export async function resolveEnvironmentDeployment(
       app: resolvedAppName,
       environment,
       provider,
-      status: record.isDelete ? "deleting" : resolveDeployStatus(record),
+      status:
+        record.workflow === "delete" ? "deleting" : resolveDeployStatus(record),
       deploymentId: record.id,
       runUrl: record.runUrl
     };

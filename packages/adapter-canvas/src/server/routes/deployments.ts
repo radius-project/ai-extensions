@@ -1,11 +1,9 @@
 import type { CanvasState } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
+import type { DeploymentAbandonmentService } from "../services/deployment-abandonment.js";
 import type { DeployRequestService } from "../services/deploy-request.js";
-import {
-  ABANDONED_DEPLOYMENT_DESCRIPTION,
-  type DeploymentRow
-} from "../services/deployment-resolver.js";
+import type { DeploymentRow } from "../services/deployment-resolver.js";
 import { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE } from "../../infra.js";
 
 // What the webview needs to decide whether to keep polling after a failed
@@ -75,7 +73,6 @@ export interface DeploymentsInstanceEntry {
 }
 
 export interface DeploymentsDependencies {
-  isValidRepoSlug(value: unknown): boolean;
   readInstanceEntry(instanceId: string): DeploymentsInstanceEntry | undefined;
   triggerDeployRepairHandoff(
     entry: DeploymentsInstanceEntry | undefined,
@@ -113,7 +110,7 @@ export interface DeploymentsDependencies {
     reservation: {
       repo: string;
       environment: string;
-      kind: "delete" | "abandon";
+      kind: "delete";
     }
   ): DeploymentDispatchLease | null;
   releaseDeploymentMutation(
@@ -149,6 +146,9 @@ export interface DeploymentsDependencies {
   // reading the body and writing the response lives behind this port, because
   // the deploy is a multi-stage runtime operation rather than an HTTP concern.
   deployRequest: DeployRequestService;
+  // GitHub-side cleanup is a separate use case from cloud deletion. The route
+  // only parses HTTP input and serializes this service's result.
+  abandonment: DeploymentAbandonmentService;
 }
 
 function errorMessage(error: unknown): string {
@@ -693,134 +693,18 @@ export async function handleAbandonDeployment(
   dependencies: DeploymentsDependencies
 ): Promise<void> {
   const body = await context.readTextBody();
-  const respond = (status: number, payload: unknown): void => {
-    context.response.setHeader("Content-Type", "application/json");
-    context.response.writeHead(status);
-    context.response.end(JSON.stringify(payload));
-  };
-  let reservation: DeploymentDispatchLease | null = null;
-  let reservationOwner: CanvasState | null = null;
-  const releaseReservation = (): void => {
-    if (reservation && reservationOwner) {
-      dependencies.releaseDeploymentMutation(reservationOwner, reservation);
-    }
-    reservation = null;
-    reservationOwner = null;
-  };
-
+  let payload: unknown;
   try {
-    const data = record(JSON.parse(body || "{}"));
-    const repo = typeof data.repo === "string" ? data.repo.trim() : "";
-    const environment =
-      typeof data.environment === "string" ? data.environment.trim() : "";
-    const application =
-      typeof data.application === "string" ? data.application.trim() : "";
-    if (
-      !repo ||
-      !environment ||
-      !application ||
-      !dependencies.isValidRepoSlug(repo)
-    ) {
-      respond(400, {
-        error:
-          "A valid repo, environment, and application are required to abandon deployment tracking."
-      });
-      return;
-    }
-
-    const entry = dependencies.readInstanceEntry(context.instanceId);
-    if (!entry) {
-      respond(503, { error: "Canvas server state is unavailable." });
-      return;
-    }
-    const active = dependencies.activeDeploymentMutation(entry.state);
-    if (dependencies.localDeploymentBlocksMutation(entry.state) || active) {
-      const operation = active?.kind || "deploy";
-      respond(409, {
-        error: `A ${operation} operation for ${active?.repo || repo} in environment ${active?.environment || environment} is already in progress. Wait for it to finish before abandoning deployment tracking.`
-      });
-      return;
-    }
-
-    reservationOwner = entry.state;
-    reservation = dependencies.reserveDeploymentMutation(entry.state, {
-      repo,
-      environment,
-      kind: "abandon"
-    });
-    if (!reservation) {
-      const conflict = dependencies.activeDeploymentMutation(entry.state);
-      respond(409, {
-        error:
-          conflict ?
-            `A ${conflict.kind} operation for ${conflict.repo} in environment ${conflict.environment} is already starting.`
-          : "Another deployment operation is already starting."
-      });
-      return;
-    }
-
-    let current: DeploymentRow | null;
-    try {
-      current = await dependencies.resolveEnvDeployment(
-        repo,
-        environment,
-        application
-      );
-    } catch {
-      respond(503, {
-        error:
-          "Could not verify the current deployment state. Check your GitHub connection and try again."
-      });
-      return;
-    }
-    if (!current || !current.deploymentId) {
-      respond(409, { error: "No failed deployment is available to abandon." });
-      return;
-    }
-    if (dependencies.deploymentStatusBlocksMutation(current.status)) {
-      respond(409, {
-        error:
-          current.status === "deleting" ?
-            "This deployment is being deleted and cannot be abandoned."
-          : "This application is still being deployed. Wait for it to finish before abandoning deployment tracking."
-      });
-      return;
-    }
-    if (current.status !== "failed") {
-      respond(409, { error: "Only a failed deployment can be abandoned." });
-      return;
-    }
-
-    const args = [
-      "api",
-      "--method",
-      "POST",
-      `/repos/${repo}/deployments/${encodeURIComponent(
-        current.deploymentId
-      )}/statuses`,
-      "-f",
-      "state=inactive",
-      "-f",
-      `description=${ABANDONED_DEPLOYMENT_DESCRIPTION}`
-    ];
-    if (current.runUrl) args.push("-f", `log_url=${current.runUrl}`);
-    try {
-      await dependencies.ghOrThrow(args);
-    } catch {
-      respond(502, {
-        error:
-          "Could not abandon deployment tracking on GitHub. Cloud resources were not changed."
-      });
-      return;
-    }
-
-    dependencies.deployListCache.delete(repo);
-    respond(200, { outcome: "abandoned" });
+    payload = JSON.parse(body || "{}");
   } catch (error) {
-    respond(400, { error: errorMessage(error) });
-  } finally {
-    releaseReservation();
+    context.json(400, { error: errorMessage(error) });
+    return;
   }
+  const result = await dependencies.abandonment.abandon({
+    instanceId: context.instanceId,
+    payload
+  });
+  context.json(result.status, result.body);
 }
 
 // Starts a deploy. The adapter is deliberately thin: the body is read exactly

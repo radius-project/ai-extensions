@@ -4,8 +4,10 @@ import { createCanvasServer } from "../../../src/server/create-canvas-server.js"
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createDeploymentsRoutes } from "../../../src/server/routes/deployments.js";
 import { isValidRepoSlug } from "../../../src/azure-oidc.js";
+import { createDeploymentAbandonmentService } from "../../../src/server/services/deployment-abandonment.js";
 import { createDeployRequestService } from "../../../src/server/services/deploy-request.js";
 import { createDeployDispatchService } from "../../../src/server/services/deploy-dispatch.js";
+import { resolveEnvironmentDeployment } from "../../../src/server/services/deployment-resolver.js";
 import {
   createDeployMonitorService,
   type DeployMonitorService
@@ -48,6 +50,13 @@ interface Harness {
   ghApiCalls: string[][];
   setEntryMissing(missing: boolean): void;
   setDeploymentStatus(status: string): void;
+  setDeploymentResolver(
+    resolver: (
+      repo: string,
+      environment: string,
+      application: string
+    ) => Promise<DeploymentRow | null>
+  ): void;
 }
 
 function row(environment: string, status = "deployed"): DeploymentRow {
@@ -71,10 +80,43 @@ function start(): Harness {
   const ghApiCalls: string[][] = [];
   let entryMissing = false;
   let deploymentStatus = "deployed";
+  let deploymentResolver: (
+    repo: string,
+    environment: string,
+    application: string
+  ) => Promise<DeploymentRow | null> = (_repo, environment, _application) =>
+    Promise.resolve(row(environment, deploymentStatus));
+  const readInstanceState = (): CanvasState | undefined =>
+    entryMissing ? undefined : state;
+  const resolveEnvDeployment = (
+    repo: string,
+    environment: string,
+    application: string
+  ): Promise<DeploymentRow | null> =>
+    deploymentResolver(repo, environment, application);
+  const ghOrThrow = (args: string[]): Promise<string> => {
+    ghApiCalls.push(args);
+    return Promise.resolve(
+      args.includes("--method") ? "" : environments.join("\n")
+    );
+  };
+  const abandonment = createDeploymentAbandonmentService({
+    isValidRepoSlug,
+    readInstanceState: () => readInstanceState(),
+    activeDeploymentMutation,
+    localDeploymentBlocksMutation,
+    reserveDeploymentMutation,
+    releaseDeploymentMutation,
+    deploymentStatusBlocksMutation,
+    resolveEnvDeployment,
+    ghOrThrow,
+    invalidateDeployListCache: (repo) => {
+      cache.delete(repo);
+    }
+  });
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
-      isValidRepoSlug,
       readInstanceEntry: () => (entryMissing ? undefined : { state }),
       triggerDeployRepairHandoff: () => false,
       triggerDeployFailureNotice: () => false,
@@ -86,14 +128,8 @@ function start(): Harness {
       }),
       resolveRepoAppName: (_repo, branch) =>
         Promise.resolve(`todo-app@${branch}`),
-      resolveEnvDeployment: (_repo, environment) =>
-        Promise.resolve(row(environment, deploymentStatus)),
-      ghOrThrow: (args) => {
-        ghApiCalls.push(args);
-        return Promise.resolve(
-          args.includes("--method") ? "" : environments.join("\n")
-        );
-      },
+      resolveEnvDeployment,
+      ghOrThrow,
       resetDeploymentViewState: (_target, attemptId) => {
         resets.push(attemptId);
       },
@@ -102,14 +138,11 @@ function start(): Harness {
       // The destructive route's collaborators, wired to a permissive happy path
       // so the HIT exercises real HTTP rather than re-proving refusal logic the
       // unit tests already cover.
-      activeDeploymentMutation: () => undefined,
-      reserveDeploymentMutation: (_target, reservation) => ({
-        ...reservation,
-        expiresAt: 0
-      }),
-      releaseDeploymentMutation: () => {},
-      deploymentStatusBlocksMutation: () => false,
-      localDeploymentBlocksMutation: () => false,
+      activeDeploymentMutation,
+      reserveDeploymentMutation,
+      releaseDeploymentMutation,
+      deploymentStatusBlocksMutation,
+      localDeploymentBlocksMutation,
       ensureWorkflowsCurrent: (...args) => {
         workflowSyncs.push(args);
         return Promise.resolve({ created: [], failed: [] });
@@ -127,7 +160,8 @@ function start(): Harness {
         deploy: () => {
           throw new Error("unexpected deploy dispatch from the read harness");
         }
-      }
+      },
+      abandonment
     })
   );
 
@@ -165,6 +199,9 @@ function start(): Harness {
     },
     setDeploymentStatus(status) {
       deploymentStatus = status;
+    },
+    setDeploymentResolver(resolver) {
+      deploymentResolver = resolver;
     }
   };
 }
@@ -414,6 +451,76 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.dispatches).toEqual([]);
   });
 
+  it("fails closed over a real socket when the newest deployment cannot be identified", async () => {
+    const harness = start();
+    const resolverCalls: string[][] = [];
+    harness.setDeploymentResolver((repo, environment, application) =>
+      resolveEnvironmentDeployment(repo, environment, application, {
+        ghOrThrow: (args) => {
+          resolverCalls.push(args);
+          const path = args[1] ?? "";
+          if (path.includes("/variables?")) return Promise.resolve("");
+          if (path.includes("/deployments?")) {
+            return Promise.resolve("new-deployment\nold-deployment");
+          }
+          if (
+            path.includes("/deployments/new-deployment/statuses?per_page=1")
+          ) {
+            return Promise.resolve("\t\t");
+          }
+          if (
+            path.includes("/deployments/new-deployment/statuses?per_page=100")
+          ) {
+            return Promise.resolve("");
+          }
+          if (
+            path.includes("/deployments/old-deployment/statuses?per_page=1")
+          ) {
+            return Promise.resolve(
+              "failure\thttps://github.com/octo/todo/actions/runs/20\t"
+            );
+          }
+          if (path.includes("/actions/runs/20")) {
+            return Promise.resolve(
+              ".github/workflows/run-rad-commands.yml\tcompleted\tfailure"
+            );
+          }
+          return Promise.reject(new Error(`unexpected path: ${path}`));
+        },
+        deployWorkflowFile: "run-rad-commands.yml",
+        deleteWorkflowFile: "delete-application.yml",
+        maxParallelRecords: 10
+      })
+    );
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error:
+        "Could not verify the current deployment state. Check your GitHub connection and try again."
+    });
+    expect(resolverCalls).toContainEqual([
+      "api",
+      "/repos/octo/todo/deployments/new-deployment/statuses?per_page=100",
+      "--jq",
+      expect.any(String)
+    ]);
+    expect(harness.ghApiCalls).not.toContainEqual(
+      expect.arrayContaining(["--method", "POST"])
+    );
+    expect(harness.state.deploymentMutation).toBeUndefined();
+  });
+
   it("delegates methods the typed declarations do not claim", async () => {
     start();
     const entry = await container!.getOrCreate("panel-a");
@@ -514,7 +621,6 @@ function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
-      isValidRepoSlug,
       readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
       triggerDeployRepairHandoff: () => false,
       triggerDeployFailureNotice: () => false,
@@ -543,7 +649,12 @@ function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
       },
       readProcessEnv: () => ({}),
       setTimer: () => ({}),
-      deployRequest
+      deployRequest,
+      abandonment: {
+        abandon: () => {
+          throw new Error("the deploy harness must not abandon deployments");
+        }
+      }
     })
   );
 

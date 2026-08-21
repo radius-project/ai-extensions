@@ -85,7 +85,6 @@ const productionHandlers = {
     repoMatchesWorkspace: () => false
   }),
   ...createDeploymentsRoutes({
-    isValidRepoSlug: () => false,
     readInstanceEntry: () => undefined,
     triggerDeployRepairHandoff: () => false,
     triggerDeployFailureNotice: () => false,
@@ -118,6 +117,13 @@ const productionHandlers = {
       deploy: () => {
         throw new Error(
           "unexpected deploy dispatch from the route-table suite"
+        );
+      }
+    },
+    abandonment: {
+      abandon: () => {
+        throw new Error(
+          "unexpected deployment abandonment from the route-table suite"
         );
       }
     }

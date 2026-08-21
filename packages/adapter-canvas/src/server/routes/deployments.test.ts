@@ -75,7 +75,6 @@ function dependencies(
   overrides: Partial<DeploymentsDependencies> = {}
 ): DeploymentsDependencies {
   return {
-    isValidRepoSlug: () => true,
     readInstanceEntry: () => {
       throw new Error("readInstanceEntry not stubbed");
     },
@@ -144,6 +143,11 @@ function dependencies(
     deployRequest: {
       deploy: () => {
         throw new Error("deployRequest.deploy not stubbed");
+      }
+    },
+    abandonment: {
+      abandon: () => {
+        throw new Error("abandonment.abandon not stubbed");
       }
     },
     ...overrides
@@ -249,6 +253,16 @@ describe("deployments routes (SU-06)", () => {
         resetDeploymentViewState: () => {},
         deployRequest: {
           deploy: () => Promise.resolve({ status: 200, body: { ok: true } })
+        },
+        abandonment: {
+          abandon: () =>
+            Promise.resolve({
+              status: 400,
+              body: {
+                error:
+                  "A valid repo, environment, and application are required to abandon deployment tracking."
+              }
+            })
         }
       })
     );
@@ -1828,78 +1842,19 @@ describe("deployments routes (SU-06)", () => {
   });
 
   describe("POST /api/abandon-deployment", () => {
-    const BODY = JSON.stringify({
-      repo: "octo/todolist",
-      environment: "dev",
-      application: "todolist"
-    });
-    const ABANDON_LEASE = { ...LEASE, kind: "abandon" as const };
-
-    function abandonContext(body = BODY) {
-      return context("POST", "/api/abandon-deployment", body);
-    }
-
-    function abandonDependencies(
-      overrides: Partial<DeploymentsDependencies> = {}
-    ): DeploymentsDependencies {
-      return dependencies({
-        isValidRepoSlug: () => true,
-        readInstanceEntry: () => ({ state: {} }),
-        activeDeploymentMutation: () => undefined,
-        localDeploymentBlocksMutation: () => false,
-        reserveDeploymentMutation: () => ABANDON_LEASE,
-        releaseDeploymentMutation: () => {},
-        deploymentStatusBlocksMutation: (status) =>
-          status === "pending" ||
-          status === "in_progress" ||
-          status === "deleting",
-        resolveEnvDeployment: () => Promise.resolve(row("dev", "failed")),
-        ghOrThrow: () => Promise.resolve(""),
-        deployListCache: new Map(),
-        ensureWorkflowsCurrent: () => {
-          throw new Error("abandonment must not synchronize workflows");
-        },
-        runGh: () => {
-          throw new Error("abandonment must not dispatch workflows");
-        },
-        ...overrides
-      });
-    }
-
-    it("rejects missing, non-string, whitespace-only, and invalid identities before reading state", async () => {
-      for (const body of [
-        "",
-        "{}",
-        '{"repo":[],"environment":"dev","application":"app"}',
-        '{"repo":"octo/app","environment":" ","application":"app"}',
-        '{"repo":"invalid","environment":"dev","application":"app"}'
-      ]) {
-        const { recording, context: ctx } = abandonContext(body);
-        await handleAbandonDeployment(
-          ctx,
-          abandonDependencies({
-            isValidRepoSlug: (value) => value !== "invalid",
-            readInstanceEntry: () => {
-              throw new Error("must reject before reading state");
-            }
-          })
-        );
-
-        expect(recording.status).toBe(400);
-        expect(JSON.parse(recording.body)).toEqual({
-          error:
-            "A valid repo, environment, and application are required to abandon deployment tracking."
-        });
-      }
-    });
-
     it("rejects malformed JSON without acquiring a lease", async () => {
-      const { recording, context: ctx } = abandonContext("{");
+      const { recording, context: ctx } = context(
+        "POST",
+        "/api/abandon-deployment",
+        "{"
+      );
       await handleAbandonDeployment(
         ctx,
-        abandonDependencies({
-          reserveDeploymentMutation: () => {
-            throw new Error("must not reserve malformed input");
+        dependencies({
+          abandonment: {
+            abandon: () => {
+              throw new Error("must not delegate malformed input");
+            }
           }
         })
       );
@@ -1908,222 +1863,72 @@ describe("deployments routes (SU-06)", () => {
       expect(JSON.parse(recording.body)).toHaveProperty("error");
     });
 
-    it("fails closed when Canvas state is unavailable", async () => {
-      const { recording, context: ctx } = abandonContext();
+    it("delegates parsed input and serializes the service result", async () => {
+      const calls: unknown[] = [];
+      const { recording, context: ctx } = context(
+        "POST",
+        "/api/abandon-deployment",
+        '{"repo":"octo/todolist","environment":"dev","application":"todolist"}'
+      );
       await handleAbandonDeployment(
         ctx,
-        abandonDependencies({ readInstanceEntry: () => undefined })
-      );
-
-      expect(recording.status).toBe(503);
-      expect(JSON.parse(recording.body)).toEqual({
-        error: "Canvas server state is unavailable."
-      });
-    });
-
-    it.each([
-      ["deploy", true],
-      ["delete", false],
-      ["abandon", false]
-    ] as const)(
-      "refuses while a %s operation is active",
-      async (kind, localOnly) => {
-        const { recording, context: ctx } = abandonContext();
-        await handleAbandonDeployment(
-          ctx,
-          abandonDependencies({
-            localDeploymentBlocksMutation: () => localOnly,
-            activeDeploymentMutation: () =>
-              localOnly ? undefined : (
-                {
-                  repo: "octo/other",
-                  environment: "prod",
-                  kind,
-                  expiresAt: 10
-                }
-              ),
-            reserveDeploymentMutation: () => {
-              throw new Error(
-                "must not reserve while another operation is active"
-              );
+        dependencies({
+          abandonment: {
+            abandon: (input) => {
+              calls.push(input);
+              return Promise.resolve({
+                status: 200,
+                body: { outcome: "abandoned" }
+              });
             }
-          })
-        );
-
-        expect(recording.status).toBe(409);
-        expect(JSON.parse(recording.body).error).toContain(`${kind} operation`);
-      }
-    );
-
-    it("reports the winner when reservation is lost in a race", async () => {
-      let reads = 0;
-      const { recording, context: ctx } = abandonContext();
-      await handleAbandonDeployment(
-        ctx,
-        abandonDependencies({
-          reserveDeploymentMutation: () => null,
-          activeDeploymentMutation: () => {
-            reads++;
-            return reads === 1 ? undefined : (
-                {
-                  repo: "octo/winner",
-                  environment: "prod",
-                  kind: "delete",
-                  expiresAt: 10
-                }
-              );
           }
         })
       );
 
-      expect(recording.status).toBe(409);
-      expect(JSON.parse(recording.body).error).toContain(
-        "A delete operation for octo/winner"
-      );
-    });
-
-    it("uses a generic race message when no winner can be read", async () => {
-      const { recording, context: ctx } = abandonContext();
-      await handleAbandonDeployment(
-        ctx,
-        abandonDependencies({ reserveDeploymentMutation: () => null })
-      );
-
-      expect(recording.status).toBe(409);
-      expect(JSON.parse(recording.body).error).toBe(
-        "Another deployment operation is already starting."
-      );
-    });
-
-    it("releases the lease when current GitHub state is unavailable", async () => {
-      const released: unknown[] = [];
-      const { recording, context: ctx } = abandonContext();
-      await handleAbandonDeployment(
-        ctx,
-        abandonDependencies({
-          resolveEnvDeployment: () => Promise.reject(new Error("offline")),
-          releaseDeploymentMutation: (_state, lease) => released.push(lease)
-        })
-      );
-
-      expect(recording.status).toBe(503);
-      expect(released).toEqual([ABANDON_LEASE]);
-    });
-
-    it.each([
-      [null, "No failed deployment is available to abandon."],
-      [row("dev", "success"), "Only a failed deployment can be abandoned."],
-      [
-        row("dev", "pending"),
-        "This application is still being deployed. Wait for it to finish before abandoning deployment tracking."
-      ],
-      [
-        row("dev", "deleting"),
-        "This deployment is being deleted and cannot be abandoned."
-      ],
-      [
-        { ...row("dev", "failed"), deploymentId: "" },
-        "No failed deployment is available to abandon."
-      ]
-    ] as const)(
-      "refuses an ineligible resolved state and releases its lease",
-      async (current, message) => {
-        const released: unknown[] = [];
-        const { recording, context: ctx } = abandonContext();
-        await handleAbandonDeployment(
-          ctx,
-          abandonDependencies({
-            resolveEnvDeployment: () => Promise.resolve(current),
-            releaseDeploymentMutation: (_state, lease) => released.push(lease)
-          })
-        );
-
-        expect(recording.status).toBe(409);
-        expect(JSON.parse(recording.body).error).toBe(message);
-        expect(released).toEqual([ABANDON_LEASE]);
-      }
-    );
-
-    it("marks the failed GitHub deployment inactive, evicts cache, and never touches workflows", async () => {
-      const ghCalls: string[][] = [];
-      const cache = new Map<string, DeployListCacheEntry>([
-        ["octo/todolist", { at: 1, payload: {} }]
-      ]);
-      const released: unknown[] = [];
-      const { recording, context: ctx } = abandonContext();
-      await handleAbandonDeployment(
-        ctx,
-        abandonDependencies({
-          ghOrThrow: (args) => {
-            ghCalls.push(args);
-            return Promise.resolve("");
-          },
-          deployListCache: cache,
-          releaseDeploymentMutation: (_state, lease) => released.push(lease)
-        })
-      );
-
-      expect(recording.status).toBe(200);
-      expect(JSON.parse(recording.body)).toEqual({ outcome: "abandoned" });
-      expect(ghCalls).toEqual([
-        [
-          "api",
-          "--method",
-          "POST",
-          "/repos/octo/todolist/deployments/dep-dev/statuses",
-          "-f",
-          "state=inactive",
-          "-f",
-          "description=Tracking abandoned in Radius Canvas; cloud resources were not deleted.",
-          "-f",
-          "log_url=https://example.test/dev"
-        ]
-      ]);
-      expect(cache.has("octo/todolist")).toBe(false);
-      expect(released).toEqual([ABANDON_LEASE]);
-    });
-
-    it("omits a blank run URL from the inactive status request", async () => {
-      const ghCalls: string[][] = [];
-      const { recording, context: ctx } = abandonContext();
-      await handleAbandonDeployment(
-        ctx,
-        abandonDependencies({
-          resolveEnvDeployment: () =>
-            Promise.resolve({ ...row("dev", "failed"), runUrl: "" }),
-          ghOrThrow: (args) => {
-            ghCalls.push(args);
-            return Promise.resolve("");
+      expect(calls).toEqual([
+        {
+          instanceId: "panel-a",
+          payload: {
+            repo: "octo/todolist",
+            environment: "dev",
+            application: "todolist"
           }
-        })
-      );
-
-      expect(recording.status).toBe(200);
-      expect(ghCalls[0]).not.toContain(expect.stringContaining("log_url="));
-    });
-
-    it("reports a GitHub mutation failure without evicting cache and releases the lease", async () => {
-      const cache = new Map<string, DeployListCacheEntry>([
-        ["octo/todolist", { at: 1, payload: {} }]
+        }
       ]);
-      const released: unknown[] = [];
-      const { recording, context: ctx } = abandonContext();
-      await handleAbandonDeployment(
-        ctx,
-        abandonDependencies({
-          ghOrThrow: () => Promise.reject(new Error("denied")),
-          deployListCache: cache,
-          releaseDeploymentMutation: (_state, lease) => released.push(lease)
-        })
-      );
-
-      expect(recording.status).toBe(502);
+      expect(recording.status).toBe(200);
       expect(JSON.parse(recording.body)).toEqual({
-        error:
-          "Could not abandon deployment tracking on GitHub. Cloud resources were not changed."
+        outcome: "abandoned"
       });
-      expect(cache.has("octo/todolist")).toBe(true);
-      expect(released).toEqual([ABANDON_LEASE]);
+    });
+
+    it("delegates an empty body as an empty request object", async () => {
+      const calls: unknown[] = [];
+      const { recording, context: ctx } = context(
+        "POST",
+        "/api/abandon-deployment"
+      );
+      await handleAbandonDeployment(
+        ctx,
+        dependencies({
+          abandonment: {
+            abandon: (input) => {
+              calls.push(input);
+              return Promise.resolve({
+                status: 400,
+                body: { error: "missing identity" }
+              });
+            }
+          }
+        })
+      );
+
+      expect(calls).toEqual([
+        {
+          instanceId: "panel-a",
+          payload: {}
+        }
+      ]);
+      expect(recording.status).toBe(400);
     });
   });
 });

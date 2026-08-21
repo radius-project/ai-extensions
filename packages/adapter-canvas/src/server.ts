@@ -218,6 +218,7 @@ import { createDeployMonitorService } from "./server/services/deploy-monitor.js"
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
+import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
 import { resolveEnvironmentDeployment } from "./server/services/deployment-resolver.js";
 import type { DeploymentRow } from "./server/services/deployment-resolver.js";
 import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
@@ -549,7 +550,6 @@ const repositoriesRoutes = createRepositoriesRoutes({
 // because all three are declared further down the module and would otherwise be
 // in the temporal dead zone when this object is built at import time.
 const deploymentsRoutes = createDeploymentsRoutes({
-  isValidRepoSlug,
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   triggerDeployRepairHandoff,
   triggerDeployFailureNotice,
@@ -595,6 +595,9 @@ const deploymentsRoutes = createDeploymentsRoutes({
   // file names and the instance container they narrow over exist.
   get deployRequest() {
     return deployRequestService;
+  },
+  get abandonment() {
+    return deploymentAbandonmentService;
   }
 });
 
@@ -2372,6 +2375,24 @@ const deployRequestService = createDeployRequestService({
   unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
   repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
   errorMessage
+});
+
+const deploymentAbandonmentService = createDeploymentAbandonmentService({
+  isValidRepoSlug,
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+  localDeploymentBlocksMutation: (state) =>
+    localDeploymentBlocksMutation(state),
+  reserveDeploymentMutation: (state, reservation) =>
+    reserveDeploymentMutation(state, reservation),
+  releaseDeploymentMutation,
+  deploymentStatusBlocksMutation,
+  resolveEnvDeployment,
+  ghOrThrow: (args) => ghOrThrow(args),
+  invalidateDeployListCache: (repo) => {
+    deployListCache.delete(repo);
+  }
 });
 
 // gh runner that REJECTS on failure, so callers can fail closed instead of
