@@ -479,7 +479,9 @@ test.describe("Radius Canvas visual baselines", () => {
       await expect(page.locator("#planned-branch")).toHaveValue(
         WORKTREE_BRANCH
       );
+      await expect(page.locator("#plan-btn")).toBeEnabled();
       await page.locator("#planned-branch").dispatchEvent("change");
+      await expect(page.locator("#plan-btn")).toBeDisabled();
       await expectWorktreeBranchRequests(requests.planGraph);
       await gotoVisual(page, canvas, "planned", theme);
       await expect(page.locator(".rad-node")).toHaveCount(2);

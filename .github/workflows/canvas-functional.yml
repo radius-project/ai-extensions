@@ -44,30 +44,13 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Cache Playwright browser
-        id: playwright-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-${{ runner.arch }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}
-
-      - name: Install Chromium system dependencies
-        run: pnpm exec playwright install-deps chromium
-
-      - name: Install Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: pnpm exec playwright install chromium
-
-      - name: Run visual stability comparisons
+      - name: Run canonical visual stability comparisons
         if: ${{ !inputs.update_snapshots }}
-        run: pnpm run test:visual:stability
+        run: pnpm run test:visual:canonical
 
-      - name: Regenerate visual baselines
+      - name: Regenerate canonical visual baselines
         if: ${{ inputs.update_snapshots }}
-        run: pnpm run test:visual:update
+        run: pnpm run test:visual:canonical:update
 
       - name: Upload visual diagnostics, baselines, and retry-only report
         if: always()
