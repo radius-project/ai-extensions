@@ -146,6 +146,10 @@ export async function handleAzureAutoSetup(
     const data = JSON.parse(body);
     const targetRepo = data.repo || "";
     const environment = data.environment || "dev";
+    const operationEnvironment =
+      typeof data.operationEnvironment === "string" ?
+        data.operationEnvironment
+      : environment;
     const resourceGroup = data.resourceGroup || "";
     const clusterName = data.cluster || "";
     const clusterResourceGroup = (data.clusterResourceGroup || "").trim();
@@ -296,7 +300,7 @@ export async function handleAzureAutoSetup(
         !existing ||
         dependencies.operations.isStale(existing) ||
         existing.repo !== targetRepo ||
-        existing.environment !== environment ||
+        existing.environment !== operationEnvironment ||
         existing.provider !== "azure" ||
         existing.currentStage !== dependencies.stageAuthorizeIdentity
       ) {

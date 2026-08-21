@@ -69,6 +69,16 @@ export interface CreateEnvironmentOperation {
   // from being narrower than what `operations.ts` actually writes.
   inputRequired?: unknown;
   verification?: unknown;
+  context?: Record<string, unknown>;
+  request?: unknown;
+  resumeRequest?: unknown;
+  setupArtifacts?: {
+    githubEnvironment?: {
+      state?: unknown;
+      repo?: unknown;
+      name?: unknown;
+    };
+  };
 }
 
 export interface OperationStartConflict {
