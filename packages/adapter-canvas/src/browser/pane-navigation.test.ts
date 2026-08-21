@@ -311,6 +311,7 @@ describe("top-level pane navigation", () => {
     harness.navigation.navigateTo(null, "/?page=environment");
 
     harness.navigation.cancelPendingWork();
+    expect(harness.content.getAttribute("aria-busy")).toBeNull();
     first.reject(new Error("stale"));
     await flushPromises();
 
