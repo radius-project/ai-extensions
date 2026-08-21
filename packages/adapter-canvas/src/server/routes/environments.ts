@@ -213,6 +213,27 @@ export async function handleDeleteEnvironment(
       return;
     }
     const provider = target.provider;
+    // Radius only supports deleting Azure-backed environments today. Stage 1's
+    // Radius-environment teardown dispatches the Azure-only delete workflow, so
+    // a non-Azure (e.g. AWS) environment cannot be torn down here and would fail
+    // deep in the runner with a generic error. Refuse up front with a clear,
+    // provider-specific message so the user knows the environment was left in
+    // place and can remove it manually, rather than starting an operation that
+    // is guaranteed to fail closed.
+    if (provider !== "azure") {
+      response.setHeader("Content-Type", "application/json");
+      response.writeHead(400);
+      response.end(
+        JSON.stringify({
+          error:
+            provider === "aws" ?
+              `Deleting AWS environments isn't supported yet. "${envName}" was not deleted. Remove its resources in AWS and delete the GitHub environment manually.`
+            : `Deleting this environment isn't supported: Radius can only delete Azure-backed environments today. "${envName}" was not deleted.`,
+          code: "provider-unsupported"
+        })
+      );
+      return;
+    }
     const clientId = target.clientId;
     // Include the Azure cleanup stages whenever the environment is Azure-backed,
     // even if the AZURE_CLIENT_ID could not be read. A missing client id is

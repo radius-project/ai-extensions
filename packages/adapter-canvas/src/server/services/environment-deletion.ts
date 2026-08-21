@@ -257,9 +257,9 @@ export async function runEnvironmentDeletion(
       // environment would strip the identity and inputs the delete workflow
       // needs, leaving the Radius environment stranded on the cluster with no
       // way to retry. Fail closed as a retryable partial failure and stop here
-      // before any cleanup runs. (This is deterministic for AWS: the delete
-      // route accepts AWS but the bundled env-delete workflow is Azure-only, so
-      // an AWS provider always lands here rather than tearing down credentials.)
+      // before any cleanup runs. (Non-Azure providers never reach this runner:
+      // the delete route rejects them up front with a provider-unsupported
+      // error, because the bundled env-delete workflow is Azure-only.)
       log(`radius env delete failed: ${outcome.detail || "unknown"}`);
       const userMessage =
         outcome.detail ||

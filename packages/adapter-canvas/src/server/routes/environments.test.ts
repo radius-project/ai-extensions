@@ -641,7 +641,7 @@ describe("environments — delete-environment refusal ladder", () => {
         resolveEnvDeployment: () => Promise.resolve(null),
         discoverEnvironmentTarget: () =>
           Promise.resolve({
-            provider: "aws",
+            provider: "azure",
             clientId: "",
             tenantId: "",
             repoId: 7
@@ -655,6 +655,41 @@ describe("environments — delete-environment refusal ladder", () => {
     const body = JSON.parse(recording.body);
     expect(body.code).toBe("operation-in-progress");
     expect(body.operationId).toBe("op-existing");
+  });
+
+  it("400s with provider-unsupported guidance for an AWS environment", async () => {
+    const createOperation = vi.fn();
+    const startOperation = vi.fn();
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        readInstanceEntry: () => entryWith(),
+        resolveRepoAppName: () => Promise.resolve("app"),
+        resolveEnvDeployment: () => Promise.resolve(null),
+        discoverEnvironmentTarget: () =>
+          Promise.resolve({
+            provider: "aws",
+            clientId: "",
+            tenantId: "",
+            repoId: 7
+          }),
+        createOperation,
+        startOperation
+      })
+    );
+    expect(recording.status).toBe(400);
+    const body = JSON.parse(recording.body);
+    expect(body.code).toBe("provider-unsupported");
+    expect(body.error).toContain("AWS");
+    expect(body.error).toContain('"dev" was not deleted');
+    // Nothing was started: no operation is created for an unsupported provider.
+    expect(createOperation).not.toHaveBeenCalled();
+    expect(startOperation).not.toHaveBeenCalled();
   });
 
   it("outer catch: 400 when the body is malformed JSON", async () => {
