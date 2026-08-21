@@ -33,7 +33,8 @@ export const GRAPH_CHIP_TICK_MS = 1000;
 // to any of them, so whichever graph page the user is on wins.
 export const GRAPH_PANEL_IDS: readonly string[] = [
   "progress-steps",
-  "diff-progress-steps"
+  "diff-progress-steps",
+  "deployed-progress-steps"
 ];
 
 const VIEW_PAGES: Readonly<Record<string, string>> = {
