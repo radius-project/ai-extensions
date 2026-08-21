@@ -13,7 +13,10 @@ import {
 } from "../../../src/server/routes/graphs-planning.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
-import type { DeployProgress } from "../../../src/deploy-artifacts.js";
+import type {
+  DeployProgress,
+  WorkflowArtifact
+} from "../../../src/deploy-artifacts.js";
 import {
   buildDeployMessageMap,
   buildDeployStatusMap,
@@ -29,7 +32,11 @@ afterEach(async () => {
 });
 
 interface ReaderScript {
-  graph?: { graph: unknown | null; status: string };
+  graph?: {
+    graph: unknown | null;
+    status: string;
+    artifact?: WorkflowArtifact | null;
+  };
   progress?: DeployProgress | null;
   graphThrows?: Error;
 }
@@ -74,9 +81,12 @@ function start(): Harness {
         return {
           graph: () => {
             if (reader.graphThrows) return Promise.reject(reader.graphThrows);
-            return Promise.resolve(
-              reader.graph ?? { graph: null, status: "missing" }
-            );
+            return Promise.resolve({
+              graph: null,
+              status: "missing",
+              artifact: null,
+              ...reader.graph
+            });
           },
           progress: () => Promise.resolve(reader.progress ?? null)
         };
@@ -572,6 +582,83 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
 
     expect(payload.mode).toBe("live");
     expect(payload.resources[0].deployStatus).toBe("success");
+  });
+
+  it("keeps current terminal state when a mismatched artifact predates the attempt", async () => {
+    const harness = start();
+    const currentOutputs = [
+      {
+        id: "current-server",
+        type: "Microsoft.DBforMySQL/flexibleServers"
+      }
+    ];
+    harness.state.contextRepo = "octo/app";
+    harness.state.deployStatus = "complete";
+    harness.state.deployStartedAt = Date.parse("2026-08-12T00:00:00.000Z");
+    harness.state.deployFinishedAt = Date.parse("2026-08-13T00:00:00.000Z");
+    harness.state.deployRunId = 7;
+    harness.state.deployingResources = [
+      { id: "mysql", name: "mysql", deployStatus: "success" }
+    ];
+    harness.state.deployedGraph = [
+      {
+        id: "mysql",
+        name: "mysql",
+        outputResources: currentOutputs
+      }
+    ];
+    harness.modeledResources.push({ id: "mysql", name: "mysql" });
+    harness.reader.graph = {
+      graph: {
+        resources: [
+          {
+            id: "mysql",
+            name: "mysql",
+            outputResources: [
+              {
+                id: "stale-server",
+                type: "Microsoft.DBforMySQL/flexibleServers"
+              }
+            ]
+          }
+        ]
+      },
+      status: "ok",
+      artifact: {
+        id: 6,
+        name: "radius-deploy-status-prod-old",
+        created_at: "2026-08-11T00:00:00.000Z"
+      }
+    };
+    harness.reader.progress = {
+      schemaVersion: 1,
+      application: "todo-list-app-1",
+      environment: "default",
+      runId: 6,
+      sequence: 1,
+      state: "failed",
+      resources: [
+        {
+          id: "mysql",
+          name: "mysql",
+          type: "Radius.Data/mySqlDatabases",
+          status: "failed"
+        }
+      ]
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+    const payload = (await response.json()) as {
+      mode: string;
+      resources: CanvasGraphResource[];
+      updatedAt: string | null;
+    };
+
+    expect(payload.mode).toBe("terminal");
+    expect(payload.updatedAt).toBeNull();
+    expect(payload.resources[0].deployStatus).toBe("success");
+    expect(payload.resources[0].outputResources).toEqual(currentOutputs);
   });
 
   it("publishes a read failure to the sibling progress route", async () => {

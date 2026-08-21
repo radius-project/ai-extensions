@@ -287,10 +287,12 @@ export function parseDeployProgressArtifact(
       type: typeof raw.type === "string" ? raw.type : "",
       outputResourceIds:
         Array.isArray(raw.outputResourceIds) ?
-          raw.outputResourceIds.filter(
-            (value): value is string =>
-              typeof value === "string" && value.trim() !== ""
-          )
+          raw.outputResourceIds
+            .filter(
+              (value): value is string =>
+                typeof value === "string" && value.trim() !== ""
+            )
+            .map((value) => value.trim())
         : undefined,
       provisioningState:
         typeof raw.provisioningState === "string" ?

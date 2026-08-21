@@ -3,7 +3,10 @@ import {
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
 import type { DeployStatus } from "@radius-project/core";
-import type { DeployProgress } from "../../deploy-artifacts.js";
+import type {
+  DeployProgress,
+  WorkflowArtifact
+} from "../../deploy-artifacts.js";
 import { recordGraphBuildEvent } from "../../shared.js";
 import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
@@ -24,7 +27,11 @@ import type { CanvasServerEntry } from "../types.js";
 // handler from quietly reaching for `read`, `status`, `sequence` or
 // `controlPlaneLog`, none of which the legacy branch touched.
 export interface DeployedGraphStatusReader {
-  graph(): Promise<{ graph: unknown | null; status: string }>;
+  graph(): Promise<{
+    graph: unknown | null;
+    status: string;
+    artifact?: WorkflowArtifact | null;
+  }>;
   progress(): Promise<DeployProgress | null>;
 }
 
@@ -318,24 +325,38 @@ export async function handleDeployedGraph(
     publishedGraph = result.graph;
     readOk = result.status === "ok" || result.status === "stale";
     progress = await reader.progress();
+    const artifactRunMismatchesSession =
+      sessionMatchesSelection &&
+      state.deployRunId != null &&
+      progress?.runId != null &&
+      String(progress.runId) !== String(state.deployRunId);
+    const attemptBoundary = Math.max(
+      state.deployStartedAt ?? 0,
+      state.deployFinishedAt ?? 0
+    );
+    const artifactCreatedAt = Date.parse(result.artifact?.created_at ?? "");
+    const mismatchedArtifactIsNewer =
+      !artifactRunMismatchesSession ||
+      (!deploying &&
+        attemptBoundary > 0 &&
+        Number.isFinite(artifactCreatedAt) &&
+        artifactCreatedAt > attemptBoundary);
     const activeArtifactMatchesRun =
-      !deploying ||
-      (state.deployRunId != null &&
+      deploying ?
+        state.deployRunId != null &&
         progress?.runId != null &&
-        String(progress.runId) === String(state.deployRunId));
+        String(progress.runId) === String(state.deployRunId)
+      : mismatchedArtifactIsNewer;
     if (!activeArtifactMatchesRun) {
       // Run discovery has not completed, or an unscoped read found a previous
       // run. Keep the active monitor state and do not expose stale graph metadata.
       publishedGraph = null;
       readOk = false;
+      progress = null;
     } else {
       updatedAt = progress?.updatedAt || null;
       if (progress?.application) resolvedApp = progress.application;
-      if (
-        progress?.runId != null &&
-        state.deployRunId != null &&
-        String(progress.runId) !== String(state.deployRunId)
-      ) {
+      if (artifactRunMismatchesSession) {
         statusByKey.clear();
       }
       for (const [key, status] of dependencies.buildDeployStatusMap(progress)) {

@@ -271,7 +271,7 @@ describe("parseDeployProgressArtifact", () => {
           {
             name: "api",
             type: "Radius.Compute/containers",
-            outputResourceIds: ["deployment", "", 42, "service"]
+            outputResourceIds: [" deployment ", "", "  ", 42, "service"]
           }
         ] as any
       })

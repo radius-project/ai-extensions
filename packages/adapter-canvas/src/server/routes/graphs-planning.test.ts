@@ -12,7 +12,10 @@ import {
   handleProgress,
   type GraphsPlanningReadsDependencies
 } from "./graphs-planning.js";
-import type { DeployProgress } from "../../deploy-artifacts.js";
+import type {
+  DeployProgress,
+  WorkflowArtifact
+} from "../../deploy-artifacts.js";
 import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
 import type {
   CanvasGraphResource,
@@ -180,6 +183,8 @@ const KNOWN_STATE_FIELDS: readonly (keyof CanvasState)[] = [
   "deployStatus",
   "deployErrorKind",
   "deployingResources",
+  "deployStartedAt",
+  "deployFinishedAt",
   "deployRunId",
   "deployedGraph",
   "plannedResources",
@@ -191,10 +196,14 @@ const KNOWN_STATE_FIELDS: readonly (keyof CanvasState)[] = [
 // Default reader outcomes. A scripted outcome must *override* one of these,
 // never add a new key.
 const DEFAULT_READER: {
-  graph: { graph: unknown | null; status: string };
+  graph: {
+    graph: unknown | null;
+    status: string;
+    artifact: WorkflowArtifact | null;
+  };
   progress: DeployProgress | null;
 } = {
-  graph: { graph: null, status: "missing" },
+  graph: { graph: null, status: "missing", artifact: null },
   progress: null
 };
 
@@ -206,7 +215,11 @@ interface FakeOptions {
   missingEntry?: boolean;
   state?: CanvasState;
   reader?: {
-    graph?: { graph: unknown | null; status: string };
+    graph?: {
+      graph: unknown | null;
+      status: string;
+      artifact?: WorkflowArtifact | null;
+    };
     progress?: DeployProgress | null;
   };
   graphThrows?: Error;
@@ -270,7 +283,7 @@ function fakes(
         graph: () => {
           calls.log.push("reader.graph");
           if (options.graphThrows) return Promise.reject(options.graphThrows);
-          return Promise.resolve(reader.graph);
+          return Promise.resolve({ artifact: null, ...reader.graph });
         },
         progress: () => {
           calls.log.push("reader.progress");
@@ -1099,7 +1112,12 @@ describe("graphs-planning read routes (SU-09)", () => {
                 { id: "mysql", name: "mysql", outputResources: staleOutputs }
               ]
             },
-            status: "ok"
+            status: "ok",
+            artifact: {
+              id: 6,
+              name: "radius-deploy-status-prod-old",
+              created_at: "2026-08-12T00:00:00.000Z"
+            }
           },
           progress: progressPayload(
             [
@@ -1165,12 +1183,15 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(calls.log).toContain("settleDeployStatuses(success)");
   });
 
-  it("lets a different artifact run supersede stale terminal monitor state", async () => {
+  it("lets a demonstrably newer artifact run supersede terminal monitor state", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       state: {
         contextRepo: CONTEXT_REPO,
         deployStatus: "complete",
+        deployAppName: DEPLOY_APP,
+        deployStartedAt: Date.parse("2026-08-12T00:00:00.000Z"),
+        deployFinishedAt: Date.parse("2026-08-13T00:00:00.000Z"),
         deployRunId: 7,
         deployingResources: [
           {
@@ -1181,6 +1202,15 @@ describe("graphs-planning read routes (SU-09)", () => {
       },
       modeledResources: DEPLOYING_RESOURCES,
       reader: {
+        graph: {
+          graph: null,
+          status: "ok",
+          artifact: {
+            id: 8,
+            name: "radius-deploy-status-prod-new",
+            created_at: "2026-08-14T00:00:00.000Z"
+          }
+        },
         progress: progressPayload(
           [
             {
@@ -1203,6 +1233,91 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(calls.log).toContain("settleDeployStatuses(failure)");
     expect(calls.log).not.toContain("settleDeployStatuses(success)");
   });
+
+  it.each([
+    ["older", "2026-08-11T00:00:00.000Z"],
+    ["without creation time", undefined]
+  ])(
+    "ignores a mismatched terminal artifact that is %s",
+    async (_case, createdAt) => {
+      const calls: Calls = { log: [] };
+      const currentOutputs = [
+        {
+          id: "current-server",
+          type: "Microsoft.DBforMySQL/flexibleServers"
+        }
+      ];
+      const staleOutputs = [
+        { id: "stale-server", type: "Microsoft.DBforMySQL/flexibleServers" }
+      ];
+      const { deps } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus: "complete",
+          deployAppName: DEPLOY_APP,
+          deployStartedAt: Date.parse("2026-08-12T00:00:00.000Z"),
+          deployFinishedAt: Date.parse("2026-08-13T00:00:00.000Z"),
+          deployRunId: 7,
+          deployingResources: [
+            {
+              id: "mysql",
+              name: "mysql",
+              deployStatus: "success"
+            }
+          ],
+          deployedGraph: [
+            {
+              id: "mysql",
+              name: "mysql",
+              outputResources: currentOutputs
+            }
+          ]
+        },
+        modeledResources: [{ id: "mysql", name: "mysql" }],
+        reader: {
+          graph: {
+            graph: {
+              resources: [
+                {
+                  id: "mysql",
+                  name: "mysql",
+                  outputResources: staleOutputs
+                }
+              ]
+            },
+            status: "ok",
+            artifact: {
+              id: 6,
+              name: "radius-deploy-status-prod-old",
+              created_at: createdAt
+            }
+          },
+          progress: progressPayload(
+            [
+              {
+                id: "mysql",
+                name: "mysql",
+                type: "Radius.Data/mySqlDatabases",
+                status: "failed"
+              }
+            ],
+            { runId: 6, state: "failed" }
+          )
+        }
+      });
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.resources[0].deployStatus).toBe("success");
+      expect(payload.resources[0].outputResources).toEqual(currentOutputs);
+      expect(payload.application).toBe(DEPLOY_APP);
+      expect(payload.updatedAt).toBeNull();
+      expect(calls.log).toContain("settleDeployStatuses(success)");
+      expect(calls.log).not.toContain("settleDeployStatuses(failure)");
+    }
+  );
 
   it("does not settle a pre-dispatch session failure", async () => {
     const calls: Calls = { log: [] };
