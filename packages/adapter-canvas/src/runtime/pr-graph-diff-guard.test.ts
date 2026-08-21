@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createPullRequestGraphDiffGuard } from "./pr-graph-diff-guard.js";
+import {
+  successfulGraphDiffResult,
+  unavailableGraphDiffResult
+} from "./pr-graph-diff-result.js";
 
 const MARKDOWN =
   "## 📊 Application Graph Diff\n\nComparing `main` → `feature`\n";
@@ -34,9 +38,7 @@ function pullRequest(body = "") {
 }
 
 function graphDiff(
-  markdown: unknown = {
-    textResultForLlm: MARKDOWN
-  },
+  toolResult: unknown = successfulGraphDiffResult(MARKDOWN),
   branches: { baseBranch?: string; headBranch?: string } = {
     baseBranch: "main",
     headBranch: "feature"
@@ -48,7 +50,7 @@ function graphDiff(
       repo: "acme/widgets",
       ...branches
     },
-    toolResult: markdown,
+    toolResult,
     workingDirectory: "/worktrees/widgets"
   };
 }
@@ -75,6 +77,19 @@ describe("pull request application graph diff guard", () => {
     await expect(guard.onPreToolUse(pullRequest())).resolves.toBeUndefined();
     expect(deps.workspaceContext).not.toHaveBeenCalled();
     expect(deps.getDefaultBranch).not.toHaveBeenCalled();
+  });
+
+  it("does not inherit a modeled worktree when a later hook omits its directory", async () => {
+    const { guard, deps } = setup(true);
+    await guard.activateAtSessionStart("/worktrees/widgets");
+
+    await expect(
+      guard.onPreToolUse({
+        toolName: "create_pull_request",
+        toolArgs: { title: "Other repo", body: "" }
+      })
+    ).resolves.toBeUndefined();
+    expect(deps.workspaceContext).not.toHaveBeenCalled();
   });
 
   it("detects a model created after startup and requires a matching graph diff", async () => {
@@ -114,7 +129,7 @@ describe("pull request application graph diff guard", () => {
     expect(deps.getDefaultBranch).not.toHaveBeenCalled();
   });
 
-  it("fails closed after activation when model verification fails", async () => {
+  it("allows the PR without a graph when model verification fails", async () => {
     const { guard, deps } = setup(true);
     await guard.activateAtSessionStart("/worktrees/widgets");
     deps.hasRadiusApplicationModel.mockRejectedValueOnce(
@@ -123,8 +138,9 @@ describe("pull request application graph diff guard", () => {
 
     const result = await guard.onPreToolUse(pullRequest());
 
-    expect(result?.permissionDecision).toBe("deny");
+    expect(result).not.toHaveProperty("permissionDecision");
     expect(result?.additionalContext).toContain("filesystem unavailable");
+    expect(result?.additionalContext).toContain("without a graph diff section");
   });
 
   it("does not activate an unrelated session when model verification fails", async () => {
@@ -136,7 +152,7 @@ describe("pull request application graph diff guard", () => {
     await expect(guard.onPreToolUse(pullRequest())).resolves.toBeUndefined();
   });
 
-  it("reports unresolved and failed PR identity lookup", async () => {
+  it("allows the PR without a graph when identity lookup is unavailable", async () => {
     const unresolved = setup(true);
     await unresolved.guard.activateAtSessionStart("/worktrees/widgets");
     unresolved.deps.workspaceContext.mockResolvedValueOnce({
@@ -146,7 +162,8 @@ describe("pull request application graph diff guard", () => {
     unresolved.deps.getDefaultBranch.mockResolvedValueOnce("");
 
     const missing = await unresolved.guard.onPreToolUse(pullRequest());
-    expect(missing?.permissionDecisionReason).toContain(
+    expect(missing).not.toHaveProperty("permissionDecision");
+    expect(missing?.additionalContext).toContain(
       "repository, base branch, and head branch"
     );
 
@@ -157,22 +174,45 @@ describe("pull request application graph diff guard", () => {
     );
 
     const error = await failed.guard.onPreToolUse(pullRequest());
+    expect(error).not.toHaveProperty("permissionDecision");
     expect(error?.additionalContext).toContain("git unavailable");
+
+    const defaultBranchFailed = setup(true);
+    await defaultBranchFailed.guard.activateAtSessionStart(
+      "/worktrees/widgets"
+    );
+    defaultBranchFailed.deps.getDefaultBranch.mockRejectedValueOnce(
+      new Error("GitHub rate limited")
+    );
+
+    const rateLimited =
+      await defaultBranchFailed.guard.onPreToolUse(pullRequest());
+    expect(rateLimited).not.toHaveProperty("permissionDecision");
+    expect(rateLimited?.additionalContext).toContain("GitHub rate limited");
   });
 
-  it("requires successful graph-diff markdown for the exact branch pair", async () => {
+  it("allows a PR without a graph after an explicit unavailable result", async () => {
     const { guard } = setup(true);
     await guard.activateAtSessionStart("/worktrees/widgets");
 
     await guard.onPostToolUse(
-      graphDiff({ textResultForLlm: "Could not generate app graph diff" })
+      graphDiff(unavailableGraphDiffResult("No committed model"))
     );
-    expect(
-      (await guard.onPreToolUse(pullRequest(MARKDOWN)))?.permissionDecision
-    ).toBe("deny");
+    const result = await guard.onPreToolUse(pullRequest("Summary"));
+    expect(result).not.toHaveProperty("permissionDecision");
+    expect(result?.additionalContext).toContain("No committed model");
+    expect(result?.additionalContext).toContain("Report this reason in chat");
+  });
+
+  it("requires a successful graph diff for the exact branch pair", async () => {
+    const { guard } = setup(true);
+    await guard.activateAtSessionStart("/worktrees/widgets");
 
     await guard.onPostToolUse(
-      graphDiff(MARKDOWN, { baseBranch: "develop", headBranch: "feature" })
+      graphDiff(successfulGraphDiffResult(MARKDOWN), {
+        baseBranch: "develop",
+        headBranch: "feature"
+      })
     );
     expect(
       (await guard.onPreToolUse(pullRequest(MARKDOWN)))?.permissionDecision
@@ -189,7 +229,8 @@ describe("pull request application graph diff guard", () => {
     );
 
     expect(result?.permissionDecision).toBe("deny");
-    expect(result?.additionalContext).toContain("TOP");
+    expect(result?.additionalContext).toContain("byte-exact");
+    expect(result?.additionalContext).toContain("repository template");
     expect(
       (await guard.onPreToolUse(pullRequest(`\n${MARKDOWN}\nPR summary`)))
         ?.permissionDecision
@@ -198,6 +239,85 @@ describe("pull request application graph diff guard", () => {
       guard.onPreToolUse(pullRequest(`${MARKDOWN}\nPR summary`))
     ).resolves.toBeUndefined();
     expect(deps.getDefaultBranch).toHaveBeenCalledOnce();
+  });
+
+  it("allows the PR after the graph tool is denied", async () => {
+    const { guard } = setup(true);
+    await guard.activateAtSessionStart("/worktrees/widgets");
+    guard.recordDeniedGraphDiff(graphDiff(), "No committed model exists");
+
+    const result = await guard.onPreToolUse(pullRequest("Summary"));
+
+    expect(result).not.toHaveProperty("permissionDecision");
+    expect(result?.additionalContext).toContain("No committed model exists");
+  });
+
+  it("ignores denied tools that are not identifiable graph diff attempts", () => {
+    const { guard } = setup();
+
+    guard.recordDeniedGraphDiff(
+      { toolName: "some_other_tool", toolArgs: {} },
+      "denied"
+    );
+    guard.recordDeniedGraphDiff(
+      { toolName: "radius_generate_pr_diff_markdown", toolArgs: {} },
+      "denied"
+    );
+  });
+
+  it("allows the PR after graph generation fails", async () => {
+    const { guard } = setup(true);
+    await guard.activateAtSessionStart("/worktrees/widgets");
+    await guard.onPostToolUseFailure({
+      toolName: "radius_generate_pr_diff_markdown",
+      toolArgs: {
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "feature"
+      },
+      error: "rad failed",
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    const result = await guard.onPreToolUse(pullRequest("Summary"));
+
+    expect(result).not.toHaveProperty("permissionDecision");
+    expect(result?.additionalContext).toContain("rad failed");
+  });
+
+  it("stops denying when a graph tool call has no observable result", async () => {
+    const { guard } = setup(true);
+    await guard.activateAtSessionStart("/worktrees/widgets");
+
+    expect((await guard.onPreToolUse(pullRequest()))?.permissionDecision).toBe(
+      "deny"
+    );
+    expect((await guard.onPreToolUse(pullRequest()))?.permissionDecision).toBe(
+      "deny"
+    );
+    await guard.onPreToolUse(
+      graphDiff(unavailableGraphDiffResult("not observed"))
+    );
+    const retry = await guard.onPreToolUse(pullRequest("Summary"));
+
+    expect(retry).not.toHaveProperty("permissionDecision");
+    expect(retry?.additionalContext).toContain(
+      "rejected, denied, or timed out"
+    );
+  });
+
+  it("retains unavailable outcomes across failed PR retries", async () => {
+    const { guard } = setup(true);
+    await guard.activateAtSessionStart("/worktrees/widgets");
+    await guard.onPostToolUse(
+      graphDiff(unavailableGraphDiffResult("No committed model"))
+    );
+
+    const first = await guard.onPreToolUse(pullRequest("Summary"));
+    const retry = await guard.onPreToolUse(pullRequest("Summary"));
+
+    expect(first?.additionalContext).toContain("No committed model");
+    expect(retry?.additionalContext).toContain("No committed model");
   });
 
   it("opens the matching interactive diff after PR creation and consumes the proof", async () => {
@@ -224,6 +344,18 @@ describe("pull request application graph diff guard", () => {
 
     await expect(
       guard.onPostToolUse(pullRequest(MARKDOWN))
+    ).resolves.toBeUndefined();
+    expect(deps.openGraphDiff).not.toHaveBeenCalled();
+  });
+
+  it("does not open a Canvas when post-PR identity is incomplete", async () => {
+    const { guard, deps } = setup(true);
+    await guard.activateAtSessionStart("/worktrees/widgets");
+    deps.workspaceContext.mockResolvedValueOnce({ repo: "", branch: "" });
+    deps.getDefaultBranch.mockResolvedValueOnce("");
+
+    await expect(
+      guard.onPostToolUse(pullRequest("Summary"))
     ).resolves.toBeUndefined();
     expect(deps.openGraphDiff).not.toHaveBeenCalled();
   });
@@ -295,7 +427,10 @@ describe("pull request application graph diff guard", () => {
       const headBranch = `feature-${index}`;
       const markdown = `${MARKDOWN}${index}`;
       await guard.onPostToolUse(
-        graphDiff(markdown, { baseBranch: "main", headBranch })
+        graphDiff(successfulGraphDiffResult(markdown), {
+          baseBranch: "main",
+          headBranch
+        })
       );
       await expect(
         guard.onPreToolUse({
@@ -346,6 +481,7 @@ describe("pull request application graph diff guard", () => {
       guard.onPostToolUse(
         graphDiff(
           {
+            resultType: "success",
             textResultForLlm: MARKDOWN
           },
           {}
@@ -355,5 +491,23 @@ describe("pull request application graph diff guard", () => {
     expect(deps.hasRadiusApplicationModel).toHaveBeenCalledExactlyOnceWith(
       "/worktrees/widgets"
     );
+  });
+
+  it("ignores failed non-graph tools and graph failures without an identity", async () => {
+    const { guard } = setup();
+
+    await expect(
+      guard.onPostToolUseFailure({
+        toolName: "other_tool",
+        error: "failed"
+      })
+    ).resolves.toBeUndefined();
+    await expect(
+      guard.onPostToolUseFailure({
+        toolName: "radius_generate_pr_diff_markdown",
+        toolArgs: {},
+        error: 42
+      })
+    ).resolves.toBeUndefined();
   });
 });

@@ -50,12 +50,21 @@ export interface RadiusExtension {
           permissionDecisionReason: string;
           additionalContext: string;
         }
+      | {
+          additionalContext: string;
+        }
       | undefined
     >;
     onPostToolUse: (input: {
       toolName?: unknown;
       toolArgs?: unknown;
       toolResult?: unknown;
+      workingDirectory?: unknown;
+    }) => Promise<{ additionalContext: string } | undefined>;
+    onPostToolUseFailure: (input: {
+      toolName?: unknown;
+      toolArgs?: unknown;
+      error?: unknown;
       workingDirectory?: unknown;
     }) => Promise<{ additionalContext: string } | undefined>;
     onSessionStart: (input: {
@@ -96,6 +105,20 @@ export function createRadiusExtension(
         input: { page: "graph-diff", repo, baseBranch, headBranch }
       })
   });
+  let pendingStartupDiagnostic = "";
+
+  function logStartupDiagnostic(message: string): boolean {
+    const session = deps.session.tryGet();
+    if (!session?.log) return false;
+    try {
+      void Promise.resolve(
+        session.log(message, { level: "warning", ephemeral: true })
+      ).catch(() => undefined);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   // ─── Host-channel callbacks ────────────────────────────────────────────────
   // Registered immediately (no session required yet): each callback only
@@ -357,6 +380,12 @@ export function createRadiusExtension(
     }
     attachedSession = session;
     deps.session.set(session);
+    if (
+      pendingStartupDiagnostic &&
+      logStartupDiagnostic(pendingStartupDiagnostic)
+    ) {
+      pendingStartupDiagnostic = "";
+    }
     startKeepalive();
   }
 
@@ -400,7 +429,13 @@ export function createRadiusExtension(
               }
             }
           );
-          if (graphDecision) return graphDecision;
+          if (graphDecision) {
+            pullRequestGraphDiffGuard.recordDeniedGraphDiff(
+              input,
+              graphDecision.permissionDecisionReason
+            );
+            return graphDecision;
+          }
         } catch {
           // Graph generation remains fail-open; the PR guard below owns its
           // own fail-closed diagnostics once a Radius model is active.
@@ -408,10 +443,20 @@ export function createRadiusExtension(
         return pullRequestGraphDiffGuard.onPreToolUse(input);
       },
       onPostToolUse: (input) => pullRequestGraphDiffGuard.onPostToolUse(input),
+      onPostToolUseFailure: (input) =>
+        pullRequestGraphDiffGuard.onPostToolUseFailure(input),
       onSessionStart: async (input) => {
-        const active = await pullRequestGraphDiffGuard
-          .activateAtSessionStart(input.workingDirectory)
-          .catch(() => false);
+        let active = false;
+        try {
+          active = await pullRequestGraphDiffGuard.activateAtSessionStart(
+            input.workingDirectory
+          );
+        } catch (error) {
+          pendingStartupDiagnostic = `Radius could not inspect the worktree for an application model during session startup: ${errorMessage(error)}. Radius remains inactive for now and will retry when a later tool call provides the worktree.`;
+          if (logStartupDiagnostic(pendingStartupDiagnostic)) {
+            pendingStartupDiagnostic = "";
+          }
+        }
         if (!active) return undefined;
         return { additionalContext: RADIUS_SESSION_START_CONTEXT };
       }

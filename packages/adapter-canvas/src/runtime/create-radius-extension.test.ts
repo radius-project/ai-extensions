@@ -158,7 +158,7 @@ describe("RU-19: onPreToolUse hook", () => {
         input: { page: "graph", repo: "acme/widgets" }
       }
     });
-    expect(result?.permissionDecision).toBe("deny");
+    expect(result).toMatchObject({ permissionDecision: "deny" });
     expect(result?.additionalContext).toContain(".radius/app.bicep");
   });
 
@@ -249,6 +249,47 @@ describe("RU-19: onSessionStart hook", () => {
     await expect(
       ext.hooks.onSessionStart({ workingDirectory: "/worktrees/widgets" })
     ).resolves.toBeUndefined();
+    expect(deps.session.get().log).toHaveBeenCalledWith(
+      expect.stringContaining("filesystem unavailable"),
+      { level: "warning", ephemeral: true }
+    );
+  });
+
+  it("logs a deferred startup diagnostic after the session attaches", async () => {
+    const fake = createFakeDependencies();
+    const ext = createRadiusExtension(fake.deps);
+    (
+      fake.deps.workspace.hasRadiusApplicationModel as ReturnType<typeof vi.fn>
+    ).mockRejectedValue(new Error("worktree still materializing"));
+
+    await ext.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+    const session = createFakeSession();
+    ext.attachSession(session);
+
+    expect(session.log).toHaveBeenCalledWith(
+      expect.stringContaining("worktree still materializing"),
+      { level: "warning", ephemeral: true }
+    );
+  });
+
+  it("does not block attachment when startup diagnostic logging fails", async () => {
+    const fake = createFakeDependencies();
+    const ext = createRadiusExtension(fake.deps);
+    (
+      fake.deps.workspace.hasRadiusApplicationModel as ReturnType<typeof vi.fn>
+    ).mockRejectedValue(new Error("worktree still materializing"));
+    await ext.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+    const session = createFakeSession({
+      log: vi.fn(() => {
+        throw new Error("log unavailable");
+      })
+    });
+
+    expect(() => ext.attachSession(session)).not.toThrow();
   });
 });
 

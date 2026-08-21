@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { computeGraphDiff } from "@radius-project/core";
-import { renderPrDiffMarkdown, renderDiffMermaid } from "./pr-diff-markdown.js";
+import {
+  PR_GRAPH_DIFF_MARKDOWN_HEADING,
+  renderPrDiffMarkdown,
+  renderDiffMermaid
+} from "./pr-diff-markdown.js";
 import type { CanvasGraphResource } from "./shared.js";
 
 // Resource/connection fixture helpers. Ids are full resource paths (the Mermaid
@@ -37,7 +41,7 @@ describe("renderPrDiffMarkdown", () => {
       "main",
       "feature"
     );
-    expect(md).toContain("## 📊 Application Graph Diff");
+    expect(md).toContain(PR_GRAPH_DIFF_MARKDOWN_HEADING);
     expect(md).toContain("Comparing `main` → `feature`");
     expect(md).toContain("No application graph changes detected");
   });

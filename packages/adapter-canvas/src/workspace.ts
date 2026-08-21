@@ -376,6 +376,8 @@ function isLegacyRadiusAppModel(content: string): boolean {
 export async function hasRadiusApplicationModel(
   workspacePath: string | null | undefined
 ): Promise<boolean> {
+  // `.radius` is Radius-owned, so any non-empty model is an activation signal
+  // even before it compiles. The ambiguous root filename must prove it is Radius.
   const radiusModel = await readWorkspaceFile(
     workspacePath,
     WORKSPACE_BICEP_PATHS[0]

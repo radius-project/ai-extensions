@@ -1,6 +1,10 @@
 import { errorMessage } from "./util.js";
+import {
+  graphDiffOutcome,
+  graphDiffResultText,
+  type PullRequestGraphDiffOutcome
+} from "./pr-graph-diff-result.js";
 
-const GRAPH_DIFF_MARKER = "## 📊 Application Graph Diff";
 const PROOF_LIMIT = 20;
 
 interface ToolUseInput {
@@ -11,6 +15,10 @@ interface ToolUseInput {
 
 interface PostToolUseInput extends ToolUseInput {
   toolResult?: unknown;
+}
+
+interface PostToolUseFailureInput extends ToolUseInput {
+  error?: unknown;
 }
 
 interface PullRequestIdentity {
@@ -32,19 +40,32 @@ interface DeniedToolUse {
   additionalContext: string;
 }
 
+interface ToolUseGuidance {
+  permissionDecision?: undefined;
+  permissionDecisionReason?: undefined;
+  additionalContext: string;
+}
+
 interface PostToolUseGuidance {
   additionalContext: string;
 }
 
-interface GraphDiffProof extends PullRequestIdentity {
-  markdown: string;
+interface GraphDiffAttempt extends PullRequestIdentity {
+  outcome: PullRequestGraphDiffOutcome | "failure";
+  text: string;
 }
 
 export interface PullRequestGraphDiffGuard {
   activateAtSessionStart(workingDirectory: unknown): Promise<boolean>;
-  onPreToolUse(input: ToolUseInput): Promise<DeniedToolUse | undefined>;
+  recordDeniedGraphDiff(input: ToolUseInput, reason: string): void;
+  onPreToolUse(
+    input: ToolUseInput
+  ): Promise<DeniedToolUse | ToolUseGuidance | undefined>;
   onPostToolUse(
     input: PostToolUseInput
+  ): Promise<PostToolUseGuidance | undefined>;
+  onPostToolUseFailure(
+    input: PostToolUseFailureInput
   ): Promise<PostToolUseGuidance | undefined>;
 }
 
@@ -83,6 +104,10 @@ function isPullRequestCreationTool(toolName: unknown): boolean {
   );
 }
 
+function isGraphDiffTool(toolName: unknown): boolean {
+  return toolName === "radius_generate_pr_diff_markdown";
+}
+
 function isRadiusToolUse(toolName: unknown, toolArgs: unknown): boolean {
   if (typeof toolName !== "string") return false;
   if (toolName.startsWith("radius_")) return true;
@@ -94,21 +119,49 @@ function proofKey(identity: PullRequestIdentity): string {
   return `${identity.repo}\n${identity.baseBranch}\n${identity.headBranch}`;
 }
 
-function toolResultText(toolResult: unknown): string {
-  if (typeof toolResult === "string") return toolResult;
-  return rawString(record(toolResult).textResultForLlm);
-}
-
-function graphDiffProof(input: PostToolUseInput): GraphDiffProof | null {
-  if (input.toolName !== "radius_generate_pr_diff_markdown") return null;
-  const args = record(input.toolArgs);
-  const markdown = toolResultText(input.toolResult);
-  if (!markdown.startsWith(GRAPH_DIFF_MARKER)) return null;
+function graphDiffIdentity(toolArgs: unknown): PullRequestIdentity | null {
+  const args = record(toolArgs);
   const repo = firstString(args, ["repo", "repo_full_name", "repository"]);
   const baseBranch = firstString(args, ["baseBranch", "base_branch", "base"]);
   const headBranch = firstString(args, ["headBranch", "head_branch", "head"]);
   if (!repo || !baseBranch || !headBranch) return null;
-  return { repo, baseBranch, headBranch, markdown };
+  return { repo, baseBranch, headBranch };
+}
+
+function graphDiffAttempt(input: PostToolUseInput): GraphDiffAttempt | null {
+  if (!isGraphDiffTool(input.toolName)) return null;
+  const identity = graphDiffIdentity(input.toolArgs);
+  const outcome = graphDiffOutcome(input.toolResult);
+  if (!identity || !outcome) return null;
+  return {
+    ...identity,
+    outcome,
+    text: graphDiffResultText(input.toolResult)
+  };
+}
+
+function unavailableGuidance(reason: string): ToolUseGuidance {
+  return {
+    additionalContext: `Create the pull request without a graph diff section. Do not add an explanation about the missing graph to the pull request body. Report this reason in chat instead, and do not open the graph-diff Canvas: ${reason}`
+  };
+}
+
+function failedGraphDiffAttempt(
+  toolArgs: unknown,
+  reason: string
+): GraphDiffAttempt | null {
+  const identity = graphDiffIdentity(toolArgs);
+  if (!identity) return null;
+  return { ...identity, outcome: "failure", text: reason };
+}
+
+function deniedGraphDiffAttempt(
+  toolArgs: unknown,
+  reason: string
+): GraphDiffAttempt | null {
+  const identity = graphDiffIdentity(toolArgs);
+  if (!identity) return null;
+  return { ...identity, outcome: "unavailable", text: reason };
 }
 
 function rememberBounded<T>(map: Map<string, T>, key: string, value: T): void {
@@ -131,20 +184,14 @@ export function createPullRequestGraphDiffGuard(
   deps: PullRequestGraphDiffGuardDependencies
 ): PullRequestGraphDiffGuard {
   let active = false;
-  let lastWorkingDirectory = "";
-  const proofs = new Map<string, GraphDiffProof>();
+  const attempts = new Map<string, GraphDiffAttempt>();
+  const requestedDiffs = new Set<string>();
   const pendingPullRequests = new Set<string>();
   const defaultBranches = new Map<string, string>();
 
-  function workingDirectory(input: ToolUseInput): string {
-    const current = optionalString(input.workingDirectory);
-    if (current) lastWorkingDirectory = current;
-    return current || lastWorkingDirectory;
-  }
-
-  async function modelExists(input: ToolUseInput): Promise<boolean> {
-    const workspacePath = workingDirectory(input);
-    if (!workspacePath) return active;
+  async function modelExists(input: ToolUseInput): Promise<boolean | null> {
+    const workspacePath = optionalString(input.workingDirectory);
+    if (!workspacePath) return null;
     return deps.hasRadiusApplicationModel(workspacePath);
   }
 
@@ -176,28 +223,43 @@ export function createPullRequestGraphDiffGuard(
   ): Promise<boolean> {
     const workspacePath = optionalString(workingDirectoryInput);
     if (!workspacePath) return false;
-    lastWorkingDirectory = workspacePath;
     active = await deps.hasRadiusApplicationModel(workspacePath);
     return active;
   }
 
+  function recordDeniedGraphDiff(input: ToolUseInput, reason: string): void {
+    if (!isGraphDiffTool(input.toolName)) return;
+    const attempt = deniedGraphDiffAttempt(input.toolArgs, reason);
+    if (attempt) {
+      active = true;
+      rememberBounded(attempts, proofKey(attempt), attempt);
+      requestedDiffs.delete(proofKey(attempt));
+    }
+  }
+
   async function onPreToolUse(
     input: ToolUseInput
-  ): Promise<DeniedToolUse | undefined> {
+  ): Promise<DeniedToolUse | ToolUseGuidance | undefined> {
+    if (isGraphDiffTool(input.toolName)) {
+      const identity = graphDiffIdentity(input.toolArgs);
+      if (identity) rememberBoundedSet(requestedDiffs, proofKey(identity));
+      return undefined;
+    }
+
+    // This hook can enforce known PR tools. Shell commands such as
+    // `gh pr create` are opaque to extensions and require a host-level PR hook.
     if (!isPullRequestCreationTool(input.toolName)) return undefined;
 
-    let modeled: boolean;
+    let modeled: boolean | null;
     try {
       modeled = await modelExists(input);
     } catch (error) {
       if (!active) return undefined;
-      return {
-        permissionDecision: "deny",
-        permissionDecisionReason:
-          "Radius could not verify the application model before pull request creation.",
-        additionalContext: `The pull request was paused because Radius could not verify the current application model: ${errorMessage(error)}. Resolve the model check failure, then retry the pull request.`
-      };
+      return unavailableGuidance(
+        `Radius could not verify the current application model: ${errorMessage(error)}`
+      );
     }
+    if (modeled === null) return undefined;
     active = modeled;
     if (!active) return undefined;
 
@@ -205,26 +267,24 @@ export function createPullRequestGraphDiffGuard(
     try {
       identity = await resolvePullRequestIdentity(input.toolArgs);
     } catch (error) {
-      return {
-        permissionDecision: "deny",
-        permissionDecisionReason:
-          "Radius could not resolve the repository and branches for the application graph diff.",
-        additionalContext: `The pull request was paused because Radius could not resolve its repository and branch pair: ${errorMessage(error)}. Resolve the repository context, then retry the pull request.`
-      };
+      return unavailableGuidance(
+        `Radius could not resolve the repository and branches: ${errorMessage(error)}`
+      );
     }
     if (!identity) {
-      return {
-        permissionDecision: "deny",
-        permissionDecisionReason:
-          "Radius requires the repository, base branch, and head branch before pull request creation.",
-        additionalContext:
-          "The pull request was paused because Radius could not determine the repository, base branch, and head branch needed for the application graph diff. Restore repository and default-branch access, then retry the pull request."
-      };
+      return unavailableGuidance(
+        "Radius could not determine the repository, base branch, and head branch."
+      );
     }
 
     const key = proofKey(identity);
-    const proof = proofs.get(key);
-    if (!proof) {
+    const attempt = attempts.get(key);
+    if (!attempt) {
+      if (requestedDiffs.has(key)) {
+        return unavailableGuidance(
+          "The graph-diff tool did not produce an observable result. It may have been rejected, denied, or timed out."
+        );
+      }
       return {
         permissionDecision: "deny",
         permissionDecisionReason:
@@ -232,15 +292,18 @@ export function createPullRequestGraphDiffGuard(
         additionalContext: `Before retrying this pull request, call radius_generate_pr_diff_markdown with repo \`${identity.repo}\`, baseBranch \`${identity.baseBranch}\`, and headBranch \`${identity.headBranch}\`. Put the returned markdown at the TOP of the pull request body.`
       };
     }
+    if (attempt.outcome !== "diff") {
+      return unavailableGuidance(attempt.text);
+    }
 
     const body = rawString(record(input.toolArgs).body);
-    if (!body.startsWith(proof.markdown)) {
+    if (!body.startsWith(attempt.text)) {
       return {
         permissionDecision: "deny",
         permissionDecisionReason:
           "The pull request body does not start with the generated Radius application graph diff.",
         additionalContext:
-          "Put the exact markdown returned by radius_generate_pr_diff_markdown at the TOP of the pull request body, before any other content, then retry."
+          "Put the byte-exact markdown returned by radius_generate_pr_diff_markdown at the TOP of the pull request body, before the repository template or any summary text. The generated section was changed or is not first; restore it, then retry."
       };
     }
 
@@ -251,10 +314,11 @@ export function createPullRequestGraphDiffGuard(
   async function onPostToolUse(
     input: PostToolUseInput
   ): Promise<PostToolUseGuidance | undefined> {
-    const proof = graphDiffProof(input);
-    if (proof) {
+    const attempt = graphDiffAttempt(input);
+    if (attempt) {
       active = true;
-      rememberBounded(proofs, proofKey(proof), proof);
+      rememberBounded(attempts, proofKey(attempt), attempt);
+      requestedDiffs.delete(proofKey(attempt));
       return undefined;
     }
 
@@ -271,7 +335,8 @@ export function createPullRequestGraphDiffGuard(
       if (!identity) return undefined;
       const key = proofKey(identity);
       if (!pendingPullRequests.delete(key)) return undefined;
-      proofs.delete(key);
+      attempts.delete(key);
+      requestedDiffs.delete(key);
       try {
         await deps.openGraphDiff(identity);
         return undefined;
@@ -284,7 +349,8 @@ export function createPullRequestGraphDiffGuard(
 
     if (isRadiusToolUse(input.toolName, input.toolArgs)) {
       try {
-        active = await modelExists(input);
+        const modeled = await modelExists(input);
+        if (modeled !== null) active = modeled;
       } catch (error) {
         return {
           additionalContext: `Radius could not verify whether this explicit Radius operation activated the current session: ${errorMessage(error)}. The operation completed, but automatic application graph diffs will remain inactive until the model can be verified.`
@@ -294,5 +360,27 @@ export function createPullRequestGraphDiffGuard(
     return undefined;
   }
 
-  return { activateAtSessionStart, onPreToolUse, onPostToolUse };
+  async function onPostToolUseFailure(
+    input: PostToolUseFailureInput
+  ): Promise<PostToolUseGuidance | undefined> {
+    if (!isGraphDiffTool(input.toolName)) return undefined;
+    const attempt = failedGraphDiffAttempt(
+      input.toolArgs,
+      optionalString(input.error) || "The graph-diff tool failed."
+    );
+    if (attempt) {
+      active = true;
+      rememberBounded(attempts, proofKey(attempt), attempt);
+      requestedDiffs.delete(proofKey(attempt));
+    }
+    return undefined;
+  }
+
+  return {
+    activateAtSessionStart,
+    recordDeniedGraphDiff,
+    onPreToolUse,
+    onPostToolUse,
+    onPostToolUseFailure
+  };
 }

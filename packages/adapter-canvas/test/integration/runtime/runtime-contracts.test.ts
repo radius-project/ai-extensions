@@ -106,6 +106,7 @@ describe("P0-A Radius runtime registration contract", () => {
     );
     expect(harness.registration.hooks).toEqual([
       "onPostToolUse",
+      "onPostToolUseFailure",
       "onPreToolUse",
       "onSessionStart"
     ]);
@@ -177,7 +178,7 @@ describe("P0-A Radius runtime registration contract", () => {
     };
 
     const denied = await harness.extension.hooks.onPreToolUse(pullRequest);
-    expect(denied?.permissionDecision).toBe("deny");
+    expect(denied).toMatchObject({ permissionDecision: "deny" });
     expect(denied?.additionalContext).toContain("baseBranch `main`");
     expect(denied?.additionalContext).toContain("headBranch `feature`");
 
@@ -185,14 +186,20 @@ describe("P0-A Radius runtime registration contract", () => {
       ({ name }) => name === "radius_generate_pr_diff_markdown"
     );
     if (!diffTool) throw new Error("PR graph diff tool was not registered");
-    const markdown = await diffTool.handler({
+    const diffResult = await diffTool.handler({
       repo: "acme/widgets",
       baseBranch: "main",
       headBranch: "feature"
     });
-    if (typeof markdown !== "string") {
+    if (
+      typeof diffResult !== "object" ||
+      !diffResult ||
+      !("textResultForLlm" in diffResult) ||
+      typeof diffResult.textResultForLlm !== "string"
+    ) {
       throw new Error("PR graph diff tool did not return markdown");
     }
+    const markdown = diffResult.textResultForLlm;
     await harness.extension.hooks.onPostToolUse({
       toolName: diffTool.name,
       toolArgs: {
@@ -200,9 +207,7 @@ describe("P0-A Radius runtime registration contract", () => {
         baseBranch: "main",
         headBranch: "feature"
       },
-      toolResult: {
-        textResultForLlm: markdown
-      },
+      toolResult: diffResult,
       workingDirectory: "/worktrees/widgets"
     });
 
@@ -260,7 +265,7 @@ describe("P0-A Radius runtime registration contract", () => {
       workingDirectory: "/worktrees/new-app"
     };
     const denied = await harness.extension.hooks.onPreToolUse(pullRequest);
-    expect(denied?.permissionDecision).toBe("deny");
+    expect(denied).toMatchObject({ permissionDecision: "deny" });
     expect(denied?.additionalContext).toContain("repo `acme/new-app`");
 
     const diffTool = harness.extension.tools.find(
@@ -272,14 +277,20 @@ describe("P0-A Radius runtime registration contract", () => {
       baseBranch: "main",
       headBranch: "feature"
     };
-    const markdown = await diffTool.handler(diffArgs);
-    if (typeof markdown !== "string") {
+    const diffResult = await diffTool.handler(diffArgs);
+    if (
+      typeof diffResult !== "object" ||
+      !diffResult ||
+      !("textResultForLlm" in diffResult) ||
+      typeof diffResult.textResultForLlm !== "string"
+    ) {
       throw new Error("PR graph diff tool did not return markdown");
     }
+    const markdown = diffResult.textResultForLlm;
     await harness.extension.hooks.onPostToolUse({
       toolName: diffTool.name,
       toolArgs: diffArgs,
-      toolResult: { textResultForLlm: markdown },
+      toolResult: diffResult,
       workingDirectory: "/worktrees/new-app"
     });
 
@@ -304,6 +315,98 @@ describe("P0-A Radius runtime registration contract", () => {
       }
     });
 
+    await harness.extension.shutdown("test");
+  });
+
+  it("allows a modeled worktree PR when committed branches have no graph", async () => {
+    const harness = await createRuntimeSdkHarness({
+      radiusEnabled: true,
+      workspaceContext: {
+        workspacePath: "/worktrees/widgets",
+        repo: "acme/widgets",
+        branch: "feature"
+      }
+    });
+    await harness.extension.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+    const diffArgs = {
+      repo: "acme/widgets",
+      baseBranch: "main",
+      headBranch: "feature"
+    };
+    const deniedDiff = await harness.extension.hooks.onPreToolUse({
+      toolName: "radius_generate_pr_diff_markdown",
+      toolArgs: diffArgs,
+      workingDirectory: "/worktrees/widgets"
+    });
+    expect(deniedDiff).toMatchObject({ permissionDecision: "deny" });
+
+    const result = await harness.extension.hooks.onPreToolUse({
+      toolName: "create_pull_request",
+      toolArgs: { title: "Document setup", body: "Summary" },
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    expect(result).not.toHaveProperty("permissionDecision");
+    expect(result?.additionalContext).toContain("without a graph diff section");
+    expect(harness.routedOpens).toHaveLength(0);
+    await harness.extension.shutdown("test");
+  });
+
+  it("allows a modeled worktree PR when graph generation fails", async () => {
+    const harness = await createRuntimeSdkHarness({
+      radiusEnabled: true,
+      workspaceContext: {
+        workspacePath: "/worktrees/widgets",
+        repo: "acme/widgets",
+        branch: "feature"
+      },
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "resource app {}",
+        "workspace:acme/widgets@feature": "resource app {}"
+      }
+    });
+    await harness.extension.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+    (
+      harness.deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>
+    ).mockRejectedValue(new Error("rad unavailable"));
+    const diffTool = harness.extension.tools.find(
+      ({ name }) => name === "radius_generate_pr_diff_markdown"
+    );
+    if (!diffTool) throw new Error("PR graph diff tool was not registered");
+    const diffArgs = {
+      repo: "acme/widgets",
+      baseBranch: "main",
+      headBranch: "feature"
+    };
+    const failed = await diffTool.handler(diffArgs);
+    if (
+      typeof failed !== "object" ||
+      !failed ||
+      !("error" in failed) ||
+      typeof failed.error !== "string"
+    ) {
+      throw new Error("PR graph diff tool did not return a failure");
+    }
+    await harness.extension.hooks.onPostToolUseFailure({
+      toolName: diffTool.name,
+      toolArgs: diffArgs,
+      error: failed.error,
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    const result = await harness.extension.hooks.onPreToolUse({
+      toolName: "create_pull_request",
+      toolArgs: { title: "Fix typo", body: "Summary" },
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    expect(result).not.toHaveProperty("permissionDecision");
+    expect(result?.additionalContext).toContain("rad unavailable");
+    expect(harness.routedOpens).toHaveLength(0);
     await harness.extension.shutdown("test");
   });
 
@@ -571,8 +674,10 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     };
 
     const denied = await harness.extension.hooks.onPreToolUse(open);
-    expect(denied?.permissionDecision).toBe("deny");
-    expect(denied?.permissionDecisionReason).toContain("out of date");
+    expect(denied).toMatchObject({
+      permissionDecision: "deny",
+      permissionDecisionReason: expect.stringContaining("out of date")
+    });
     expect(denied?.additionalContext).toContain("radius_generate_app");
 
     // The skill regenerates and rewrites the origin record against the branch's
@@ -621,14 +726,14 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     for (const attempt of [1, 150, 300]) {
       commit = attempt;
       const decision = await harness.extension.hooks.onPreToolUse(open);
-      expect(decision?.permissionDecision).toBe("deny");
+      expect(decision).toMatchObject({ permissionDecision: "deny" });
     }
 
     // And the same problem twice running is still only reported once.
     commit = 999;
-    expect(
-      (await harness.extension.hooks.onPreToolUse(open))?.permissionDecision
-    ).toBe("deny");
+    expect(await harness.extension.hooks.onPreToolUse(open)).toMatchObject({
+      permissionDecision: "deny"
+    });
     expect(await harness.extension.hooks.onPreToolUse(open)).toBeUndefined();
 
     await harness.extension.shutdown("test");
@@ -707,7 +812,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     expect(harness.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
 
     const denied = await harness.extension.hooks.onPreToolUse(OPEN_GRAPH);
-    expect(denied?.permissionDecision).toBe("deny");
+    expect(denied).toMatchObject({ permissionDecision: "deny" });
     expect(denied?.additionalContext).toContain(
       UNSUPPORTED_NO_DOCKERFILE_MESSAGE
     );
@@ -803,7 +908,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       }
     });
 
-    expect(denied?.permissionDecision).toBe("deny");
+    expect(denied).toMatchObject({ permissionDecision: "deny" });
     expect(denied?.additionalContext).toContain(
       UNSUPPORTED_NO_DOCKERFILE_MESSAGE
     );
