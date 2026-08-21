@@ -211,9 +211,6 @@ test.describe("Radius Canvas in Chromium", () => {
         "#e6edf3"
       );
     `);
-    const initialContent = await page
-      .locator("#radius-main-content")
-      .innerHTML();
     let documentNavigations = 0;
     page.on("request", (request) => {
       if (request.isNavigationRequest()) documentNavigations += 1;
@@ -235,10 +232,14 @@ test.describe("Radius Canvas in Chromium", () => {
         document.querySelector('a[href="/?page=environment"]').click();
       `);
       await expect.poll(() => environmentRequests).toBe(1);
-      await expect(page.locator("#radius-main-content")).toHaveJSProperty(
-        "innerHTML",
-        initialContent
+      // The outgoing pane stays mounted while the request is in flight, so the
+      // webview never unloads and exposes the host surface.
+      await expect(page.locator("#radius-main-content")).toHaveAttribute(
+        "aria-busy",
+        "true"
       );
+      await expect(page.locator("#graph-page-content")).toBeVisible();
+      await expect(page.locator("#env-subtabs")).toHaveCount(0);
       await page.evaluate(`
         document.querySelector('a[href="/?page=deploying"]').click();
       `);
