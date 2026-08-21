@@ -18,6 +18,7 @@ import {
   deployStatusKeys,
   fetchBicepFromRepo,
   fetchRecipePack,
+  mergeDeployedGraphMetadata,
   projectDeployedGraph,
   resolveRecipeOutputs,
   DEFAULT_STATE_ARCHIVE,
@@ -903,6 +904,7 @@ const graphsPlanningRoutes = createGraphsPlanningRoutes({
   buildDeployStatusMap,
   buildDeployMessageMap,
   deployStatusKeys,
+  mergeDeployedGraphMetadata,
   projectDeployedGraph: (modeled, statusByKey) =>
     projectDeployedGraph(modeled as any[], statusByKey),
   canvasGraphResources,
@@ -1982,6 +1984,10 @@ export function beginDeployAttempt(
   state.deployErrorBranch = null;
   state.deployRunUrl = null;
   state.deployRunId = null;
+  // Concrete outputs belong to one deployment attempt. Keeping the previous
+  // graph would relabel a later failed run with stale resource and portal data.
+  state.deployedGraph = null;
+  state.deployedGraphRepo = undefined;
   // Only a redeploy inside an existing repair loop is already owned by the
   // agent. Every other deploy — including the agent's first one, which opens no
   // loop — must stay eligible to hand its failure off; marking that one as
