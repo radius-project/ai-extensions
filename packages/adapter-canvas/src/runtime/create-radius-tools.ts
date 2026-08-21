@@ -199,18 +199,28 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
     },
     {
       ...declarationByName.get("radius_publish_custom_type_extension")!,
+      // Modeling now writes its whole run into `.radius/.staging-<runId>/` and
+      // publishes it only once it is complete, so the custom-type package this
+      // tool produces has to land there with the rest of the run rather than in
+      // `.radius/` where the product reads it. `stagingDir` moves the defaults
+      // into that directory; path confinement is unchanged, and the staging
+      // directory is itself confined to a `.staging-*` child of `.radius/`.
       handler: async (args: ToolArgs) => {
         try {
           const { workspacePath } = await workspaceState();
+          const stagingPrefix = deps.publishTargets.resolveStagingDirPrefix(
+            workspacePath,
+            args.stagingDir
+          );
           const fromFile = deps.publishTargets.resolveExistingRadiusArtifact(
             workspacePath,
             args.manifestPath,
-            ".radius/custom-types.yaml"
+            `.radius/${stagingPrefix}custom-types.yaml`
           );
           const target = deps.publishTargets.resolveRadiusArtifactTarget(
             workspacePath,
             args.targetPath,
-            ".radius/custom-types.tgz"
+            `.radius/${stagingPrefix}custom-types.tgz`
           );
           if (!deps.process.existsSync(fromFile)) {
             return `Resource-type manifest not found at ${fromFile}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;

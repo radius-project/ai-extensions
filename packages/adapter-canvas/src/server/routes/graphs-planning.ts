@@ -64,6 +64,11 @@ export interface GraphsPlanningReadsDependencies {
   createDeployStatusReader(
     options: DeployedGraphReaderOptions
   ): DeployedGraphStatusReader;
+  loadModeledGraph(
+    instanceId: string,
+    repo: string,
+    branch: string
+  ): Promise<{ status: number; error?: string; retry?: boolean }>;
   buildDeployStatusMap(
     progress: DeployProgress | null | undefined
   ): Map<string, DeployStatus>;
@@ -80,7 +85,10 @@ export interface GraphsPlanningReadsDependencies {
     resources: CanvasGraphResource[],
     messageMap: Map<string, string>
   ): void;
-  record(value: unknown): Record<string, unknown>;
+  settleDeployStatuses(
+    resources: Array<{ deployStatus?: DeployStatus }>,
+    conclusion?: string | null
+  ): void;
   errorMessage(error: unknown): string;
   repoMatchesWorkspace(state: CanvasState, repo: string): boolean;
   // Wall clock for the build record's elapsed time.
@@ -178,11 +186,9 @@ export function handleProgress(
 //   terminal - a deployment's status is known.
 //   greyed   - nothing is known; every node renders pending.
 //
-// Four ordering-precedence chains are load-bearing and preserved verbatim: the
-// repo fallback chain, the topology fallback chain, the mode ladder, and the
-// first-wins seeding of the status and message maps. The seeding order matters
-// most — the deploy monitor's own resources are seeded BEFORE the artifact read,
-// so a terminal deploy keeps its colors even when the read comes back empty.
+// The deploy monitor's resources are seeded before the artifact read, so fresher
+// in-session statuses win. Topology has one authority: graphResources for the
+// selected repo and branch, populated on demand through the graph workflow.
 export async function handleDeployedGraph(
   context: CanvasRequestContext,
   dependencies: GraphsPlanningReadsDependencies
@@ -208,7 +214,31 @@ export async function handleDeployedGraph(
   const branch =
     state.workspaceBranch && dependencies.repoMatchesWorkspace(state, repo) ?
       state.workspaceBranch
+    : state.contextRepo === repo && state.contextBranch ? state.contextBranch
+    : state.deployingRepo === repo && state.deployingBranch ?
+      state.deployingBranch
+    : state.plannedRepo === repo && state.plannedBranch ? state.plannedBranch
+    : state.graphTargetRepo === repo && state.graphBranch ? state.graphBranch
     : "main";
+
+  const modeledGraphMatchesSelection =
+    state.graphTargetRepo === repo &&
+    state.graphBranch === branch &&
+    Array.isArray(state.graphResources);
+  if (!modeledGraphMatchesSelection) {
+    const modeled = await dependencies.loadModeledGraph(
+      context.instanceId,
+      repo,
+      branch
+    );
+    if (modeled.error) {
+      response.writeHead(modeled.status);
+      response.end(
+        JSON.stringify({ error: modeled.error, retry: modeled.retry === true })
+      );
+      return;
+    }
+  }
 
   // The page's selectors are authoritative: the user can pick an environment
   // other than the one this session last deployed to, and the graph must follow
@@ -222,18 +252,26 @@ export async function handleDeployedGraph(
     state.deployAppName ||
     "";
 
-  // This session's own deploy status only describes the environment it deployed
-  // to, so it is used only when the selection matches. An empty side on either
-  // end means "unconstrained" and matches, which is what makes the very first
-  // poll — before any environment is chosen — show the session's own deploy.
-  // `!requestedEnv` is redundant by construction — `requestedEnv` falls back to
-  // `sessionEnv`, so an empty `requestedEnv` implies an empty `sessionEnv` — but
-  // it is kept because legacy has it and removing it would be a rewrite, not a
-  // migration. Mutation testing confirms it as an equivalent mutant.
+  // In-session monitor data is fresher than artifacts, but only for the exact
+  // selection it describes. Empty values remain unconstrained so the first poll
+  // can show a deploy before every selector has initialized.
+  const exactSelectionPartMatches = (
+    session: string,
+    selected: string
+  ): boolean => !session || !selected || session === selected;
+  const namedSelectionPartMatches = (
+    session: string,
+    selected: string
+  ): boolean =>
+    !session || !selected || session.toLowerCase() === selected.toLowerCase();
+  const sessionRepo = state.deployingRepo || state.contextRepo || "";
+  const sessionBranch =
+    state.deployingBranch || state.contextBranch || state.graphBranch || "";
   const sessionMatchesSelection =
-    !requestedEnv ||
-    !sessionEnv ||
-    requestedEnv.toLowerCase() === sessionEnv.toLowerCase();
+    exactSelectionPartMatches(sessionRepo, repo) &&
+    exactSelectionPartMatches(sessionBranch, branch) &&
+    namedSelectionPartMatches(sessionEnv, requestedEnv) &&
+    namedSelectionPartMatches(state.deployAppName || "", requestedApp);
   const deploying =
     state.deployStatus === "in_progress" && sessionMatchesSelection;
 
@@ -253,9 +291,10 @@ export async function handleDeployedGraph(
     }
   }
 
-  let graph: unknown = null;
+  let publishedGraph: unknown = null;
   let readOk = false;
   let updatedAt: string | null = null;
+  let progress: DeployProgress | null = null;
   // The app selector is a hint, not a hard filter: the reader falls back to an
   // env-only match when the selected app has no artifact yet (the app name can
   // itself be a guess from the repo short name). Surface the app it actually
@@ -276,11 +315,18 @@ export async function handleDeployedGraph(
       runId: deploying ? (state.deployRunId ?? null) : null
     });
     const result = await reader.graph();
-    graph = result.graph;
+    publishedGraph = result.graph;
     readOk = result.status === "ok" || result.status === "stale";
-    const progress = await reader.progress();
+    progress = await reader.progress();
     updatedAt = progress?.updatedAt || null;
     if (progress?.application) resolvedApp = progress.application;
+    if (
+      progress?.runId != null &&
+      state.deployRunId != null &&
+      String(progress.runId) !== String(state.deployRunId)
+    ) {
+      statusByKey.clear();
+    }
     for (const [key, status] of dependencies.buildDeployStatusMap(progress)) {
       if (!statusByKey.has(key)) statusByKey.set(key, status);
     }
@@ -301,8 +347,34 @@ export async function handleDeployedGraph(
       ];
     }
   }
-  if (!graph && sessionMatchesSelection && state.deployedGraph)
-    graph = state.deployedGraph;
+  const hasPublishedGraph =
+    publishedGraph != null ||
+    (sessionMatchesSelection && state.deployedGraph != null);
+  const artifactMatchesSessionRun =
+    progress?.runId == null ||
+    state.deployRunId == null ||
+    String(progress.runId) === String(state.deployRunId);
+
+  const terminalConclusion =
+    (
+      !deploying &&
+      sessionMatchesSelection &&
+      artifactMatchesSessionRun &&
+      state.deployStatus === "complete"
+    ) ?
+      "success"
+    : (
+      !deploying &&
+      sessionMatchesSelection &&
+      artifactMatchesSessionRun &&
+      state.deployStatus === "failed" &&
+      state.deployRunId != null &&
+      !state.deployErrorKind
+    ) ?
+      "failure"
+    : !deploying && progress?.state === "succeeded" ? "success"
+    : !deploying && progress?.state === "failed" ? "failure"
+    : null;
 
   // A deployment is "terminal" when its status is known, which is not the same
   // as having a published graph: the producer only attaches deploy-graph.json to
@@ -310,24 +382,23 @@ export async function handleDeployedGraph(
   // at all.
   const mode: "live" | "terminal" | "greyed" =
     deploying ? "live"
-    : statusByKey.size > 0 || readOk || graph ? "terminal"
+    : (
+      statusByKey.size > 0 || readOk || hasPublishedGraph || terminalConclusion
+    ) ?
+      "terminal"
     : "greyed";
 
-  // Topology: prefer the graph the deploy actually published (it reflects what
-  // is running), falling back to the modeled resources so the skeleton renders
-  // before anything has ever been deployed.
-  const graphRecord = dependencies.record(graph);
-  let topology: unknown[] =
-    Array.isArray(graph) ? graph
-    : Array.isArray(graphRecord.resources) ? graphRecord.resources
+  // deploy-graph.json is terminal metadata only. It can be sparse after a failed
+  // deployment and does not preserve modeled connections, so it must never
+  // replace the selected branch's fixed modeled topology.
+  const topology =
+    (
+      state.graphTargetRepo === repo &&
+      state.graphBranch === branch &&
+      Array.isArray(state.graphResources)
+    ) ?
+      state.graphResources
     : [];
-  if (topology.length === 0) {
-    topology =
-      (sessionMatchesSelection ? state.deployingResources : null) ||
-      state.plannedResources ||
-      state.graphResources ||
-      [];
-  }
 
   const resources = dependencies.canvasGraphResources(
     dependencies.projectDeployedGraph(topology, statusByKey)
@@ -335,6 +406,9 @@ export async function handleDeployedGraph(
   // Attach the producer's per-resource message so a red node can explain itself
   // in the popup instead of just being red.
   dependencies.applyDeployMessages(resources, messageByKey);
+  if (terminalConclusion) {
+    dependencies.settleDeployStatuses(resources, terminalConclusion);
+  }
   response.writeHead(200);
   response.end(
     JSON.stringify({

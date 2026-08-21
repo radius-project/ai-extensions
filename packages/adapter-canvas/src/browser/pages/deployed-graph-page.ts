@@ -148,6 +148,7 @@ export function initializeDeployedGraphPage(
   let graphGeneration = 0;
   let logTotal = 0;
   let lastMode = "";
+  let modeledGraphPending = false;
   let controller: GraphController | null = null;
   let renderedBranch = "";
   let resumeGraphOnVisible = false;
@@ -312,7 +313,7 @@ export function initializeDeployedGraphPage(
   const scheduleGraphPoll = (): void => {
     stopGraphPolling();
     if (
-      lastMode !== "live" ||
+      (lastMode !== "live" && !modeledGraphPending) ||
       context.dom.document.visibilityState === "hidden"
     ) {
       return;
@@ -362,6 +363,20 @@ export function initializeDeployedGraphPage(
       .then((payload) => {
         if (requestGeneration !== graphGeneration) return;
         stopProgress();
+        const loadError = readString(payload, "error");
+        if (loadError) {
+          modeledGraphPending = isRecord(payload) && payload.retry === true;
+          if (!controller && status) {
+            status.style.display = "";
+            status.className = "status error";
+            status.textContent = loadError;
+          } else {
+            setModeNote(loadError);
+          }
+          scheduleGraphPoll();
+          return;
+        }
+        modeledGraphPending = false;
         const resources = parseGraphResources(readArray(payload, "resources"));
         lastMode = readString(payload, "mode") || "greyed";
         if (resources.length === 0) {
@@ -692,7 +707,8 @@ export function initializeDeployedGraphPage(
   entry.on(context.dom.document, "visibilitychange", () => {
     if (context.dom.document.visibilityState === "hidden") {
       stopGraphPolling();
-      resumeGraphOnVisible = graphRequestInFlight || lastMode === "live";
+      resumeGraphOnVisible =
+        graphRequestInFlight || lastMode === "live" || modeledGraphPending;
       graphGeneration++;
       graphAbort?.abort();
       graphAbort = null;

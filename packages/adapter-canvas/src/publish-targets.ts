@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { STAGING_DIR_PREFIX } from "@radius-project/core";
 import { toSafeRepoRelPath } from "./workspace.js";
 
 function isUnder(root: string, p: string): boolean {
@@ -103,6 +104,43 @@ export function resolveRadiusArtifactTarget(
   fallback: string | null | undefined
 ): string {
   return confineUnderRadius(workspacePath, value, fallback);
+}
+
+// Resolve the staging directory a modeling run writes into, as a `.radius/`
+// relative prefix.
+//
+// A staged run must be able to publish its custom-type package alongside the
+// rest of its output, which means the tool's default targets have to move with
+// it. The directory is still confined under `.radius/` exactly as every other
+// path is — the staging directory lives there — and it must additionally be a
+// direct `.staging-*` child, so this argument cannot be used to redirect the
+// defaults at `.radius/` itself or at an arbitrary subdirectory.
+//
+// Returns "" when no staging directory was supplied, in which case the caller
+// keeps its `.radius/` defaults.
+export function resolveStagingDirPrefix(
+  workspacePath: string | null | undefined,
+  value: unknown
+): string {
+  if (!value || !String(value).trim()) return "";
+  const { radiusRoot, resolved, raw } = lexicalRadiusPath(
+    workspacePath,
+    value,
+    null
+  );
+  const name = resolved.slice(radiusRoot.length + 1);
+  if (
+    !name ||
+    name.includes(sep) ||
+    name.includes("/") ||
+    !name.startsWith(STAGING_DIR_PREFIX) ||
+    name.length === STAGING_DIR_PREFIX.length
+  ) {
+    throw new Error(
+      `The staging directory must be a ${STAGING_DIR_PREFIX}* directory directly inside the workspace .radius directory: ${raw}`
+    );
+  }
+  return `${name}/`;
 }
 
 // Validate that a GHCR recipe target publishes under the repository being
