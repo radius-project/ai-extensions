@@ -107,4 +107,55 @@ describe("page-scoped browser registry", () => {
     registry.teardownAll();
     expect(order).toEqual(["page", "document"]);
   });
+
+  it("keeps one same-document navigation live and cancels the one it replaces", () => {
+    const { scope } = createFakeBrowserScope();
+    const registry = resolvePageRegistry(scope);
+    const cancelled: string[] = [];
+    const cancelFirst = () => cancelled.push("first");
+    const cancelSecond = () => cancelled.push("second");
+
+    registry.beginNavigation(cancelFirst);
+    expect(cancelled).toEqual([]);
+
+    registry.beginNavigation(cancelSecond);
+    expect(cancelled).toEqual(["first"]);
+
+    registry.beginNavigation(cancelSecond);
+    expect(cancelled).toEqual(["first"]);
+
+    registry.beginNavigation(cancelFirst);
+    expect(cancelled).toEqual(["first", "second"]);
+  });
+
+  it("frees the claim when a navigation settles so the next one cancels nobody", () => {
+    const { scope } = createFakeBrowserScope();
+    const registry = resolvePageRegistry(scope);
+    const cancelled: string[] = [];
+    const cancelFirst = () => cancelled.push("first");
+    const cancelSecond = () => cancelled.push("second");
+
+    registry.beginNavigation(cancelFirst);
+    registry.endNavigation(cancelFirst);
+
+    registry.beginNavigation(cancelSecond);
+    expect(cancelled).toEqual([]);
+  });
+
+  it("ignores a release from a navigation that no longer holds the claim", () => {
+    const { scope } = createFakeBrowserScope();
+    const registry = resolvePageRegistry(scope);
+    const cancelled: string[] = [];
+    const cancelFirst = () => cancelled.push("first");
+    const cancelSecond = () => cancelled.push("second");
+
+    registry.beginNavigation(cancelFirst);
+    registry.beginNavigation(cancelSecond);
+    expect(cancelled).toEqual(["first"]);
+
+    registry.endNavigation(cancelFirst);
+    registry.beginNavigation(cancelFirst);
+
+    expect(cancelled).toEqual(["first", "second"]);
+  });
 });

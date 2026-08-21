@@ -64,7 +64,7 @@ describe("graph browser entry", () => {
       resolvePageRegistry(browser.scope)
     );
     expect(browser.document.listenerCount("click")).toBe(1);
-    expect(browser.page.listenerCount("popstate")).toBe(1);
+    expect(browser.page.listenerCount("popstate")).toBe(0);
     for (const name of GRAPH_ENTRY_GLOBALS) {
       expect(browser.scope[name]).toBeTypeOf("function");
     }
