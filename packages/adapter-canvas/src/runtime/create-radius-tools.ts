@@ -9,6 +9,11 @@ import {
 } from "@radius-project/core";
 import { errorMessage } from "./util.js";
 import { createGraphContextHelpers } from "./graph-context.js";
+import {
+  failedGraphDiffResult,
+  successfulGraphDiffResult,
+  unavailableGraphDiffResult
+} from "./pr-graph-diff-result.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
 
@@ -126,7 +131,9 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
           ]);
 
           if (!baseContent && !headContent) {
-            return `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch, so author it with the Radius app-bicep skill (run the radius_generate_app tool) and make sure each branch you are comparing contains the committed file, then re-run this tool.`;
+            return unavailableGraphDiffResult(
+              `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
+            );
           }
 
           const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
@@ -180,13 +187,13 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
             baseResources,
             headResources
           );
-          return deps.renderPrDiffMarkdown(
-            diffResources,
-            baseBranch,
-            headBranch
+          return successfulGraphDiffResult(
+            deps.renderPrDiffMarkdown(diffResources, baseBranch, headBranch)
           );
         } catch (err) {
-          return `⚠️ Could not generate app graph diff: ${errorMessage(err)}`;
+          return failedGraphDiffResult(
+            `Could not generate app graph diff: ${errorMessage(err)}`
+          );
         }
       }
     },
