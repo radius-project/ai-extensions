@@ -150,6 +150,18 @@ function stage(
   return op.stages.find((s) => s.id === id)?.state;
 }
 
+// Simulate a resumed operation by marking the given stages as already finished,
+// so only the still-pending stages run on the next invocation.
+function markStagesDone(
+  op: { stages: Array<{ id: string; state: string }> },
+  ids: string[]
+) {
+  for (const id of ids) {
+    const target = op.stages.find((s) => s.id === id);
+    if (target) target.state = "succeeded";
+  }
+}
+
 describe("runEnvironmentDeletion — azure happy path", () => {
   it("holds the provenance lock through credential and GitHub deletion", async () => {
     const op = makeOp();
@@ -370,6 +382,61 @@ describe("runEnvironmentDeletion — credential stage edge cases", () => {
     await runEnvironmentDeletion(op, ports);
     expect(op.state).toBe("failed_partial");
     expect(op.failure?.code).toBe("credential-provenance-lock-unavailable");
+    expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
+  });
+
+  it("resume: runs only the GitHub delete under the lock when the credential stage is already done", async () => {
+    // Simulate a restart that resumes after stages 1 and 2 already completed:
+    // only the GitHub-environment delete is still pending. It must still run
+    // under the credential-provenance lock, and must not re-run any az command.
+    const op = makeOp();
+    markStagesDone(op, [STAGE_DELETE_RADIUS_ENV, STAGE_DELETE_CREDENTIAL]);
+    op.request.credentialConsumerRetirementReady = true;
+    let lockHeld = false;
+    const runAz = vi.fn();
+    const ports = makePorts({
+      runAz,
+      withCredentialProvenanceLock: async (work) => {
+        lockHeld = true;
+        try {
+          return await work();
+        } finally {
+          lockHeld = false;
+        }
+      },
+      deleteRadiusEnvironment: vi.fn(),
+      deleteGitHubEnvironment: vi.fn(async () => {
+        expect(lockHeld).toBe(true);
+        return { outcome: "deleted" as const };
+      })
+    });
+    await runEnvironmentDeletion(op, ports);
+    expect(ports.deleteRadiusEnvironment).not.toHaveBeenCalled();
+    expect(runAz).not.toHaveBeenCalled();
+    expect(ports.deleteGitHubEnvironment).toHaveBeenCalledOnce();
+    // Retirement handoff set in stage 2 is still consumed on resume.
+    expect(ports.clearEnvironmentCredentialProvenance).toHaveBeenCalledWith(
+      5,
+      "dev"
+    );
+    expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("succeeded");
+    expect(op.state).toBe("succeeded");
+  });
+
+  it("resume: attributes a lock failure to the GitHub stage when only it is pending", async () => {
+    const op = makeOp();
+    markStagesDone(op, [STAGE_DELETE_RADIUS_ENV, STAGE_DELETE_CREDENTIAL]);
+    const ports = makePorts({
+      deleteRadiusEnvironment: vi.fn(),
+      withCredentialProvenanceLock: async () => {
+        throw new Error("lock timeout");
+      }
+    });
+    await runEnvironmentDeletion(op, ports);
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure?.code).toBe("credential-provenance-lock-unavailable");
+    expect(op.failure?.stage).toBe(STAGE_DELETE_GITHUB_ENV);
+    expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("failed");
     expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
   });
 

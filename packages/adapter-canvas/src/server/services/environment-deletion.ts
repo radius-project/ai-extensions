@@ -287,82 +287,78 @@ export async function runEnvironmentDeletion(
     await ports.persist();
   }
 
-  // Stage 2 — remove the per-environment Azure federated credential(s).
+  // Stages 2 & 3 — remove the per-environment Azure federated credential(s) and
+  // delete the GitHub environment. For an Azure environment both mutations run
+  // under a SINGLE credential-provenance lock acquisition, so the invariant
+  // "the GitHub-environment delete is owned by the same lock that retired the
+  // credential" is expressed in exactly one place. `deleteEnvironmentCredentials`
+  // sets the `credentialConsumerRetirementReady` handoff that
+  // `deleteGitHubEnvironmentStage` consumes; keeping both inside one lock keeps
+  // that producer/consumer pair together. On the resume path the credential
+  // stage is already done, so only the GitHub delete runs — still under the same
+  // lock. Non-Azure environments have no federated credential to retire, so
+  // their GitHub delete needs no lock.
   const clientId = String(op.request?.clientId || "");
   const tenantId = String(op.request?.tenantId || "");
   const repoId = Number(op.request?.repoId);
-  if (stagePending(op, STAGE_DELETE_CREDENTIAL)) {
-    enterStage(op, STAGE_DELETE_CREDENTIAL);
-    await ports.persist();
-    let credentialStageComplete: boolean | void;
-    try {
-      credentialStageComplete = await ports.withCredentialProvenanceLock(() =>
-        deleteEnvironmentCredentials(op, ports, {
-          repo,
-          environment,
-          clientId,
-          tenantId,
-          repoId
-        }).then(async (complete) => {
-          if (complete !== false) {
-            await ports.persist();
-            await deleteGitHubEnvironmentStage(
-              op,
-              ports,
-              repo,
-              environment,
-              repoId
-            );
-          }
-          return complete;
-        })
-      );
-    } catch (error) {
-      addStep(op, {
-        stage: STAGE_DELETE_CREDENTIAL,
-        kind: "warning",
-        label: "Could not lock credential ownership records",
-        warning: {
-          code: "credential-provenance-lock-unavailable",
-          message: ports.errorMessage(error),
-          impact: "Radius did not mutate credentials without an exclusive lock."
-        }
-      });
-      credentialStageComplete = stopCredentialCleanup(
-        op,
-        "credential-provenance-lock-unavailable",
-        "Radius could not lock the credential ownership records. The GitHub environment was kept so deletion can be retried."
-      );
-    }
-    await ports.persist();
-    if (credentialStageComplete === false) return;
-  }
+  const credentialStagePending = stagePending(op, STAGE_DELETE_CREDENTIAL);
 
-  // Stage 3 — delete the GitHub environment. Azure recovery can resume here
-  // after a restart, so reacquire the same lock setup uses before finishing.
-  if (stagePending(op, STAGE_DELETE_GITHUB_ENV)) {
+  if (credentialStagePending || stagePending(op, STAGE_DELETE_GITHUB_ENV)) {
     if (op.provider === "azure") {
       try {
-        await ports.withCredentialProvenanceLock(() =>
-          deleteGitHubEnvironmentStage(op, ports, repo, environment, repoId)
-        );
+        const stopped = await ports.withCredentialProvenanceLock(async () => {
+          if (stagePending(op, STAGE_DELETE_CREDENTIAL)) {
+            enterStage(op, STAGE_DELETE_CREDENTIAL);
+            await ports.persist();
+            const complete = await deleteEnvironmentCredentials(op, ports, {
+              repo,
+              environment,
+              clientId,
+              tenantId,
+              repoId
+            });
+            await ports.persist();
+            // Credential cleanup failed closed and already latched the terminal
+            // state; do NOT delete the GitHub environment a retry still needs.
+            if (complete === false) return true;
+          }
+          await deleteGitHubEnvironmentStage(
+            op,
+            ports,
+            repo,
+            environment,
+            repoId
+          );
+          return false;
+        });
+        await ports.persist();
+        if (stopped) return;
       } catch (error) {
+        // The lock gates BOTH mutations, so a lock-acquisition failure stops the
+        // operation. Attribute it to whichever stage still needed the lock: the
+        // credential stage on a fresh run, or the GitHub stage on resume.
+        const lockFailureStage =
+          credentialStagePending ?
+            STAGE_DELETE_CREDENTIAL
+          : STAGE_DELETE_GITHUB_ENV;
         addStep(op, {
-          stage: STAGE_DELETE_GITHUB_ENV,
+          stage: lockFailureStage,
           kind: "warning",
           label: "Could not lock credential ownership records",
           warning: {
             code: "credential-provenance-lock-unavailable",
             message: ports.errorMessage(error),
             impact:
-              "The GitHub environment was kept so deletion can be retried."
+              credentialStagePending ?
+                "Radius did not mutate credentials without an exclusive lock."
+              : "The GitHub environment was kept so deletion can be retried."
           }
         });
-        setStageState(op, STAGE_DELETE_GITHUB_ENV, "failed");
+        setStageState(op, lockFailureStage, "failed");
         finish(op, "failed_partial", {
           failure: {
             code: "credential-provenance-lock-unavailable",
-            stage: STAGE_DELETE_GITHUB_ENV,
+            stage: lockFailureStage,
             stepSeq: null,
             message:
               "Radius could not lock the credential ownership records. The GitHub environment was kept so deletion can be retried.",
@@ -375,6 +371,7 @@ export async function runEnvironmentDeletion(
       }
     } else {
       await deleteGitHubEnvironmentStage(op, ports, repo, environment, repoId);
+      await ports.persist();
     }
   }
 
