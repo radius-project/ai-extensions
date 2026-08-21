@@ -4,11 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, it, test } from "vitest";
+import { afterAll, afterEach, it, test } from "vitest";
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  "../../.."
+  "../../../../.."
 );
 const checker = path.join(
   root,
@@ -22,12 +22,18 @@ const checker = path.join(
 const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
 const temporaryDirectories = new Set<string>();
 
+// A wrong relative depth here would not fail loudly: every case would spawn Node
+// against a missing script, which exits 1 with a message on stderr, and that is
+// all `fails closed when the managed Bicep executable is missing` asserts. Check
+// the path once rather than letting the suite pass for the wrong reason.
+assert.ok(fs.existsSync(checker), `checker script not found: ${checker}`);
+
 afterEach(() => {
   for (const directory of temporaryDirectories) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
   temporaryDirectories.clear();
-});
+}, 30_000);
 
 function temporaryDirectory(): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "app-bicep-check-"));
@@ -35,29 +41,260 @@ function temporaryDirectory(): string {
   return directory;
 }
 
+interface ExecutableHomeFs {
+  mkdtemp(prefix: string): string;
+  mkdir(directory: string): void;
+  copyFile(source: string, destination: string): void;
+  chmod(file: string, mode: number): void;
+  remove(directory: string): void;
+}
+
+interface ExecutableHome {
+  path(): string;
+  cleanup(): void;
+}
+
+const nodeExecutableHomeFs: ExecutableHomeFs = {
+  mkdtemp: (prefix) => fs.mkdtempSync(prefix),
+  mkdir: (directory) => {
+    fs.mkdirSync(directory, { recursive: true });
+  },
+  copyFile: (source, destination) => {
+    fs.copyFileSync(source, destination);
+  },
+  chmod: (file, mode) => {
+    // Windows has no mode bits, so the port models "make this executable" and
+    // this adapter is where that becomes a no-op.
+    if (process.platform === "win32") {
+      return;
+    }
+    fs.chmodSync(file, mode);
+  },
+  remove: (directory) => {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+};
+
+// The checker resolves the managed Bicep binary from the home directory but
+// resolves the driver script from the application's own directory, so one home
+// shared by every case still gives each case its own driver. Installing the
+// ~78 MB stand-in per case instead made each test copy the Node binary, because
+// Windows refuses to hardlink it out of C:\Program Files, and made each cleanup
+// delete a file that size.
+function executableHome(
+  source: string,
+  io: ExecutableHomeFs = nodeExecutableHomeFs
+): ExecutableHome {
+  // The directory is tracked separately from the installed binary so a failed
+  // installation is still cleaned up, while only a home that actually holds the
+  // binary is ever handed to a case. Both a failure and a cleanup latch: the
+  // first because retrying the ~78 MB copy for each of the remaining cases would
+  // spend the rest of the run on the I/O this shared home exists to avoid, and
+  // would report the same low-level error 60-odd times instead of once; the
+  // second because a home minted after `afterAll` would have nothing left to
+  // remove it.
+  let created: string | undefined;
+  let installed: string | undefined;
+  let failure: Error | undefined;
+  let closed = false;
+
+  function install(): string {
+    const home = io.mkdtemp(path.join(os.tmpdir(), "app-bicep-check-home-"));
+    created = home;
+    const bicep = path.join(
+      home,
+      ".radius",
+      "ai-extensions",
+      "bin",
+      executable
+    );
+    io.mkdir(path.dirname(bicep));
+    io.copyFile(source, bicep);
+    // `copyFile` gives the destination the source's mode, but that mode is still
+    // filtered through the umask, so ask for the execute bit explicitly.
+    io.chmod(bicep, 0o755);
+    return home;
+  }
+
+  return {
+    path() {
+      if (closed) {
+        throw new Error("the shared stand-in home has already been removed");
+      }
+      if (failure !== undefined) {
+        throw failure;
+      }
+      if (installed === undefined) {
+        try {
+          installed = install();
+        } catch (error) {
+          failure = error instanceof Error ? error : new Error(String(error));
+          throw failure;
+        }
+      }
+      return installed;
+    },
+    cleanup() {
+      closed = true;
+      const directory = created;
+      created = undefined;
+      installed = undefined;
+      if (directory !== undefined) {
+        io.remove(directory);
+      }
+    }
+  };
+}
+
+const sharedHome = executableHome(fs.realpathSync(process.execPath));
+
+afterAll(() => {
+  sharedHome.cleanup();
+});
+
+// The cases below drive `executableHome` through a fake filesystem, so unlike
+// the rest of the file they spawn nothing. They live here rather than in `src/`
+// because the thing they cover is this suite's own fixture, which exists only to
+// serve the child-process cases it sits next to.
+function recordedHomeFs(failures: { mkdir?: number; copyFile?: number } = {}) {
+  const created: string[] = [];
+  const attempted: string[] = [];
+  const installed: string[] = [];
+  const executables: string[] = [];
+  const removed: string[] = [];
+  let directories = 0;
+  let mkdirs = 0;
+  let copies = 0;
+  const io: ExecutableHomeFs = {
+    mkdtemp(prefix) {
+      directories += 1;
+      const directory = `${prefix}${directories}`;
+      created.push(directory);
+      return directory;
+    },
+    mkdir() {
+      mkdirs += 1;
+      if (mkdirs <= (failures.mkdir ?? 0)) {
+        throw new Error("mkdir failed");
+      }
+    },
+    copyFile(_source, destination) {
+      copies += 1;
+      attempted.push(destination);
+      if (copies <= (failures.copyFile ?? 0)) {
+        throw new Error("copy failed");
+      }
+      installed.push(destination);
+    },
+    chmod(file) {
+      executables.push(file);
+    },
+    remove(directory) {
+      removed.push(directory);
+    }
+  };
+  return { io, created, attempted, installed, executables, removed };
+}
+
+function captureError(action: () => unknown): Error {
+  try {
+    action();
+  } catch (error) {
+    assert.ok(error instanceof Error);
+    return error;
+  }
+  assert.fail("expected the call to throw");
+}
+
+test("installs the shared stand-in binary once for repeated use", () => {
+  const { io, created, installed, executables } = recordedHomeFs();
+  const home = executableHome("node", io);
+
+  const first = home.path();
+
+  assert.equal(home.path(), first);
+  assert.deepEqual(created, [first]);
+  assert.deepEqual(installed, [
+    path.join(first, ".radius", "ai-extensions", "bin", executable)
+  ]);
+  assert.deepEqual(executables, installed);
+});
+
+test("removes a stand-in home left behind by a failed copy", () => {
+  const { io, created, removed } = recordedHomeFs({ copyFile: 1 });
+  const home = executableHome("node", io);
+
+  assert.throws(() => home.path(), /copy failed/u);
+  home.cleanup();
+
+  assert.equal(created.length, 1);
+  assert.deepEqual(removed, created);
+});
+
+test("removes a stand-in home left behind by a failed directory creation", () => {
+  const { io, created, attempted, removed } = recordedHomeFs({ mkdir: 1 });
+  const home = executableHome("node", io);
+
+  assert.throws(() => home.path(), /mkdir failed/u);
+  home.cleanup();
+
+  assert.equal(created.length, 1);
+  assert.deepEqual(attempted, []);
+  assert.deepEqual(removed, created);
+});
+
+test("reuses the first installation failure instead of copying again", () => {
+  const { io, created, attempted, installed } = recordedHomeFs({ copyFile: 1 });
+  const home = executableHome("node", io);
+  const first = captureError(() => home.path());
+
+  const second = captureError(() => home.path());
+
+  assert.equal(second, first);
+  assert.match(first.message, /copy failed/u);
+  assert.equal(created.length, 1);
+  assert.equal(attempted.length, 1);
+  assert.deepEqual(installed, []);
+});
+
+test("removes the shared stand-in home only once", () => {
+  const { io, created, removed } = recordedHomeFs();
+  const home = executableHome("node", io);
+  home.path();
+
+  home.cleanup();
+  home.cleanup();
+
+  assert.deepEqual(removed, created);
+});
+
+test("refuses to hand out a stand-in home after cleanup", () => {
+  const { io, created, removed } = recordedHomeFs();
+  const home = executableHome("node", io);
+  home.path();
+  home.cleanup();
+
+  assert.throws(() => home.path(), /already been removed/u);
+  assert.equal(created.length, 1);
+  assert.deepEqual(removed, created);
+});
+
+test("removes nothing when no stand-in home was created", () => {
+  const { io, removed } = recordedHomeFs();
+
+  executableHome("node", io).cleanup();
+
+  assert.deepEqual(removed, []);
+});
+
 function fakeBicep(
   directory: string,
   compilerOutput: string,
   status: number,
   compiledOutput = "{}"
 ): NodeJS.ProcessEnv {
-  const bicep = path.join(
-    directory,
-    ".radius",
-    "ai-extensions",
-    "bin",
-    executable
-  );
+  const home = sharedHome.path();
   const driver = path.join(directory, "build");
-  fs.mkdirSync(path.dirname(bicep), { recursive: true });
-  try {
-    fs.linkSync(fs.realpathSync(process.execPath), bicep);
-  } catch {
-    fs.copyFileSync(process.execPath, bicep);
-  }
-  if (process.platform !== "win32") {
-    fs.chmodSync(bicep, 0o755);
-  }
   fs.writeFileSync(
     driver,
     [
@@ -68,7 +305,7 @@ function fakeBicep(
       ""
     ].join("\n")
   );
-  return { HOME: directory, USERPROFILE: directory };
+  return { HOME: home, USERPROFILE: home };
 }
 
 function runChecker(directory: string, env: NodeJS.ProcessEnv, appSource = "") {

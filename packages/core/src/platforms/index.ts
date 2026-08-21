@@ -2,15 +2,7 @@ import type { ComputePlatform } from "./types.js";
 import { azure } from "./azure.js";
 import { aws } from "./aws.js";
 
-export type {
-  ComputePlatform,
-  OidcResult,
-  PortalContext,
-  SecretSpec,
-  PlatformCapabilities
-} from "./types.js";
-export { azure } from "./azure.js";
-export { aws } from "./aws.js";
+export type { ComputePlatform, PortalContext } from "./types.js";
 export {
   buildOidcSubject,
   buildEnvironmentSuffix,
@@ -35,11 +27,6 @@ const PLACEHOLDER_REGION = "us-east-1";
 /** Look up a registered compute platform by id, or undefined if unknown. */
 export function getPlatform(id: string): ComputePlatform | undefined {
   return REGISTRY[id];
-}
-
-/** All registered compute platforms. */
-export function listPlatforms(): ComputePlatform[] {
-  return Object.values(REGISTRY);
 }
 
 /**

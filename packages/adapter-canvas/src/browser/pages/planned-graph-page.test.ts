@@ -5,9 +5,15 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import {
+  graphProgressElapsed,
+  graphProgressStages
+} from "../../../test/support/browser/graph-progress.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import {
@@ -73,7 +79,8 @@ function fixture(options: FixtureOptions = {}) {
   const status = createFakeElement("plan-status");
   const container = createFakeElement("graph-container");
   const wrapper = createFakeElement("graph-container-wrapper");
-  const elements = [state];
+  const progressHost = createFakeElement("progress-steps");
+  const elements = [state, progressHost];
   if (withContainer) elements.push(container);
   if (withApp) elements.push(app);
   if (withBranch) elements.push(branch);
@@ -111,6 +118,10 @@ function fixture(options: FixtureOptions = {}) {
     () => jsonResponse(deploymentsPayload)
   );
   browser.net.handle("/api/deploy", () => jsonResponse({}));
+  // The page polls progress as soon as it starts a plan, so every scenario
+  // reaches this route whether or not it is what the scenario is about. A test
+  // that cares overrides it.
+  browser.net.handle("/api/progress?view=planned", () => jsonResponse({}));
 
   return {
     browser,
@@ -120,7 +131,8 @@ function fixture(options: FixtureOptions = {}) {
     button,
     status,
     container,
-    wrapper
+    wrapper,
+    progressHost
   };
 }
 
@@ -386,11 +398,11 @@ describe("initializePlannedGraphPage", () => {
     expect(container.innerHTML).toBe("");
   });
 
-  it("polls progress and ignores a late progress message", async () => {
+  it("polls progress immediately and then per interval, ignoring a late message", async () => {
     const { browser, status } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () =>
+    browser.net.handle("/api/progress?view=planned", () =>
       jsonResponse({ messages: ["Drafting .radius/app.bicep"] })
     );
     initializePlannedGraphPage(browser.context, globals());
@@ -398,11 +410,19 @@ describe("initializePlannedGraphPage", () => {
     browser.clock.tick(0);
     await flushPromises();
 
+    // A plan already in flight is adopted without waiting out an interval.
+    expect(
+      browser.net.calls.filter(
+        (call) => call.url === "/api/progress?view=planned"
+      )
+    ).toHaveLength(1);
     browser.clock.tick(PLAN_PROGRESS_MS);
     await flushPromises();
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/progress")
-    ).toHaveLength(1);
+      browser.net.calls.filter(
+        (call) => call.url === "/api/progress?view=planned"
+      )
+    ).toHaveLength(2);
     expect(status.textContent).toBe("Drafting .radius/app.bicep");
 
     plan.resolve(jsonResponse({ reload: true }));
@@ -414,7 +434,9 @@ describe("initializePlannedGraphPage", () => {
     const { browser, status } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => jsonResponse({ messages: [] }));
+    browser.net.handle("/api/progress?view=planned", () =>
+      jsonResponse({ messages: [] })
+    );
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -432,7 +454,7 @@ describe("initializePlannedGraphPage", () => {
     const plan = createDeferred<HttpResponse>();
     const progress = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => progress.promise);
+    browser.net.handle("/api/progress?view=planned", () => progress.promise);
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -451,7 +473,7 @@ describe("initializePlannedGraphPage", () => {
     const { browser } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () =>
+    browser.net.handle("/api/progress?view=planned", () =>
       Promise.reject(new Error("progress unavailable"))
     );
     initializePlannedGraphPage(browser.context, globals());
@@ -474,7 +496,7 @@ describe("initializePlannedGraphPage", () => {
     const plan = createDeferred<HttpResponse>();
     const progress = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => progress.promise);
+    browser.net.handle("/api/progress?view=planned", () => progress.promise);
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -691,7 +713,9 @@ describe("initializePlannedGraphPage", () => {
     const { browser } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => jsonResponse({ messages: [] }));
+    browser.net.handle("/api/progress?view=planned", () =>
+      jsonResponse({ messages: [] })
+    );
     const teardown = initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -785,5 +809,135 @@ describe("initializePlannedGraphPage", () => {
     await flushPromises();
 
     expect(browser.clock.pending).toBe(0);
+  });
+  describe("graph build progress", () => {
+    const stageText = graphProgressStages;
+
+    it("renders typed planning stages instead of prose", async () => {
+      const { browser, progressHost } = fixture();
+      const plan = createDeferred<HttpResponse>();
+      browser.net.handle("/api/plan-graph", () => plan.promise);
+      browser.net.handle("/api/progress?view=planned", () =>
+        jsonResponse({
+          generation: 3,
+          events: [
+            {
+              sequence: 1,
+              stage: "building_graph",
+              state: "succeeded",
+              detail: "Built a graph with 4 resource(s)."
+            },
+            {
+              sequence: 2,
+              stage: "resolving_recipes",
+              state: "running",
+              detail: "Resolving recipes for dev."
+            }
+          ]
+        })
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      browser.clock.tick(PLAN_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_graph}:succeeded`,
+        `${GRAPH_STAGE_LABELS.resolving_recipes}:running`
+      ]);
+      expect(graphProgressElapsed(progressHost)).toMatch(/^\d+:\d{2}$/);
+      expect(fakeText(progressHost)).not.toMatch(/%/);
+    });
+
+    it("shows a starting stage before the first poll returns", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/plan-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:running`
+      ]);
+    });
+    it.each([
+      ["the plan errors", { error: "invalid app.bicep" }],
+      ["the plan response is incomplete", {}]
+    ])("clears the panel when %s", async (_name, body) => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle("/api/plan-graph", () => jsonResponse(body));
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      // The failure is stated once, in the status surface. A panel left behind
+      // would repeat it and keep claiming the plan is running.
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("clears the panel when the request throws", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle("/api/plan-graph", () =>
+        Promise.reject(new Error("offline"))
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("clears the panel while Copilot authors the model", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle("/api/plan-graph", () =>
+        jsonResponse({ needsAppBicep: true })
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([]);
+    });
+  });
+  describe("planned graph progress defaults", () => {
+    it("accepts typed events from a payload that omits the generation", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/plan-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress?view=planned", () =>
+        jsonResponse({
+          events: [
+            {
+              sequence: 5,
+              stage: "resolving_recipes",
+              state: "running",
+              detail: "Resolving recipes."
+            }
+          ]
+        })
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+      browser.clock.tick(PLAN_PROGRESS_MS);
+      await flushPromises();
+
+      expect(graphProgressStages(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.resolving_recipes}:running`
+      ]);
+    });
   });
 });
