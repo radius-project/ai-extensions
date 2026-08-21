@@ -2,7 +2,7 @@
 
 - **Author**: Ryan Waite (@ryanwaite)
 - **Date**: 2026-08
-- **Status**: Draft
+- **Status**: In review
 
 ## Overview
 
