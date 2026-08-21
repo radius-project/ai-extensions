@@ -19,6 +19,7 @@ export {
   deployStatusKeys,
   filterGraphVisualizationResources,
   lookupDeployStatus,
+  mergeDeployedGraphMetadata,
   projectDeployedGraph
 } from "./graph/index.js";
 export type { DeployStatus } from "./graph/index.js";
