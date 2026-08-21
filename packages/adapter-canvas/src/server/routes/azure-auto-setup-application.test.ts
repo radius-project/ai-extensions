@@ -3,7 +3,10 @@ import {
   buildRadiusAppProvenanceTags,
   type ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
-import { resolveAzureAutoSetupApplication } from "./azure-auto-setup-application.js";
+import {
+  ENTRA_APP_RETENTION_NOTICE,
+  resolveAzureAutoSetupApplication
+} from "./azure-auto-setup-application.js";
 import type {
   AzureAutoSetupApplicationInput,
   AzureAutoSetupCommandResult,
@@ -33,6 +36,7 @@ interface Harness {
   calls: string[];
   failures: Record<string, unknown>[];
   responses: Array<{ status: number; payload: unknown }>;
+  steps: string[];
 }
 
 function command(
@@ -107,6 +111,7 @@ function harness(
     calls,
     failures,
     responses,
+    steps: workflow.steps,
     input: {
       workflow,
       dependencies: { operations: dependencies.operations },
@@ -175,11 +180,16 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
 
     expect(await resolveAzureAutoSetupApplication(test.input)).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "reused"
     });
     expect(githubCalls).toEqual([
       "/repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID"
     ]);
+    expect(test.steps).toContain(
+      `✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
   });
 
   it("reuses the repository's owned client id and persists before returning", async () => {
@@ -204,10 +214,15 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     const result = await resolveAzureAutoSetupApplication(test.input);
     expect(result).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "reused"
     });
     expect(test.calls).toEqual(["record:reused", "persist"]);
     expect(azCalls).toHaveLength(3);
+    expect(test.steps).toContain(
+      `✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
   });
 
   it.each([
@@ -383,9 +398,14 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
 
     expect(await resolveAzureAutoSetupApplication(test.input)).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "reused"
     });
     expect(test.calls).toEqual(["record:reused"]);
+    expect(test.steps).toContain(
+      `✅ Using the selected App Registration: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
   });
 
   it("fails closed when ownership of an explicit application cannot be read", async () => {
@@ -512,9 +532,14 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
 
     expect(await resolveAzureAutoSetupApplication(test.input)).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "reused"
     });
     expect(test.calls).toEqual(["record:reused", "persist"]);
+    expect(test.steps).toContain(
+      `✅ Reusing existing App Registration: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
   });
 
   it("fails closed when the reused name match cannot be persisted", async () => {
@@ -693,9 +718,14 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     const result = await resolveAzureAutoSetupApplication(test.input);
     expect(result).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "created"
     });
     expect(test.calls).toEqual(["record:created", "checkpoint"]);
+    expect(test.steps).toContain(
+      `✅ Entra app registration created: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
     const create = azCalls.findIndex((line) =>
       line.startsWith("ad app create ")
     );
