@@ -233,6 +233,80 @@ describe("P0-A Radius runtime registration contract", () => {
     await harness.extension.shutdown("test");
   });
 
+  it("activates PR graph diffs after first-time modeling in the same session", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceContext: {
+        workspacePath: "/worktrees/new-app",
+        repo: "acme/new-app",
+        branch: "feature"
+      },
+      bicepByRepoBranch: {
+        "workspace:acme/new-app@feature": "resource app {}"
+      }
+    });
+    const hasModel = harness.deps.workspace
+      .hasRadiusApplicationModel as ReturnType<typeof vi.fn>;
+    hasModel.mockResolvedValueOnce(false).mockResolvedValue(true);
+
+    await expect(
+      harness.extension.hooks.onSessionStart({
+        workingDirectory: "/worktrees/new-app"
+      })
+    ).resolves.toBeUndefined();
+
+    const pullRequest = {
+      toolName: "create_pull_request",
+      toolArgs: { title: "Model new application", body: "" },
+      workingDirectory: "/worktrees/new-app"
+    };
+    const denied = await harness.extension.hooks.onPreToolUse(pullRequest);
+    expect(denied?.permissionDecision).toBe("deny");
+    expect(denied?.additionalContext).toContain("repo `acme/new-app`");
+
+    const diffTool = harness.extension.tools.find(
+      ({ name }) => name === "radius_generate_pr_diff_markdown"
+    );
+    if (!diffTool) throw new Error("PR graph diff tool was not registered");
+    const diffArgs = {
+      repo: "acme/new-app",
+      baseBranch: "main",
+      headBranch: "feature"
+    };
+    const markdown = await diffTool.handler(diffArgs);
+    if (typeof markdown !== "string") {
+      throw new Error("PR graph diff tool did not return markdown");
+    }
+    await harness.extension.hooks.onPostToolUse({
+      toolName: diffTool.name,
+      toolArgs: diffArgs,
+      toolResult: { textResultForLlm: markdown },
+      workingDirectory: "/worktrees/new-app"
+    });
+
+    const allowed = {
+      ...pullRequest,
+      toolArgs: {
+        title: "Model new application",
+        body: `${markdown}\nFirst Radius model`
+      }
+    };
+    await expect(
+      harness.extension.hooks.onPreToolUse(allowed)
+    ).resolves.toBeUndefined();
+    await harness.extension.hooks.onPostToolUse(allowed);
+    expect(harness.routedOpens.at(-1)).toMatchObject({
+      instanceId: "radius-panel",
+      input: {
+        page: "graph-diff",
+        repo: "acme/new-app",
+        baseBranch: "main",
+        headBranch: "feature"
+      }
+    });
+
+    await harness.extension.shutdown("test");
+  });
+
   it("leaves unrelated worktree PR creation untouched", async () => {
     const harness = await createRuntimeSdkHarness();
     const pullRequest = {

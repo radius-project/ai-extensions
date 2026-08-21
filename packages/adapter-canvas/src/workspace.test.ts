@@ -12,9 +12,9 @@ import {
   resolveSessionId,
   resolvePersistedSessionId,
   workspaceFileExists,
+  hasRadiusApplicationModel,
   fetchWorkspaceTree,
   isWorkspacePath,
-  hasRadiusApplicationModel,
   workspaceHeadCommit,
   workspaceSourceChangedSince
 } from "./workspace.js";
