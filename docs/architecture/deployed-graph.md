@@ -142,7 +142,7 @@ The Deployed tab is a projection, not a distinct graph: a fixed topology painted
 
 Resources on this route always carry an empty `outputResources`: the Deployed view is one node per Radius resource.
 
-Each node's status is matched to a payload entry by, in priority order, exact `id`, then lowercased `name|type` with the API version stripped, then lowercased `name`. The middle tier matters because modeled resource ids are synthesized locally by `buildResourceID` and are not guaranteed to equal the UCP ids the control plane reports; without it, an id mismatch would silently degrade every node to bare-name matching, which collides across types.
+Each node's status is matched to a payload entry by, in priority order, exact `id`, then lowercased `name|type` with the API version stripped, then lowercased `name`. The middle tier matters because modeled resource ids are synthesized locally by the modeling side and are not guaranteed to equal the UCP ids the control plane reports; without it, an id mismatch would silently degrade every node to bare-name matching, which collides across types.
 
 Merging successive snapshots is deliberately conservative, because each payload is an independent snapshot rather than a stream of transitions:
 

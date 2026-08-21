@@ -26,7 +26,6 @@ import {
   generateDeployWorkflow,
   generateVerifyWorkflow,
   getPlatform,
-  listPlatforms,
   RADIUS_REF,
   stateRegistryForEnvironment,
   verifyTemplateFile
@@ -41,6 +40,7 @@ import {
 import { REPO } from "../fixtures/storefront-app.js";
 
 const ENV_NAME = "production";
+const PLATFORM_IDS = ["azure", "aws"] as const;
 
 const deployTemplates = {
   [DEPLOY_DISPATCHER_FILE]: DEPLOY_DISPATCHER_TEMPLATE,
@@ -63,7 +63,7 @@ function pinnedRefs(yamlText: string): string[] {
 describe("environment provisioning journey", () => {
   it("produces a consistent identity, workflow set, and state registry", () => {
     const platform = getPlatform("azure");
-    expect(platform?.supports).toEqual({ oidc: true, portalUrl: true });
+    expect(platform?.clusterServiceName).toBe("AKS");
 
     const suffix = buildEnvironmentSuffix(ENV_NAME);
     const subject = buildOidcSubject({
@@ -101,18 +101,6 @@ describe("environment provisioning journey", () => {
       expect(() => parseYaml(body), file).not.toThrow();
       expect(body, file).not.toMatch(/(?<!\$)\{\{[A-Z_]+\}\}/);
     }
-
-    // The manual OIDC script the platform emits targets the same subject the
-    // credential builder derived, so a user following it lands on a credential
-    // the deploy workflow can actually use.
-    const oidc = platform!.generateOidc({
-      repoFullName: REPO,
-      environment: ENV_NAME,
-      tenantId: "tenant-1",
-      subscriptionId: "sub-1",
-      clientId: "client-1"
-    });
-    expect(oidc.output).toContain(`"subject": "${subject}"`);
 
     // Composite actions in every generated workflow are pinned to the ref the
     // templates themselves were fetched at.
@@ -222,16 +210,16 @@ describe("environment provisioning journey", () => {
   });
 
   it("provisions every registered platform with its own verify template", () => {
-    const platforms = listPlatforms();
+    const platforms = PLATFORM_IDS.map((id) => getPlatform(id));
 
-    expect(platforms.map((p) => p.id).sort()).toEqual(["aws", "azure"]);
+    expect(platforms.every(Boolean)).toBe(true);
     for (const platform of platforms) {
-      const file = verifyTemplateFile(platform);
-      expect(file, platform.id).toBe(`verify-${platform.id}.yml`);
+      const file = verifyTemplateFile(platform!);
+      expect(file, platform!.id).toBe(`verify-${platform!.id}.yml`);
       const workflow = generateVerifyWorkflow(
         ENV_NAME,
-        platform,
-        VERIFY_TEMPLATE(platform.displayName)
+        platform!,
+        VERIFY_TEMPLATE(platform!.displayName)
       );
       expect(parseYaml(workflow).jobs.verify.environment).toBe(
         "${{ inputs.environment }}"

@@ -17,7 +17,7 @@ packages/core/      UI-agnostic core (this package). No SDK, no HTTP, no DOM.
     modeling/                 Repo modeling: app.bicep generation, recipe resolution.
     platforms/                Compute-platform abstraction (azure, aws) + registry.
     workflows/                GitHub Actions verify/deploy workflow generation.
-    ports/                    Interfaces for the outside world (Shell, GitHub, …).
+    ports/                    Interfaces for the outside world (GitHub).
     index.ts                  The public use-case API surface.
 
 packages/adapter-canvas/      The Copilot-canvas UI adapter (thin).
@@ -38,27 +38,27 @@ packages/adapter-canvas/      The Copilot-canvas UI adapter (thin).
 
 `packages/core` never imports from an adapter, the Copilot SDK, `node:http`, or the
 DOM. Anything that touches the outside world is reached through a **port**
-(`src/ports/index.ts`): `Shell`, `GitHub`, `StateStore`, `Clock`, `Logger`.
-Adapters depend on the core, supply port implementations, and own all
-UI/transport concerns. This keeps the product logic testable in isolation and
-makes a second UI (guide 3) a thin layer rather than a fork.
+(`src/ports/index.ts`). Reading a repository is the only side effect core's
+use-cases need today, so `GitHub` is the only port. Adapters depend on the core,
+supply port implementations, and own all UI/transport concerns. This keeps the
+product logic testable in isolation and makes a second UI (guide 3) a thin layer
+rather than a fork.
 
 ## Guide 1: Add a compute platform
 
 Everything provider-specific lives behind the `ComputePlatform` interface
-(`src/platforms/types.ts`): OIDC bootstrap, portal deep-links, and the
-provider-gated fragments injected into the verify/deploy workflows. Adding a
-platform never requires touching the workflow templates or any UI adapter.
+(`src/platforms/types.ts`): portal deep-links and the provider-gated fragments
+injected into the verify/deploy workflows. Adding a platform never requires
+touching the workflow templates or any UI adapter.
 
 1. Create `src/platforms/<id>.ts` exporting a `ComputePlatform` (use
    `azure.ts` / `aws.ts` as the template). Implement `id`, `displayName`,
-   `capabilities`, `oidc(...)`, `portalUrl(...)`, and the workflow fragment
-   getters.
-2. Register it in `src/platforms/index.ts`: import it and add it to `REGISTRY`,
-   then re-export it.
+   `clusterServiceName`, and `portalUrl(...)`.
+2. Register it in `src/platforms/index.ts`: import it and add it to `REGISTRY`.
+   Platform objects are reached through `getPlatform(id)`, so they are not
+   re-exported from the barrel.
 3. Add its id to any UI `enum`s (e.g. the canvas `provider` action input in
-   `packages/adapter-canvas/src/extension.ts`). The route/UI layer reads capabilities
-   and degrades gracefully, so partial platforms are fine.
+   `packages/adapter-canvas/src/extension.ts`).
 4. `pnpm --filter @radius-project/core typecheck && pnpm build:canvas`.
 
 No changes to `workflows/`, `pages.mjs`, or `server.mjs` are needed.
@@ -88,9 +88,8 @@ Because all product logic is in `packages/core` behind ports, a new front-end
 (browser panel, chat surface, CLI) is a thin adapter:
 
 1. Create `packages/adapter-<name>/` with its own entry and build.
-2. Implement the ports your adapter needs (`Shell`, `GitHub`, `StateStore`,
-   `Clock`, `Logger`) for that environment. The canvas implementations in
-   `gh.mjs` (Shell + GitHub) are a reference.
+2. Implement the ports your adapter needs (today just `GitHub`) for that
+   environment. The canvas implementation in `gh.mjs` is a reference.
 3. Import use-cases from `@radius-project/core` and wire them to your transport
    and rendering. Reuse pure renderers/helpers where the environment allows;
    keep transport-specific code (HTTP host, SDK surface) in the adapter.

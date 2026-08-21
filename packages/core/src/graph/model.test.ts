@@ -1,9 +1,6 @@
 import { describe, it, expect } from "vitest";
-import {
-  addInboundConnections,
-  buildResourceID,
-  stripAPIVersion
-} from "./model.js";
+import { addInboundConnections, stripAPIVersion } from "./model.js";
+import { buildResourceID } from "../../test/support/resource-id.js";
 
 describe("stripAPIVersion", () => {
   it("removes the @version suffix", () => {
@@ -20,15 +17,6 @@ describe("stripAPIVersion", () => {
 
   it("handles empty string", () => {
     expect(stripAPIVersion("")).toBe("");
-  });
-});
-
-describe("buildResourceID", () => {
-  it("constructs the expected Radius resource ID", () => {
-    const id = buildResourceID("Radius.Compute/containers", "frontend");
-    expect(id).toBe(
-      "/planes/radius/local/resourcegroups/default/providers/Radius.Compute/containers/frontend"
-    );
   });
 });
 

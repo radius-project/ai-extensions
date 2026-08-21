@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getPlatform, listPlatforms, generatePortalUrl } from "./index.js";
+import { getPlatform, generatePortalUrl } from "./index.js";
 
 describe("getPlatform", () => {
   it("returns the azure platform by id", () => {
@@ -7,6 +7,8 @@ describe("getPlatform", () => {
     expect(platform).toBeDefined();
     expect(platform!.id).toBe("azure");
     expect(platform!.displayName).toBe("Azure");
+    expect(platform!.clusterServiceName).toBe("AKS");
+    expect(typeof platform!.portalUrl).toBe("function");
   });
 
   it("returns the aws platform by id", () => {
@@ -14,6 +16,8 @@ describe("getPlatform", () => {
     expect(platform).toBeDefined();
     expect(platform!.id).toBe("aws");
     expect(platform!.displayName).toBe("AWS");
+    expect(platform!.clusterServiceName).toBe("EKS");
+    expect(typeof platform!.portalUrl).toBe("function");
   });
 
   it("returns undefined for an unknown platform id", () => {
@@ -22,25 +26,6 @@ describe("getPlatform", () => {
 
   it("returns undefined for an empty string", () => {
     expect(getPlatform("")).toBeUndefined();
-  });
-});
-
-describe("listPlatforms", () => {
-  it("returns all registered platforms", () => {
-    const platforms = listPlatforms();
-    expect(platforms).toHaveLength(2);
-    const ids = platforms.map((p) => p.id).sort();
-    expect(ids).toEqual(["aws", "azure"]);
-  });
-
-  it("returns platform objects with required properties", () => {
-    const platforms = listPlatforms();
-    for (const p of platforms) {
-      expect(p.id).toBeDefined();
-      expect(p.displayName).toBeDefined();
-      expect(p.supports).toBeDefined();
-      expect(typeof p.portalUrl).toBe("function");
-    }
   });
 });
 

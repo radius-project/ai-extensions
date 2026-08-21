@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { filterGraphVisualizationResources } from "./visualization.js";
-import { buildResourceID } from "./model.js";
+import { buildResourceID } from "../../test/support/resource-id.js";
 
 const containerId = buildResourceID("Radius.Compute/containers", "api");
 const imageId = buildResourceID("Radius.Compute/containerImages", "apiImage");
