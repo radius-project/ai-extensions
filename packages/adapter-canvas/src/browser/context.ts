@@ -64,6 +64,7 @@ export function isDomElement(value: unknown): value is DomElement {
     isDomEventTargetLike(value) &&
     isCallable(value.setAttribute) &&
     isCallable(value.getAttribute) &&
+    isCallable(value.getAttributeNames) &&
     isCallable(value.removeAttribute) &&
     isCallable(value.focus) &&
     isCallable(value.scrollIntoView) &&

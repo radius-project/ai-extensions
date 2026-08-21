@@ -47,7 +47,8 @@ export function clearChildren(host: DomElement): void {
 
 // Server-rendered page fragments are trusted extension output. Replacing each
 // parsed script node is required because scripts assigned through innerHTML do
-// not execute.
+// not execute. Every attribute is carried over, so a `type` that marks a block
+// as inert data keeps it inert instead of turning it into a classic script.
 export function activateInlineScripts(
   context: BrowserContext,
   root: DomElement
@@ -56,9 +57,12 @@ export function activateInlineScripts(
     const parent = stale.parentNode;
     if (parent === null) continue;
     const next = context.dom.createElement("script");
+    for (const name of stale.getAttributeNames()) {
+      const value = stale.getAttribute(name);
+      if (value !== null) next.setAttribute(name, value);
+    }
     const src = stale.getAttribute("src");
-    if (src !== null && src !== "") next.setAttribute("src", src);
-    else next.textContent = stale.textContent;
+    if (src === null || src === "") next.textContent = stale.textContent;
     parent.replaceChild(next, stale);
   }
 }

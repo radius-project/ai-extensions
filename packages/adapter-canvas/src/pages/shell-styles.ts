@@ -173,6 +173,18 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     padding: 20px;
     min-width: 0;
   }
+  /* A pane swap keeps the outgoing pane on screen while the next one is
+     fetched, but its page-scoped handlers are already gone. The region is made
+     inert for that window, so it also has to look unavailable rather than
+     silently swallowing clicks. The delay keeps a fast swap from flickering. */
+  .main-content[aria-busy="true"] {
+    opacity: 0.55;
+    cursor: progress;
+    transition: opacity 120ms linear 200ms;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .main-content[aria-busy="true"] { transition: none; }
+  }
 
   /* ─── Headings ────────────────────────────────────────────────────────── */
   .rad-heading { margin-bottom: 20px; }

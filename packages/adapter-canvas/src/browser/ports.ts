@@ -65,6 +65,7 @@ export interface DomElement extends DomEventTarget {
   offsetParent: unknown;
   setAttribute(name: string, value: string): void;
   getAttribute(name: string): string | null;
+  getAttributeNames(): readonly string[];
   removeAttribute(name: string): void;
   focus(): void;
   scrollIntoView(options?: ScrollOptions): void;

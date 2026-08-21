@@ -80,6 +80,31 @@ describe("document canvas background", () => {
   });
 });
 
+describe("busy pane affordance", () => {
+  const busyStyles = SHELL_STYLE_CSS.match(
+    /\.main-content\[aria-busy="true"\]\s*\{([^}]*)\}/
+  )?.[1];
+
+  it("dims the outgoing pane it makes inert so it reads as unavailable", () => {
+    expect(busyStyles).toContain("opacity: 0.55");
+    expect(busyStyles).toContain("cursor: progress");
+  });
+
+  it("delays the dim so a fast pane swap never flickers", () => {
+    expect(busyStyles).toContain("transition: opacity 120ms linear 200ms");
+  });
+
+  it("drops the transition under a reduced-motion preference", () => {
+    const reducedMotion = SHELL_STYLE_CSS.slice(
+      SHELL_STYLE_CSS.indexOf("@media (prefers-reduced-motion: reduce)")
+    );
+
+    expect(reducedMotion).toContain(
+      '.main-content[aria-busy="true"] { transition: none; }'
+    );
+  });
+});
+
 describe("status color tokens", () => {
   const cases = statuses.flatMap((status) =>
     Object.entries(palettes).flatMap(([canvas, palette]) =>

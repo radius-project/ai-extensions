@@ -17,6 +17,10 @@ export interface PageRegistry {
   // navigation live so a superseded response can never swap content or push
   // history for the pane the user already left.
   beginNavigation(cancel: BrowserTeardown): void;
+  // Releasing on settle keeps the claim honest: without it a finished
+  // navigator stays installed and is cancelled again by the next navigation,
+  // and the slot reports an active navigation when none is running.
+  endNavigation(cancel: BrowserTeardown): void;
   teardownPage(): void;
   teardownAll(): void;
 }
@@ -66,6 +70,9 @@ function createPageRegistry(): PageRegistry {
       cancelActiveNavigation = cancel;
       if (previous !== null && previous !== cancel) previous();
     },
+    endNavigation(cancel) {
+      if (cancelActiveNavigation === cancel) cancelActiveNavigation = null;
+    },
     teardownPage() {
       teardownWhere((lifetime) => lifetime === "page");
     },
@@ -90,6 +97,7 @@ function isPageRegistry(value: unknown): value is PageRegistry {
     isBindingRegistry(value.bindings) &&
     isCallable(value.register) &&
     isCallable(value.beginNavigation) &&
+    isCallable(value.endNavigation) &&
     isCallable(value.teardownPage) &&
     isCallable(value.teardownAll)
   );

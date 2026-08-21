@@ -161,6 +161,54 @@ describe("activateInlineScripts", () => {
       "installEmptySource();"
     );
   });
+
+  it("carries every attribute over so inert data blocks stay inert", () => {
+    const browser = createFakeBrowser();
+    const root = createFakeElement("root");
+    const state = createFakeElement("", "script");
+    state.setAttribute("type", "application/json");
+    state.setAttribute("id", "radius-state");
+    state.setAttribute("data-radius-scope", "environment");
+    state.textContent = '{"branch":"main"}';
+    const replaced: Array<[unknown, unknown]> = [];
+    state.parentNode = {
+      replaceChild(next, previous) {
+        replaced.push([next, previous]);
+      }
+    };
+    root.matches.set("script", [state]);
+
+    activateInlineScripts(browser.context, root);
+
+    const next = replaced[0][0] as FakeElement;
+    expect(next.getAttribute("type")).toBe("application/json");
+    expect(next.getAttribute("id")).toBe("radius-state");
+    expect(next.getAttribute("data-radius-scope")).toBe("environment");
+    expect(next.textContent).toBe('{"branch":"main"}');
+  });
+
+  it("skips an attribute the source element reports but does not expose", () => {
+    const browser = createFakeBrowser();
+    const root = createFakeElement("root");
+    const script = createFakeElement("", "script");
+    script.setAttribute("type", "module");
+    Object.assign(script, {
+      getAttributeNames: () => ["type", "detached"]
+    });
+    const replaced: Array<[unknown, unknown]> = [];
+    script.parentNode = {
+      replaceChild(next, previous) {
+        replaced.push([next, previous]);
+      }
+    };
+    root.matches.set("script", [script]);
+
+    activateInlineScripts(browser.context, root);
+
+    const next = replaced[0][0] as FakeElement;
+    expect(next.getAttribute("type")).toBe("module");
+    expect(next.getAttributeNames()).toEqual(["type"]);
+  });
 });
 
 describe("text and strong helpers", () => {

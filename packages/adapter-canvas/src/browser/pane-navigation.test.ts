@@ -2,10 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createPaneNavigation,
   initializePaneNavigation,
+  paneIdFromUrl,
   PANE_ACTIVE_CLASS,
   PANE_CONTENT_ID,
+  PANE_DEFAULT_PAGE,
   PANE_NAVIGATION_LINK_SELECTOR,
   PANE_NAVIGATION_TRIGGER_SELECTOR,
+  PANE_OWNED_SUBTAB_SELECTOR,
+  PANE_SUBTAB_SELECTOR,
   PANE_TOP_NAV_ID
 } from "./pane-navigation.js";
 import {
@@ -16,7 +20,11 @@ import {
   flushPromises,
   textResponse
 } from "../../test/support/browser/fakes.js";
-import { createGraphNavigation, GRAPH_CONTENT_ID } from "./graph/navigation.js";
+import {
+  createGraphNavigation,
+  GRAPH_CONTENT_ID,
+  GRAPH_PAGE_ATTRIBUTE
+} from "./graph/navigation.js";
 import { resolvePageRegistry } from "./registry.js";
 import type { DomEvent, HttpResponse } from "./ports.js";
 
@@ -69,7 +77,8 @@ function setup(options: { content?: boolean; nav?: boolean } = {}) {
     teardownPage() {
       pageTeardowns += 1;
     },
-    beginNavigation: registry.beginNavigation
+    beginNavigation: registry.beginNavigation,
+    endNavigation: registry.endNavigation
   });
   return {
     ...browser,
@@ -160,7 +169,8 @@ describe("top-level pane navigation", () => {
       teardownPage() {
         return undefined;
       },
-      beginNavigation: harness.registry.beginNavigation
+      beginNavigation: harness.registry.beginNavigation,
+      endNavigation: harness.registry.endNavigation
     });
     const pendingGraph = createDeferred<HttpResponse>();
     harness.net.handle("/?page=planned", () => pendingGraph.promise);
@@ -191,7 +201,8 @@ describe("top-level pane navigation", () => {
       teardownPage() {
         return undefined;
       },
-      beginNavigation: harness.registry.beginNavigation
+      beginNavigation: harness.registry.beginNavigation,
+      endNavigation: harness.registry.endNavigation
     });
     const pendingPane = createDeferred<HttpResponse>();
     harness.net.handle("/?page=environment", () => pendingPane.promise);
@@ -429,5 +440,252 @@ describe("top-level pane navigation", () => {
 
     initializePaneNavigation(harness.context, harness.navigation);
     expect(harness.document.listenerCount("click")).toBe(1);
+  });
+});
+
+describe("pane identity", () => {
+  it.each([
+    ["/?page=environment", "environment"],
+    ["?page=planned&repo=owner%2Frepo", "planned"],
+    ["/?repo=owner%2Frepo&page=deploying", "deploying"],
+    ["/", PANE_DEFAULT_PAGE],
+    ["/?flag", PANE_DEFAULT_PAGE],
+    ["/?repo=owner", PANE_DEFAULT_PAGE]
+  ])("reads %s as the %s pane", (url, pane) => {
+    expect(paneIdFromUrl(url)).toBe(pane);
+  });
+
+  it("leaves graph sub-tabs to the navigator that owns their smaller region", () => {
+    expect(PANE_OWNED_SUBTAB_SELECTOR).toBe(
+      `${PANE_SUBTAB_SELECTOR}:not([${GRAPH_PAGE_ATTRIBUTE}])`
+    );
+    expect(PANE_NAVIGATION_TRIGGER_SELECTOR).toContain(
+      PANE_OWNED_SUBTAB_SELECTOR
+    );
+  });
+});
+
+describe("sub-tab pane navigation", () => {
+  function subtabHarness() {
+    const harness = setup();
+    const subtab = createFakeElement("credentials-subtab", "a");
+    subtab.className = PANE_SUBTAB_SELECTOR.slice(1);
+    subtab.setAttribute("href", "/?page=credentials");
+    subtab.ancestors.set(PANE_NAVIGATION_TRIGGER_SELECTOR, subtab);
+    subtab.ancestors.set(`#${PANE_CONTENT_ID}`, harness.content);
+    const incoming = createFakeElement("incoming-credentials-subtab", "a");
+    incoming.setAttribute("href", "/?page=credentials");
+    harness.content.matches.set(PANE_SUBTAB_SELECTOR, [incoming]);
+    harness.net.handle("/?page=credentials", () =>
+      textResponse("<html>credentials</html>")
+    );
+    harness.nav.parsed = () =>
+      parsedPane("<section>credentials</section>", "/?page=environment");
+    return { ...harness, subtab, incoming };
+  }
+
+  it("swaps the pane instead of unloading the document", async () => {
+    const harness = subtabHarness();
+    initializePaneNavigation(harness.context, harness.navigation);
+
+    harness.document.dispatch("click", clickEvent(harness.subtab));
+    await flushPromises();
+
+    expect(harness.content.innerHTML).toBe("<section>credentials</section>");
+    expect(harness.nav.pushed).toEqual(["/?page=credentials"]);
+    expect(harness.nav.assigned).toEqual([]);
+  });
+
+  it("moves focus to the incoming counterpart of the sub-tab that was replaced", async () => {
+    const harness = subtabHarness();
+
+    harness.navigation.navigateTo(
+      clickEvent(harness.subtab),
+      "/?page=credentials"
+    );
+    await flushPromises();
+
+    expect(harness.incoming.focusCount).toBe(1);
+    expect(harness.environments.focusCount).toBe(0);
+  });
+
+  it("restores focus to the sub-tab a history entry points at", async () => {
+    const harness = subtabHarness();
+
+    harness.navigation.navigateTo(null, "/?page=credentials", "none");
+    await flushPromises();
+
+    expect(harness.incoming.focusCount).toBe(1);
+    expect(harness.nav.pushed).toEqual([]);
+  });
+
+  it("falls back to the top-level tab when no sub-tab matches the destination", async () => {
+    const harness = setup();
+    const stale = createFakeElement("stale-subtab", "a");
+    stale.setAttribute("href", "/?page=credentials");
+    harness.content.matches.set(PANE_SUBTAB_SELECTOR, [
+      createFakeElement("hrefless-subtab", "a"),
+      stale
+    ]);
+    harness.net.handle("/?page=environment", () =>
+      textResponse("<html>environment</html>")
+    );
+    harness.nav.parsed = () =>
+      parsedPane("<section>environment</section>", "/?page=environment");
+
+    harness.navigation.navigateTo(null, "/?page=environment", "none");
+    await flushPromises();
+
+    expect(harness.environments.focusCount).toBe(1);
+    expect(stale.focusCount).toBe(0);
+  });
+});
+
+describe("pane navigation busy state", () => {
+  it("makes the outgoing pane inert until its replacement arrives", async () => {
+    const harness = setup();
+    const pending = createDeferred<HttpResponse>();
+    harness.net.handle("/?page=environment", () => pending.promise);
+    harness.nav.parsed = () =>
+      parsedPane("<section>environment</section>", "/?page=environment");
+
+    harness.navigation.navigateTo(null, "/?page=environment");
+
+    expect(harness.content.getAttribute("aria-busy")).toBe("true");
+    expect(harness.content.getAttribute("inert")).toBe("");
+
+    pending.resolve(textResponse("<html>environment</html>"));
+    await flushPromises();
+
+    expect(harness.content.getAttribute("aria-busy")).toBeNull();
+    expect(harness.content.getAttribute("inert")).toBeNull();
+  });
+
+  it.each([
+    [
+      "cancellation",
+      (harness: ReturnType<typeof setup>) => {
+        harness.navigation.cancelPendingWork();
+      }
+    ],
+    [
+      "teardown",
+      (harness: ReturnType<typeof setup>) => {
+        harness.navigation.teardown();
+      }
+    ]
+  ])("releases the pane again on %s", async (_label, interrupt) => {
+    const harness = setup();
+    const pending = createDeferred<HttpResponse>();
+    harness.net.handle("/?page=environment", () => pending.promise);
+    harness.navigation.navigateTo(null, "/?page=environment");
+
+    interrupt(harness);
+
+    expect(harness.content.getAttribute("aria-busy")).toBeNull();
+    expect(harness.content.getAttribute("inert")).toBeNull();
+    pending.resolve(textResponse("<html>environment</html>"));
+    await flushPromises();
+    expect(harness.content.getAttribute("inert")).toBeNull();
+  });
+
+  it("releases the pane when the swap fails", async () => {
+    const harness = setup();
+    harness.net.handle("/?page=environment", () =>
+      Promise.reject(new Error("offline"))
+    );
+
+    harness.navigation.navigateTo(null, "/?page=environment");
+    await flushPromises();
+
+    expect(harness.content.getAttribute("aria-busy")).toBeNull();
+    expect(harness.content.getAttribute("inert")).toBeNull();
+  });
+});
+
+describe("pane document title", () => {
+  function titled(text: string): ReturnType<typeof createFakeElement> {
+    const title = createFakeElement("", "title");
+    title.textContent = text;
+    return title;
+  }
+
+  it("adopts the title of the pane that was swapped in", async () => {
+    const harness = setup();
+    const current = titled("Applications — Radius");
+    harness.document.addSelector("title", current);
+    harness.net.handle("/?page=environment", () =>
+      textResponse("<html>environment</html>")
+    );
+    harness.nav.parsed = () => {
+      const parsed = parsedPane(
+        "<section>environment</section>",
+        "/?page=environment"
+      );
+      parsed.addSelector("title", titled("Environments — Radius"));
+      return parsed;
+    };
+
+    harness.navigation.navigateTo(null, "/?page=environment");
+    await flushPromises();
+
+    expect(current.textContent).toBe("Environments — Radius");
+  });
+
+  it.each([
+    ["the response has no title", false, true],
+    ["the document has no title", true, false]
+  ])("keeps the current title when %s", async (_label, incoming, live) => {
+    const harness = setup();
+    const current = titled("Applications — Radius");
+    if (live) harness.document.addSelector("title", current);
+    harness.net.handle("/?page=environment", () =>
+      textResponse("<html>environment</html>")
+    );
+    harness.nav.parsed = () => {
+      const parsed = parsedPane(
+        "<section>environment</section>",
+        "/?page=environment"
+      );
+      if (incoming)
+        parsed.addSelector("title", titled("Environments — Radius"));
+      return parsed;
+    };
+
+    harness.navigation.navigateTo(null, "/?page=environment");
+    await flushPromises();
+
+    expect(current.textContent).toBe("Applications — Radius");
+    expect(harness.content.innerHTML).toBe("<section>environment</section>");
+  });
+});
+
+describe("re-entering the pane already on screen", () => {
+  it("is ignored instead of refetching and pushing a duplicate entry", () => {
+    const harness = setup();
+    harness.nav.search = "?page=environment&repo=owner%2Frepo";
+    const navigateTo = vi.spyOn(harness.navigation, "navigateTo");
+    initializePaneNavigation(harness.context, harness.navigation);
+    const event = clickEvent(harness.environments);
+
+    harness.document.dispatch("click", event);
+
+    expect(navigateTo).not.toHaveBeenCalled();
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(event.stopPropagation).toHaveBeenCalledOnce();
+    expect(harness.net.calls).toEqual([]);
+    expect(harness.nav.pushed).toEqual([]);
+    expect(harness.nav.assigned).toEqual([]);
+  });
+
+  it("still navigates to a different pane", () => {
+    const harness = setup();
+    harness.nav.search = "?page=graph";
+    const navigateTo = vi.spyOn(harness.navigation, "navigateTo");
+    initializePaneNavigation(harness.context, harness.navigation);
+
+    harness.document.dispatch("click", clickEvent(harness.environments));
+
+    expect(navigateTo).toHaveBeenCalledOnce();
   });
 });

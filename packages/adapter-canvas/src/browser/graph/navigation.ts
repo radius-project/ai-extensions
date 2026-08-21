@@ -59,7 +59,10 @@ export interface GraphNavigation {
 
 export function createGraphNavigation(
   context: BrowserContext,
-  registry: Pick<PageRegistry, "teardownPage" | "beginNavigation">
+  registry: Pick<
+    PageRegistry,
+    "teardownPage" | "beginNavigation" | "endNavigation"
+  >
 ): GraphNavigation {
   let generation = 0;
   let request: AbortHandle | null = null;
@@ -68,6 +71,7 @@ export function createGraphNavigation(
     generation++;
     request?.abort();
     request = null;
+    registry.endNavigation(cancelRequest);
   }
 
   function cancelPendingWork(): void {
@@ -104,6 +108,7 @@ export function createGraphNavigation(
       })
       .then((html) => {
         if (requestGeneration !== generation) return;
+        registry.endNavigation(cancelRequest);
         const parsed = context.nav.parseDocument(html);
         const newContentValue = parsed.getElementById(GRAPH_CONTENT_ID);
         if (!isDomElement(newContentValue)) {
@@ -126,6 +131,7 @@ export function createGraphNavigation(
       .catch((error: unknown) => {
         if (requestGeneration !== generation) return;
         request = null;
+        registry.endNavigation(cancelRequest);
         context.logger.error("Radius graph navigation failed.", error);
         context.nav.assign(url);
       });

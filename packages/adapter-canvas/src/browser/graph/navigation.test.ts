@@ -26,12 +26,16 @@ function setup(options: { withContent?: boolean; withNav?: boolean } = {}) {
     if (options.withNav !== false) browser.document.add(nav);
   }
   let pageTeardowns = 0;
+  const claims: Array<"begin" | "end"> = [];
   const navigation = createGraphNavigation(browser.context, {
     teardownPage() {
       pageTeardowns++;
     },
     beginNavigation() {
-      return undefined;
+      claims.push("begin");
+    },
+    endNavigation() {
+      claims.push("end");
     }
   });
   return {
@@ -39,6 +43,7 @@ function setup(options: { withContent?: boolean; withNav?: boolean } = {}) {
     content,
     nav,
     navigation,
+    claims,
     get pageTeardowns() {
       return pageTeardowns;
     }
@@ -175,6 +180,48 @@ describe("graph navigation", () => {
     expect(harness.browser.nav.assigned).toEqual(["?page=planned"]);
     expect(harness.browser.net.calls).toEqual([]);
     expect(harness.pageTeardowns).toBe(0);
+  });
+
+  it.each([
+    [
+      "a completed swap",
+      async (harness: ReturnType<typeof setup>) => {
+        harness.browser.net.handle("/?page=planned", () =>
+          textResponse("<html>planned</html>")
+        );
+        harness.browser.nav.parsed = () =>
+          parsedPage("<div>planned</div>", null);
+        harness.navigation.navigateTo(null, "planned");
+        await flushPromises();
+      }
+    ],
+    [
+      "a failed swap",
+      async (harness: ReturnType<typeof setup>) => {
+        harness.browser.net.handle("/?page=planned", () =>
+          Promise.reject(new Error("offline"))
+        );
+        harness.navigation.navigateTo(null, "planned");
+        await flushPromises();
+      }
+    ],
+    [
+      "cancellation",
+      async (harness: ReturnType<typeof setup>) => {
+        harness.browser.net.handle(
+          "/?page=planned",
+          () => createDeferred<HttpResponse>().promise
+        );
+        harness.navigation.navigateTo(null, "planned");
+        harness.navigation.cancelPendingWork();
+      }
+    ]
+  ])("releases its navigation claim after %s", async (_label, run) => {
+    const harness = setup();
+
+    await run(harness);
+
+    expect(harness.claims.at(-1)).toBe("end");
   });
 
   it.each([
