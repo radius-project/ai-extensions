@@ -1,4 +1,7 @@
-import { appBicepRefusalReason } from "../../app-bicep-support.js";
+import {
+  evaluateAppSource,
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+} from "@radius-project/core";
 import { recordGraphBuildEvent } from "../../shared.js";
 import { GRAPH_APP_BICEP_TIMEOUT_MS } from "../../graph-progress-contract.js";
 import type {
@@ -310,7 +313,9 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     branch: string
   ): Promise<string | null> {
     const paths = await dependencies.listBranchPaths(entry, repo, branch);
-    return appBicepRefusalReason(paths, repo, branch);
+    return evaluateAppSource(paths).status === "none" ?
+        UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+      : null;
   }
 
   // The diff spans two branches, so it is only unsupported when neither side
@@ -472,9 +477,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         // Deliberately *not* best-effort, unlike the stale exit above: a failure
         // here falls into the catch and answers 400. Preserved as-is.
         pipeline.discardStagedArtifacts(staged);
+        // Keep persisted provenance in step with what this response reports, so
+        // a later page render cannot disagree with the page it just answered.
+        state.graphFromWorkspace = selection.fromWorkspace;
         return json(200, {
           reload: false,
           resources: state.graphResources,
+          fromWorkspace: selection.fromWorkspace,
           cached: true
         });
       }
@@ -535,7 +544,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "succeeded",
         "Rendered the application graph."
       );
-      return json(200, { reload: !data.refresh, resources });
+      return json(200, {
+        reload: !data.refresh,
+        resources,
+        fromWorkspace: selection.fromWorkspace
+      });
     };
     return await settleWorkflow(run, {
       state: () => activeState,

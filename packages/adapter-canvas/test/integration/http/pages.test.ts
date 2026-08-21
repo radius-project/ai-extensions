@@ -5,7 +5,7 @@
 //
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { getOrCreateServer } from "../../../src/server.js";
+import { getOrCreateServer, stopServer } from "../../../src/server.js";
 import { deployedGraphPage } from "../../../src/pages/deployed-graph-page.js";
 import { deployingPage } from "../../../src/pages/deploying-page.js";
 import { environmentPage } from "../../../src/pages/environment-page.js";
@@ -46,12 +46,8 @@ beforeAll(async () => {
   entry = await getOrCreateServer(INSTANCE_ID, "graph");
 });
 
-afterAll(() => {
-  try {
-    entry?.server?.close();
-  } catch {
-    /* best-effort */
-  }
+afterAll(async () => {
+  await stopServer(INSTANCE_ID, true);
 });
 
 describe("canvas pages over real loopback HTTP", () => {

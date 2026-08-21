@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { computeGraphDiff } from "@radius-project/core";
+import {
+  computeGraphDiff,
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+} from "@radius-project/core";
 import {
   createGraphPlanningWorkflows,
   type GraphPlanningWorkflows,
   type GraphWorkflowDependencies,
   type GraphWorkflowOutcome
 } from "./graph-workflows.js";
-import { appBicepNoDockerfileMessage } from "../../app-bicep-support.js";
 import type {
   AppBicepSelection,
   CompileResourcesInput,
@@ -357,12 +359,14 @@ describe("graph planning workflows", () => {
     it("refuses instead of handing off when the branch has no Dockerfile", async () => {
       const harness = start({
         selections: { main: selectionOf({ content: null }) },
-        branchPaths: { main: ["README.md", "src/index.ts"] }
+        branchPaths: {
+          main: ["README.md", "src/index.ts", ".devcontainer/Dockerfile"]
+        }
       });
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
       expect(outcome.status).toBe(200);
       expect(outcome.payload).toEqual({
-        error: appBicepNoDockerfileMessage("octo/app", "main"),
+        error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
         appBicepUnsupported: true,
         repo: "octo/app",
         branch: "main"
@@ -372,7 +376,7 @@ describe("graph planning workflows", () => {
         "Checking octo/app for .radius/app.bicep.",
         "No application model exists yet.",
         "Copilot is creating .radius/app.bicep with the Radius app-bicep skill.",
-        appBicepNoDockerfileMessage("octo/app", "main")
+        UNSUPPORTED_NO_DOCKERFILE_MESSAGE
       ]);
     });
 
@@ -399,7 +403,8 @@ describe("graph planning workflows", () => {
       expect(outcome.kind).toBe("json");
       expect(outcome.payload).toEqual({
         reload: true,
-        resources: [{ id: "res-a" }]
+        resources: [{ id: "res-a" }],
+        fromWorkspace: true
       });
       expect(harness.order).toEqual([
         "select:feature/x",
@@ -447,7 +452,8 @@ describe("graph planning workflows", () => {
       );
       expect(outcome.payload).toEqual({
         reload: false,
-        resources: []
+        resources: [],
+        fromWorkspace: false
       });
     });
 
@@ -502,6 +508,7 @@ describe("graph planning workflows", () => {
         graphLoaded: true,
         graphTargetRepo: "octo/app",
         graphBranch: "main",
+        graphFromWorkspace: true,
         graphDefinitionHash: "hash-a",
         graphResources: [{ id: "cached" }] as CanvasGraphResource[]
       });
@@ -515,8 +522,12 @@ describe("graph planning workflows", () => {
       expect(outcome.payload).toEqual({
         reload: false,
         resources: [{ id: "cached" }],
+        fromWorkspace: false,
         cached: true
       });
+      // Persisted provenance follows the response, so the next page render
+      // cannot contradict what this request just reported.
+      expect(harness.state.graphFromWorkspace).toBe(false);
       // The compile is skipped entirely, which is the point of the cache.
       expect(harness.order).toEqual([
         "select:main",
@@ -700,7 +711,7 @@ describe("graph planning workflows", () => {
       const outcome = await harness.run("planGraph", '{"repo":"octo/app"}');
 
       expect(outcome.payload).toEqual({
-        error: appBicepNoDockerfileMessage("octo/app", "main"),
+        error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
         appBicepUnsupported: true,
         repo: "octo/app",
         branch: "main"
@@ -1009,7 +1020,7 @@ describe("graph planning workflows", () => {
 
       expect(outcome.status).toBe(200);
       expect(outcome.payload).toEqual({
-        error: appBicepNoDockerfileMessage("octo/app", "feature/x"),
+        error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
         appBicepUnsupported: true,
         repo: "octo/app"
       });

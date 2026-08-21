@@ -19,17 +19,34 @@ Use this skill to generate a Radius application definition (`app.bicep`) from a 
 
 ## Prerequisites
 
-This skill currently supports only repositories that already contain a Dockerfile for building the application image. Before doing anything else, confirm the target repository includes a Dockerfile for the application (repo root or the relevant service subdirectory; match `Dockerfile`, `Dockerfile.*`, or `*.Dockerfile`, case-insensitively).
+This skill currently supports only repositories that already contain a Dockerfile for building the application image, so a repository without one cannot be modeled.
 
-If no Dockerfile is present, stop immediately. Do not generate `.radius/app.bicep` or `.radius/bicepconfig.json`, do not create or write to a branch, and do not commit or push. Return only this error:
+The extension normally screens this out before handing over the skill, so re-running that check is not your job. If you do find the application has no Dockerfile, stop: generate nothing, write nothing, and report this to the user verbatim.
 
-> This repository does not contain a Dockerfile. The Radius app modeling skill currently supports only repositories that already include a Dockerfile for building the application image. Add a Dockerfile for the application service and run the skill again.
+A Dockerfile means a file named `Dockerfile`, `Dockerfile.<suffix>`, or `<prefix>.Dockerfile`, matched case-insensitively on the file name, at the repository root or in a service subdirectory. Ignore any that sits inside a vendored, generated, or tooling directory — `node_modules`, `dist`, `build`, `coverage`, `.next`, `.turbo`, `venv`, `.venv`, or any other dot-directory apart from `.radius` and `.github`. A `.devcontainer` image builds the development environment, not the application, so it does not count.
+
+> I could not find a Dockerfile in this repository. I can only create application definitions for containerized applications. Add a Dockerfile first, then I can create an application definition.
+
+### Identifying the application
+
+A repository with several Dockerfiles is normally still one application. A microservices repository builds many images, and this skill models a microservices repository into a single `Radius.Core/applications` named after the repository, with the services wired to each other through the addressing rules in [connection-conventions.md](references/connection-conventions.md). A Dockerfile count is never decisive on its own, and it is never by itself a reason to put a question to the user. Nor does a Dockerfile prove there is a service to model: it may build a CI image, a migration or tooling image, an unused example, or an alternative to another one. A root workspace manifest such as `pnpm-workspace.yaml` or `go.work` describes how the repository is organized, not that its projects form one application — independent applications use those tools too, so weigh it against the source rather than concluding from it.
+
+Establish from the source which directories hold application services that share a runtime and deploy together, and model those as one application. Ask the user only when, after reading the source, you cannot identify an application at all. That happens in two cases:
+
+- the repository holds more than one **independent** application, which a single definition cannot represent, or
+- nothing in the repository is an application — for example the Dockerfiles build only tooling or CI images.
+
+In either case, ask exactly:
+
+> I looked through the repository but could not identify an application or application resources. Which directory contains your application source code and Dockerfile?
+
+Then stop, and write nothing: no `.radius/app.bicep`, no `.radius/bicepconfig.json`, no origin record, no branch, no commit. Do not guess a directory on the user's behalf or model one candidate to "make progress" — a directory you chose yourself is not an answer to the question you just asked. The user replies with a directory and asks for analysis again, which scopes the next run to it; the skill already supports a subdirectory through the `build.source` rule.
 
 ## Response
 
-When asked to model a repository, first apply the [Prerequisites](#prerequisites) check. Only if it passes:
+When asked to model a repository:
 
-1. Generate the application definition and write both `.radius/app.bicep` and `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)) into the `.radius/` directory of the working tree, then stage them with `git add`. Do NOT push, and do NOT open a pull request: modeling only writes and stages the files locally. The application graph renders from the on-disk working tree, so no push is needed to preview it, and pushing to a remote is a deployment concern handled later, not part of modeling.
+1. Generate the application definition and write both `.radius/app.bicep` and `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)) into the `.radius/` directory of the working tree, write the origin record (see [Origin record](#origin-record-apporiginjson)), then stage all three with `git add`. Do NOT push, and do NOT open a pull request: modeling only writes and stages the files locally. The application graph renders from the on-disk working tree, so no push is needed to preview it, and pushing to a remote is a deployment concern handled later, not part of modeling.
 2. In your chat reply, give a one-line intro naming the app (e.g. "I'll create an application definition for `todo-list-app`."), then a short, natural summary of the resources you identified, a brief list such as "Container: `todo-list-app`", "MySQL database", "Secret for DB credentials". A sentence or two of reasoning is fine; don't dump raw source analysis or the full file contents. Describe only what you actually did (that you wrote and staged the model files in the working tree); do not claim the application graph or canvas is rendering, since you cannot observe that. If a graph view is opened and shows an error or empty state, report that honestly instead of asserting success. Keep the reply about the user's application and its resources; do not name internal skill or reference files (for example, reference examples the skill consulted).
 
 ## Radius CLI execution boundary
@@ -38,17 +55,16 @@ Never invoke `rad` or `rad.exe` directly from PowerShell, a shell, a subprocess,
 
 ## Workflow
 
-Before writing the Bicep, confirm the repository satisfies the [Prerequisites](#prerequisites) (it must contain a Dockerfile); if not, stop and return the prerequisite error without modeling, generating, or writing anything. Then:
-
 1. Select one runnable deployment profile. Treat explicit user, scenario, and target-repository deployment requirements for Radius types, resource-name parameters, workload roles/count, native configuration keys, secret bindings, provider profile, protocol values, and connection names as acceptance criteria. Verify that the pinned source supports that profile; do not silently replace it with an easier default or optional backend.
 2. Build an internal requirement ledger that maps every acceptance criterion and planned resource property reference to source evidence, an exact Radius schema/recipe field, and the workload setting that consumes it. Use it for reasoning and validation; do not print it or add it as Bicep comments. Follow [runtime-contract.md](references/runtime-contract.md).
 3. Inventory every executable workload and backing service in the selected profile from manifests, Dockerfiles, compose/Helm files, entrypoints, source configuration reads, client initialization, and referenced config files. Treat web, worker, producer, consumer, migration, scheduler, and sidecar roles separately. Model a backing service only when source evidence proves it is mandatory for the selected startup/configuration path; a repo-wide optional dependency, extra, adapter, test, or example does not become a resource.
 4. Extract each workload's runtime contract: image/build context and target platform, entrypoint and arguments, listener and ports, required environment/configuration including parser coercion and unset behavior, secrets, writable storage, dependencies, wire protocols, TLS, authentication/bootstrap setup, and feature-critical configuration. Inspect CLI flags and structured fields as well as environment variables.
 5. Map every selected backing service to a Radius type with [component-catalog.md](references/component-catalog.md), using [architecture-patterns.md](references/architecture-patterns.md) only as context. Report unsupported essential components instead of substituting unrelated types.
 6. First create or update `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)), using any `bicepconfig.json` currently applicable to `.radius/app.bicep` as input. Resolve every emitted type and planned property read/write against the exact target Environment schema and Recipe contract, then reconcile that contract with the extension declared by `.radius/bicepconfig.json`. For every generated output, inspect the exact target Recipe or matching immutable provider recipe-pack source and record the verbatim mapping; schema descriptions and property names are not Recipe evidence. Also prove each managed-secret name/key, every omitted optional Recipe input, and Recipe availability for every emitted extensible type in the target Environment. The exact target schema and Recipe outrank stale mutable extension metadata. Refresh or pin a verified compatible extension when possible; otherwise fail closed before generation rather than deleting required wiring to fit the stale artifact.
-7. Build the application's own workloads from the repository Dockerfile via `Radius.Compute/containerImages`; this is the default path, and a repository without a Dockerfile is unsupported (see [Prerequisites](#prerequisites)). Require a complete, practical build context and pin `build.source` to the exact modeled checkout or an explicit immutable release tag. Resolve the exact `containerImages` Recipe: verify omitted optional inputs, set a Docker-valid immutable `tag` only when required by that contract, validate target-compatible `build.platforms`, and preserve required Git metadata with schema-supported build arguments. Use a pinned published image only for a genuinely third-party/backing container, never for the application's own code. Map every runtime value using [connection-conventions.md](references/connection-conventions.md), [secrets-handling.md](references/secrets-handling.md), and [bicep-structure-rules.md](references/bicep-structure-rules.md).
+7. Build the application's own workloads from the repository Dockerfile via `Radius.Compute/containerImages`; this is the default path, and a repository without a Dockerfile is unsupported (see [Prerequisites](#prerequisites)). Require a complete, practical build context and pin `build.source` to the exact modeled checkout or an explicit immutable release tag. When the ref is a commit, use its full 40-character SHA in `?ref=`; never use an abbreviated SHA. The image `tag` may remain abbreviated because it is not a Git ref. Resolve the exact `containerImages` Recipe: verify omitted optional inputs, set a Docker-valid immutable `tag` only when required by that contract, validate target-compatible `build.platforms`, and preserve required Git metadata with schema-supported build arguments. Use a pinned published image only for a genuinely third-party/backing container, never for the application's own code. Map every runtime value using [connection-conventions.md](references/connection-conventions.md), [secrets-handling.md](references/secrets-handling.md), and [bicep-structure-rules.md](references/bicep-structure-rules.md).
 8. Generate the Bicep using [naming-conventions.md](references/naming-conventions.md), then run `node "<loaded-skill-base>/scripts/validate-bicep.mjs" .radius/app.bicep`. Repair every compiler error and warning until the checker exits successfully and prints no warnings. Never make compilation pass by deleting a required backend activation, native configuration value, secret binding, or dependency edge.
 9. Perform the [validation checklist](#validation-checklist) and close every item in the requirement ledger. Compilation or process startup alone is not success.
+10. Only after the checker exits successfully, write the [origin record](#origin-record-apporiginjson).
 
 ## Deployment Profile and Acceptance Contract
 
@@ -68,7 +84,31 @@ When a deploy fails because of a modeling or schema error in an existing `.radiu
 2. Locate the implicated resource, property, or workload setting, then re-resolve the exact configured type schema and recipe output contract (see [Resource Type Resolution](#resource-type-resolution)) to confirm property names, required fields, credential shape, API version, and resource reference paths.
 3. Apply the fix using the same runtime-contract, naming, structure, and secrets rules as authoring so the repaired resource stays consistent with the rest of the file. While you are in the file, also correct any other clear schema or rule violations you notice, and report each collateral fix you made. Never clear a compile error by deleting a required binding, native value, backend activation, or dependency edge; report version drift when the configured schema cannot represent the runnable profile.
 4. Re-run the [validation checklist](#validation-checklist) against the whole file; a change in one resource can ripple to connections or references elsewhere.
-5. Return the corrected file with a short note of what changed and why, then hand it back to `radius-deploy` to redeploy. If the same error recurs, treat the previous fix as insufficient and try a different fix rather than reapplying the one that just failed. If a couple of different fixes still do not resolve it, or no different fix can be found, report that to `radius-deploy` so it can stop the retry loop and surface the problem to the user.
+5. Return the corrected file with a short note of what changed and why, then hand it back to `radius-deploy` to redeploy. Write a new [origin record](#origin-record-apporiginjson) after the checker passes, so the repaired bytes are the ones recorded. If the same error recurs, treat the previous fix as insufficient and try a different fix rather than reapplying the one that just failed. If a couple of different fixes still do not resolve it, or no different fix can be found, report that to `radius-deploy` so it can stop the retry loop and surface the problem to the user.
+
+## Origin record (`app.origin.json`)
+
+Every generation records what the model was produced from, in `.radius/app.origin.json` beside `app.bicep`. The Radius canvas reads this record before rendering a graph: without it, the only question the canvas can ask is "does `app.bicep` exist?", so a model whose source has since moved on is rendered as though it were current. Write it with the bundled script, never by hand, so the format stays exactly what the canvas parses:
+
+```text
+node "<loaded-skill-base>/scripts/write-app-origin.mjs" .radius/app.bicep --skill-version "<loaded-skill-version>"
+```
+
+Rules:
+
+- Write the record on **every** generation and every repair, as the last step, and only after `validate-bicep.mjs` exits successfully with no warnings. The record holds a hash of the exact bytes that compiled, which is what lets the canvas treat the model as known-valid instead of recompiling it on every graph open. Recording a file that has not passed the checker asserts a validity that was never proven.
+- `--skill-version` is optional. Pass it when the prompt gave you a real version; if the value you were given is still the literal `<loaded-skill-version>`, omit the flag entirely rather than passing the placeholder through. The script reads the version from the plugin manifest itself, and a placeholder recorded in the origin record would make every later freshness check report the model as generated by an unknown generator.
+- Stage `.radius/app.origin.json` alongside `.radius/app.bicep`. A model committed without its origin record reads as unverified on every other checkout of that branch.
+- Never edit `app.bicep` after recording it. If you change one byte, re-run the checker and re-run the origin script.
+- The script fails closed when it cannot resolve the source commit or read the model. Do not work around it by writing the JSON yourself; fix the underlying problem and re-run it.
+
+## Refreshing a stale model
+
+The canvas asks for a refresh when an existing model is stale: its branch has moved past the recorded commit, a different generator version is installed, the model no longer matches its origin record, or there is no usable origin record at all. Regenerate from current source and write a new origin record, with one guard:
+
+- **When the model is reported as edited or unrecorded, ask the user before overwriting it.** Those two states mean the file on disk contains content this skill cannot prove it wrote: hand-tuned properties, a custom type, or a recipe pack reference someone added deliberately. Say what would be lost and regenerate only after the user agrees. Offer to repair the specific problem in place (see [Repairing an existing app.bicep](#repairing-an-existing-appbicep)) as the alternative, since that preserves their edits.
+- A model that is stale only because the source or generator moved on carries no unproven content, so refresh it without asking.
+- Refresh only the current workspace branch, where writing the working tree is enough. A model on a **different** branch cannot be refreshed by modeling: report the staleness to the user and let them decide, rather than committing or pushing a regenerated model to that branch.
 
 ## Deterministic Naming Rules
 
@@ -113,6 +153,16 @@ Explicit profile-required resource, relationship, parameter, and app-native conf
 | Container key in `containers` map  | Service short name camelCase (single-container: derived from app, e.g., `todo`)                                                                                                                                                                                                           |
 | Port key in `ports` map            | `web` for the primary HTTP port; additional ports derive from protocol/use (`http`, `grpc`)                                                                                                                                                                                               |
 | `build.source` for containerImages | Repo git URL pinned to the modeled checkout: `git::https://github.com/<org>/<repo>.git//<subdir>?ref=<checked-out-sha-or-explicit-immutable-tag>` (`//<subdir>` only when the Dockerfile isn't at the repo root)                                                                          |
+
+### Deterministic output
+
+Two runs of this skill over the same source, with the same generator version and the same schema/recipe contract, must produce byte-identical `.radius/app.bicep`. A regeneration that reshuffles equivalent content produces a large diff that says nothing, which makes real changes hard to review and adds noise to the repository's history. Apply:
+
+- **Canonical declaration order.** `extension` lines first, then `param` declarations, then the `Radius.Core/applications` resource, then the remaining resources. Never order resources by discovery order, file-walk order, or the order a tool happened to return them.
+- **Canonical ordering within each group.** Order `param` declarations, and resources of the same type, by their `name` value using plain ASCII ordering. Resource types themselves follow the order they appear in the allow-list table under [Resource Type Resolution](#resource-type-resolution). The one exception is a resource that must be declared after something it references.
+- **Canonical ordering inside a resource.** `name` first, then `properties`. Within a map whose keys you choose (`env`, `ports`, `containers`, `connections`), order keys ASCII-ascending.
+- **Stable values.** Nothing derived from the current time, a random value, a temporary path, an absolute path on this machine, or an environment variable of the machine running the skill may appear in the output. Values pinned to a revision use the modeled commit or an explicit immutable tag, which are properties of the source rather than of the run.
+- **Normalized formatting.** Two-space indentation, single quotes for strings, one trailing newline, no trailing whitespace, and no blank line runs longer than one.
 
 ## Source-code reference metadata (`codeReference`)
 
@@ -275,7 +325,6 @@ Read [bicep-structure-rules.md](references/bicep-structure-rules.md) for all str
 
 Before returning the Bicep, verify:
 
-- [ ] The repository contains a Dockerfile; a repo without one was rejected with the prerequisite error and produced no files (see [Prerequisites](#prerequisites)).
 - [ ] One deployment profile is selected. Every explicit type, workload role/count, native key, required value, secret binding, and connection name from the request is represented in a closed requirement ledger.
 - [ ] Every planned resource property read/write has its verbatim path in the ledger and exists in the exact configured schema/API version. Every recipe-generated output also has a verified output mapping; every managed-secret reference has the declared secret-name path and key. An absent path blocks generation rather than being replaced by a guessed property, alias, or wrapper.
 - [ ] Every extensible type has an exact Recipe available in the target Environment. Each generated output and managed-secret key is verified against that Recipe or immutable provider recipe-pack source; each omitted optional input has a proven safe path.
@@ -295,6 +344,9 @@ Before returning the Bicep, verify:
 - [ ] No required binding or dependency was deleted to satisfy stale mutable extension metadata or obtain a clean compile.
 - [ ] Perform the static consistency pass in [runtime-contract.md](references/runtime-contract.md); no unresolved runtime caveat remains.
 - [ ] The generated Bicep contains no explanatory comments. `.radius/bicepconfig.json` resolves the `radius` extension for `app.bicep`: created or updated in place (a parent `bicepconfig.json` is used only as input, never modified).
+- [ ] The output follows the [deterministic output](#deterministic-output) rules, so regenerating from unchanged source would produce the identical file.
+- [ ] `.radius/app.origin.json` was written by `write-app-origin.mjs` after the checker passed, describes the final `app.bicep` byte-for-byte, and is staged with it (see [Origin record](#origin-record-apporiginjson)).
+- [ ] An existing model reported as edited or unrecorded was not overwritten without the user's agreement (see [Refreshing a stale model](#refreshing-a-stale-model)).
 
 ## Example
 

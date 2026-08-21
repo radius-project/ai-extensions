@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
+import { UNSUPPORTED_NO_DOCKERFILE_MESSAGE } from "@radius-project/core";
 import { createRequestContext } from "../request-context.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { CanvasServerEntry } from "../types.js";
@@ -117,6 +118,7 @@ interface Options {
   buildThrows?: unknown;
   commit?: boolean;
   token?: string;
+  paths?: string[];
 }
 
 interface Fakes {
@@ -167,6 +169,11 @@ function fakes(options: Options = {}): Fakes {
       expect(givenEntry).toBe(entry);
       if (options.fetchThrows) return Promise.reject(options.fetchThrows);
       return Promise.resolve(sel);
+    },
+    listBranchPaths: (givenEntry, repo, branch) => {
+      calls.push(`listBranchPaths(${repo}|${branch})`);
+      expect(givenEntry).toBe(entry);
+      return Promise.resolve(options.paths ?? []);
     },
     workspaceGraphJsonPath: (_state, bicepRepoPath) => {
       calls.push(`workspaceGraphJsonPath(${bicepRepoPath})`);
@@ -327,6 +334,28 @@ describe("graphs-planning load-graph-stream route", () => {
     );
     // The compile never runs on the handoff path.
     expect(calls.some((c) => c.startsWith("buildGraphViaRad"))).toBe(false);
+  });
+
+  it("refuses a missing model when the source has no usable Dockerfile", async () => {
+    const { deps, calls } = fakes({
+      selection: selection({ content: null }),
+      paths: ["README.md", ".devcontainer/Dockerfile"]
+    });
+
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+
+    expect(frames(recording.stream).at(-1)).toEqual({
+      event: "done",
+      data: {
+        error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+        appBicepUnsupported: true,
+        repo: REPO,
+        branch: DEFAULT_BRANCH
+      }
+    });
+    expect(
+      calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
+    ).toBe(false);
   });
 
   it("models the app, commits the source ref, records provenance, and streams a reload done frame", async () => {

@@ -546,6 +546,21 @@ export async function handleVerifyStatus(
       });
       return;
     }
+    const selectedExecutor =
+      operationId ?
+        dependencies.getSelectedGitHubExecutor(operationId) || undefined
+      : undefined;
+    const pinnedLogin =
+      typeof verifyOp?.context?.githubLogin === "string" ?
+        verifyOp.context.githubLogin.trim()
+      : "";
+    if (operationId && pinnedLogin && !selectedExecutor) {
+      respond({
+        state: "pending",
+        runId: verifyOp?.verification?.runId || null
+      });
+      return;
+    }
     const dispatchedAt =
       verifyOp?.verification?.dispatchedAt ||
       entry?.state?.deployDispatchedAt ||
@@ -553,12 +568,23 @@ export async function handleVerifyStatus(
     let runId: number | string | null =
       verifyOp?.verification?.runId || entry?.state?.verifyRunId || null;
     if (!runId) {
-      runId = await dependencies.findWorkflowRun(
-        repo,
-        verifyOp?.verification?.workflow || dependencies.verifyWorkflowFile,
-        dispatchedAt,
-        null
-      );
+      const workflow =
+        verifyOp?.verification?.workflow || dependencies.verifyWorkflowFile;
+      runId =
+        selectedExecutor ?
+          await dependencies.findWorkflowRun(
+            repo,
+            workflow,
+            dispatchedAt,
+            null,
+            selectedExecutor
+          )
+        : await dependencies.findWorkflowRun(
+            repo,
+            workflow,
+            dispatchedAt,
+            null
+          );
       if (runId && verifyOp) {
         verifyOp.verification = {
           dispatchedAt: verifyOp.verification.dispatchedAt,
@@ -581,7 +607,10 @@ export async function handleVerifyStatus(
       return;
     }
 
-    const detail = await dependencies.getRunDetail(repo, runId);
+    const detail =
+      selectedExecutor ?
+        await dependencies.getRunDetail(repo, runId, selectedExecutor)
+      : await dependencies.getRunDetail(repo, runId);
     const runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
     if (!detail) {
       respond({ state: "pending", runId, runUrl });
@@ -637,7 +666,10 @@ export async function handleVerifyStatus(
       ".";
     if (failed.length)
       errMsg += " Failed step: " + failed.map((s) => s.name).join(", ") + ".";
-    const log = await dependencies.fetchRunLog(repo, runId);
+    const log =
+      selectedExecutor ?
+        await dependencies.fetchRunLog(repo, runId, selectedExecutor)
+      : await dependencies.fetchRunLog(repo, runId);
     const lines = dependencies.extractErrorLines(log, 8);
     if (lines.length) errMsg += "\n" + lines.join("\n");
     const azureLoginLog = dependencies.extractGitHubActionsStepLog(

@@ -29,6 +29,10 @@ import {
   resolveRadiusArtifactTarget,
   validateGhcrTargetForRepo
 } from "../../../src/publish-targets.js";
+import {
+  isWorkspacePath,
+  isWorkspaceSelection
+} from "../../../src/workspace.js";
 import { renderPrDiffMarkdown } from "../../../src/pr-diff-markdown.js";
 import { createSessionHolder } from "../../../src/runtime/session.js";
 import type { SessionPort } from "../../../src/runtime/session.js";
@@ -85,9 +89,19 @@ export function createFakeSession(
 export interface FakeDependenciesOptions {
   workspaceContext?: WorkspaceContext;
   bicepByRepoBranch?: Record<string, string | null>;
-  // Keyed the same way as bicepByRepoBranch: `workspace:owner/repo@branch` and
-  // `remote:owner/repo@branch`. An absent key means the tree could not be read.
-  pathsByRepoBranch?: Record<string, string[]>;
+  // Keyed `workspace:<repo>@<branch>:<repoPath>` / `remote:<repo>@<branch>:<repoPath>`.
+  filesByRepoBranch?: Record<string, string | null>;
+  // Keyed `workspace:<workspacePath>` / `<repo>@<branch>`.
+  headCommits?: Record<string, string>;
+  // Answer for workspaceSourceChangedSince; undefined means "git cannot say".
+  sourceChangedSince?: boolean;
+  generatorVersion?: string;
+  // Worktree file listings keyed `<repo>@<branch>`. A missing key resolves to
+  // null, matching fetchWorkspaceTree's "could not list" answer.
+  workspaceTreeByRepoBranch?: Record<string, string[] | null>;
+  // Remote git-tree listings keyed `<repo>@<branch>`. A missing key resolves to
+  // an empty array, matching what the real lister returns on failure.
+  remoteTreeByRepoBranch?: Record<string, string[]>;
 }
 
 // Builds a complete RadiusExtensionDependencies fake. `servers` is a real Map
@@ -104,7 +118,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   };
 
   const bicepByRepoBranch = options.bicepByRepoBranch ?? {};
-  const pathsByRepoBranch = options.pathsByRepoBranch ?? {};
+  const filesByRepoBranch = options.filesByRepoBranch ?? {};
+  const headCommits = options.headCommits ?? {};
+  const workspaceTreeByRepoBranch = options.workspaceTreeByRepoBranch ?? {};
+  const remoteTreeByRepoBranch = options.remoteTreeByRepoBranch ?? {};
 
   const getOrCreateServer = vi.fn(
     async (instanceId: string, page?: string): Promise<CanvasServerEntry> => {
@@ -140,6 +157,15 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           instanceId: string;
         }) => unknown)
       | null;
+    deployFailureNotice?:
+      | ((input: {
+          repo: string;
+          branch: string;
+          error: string;
+          deployRunUrl: string;
+          instanceId: string;
+        }) => unknown)
+      | null;
     openSourceHandler?: (input: {
       path: string;
       line: number;
@@ -161,19 +187,21 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       defaultBranchForState: vi.fn(
         (state) => (state?.contextBranch as string) || "main"
       ),
-      isWorkspaceSelection: vi.fn(
-        (state, repo, branch) =>
-          !!state?.workspacePath &&
-          repo === workspaceContext.repo &&
-          branch === workspaceContext.branch
-      ),
+      // Real implementation, not a restatement. This predicate is fail-closed on
+      // an empty repo or branch, and the "never a false unsupported" argument
+      // rests on it, so a hand-synced copy that drifted looser would let tests
+      // assert behavior production cannot produce.
+      isWorkspaceSelection: vi.fn(isWorkspaceSelection),
       fetchWorkspaceBicep: vi.fn(
         async (_state, repo: string, branch: string) =>
           bicepByRepoBranch[`workspace:${repo}@${branch}`] ?? null
       ),
       fetchWorkspaceTree: vi.fn(
-        async (_state, repo: string, branch: string) =>
-          pathsByRepoBranch[`workspace:${repo}@${branch}`] ?? null
+        async (
+          _state,
+          repo: string | null | undefined,
+          branch: string | null | undefined
+        ) => workspaceTreeByRepoBranch[`${repo}@${branch}`] ?? null
       ),
       parseRepoFromRemote: vi.fn((url: unknown) => {
         const match = String(url || "").match(
@@ -186,15 +214,18 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         if (!raw || raw.includes("..")) throw new Error("invalid path");
         return raw.replace(/^\/+/, "");
       }),
-      workspaceFileExists: vi.fn(async () => true)
+      workspaceFileExists: vi.fn(async () => true),
+      // Real implementation: path confinement is exactly the behavior the gate
+      // depends on, so a hand-rolled fake would test the wrong thing.
+      isWorkspacePath: vi.fn(isWorkspacePath)
     },
     github: {
       getContent: vi.fn(async () => null),
       getContentBytes: vi.fn(async () => null),
       listNames: vi.fn(async () => []),
       treePaths: vi.fn(
-        async (repo: string, branch?: string) =>
-          pathsByRepoBranch[`remote:${repo}@${branch ?? ""}`] ?? []
+        async (requestedRepo: string, branch = "main") =>
+          remoteTreeByRepoBranch[`${requestedRepo}@${branch}`] ?? []
       )
     },
     core: {
@@ -261,6 +292,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       setDeployRepairHandoff: vi.fn((fn) => {
         capturedHostCallbacks.deployRepairHandoff = fn;
       }),
+      setDeployFailureNotice: vi.fn((fn) => {
+        capturedHostCallbacks.deployFailureNotice = fn;
+      }),
       setOpenSourceHandler: vi.fn((fn) => {
         capturedHostCallbacks.openSourceHandler = fn;
       }),
@@ -287,6 +321,28 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       markEnvironmentInstanceShuttingDown: vi.fn(),
       onEnvironmentTasksSettled: vi.fn(
         (_instanceId: string, _listener: () => void) => () => {}
+      )
+    },
+    appModel: {
+      generatorVersion: vi.fn(() => options.generatorVersion ?? "0.1.0-test"),
+      workspaceHeadCommit: vi.fn(
+        async (workspacePath: string | null | undefined) =>
+          headCommits[`workspace:${workspacePath}`] ?? ""
+      ),
+      workspaceSourceChangedSince: vi.fn(
+        async () => options.sourceChangedSince
+      ),
+      branchHeadCommit: vi.fn(
+        async (repo: string, branch: string) =>
+          headCommits[`${repo}@${branch}`] ?? ""
+      ),
+      fetchWorkspaceFile: vi.fn(
+        async (_state, repo: string, branch: string, repoPath: string) =>
+          filesByRepoBranch[`workspace:${repo}@${branch}:${repoPath}`] ?? null
+      ),
+      fetchRepoFile: vi.fn(
+        async (repo: string, branch: string, repoPath: string) =>
+          filesByRepoBranch[`remote:${repo}@${branch}:${repoPath}`] ?? null
       )
     },
     radiusAppBicepSkill: vi.fn(

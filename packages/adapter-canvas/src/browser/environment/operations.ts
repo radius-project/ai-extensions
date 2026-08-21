@@ -195,6 +195,7 @@ export interface EnvironmentOperationsDeps {
 
 export interface EnvironmentOperationsOptions {
   readonly repo: string;
+  readonly mutationNonce?: string;
   readonly deps: EnvironmentOperationsDeps;
 }
 
@@ -915,7 +916,10 @@ export function initializeEnvironmentOperations(
           };
           return fetchTracked(resumeUrl(operationId, prompt.code), {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              "X-Radius-Mutation-Nonce": options.mutationNonce || ""
+            },
             body: JSON.stringify(body)
           }).then((response) => {
             if (response.ok) return response;
@@ -935,7 +939,12 @@ export function initializeEnvironmentOperations(
           (error: unknown) => {
             if (!active()) return;
             if (isAbandonError(error)) {
-              void fetchTracked(abandonUrl(operationId), { method: "POST" })
+              void fetchTracked(abandonUrl(operationId), {
+                method: "POST",
+                headers: {
+                  "X-Radius-Mutation-Nonce": options.mutationNonce || ""
+                }
+              })
                 .then((response) => {
                   if (!response.ok) {
                     promptingRequestedAt = "";

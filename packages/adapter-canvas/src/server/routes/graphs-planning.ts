@@ -1,3 +1,7 @@
+import {
+  evaluateAppSource,
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+} from "@radius-project/core";
 import type { DeployStatus } from "@radius-project/core";
 import type { DeployProgress } from "../../deploy-artifacts.js";
 import { recordGraphBuildEvent } from "../../shared.js";
@@ -421,6 +425,11 @@ export interface GraphsPlanningStreamDependencies {
     repo: string,
     branch: string
   ): Promise<LoadGraphStreamBicepSelection>;
+  listBranchPaths(
+    entry: CanvasServerEntry,
+    repo: string,
+    branch: string
+  ): Promise<string[]>;
   workspaceGraphJsonPath(state: CanvasState, bicepRepoPath: string): string;
   radArtifactsDirForSelection(
     options: LoadGraphStreamRadArtifactsOptions
@@ -495,6 +504,18 @@ export async function handleLoadGraphStream(
     if (content) {
       sendProgress("Found existing app.bicep — parsing resources...");
     } else {
+      const source = evaluateAppSource(
+        await dependencies.listBranchPaths(entry, repo, branch)
+      );
+      if (source.status === "none") {
+        sendDone({
+          error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+          appBicepUnsupported: true,
+          repo,
+          branch
+        });
+        return;
+      }
       dependencies.triggerAppBicepHandoff(entry, repo, branch);
       sendDone({
         error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,

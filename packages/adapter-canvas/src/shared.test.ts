@@ -1,18 +1,35 @@
 // Tests for credential-profile persistence (Environments → Credentials tab) and
 // for the instance-scoped graph build record.
+import path from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
-  getPreferredGitHubLogin,
   recordGraphBuildEvent,
-  setPreferredGitHubLogin,
+  resolveCredentialsFilePath,
   sharedCredentials
 } from "./shared.js";
 import type { CanvasState } from "./shared.js";
 
 const REPO = "octo-test/creds-" + Math.random().toString(36).slice(2);
+
+describe("credential store path", () => {
+  it("uses the configured isolated path when one is supplied", () => {
+    expect(
+      resolveCredentialsFilePath(
+        { RADIUS_CREDENTIALS_FILE: "  fixture/credentials.json  " },
+        "package"
+      )
+    ).toBe("fixture/credentials.json");
+  });
+
+  it("falls back to the package-local compatibility path", () => {
+    expect(resolveCredentialsFilePath({}, "package")).toBe(
+      path.join("package", ".radius-credentials.json")
+    );
+  });
+});
 
 describe("credential profiles", () => {
   beforeEach(() => {
@@ -101,26 +118,6 @@ describe("credential profiles", () => {
     expect(listCredentialProfiles(REPO)).toEqual([]);
   });
 });
-
-describe("preferred GitHub login", () => {
-  beforeEach(() => setPreferredGitHubLogin(""));
-
-  it("is empty by default", () => {
-    expect(getPreferredGitHubLogin()).toBe("");
-  });
-
-  it("persists and trims the chosen login so it survives a restart", () => {
-    setPreferredGitHubLogin("  chosen-user  ");
-    expect(getPreferredGitHubLogin()).toBe("chosen-user");
-  });
-
-  it("clears the preference when set to blank", () => {
-    setPreferredGitHubLogin("chosen-user");
-    setPreferredGitHubLogin("");
-    expect(getPreferredGitHubLogin()).toBe("");
-  });
-});
-
 describe("graph build record", () => {
   function stages(state: CanvasState): string[] {
     return (state.graphBuildEvents ?? []).map(

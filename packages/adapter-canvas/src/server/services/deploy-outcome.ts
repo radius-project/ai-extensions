@@ -262,10 +262,38 @@ export function createDeployOutcomeService(
         );
         return;
       }
-      entry.state.deployStatus = "failed";
       log("");
       log("❌ Deployment failed. Conclusion: " + conclusion);
-      entry.state.deployError = await describeFailure(request);
+      // Assemble the error BEFORE flipping the status to "failed". The webview's
+      // /api/deploy-status poll fires triggerDeployRepairHandoff the instant it
+      // observes "failed", and describeFailure awaits network reads (run log +
+      // control-plane log) that take seconds. Setting the status first opens a
+      // window where a poll relays a handoff with an empty deployError and marks
+      // it delivered, permanently locking out the real error — the "flaky error
+      // logs" symptom. Publishing the error first closes that window for both
+      // the webview trigger and the deploy-request `.finally()` trigger.
+      //
+      // But describeFailure's run-log read is unguarded, so guard it here: if it
+      // throws we must still settle this run as "failed" with a degraded message
+      // rather than let settle() reject. A rejection would both leave the panel
+      // non-terminal AND reach the monitor's `.catch`, which reclassifies the
+      // run as run-unconfirmed — sending a run that actually concluded "failure"
+      // down the informational notice path and telling the user it could not be
+      // confirmed, instead of down the repair path it belongs to.
+      try {
+        entry.state.deployError = await describeFailure(request);
+      } catch {
+        entry.state.deployError =
+          "Deployment failed" +
+          (conclusion ? " (" + conclusion + ")" : "") +
+          ". The failure details could not be read; see the full run: " +
+          "https://github.com/" +
+          repo +
+          "/actions/runs/" +
+          request.runId +
+          ".";
+      }
+      entry.state.deployStatus = "failed";
     }
   };
 }

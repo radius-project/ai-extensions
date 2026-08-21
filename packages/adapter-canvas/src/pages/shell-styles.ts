@@ -374,6 +374,7 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
     font-size: 12px; font-weight: 500; color: var(--rad-link); text-decoration: none; cursor: pointer;
     pointer-events: auto; background: none; border: none; padding: 0; font-family: inherit;
+    min-height: 24px;
   }
   .rad-node__source:hover { text-decoration: underline; }
   .rad-node__source-glyph { font-family: var(--rad-mono); font-weight: 600; }
@@ -382,6 +383,7 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     font-size: 12px; font-weight: 700; letter-spacing: 1px; line-height: 1;
     color: var(--rad-text-tertiary); background: none; border: none; border-radius: 4px;
     cursor: pointer; pointer-events: auto;
+    min-width: 24px; min-height: 24px;
   }
   .rad-node__dots:hover { background: var(--rad-bg-subtle); color: var(--rad-text); }
 

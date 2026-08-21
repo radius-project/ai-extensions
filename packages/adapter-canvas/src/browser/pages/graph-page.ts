@@ -108,6 +108,7 @@ export function initializeGraphPage(
   };
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
+  let hasLoadedGraph = page.loaded;
   let generation = 0;
   let requestActive = false;
   let retry: ScopeTimer | null = null;
@@ -118,6 +119,7 @@ export function initializeGraphPage(
   // When the current wait for Copilot to author .radius/app.bicep began, or
   // null when the page is not waiting on one.
   let appBicepWaitStartedAtMs: number | null = null;
+  let renderedOptions: GraphOptions | null = null;
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
@@ -184,21 +186,58 @@ export function initializeGraphPage(
     stopProgress();
   };
 
+  // A live controller keeps the options it was rendered with, so changed
+  // provenance or branch only takes effect through a fresh render.
+  const carriesOptions = (options: GraphOptions): boolean =>
+    renderedOptions !== null &&
+    renderedOptions.repoUrl === options.repoUrl &&
+    renderedOptions.branch === options.branch &&
+    renderedOptions.localSource === options.localSource;
+
   const renderOrUpdate = (
     resources: GraphResource[],
     options: GraphOptions
   ): void => {
     if (controller) {
-      const updated = controller.update(resources);
-      if (updated) {
-        controller = updated;
-        return;
+      if (carriesOptions(options)) {
+        const updated = controller.update(resources);
+        if (updated) {
+          controller = updated;
+          return;
+        }
       }
       controller.destroy();
     }
     controller = asGraphController(
       renderGraph("graph-container", resources, options)
     );
+    renderedOptions = options;
+  };
+
+  // The server recomputes provenance per request, so a response that reports it
+  // wins over the value serialized into the initial page render.
+  const sourceProvenance = (payload: unknown): boolean =>
+    isRecord(payload) && typeof payload.fromWorkspace === "boolean" ?
+      payload.fromWorkspace
+    : page.localSource;
+
+  const showLoadedGraph = (): void => {
+    const wrapper = context.dom.byId("graph-container-wrapper");
+    if (wrapper) {
+      const container = context.dom.createElement("div");
+      container.id = "graph-container";
+      const hint = context.dom.createElement("div");
+      hint.setAttribute(
+        "style",
+        "margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);"
+      );
+      hint.textContent = "Click a node to view source code links.";
+      wrapper.replaceChildren(container, hint);
+    }
+    const status =
+      context.dom.byId("graph-status") ??
+      context.dom.byId("graph-refresh-status");
+    if (status) status.style.display = "none";
   };
 
   const pollProgress = (
@@ -247,10 +286,10 @@ export function initializeGraphPage(
     requestActive = true;
     const requestGeneration = ++generation;
     requestAbort = context.net.createAbort();
+    controller?.destroy();
+    controller = null;
     const wrapper = context.dom.byId("graph-container-wrapper");
     if (wrapper) {
-      controller?.destroy();
-      controller = null;
       wrapper.innerHTML = '<div id="graph-container"></div>';
     }
     setLoading("graph-container");
@@ -274,6 +313,18 @@ export function initializeGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== generation) return;
+        if (isRecord(payload) && Array.isArray(payload.resources)) {
+          stopProgress();
+          showStatus(context, "Application graph ready.", "info");
+          showLoadedGraph();
+          renderOrUpdate(parseGraphResources(payload.resources), {
+            repoUrl: githubRepositoryUrl(page.repo),
+            branch,
+            localSource: sourceProvenance(payload)
+          });
+          hasLoadedGraph = true;
+          return;
+        }
         if (readBoolean(payload, "reload")) {
           stopProgress();
           showStatus(context, "Application graph ready.", "info");
@@ -340,51 +391,6 @@ export function initializeGraphPage(
       });
   };
 
-  const reloadForBranch = (branch: string): void => {
-    if (!page.repo || !branch) return;
-    const requestGeneration = ++generation;
-    requestActive = true;
-    requestAbort = context.net.createAbort();
-    showStatus(context, `Regenerating graph for ${branch}…`, "info");
-    const wrapper = context.dom.byId("graph-container-wrapper");
-    if (wrapper) {
-      controller?.destroy();
-      controller = null;
-      wrapper.innerHTML = '<div id="graph-container"></div>';
-    }
-    setLoading("graph-container");
-    startProgress(requestGeneration, `Regenerating graph for ${branch}…`);
-    void context.net
-      .fetch("/api/load-graph", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: page.repo, branch }),
-        signal: requestAbort?.signal
-      })
-      .then((response) => response.json())
-      .then((payload) => {
-        if (requestGeneration !== generation) return;
-        stopProgress();
-        if (readBoolean(payload, "reload")) context.nav.reload();
-        else {
-          const error = readString(payload, "error");
-          if (error) showFailure(error);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!entry.active || requestGeneration !== generation) return;
-        stopProgress();
-        context.logger.error("Radius graph regeneration failed.", error);
-        showFailure("Failed to regenerate graph.");
-      })
-      .then(() => {
-        if (requestGeneration === generation) {
-          requestActive = false;
-          requestAbort = null;
-        }
-      });
-  };
-
   if (branchSelect) {
     entry.on(branchSelect, "change", () => {
       stopRequest();
@@ -392,8 +398,7 @@ export function initializeGraphPage(
         button.disabled = !branchSelect.value;
       }
       if (branchSelect.value) {
-        if (page.loaded) reloadForBranch(branchSelect.value.trim());
-        else load();
+        load();
       }
     });
   }
@@ -425,7 +430,10 @@ export function initializeGraphPage(
       .then((payload) => {
         if (refreshGeneration !== generation) return;
         if (isRecord(payload) && Array.isArray(payload.resources)) {
-          renderOrUpdate(parseGraphResources(payload.resources), graphOptions);
+          renderOrUpdate(parseGraphResources(payload.resources), {
+            ...graphOptions,
+            localSource: sourceProvenance(payload)
+          });
         } else if (readBoolean(payload, "needsAppBicep")) {
           showStatus(
             context,
@@ -465,7 +473,7 @@ export function initializeGraphPage(
     () => entry.active
   )
     .then(() => {
-      if (!entry.active || page.loaded || !branchSelect?.value) return;
+      if (!entry.active || hasLoadedGraph || !branchSelect?.value) return;
       if (button && button.dataset.mode !== "create-env")
         button.disabled = false;
       load();

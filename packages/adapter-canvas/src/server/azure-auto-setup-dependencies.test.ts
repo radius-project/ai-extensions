@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { successfulSelectedGhExecutor } from "../../test/support/server/selected-gh.js";
 import type {
   AzureAutoSetupExternalPort,
   AzureAutoSetupOperation,
@@ -46,6 +47,7 @@ describe("Azure auto-setup dependency composition", () => {
       recordCreatedRoleAssignment: vi.fn()
     };
     const external: AzureAutoSetupExternalPort = {
+      getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
       getGitHubIdentity: vi.fn(async () => null),
       preflightRepoAdmin: vi.fn(async () => ""),
       preflightGhcrPackageWriteAccess: vi.fn(async () => ({

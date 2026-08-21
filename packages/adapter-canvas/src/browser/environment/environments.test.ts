@@ -29,6 +29,7 @@ function renderPage(repo = "octo/app", withoutInfraSelection = false) {
     environmentPane: createFakeElement("pane-environments"),
     credentialPane: createFakeElement("pane-credentials"),
     environmentLanding: createFakeElement("env-landing"),
+    newEnvironment: createFakeElement("new-env-btn", "button"),
     environmentForm: createFakeElement("env-form"),
     environmentName: createFakeInput("env-name-input", "dev"),
     profileSelect: createFakeInput("env-profile-select"),
@@ -412,6 +413,12 @@ describe("environment pane initialization", () => {
     page.controller.showEnvironmentLanding();
     expect(page.elements.environmentForm.style.display).toBe("none");
     expect(page.elements.environmentLanding.style.display).toBe("");
+    expect(page.elements.newEnvironment.focusCount).toBe(1);
+  });
+
+  it("returns to the landing view when the reveal control is absent", () => {
+    const page = renderRequiredOnly();
+    expect(() => page.controller.showEnvironmentLanding()).not.toThrow();
   });
 
   it("opens an existing environment for editing without renaming it", async () => {

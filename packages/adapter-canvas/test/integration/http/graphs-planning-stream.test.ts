@@ -88,6 +88,7 @@ function start(): Harness {
           }
         );
       },
+      listBranchPaths: () => Promise.resolve([]),
       workspaceGraphJsonPath: (_current, bicepRepoPath) =>
         `/ws/${bicepRepoPath}.graph.json`,
       radArtifactsDirForSelection: () =>
