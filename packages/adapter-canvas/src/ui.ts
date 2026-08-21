@@ -67,7 +67,7 @@ export function topNav(active: string): string {
     ` aria-live="polite" title="View environment setup">` +
     `<span class="rad-opchip__dot" id="rad-opchip-dot" aria-hidden="true"></span>` +
     `<span class="rad-opchip__label" id="rad-opchip-label"></span></a>`;
-  return `<nav class="rad-topnav">${items}${chip}</nav>`;
+  return `<nav class="rad-topnav" id="radius-topnav">${items}${chip}</nav>`;
 }
 
 // Underlined sub-tabs (e.g. Modeled / Planned / Deployed / Diff).
