@@ -80,10 +80,11 @@ export function createPaneNavigation(
   let generation = 0;
   let request: AbortHandle | null = null;
 
-  function cancelRequest(): void {
+function cancelRequest(): void {
     generation += 1;
     request?.abort();
     request = null;
+    context.dom.byId(PANE_CONTENT_ID)?.removeAttribute("aria-busy");
   }
 
   function cancelPendingWork(): void {
