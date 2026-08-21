@@ -30,7 +30,6 @@ import {
   localDeploymentBlocksMutation,
   preflightGhcrPackageWriteAccess,
   resetDeploymentViewState,
-  resolveGitHubEnvironmentCreateState,
   releaseDeploymentMutation,
   reserveDeploymentMutation,
   resolveDeploymentEnvironment,
@@ -146,38 +145,6 @@ describe("preflightGhcrPackageWriteAccess", () => {
       "gh auth switch --hostname github.com --user pubuser"
     );
     expect(result.error).not.toContain("previous-login");
-  });
-});
-
-describe("resolveGitHubEnvironmentCreateState", () => {
-  it("treats a successful GET as a reused environment", () => {
-    expect(
-      resolveGitHubEnvironmentCreateState({
-        code: 0,
-        stdout: '{"name":"dev"}',
-        stderr: ""
-      })
-    ).toBe("reused");
-  });
-
-  it("treats a 404 lookup as a created-candidate environment", () => {
-    expect(
-      resolveGitHubEnvironmentCreateState({
-        code: 1,
-        stdout: "",
-        stderr: "gh: Not Found (HTTP 404)"
-      })
-    ).toBe("created_candidate");
-  });
-
-  it("fails closed when the lookup error is ambiguous", () => {
-    expect(
-      resolveGitHubEnvironmentCreateState({
-        code: 1,
-        stdout: "",
-        stderr: "gh: Forbidden (HTTP 403)"
-      })
-    ).toBeNull();
   });
 });
 
