@@ -76,7 +76,7 @@ export function topNav(active: string): string {
     `<span class="rad-opchip__dot" id="rad-graphchip-dot" aria-hidden="true"></span>` +
     `<span class="rad-opchip__label" id="rad-graphchip-label"></span></a>`;
   return (
-    `<nav class="rad-topnav">${items}` +
+    `<nav class="rad-topnav" id="radius-topnav">${items}` +
     `<span class="rad-topnav__chips">${graphChip}${chip}</span></nav>`
   );
 }

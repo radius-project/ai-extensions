@@ -2,6 +2,14 @@
 // shared shell (./shell.ts) so every page inherits the same Radius design
 // tokens, host theme mapping, and component styles.
 
+export const CRITICAL_SHELL_STYLE_CSS = `  html {
+    color-scheme: var(--color-scheme, inherit);
+  }
+  html, body {
+    background: var(--background-color-default, Canvas);
+  }
+`;
+
 export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma variables) ─────────────────────── */
   :root {
     /* The Copilot host owns theme selection and injects these semantic tokens.
@@ -73,12 +81,15 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     --rad-mono: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; overflow: hidden; }
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--rad-bg);
+  }
   body {
     font-family: var(--rad-font);
     font-size: 14px;
     line-height: 20px;
-    background: var(--rad-bg);
     color: var(--rad-text);
     display: flex;
     flex-direction: column;
@@ -169,6 +180,18 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     overflow-x: hidden;
     padding: 20px;
     min-width: 0;
+  }
+  /* A pane swap keeps the outgoing pane on screen while the next one is
+     fetched, but its page-scoped handlers are already gone. The region is made
+     inert for that window, so it also has to look unavailable rather than
+     silently swallowing clicks. The delay keeps a fast swap from flickering. */
+  .main-content[aria-busy="true"] {
+    opacity: 0.55;
+    cursor: progress;
+    transition: opacity 120ms linear 200ms;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .main-content[aria-busy="true"] { transition: none; }
   }
 
   /* ─── Headings ────────────────────────────────────────────────────────── */

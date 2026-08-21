@@ -28,9 +28,9 @@ export type DeployStatus = "pending" | "in_progress" | "success" | "failed";
  *   2. `name|type` lowercased, with the API version stripped.
  *   3. `name` lowercased.
  *
- * The middle tier exists because modeled resource ids are synthesized locally by
- * `buildResourceID` and are not guaranteed to equal the UCP ids the control
- * plane reports. Without it, an id mismatch would silently degrade every node to
+ * The middle tier exists because modeled resource ids are synthesized by the
+ * modeling side and are not guaranteed to equal the UCP ids the control plane
+ * reports. Without it, an id mismatch would silently degrade every node to
  * bare-name matching, which collides across types.
  */
 export function deployStatusKeys(resource: any): string[] {
