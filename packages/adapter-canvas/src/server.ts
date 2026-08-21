@@ -30,12 +30,15 @@ import {
   cloudCredential,
   listCredentialProfiles,
   saveCredentialProfile,
-  deleteCredentialProfile
+  deleteCredentialProfile,
+  recordGraphBuildEvent
 } from "./shared.js";
 import type {
   CanvasGraphResource,
   CanvasState,
   DeployErrorKind,
+  GraphBuildEvent,
+  GraphProgressView,
   GraphView
 } from "./shared.js";
 import {
@@ -818,7 +821,8 @@ const graphsPlanningRoutes = createGraphsPlanningRoutes({
   applyDeployMessages,
   record,
   errorMessage,
-  repoMatchesWorkspace
+  repoMatchesWorkspace,
+  now: () => Date.now()
 });
 
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
@@ -832,6 +836,8 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
     triggerAppBicepHandoff(entry, repo, branch, "graph"),
   fetchBicepSelection: (entry, repo, branch) =>
     fetchBicepSelection(entry, repo, branch),
+  listBranchPaths: (entry, repo, branch) =>
+    listBranchPaths(entry, repo, branch),
   workspaceGraphJsonPath: (state, bicepRepoPath) =>
     workspaceGraphJsonPath(state, bicepRepoPath),
   radArtifactsDirForSelection: (options) =>
@@ -871,6 +877,8 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     }
   }),
   triggerAppBicepHandoff,
+  listBranchPaths: (entry, repo, branch) =>
+    listBranchPaths(entry, repo, branch),
   prepareSourceRefResources: (entry, view, sourceRefInput) =>
     prepareSourceRefResources(entry, view, sourceRefInput),
   setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
@@ -888,7 +896,8 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     computeGraphDiff(baseResources, headResources),
   record,
   optionalString,
-  errorMessage
+  errorMessage,
+  now: () => Date.now()
 });
 
 // The route layer sees exactly one seam: the workflow service above. Parsing
@@ -1268,11 +1277,13 @@ export function isCurrentSourceRefToken(
 export function addGraphProgress(
   state: CanvasState,
   generation: number,
-  message: string
+  view: GraphProgressView,
+  event: Omit<GraphBuildEvent, "sequence">
 ): boolean {
   if (!state || state.graphBuildGeneration !== generation) return false;
-  if (!state.progressMessages) state.progressMessages = [];
-  state.progressMessages.push(message);
+  const record = state.graphProgressRecords?.[view];
+  if (!record) return false;
+  recordGraphBuildEvent(record, event);
   return true;
 }
 
@@ -3609,6 +3620,19 @@ async function fetchFileForSelection(
     if (local !== null) return local;
   }
   return await fetchFileFromRepo(repo, repoPath, access.branch);
+}
+
+// Every path on a branch, resolved through the same workspace-or-remote access
+// rule as the Bicep selection so the answer describes the tree the graph would
+// actually be built from. Resolves empty when the tree cannot be read, which
+// callers must treat as "unknown" rather than "empty repository".
+async function listBranchPaths(
+  entry: CanvasServerEntry,
+  repo: string,
+  branch: string
+): Promise<string[]> {
+  const access = accessForSelection(entry, repo, branch);
+  return await access.github.treePaths(repo, access.branch);
 }
 
 // Reject browser-labeled cross-site mutations while allowing non-browser clients.

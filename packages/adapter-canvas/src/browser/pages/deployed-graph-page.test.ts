@@ -5,9 +5,15 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import {
+  graphProgressElapsed,
+  graphProgressStages
+} from "../../../test/support/browser/graph-progress.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import {
@@ -95,6 +101,8 @@ function fixture(options: FixtureOptions = {}) {
   const modalText = createFakeElement("deployed-deleting-text");
 
   const elements = [state];
+  const progressHost = createFakeElement("deployed-progress-steps");
+  elements.push(progressHost);
   if (withAppSelect) elements.push(appSelect);
   if (withEnvSelect) elements.push(envSelect);
   if (withAction) elements.push(action);
@@ -160,7 +168,8 @@ function fixture(options: FixtureOptions = {}) {
     logOutput,
     container,
     modal,
-    modalText
+    modalText,
+    progressHost
   };
 }
 
@@ -2118,5 +2127,69 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.net.calls.filter((call) => call.url === url).length).toBe(
       before + 1
     );
+  });
+  describe("graph build progress", () => {
+    const stageText = graphProgressStages;
+
+    it("shows the loading stage while the first request is in flight", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => createDeferred<HttpResponse>().promise
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.loading_deployment}:running`
+      ]);
+      expect(graphProgressElapsed(progressHost)).toMatch(/^\d+:\d{2}$/);
+      expect(fakeText(progressHost)).not.toMatch(/%/);
+    });
+
+    it("clears the panel once the deployed graph arrives", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => jsonResponse({ resources: [{ id: "app/web" }], mode: "greyed" })
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([]);
+      expect(fakeText(progressHost)).toBe("");
+    });
+
+    it("reports the failure once in the status banner, clearing the panel", async () => {
+      const { browser, progressHost, status } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => Promise.reject(new Error("graph service down"))
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(status.textContent).toBe(
+        "The deployed application graph could not be loaded."
+      );
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("states the failure on the panel when there is no status banner", async () => {
+      const { browser, progressHost } = fixture({ withStatus: false });
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => Promise.reject(new Error("graph service down"))
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      // The panel is the only surface left, so it carries the failure rather
+      // than being cleared and leaving the outcome unreported.
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.loading_deployment}:failed`
+      ]);
+      expect(fakeText(progressHost)).not.toContain("graph service down");
+    });
   });
 });

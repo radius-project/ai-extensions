@@ -351,6 +351,7 @@ describe("P0-C built Radius extension artifact", () => {
       "pane-navigation",
       "heartbeat",
       "operation-chip",
+      "graph-chip",
       "deploy-result-page",
       "environment-page",
       "deploying-page",
@@ -404,7 +405,7 @@ describe("P0-C built Radius extension artifact", () => {
     )}\n</script>`;
     expect(smoke.renderedPage.split(marker)).toHaveLength(2);
     expect(smoke.renderedPage).toContain(expectedTag);
-    for (const name of ["graph"] as const) {
+    for (const name of ["graph", "graph-chip"] as const) {
       const entryMarker = browserEntryMarker(name);
       expect(smoke.renderedPage.split(`\n${entryMarker}\n`)).toHaveLength(2);
       expect(smoke.renderedPage).toContain(

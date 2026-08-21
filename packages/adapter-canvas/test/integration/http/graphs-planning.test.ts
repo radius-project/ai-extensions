@@ -29,6 +29,7 @@ interface Harness {
   reader: ReaderScript;
   readerOptions: DeployedGraphReaderOptions[];
   setEntryMissing(missing: boolean): void;
+  advanceClock(ms: number): void;
 }
 
 // Real helpers wherever the projection is pure, so the wire payload is the one
@@ -45,6 +46,7 @@ function start(): Harness {
   const reader: ReaderScript = {};
   const readerOptions: DeployedGraphReaderOptions[] = [];
   let entryMissing = false;
+  let nowMs = 0;
 
   const routes = createTestRouteTable(
     createGraphsPlanningRoutes({
@@ -112,7 +114,8 @@ function start(): Harness {
       errorMessage: (error) =>
         error instanceof Error ? error.message : String(error),
       repoMatchesWorkspace: (current, repo) =>
-        !!current.workspaceRepo && current.workspaceRepo === repo
+        !!current.workspaceRepo && current.workspaceRepo === repo,
+      now: () => nowMs
     })
   );
 
@@ -142,11 +145,58 @@ function start(): Harness {
     readerOptions,
     setEntryMissing(missing) {
       entryMissing = missing;
+    },
+    advanceClock(ms) {
+      nowMs += ms;
     }
   };
 }
 
 describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
+  it("serves typed graph progress events over a real socket", async () => {
+    const harness = start();
+    harness.state.progressMessages = ["deployed diagnostic"];
+    harness.state.graphProgressRecords = {
+      graph: {
+        graphProgressGeneration: 7,
+        graphProgressActive: true,
+        graphProgressView: "graph",
+        graphProgressStartedAtMs: 1_000,
+        graphProgressKey: "octo/app",
+        graphProgressOwner: 1,
+        graphProgressAwaitingModel: false,
+        graphBuildEvents: [
+          {
+            sequence: 1,
+            stage: "building_graph",
+            state: "running",
+            detail: "Building graph."
+          }
+        ]
+      }
+    };
+    const entry = await container!.getOrCreate("panel-a");
+    harness.advanceClock(5_000);
+    const graphEvents =
+      harness.state.graphProgressRecords.graph?.graphBuildEvents;
+    expect(graphEvents).toBeDefined();
+
+    const response = await fetch(`${entry.baseUrl}/api/progress`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.json()).toEqual({
+      messages: ["deployed diagnostic"],
+      generation: 7,
+      events: graphEvents,
+      active: true,
+      view: "graph",
+      // The server measures the build's age, so a client whose clock disagrees
+      // still reports the time the build has actually been running.
+      elapsedMs: 4_000
+    });
+  });
+
   it("greys out an unresolvable repo without constructing a reader", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
