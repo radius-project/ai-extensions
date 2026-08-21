@@ -237,10 +237,10 @@ function isTargetConsumer(
 }
 
 function equalAudiences(a: readonly string[], b: readonly string[]): boolean {
-  return (
-    a.length === b.length &&
-    [...a].sort().every((entry, index) => entry === [...b].sort()[index])
-  );
+  if (a.length !== b.length) return false;
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((entry, index) => entry === sortedB[index]);
 }
 
 function provesExclusiveSubject(config: OidcSubjectConfig): boolean {

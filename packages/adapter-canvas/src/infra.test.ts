@@ -229,6 +229,43 @@ describe("generateDeleteWorkflow", () => {
       "Found ${app_count} application(s) in environment '${RESOURCE_NAME}'."
     );
   });
+
+  it("routes environment-controlled vars.* through env: rather than shell interpolation", async () => {
+    const files = await generateDeleteWorkflow("dev");
+    const dispatcher = files["delete-environment.yml"];
+    const provider = files["delete-environment-azure.yml"];
+    // The provider-detect guard reads AZURE_CLIENT_ID from env, so a crafted
+    // value cannot execute in the id-token:write dispatcher job.
+    expect(dispatcher).toContain(
+      "AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}"
+    );
+    expect(dispatcher).toContain('if [ -n "$AZURE_CLIENT_ID" ]');
+    // The AKS connect step reads the resource group / cluster / subscription
+    // from env and references them with $VAR, never inline ${{ vars.* }}.
+    expect(provider).toContain(
+      "AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}"
+    );
+    expect(provider).toContain('--resource-group "$AZURE_RESOURCE_GROUP"');
+    expect(provider).not.toContain(
+      '--resource-group "${{ vars.AZURE_RESOURCE_GROUP }}"'
+    );
+    expect(provider).toContain('if [ -n "$AZURE_CLIENT_ID" ]');
+  });
+
+  it("caps the Azure delete job with a timeout aligned to the poll deadline", async () => {
+    const provider = (await generateDeleteWorkflow("dev"))[
+      "delete-environment-azure.yml"
+    ];
+    expect(provider).toContain("timeout-minutes: 30");
+  });
+
+  it("emits app_names through a delimited heredoc so a newline cannot corrupt the output", async () => {
+    const provider = (await generateDeleteWorkflow("dev"))[
+      "delete-environment-azure.yml"
+    ];
+    expect(provider).toContain("app_names<<${delimiter}");
+    expect(provider).not.toContain('echo "app_names=${app_names}"');
+  });
 });
 
 describe("GHCR verification probe", () => {

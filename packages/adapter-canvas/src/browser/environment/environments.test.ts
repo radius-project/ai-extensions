@@ -941,6 +941,11 @@ describe("environment deletion", () => {
     rows.remove.dispatch("click");
     expect(page.confirmDialog.show).toHaveBeenCalledOnce();
     expect(page.confirmDialog.show.mock.calls[0][0].message).toContain("ghost");
+    // The confirm copy warns about the full blast radius: cluster teardown and
+    // the shared app-registration credential, not just the GitHub environment.
+    expect(page.confirmDialog.show.mock.calls[0][0].message).toContain(
+      "federated credential"
+    );
   });
 
   it("posts the exact target and follows the delete operation on success", async () => {

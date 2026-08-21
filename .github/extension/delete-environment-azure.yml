@@ -45,6 +45,13 @@ jobs:
   delete:
     name: Delete with Radius
     runs-on: ubuntu-24.04
+    # Cap the job near the extension's own 30-minute poll deadline
+    # (server.ts monitorDeleteRun). GitHub's default job timeout is 360 minutes,
+    # so without this a run wedged on an AKS connect or `rollout status` step
+    # would keep running for hours after the extension has already reported it
+    # could not confirm the deletion — long enough for a stale run to land
+    # `rad env delete` underneath a user's retry.
+    timeout-minutes: 30
     environment: ${{ inputs.environment }}
     # OCI-backed Radius control-plane state, provisioned per-environment by the
     # deploy tooling (canvas extension) as environment variables. Set at job
@@ -91,23 +98,32 @@ jobs:
 
       - name: Connect to AKS cluster
         if: ${{ vars.AZURE_AKS_CLUSTER_NAME != '' }}
+        env:
+          # Pass environment-controlled values through the environment rather
+          # than interpolating them into the shell source, so a crafted value
+          # cannot execute commands in this OIDC + write job.
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          AZURE_AKS_CLUSTER_NAME: ${{ vars.AZURE_AKS_CLUSTER_NAME }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
           az aks get-credentials \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --name "${{ vars.AZURE_AKS_CLUSTER_NAME }}" \
-            --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$AZURE_AKS_CLUSTER_NAME" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --file "$RADIUS_TARGET_KUBECONFIG"
 
       - name: Set up control plane
         uses: radius-project/radius/.github/extension/actions/setup-control-plane@{{RADIUS_REF}}
 
       - name: Project cloud OIDC tokens into Radius pods
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
         run: |
           # Mint GitHub OIDC tokens and mount them where Radius expects them, so the
           # recipe deletes triggered by the delete can authenticate to Azure exactly
           # as the deploy workflow does. GitHub Actions is already a trusted OIDC
           # issuer for Azure via the AAD federated credential.
-          if [ -n "${{ vars.AZURE_CLIENT_ID }}" ]; then
+          if [ -n "$AZURE_CLIENT_ID" ]; then
             echo "Projecting Azure OIDC token..."
             AZ_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
               "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r '.value')
@@ -161,14 +177,17 @@ jobs:
           namespace: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
 
       - name: Register cloud credentials with Radius
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
         run: |
           # Register the Azure identity so the recipe deletes can authenticate,
           # reading the projected OIDC token at runtime.
-          if [ -n "${{ vars.AZURE_CLIENT_ID }}" ]; then
+          if [ -n "$AZURE_CLIENT_ID" ]; then
             echo "Registering Azure workload identity credential..."
             rad credential register azure wi \
-              --client-id "${{ vars.AZURE_CLIENT_ID }}" \
-              --tenant-id "${{ vars.AZURE_TENANT_ID }}"
+              --client-id "$AZURE_CLIENT_ID" \
+              --tenant-id "$AZURE_TENANT_ID"
           fi
           echo "✅ Cloud credentials registered with Radius."
 
@@ -201,9 +220,18 @@ jobs:
           fi
           app_count="$(printf '%s' "$apps_json" | jq 'length')"
           app_names="$(printf '%s' "$apps_json" | jq -r '.[].name' | paste -sd ', ' -)"
+          # app_count is a plain integer, but an application name could in
+          # principle contain a newline; a bare `app_names=${app_names}` line
+          # would then split the output file and make the guard below read an
+          # empty APP_COUNT and delete a still-populated environment. Emit
+          # app_names through a randomly-delimited heredoc so any newline is
+          # preserved instead of corrupting $GITHUB_OUTPUT.
+          delimiter="ghadelim_$(openssl rand -hex 16 2>/dev/null || date +%s%N)"
           {
             echo "app_count=${app_count}"
-            echo "app_names=${app_names}"
+            echo "app_names<<${delimiter}"
+            echo "${app_names}"
+            echo "${delimiter}"
           } >> "$GITHUB_OUTPUT"
           echo "Found ${app_count} application(s) in environment '${RESOURCE_NAME}'."
 

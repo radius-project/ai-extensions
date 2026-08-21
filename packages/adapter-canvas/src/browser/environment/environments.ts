@@ -398,7 +398,7 @@ export function initializeEnvironmentPane(
         const provider = environment?.provider ?? "";
         options.confirmDialog?.show({
           title: "Delete environment?",
-          message: `This deletes the GitHub environment "${name}" and its Radius configuration. Applications already deployed to it must be deleted first.`,
+          message: `This deletes the GitHub environment "${name}", removes the Radius environment from the cluster, and permanently deletes the environment's federated credential from its Azure app registration (which may be shared). Applications already deployed to it must be deleted first.`,
           confirmLabel: "Delete environment",
           onConfirm: () => deleteEnvironment(name, provider, button)
         });

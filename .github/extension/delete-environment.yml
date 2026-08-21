@@ -52,8 +52,10 @@ jobs:
     steps:
       - name: Determine provider from environment variables
         id: detect
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
         run: |
-          if [ -n "${{ vars.AZURE_CLIENT_ID }}" ]; then
+          if [ -n "$AZURE_CLIENT_ID" ]; then
             echo "provider=azure" >> "$GITHUB_OUTPUT"
           else
             echo "This environment is not configured for Azure (no AZURE_CLIENT_ID set)." >&2

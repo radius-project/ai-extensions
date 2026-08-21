@@ -967,10 +967,18 @@ async function discoverEnvironmentTarget(
     }
     vars[line.slice(0, tab)] = line.slice(tab + 1);
   }
-  const names = Object.keys(vars).join("\n");
+  // Classify the provider by the presence of a canonical, exact-named
+  // configuration variable rather than a regex over every variable name joined
+  // together. A substring test like /AZURE_/ matches a user-defined
+  // `MY_AZURE_THING` (misclassifying an AWS environment as Azure), and any
+  // variable whose value contained a newline would have split into phantom
+  // names above. Keying off the exact canonical name each provider always
+  // writes avoids both.
   let provider = "";
-  if (/AZURE_/.test(names)) provider = "azure";
-  else if (/AWS_/.test(names)) provider = "aws";
+  if (Object.prototype.hasOwnProperty.call(vars, "AZURE_CLIENT_ID"))
+    provider = "azure";
+  else if (Object.prototype.hasOwnProperty.call(vars, "AWS_EKS_CLUSTER_NAME"))
+    provider = "aws";
   let repoId = 0;
   if (provider === "azure") {
     const repoIdOutput = await runCommand(
