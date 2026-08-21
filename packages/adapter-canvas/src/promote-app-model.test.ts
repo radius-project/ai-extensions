@@ -4,6 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { serializeAppOrigin } from "@radius-project/core";
+// The staging rules are core's specification for the bundled script, not part
+// of the package's public surface, so they are imported from the modeling
+// barrel rather than the top-level one.
 import {
   CUSTOM_TYPE_STAGED_FILES,
   REQUIRED_STAGED_FILES,
@@ -11,9 +15,8 @@ import {
   STAGING_IGNORE_PATTERN,
   STAGING_RUN_RECORD,
   evaluateStagedRun,
-  publishableFiles,
-  serializeAppOrigin
-} from "@radius-project/core";
+  publishableFiles
+} from "@radius-project/core/modeling";
 import { hashAppBicep } from "./app-bicep-hash.js";
 
 // The promote script ships inside the installed plugin, where the workspace

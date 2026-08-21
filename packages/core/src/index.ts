@@ -39,35 +39,13 @@ export {
   evaluateAppSource,
   findWorkspaceManifests,
   unsupportedAppSourceReport,
-  CONCURRENT_EDIT_MESSAGE,
-  CUSTOM_TYPE_STAGED_FILES,
-  REQUIRED_STAGED_FILES,
   STAGING_DIR_PREFIX,
-  STAGING_IGNORE_PATTERN,
-  STAGING_RUN_RECORD,
-  UNRECORDED_RUN_MESSAGE,
-  changedManagedFiles,
-  concurrentEditMessage,
-  evaluateStagedRun,
-  isPublishableExtraArtifact,
-  isStagingDirName,
-  publishableFiles,
-  requiredStagedFiles,
-  sanitizeRunId,
-  stagingDirName,
   fetchBicepFromRepo,
   fetchRecipePack,
   resolveRecipeOutputs
 } from "./modeling/index.js";
 export type { ConcreteResource, RecipePackEntry } from "./modeling/index.js";
 export type { AppSourceEvaluation, AppSourceStatus } from "./modeling/index.js";
-export type {
-  ManagedFileHashes,
-  StagedRunEvaluation,
-  StagedRunInput,
-  StagedRunRecord,
-  StagedRunStatus
-} from "./modeling/index.js";
 export type {
   AppModelFreshness,
   AppModelFreshnessInput,
