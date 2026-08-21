@@ -824,6 +824,10 @@ export function applyPlanEnvState(
       hint.innerHTML =
         environment !== "" && !environmentAllowsDeploy(environmentStatus) ?
           ` The environment (<strong>${escapeBrowserHtml(envName)}</strong>) ${environmentNotReadyPhrase(environmentStatus)}, so it cannot be deployed to yet.`
+        : state.deploymentsPending ?
+          " Deployment states are still loading, so deployment is temporarily unavailable."
+        : state.planPending ?
+          " The deployment plan is still updating, so deployment is temporarily unavailable."
         : state.deploymentsStale ?
           " Deployment states could not be loaded, so deployment is temporarily unavailable."
         : deploymentBlocked ?

@@ -807,7 +807,7 @@ describe("planned selectors", () => {
   });
 
   it("settles environment availability before the deployment listing resolves and holds deployment closed until it arrives", async () => {
-    const { browser, created, button } = plannedPage();
+    const { browser, created, button, hint } = plannedPage();
     browser.net.handle(`${APPLICATIONS_PATH}?repo=octo%2Fapp`, () =>
       jsonResponse({ applications: [{ name: "store" }] })
     );
@@ -843,6 +843,9 @@ describe("planned selectors", () => {
     expect(button.disabled).toBe(true);
     expect(button.getAttribute("title")).toContain(
       "Deployment states are still loading"
+    );
+    expect(hint.innerHTML).toContain(
+      "Deployment states are still loading, so deployment is temporarily unavailable"
     );
 
     deployments.resolve(jsonResponse({ deployments: [] }));
@@ -1201,7 +1204,7 @@ describe("planned primary button state", () => {
   );
 
   it("blocks deployment while the selected plan is updating", () => {
-    const { browser, button, created } = plannedButtons();
+    const { browser, button, hint, created } = plannedButtons();
     created["planned-app"].value = "store";
     created["planned-branch"].value = "feature";
     created["planned-env"].value = "dev";
@@ -1213,6 +1216,9 @@ describe("planned primary button state", () => {
     expect(button.disabled).toBe(true);
     expect(button.getAttribute("title")).toContain(
       "deployment plan is still updating"
+    );
+    expect(hint.innerHTML).toContain(
+      "deployment plan is still updating, so deployment is temporarily unavailable"
     );
   });
 
