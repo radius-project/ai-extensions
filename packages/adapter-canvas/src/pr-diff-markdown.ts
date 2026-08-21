@@ -10,6 +10,8 @@
 
 import type { CanvasGraphResource } from "./shared.js";
 
+export const PR_GRAPH_DIFF_MARKDOWN_HEADING = "## 📊 Application Graph Diff";
+
 const STATUS_STYLE: Readonly<Record<string, string>> = {
   added: ":::added",
   removed: ":::removed",
@@ -128,7 +130,7 @@ export function renderPrDiffMarkdown(
     (r) => r.diffStatus === "unchanged"
   ).length;
 
-  let md = `## 📊 Application Graph Diff\n\n`;
+  let md = `${PR_GRAPH_DIFF_MARKDOWN_HEADING}\n\n`;
   md += `Comparing \`${baseBranch}\` → \`${headBranch}\`\n\n`;
 
   if (added === 0 && removed === 0 && modified === 0) {

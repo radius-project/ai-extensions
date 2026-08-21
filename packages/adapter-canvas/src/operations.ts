@@ -511,6 +511,31 @@ export function setContext(op: any, patch: any): any {
   return op;
 }
 
+export function setCanonicalEnvironment(op: any, environment: any): any {
+  const canonical = typeof environment === "string" ? environment.trim() : "";
+  if (!op || !canonical) return op;
+  const requested =
+    typeof op.context?.requestedEnvironment === "string" ?
+      op.context.requestedEnvironment
+    : String(op.environment || "");
+  setContext(op, {
+    requestedEnvironment: requested,
+    canonicalEnvironment: canonical
+  });
+  for (const requestName of ["request", "resumeRequest"]) {
+    const request = op[requestName];
+    if (
+      request &&
+      typeof request === "object" &&
+      request.environment &&
+      typeof request.environment === "object"
+    ) {
+      request.environment.environment = canonical;
+    }
+  }
+  return op;
+}
+
 /**
  * Record the resolved cloud context as a discriminated union.
  *
@@ -588,7 +613,26 @@ export function recordCreatedRoleAssignment(op: any, entry: any): any {
 export function recordGitHubEnvironment(op: any, patch: any): any {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger || !patch) return op;
-  ledger.githubEnvironment = { ...ledger.githubEnvironment, ...patch };
+  const sameEnvironment =
+    typeof ledger.githubEnvironment.repo === "string" &&
+    typeof patch.repo === "string" &&
+    ledger.githubEnvironment.repo.toLowerCase() === patch.repo.toLowerCase() &&
+    typeof ledger.githubEnvironment.name === "string" &&
+    typeof patch.name === "string" &&
+    ledger.githubEnvironment.name.toLowerCase() === patch.name.toLowerCase();
+  const state =
+    (
+      sameEnvironment &&
+      ledger.githubEnvironment.state === "created_candidate" &&
+      patch.state === "reused"
+    ) ?
+      "created_candidate"
+    : patch.state;
+  ledger.githubEnvironment = {
+    ...ledger.githubEnvironment,
+    ...patch,
+    ...(state ? { state } : {})
+  };
   return op;
 }
 

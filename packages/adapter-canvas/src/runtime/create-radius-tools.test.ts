@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  UNIDENTIFIED_APPLICATION_MESSAGE,
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+} from "@radius-project/core";
 import { createRadiusTools } from "./create-radius-tools.js";
 import {
   createFakeDependencies,
@@ -47,6 +51,346 @@ describe("RU-07: radius_generate_app", () => {
     expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(undefined);
     expect(result).toBe("SKILL.md content for .");
   });
+
+  it("withholds the skill and reports the unsupported repository when it has no Dockerfile", async () => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(result).toContain("acme/widgets");
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+  });
+
+  it("hands over the skill when the repository has a Dockerfile", async () => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+  });
+
+  it("hands over the skill when the repository cannot be listed", async () => {
+    const { tools, deps } = setup();
+    (
+      deps.workspace.fetchWorkspaceTree as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error("permission denied"));
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+  });
+
+  it("hands over the skill when the workspace context cannot be resolved", async () => {
+    const { tools, deps } = setup();
+    (
+      deps.workspace.detectWorkspaceContext as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error("no session"));
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+  });
+
+  it("hands over the skill when deciding which listing to use throws", async () => {
+    const { tools, deps } = setup();
+    (
+      deps.workspace.isWorkspaceSelection as ReturnType<typeof vi.fn>
+    ).mockImplementationOnce(() => {
+      throw new Error("selection unavailable");
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+  });
+
+  // Without a repository the worktree predicate is fail-closed, so nothing can
+  // be listed and no verdict is available. The gate must hand over the skill
+  // rather than refuse, and must not spend a doomed remote lookup to get there.
+  it("hands over the skill, without listing, when the workspace has no repo context", async () => {
+    const { tools, deps } = setup({
+      workspaceContext: { workspacePath: "/workspace", repo: "", branch: "" }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+    expect(deps.github.treePaths).not.toHaveBeenCalled();
+    expect(deps.workspace.fetchWorkspaceTree).not.toHaveBeenCalled();
+  });
+
+  // A sibling whose name merely starts with the workspace root is not inside
+  // it, and neither is a path that walks back out of it.
+  it.each([
+    ["a sibling with a shared prefix", "/workspace-other"],
+    ["a path that escapes upward", "/workspace/../elsewhere"]
+  ])("does not gate %s", async (_label, repoPath) => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath
+    });
+
+    expect(result).toBe(`SKILL.md content for ${repoPath}`);
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(repoPath);
+  });
+
+  // The listing the check can obtain describes the workspace, so it is not
+  // evidence about some other directory the caller named.
+  it("does not refuse a target outside the workspace on the workspace's contents", async () => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/elsewhere/other-repo"
+    });
+
+    expect(result).toBe("SKILL.md content for /elsewhere/other-repo");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+      "/elsewhere/other-repo"
+    );
+  });
+
+  it.each([
+    ["a trailing slash", "/workspace/"],
+    ["Windows separators", "\\workspace"],
+    ["a dot form", "/workspace/."],
+    ["a subdirectory", "/workspace/services/api"],
+    ["a nested dot form", "/workspace/services/../services/api"]
+  ])("still gates the workspace named with %s", async (_label, repoPath) => {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath
+    });
+
+    expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+  });
+
+  it("does not gate when the workspace path itself is unknown", async () => {
+    const { tools, deps } = setup({
+      workspaceContext: {
+        workspacePath: "",
+        repo: "acme/widgets",
+        branch: "main"
+      },
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(result).toBe("SKILL.md content for /workspace");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+  });
+});
+
+// RU-07b: several Dockerfiles brief the agent without refusing to model.
+describe("RU-07b: radius_generate_app with several Dockerfiles", () => {
+  const MICROSERVICES = [
+    "services/api/Dockerfile",
+    "services/web/Dockerfile",
+    "services/worker/Dockerfile",
+    "pnpm-workspace.yaml"
+  ];
+
+  async function generateFor(paths: string[], repoPath = "/workspace") {
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: { "acme/widgets@main": paths }
+    });
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath
+    });
+    return { result: String(result), deps };
+  }
+
+  // The central regression: a microservices repository is ONE application, so
+  // several Dockerfiles must never withhold the skill or trigger the question.
+  it("still hands over the full skill so the services are modeled as one application", async () => {
+    const { result, deps } = await generateFor(MICROSERVICES);
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+    expect(result).toContain("SKILL.md content for /workspace");
+    expect(result).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+  });
+
+  it("does not instruct the agent to ask merely because there are several", async () => {
+    const { result } = await generateFor(MICROSERVICES);
+    expect(result).toContain("ONE application");
+    expect(result).toMatch(/Ask the user only if/);
+  });
+
+  it("appends the candidate directories it found", async () => {
+    const { result } = await generateFor(MICROSERVICES);
+    expect(result).toContain("`services/api`");
+    expect(result).toContain("`services/web`");
+    expect(result).toContain("`services/worker`");
+  });
+
+  it("carries the specified question for the case where no application can be identified", async () => {
+    const { result } = await generateFor(MICROSERVICES);
+    expect(result).toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
+  });
+
+  it("reports the workspace manifest it found", async () => {
+    const { result } = await generateFor(MICROSERVICES);
+    expect(result).toContain("`pnpm-workspace.yaml`");
+  });
+
+  // The user's answer to the question comes back as repoPath naming a
+  // subdirectory. That is not the workspace, so the evidence gate skips the
+  // block entirely and the question cannot be re-asked after being answered.
+  it("says nothing more once the user has answered with a directory", async () => {
+    const { result, deps } = await generateFor(MICROSERVICES, "services/api");
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("services/api");
+    expect(result).toBe("SKILL.md content for services/api");
+    expect(result).not.toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
+  });
+
+  // Acceptance criterion 3 of #437: the answer scopes the next analysis to that
+  // directory, which means the question must not be posed a second time.
+  it("says nothing more for an absolute path inside the workspace either", async () => {
+    const { result } = await generateFor(
+      MICROSERVICES,
+      "/workspace/services/api"
+    );
+    expect(result).not.toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
+  });
+
+  it("does not re-ask when the answer is a dot-relative path inside the tree", async () => {
+    const { result } = await generateFor(
+      MICROSERVICES,
+      "/workspace/./services/api"
+    );
+    expect(result).not.toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
+  });
+
+  it("still refuses a scoped answer when the whole tree has no Dockerfile", async () => {
+    // The refusal survives the scope check: a tree with no Dockerfile has none
+    // in the named subdirectory either, so 2.1's evidence still applies.
+    const { result, deps } = await generateFor(
+      ["src/index.ts", "package.json"],
+      "/workspace/services/api"
+    );
+    expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+  });
+
+  it("still briefs for a location outside the worktree", async () => {
+    // Not the user's answer to this question, and the worktree listing is not
+    // evidence about it, so the gate skips the block entirely.
+    const { result, deps } = await generateFor(MICROSERVICES, "/elsewhere/api");
+    expect(result).toBe("SKILL.md content for /elsewhere/api");
+    expect(deps.workspace.isWorkspacePath).toHaveBeenCalled();
+  });
+
+  it("briefs when the target is the workspace root", async () => {
+    const { result } = await generateFor(MICROSERVICES, "/workspace/");
+    expect(result).toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
+  });
+
+  // Now reachable: the brief reads the listing through the same branch-aware
+  // lister as the classification, so a non-workspace branch is briefed from the
+  // repository tree rather than losing the signal.
+  it("briefs from the repository tree when the branch is not the worktree", async () => {
+    const { tools, deps } = setup({
+      remoteTreeByRepoBranch: { "acme/widgets@main": MICROSERVICES }
+    });
+    vi.mocked(deps.workspace.isWorkspaceSelection).mockReturnValue(false);
+
+    const result = String(
+      await findTool(tools, "radius_generate_app").handler({
+        repoPath: "/workspace"
+      })
+    );
+
+    expect(result).toContain("`services/api`");
+    expect(result).toContain("`pnpm-workspace.yaml`");
+    expect(deps.github.treePaths).toHaveBeenCalledWith("acme/widgets", "main");
+  });
+
+  it("still briefs the agent when the workspace-manifest re-read fails", async () => {
+    // The signal is an enhancement, not a precondition: losing it must not cost
+    // the candidate directories or the question.
+    const { tools, deps } = setup({
+      workspaceTreeByRepoBranch: { "acme/widgets@main": MICROSERVICES }
+    });
+    vi.mocked(deps.workspace.fetchWorkspaceTree)
+      .mockImplementationOnce(async () => MICROSERVICES)
+      .mockRejectedValueOnce(new Error("permission denied"));
+
+    const result = String(
+      await findTool(tools, "radius_generate_app").handler({
+        repoPath: "/workspace"
+      })
+    );
+
+    expect(result).toContain("`services/api`");
+    expect(result).toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
+    expect(result).not.toContain("`pnpm-workspace.yaml`");
+  });
+
+  it("appends nothing when a single Dockerfile makes the location unambiguous", async () => {
+    const { result } = await generateFor(["services/api/Dockerfile"]);
+    expect(result).toBe("SKILL.md content for /workspace");
+  });
+
+  it("appends nothing when the listing could not be established", async () => {
+    // An unlistable repository is `unknown`, never a report to the user.
+    const { tools } = setup();
+    const result = await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+    expect(result).toBe("SKILL.md content for /workspace");
+  });
+
+  it("ignores Dockerfiles in vendored directories when counting candidates", async () => {
+    const { result } = await generateFor([
+      "services/api/Dockerfile",
+      "node_modules/some-dep/Dockerfile"
+    ]);
+    expect(result).toBe("SKILL.md content for /workspace");
+  });
 });
 
 // RU-08: PR diff mapping/fetch failure/markdown.
@@ -57,7 +401,13 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
       tools,
       "radius_generate_pr_diff_markdown"
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
-    expect(result).toContain("does not exist on main or feat yet");
+    expect(result).toMatchObject({
+      resultType: "success",
+      textResultForLlm: expect.stringContaining(
+        "does not exist on main or feat yet"
+      ),
+      toolTelemetry: { radiusGraphDiff: { outcome: "unavailable" } }
+    });
     expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
   });
 
@@ -78,9 +428,13 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
       tools,
       "radius_generate_pr_diff_markdown"
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
-    expect(result).toContain("Application Graph Diff");
-    expect(result).toContain("main");
-    expect(result).toContain("feat");
+    expect(result).toMatchObject({
+      resultType: "success",
+      textResultForLlm: expect.stringContaining("Application Graph Diff"),
+      toolTelemetry: { radiusGraphDiff: { outcome: "diff" } }
+    });
+    expect(result.textResultForLlm).toContain("main");
+    expect(result.textResultForLlm).toContain("feat");
   });
 
   it("maps a fetch/build failure to a friendly warning instead of throwing", async () => {
@@ -97,8 +451,13 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
       tools,
       "radius_generate_pr_diff_markdown"
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
-    expect(result).toContain("Could not generate app graph diff");
-    expect(result).toContain("rad exploded");
+    expect(result).toMatchObject({
+      resultType: "failure",
+      error: expect.stringContaining("rad exploded"),
+      textResultForLlm: expect.stringContaining(
+        "Could not generate app graph diff"
+      )
+    });
   });
 
   it("logs graph build progress when available without letting a logging failure break the diff", async () => {
@@ -125,7 +484,7 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
 
     expect(session.log).toHaveBeenCalledWith("building graph");
-    expect(result).toContain("Application Graph Diff");
+    expect(result.textResultForLlm).toContain("Application Graph Diff");
   });
 });
 

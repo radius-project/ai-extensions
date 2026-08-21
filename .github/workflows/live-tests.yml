@@ -1,0 +1,77 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Live upstream tests
+
+# Runs the opt-in `*.live.test.ts` suites that fetch the real workflow templates
+# from radius-project/radius at runtime and assert YAML validity plus the OIDC
+# environment-binding contract. A failure means an upstream template change
+# broke what the extension generates (e.g. the invalid-YAML deploy regression
+# in #407).
+#
+# This is a SEPARATE workflow from the hermetic Build suite (build.yml), which
+# stays fully offline and deterministic. These live suites are intentionally
+# excluded from that suite and from the publish/release pipeline because they are
+# non-hermetic: they depend on an external repo's moving `main` ref and on
+# network access to raw.githubusercontent.com.
+#
+# They run on every pull request and every push to `main` so an upstream
+# template regression is flagged immediately as a failed check, plus nightly as a
+# catch-all in case no PR lands between an upstream change and the next run.
+#
+# Tradeoff to be aware of: because they fetch from radius-project/radius@main, a
+# regression pushed upstream can turn an otherwise-good ai-extensions PR red until
+# upstream is fixed. That is intentional here — surfacing the break early is the
+# point — but a failure in this job should be triaged against the current
+# upstream templates, not assumed to be caused by the PR's own changes.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # 07:00 UTC daily (~midnight US Pacific), as a catch-all between pushes.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  live:
+    name: Live upstream template tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # Enables the `describe.skipIf(!LIVE)` blocks in the workflow live tests
+      # (workflow-yaml.live.test.ts and oidc-environment-contract.live.test.ts).
+      RUN_LIVE_WORKFLOW_TESTS: "1"
+      # Enables the `az` argument-contract test for the Azure OIDC deploy
+      # preflight (deploy-dispatch-az-contract.live.test.ts). The Azure CLI is
+      # preinstalled on GitHub-hosted ubuntu runners; the test only checks that
+      # `az` parses the arguments, so it needs no login and touches no cloud
+      # resources.
+      RUN_LIVE_AZ_CLI_TESTS: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run live upstream workflow tests
+        run: pnpm test -- src/workflows/workflow-yaml.live.test.ts src/workflows/oidc-environment-contract.live.test.ts
+
+      - name: Run live Azure CLI contract test
+        working-directory: packages/adapter-canvas
+        run: pnpm exec vitest run src/server/services/deploy-dispatch-az-contract.live.test.ts

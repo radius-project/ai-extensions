@@ -22,6 +22,7 @@ import {
   deployRepairHandoffMessage,
   deployFailureNoticeMessage
 } from "./hooks.js";
+import { createPullRequestGraphDiffGuard } from "./pr-graph-diff-guard.js";
 import { errorMessage } from "./util.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { SessionPort } from "./session.js";
@@ -42,15 +43,33 @@ export interface RadiusExtension {
     onPreToolUse: (input: {
       toolName?: unknown;
       toolArgs?: unknown;
+      workingDirectory?: unknown;
     }) => Promise<
       | {
           permissionDecision: "deny";
           permissionDecisionReason: string;
           additionalContext: string;
         }
+      | {
+          additionalContext: string;
+        }
       | undefined
     >;
-    onSessionStart: () => Promise<{ additionalContext: string }>;
+    onPostToolUse: (input: {
+      toolName?: unknown;
+      toolArgs?: unknown;
+      toolResult?: unknown;
+      workingDirectory?: unknown;
+    }) => Promise<{ additionalContext: string } | undefined>;
+    onPostToolUseFailure: (input: {
+      toolName?: unknown;
+      toolArgs?: unknown;
+      error?: unknown;
+      workingDirectory?: unknown;
+    }) => Promise<{ additionalContext: string } | undefined>;
+    onSessionStart: (input: {
+      workingDirectory?: unknown;
+    }) => Promise<{ additionalContext: string } | undefined>;
   };
   // Attaches the real (or fake) joined session. Must be called exactly once,
   // strictly after joinSession() resolves in production.
@@ -66,8 +85,40 @@ export interface RadiusExtension {
 export function createRadiusExtension(
   deps: RadiusExtensionDependencies
 ): RadiusExtension {
-  const { workspaceState, resolveAppModelStatus } =
+  const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
+  const pullRequestGraphDiffGuard = createPullRequestGraphDiffGuard({
+    hasRadiusApplicationModel: (workspacePath) =>
+      deps.workspace.hasRadiusApplicationModel(workspacePath),
+    workspaceContext: async () => {
+      const state = await workspaceState();
+      return {
+        repo: state.contextRepo || "",
+        branch: state.contextBranch || ""
+      };
+    },
+    getDefaultBranch: (repo) => deps.github.getDefaultBranch(repo),
+    openGraphDiff: ({ repo, baseBranch, headBranch }) =>
+      deps.session.get().rpc.canvas.open({
+        canvasId: "radius",
+        instanceId: "radius-panel",
+        input: { page: "graph-diff", repo, baseBranch, headBranch }
+      })
+  });
+  let pendingStartupDiagnostic = "";
+
+  function logStartupDiagnostic(message: string): boolean {
+    const session = deps.session.tryGet();
+    if (!session?.log) return false;
+    try {
+      void Promise.resolve(
+        session.log(message, { level: "warning", ephemeral: true })
+      ).catch(() => undefined);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   // ─── Host-channel callbacks ────────────────────────────────────────────────
   // Registered immediately (no session required yet): each callback only
@@ -329,6 +380,12 @@ export function createRadiusExtension(
     }
     attachedSession = session;
     deps.session.set(session);
+    if (
+      pendingStartupDiagnostic &&
+      logStartupDiagnostic(pendingStartupDiagnostic)
+    ) {
+      pendingStartupDiagnostic = "";
+    }
     startKeepalive();
   }
 
@@ -351,15 +408,16 @@ export function createRadiusExtension(
     hooks: {
       // Guards the graph-generating tool calls: denies the call and instructs
       // the agent to author + SAVE .radius/app.bicep via the radius-app-bicep
-      // skill first when no bicep exists. Fails open on any hook error.
+      // skill first when no bicep exists. It fails open on any hook error.
       onPreToolUse: async (input) => {
         try {
-          return await evaluateAppBicepHook(
+          const graphDecision = await evaluateAppBicepHook(
             { toolName: input.toolName, toolArgs: input.toolArgs },
             {
               workspaceState,
               defaultBranchForState: deps.workspace.defaultBranchForState,
               appModelStatus: resolveAppModelStatus,
+              appSource: evaluateAppSourceForBranch,
               shouldRequestRefresh: (key: string) => {
                 if (requestedRefreshes.has(key)) return false;
                 requestedRefreshes.add(key);
@@ -371,13 +429,37 @@ export function createRadiusExtension(
               }
             }
           );
+          if (graphDecision) {
+            pullRequestGraphDiffGuard.recordDeniedGraphDiff(
+              input,
+              graphDecision.permissionDecisionReason
+            );
+            return graphDecision;
+          }
         } catch {
-          return undefined;
+          // Graph generation remains fail-open; the PR guard below owns its
+          // own fail-closed diagnostics once a Radius model is active.
         }
+        return pullRequestGraphDiffGuard.onPreToolUse(input);
       },
-      onSessionStart: async () => ({
-        additionalContext: RADIUS_SESSION_START_CONTEXT
-      })
+      onPostToolUse: (input) => pullRequestGraphDiffGuard.onPostToolUse(input),
+      onPostToolUseFailure: (input) =>
+        pullRequestGraphDiffGuard.onPostToolUseFailure(input),
+      onSessionStart: async (input) => {
+        let active = false;
+        try {
+          active = await pullRequestGraphDiffGuard.activateAtSessionStart(
+            input.workingDirectory
+          );
+        } catch (error) {
+          pendingStartupDiagnostic = `Radius could not inspect the worktree for an application model during session startup: ${errorMessage(error)}. Radius remains inactive for now and will retry when a later tool call provides the worktree.`;
+          if (logStartupDiagnostic(pendingStartupDiagnostic)) {
+            pendingStartupDiagnostic = "";
+          }
+        }
+        if (!active) return undefined;
+        return { additionalContext: RADIUS_SESSION_START_CONTEXT };
+      }
     },
     attachSession,
     shutdown,

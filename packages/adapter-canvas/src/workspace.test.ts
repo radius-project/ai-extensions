@@ -12,6 +12,9 @@ import {
   resolveSessionId,
   resolvePersistedSessionId,
   workspaceFileExists,
+  hasRadiusApplicationModel,
+  fetchWorkspaceTree,
+  isWorkspacePath,
   workspaceHeadCommit,
   workspaceSourceChangedSince
 } from "./workspace.js";
@@ -284,6 +287,80 @@ describe("workspaceFileExists", () => {
   });
 });
 
+describe("hasRadiusApplicationModel", () => {
+  async function workspace(
+    files: Record<string, string>
+  ): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "radius-enabled-"));
+    for (const [repoPath, content] of Object.entries(files)) {
+      const filePath = path.join(dir, ...repoPath.split("/"));
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, content);
+    }
+    return {
+      dir,
+      cleanup: () => fs.rm(dir, { recursive: true, force: true })
+    };
+  }
+
+  it("recognizes a non-empty .radius/app.bicep without repository metadata or a Git remote", async () => {
+    const testWorkspace = await workspace({
+      ".radius/app.bicep": "resource app {}\n"
+    });
+    try {
+      expect(await hasRadiusApplicationModel(testWorkspace.dir)).toBe(true);
+    } finally {
+      await testWorkspace.cleanup();
+    }
+  });
+
+  it.each([
+    ["the radius extension", "extension radius\n"],
+    [
+      "the current Radius application type",
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {}\n"
+    ],
+    [
+      "the legacy Radius application type",
+      "resource app 'Applications.Core/applications@2023-10-01-preview' = {}\n"
+    ]
+  ])("recognizes a root app.bicep containing %s", async (_label, content) => {
+    const testWorkspace = await workspace({ "app.bicep": content });
+    try {
+      expect(await hasRadiusApplicationModel(testWorkspace.dir)).toBe(true);
+    } finally {
+      await testWorkspace.cleanup();
+    }
+  });
+
+  it("rejects a generic Azure root app.bicep", async () => {
+    const testWorkspace = await workspace({
+      "app.bicep":
+        "resource site 'Microsoft.Web/sites@2024-04-01' = { name: 'web' }\n"
+    });
+    try {
+      expect(await hasRadiusApplicationModel(testWorkspace.dir)).toBe(false);
+    } finally {
+      await testWorkspace.cleanup();
+    }
+  });
+
+  it("rejects empty and missing application models", async () => {
+    const emptyWorkspace = await workspace({
+      ".radius/app.bicep": " \n",
+      "app.bicep": ""
+    });
+    const missingWorkspace = await workspace({});
+    try {
+      expect(await hasRadiusApplicationModel(emptyWorkspace.dir)).toBe(false);
+      expect(await hasRadiusApplicationModel(missingWorkspace.dir)).toBe(false);
+      expect(await hasRadiusApplicationModel("")).toBe(false);
+    } finally {
+      await Promise.all([emptyWorkspace.cleanup(), missingWorkspace.cleanup()]);
+    }
+  });
+});
+
 // The origin record records the commit a model was generated from, and this
 // is the other half of that comparison. An unresolvable commit must read as
 // "unknown" ("") rather than as drift, because drift triggers a regeneration
@@ -419,5 +496,118 @@ describe("workspaceSourceChangedSince", () => {
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// The walker prunes directories using the skip list that packages/core owns, so
+// that a vendored Dockerfile is ignored identically here and on the remote tree
+// listing, which prunes nothing of its own. A regression in that shared list
+// would silently make one of the two paths see files the other does not.
+describe("fetchWorkspaceTree", () => {
+  const state = {
+    workspacePath: "",
+    workspaceRepo: "acme/widgets",
+    workspaceBranch: "main",
+    contextRepo: "acme/widgets",
+    contextBranch: "main"
+  };
+
+  it("lists application files and prunes vendored and generated directories", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-tree-"));
+    try {
+      await fs.mkdir(path.join(dir, "services", "api"), { recursive: true });
+      await fs.mkdir(path.join(dir, "node_modules", "pkg"), {
+        recursive: true
+      });
+      await fs.mkdir(path.join(dir, "dist"), { recursive: true });
+      await fs.mkdir(path.join(dir, ".cache"), { recursive: true });
+      await fs.writeFile(path.join(dir, ".cache", "Dockerfile"), "FROM x\n");
+      await fs.writeFile(path.join(dir, ".env"), "TOKEN=x\n");
+      await fs.writeFile(path.join(dir, "Dockerfile"), "FROM scratch\n");
+      await fs.writeFile(
+        path.join(dir, "services", "api", "main.go"),
+        "package main\n"
+      );
+      await fs.writeFile(
+        path.join(dir, "node_modules", "pkg", "Dockerfile"),
+        "FROM scratch\n"
+      );
+      await fs.writeFile(path.join(dir, "dist", "bundle.js"), "//\n");
+
+      const paths = await fetchWorkspaceTree(
+        { ...state, workspacePath: dir },
+        "acme/widgets",
+        "main"
+      );
+
+      expect(paths?.sort()).toEqual([
+        ".env",
+        "Dockerfile",
+        "services/api/main.go"
+      ]);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null for a selection that is not the worktree", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-tree-"));
+    try {
+      expect(
+        await fetchWorkspaceTree(
+          { ...state, workspacePath: dir },
+          "acme/widgets",
+          "feat"
+        )
+      ).toBeNull();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null rather than an empty listing when the worktree cannot be walked", async () => {
+    expect(
+      await fetchWorkspaceTree(
+        { ...state, workspacePath: path.join(os.tmpdir(), "rad-tree-absent") },
+        "acme/widgets",
+        "main"
+      )
+    ).toBeNull();
+  });
+});
+
+// Decides whether a worktree listing is evidence about a caller-named target.
+// A prefix match would wrongly claim a sibling directory, and an unresolved
+// compare would let `..` walk out of the tree, so both are covered directly.
+describe("isWorkspacePath", () => {
+  const root = path.resolve("/workspace");
+
+  it.each([
+    ["the root itself", root],
+    ["a trailing slash", `${root}/`],
+    ["a dot form", `${root}/.`],
+    ["a subdirectory", path.join(root, "services", "api")],
+    ["a redundant traversal that stays inside", `${root}/services/../services`]
+  ])("accepts %s", (_label: string, candidate: string) => {
+    expect(isWorkspacePath(root, candidate)).toBe(true);
+  });
+
+  it.each([
+    ["a sibling sharing the root's prefix", `${root}-other`],
+    ["a traversal that escapes", `${root}/../elsewhere`],
+    ["an unrelated absolute path", path.resolve("/somewhere/else")],
+    ["the parent directory", path.dirname(root)]
+  ])("rejects %s", (_label: string, candidate: string) => {
+    expect(isWorkspacePath(root, candidate)).toBe(false);
+  });
+
+  it("rejects when either side is missing", () => {
+    expect(isWorkspacePath("", root)).toBe(false);
+    expect(isWorkspacePath(root, "")).toBe(false);
+    expect(isWorkspacePath(null, undefined)).toBe(false);
+  });
+
+  it("accepts either separator, since the value arrives as agent-authored text", () => {
+    expect(isWorkspacePath("/workspace", "\\workspace\\services")).toBe(true);
   });
 });

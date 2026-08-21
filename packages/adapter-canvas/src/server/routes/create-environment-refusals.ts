@@ -31,6 +31,7 @@ export const SERVER_OWNED_REFUSAL: CreateEnvironmentRefusal = {
 export interface CreateEnvironmentRequestData {
   repo?: string;
   environment?: string;
+  operationEnvironment?: string;
   provider?: string;
   operationId?: unknown;
   origin?: string | null;
@@ -153,12 +154,16 @@ export async function admitCreateEnvironmentRequest(
   const continuationId =
     typeof data.operationId === "string" ? data.operationId : "";
   if (continuationId) {
+    const operationEnvironment =
+      typeof data.operationEnvironment === "string" ?
+        data.operationEnvironment
+      : envName;
     const existing = ports.getOperation(continuationId);
     if (
       !existing ||
       ports.isStale(existing) ||
       existing.repo !== targetRepo ||
-      existing.environment !== envName ||
+      existing.environment !== operationEnvironment ||
       existing.provider !== provider ||
       (existing.currentStage !== ports.stageAuthorizeIdentity &&
         existing.currentStage !== ports.stageConfigureEnvironment) ||

@@ -30,7 +30,6 @@ import {
   localDeploymentBlocksMutation,
   preflightGhcrPackageWriteAccess,
   resetDeploymentViewState,
-  resolveGitHubEnvironmentCreateState,
   releaseDeploymentMutation,
   reserveDeploymentMutation,
   resolveDeploymentEnvironment,
@@ -42,6 +41,7 @@ import {
   triggerDeployFailureNotice,
   classifyDeployDispatchFailure,
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
+  DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
   DEPLOY_RUN_UNCONFIRMED_KIND
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
@@ -145,38 +145,6 @@ describe("preflightGhcrPackageWriteAccess", () => {
       "gh auth switch --hostname github.com --user pubuser"
     );
     expect(result.error).not.toContain("previous-login");
-  });
-});
-
-describe("resolveGitHubEnvironmentCreateState", () => {
-  it("treats a successful GET as a reused environment", () => {
-    expect(
-      resolveGitHubEnvironmentCreateState({
-        code: 0,
-        stdout: '{"name":"dev"}',
-        stderr: ""
-      })
-    ).toBe("reused");
-  });
-
-  it("treats a 404 lookup as a created-candidate environment", () => {
-    expect(
-      resolveGitHubEnvironmentCreateState({
-        code: 1,
-        stdout: "",
-        stderr: "gh: Not Found (HTTP 404)"
-      })
-    ).toBe("created_candidate");
-  });
-
-  it("fails closed when the lookup error is ambiguous", () => {
-    expect(
-      resolveGitHubEnvironmentCreateState({
-        code: 1,
-        stdout: "",
-        stderr: "gh: Forbidden (HTTP 403)"
-      })
-    ).toBeNull();
   });
 });
 
@@ -1388,6 +1356,36 @@ describe("triggerDeployRepairHandoff", () => {
     expect(
       triggerDeployRepairHandoff(
         failedEntry({ deployErrorKind: "branch-not-pushed" })
+      )
+    ).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does not hand off an oidc-subject-missing refusal, which lives in cloud configuration", () => {
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+    });
+    // The remedy is a federated credential in Azure, so a repair loop could only
+    // burn its attempts redeploying an unchanged, still-doomed configuration.
+    expect(
+      triggerDeployRepairHandoff(
+        failedEntry({ deployErrorKind: "oidc-subject-missing" })
+      )
+    ).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does not hand off an OIDC subject case mismatch", () => {
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+    });
+    expect(
+      triggerDeployRepairHandoff(
+        failedEntry({
+          deployErrorKind: DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND
+        })
       )
     ).toBe(false);
     expect(calls).toHaveLength(0);

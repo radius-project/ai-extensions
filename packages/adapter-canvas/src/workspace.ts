@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { IGNORED_SOURCE_DIRS } from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 
 export interface CanvasSessionWorkspace {
@@ -27,18 +28,6 @@ export interface WorkspaceGitHub {
   listNames(): Promise<string[]>;
   treePaths(requestedRepo: string): Promise<string[]>;
 }
-
-const IGNORED_DIRS = new Set([
-  ".git",
-  "node_modules",
-  "dist",
-  "build",
-  "coverage",
-  ".next",
-  ".turbo",
-  ".venv",
-  "venv"
-]);
 
 function runGit(
   workspacePath: string | null | undefined,
@@ -295,6 +284,33 @@ export function toSafeRepoRelPath(input: unknown): string {
   return rel;
 }
 
+// Whether a caller-supplied path denotes the worktree or something inside it.
+//
+// Used to decide whether a worktree listing is evidence about the target a
+// caller named. A subdirectory qualifies: if the whole worktree contains no
+// Dockerfile, neither does any directory within it, so the listing answers the
+// question for a subdirectory too.
+//
+// Resolves both sides before comparing, so `..` cannot walk out and a sibling
+// whose name merely starts with the root (`/workspace-other` against
+// `/workspace`) is not mistaken for a child.
+export function isWorkspacePath(
+  workspacePath: string | null | undefined,
+  candidate: string | null | undefined
+): boolean {
+  if (!workspacePath || !candidate) return false;
+  // Accept either separator on either side: the value reaches us as
+  // agent-authored text, and forward slashes resolve correctly on Windows too.
+  const toSlashes = (value: string) => value.replace(/\\/g, "/");
+  try {
+    const root = path.resolve(toSlashes(workspacePath));
+    const resolved = path.resolve(toSlashes(candidate));
+    return resolved === root || resolved.startsWith(root + path.sep);
+  } catch {
+    return false;
+  }
+}
+
 function safeWorkspacePath(
   workspacePath: string | null | undefined,
   repoPath: string | null | undefined
@@ -344,6 +360,36 @@ export async function workspaceFileExists(
 // Candidate locations for a workspace app.bicep, in priority order. The graph
 // JSON is saved next to whichever one is actually found.
 const WORKSPACE_BICEP_PATHS = [".radius/app.bicep", "app.bicep"];
+
+// A root app.bicep is a common Azure convention, so its filename alone cannot
+// activate Radius. Accept the current extension declaration or either supported
+// Radius application resource type used by legacy models.
+function isLegacyRadiusAppModel(content: string): boolean {
+  return (
+    /^\s*extension\s+radius\b/im.test(content) ||
+    /^\s*resource\s+\w+\s+['"](?:Radius|Applications)\.Core\/applications@/im.test(
+      content
+    )
+  );
+}
+
+export async function hasRadiusApplicationModel(
+  workspacePath: string | null | undefined
+): Promise<boolean> {
+  // `.radius` is Radius-owned, so any non-empty model is an activation signal
+  // even before it compiles. The ambiguous root filename must prove it is Radius.
+  const radiusModel = await readWorkspaceFile(
+    workspacePath,
+    WORKSPACE_BICEP_PATHS[0]
+  );
+  if (radiusModel?.trim()) return true;
+
+  const legacyModel = await readWorkspaceFile(
+    workspacePath,
+    WORKSPACE_BICEP_PATHS[1]
+  );
+  return legacyModel ? isLegacyRadiusAppModel(legacyModel) : false;
+}
 
 // Reads the workspace app.bicep and reports which repo-relative path it came
 // from, so callers can persist sibling artifacts (e.g. app-graph.json) next to
@@ -475,7 +521,7 @@ async function walkWorkspace(
     if (entry.name.startsWith(".") && entry.name !== ".radius") {
       if (entry.isDirectory() && entry.name !== ".github") continue;
     }
-    if (entry.isDirectory() && IGNORED_DIRS.has(entry.name)) continue;
+    if (entry.isDirectory() && IGNORED_SOURCE_DIRS.has(entry.name)) continue;
 
     const rel = dir ? `${dir}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {

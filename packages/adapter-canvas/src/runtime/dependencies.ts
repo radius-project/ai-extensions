@@ -26,6 +26,9 @@ export interface WorkspaceContext {
 }
 
 export interface WorkspaceDependencies {
+  hasRadiusApplicationModel(
+    workspacePath: string | null | undefined
+  ): Promise<boolean>;
   detectWorkspaceContext(session: {
     cwd?: string;
     workspacePath?: string;
@@ -41,8 +44,21 @@ export interface WorkspaceDependencies {
     repo: string,
     branch: string
   ): Promise<string | null>;
+  // Repo-relative paths in the local worktree, or null when the selection is not
+  // the workspace or the tree could not be walked. Null is distinct from an
+  // empty list on purpose: a listing that failed proves nothing about the
+  // repository's contents.
+  fetchWorkspaceTree(
+    state: CanvasState,
+    repo: string | null | undefined,
+    branch: string | null | undefined
+  ): Promise<string[] | null>;
   parseRepoFromRemote(remoteUrl: unknown): string;
   toSafeRepoRelPath(input: unknown): string;
+  isWorkspacePath(
+    workspacePath: string | null | undefined,
+    candidate: string | null | undefined
+  ): boolean;
   workspaceFileExists(worktree: string, relPath: string): Promise<boolean>;
 }
 
@@ -51,6 +67,7 @@ export interface GitHubContentReader {
   getContentBytes(apiPath: string): Promise<Buffer | { tooLarge: true } | null>;
   listNames(apiPath: string): Promise<string[]>;
   treePaths(requestedRepo: string, branch?: string): Promise<string[]>;
+  getDefaultBranch(repo: string): Promise<string>;
 }
 
 export interface CoreGraphDependencies {

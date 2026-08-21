@@ -3,8 +3,17 @@
 // createRadiusCanvas: pure construction, no I/O until a handler is invoked.
 
 import { RADIUS_TOOL_DECLARATIONS } from "./declarations.js";
+import {
+  ambiguousAppSourceBrief,
+  unsupportedAppSourceReport
+} from "@radius-project/core";
 import { errorMessage } from "./util.js";
 import { createGraphContextHelpers } from "./graph-context.js";
+import {
+  failedGraphDiffResult,
+  successfulGraphDiffResult,
+  unavailableGraphDiffResult
+} from "./pr-graph-diff-result.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
 
@@ -13,8 +22,12 @@ interface ToolArgs {
 }
 
 export function createRadiusTools(deps: RadiusExtensionDependencies) {
-  const { workspaceState, fetchBicepForBranch } =
-    createGraphContextHelpers(deps);
+  const {
+    workspaceState,
+    fetchBicepForBranch,
+    evaluateAppSourceForBranch,
+    listSourceTreeForBranch
+  } = createGraphContextHelpers(deps);
   const declarationByName = new Map(
     RADIUS_TOOL_DECLARATIONS.map((decl) => [decl.name, decl])
   );
@@ -30,8 +43,76 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
   return [
     {
       ...declarationByName.get("radius_generate_app")!,
+      // Two source checks gate the authoring instructions, and they differ in
+      // kind. A repository with no Dockerfile is refused outright (2.1): the
+      // product cannot model it, so the skill is withheld entirely. A repository
+      // with SEVERAL Dockerfiles is not refused at all (2.2) — it is the normal
+      // shape of a microservices application and must still be modeled as one
+      // application — so the skill is handed over as usual, with a brief
+      // appended describing the candidate directories and the narrow case in
+      // which the agent should stop and ask the user where the application is.
+      //
+      // Any failure to establish the repository's contents hands over the skill
+      // unchanged: both checks act on evidence, never on a lookup that did not
+      // work.
       handler: async (args: ToolArgs) => {
-        return deps.radiusAppBicepSkill(args.repoPath as string | undefined);
+        const repoPath = args.repoPath as string | undefined;
+        const state = await workspaceState().catch(() => null);
+        // The listing this check can obtain describes the worktree, so it is
+        // evidence about the worktree and anything inside it — a subdirectory
+        // of a tree with no Dockerfile has none either. A caller naming some
+        // other location is asking about a target the extension cannot
+        // enumerate, and there is no evidence to refuse on. An omitted path
+        // means the workspace, which is how the tool is invoked in practice.
+        const targetsWorkspace =
+          !repoPath ||
+          deps.workspace.isWorkspacePath(state?.workspacePath, repoPath);
+        if (state && targetsWorkspace) {
+          const source = await evaluateAppSourceForBranch(
+            state.contextRepo || "",
+            state.contextBranch || "",
+            state
+          ).catch(() => null);
+          if (source?.status === "none") {
+            return unsupportedAppSourceReport(state.contextRepo);
+          }
+          // The workspace-manifest signal needs the listing itself, which the
+          // classification does not carry. It is re-read only on the
+          // `ambiguous` branch — the rare case — through the same branch-aware
+          // lister, so a branch that is not the current worktree gets the same
+          // signal the classification was derived from.
+          //
+          // A null listing means the re-read did not happen, so the brief
+          // simply omits the signal; it must never be read as "no manifests
+          // present".
+          const listing =
+            source?.status === "ambiguous" ?
+              await listSourceTreeForBranch(
+                state.contextRepo || "",
+                state.contextBranch || "",
+                state
+              )
+            : null;
+          // A repoPath naming somewhere INSIDE the worktree is the user's
+          // answer to the very question this brief asks. The gate above
+          // deliberately lets a subdirectory through, because a tree with no
+          // Dockerfile has none in any subdirectory either — but that evidence
+          // only justifies the refusal above. Asking again here, with
+          // candidates from outside the directory they just named, would undo
+          // their answer and loop. So the brief is for the worktree itself.
+          const answeredWithDirectory =
+            !!repoPath &&
+            deps.workspace.isWorkspacePath(state.workspacePath, repoPath) &&
+            !deps.workspace.isWorkspacePath(repoPath, state.workspacePath);
+          const brief =
+            answeredWithDirectory ? null : (
+              ambiguousAppSourceBrief(source, listing)
+            );
+          if (brief) {
+            return `${deps.radiusAppBicepSkill(repoPath)}\n---\n\n${brief}\n`;
+          }
+        }
+        return deps.radiusAppBicepSkill(repoPath);
       }
     },
     {
@@ -50,7 +131,9 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
           ]);
 
           if (!baseContent && !headContent) {
-            return `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch, so author it with the Radius app-bicep skill (run the radius_generate_app tool) and make sure each branch you are comparing contains the committed file, then re-run this tool.`;
+            return unavailableGraphDiffResult(
+              `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
+            );
           }
 
           const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
@@ -104,13 +187,13 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
             baseResources,
             headResources
           );
-          return deps.renderPrDiffMarkdown(
-            diffResources,
-            baseBranch,
-            headBranch
+          return successfulGraphDiffResult(
+            deps.renderPrDiffMarkdown(diffResources, baseBranch, headBranch)
           );
         } catch (err) {
-          return `⚠️ Could not generate app graph diff: ${errorMessage(err)}`;
+          return failedGraphDiffResult(
+            `Could not generate app graph diff: ${errorMessage(err)}`
+          );
         }
       }
     },

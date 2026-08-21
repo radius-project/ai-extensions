@@ -1205,6 +1205,13 @@ export function fetchFileFromRepoResult(
   return ghApiGetContentResult(`/repos/${repo}/contents/${path}?ref=${branch}`);
 }
 
+// Repo-relative paths of the FILES on a branch.
+//
+// Resolves an empty array for every failure, and callers must therefore treat an
+// empty result as "could not establish", never as "the repository is empty".
+// A truncated tree is one of those failures: GitHub caps a recursive listing, and
+// a partial listing that happens to omit a file is indistinguishable from one
+// that proves the file is absent, so it must not be used as evidence.
 export function fetchRepoTree(
   repo: string,
   branch = "main"
@@ -1214,7 +1221,9 @@ export function fetchRepoTree(
       "api",
       `/repos/${repo}/git/trees/${branch}?recursive=1`,
       "--jq",
-      `[.tree[].path]`
+      // Blobs only: a directory named `Dockerfile` is not a build file, and a
+      // consumer deciding what a repository contains must not count one.
+      `{truncated: (.truncated // false), paths: [.tree[] | select(.type == "blob") | .path]}`
     ];
     cliExec("gh", args, { timeout: 30000 }, (err, stdout) => {
       if (err) {
@@ -1223,9 +1232,17 @@ export function fetchRepoTree(
       }
       try {
         const value: unknown = JSON.parse(stdout);
+        if (value === null || typeof value !== "object") {
+          resolve([]);
+          return;
+        }
+        const { truncated, paths } = value as {
+          truncated?: unknown;
+          paths?: unknown;
+        };
         resolve(
-          Array.isArray(value) ?
-            value.filter((item): item is string => typeof item === "string")
+          truncated !== true && Array.isArray(paths) ?
+            paths.filter((item): item is string => typeof item === "string")
           : []
         );
       } catch (e) {
@@ -1239,7 +1256,8 @@ export const github = {
   getContent: (apiPath: string) => ghApiGetContent(apiPath),
   getContentBytes: (apiPath: string) => ghApiGetContentBytes(apiPath),
   listNames: (apiPath: string) => ghApiListNames(apiPath),
-  treePaths: (repo: string, branch = "main") => fetchRepoTree(repo, branch)
+  treePaths: (repo: string, branch = "main") => fetchRepoTree(repo, branch),
+  getDefaultBranch: (repo: string) => getDefaultBranch(repo)
 };
 
 // Look up a file's blob SHA on a branch; resolves '' when the file is absent.

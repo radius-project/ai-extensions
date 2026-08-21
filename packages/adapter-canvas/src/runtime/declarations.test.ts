@@ -7,6 +7,7 @@ import {
   RESERVED_DECLARATION_NAMES,
   buildRadiusCanvasInputSchema,
   RADIUS_ACTION_DECLARATIONS,
+  RADIUS_SESSION_START_CONTEXT,
   RADIUS_TOOL_DECLARATIONS
 } from "./declarations.js";
 
@@ -168,11 +169,55 @@ describe("RU-03: tool declarations", () => {
     ]);
   });
 
+  it("makes PR embedding conditional on a successful graph diff", () => {
+    const decl = RADIUS_TOOL_DECLARATIONS.find(
+      (tool) => tool.name === "radius_generate_pr_diff_markdown"
+    )!;
+
+    expect(decl.description).toContain("only when the result contains a diff");
+    expect(decl.description).toContain(
+      "create the PR without a graph diff section"
+    );
+    expect(decl.description).toContain("report the reason in chat");
+  });
+
   it("requires file/target on radius_publish_recipe", () => {
     const decl = RADIUS_TOOL_DECLARATIONS.find(
       (t) => t.name === "radius_publish_recipe"
     )!;
     expect(decl.parameters.required).toEqual(["file", "target"]);
+  });
+
+  describe("RU-19: automatic PR graph diff guidance", () => {
+    it("requires exact returned markdown only when a graph diff exists", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "If it returns a Mermaid application graph diff"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "exact returned markdown at the TOP"
+      );
+    });
+
+    it("keeps unavailable graph explanations out of the PR body", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "create the pull request without a graph diff section"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Do not add a sentence to the PR body"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Report the reason in chat"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "describe the change itself normally"
+      );
+    });
+
+    it("keeps numbered instructions flush-left", () => {
+      for (const line of RADIUS_SESSION_START_CONTEXT.split("\n")) {
+        expect(line).not.toMatch(/^\s{4,}\d\./);
+      }
+    });
   });
 
   it("constrains provider enums to azure/aws where present", () => {

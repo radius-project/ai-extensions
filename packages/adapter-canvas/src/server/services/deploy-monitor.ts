@@ -57,7 +57,8 @@ export interface DeployMonitorDependencies {
     repo: string,
     workflowFile: string,
     sinceMs: number,
-    knownId: number | string | null
+    knownId: number | string | null,
+    afterRunId?: number | string | null
   ): Promise<number | string | null>;
   getRunDetail(
     repo: string,
@@ -224,7 +225,7 @@ export function createDeployMonitorService(
         log
       });
       if (!dispatched.dispatched) return;
-      const { workflowFile, dispatchedAt } = dispatched;
+      const { workflowFile, dispatchedAt, baselineRunId } = dispatched;
 
       log("Waiting for the deploy workflow to start...");
       let dRunId: number | string | null = null;
@@ -237,7 +238,8 @@ export function createDeployMonitorService(
           repo,
           workflowFile,
           dispatchedAt,
-          null
+          null,
+          baselineRunId
         );
         if (!dRunId) await dependencies.sleep(POLL_INTERVAL_MS);
       }
@@ -414,11 +416,10 @@ export function createDeployMonitorService(
             // Leave nodes gray; each flips to yellow when its own
             // recipe/operation actually starts.
           }
-          // Nothing arrives mid-run yet: the producer publishes after
-          // `rad deploy` returns, because a composite step cannot invoke
-          // actions/upload-artifact while it runs. The poll is here regardless
-          // so that when the producer starts uploading during the deploy, this
-          // lights up unchanged.
+          // The producer rotates changed snapshots through a bounded artifact
+          // ring while `rad deploy` runs. The reader selects the greatest valid
+          // sequence for this run, so artifact list order cannot roll status
+          // backwards.
           await pollDeployStatus();
           // Run this only when the producer has published no progress. This
           // cannot use setStatus because advanced output nodes must be kept.

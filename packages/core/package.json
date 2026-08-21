@@ -22,6 +22,7 @@
     "lint": "eslint \"src/**/*.ts\" vitest.config.ts"
   },
   "devDependencies": {
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "yaml": "catalog:"
   }
 }

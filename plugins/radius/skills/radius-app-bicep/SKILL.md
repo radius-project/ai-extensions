@@ -19,15 +19,32 @@ Use this skill to generate a Radius application definition (`app.bicep`) from a 
 
 ## Prerequisites
 
-This skill currently supports only repositories that already contain a Dockerfile for building the application image. Before doing anything else, confirm the target repository includes a Dockerfile for the application (repo root or the relevant service subdirectory; match `Dockerfile`, `Dockerfile.*`, or `*.Dockerfile`, case-insensitively).
+This skill currently supports only repositories that already contain a Dockerfile for building the application image, so a repository without one cannot be modeled.
 
-If no Dockerfile is present, stop immediately. Do not generate `.radius/app.bicep` or `.radius/bicepconfig.json`, do not create or write to a branch, and do not commit or push. Return only this error:
+The extension normally screens this out before handing over the skill, so re-running that check is not your job. If you do find the application has no Dockerfile, stop: generate nothing, write nothing, and report this to the user verbatim.
 
-> This repository does not contain a Dockerfile. The Radius app modeling skill currently supports only repositories that already include a Dockerfile for building the application image. Add a Dockerfile for the application service and run the skill again.
+A Dockerfile means a file named `Dockerfile`, `Dockerfile.<suffix>`, or `<prefix>.Dockerfile`, matched case-insensitively on the file name, at the repository root or in a service subdirectory. Ignore any that sits inside a vendored, generated, or tooling directory — `node_modules`, `dist`, `build`, `coverage`, `.next`, `.turbo`, `venv`, `.venv`, or any other dot-directory apart from `.radius` and `.github`. A `.devcontainer` image builds the development environment, not the application, so it does not count.
+
+> I could not find a Dockerfile in this repository. I can only create application definitions for containerized applications. Add a Dockerfile first, then I can create an application definition.
+
+### Identifying the application
+
+A repository with several Dockerfiles is normally still one application. A microservices repository builds many images, and this skill models a microservices repository into a single `Radius.Core/applications` named after the repository, with the services wired to each other through the addressing rules in [connection-conventions.md](references/connection-conventions.md). A Dockerfile count is never decisive on its own, and it is never by itself a reason to put a question to the user. Nor does a Dockerfile prove there is a service to model: it may build a CI image, a migration or tooling image, an unused example, or an alternative to another one. A root workspace manifest such as `pnpm-workspace.yaml` or `go.work` describes how the repository is organized, not that its projects form one application — independent applications use those tools too, so weigh it against the source rather than concluding from it.
+
+Establish from the source which directories hold application services that share a runtime and deploy together, and model those as one application. Ask the user only when, after reading the source, you cannot identify an application at all. That happens in two cases:
+
+- the repository holds more than one **independent** application, which a single definition cannot represent, or
+- nothing in the repository is an application — for example the Dockerfiles build only tooling or CI images.
+
+In either case, ask exactly:
+
+> I looked through the repository but could not identify an application or application resources. Which directory contains your application source code and Dockerfile?
+
+Then stop, and write nothing: no `.radius/app.bicep`, no `.radius/bicepconfig.json`, no origin record, no branch, no commit. Do not guess a directory on the user's behalf or model one candidate to "make progress" — a directory you chose yourself is not an answer to the question you just asked. The user replies with a directory and asks for analysis again, which scopes the next run to it; the skill already supports a subdirectory through the `build.source` rule.
 
 ## Response
 
-When asked to model a repository, first apply the [Prerequisites](#prerequisites) check. Only if it passes:
+When asked to model a repository:
 
 1. Generate the application definition and write both `.radius/app.bicep` and `.radius/bicepconfig.json` (see [bicepconfig.json](#bicepconfigjson)) into the `.radius/` directory of the working tree, write the origin record (see [Origin record](#origin-record-apporiginjson)), then stage all three with `git add`. Do NOT push, and do NOT open a pull request: modeling only writes and stages the files locally. The application graph renders from the on-disk working tree, so no push is needed to preview it, and pushing to a remote is a deployment concern handled later, not part of modeling.
 2. In your chat reply, give a one-line intro naming the app (e.g. "I'll create an application definition for `todo-list-app`."), then a short, natural summary of the resources you identified, a brief list such as "Container: `todo-list-app`", "MySQL database", "Secret for DB credentials". A sentence or two of reasoning is fine; don't dump raw source analysis or the full file contents. Describe only what you actually did (that you wrote and staged the model files in the working tree); do not claim the application graph or canvas is rendering, since you cannot observe that. If a graph view is opened and shows an error or empty state, report that honestly instead of asserting success. Keep the reply about the user's application and its resources; do not name internal skill or reference files (for example, reference examples the skill consulted).
@@ -37,8 +54,6 @@ When asked to model a repository, first apply the [Prerequisites](#prerequisites
 Never invoke `rad` or `rad.exe` directly from PowerShell, a shell, a subprocess, or a delegated agent. Compile the generated application definition with `node "<loaded-skill-base>/scripts/validate-bicep.mjs" .radius/app.bicep`; the checker uses only the extension-managed Bicep and fails on every compiler warning or error. Graph validation must go through the Radius canvas and its tools: open `canvasId: "radius"` with `instanceId: "radius-panel"`, pass the current session repository as `repo` in `owner/repo` form, and use the current Copilot worktree branch. The extension honors an existing `RADIUS_RAD_BINARY`; otherwise it runs its managed binary from `%USERPROFILE%\.radius\ai-extensions\bin\rad.exe` on Windows or `$HOME/.radius/ai-extensions/bin/rad` on macOS/Linux, downloading it when absent and attempting a best-effort upgrade when older than the latest release (offline/API failures keep the installed binary; set `RADIUS_RAD_SKIP_VERSION_CHECK` to skip the version check). It does not resolve `rad` from `PATH` or `.rad/bin`. Diagnose graph failures only from the Radius extension log; never reproduce them with a direct CLI command or through another agent.
 
 ## Workflow
-
-Before writing the Bicep, confirm the repository satisfies the [Prerequisites](#prerequisites) (it must contain a Dockerfile); if not, stop and return the prerequisite error without modeling, generating, or writing anything. Then:
 
 1. Select one runnable deployment profile. Treat explicit user, scenario, and target-repository deployment requirements for Radius types, resource-name parameters, workload roles/count, native configuration keys, secret bindings, provider profile, protocol values, and connection names as acceptance criteria. Verify that the pinned source supports that profile; do not silently replace it with an easier default or optional backend.
 2. Build an internal requirement ledger that maps every acceptance criterion and planned resource property reference to source evidence, an exact Radius schema/recipe field, and the workload setting that consumes it. Use it for reasoning and validation; do not print it or add it as Bicep comments. Follow [runtime-contract.md](references/runtime-contract.md).
@@ -310,7 +325,6 @@ Read [bicep-structure-rules.md](references/bicep-structure-rules.md) for all str
 
 Before returning the Bicep, verify:
 
-- [ ] The repository contains a Dockerfile; a repo without one was rejected with the prerequisite error and produced no files (see [Prerequisites](#prerequisites)).
 - [ ] One deployment profile is selected. Every explicit type, workload role/count, native key, required value, secret binding, and connection name from the request is represented in a closed requirement ledger.
 - [ ] Every planned resource property read/write has its verbatim path in the ledger and exists in the exact configured schema/API version. Every recipe-generated output also has a verified output mapping; every managed-secret reference has the declared secret-name path and key. An absent path blocks generation rather than being replaced by a guessed property, alias, or wrapper.
 - [ ] Every extensible type has an exact Recipe available in the target Environment. Each generated output and managed-secret key is verified against that Recipe or immutable provider recipe-pack source; each omitted optional input has a proven safe path.
