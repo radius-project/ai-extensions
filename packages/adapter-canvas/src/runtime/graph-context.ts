@@ -59,12 +59,9 @@ export function createGraphContextHelpers(
     state: CanvasState
   ): Promise<string[]> {
     if (deps.workspace.isWorkspaceSelection(state, repo, branch)) {
-      const local = await deps.workspace.fetchWorkspaceTree(
-        state,
-        repo,
-        branch
-      );
-      if (local) return local;
+      const local = await deps.workspace.fetchWorkspaceTree(state, repo, branch);
+      // An unreadable workspace tree is "unknown" and must fail open.
+      return local ?? [];
     }
     return await deps.github.treePaths(repo, branch);
   }
