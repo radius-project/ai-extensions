@@ -126,6 +126,7 @@ function fixture(options: FixtureOptions = {}) {
   // markup renders; production wiring (context.dom.byId) finds it exactly as
   // it would find the real parsed element.
   const copyPushBtn = createFakeInput("deploy-copy-push");
+  const fixCredentialsBtn = createFakeInput("deploy-fix-credentials");
   if (withProgressModal) {
     elements.push(
       progressSpinner,
@@ -136,7 +137,8 @@ function fixture(options: FixtureOptions = {}) {
       progressFailActions,
       failRepairNote,
       backBtn,
-      copyPushBtn
+      copyPushBtn,
+      fixCredentialsBtn
     );
   }
   if (withProgressModalElement) elements.push(progressModal);
@@ -190,6 +192,7 @@ function fixture(options: FixtureOptions = {}) {
     failRepairNote,
     backBtn,
     copyPushBtn,
+    fixCredentialsBtn,
     deleteModal,
     deleteBody,
     deleteApp,
@@ -1604,6 +1607,127 @@ describe("deploy flow", () => {
     expect(page.progressSubtitle.innerHTML).toContain("your branch");
   });
 
+  it("shows the OIDC-credential panel and routes to environment creation", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-missing",
+        error: "no federated credential matching any subject",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(page.progressTitle.innerHTML).toContain(
+      "Azure credentials aren't set up yet"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "no federated credential matching any subject"
+    );
+    // The only fix is an Azure federated credential, which Create Environment
+    // makes, so the button must land there rather than dead-end the user.
+    page.fixCredentialsBtn.dispatch("click");
+    await flushPromises();
+    expect(page.browser.nav.assigned).toContain("/?page=environment&new=1");
+  });
+
+  it("gives a case-sensitive OIDC mismatch its own panel instead of the generic failure", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-case-mismatch",
+        error:
+          'expected "repo:acme/widgets:environment:production" but the app has "repo:Acme/Widgets:environment:Production"',
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    // Nothing was dispatched, so this must not read like a run that failed.
+    expect(page.progressTitle.innerHTML).not.toContain("Deployment of");
+    expect(page.progressTitle.innerHTML).toContain(
+      "Azure credentials don't match GitHub"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain("Nothing was deployed.");
+    expect(page.progressSubtitle.style.color).toBe("var(--rad-text-secondary)");
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "repo:acme/widgets:environment:production"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "repo:Acme/Widgets:environment:Production"
+    );
+    // Create Environment would rebuild the same spelling, so the route that
+    // the missing-subject panel offers must not appear here.
+    expect(page.progressSubtitle.innerHTML).not.toContain(
+      "Set up Azure credentials"
+    );
+    expect(page.browser.nav.assigned).toEqual([]);
+  });
+
+  it("omits the preflight detail from the case-mismatch panel when the failure carries no text", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-case-mismatch",
+        error: "",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(page.progressTitle.innerHTML).toContain(
+      "Azure credentials don't match GitHub"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain("Nothing was deployed.");
+    expect(page.progressSubtitle.innerHTML).not.toContain("margin-top:10px");
+  });
+
+  it("omits the preflight detail from the OIDC panel when the failure carries no text", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-missing",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(page.progressTitle.innerHTML).toContain(
+      "Azure credentials aren't set up yet"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "Set up Azure credentials"
+    );
+  });
+
   it("shows a generic failure with the run link and repair note while repairing", async () => {
     const page = fixture();
     init(page);
@@ -1708,6 +1832,46 @@ describe("deploy flow", () => {
         status: "failed",
         errorKind: "branch-not-pushed",
         errorBranch: "feature",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.deployBtn.disabled).toBe(false);
+  });
+
+  it("runs the OIDC-credential failure flow with no progress-modal chrome present", async () => {
+    const page = fixture({ withProgressModal: false });
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-missing",
+        error: "no federated credential",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.deployBtn.disabled).toBe(false);
+  });
+
+  it("runs the case-mismatch failure flow with no progress-modal chrome present", async () => {
+    const page = fixture({ withProgressModal: false });
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-case-mismatch",
+        error: "differs only by letter casing",
         handoff: { pending: false, state: "idle" }
       })
     );

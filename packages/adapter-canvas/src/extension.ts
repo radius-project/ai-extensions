@@ -37,6 +37,7 @@ import {
   detectWorkspaceContext,
   fetchWorkspaceBicep,
   fetchWorkspaceFile,
+  hasRadiusApplicationModel,
   fetchWorkspaceTree,
   isWorkspacePath,
   isWorkspaceSelection,
@@ -117,6 +118,7 @@ const dependencies: RadiusExtensionDependencies = {
   getOrCreateServer,
   getLastWebviewActivityAt,
   workspace: {
+    hasRadiusApplicationModel,
     detectWorkspaceContext,
     defaultBranchForState,
     isWorkspaceSelection,

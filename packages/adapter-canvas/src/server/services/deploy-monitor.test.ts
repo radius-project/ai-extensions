@@ -1217,6 +1217,8 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
         "run-rad-commands-azure.yml"
       ],
       branchNotPushedKind: "branch-not-pushed",
+      oidcSubjectMissingKind: "oidc-subject-missing",
+      oidcSubjectCaseMismatchKind: "oidc-subject-case-mismatch",
       getBranchHeadSha: () => {
         record("branch-head-sha");
         return Promise.resolve("sha-1");
@@ -1230,6 +1232,46 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       },
       runGhWithStdin: () => {
         throw new Error("no secret params means no secret write");
+      },
+      runAz: (args) => {
+        record(`az:${args.slice(0, 4).join(" ")}`);
+        return Promise.resolve({
+          code: 0,
+          stdout: JSON.stringify([
+            "repo:acme/widgets:environment:production",
+            "repo:acme@101/widgets@202:environment:production"
+          ]),
+          stderr: ""
+        });
+      },
+      runGitHubJson: (path) => {
+        record(`github-json:${path}`);
+        if (path.includes("/variables/AZURE_CLIENT_ID")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: { value: "client-123" }
+          });
+        }
+        if (path === "/repos/acme/widgets/environments/production") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: { name: "production" }
+          });
+        }
+        if (path === "/repos/acme/widgets") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: {
+              full_name: "acme/widgets",
+              id: 202,
+              owner: { id: 101 }
+            }
+          });
+        }
+        return Promise.resolve({ ok: false, status: 404 });
       },
       readProcessEnv: () => ({}),
       fetchFileForSelection: (_entry, _repo, _branch, repoPath) => {
@@ -1349,6 +1391,11 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       "resolve-recipe-outputs",
       "commit-source-refs",
       "branch-head-sha",
+      "github-json:/repos/acme/widgets/environments/production/variables/AZURE_CLIENT_ID",
+      "github-json:/repos/acme/widgets/environments/production",
+      "github-json:/repos/acme/widgets",
+      "github-json:/repos/acme/widgets/actions/oidc/customization/sub",
+      "az:ad app federated-credential list",
       "fetch-file:.radius/app.bicep",
       "publish-workflows",
       "sync-workflows",
