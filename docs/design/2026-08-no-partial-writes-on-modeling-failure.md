@@ -2,7 +2,7 @@
 
 - **Author**: Karishma Chawla (@kachawla)
 - **Date**: 2026-08
-- **Status**: Approved
+- **Status**: In review
 - **Tracks**: [radius-project/ai-extensions#97](https://github.com/radius-project/ai-extensions/issues/97), case 2.4
 
 ## Current state
