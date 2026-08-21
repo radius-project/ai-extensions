@@ -255,16 +255,23 @@ export async function handleDeployedGraph(
   // In-session monitor data is fresher than artifacts, but only for the exact
   // selection it describes. Empty values remain unconstrained so the first poll
   // can show a deploy before every selector has initialized.
-  const selectionPartMatches = (session: string, selected: string): boolean =>
+  const exactSelectionPartMatches = (
+    session: string,
+    selected: string
+  ): boolean => !session || !selected || session === selected;
+  const namedSelectionPartMatches = (
+    session: string,
+    selected: string
+  ): boolean =>
     !session || !selected || session.toLowerCase() === selected.toLowerCase();
   const sessionRepo = state.deployingRepo || state.contextRepo || "";
   const sessionBranch =
     state.deployingBranch || state.contextBranch || state.graphBranch || "";
   const sessionMatchesSelection =
-    selectionPartMatches(sessionRepo, repo) &&
-    selectionPartMatches(sessionBranch, branch) &&
-    selectionPartMatches(sessionEnv, requestedEnv) &&
-    selectionPartMatches(state.deployAppName || "", requestedApp);
+    exactSelectionPartMatches(sessionRepo, repo) &&
+    exactSelectionPartMatches(sessionBranch, branch) &&
+    namedSelectionPartMatches(sessionEnv, requestedEnv) &&
+    namedSelectionPartMatches(state.deployAppName || "", requestedApp);
   const deploying =
     state.deployStatus === "in_progress" && sessionMatchesSelection;
 

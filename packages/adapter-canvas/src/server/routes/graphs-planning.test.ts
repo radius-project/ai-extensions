@@ -872,6 +872,56 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(payloadOf(recording).mode).toBe("live");
   });
 
+  it("matches the session application case-insensitively", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "in_progress",
+        deployAppName: DEPLOY_APP
+      }
+    });
+    const recording = await run(
+      `/api/deployed-graph?application=${DEPLOY_APP.toUpperCase()}`,
+      handleDeployedGraph,
+      deps
+    );
+    expect(payloadOf(recording).mode).toBe("live");
+  });
+
+  it.each([
+    {
+      selectionPart: "repository",
+      url: `/api/deployed-graph?repo=${CONTEXT_REPO.toUpperCase()}`,
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "in_progress" as const,
+        deployRunId: 7
+      }
+    },
+    {
+      selectionPart: "branch",
+      url: "/api/deployed-graph",
+      state: {
+        contextRepo: CONTEXT_REPO,
+        contextBranch: WORKSPACE_BRANCH,
+        deployingBranch: WORKSPACE_BRANCH.toUpperCase(),
+        deployStatus: "in_progress" as const,
+        deployRunId: 7
+      }
+    }
+  ])(
+    "matches the session $selectionPart case-sensitively",
+    async ({ url, state }) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls, { state });
+      const recording = await run(url, handleDeployedGraph, deps);
+
+      expect(payloadOf(recording).mode).toBe("greyed");
+      expect(calls.log.some((call) => call.includes('"runId":null'))).toBe(true);
+    }
+  );
+
   it("treats an empty side of the environment comparison as a match", async () => {
     // Session env empty, request env set.
     const first: Calls = { log: [] };
