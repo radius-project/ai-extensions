@@ -71,6 +71,11 @@ export interface DeploymentInfo {
   runUrl: string;
 }
 
+export interface DeploymentListing {
+  deployments: DeploymentInfo[];
+  error: string;
+}
+
 export function deploymentKey(
   application: string,
   environment: string
@@ -150,6 +155,27 @@ export function parseDeploymentListing(payload: unknown): DeploymentInfo[] {
       runUrl: readString(entry, "runUrl")
     }))
     .filter((entry) => entry.app !== "" && entry.environment !== "");
+}
+
+export function parseRequiredDeploymentListing(
+  payload: unknown
+): DeploymentListing {
+  if (!isRecord(payload) || !Array.isArray(payload.deployments)) {
+    return { deployments: [], error: "Invalid deployment listing." };
+  }
+  const deployments = parseDeploymentListing(payload);
+  const recordsAreComplete =
+    deployments.length === payload.deployments.length &&
+    payload.deployments.every(
+      (entry) =>
+        isRecord(entry) &&
+        readString(entry, "status") !== "" &&
+        typeof entry.runUrl === "string"
+    );
+  if (!recordsAreComplete) {
+    return { deployments: [], error: "Invalid deployment listing." };
+  }
+  return { deployments, error: readString(payload, "error") };
 }
 
 // A worktree branch has no pushed commit, so it is labelled as such instead of
@@ -625,15 +651,19 @@ export function populatePlannedSelectors(
 
   const deploymentsPromise =
     appSelect && envSelect ?
-      getJson(context, `${DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}`)
+      getJson(
+        context,
+        `${DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}&fresh=1`
+      )
         .then((payload) => {
-          if (readString(payload, "error") !== "") {
+          const listing = parseRequiredDeploymentListing(payload);
+          if (listing.error !== "") {
             state.deploymentsStale = true;
             return;
           }
           state.deploymentsStale = false;
           state.deploymentStatuses = {};
-          for (const deployment of parseDeploymentListing(payload)) {
+          for (const deployment of listing.deployments) {
             state.deploymentStatuses[
               deploymentKey(deployment.app, deployment.environment)
             ] = deployment.status;
@@ -710,11 +740,13 @@ export function applyPlanEnvState(
       const environmentReady =
         environment === "" || environmentAllowsDeploy(environmentStatus);
       button.disabled =
-        !(branch && environment) ||
+        !(application && branch && environment) ||
         !environmentReady ||
         state.deploymentsStale ||
         deploymentBlocked;
-      if (!branch && !environment) {
+      if (!application) {
+        button.setAttribute("title", "Select the application to deploy.");
+      } else if (!branch && !environment) {
         button.setAttribute(
           "title",
           "Select a branch and an environment to deploy."

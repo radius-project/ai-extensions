@@ -107,7 +107,7 @@ function fixture(options: FixtureOptions = {}) {
     () => jsonResponse(envPayload)
   );
   browser.net.handle(
-    `${DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}`,
+    `${DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}&fresh=1`,
     () => jsonResponse(deploymentsPayload)
   );
   browser.net.handle("/api/deploy", () => jsonResponse({}));
@@ -232,8 +232,8 @@ describe("initializePlannedGraphPage", () => {
     const { browser, button } = fixture({
       deploymentsPayload: {
         deployments: [
-          { app: "app", environment: "dev", status: "pending" },
-          { app: "other", environment: "dev", status: "success" }
+          { app: "app", environment: "dev", status: "pending", runUrl: "" },
+          { app: "other", environment: "dev", status: "success", runUrl: "" }
         ]
       }
     });

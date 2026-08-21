@@ -1363,9 +1363,12 @@ const deployListCache = new Map<string, CachedPayload>();
 // Both listing caches are module-scoped, so they outlive any single canvas
 // server instance. Callers that must not observe a listing captured under
 // different external state clear them wholesale through this seam.
-export function resetListingCaches(): void {
-  envListCache.clear();
-  deployListCache.clear();
+export function resetListingCaches(
+  environments: { clear(): void } = envListCache,
+  deployments: { clear(): void } = deployListCache
+): void {
+  environments.clear();
+  deployments.clear();
 }
 
 // A deploy request resolves branch and GitHub state asynchronously before

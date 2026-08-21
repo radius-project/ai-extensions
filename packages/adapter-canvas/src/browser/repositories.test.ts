@@ -35,6 +35,7 @@ import {
   parseApplicationListing,
   parseBranchListing,
   parseDeploymentListing,
+  parseRequiredDeploymentListing,
   parseEnvironmentListing,
   populateApplications,
   populateBranches,
@@ -659,7 +660,7 @@ describe("planned selectors", () => {
     const hint = createFakeElement("planned-subtitle-hint");
     browser.document.add(button);
     browser.document.add(hint);
-    browser.net.handle(`${DEPLOYMENTS_PATH}?repo=octo%2Fapp`, () =>
+    browser.net.handle(`${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`, () =>
       jsonResponse({ deployments: [] })
     );
     return { browser, created, button, hint };
@@ -744,11 +745,11 @@ describe("planned selectors", () => {
         environments: [{ name: "dev", provider: "azure", status: "success" }]
       })
     );
-    browser.net.handle(`${DEPLOYMENTS_PATH}?repo=octo%2Fapp`, () =>
+    browser.net.handle(`${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`, () =>
       jsonResponse({
         deployments: [
-          { app: "store", environment: "dev", status: "pending" },
-          { app: "other", environment: "dev", status: "pending" }
+          { app: "store", environment: "dev", status: "pending", runUrl: "" },
+          { app: "other", environment: "dev", status: "pending", runUrl: "" }
         ]
       })
     );
@@ -786,8 +787,43 @@ describe("planned selectors", () => {
         environments: [{ name: "dev", provider: "azure", status: "success" }]
       })
     );
-    browser.net.handle(`${DEPLOYMENTS_PATH}?repo=octo%2Fapp`, () =>
+    browser.net.handle(`${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`, () =>
       jsonResponse({ deployments: [], error: "unavailable" })
+    );
+
+    const state = createPlanState();
+    await populatePlannedSelectors(browser.context, state, {
+      repo: "octo/app",
+      environmentProviders: {},
+      defaultBranch: "feature",
+      defaultEnvironment: "dev"
+    });
+
+    expect(state.deploymentsStale).toBe(true);
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "Deployment states could not be loaded"
+    );
+  });
+
+  it("fails closed when the deployment listing request rejects", async () => {
+    const { browser, button } = plannedPage();
+    browser.net.handle(`${APPLICATIONS_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({ applications: [{ name: "store" }] })
+    );
+    browser.net.handle(BRANCHES_PATH, () =>
+      jsonResponse({
+        branches: [{ name: "feature", sha: "worktree" }],
+        workspaceBranch: "feature"
+      })
+    );
+    browser.net.handle(`${ENVIRONMENTS_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [{ name: "dev", provider: "azure", status: "success" }]
+      })
+    );
+    browser.net.handle(`${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`, () =>
+      Promise.reject(new Error("offline"))
     );
 
     const state = createPlanState();
@@ -1023,6 +1059,51 @@ describe("deployment listings", () => {
   });
 
   it.each([
+    null,
+    {},
+    { deployments: "not-an-array" },
+    { deployments: [null] },
+    {
+      deployments: [
+        { app: "store", environment: "dev", status: "", runUrl: "" }
+      ]
+    },
+    {
+      deployments: [{ app: "store", environment: "dev", status: "pending" }]
+    }
+  ])("rejects an incomplete required deployment listing", (payload) => {
+    expect(parseRequiredDeploymentListing(payload)).toEqual({
+      deployments: [],
+      error: "Invalid deployment listing."
+    });
+  });
+
+  it("accepts complete required deployment records", () => {
+    expect(
+      parseRequiredDeploymentListing({
+        deployments: [
+          {
+            app: "store",
+            environment: "dev",
+            status: "pending",
+            runUrl: ""
+          }
+        ]
+      })
+    ).toEqual({
+      deployments: [
+        {
+          app: "store",
+          environment: "dev",
+          status: "pending",
+          runUrl: ""
+        }
+      ],
+      error: ""
+    });
+  });
+
+  it.each([
     ["pending", true],
     ["in_progress", true],
     ["deleting", true],
@@ -1088,6 +1169,19 @@ describe("planned primary button state", () => {
     expect(button.getAttribute("title")).toBeNull();
   });
 
+  it("requires an application before enabling deployment", () => {
+    const { browser, button, created } = plannedButtons();
+    created["planned-branch"].value = "feature";
+    created["planned-env"].value = "dev";
+
+    applyPlanEnvState(browser.context, readyPlanState(), true, false);
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toBe(
+      "Select the application to deploy."
+    );
+  });
+
   it("offers environment creation when the repository has none", () => {
     const { browser, button, hint } = plannedButtons();
     const state = createPlanState();
@@ -1108,6 +1202,7 @@ describe("planned primary button state", () => {
     "refuses to deploy with branch %s and environment %s",
     (branch, environment, reason) => {
       const { browser, button, created } = plannedButtons();
+      created["planned-app"].value = "store";
       created["planned-branch"].value = branch;
       created["planned-env"].value = environment;
 
@@ -1122,6 +1217,7 @@ describe("planned primary button state", () => {
     "refuses to plan a deploy into a %s environment",
     (status) => {
       const { browser, button, created } = plannedButtons();
+      created["planned-app"].value = "store";
       created["planned-branch"].value = "feature";
       created["planned-env"].value = "dev";
       const state = createPlanState();
@@ -1139,6 +1235,7 @@ describe("planned primary button state", () => {
 
   it("allows a planned deploy when verification history is unavailable", () => {
     const { browser, button, created } = plannedButtons();
+    created["planned-app"].value = "store";
     created["planned-branch"].value = "feature";
     created["planned-env"].value = "dev";
     const state = createPlanState();
@@ -1153,6 +1250,7 @@ describe("planned primary button state", () => {
 
   it("disables deployment while the last plan request failed", () => {
     const { browser, button, created } = plannedButtons();
+    created["planned-app"].value = "store";
     created["planned-branch"].value = "feature";
     created["planned-env"].value = "dev";
     const state = createPlanState();
@@ -1167,6 +1265,7 @@ describe("planned primary button state", () => {
 
   it("clears a stale title when the state becomes deployable", () => {
     const { browser, button, created } = plannedButtons();
+    created["planned-app"].value = "store";
     applyPlanEnvState(browser.context, readyPlanState(), true, false);
     expect(button.getAttribute("title")).not.toBeNull();
 
