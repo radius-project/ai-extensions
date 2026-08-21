@@ -1,38 +1,9 @@
-import type { ComputePlatform, OidcResult, PortalContext } from "./types.js";
+import type { ComputePlatform, PortalContext } from "./types.js";
 
 export const aws: ComputePlatform = {
   id: "aws",
   displayName: "AWS",
-  recipePlatform: "aws",
   clusterServiceName: "EKS",
-  supports: { oidc: true, portalUrl: true },
-
-  generateOidc(data: any): OidcResult {
-    return {
-      message: "AWS authentication validated",
-      output: `# AWS OIDC Authentication Verified
-Account ID: ${data.accountId || ""}
-Region: ${data.region || ""}
-
-# GitHub Actions will use OIDC to assume a role in this account.
-# The following variables have been configured (these identifiers are not secret):
-
-gh variable set AWS_ACCOUNT_ID --body "${data.accountId || ""}"
-gh variable set AWS_REGION --body "${data.region || ""}"
-`
-    };
-  },
-
-  environmentSecrets(data: any) {
-    return [
-      {
-        kind: "variable" as const,
-        name: "AWS_ACCOUNT_ID",
-        value: data.accountId
-      },
-      { kind: "variable" as const, name: "AWS_REGION", value: data.region }
-    ];
-  },
 
   portalUrl(resourceType: string, ctx: PortalContext): string {
     const region = ctx.region;

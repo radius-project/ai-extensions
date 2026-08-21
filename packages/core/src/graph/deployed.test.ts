@@ -5,7 +5,7 @@ import {
   projectDeployedGraph
 } from "./deployed.js";
 import type { DeployStatus } from "./deployed.js";
-import { buildResourceID } from "./model.js";
+import { buildResourceID } from "../../test/support/resource-id.js";
 
 function makeResource(type: string, name: string, extra: any = {}) {
   return {
