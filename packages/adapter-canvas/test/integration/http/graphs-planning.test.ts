@@ -1,6 +1,10 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { deployStatusKeys, projectDeployedGraph } from "@radius-project/core";
+import {
+  deployStatusKeys,
+  mergeDeployedGraphMetadata,
+  projectDeployedGraph
+} from "@radius-project/core";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import {
@@ -87,6 +91,7 @@ function start(): Harness {
       buildDeployStatusMap,
       buildDeployMessageMap,
       deployStatusKeys,
+      mergeDeployedGraphMetadata,
       projectDeployedGraph,
       canvasGraphResources: (values) => values as CanvasGraphResource[],
       applyDeployMessages: (resources, messageMap) => {
@@ -237,7 +242,19 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     harness.reader.graph = {
       graph: {
         resources: [
-          { id: "res-a", name: "api", type: "Radius.Compute/containers" }
+          {
+            id: "res-a",
+            name: "api",
+            type: "Radius.Compute/containers",
+            outputResources: [
+              { id: "service", name: "api", type: "core/Service" },
+              {
+                id: "deployment",
+                name: "api",
+                type: "apps/Deployment"
+              }
+            ]
+          }
         ]
       },
       status: "ok"
@@ -271,7 +288,10 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
           deployStatus: "failed",
           deployMessage: "recipe failed",
           connections: [],
-          outputResources: []
+          outputResources: [
+            { id: "service", name: "api", type: "core/Service" },
+            { id: "deployment", name: "api", type: "apps/Deployment" }
+          ]
         }
       ],
       repo: "octo/app",
@@ -504,6 +524,54 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
         runId: null
       }
     ]);
+  });
+
+  it("applies a newer same-run artifact before the final graph is published", async () => {
+    const harness = start();
+    harness.state.contextRepo = "octo/app";
+    harness.state.deployStatus = "in_progress";
+    harness.state.deployRunId = 32529608815;
+    harness.state.deployingResources = [
+      {
+        id: "container",
+        name: "todo-list-app-1",
+        type: "Radius.Compute/containers",
+        deployStatus: "in_progress"
+      }
+    ];
+    harness.modeledResources.push({
+      id: "container",
+      name: "todo-list-app-1",
+      type: "Radius.Compute/containers"
+    });
+    harness.reader.progress = {
+      schemaVersion: 1,
+      application: "todo-list-app-1",
+      environment: "default",
+      runId: 32529608815,
+      sequence: 5,
+      state: "in_progress",
+      resources: [
+        {
+          id: "container",
+          name: "todo-list-app-1",
+          type: "Radius.Compute/containers",
+          outputResourceIds: ["deployment", "service"],
+          provisioningState: "Succeeded",
+          status: "success"
+        }
+      ]
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+    const payload = (await response.json()) as {
+      mode: string;
+      resources: CanvasGraphResource[];
+    };
+
+    expect(payload.mode).toBe("live");
+    expect(payload.resources[0].deployStatus).toBe("success");
   });
 
   it("publishes a read failure to the sibling progress route", async () => {

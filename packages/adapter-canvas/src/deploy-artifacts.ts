@@ -78,6 +78,7 @@ export interface DeployProgressResource {
   id?: string;
   name: string;
   type: string;
+  outputResourceIds?: string[];
   provisioningState?: string;
   status?: DeployStatus;
   message?: string;
@@ -284,6 +285,13 @@ export function parseDeployProgressArtifact(
       id: typeof raw.id === "string" ? raw.id : undefined,
       name,
       type: typeof raw.type === "string" ? raw.type : "",
+      outputResourceIds:
+        Array.isArray(raw.outputResourceIds) ?
+          raw.outputResourceIds.filter(
+            (value): value is string =>
+              typeof value === "string" && value.trim() !== ""
+          )
+        : undefined,
       provisioningState:
         typeof raw.provisioningState === "string" ?
           raw.provisioningState
@@ -405,6 +413,13 @@ export function buildDeployStatusMap(
 ): Map<string, DeployStatus> {
   const map = new Map<string, DeployStatus>();
   if (!progress || !Array.isArray(progress.resources)) return map;
+  // Reserve authoritative modeled ids before adding output aliases. A concrete
+  // output can be shared by multiple parents or equal another parent's id; an
+  // alias must never claim that parent's exact key.
+  for (const resource of progress.resources) {
+    const id = (resource.id || "").trim();
+    if (id && !map.has(id)) map.set(id, resolveResourceStatus(resource));
+  }
   for (const resource of progress.resources) {
     const status = resolveResourceStatus(resource);
     for (const key of deployStatusKeys(resource)) {
@@ -431,10 +446,22 @@ export function buildDeployMessageMap(
 ): Map<string, string> {
   const map = new Map<string, string>();
   if (!progress || !Array.isArray(progress.resources)) return map;
+  const directIds = new Set(
+    progress.resources
+      .map((resource) => (resource.id || "").trim())
+      .filter(Boolean)
+  );
   for (const resource of progress.resources) {
+    const id = (resource.id || "").trim();
+    const message = (resource.message || "").trim();
+    if (id && message && !map.has(id)) map.set(id, message);
+  }
+  for (const resource of progress.resources) {
+    const resourceId = (resource.id || "").trim();
     const message = (resource.message || "").trim();
     if (!message) continue;
     for (const key of deployStatusKeys(resource)) {
+      if (directIds.has(key) && key !== resourceId) continue;
       if (!map.has(key)) map.set(key, message);
     }
   }

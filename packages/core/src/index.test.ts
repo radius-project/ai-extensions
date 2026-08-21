@@ -18,6 +18,7 @@ const EXPECTED_FUNCTIONS = [
   "deployStatusKeys",
   "filterGraphVisualizationResources",
   "lookupDeployStatus",
+  "mergeDeployedGraphMetadata",
   "projectDeployedGraph",
   "evaluateAppModelFreshness",
   "normalizeAppBicep",

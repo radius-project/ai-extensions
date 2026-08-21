@@ -264,6 +264,24 @@ describe("parseDeployProgressArtifact", () => {
     expect(parsed?.resources[0].status).toBeUndefined();
   });
 
+  it("accepts optional exact output resource ids and drops malformed entries", () => {
+    const parsed = parseDeployProgressArtifact(
+      progressPayload({
+        resources: [
+          {
+            name: "api",
+            type: "Radius.Compute/containers",
+            outputResourceIds: ["deployment", "", 42, "service"]
+          }
+        ] as any
+      })
+    );
+    expect(parsed?.resources[0].outputResourceIds).toEqual([
+      "deployment",
+      "service"
+    ]);
+  });
+
   it("rejects a payload without a finite positive-integer sequence", () => {
     // The producer contract starts sequences at 1 and increments by 1.
     // Accepting a bogus value would let malformed uploads win the
@@ -444,6 +462,50 @@ describe("buildDeployStatusMap", () => {
     expect(map.get("id-a")).toBe("success");
     expect(map.get("id-b")).toBe("failed");
     expect(map.get("dup")).toBe("success");
+  });
+
+  it("reserves modeled ids before adding shared output aliases", () => {
+    const progress = parseDeployProgressArtifact(
+      progressPayload({
+        resources: [
+          {
+            id: "id-a",
+            name: "a",
+            type: "A",
+            outputResourceIds: ["id-b"],
+            status: "failed",
+            message: "alias failure"
+          },
+          {
+            id: "id-b",
+            name: "b",
+            type: "B",
+            status: "success",
+            message: "direct success"
+          }
+        ]
+      })
+    );
+    expect(buildDeployStatusMap(progress).get("id-b")).toBe("success");
+    expect(buildDeployMessageMap(progress).get("id-b")).toBe("direct success");
+  });
+
+  it("does not attach an alias message to a direct id with no message", () => {
+    const progress = parseDeployProgressArtifact(
+      progressPayload({
+        resources: [
+          {
+            id: "id-a",
+            name: "a",
+            type: "A",
+            outputResourceIds: ["id-b"],
+            message: "alias failure"
+          },
+          { id: "id-b", name: "b", type: "B", message: "" }
+        ]
+      })
+    );
+    expect(buildDeployMessageMap(progress).get("id-b")).toBeUndefined();
   });
 
   it("returns an empty map for a null payload", () => {
@@ -718,6 +780,53 @@ describe("the producer's real payload", () => {
       "in_progress"
     ]);
     expect(projected.every((r) => r.outputResources.length === 0)).toBe(true);
+  });
+
+  it("indexes status and messages by exact output resource ids", () => {
+    const progress = parseDeployProgressArtifact(
+      progressPayload({
+        resources: [
+          {
+            id: "parent",
+            name: "api",
+            type: "Radius.Compute/containers",
+            outputResourceIds: ["apps/deployments/api", "core/services/api"],
+            status: "success",
+            message: "deployed"
+          }
+        ]
+      })
+    );
+    expect(buildDeployStatusMap(progress)).toEqual(
+      new Map([
+        ["parent", "success"],
+        ["apps/deployments/api", "success"],
+        ["core/services/api", "success"],
+        ["api|radius.compute/containers", "success"],
+        ["api", "success"]
+      ])
+    );
+    expect(buildDeployMessageMap(progress).get("apps/deployments/api")).toBe(
+      "deployed"
+    );
+    const resources = [
+      {
+        id: "locally-synthesized-parent",
+        name: "different-local-name",
+        type: "Radius.Compute/containers",
+        outputResources: [{ id: "apps/deployments/api" }],
+        deployStatus: "in_progress" as const
+      }
+    ];
+    expect(
+      applyDeployStatusToResources(resources, buildDeployStatusMap(progress))
+    ).toEqual([
+      {
+        name: "different-local-name",
+        from: "in_progress",
+        to: "success"
+      }
+    ]);
   });
 
   it("confirms identity against the artifact name for this run", () => {
