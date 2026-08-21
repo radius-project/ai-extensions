@@ -3,7 +3,10 @@ import {
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
 import { recordGraphBuildEvent } from "../../shared.js";
-import { GRAPH_APP_BICEP_TIMEOUT_MS } from "../../graph-progress-contract.js";
+import {
+  GRAPH_APP_BICEP_TIMEOUT_MS,
+  GraphModelingFailure
+} from "../../graph-progress-contract.js";
 import type {
   CanvasGraphResource,
   CanvasState,
@@ -37,16 +40,6 @@ const MISSING_ENTRY_PAYLOAD = {
 } as const;
 const GENERATING_APP_BICEP_MESSAGE =
   "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.";
-
-// What the canvas says when modeling fails. The thrown detail is `rad`'s raw
-// compile output — pages of Bicep diagnostics with file offsets into
-// .radius/app.bicep — and the graph pages render a failure as graph content, so
-// forwarding it puts a compiler transcript where the application graph belongs
-// (issue #475). A failed compile is a defect in the generated model rather than
-// something the user acts on in the graph, so the response carries one sentence
-// and the detail goes to the server log through `logError`.
-export const GRAPH_MODELING_FAILURE_MESSAGE =
-  "Radius could not build the application graph from .radius/app.bicep. Ask Copilot to review the application model, then try again.";
 
 // `bare` responses are written without a `Content-Type` header, exactly as the
 // legacy branches wrote them: the missing-entry 503 on all three routes, and
@@ -326,12 +319,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     try {
       outcome = await run();
     } catch (e) {
-      dependencies.logError(
-        `[radius graph] modeling failed: ${dependencies.errorMessage(e)}`
-      );
-      hooks.onError(GRAPH_MODELING_FAILURE_MESSAGE);
-      outcome = json(400, { error: GRAPH_MODELING_FAILURE_MESSAGE });
+      const error = dependencies.errorMessage(e);
+      hooks.onError(error);
+      outcome = json(400, { error });
     }
+
     const state = hooks.state();
     if (state) {
       settleGraphProgress(
@@ -342,6 +334,19 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       );
     }
     return outcome;
+  }
+
+  async function compileResources(
+    input: Parameters<GraphPipeline<TEntry>["compileResources"]>[0]
+  ): ReturnType<GraphPipeline<TEntry>["compileResources"]> {
+    try {
+      return await pipeline.compileResources(input);
+    } catch (error) {
+      dependencies.logError(
+        `[radius graph] modeling failed: ${dependencies.errorMessage(error)}`
+      );
+      throw new GraphModelingFailure(error);
+    }
   }
 
   // The app-bicep modeling skill refuses outright — before writing anything —
@@ -536,7 +541,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         "Compiling the application model and building the resource graph."
       );
-      const resources = await pipeline.compileResources({
+      const resources = await compileResources({
         selection,
         staged,
         log: addBuildDetail,
@@ -707,7 +712,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         "Compiling the application model and building the resource graph."
       );
-      const resources = await pipeline.compileResources({
+      const resources = await compileResources({
         selection,
         staged,
         log: addBuildDetail
@@ -951,7 +956,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         `Building the graph for ${data.base}.`
       );
-      const baseResources = await pipeline.compileResources({
+      const baseResources = await compileResources({
         selection: baseSelection,
         staged: baseStaged
       });
@@ -965,7 +970,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         `Building the graph for ${data.head}.`
       );
-      const headResources = await pipeline.compileResources({
+      const headResources = await compileResources({
         selection: headSelection,
         staged: headStaged
       });

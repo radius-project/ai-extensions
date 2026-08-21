@@ -822,7 +822,8 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   buildGraphViaRad: (content, bicepPath, options) =>
     buildGraphViaRad(content, bicepPath, options),
   canvasGraphResources,
-  errorMessage
+  errorMessage,
+  logError: (message) => console.error(message)
 });
 
 // Composition root for the write half of the `graphs-planning` family. The

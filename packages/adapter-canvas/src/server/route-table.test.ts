@@ -211,7 +211,8 @@ const productionHandlers = {
       Promise.resolve({ dir: "", remote: false }),
     buildGraphViaRad: () => Promise.resolve([]),
     canvasGraphResources: () => [],
-    errorMessage: (error) => String(error)
+    errorMessage: (error) => String(error),
+    logError: () => {}
   }),
   ...createGraphsPlanningWritesRoutes({
     workflows: createGraphPlanningWorkflows({

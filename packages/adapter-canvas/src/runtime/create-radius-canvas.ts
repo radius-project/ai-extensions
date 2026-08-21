@@ -25,7 +25,11 @@ import { reloadCanvasInstance } from "./canvas-lifecycle.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasServerEntry } from "../server.js";
-import type { CanvasState } from "../shared.js";
+import type { CanvasGraphResource, CanvasState } from "../shared.js";
+import {
+  GRAPH_MODELING_FAILURE_MESSAGE,
+  GraphModelingFailure
+} from "../graph-progress-contract.js";
 
 const MAX_DEFERRED_ENVIRONMENT_CLOSE_MS = 46 * 60 * 1000;
 
@@ -413,24 +417,33 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
               bicepRepoPath: ".radius/app.bicep",
               log
             });
-          const baseResources = await deps.rad.buildGraphViaRad(
-            baseContent || "",
-            ".radius/app.bicep",
-            {
-              log,
-              radArtifactsDir: baseRadArtifactsDir,
-              cleanupRadArtifactsDir: baseRadArtifactsRemote
-            }
-          );
-          const headResources = await deps.rad.buildGraphViaRad(
-            headContent || "",
-            ".radius/app.bicep",
-            {
-              log,
-              radArtifactsDir: headRadArtifactsDir,
-              cleanupRadArtifactsDir: headRadArtifactsRemote
-            }
-          );
+          let baseResources: CanvasGraphResource[];
+          let headResources: CanvasGraphResource[];
+          try {
+            baseResources = await deps.rad.buildGraphViaRad(
+              baseContent || "",
+              ".radius/app.bicep",
+              {
+                log,
+                radArtifactsDir: baseRadArtifactsDir,
+                cleanupRadArtifactsDir: baseRadArtifactsRemote
+              }
+            );
+            headResources = await deps.rad.buildGraphViaRad(
+              headContent || "",
+              ".radius/app.bicep",
+              {
+                log,
+                radArtifactsDir: headRadArtifactsDir,
+                cleanupRadArtifactsDir: headRadArtifactsRemote
+              }
+            );
+          } catch (error) {
+            deps.logError(
+              `[radius graph] modeling failed: ${errorMessage(error)}`
+            );
+            throw new GraphModelingFailure(error);
+          }
           const diffResources = deps.core.computeGraphDiff(
             baseResources,
             headResources
@@ -452,7 +465,10 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
           if (
             isCurrentSourceRefToken(entry.state, "diff", sourceRefContext.token)
           ) {
-            entry.state.diffError = errorMessage(e);
+            entry.state.diffError =
+              e instanceof GraphModelingFailure ?
+                GRAPH_MODELING_FAILURE_MESSAGE
+              : errorMessage(e);
           }
         }
       }

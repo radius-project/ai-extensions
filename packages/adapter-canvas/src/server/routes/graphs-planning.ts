@@ -2,6 +2,7 @@ import {
   evaluateAppSource,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
+import { GraphModelingFailure } from "../../graph-progress-contract.js";
 import type { DeployStatus } from "@radius-project/core";
 import type { DeployProgress } from "../../deploy-artifacts.js";
 import { recordGraphBuildEvent } from "../../shared.js";
@@ -545,6 +546,7 @@ export interface GraphsPlanningStreamDependencies {
   ): Promise<unknown[]>;
   canvasGraphResources(values: unknown[]): CanvasGraphResource[];
   errorMessage(error: unknown): string;
+  logError(message: string): void;
 }
 
 // The progress log the Graph tab streams while `rad` models the app. The
@@ -643,8 +645,9 @@ export async function handleLoadGraphStream(
         bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
         log: sendProgress
       });
-    const resources = dependencies.canvasGraphResources(
-      await dependencies.buildGraphViaRad(
+    let graphValues: unknown[];
+    try {
+      graphValues = await dependencies.buildGraphViaRad(
         content,
         selection.bicepPath || ".radius/app.bicep",
         {
@@ -653,8 +656,14 @@ export async function handleLoadGraphStream(
           radArtifactsDir,
           cleanupRadArtifactsDir: radArtifactsRemote
         }
-      )
-    );
+      );
+    } catch (error) {
+      dependencies.logError(
+        `[radius graph] modeling failed: ${dependencies.errorMessage(error)}`
+      );
+      throw new GraphModelingFailure(error);
+    }
+    const resources = dependencies.canvasGraphResources(graphValues);
     sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
     if (

@@ -7,6 +7,7 @@ import {
   type LoadGraphStreamBicepSelection
 } from "../../../src/server/routes/graphs-planning.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
+import { GRAPH_MODELING_FAILURE_MESSAGE } from "../../../src/graph-progress-contract.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
@@ -107,7 +108,8 @@ function start(): Harness {
       },
       canvasGraphResources: (values) => values as CanvasGraphResource[],
       errorMessage: (error) =>
-        error instanceof Error ? error.message : String(error)
+        error instanceof Error ? error.message : String(error),
+      logError: () => {}
     })
   );
 
@@ -357,7 +359,7 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
     ]);
   });
 
-  it("streams a formatted error done frame when the compile fails", async () => {
+  it("keeps compile diagnostics out of the terminal done frame", async () => {
     const harness = start();
     harness.script.buildThrows = new Error("rad exited 1");
     const entry = await container!.getOrCreate("panel-a");
@@ -368,7 +370,7 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
     const { frames } = await readFrames(response);
     expect(frames.at(-1)).toEqual({
       event: "done",
-      data: { error: "rad exited 1" }
+      data: { error: GRAPH_MODELING_FAILURE_MESSAGE }
     });
     // A failed compile leaves no provenance behind.
     expect(harness.state.graphTargetRepo).toBeUndefined();

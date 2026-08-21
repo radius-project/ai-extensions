@@ -7,6 +7,7 @@ import {
   createFakeSession
 } from "../../test/support/runtime/fakes.js";
 import type { CanvasGraphResource } from "../shared.js";
+import { GRAPH_MODELING_FAILURE_MESSAGE } from "../graph-progress-contract.js";
 
 interface CanvasContext {
   extensionId: string;
@@ -462,7 +463,10 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     );
 
     expect(deps.servers.get("radius-panel")!.state.diffError).toBe(
-      "graph compilation failed"
+      GRAPH_MODELING_FAILURE_MESSAGE
+    );
+    expect(deps.logError).toHaveBeenCalledWith(
+      "[radius graph] modeling failed: graph compilation failed"
     );
   });
 

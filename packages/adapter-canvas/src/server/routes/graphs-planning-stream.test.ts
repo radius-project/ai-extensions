@@ -11,6 +11,7 @@ import {
   type GraphsPlanningStreamDependencies,
   type LoadGraphStreamBicepSelection
 } from "./graphs-planning.js";
+import { GRAPH_MODELING_FAILURE_MESSAGE } from "../../graph-progress-contract.js";
 
 // ── Recorder ─────────────────────────────────────────────────────────────────
 // The stream handler writes SSE frames through `response.write` and terminates
@@ -204,7 +205,10 @@ function fakes(options: Options = {}): Fakes {
     // Distinct from the raw message so a handler that formats the error itself
     // instead of using the injected formatter is detectable.
     errorMessage: (error) =>
-      `formatted:${error instanceof Error ? error.message : String(error)}`
+      `formatted:${error instanceof Error ? error.message : String(error)}`,
+    logError: (message) => {
+      calls.push(`logError(${message})`);
+    }
   };
   return { deps, entry, calls };
 }
@@ -457,12 +461,12 @@ describe("graphs-planning load-graph-stream route", () => {
     });
   });
 
-  it("streams a formatted error done frame when the compile throws", async () => {
+  it("keeps compile diagnostics out of the terminal done frame", async () => {
     const { deps } = fakes({ buildThrows: new Error("rad failed") });
     const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
     expect(frames(recording.stream).at(-1)).toEqual({
       event: "done",
-      data: { error: "formatted:rad failed" }
+      data: { error: `formatted:${GRAPH_MODELING_FAILURE_MESSAGE}` }
     });
   });
 
