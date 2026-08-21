@@ -1218,6 +1218,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       ],
       branchNotPushedKind: "branch-not-pushed",
       oidcSubjectMissingKind: "oidc-subject-missing",
+      oidcSubjectCaseMismatchKind: "oidc-subject-case-mismatch",
       getBranchHeadSha: () => {
         record("branch-head-sha");
         return Promise.resolve("sha-1");

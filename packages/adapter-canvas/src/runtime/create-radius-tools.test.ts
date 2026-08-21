@@ -401,7 +401,13 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
       tools,
       "radius_generate_pr_diff_markdown"
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
-    expect(result).toContain("does not exist on main or feat yet");
+    expect(result).toMatchObject({
+      resultType: "success",
+      textResultForLlm: expect.stringContaining(
+        "does not exist on main or feat yet"
+      ),
+      toolTelemetry: { radiusGraphDiff: { outcome: "unavailable" } }
+    });
     expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
   });
 
@@ -422,9 +428,13 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
       tools,
       "radius_generate_pr_diff_markdown"
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
-    expect(result).toContain("Application Graph Diff");
-    expect(result).toContain("main");
-    expect(result).toContain("feat");
+    expect(result).toMatchObject({
+      resultType: "success",
+      textResultForLlm: expect.stringContaining("Application Graph Diff"),
+      toolTelemetry: { radiusGraphDiff: { outcome: "diff" } }
+    });
+    expect(result.textResultForLlm).toContain("main");
+    expect(result.textResultForLlm).toContain("feat");
   });
 
   it("maps a fetch/build failure to a friendly warning instead of throwing", async () => {
@@ -441,8 +451,13 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
       tools,
       "radius_generate_pr_diff_markdown"
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
-    expect(result).toContain("Could not generate app graph diff");
-    expect(result).toContain("rad exploded");
+    expect(result).toMatchObject({
+      resultType: "failure",
+      error: expect.stringContaining("rad exploded"),
+      textResultForLlm: expect.stringContaining(
+        "Could not generate app graph diff"
+      )
+    });
   });
 
   it("logs graph build progress when available without letting a logging failure break the diff", async () => {
@@ -469,7 +484,7 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
 
     expect(session.log).toHaveBeenCalledWith("building graph");
-    expect(result).toContain("Application Graph Diff");
+    expect(result.textResultForLlm).toContain("Application Graph Diff");
   });
 });
 

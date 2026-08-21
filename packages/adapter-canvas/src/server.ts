@@ -114,6 +114,7 @@ import {
   hasWarnings,
   addLegacyStep,
   setContext,
+  setCanonicalEnvironment,
   setCloudContext,
   getSetupArtifactLedger,
   recordAzureApp,
@@ -217,6 +218,7 @@ import { createDeployMonitorService } from "./server/services/deploy-monitor.js"
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
+import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -1012,6 +1014,8 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
       getGitHubIdentity,
       executor
     ),
+  readGitHubJson: (apiPath, executor) =>
+    runGitHubJsonRequest(apiPath, executor),
   bootstrapGHCRStatePackage: (input) =>
     bootstrapGHCRStatePackage({
       targetRepository: input.targetRepository,
@@ -1050,7 +1054,9 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
       } catch {}
     }
   },
-  resolveGitHubEnvironmentCreateState,
+  setCanonicalEnvironment: (operation, environment) => {
+    setCanonicalEnvironment(operation, environment);
+  },
   recordGitHubEnvironment: (operation, patch) => {
     recordGitHubEnvironment(operation, patch);
   },
@@ -1774,9 +1780,8 @@ function triggerAppBicepHandoff(
 // per repair loop: once the agent owns the loop it redeploys and re-reads status
 // itself, so re-handing off every failed attempt would double-drive it.
 // `branch-not-pushed` is excluded: the user fixes that with a push, not by
-// editing the model. `oidc-subject-missing` is excluded for the same reason: the
-// remedy is re-running Create Environment or adding a federated credential in
-// Azure, neither of which the agent can reach by editing app.bicep.
+// editing the model. Azure OIDC preflight failures are excluded for the same
+// reason: their remedies live in cloud identity configuration, not app.bicep.
 //
 // Delivery is tracked explicitly (pending -> delivered | failed) because the
 // browser stops polling once a deploy is terminal: a rejected send has no later
@@ -1818,6 +1823,12 @@ export const DEPLOY_RUN_UNCONFIRMED_KIND: DeployErrorKind = "run-unconfirmed";
 // never opens a repair loop.
 export const DEPLOY_OIDC_SUBJECT_MISSING_KIND: DeployErrorKind =
   "oidc-subject-missing";
+
+// A federated credential exists, but Entra's case-sensitive subject comparison
+// rejects it. This stays distinct from "missing" so the browser does not send
+// the user through environment creation, which would preserve the bad casing.
+export const DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND: DeployErrorKind =
+  "oidc-subject-case-mismatch";
 
 // Ceiling for the preflight's `az` call. The check is advisory — it can only
 // block on a definitive answer — so a slow or hung `az` must not hold up a
@@ -1996,6 +2007,7 @@ export function triggerDeployRepairHandoff(
       // Refused before dispatch because no federated credential can match the
       // token GitHub would mint. Repairing the model cannot change that.
       state.deployErrorKind === DEPLOY_OIDC_SUBJECT_MISSING_KIND ||
+      state.deployErrorKind === DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND ||
       // An attempt whose run may still be in flight can never be repaired: the
       // resolver refuses its redeploy. Opening a loop only to refuse its first
       // call would spend a cycle and tell the agent two different things.
@@ -2278,6 +2290,7 @@ const deployDispatchService = createDeployDispatchService({
   deployWorkflowFiles: [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
   branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
   oidcSubjectMissingKind: DEPLOY_OIDC_SUBJECT_MISSING_KIND,
+  oidcSubjectCaseMismatchKind: DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
   getBranchHeadSha,
   getDefaultBranch,
   runGh: runGhForDeploy,
@@ -2392,15 +2405,6 @@ function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
       else resolve((stdout || "").trim());
     });
   });
-}
-
-export function resolveGitHubEnvironmentCreateState(
-  result: Partial<CommandResult> | null | undefined
-): "created_candidate" | "reused" | null {
-  if (!result) return null;
-  if (result.code === 0 || result.code === "0") return "reused";
-  const detail = `${result.stderr || ""}\n${result.stdout || ""}`;
-  return /HTTP 404|Not Found|404\b/i.test(detail) ? "created_candidate" : null;
 }
 
 export async function deleteNewlyCreatedGitHubEnvironment(
@@ -3817,36 +3821,76 @@ function createInstanceRequestCoordinator(
         async (executor) => {
           selectedGitHubExecutorsByOperation.set(operationId, executor);
           executorRegistered = true;
-          let setupResult: any = null;
-          if (op.provider === "azure" && request.needsAzureCredentials) {
-            setupResult = await postInternal("/api/azure-auto-setup", {
-              ...request.azure,
-              repo: op.repo,
-              environment: op.environment,
-              operationId
-            });
-            if (setupResult?.inputRequired || op.state === "input_required") {
-              return { shouldMonitor: false };
-            }
-          }
-          const current = operations.get(operationId);
-          if (
-            !current ||
-            current.state === "input_required" ||
-            current.endedAt
-          ) {
-            return { shouldMonitor: false };
-          }
-          await postInternal("/api/create-environment", {
-            ...request.environment,
-            repo: op.repo,
-            environment: op.environment,
-            provider: op.provider,
-            operationId,
-            clientId:
-              setupResult?.clientId || request.environment?.clientId || ""
+          return runEnvironmentOperationWorkflow(op, executor, {
+            preflightRepoAdmin: (repo, selectedExecutor) =>
+              preflightRepoAdmin(repo, selectedExecutor),
+            preflightGhcrPackageWriteAccess: (selectedExecutor) =>
+              preflightGhcrPackageWriteAccess(
+                getGhPackageCredentials,
+                getGitHubIdentity,
+                selectedExecutor
+              ),
+            readGitHubJson: (apiPath, selectedExecutor) =>
+              runGitHubJsonRequest(apiPath, selectedExecutor),
+            setCanonicalEnvironment: (operation, environment) => {
+              setCanonicalEnvironment(operation, environment);
+            },
+            recordGitHubEnvironment: (operation, patch) => {
+              recordGitHubEnvironment(operation, patch);
+            },
+            addLegacyStep: (operation, text) => {
+              addLegacyStep(operation, text);
+            },
+            persistEnvironmentResolution: (operation) =>
+              persistMutationCheckpoint({
+                operation,
+                persist: () => operations.persist(),
+                report: (diagnostic) => operations.report?.(diagnostic),
+                fail: async (status, error, code) => {
+                  await finalizeSetupFailure(operation, {
+                    status,
+                    error,
+                    code,
+                    stage: operation.currentStage,
+                    classification: "unknown",
+                    runDeleteEnvironment: async (args) => {
+                      const result = await executor.run(args);
+                      if (result.code !== 0 && result.code !== "0") {
+                        throw new Error(
+                          (result.stderr || result.stdout || "").trim() ||
+                            "GitHub API request failed."
+                        );
+                      }
+                    }
+                  });
+                }
+              }),
+            finalizeEnvironmentResolutionFailure: async (
+              operation,
+              input,
+              selectedExecutor
+            ) => {
+              await finalizeSetupFailure(operation, {
+                ...input,
+                stage: operation.currentStage,
+                classification:
+                  input.code === "repo-admin-required" ?
+                    "needs-someone-else"
+                  : "unknown",
+                runDeleteEnvironment: async (args) => {
+                  const result = await selectedExecutor.run(args);
+                  if (result.code !== 0 && result.code !== "0") {
+                    throw new Error(
+                      (result.stderr || result.stdout || "").trim() ||
+                        "GitHub API request failed."
+                    );
+                  }
+                }
+              });
+            },
+            getOperation: (id) => operations.get(id),
+            postInternal
           });
-          return { shouldMonitor: true };
         },
         30000
       );
