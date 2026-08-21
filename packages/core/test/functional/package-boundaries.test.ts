@@ -10,8 +10,9 @@
 
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { readdir, readFile } from "node:fs/promises";
+import { builtinModules } from "node:module";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SRC_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -24,27 +25,19 @@ const SRC_DIR = join(
 const SPECIFIER_PATTERN =
   /\b(?:import|export)\b[^;]*?\bfrom\s*["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)|\bimport\s+["']([^"']+)["']/g;
 
-const NODE_BUILTINS = new Set([
-  "assert",
-  "buffer",
-  "child_process",
-  "crypto",
-  "events",
-  "fs",
-  "fs/promises",
-  "http",
-  "https",
-  "module",
-  "net",
-  "os",
-  "path",
-  "process",
-  "stream",
-  "url",
-  "util",
-  "worker_threads",
-  "zlib"
-]);
+// Derived from the running Node rather than hand-maintained: a list written out
+// by hand silently stops covering built-ins it did not anticipate, which lets a
+// browser-unsafe import land while this suite stays green. `builtinModules`
+// reports prefix-only modules (`node:test`, `node:sqlite`) in prefixed form, so
+// every entry is normalized to its bare specifier and the prefixed form is
+// matched separately below.
+const NODE_BUILTINS = new Set(
+  builtinModules.map((name) => name.replace(/^node:/, ""))
+);
+
+function isNodeBuiltin(specifier: string): boolean {
+  return specifier.startsWith("node:") || NODE_BUILTINS.has(specifier);
+}
 
 interface SourceFile {
   path: string;
@@ -97,14 +90,40 @@ describe("core package boundary", () => {
   it("imports no Node built-in, so the barrel can be bundled for the browser", () => {
     const offenders = sourceFiles.flatMap((file) =>
       file.specifiers
-        .filter(
-          (specifier) =>
-            specifier.startsWith("node:") || NODE_BUILTINS.has(specifier)
-        )
+        .filter((specifier) => isNodeBuiltin(specifier))
         .map((specifier) => `${file.path} -> ${specifier}`)
     );
 
     expect(offenders).toEqual([]);
+  });
+
+  // The check above can only fail a build-breaking import if it recognizes one,
+  // so the recognizer is exercised directly. The bare forms here were missing
+  // from the hand-maintained list this suite started with.
+  it.each([
+    "dns",
+    "perf_hooks",
+    "timers/promises",
+    "vm",
+    "fs",
+    "fs/promises",
+    "child_process",
+    "node:fs",
+    "node:timers/promises",
+    "node:test"
+  ])("recognizes %s as a Node built-in", (specifier) => {
+    expect(isNodeBuiltin(specifier)).toBe(true);
+  });
+
+  it.each([
+    "./graph/index.js",
+    "../ports/index.js",
+    "yaml",
+    "node-fetch",
+    "pathe",
+    "process-env-parser"
+  ])("does not mistake %s for a Node built-in", (specifier) => {
+    expect(isNodeBuiltin(specifier)).toBe(false);
   });
 
   it("imports no adapter, SDK, or HTTP implementation", () => {
@@ -173,23 +192,32 @@ describe("core package in a host without HTTP or DOM globals", () => {
   });
 
   it("exposes every subpath the package manifest declares, and nothing more", async () => {
+    const packageRoot = join(SRC_DIR, "..");
     const manifest = JSON.parse(
-      await readFile(join(SRC_DIR, "..", "package.json"), "utf8")
+      await readFile(join(packageRoot, "package.json"), "utf8")
     ) as { exports: Record<string, string> };
 
     // Only these three subpaths have an importer outside core. `./modeling` and
     // `./workflows` were declared but never imported, so they are not part of
-    // the package's contract.
-    expect(Object.keys(manifest.exports).sort()).toEqual([
-      ".",
-      "./graph",
-      "./platforms"
-    ]);
+    // the package's contract. Targets are pinned alongside the keys: a subpath
+    // repointed at the wrong module keeps the same key set.
+    expect(manifest.exports).toEqual({
+      ".": "./src/index.ts",
+      "./graph": "./src/graph/index.ts",
+      "./platforms": "./src/platforms/index.ts"
+    });
+
+    // Loaded through the manifest's own targets rather than hardcoded source
+    // paths, so the declared entry points are what actually gets imported.
+    const load = (subpath: string): Promise<Record<string, unknown>> =>
+      import(
+        pathToFileURL(join(packageRoot, manifest.exports[subpath])).href
+      ) as Promise<Record<string, unknown>>;
 
     const [barrel, graph, platforms] = await Promise.all([
-      import("../../src/index.js"),
-      import("../../src/graph/index.js"),
-      import("../../src/platforms/index.js")
+      load("."),
+      load("./graph"),
+      load("./platforms")
     ]);
 
     expect(typeof barrel.computeGraphDiff).toBe("function");

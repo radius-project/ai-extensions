@@ -1,10 +1,10 @@
 // Compute-platform abstraction for the Radius Canvas product.
 //
 // Each supported deployment target (Azure, AWS, …) implements ComputePlatform.
-// All provider-specific behavior — portal deep-links and the provider-gated
-// fragments injected into the verify/deploy GitHub Actions workflows — lives
-// behind this interface so adding a platform never requires touching the
-// workflow templates or UI adapters.
+// The interface owns platform identity, the managed-cluster label, and portal
+// deep-links, so those need no provider branching at the call site. Workflow
+// selection is not behind this interface — the verify/deploy workflow modules
+// still resolve provider-specific fragments themselves.
 
 /** Inputs used to build cloud-portal deep links for a deployed resource. */
 export interface PortalContext {

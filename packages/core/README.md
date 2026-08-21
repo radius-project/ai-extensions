@@ -90,6 +90,7 @@ Because all product logic is in `packages/core` behind ports, a new front-end
 1. Create `packages/adapter-<name>/` with its own entry and build.
 2. Implement the ports your adapter needs (today just `GitHub`) for that
    environment. The canvas implementation in `packages/adapter-canvas/src/gh.ts` is a reference.
+3. Import use-cases from `@radius-project/core` and wire them to your transport
    and rendering. Reuse pure renderers/helpers where the environment allows;
    keep transport-specific code (HTTP host, SDK surface) in the adapter.
 4. Add a build script that bundles the adapter, mirroring

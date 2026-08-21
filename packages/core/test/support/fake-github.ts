@@ -14,7 +14,11 @@ export interface FakeGitHubContent {
   directories?: Record<string, string[]>;
   /** `${repo}@${branch}` -> every path in that tree. */
   trees?: Record<string, string[]>;
-  /** getContent() paths that should resolve to null ("no such file") rather than throwing. */
+  /**
+   * `getContent` paths that resolve to null ("no such file") instead of
+   * throwing. Consulted only by `getContent`; `listNames` and `treePaths` are
+   * unaffected.
+   */
   absent?: string[];
 }
 
