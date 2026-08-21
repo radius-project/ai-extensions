@@ -1,8 +1,157 @@
 #!/usr/bin/env node
 
+// Compiles a generated application model and reports what Bicep rejected, and
+// bounds the repair loop that runs while the model is being authored.
+//
+// The bound lives here rather than in the skill's prose because prose only binds
+// an agent that is already following it, and the agent that loops is the one
+// that is not. It applies only to a compile inside a staged modeling run: the
+// run directory holds a `run.json` whose lifetime is exactly one run, which is
+// the right scope for the counter — one that outlived the run would refuse a
+// legitimate fresh run because of a stuck one last week. Compiling a file that
+// is not in a staged run has no budget and behaves exactly as it always has.
+//
+// The repair rules below MUST stay behavior-compatible with
+// packages/core/src/modeling/app-staging.ts. They are duplicated here rather
+// than imported because this script ships inside the installed plugin, where the
+// workspace packages do not exist; app-bicep-check.test.ts asserts the copies
+// agree.
+
 import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+const STAGING_RUN_RECORD = "run.json";
+const REPAIR_ATTEMPT_BUDGET = 3;
+
+function repairBudgetSpentMessage(attempts) {
+  return (
+    `The application model was compiled ${attempts} times in this modeling run and still does not build, ` +
+    `so the repair budget of ${REPAIR_ATTEMPT_BUDGET} is spent and it was not compiled again. ` +
+    "Stop repairing: do not write the origin record and do not publish the run. " +
+    "Report to the user which resource and property the compiler rejected, quote the last compiler output verbatim, " +
+    "and say that no application definition was written."
+  );
+}
+
+const REPEATED_FAILURE_MESSAGE =
+  "This is the same compiler failure as the previous attempt, so the last fix " +
+  "did not address it. Make a materially different fix rather than varying one " +
+  "that has already failed, or use the remaining budget to establish why the " +
+  "schema cannot express what the source needs.";
+
+// A missing or unusable repair field reads as "no compiles yet" rather than
+// being rejected. Unlike the baseline, an unreadable counter cannot destroy
+// anything: the worst case is one extra compile, which is a much better failure
+// than refusing to compile a run that is fine.
+function parseRepairState(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { attempts: 0, fingerprint: null };
+  }
+  const attempts = value.attempts;
+  const fingerprint = value.fingerprint;
+  return {
+    attempts:
+      (
+        typeof attempts === "number" &&
+        Number.isInteger(attempts) &&
+        attempts > 0
+      ) ?
+        attempts
+      : 0,
+    fingerprint:
+      typeof fingerprint === "string" && fingerprint.trim() ?
+        fingerprint.trim()
+      : null
+  };
+}
+
+function evaluateRepairAttempt(state) {
+  const attempt = state.attempts + 1;
+  if (state.attempts >= REPAIR_ATTEMPT_BUDGET) {
+    return {
+      verdict: "exhausted",
+      allowed: false,
+      attempt,
+      reason: repairBudgetSpentMessage(state.attempts)
+    };
+  }
+  return { verdict: "allowed", allowed: true, attempt, reason: "" };
+}
+
+function nextRepairState(state, fingerprint) {
+  return { attempts: state.attempts + 1, fingerprint };
+}
+
+function isRepeatedFailure(state, fingerprint) {
+  return fingerprint !== null && state.fingerprint === fingerprint;
+}
+
+// Reduces compiler output to what is the same failure said twice. Line and
+// column numbers shift as the model is edited, absolute paths differ between
+// machines, and diagnostics do not come back in a stable order, so all three are
+// normalized away; what remains is the set of messages.
+function fingerprintCompilerOutput(output) {
+  const text = typeof output === "string" ? output : "";
+  const lines = text
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(/\r/gu, "")
+        .replace(/:\d+(?::\d+)?(?=:)/gu, ":")
+        .replace(/\bline \d+\b/gu, "line")
+        .replace(/\s+/gu, " ")
+        .trim()
+    )
+    .filter((line) => line !== "");
+  if (lines.length === 0) return "";
+  return [...new Set(lines)].sort().join("\n");
+}
+
+// The staged run this compile belongs to, or null when the model is not inside
+// one. Only the run record's presence makes a directory a staged run: a plain
+// `.radius/app.bicep`, or any other caller, has no budget.
+function readRunRecord(app) {
+  const file = path.join(path.dirname(app), STAGING_RUN_RECORD);
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // A record that exists but cannot be parsed still marks a staged run. It is
+    // not rewritten, because overwriting it would destroy the baseline the
+    // publish check needs; the run simply gets no budget enforcement.
+    return { file, record: null, state: parseRepairState(null) };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { file, record: null, state: parseRepairState(null) };
+  }
+  return { file, record: parsed, state: parseRepairState(parsed.repair) };
+}
+
+// Records the attempt back into the run record. A failure to write is reported
+// but does not fail an otherwise successful compile: the budget is a guard rail,
+// and losing it must not turn a model that compiles into a modeling failure.
+function recordAttempt(run, fingerprint) {
+  if (run.record === null) return;
+  const updated = {
+    ...run.record,
+    repair: nextRepairState(run.state, fingerprint)
+  };
+  try {
+    writeFileSync(run.file, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+  } catch (error) {
+    console.error(
+      `Could not record this compile in ${run.file}: ${error.message}. The repair budget is not being counted for this run.`
+    );
+  }
+}
 
 function diagnostics(output) {
   try {
@@ -38,6 +187,15 @@ function diagnostics(output) {
   }
 }
 
+// Every message this run reported, so a failure can be fingerprinted and
+// compared with the previous attempt's.
+const reported = [];
+
+function report(message) {
+  reported.push(message);
+  console.error(message);
+}
+
 function printDiagnostic(result) {
   const physical = result.locations?.[0]?.physicalLocation;
   const source = physical?.artifactLocation?.uri;
@@ -57,7 +215,7 @@ function printDiagnostic(result) {
     typeof result.message?.text === "string" && result.message.text ?
       result.message.text
     : "Bicep reported a diagnostic.";
-  console.error(`${location ? `${location}: ` : ""}${level}${rule}: ${text}`);
+  report(`${location ? `${location}: ` : ""}${level}${rule}: ${text}`);
 }
 
 function isFailure(result) {
@@ -172,7 +330,7 @@ function checkContainerImageBuildSources(
       continue;
     }
 
-    console.error(
+    report(
       `${app}: error container-image-build-source: ${resourcePath}.properties.build.source: build ref "${ref}" looks like an abbreviated commit SHA; use the full 40-character SHA or an explicit tag ref such as "refs/tags/v1.2.3".`
     );
     failed = true;
@@ -189,8 +347,9 @@ const bicep = path.join(
   executable
 );
 
-function main() {
-  const app = path.resolve(process.argv[2] || ".radius/app.bicep");
+// Compiles the model and reports what Bicep rejected. Unchanged from what this
+// script has always done; the budget wraps it rather than living inside it.
+function check(app) {
   const compiled = spawnSync(
     bicep,
     ["build", app, "--diagnostics-format", "sarif", "--stdout"],
@@ -204,13 +363,13 @@ function main() {
     }
   );
   if (compiled.error) {
-    console.error(compiled.error.message);
+    report(compiled.error.message);
     return 1;
   }
 
   const compilerFindings = diagnostics(compiled.stderr ?? "");
   if (compilerFindings === null) {
-    console.error(
+    report(
       (compiled.stderr ?? "").trim() ||
         "Bicep did not return valid SARIF diagnostics."
     );
@@ -233,12 +392,43 @@ function main() {
     typeof template !== "object" ||
     Array.isArray(template)
   ) {
-    console.error(`${app}: error: Bicep did not return valid compiled JSON.`);
+    report(`${app}: error: Bicep did not return valid compiled JSON.`);
     return 1;
   }
 
   const invalidBuildSource = checkContainerImageBuildSources(template, app);
   return compilerFindings.some(isFailure) || invalidBuildSource ? 1 : 0;
+}
+
+function main() {
+  const app = path.resolve(process.argv[2] || ".radius/app.bicep");
+  const run = readRunRecord(app);
+  if (run === null) {
+    return check(app);
+  }
+
+  // Refused before the compiler is spawned: once the budget is spent there is
+  // nothing more to learn from another identical failure, and compiling anyway
+  // would invite one more repair.
+  const decision = evaluateRepairAttempt(run.state);
+  if (!decision.allowed) {
+    console.error(decision.reason);
+    return 1;
+  }
+
+  const status = check(app);
+  const fingerprint =
+    status === 0 ? null : fingerprintCompilerOutput(reported.join("\n"));
+  if (isRepeatedFailure(run.state, fingerprint)) {
+    console.error(REPEATED_FAILURE_MESSAGE);
+  }
+  recordAttempt(run, fingerprint);
+  if (status !== 0 && decision.attempt >= REPAIR_ATTEMPT_BUDGET) {
+    console.error(
+      `This was attempt ${decision.attempt} of ${REPAIR_ATTEMPT_BUDGET}; the repair budget is now spent and the checker will refuse to compile this run again.`
+    );
+  }
+  return status;
 }
 
 process.exitCode = main();

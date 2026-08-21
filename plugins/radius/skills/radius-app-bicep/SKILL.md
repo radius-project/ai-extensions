@@ -69,13 +69,13 @@ Never invoke `rad` or `rad.exe` directly from PowerShell, a shell, a subprocess,
 
 ### Repair budget
 
-A compile error the skill cannot resolve is usually a real signal — a schema that has moved, a type the configured extension does not have, or a changed recipe contract — not something more attempts will fix. So the checker bounds the repair loop in step 8 itself, and the run ends by reporting rather than by editing indefinitely.
+A compile error the skill cannot resolve is usually a real signal — a schema that has moved, a type the configured extension does not have, or a changed recipe contract — not something more attempts will fix. So `validate-bicep.mjs` bounds the repair loop itself, and the run ends by reporting rather than by editing indefinitely.
 
-`validate-bicep.mjs` counts its own runs in the staging directory's run record, so the count covers exactly one modeling run and a later run starts fresh. You do not track attempts yourself.
+The checker enforces this whenever the model it compiles is inside a staging directory, by counting its own runs in that run's `run.json`. The count covers exactly one modeling run, and a later run starts fresh. You do not track attempts yourself, and you cannot compile your way past the limit.
 
-- **Three attempts.** The checker refuses to compile a fourth time and exits non-zero saying the budget is spent. This is the same budget the deploy repair loop uses, so the product has one answer to "how many times do we retry a repair".
-- **The checker tells you when an error repeats.** It fingerprints the compiler output, ignoring line numbers that shifted, and says when a failure is the one you just saw. Treat that as proof the last fix was wrong: make a materially different one rather than varying it, or spend the remaining budget establishing why the schema cannot express what the source needs.
-- **Stop when the checker says the budget is spent.** Do not edit and retry, do not write the origin record, and do not publish the run. Tell the user which resource and property the compiler rejected, quote the last compiler output verbatim, and say that no application definition was written. The raw error is the most useful thing to hand over, because it is usually pointing at something real.
+- **Three compiles per run.** After the third, the checker refuses to compile again and exits non-zero saying the budget is spent. This is the same budget the deploy repair loop uses, so the product has one answer to "how many times do we retry a repair".
+- **The checker tells you when a failure repeats.** It fingerprints the compiler output with line numbers and diagnostic ordering normalized out, and says so when a failure is the one you just saw. Treat that as proof the last fix was wrong: make a materially different fix rather than varying it, or use the remaining budget to establish why the schema cannot express what the source needs.
+- **When the checker says the budget is spent, stop.** Do not edit and retry, do not write the origin record, and do not publish the run. Tell the user which resource and property the compiler rejected, quote the last compiler output verbatim, and say that no application definition was written. The raw error is the most useful thing to hand over, because it is usually pointing at something real.
 
 Never buy a clean compile by deleting a required backend activation, native configuration value, secret binding, or dependency edge. Running out of budget is the correct outcome when the alternative is a model that compiles and does not work.
 

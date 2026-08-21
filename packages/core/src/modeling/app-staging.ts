@@ -121,6 +121,9 @@ export type ManagedFileHashes = Readonly<Record<string, string | null>>;
 export interface StagedRunRecord {
   // Fingerprints of every file in `.radius/` this run may overwrite.
   baseline: ManagedFileHashes;
+  // How the authoring repair loop has gone so far, when the Bicep checker has
+  // run at least once. Absent on a run that has not compiled yet.
+  repair?: RepairState;
 }
 
 export interface StagedRunInput {
@@ -340,3 +343,150 @@ function parseStagedOriginHash(text: unknown): string | null {
   const hash = (parsed as Record<string, unknown>).appBicepHash;
   return typeof hash === "string" && hash.trim() ? hash.trim() : null;
 }
+
+// --- Repair budget ---------------------------------------------------------
+//
+// Authoring compiles the generated model and repairs what the checker rejects.
+// That loop used to have no attempt limit and no defined way to give up, so a
+// model that could not be made to compile was repaired until the agent ran out
+// of context. A compile error the skill cannot resolve is usually a real signal
+// — a schema that moved, a type the configured extension does not have — so
+// stopping and reporting it is more useful than another attempt.
+//
+// The bound is enforced by the checker rather than by prose, because prose only
+// binds an agent that is already following it, and the agent that loops is the
+// one that is not. The count lives in the staging run record, whose lifetime is
+// exactly one modeling run: a counter that outlived the run would refuse a
+// legitimate fresh run because of a stuck one last week.
+
+// Compiles allowed per modeling run: the first plus two repairs, or three
+// repairs of a model generated before the first compile. Matched to
+// DEPLOY_HANDOFF_MAX_ATTEMPTS so the product has one answer to "how many times
+// do we retry a repair".
+export const REPAIR_ATTEMPT_BUDGET = 3;
+
+// What the checker has recorded about this run's compiles.
+export interface RepairState {
+  // Compiles already performed, including the ones that passed.
+  attempts: number;
+  // Fingerprint of the last failing compiler output, or null when the last
+  // compile did not fail.
+  fingerprint: string | null;
+}
+
+export type RepairVerdict =
+  // The compile may proceed.
+  | "allowed"
+  // The budget is spent; the checker refuses to compile at all.
+  | "exhausted";
+
+export interface RepairDecision {
+  verdict: RepairVerdict;
+  // True only for `allowed`.
+  allowed: boolean;
+  // Attempt this compile would be, 1-based. Equals the budget + 1 when spent.
+  attempt: number;
+  // What to tell the agent, or empty when there is nothing to say.
+  reason: string;
+}
+
+// A run record whose repair field is missing or unusable reads as "no compiles
+// yet" rather than being rejected. Unlike the baseline, an unreadable counter
+// cannot destroy anything: the worst case is one extra compile, which is a much
+// better failure than refusing to compile a run that is fine.
+export function parseRepairState(value: unknown): RepairState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { attempts: 0, fingerprint: null };
+  }
+  const record = value as Record<string, unknown>;
+  const attempts = record.attempts;
+  const fingerprint = record.fingerprint;
+  return {
+    attempts:
+      (
+        typeof attempts === "number" &&
+        Number.isInteger(attempts) &&
+        attempts > 0
+      ) ?
+        attempts
+      : 0,
+    fingerprint:
+      typeof fingerprint === "string" && fingerprint.trim() ?
+        fingerprint.trim()
+      : null
+  };
+}
+
+// Whether the checker may compile again, given what this run has already done.
+export function evaluateRepairAttempt(state: RepairState): RepairDecision {
+  const attempt = state.attempts + 1;
+  if (state.attempts >= REPAIR_ATTEMPT_BUDGET) {
+    return {
+      verdict: "exhausted",
+      allowed: false,
+      attempt,
+      reason: repairBudgetSpentMessage(state.attempts)
+    };
+  }
+  return { verdict: "allowed", allowed: true, attempt, reason: "" };
+}
+
+// The run record's repair field after a compile that produced `fingerprint`
+// (null when it passed).
+export function nextRepairState(
+  state: RepairState,
+  fingerprint: string | null
+): RepairState {
+  return { attempts: state.attempts + 1, fingerprint };
+}
+
+// Whether this failure is the one the previous compile already reported. The
+// agent has to remember that across turns and the checker does not, so the
+// checker is the better place to notice it.
+export function isRepeatedFailure(
+  state: RepairState,
+  fingerprint: string | null
+): boolean {
+  return fingerprint !== null && state.fingerprint === fingerprint;
+}
+
+// Reduces compiler output to what is the same failure said twice. Line and
+// column numbers shift as the model is edited, absolute paths differ between
+// machines, and diagnostics do not come back in a stable order, so all three are
+// normalized away; what remains is the set of messages.
+export function fingerprintCompilerOutput(output: unknown): string {
+  const text = typeof output === "string" ? output : "";
+  const lines = text
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(/\r/gu, "")
+        // "path/app.bicep:12:5:" and "line 12:" carry a position that moves
+        // whenever anything above the error is edited.
+        .replace(/:\d+(?::\d+)?(?=:)/gu, ":")
+        .replace(/\bline \d+\b/gu, "line")
+        .replace(/\s+/gu, " ")
+        .trim()
+    )
+    .filter((line) => line !== "");
+  if (lines.length === 0) return "";
+  return [...new Set(lines)].sort().join("\n");
+}
+
+// What the checker says when it refuses to compile again.
+export function repairBudgetSpentMessage(attempts: number): string {
+  return (
+    `The application model was compiled ${attempts} times in this modeling run and still does not build, ` +
+    `so the repair budget of ${REPAIR_ATTEMPT_BUDGET} is spent and it was not compiled again. ` +
+    "Stop repairing: do not write the origin record and do not publish the run. " +
+    "Report to the user which resource and property the compiler rejected, quote the last compiler output verbatim, " +
+    "and say that no application definition was written."
+  );
+}
+
+// What the checker says when the same failure comes back.
+export const REPEATED_FAILURE_MESSAGE =
+  "This is the same compiler failure as the previous attempt, so the last fix " +
+  "did not address it. Make a materially different fix rather than varying one " +
+  "that has already failed, or use the remaining budget to establish why the " +
+  "schema cannot express what the source needs.";
