@@ -646,6 +646,8 @@ describe("deployments table", () => {
     await flushPromises();
     expect(page.tableBody.innerHTML).not.toContain("<img");
     expect(page.tableBody.innerHTML).toContain("&lt;img");
+    expect(page.tableBody.innerHTML).toContain("<td>Success</td>");
+    expect(page.tableBody.innerHTML).not.toContain("rad-dot");
     expect(page.tableBody.innerHTML).toContain("View Run");
     expect(page.tableBody.innerHTML).toContain("https://example.test/run/1");
   });
@@ -661,7 +663,7 @@ describe("deployments table", () => {
     expect(page.tableBody.innerHTML).toContain("rad-cell-empty");
   });
 
-  it("disables Delete for pending, deleting, and synthetic rows and solidifies it for failed", async () => {
+  it("uses the neutral danger style for failed and pending rows while disabling pending deletion", async () => {
     const page = fixture({
       deploymentsPayload: {
         deployments: [
@@ -672,9 +674,15 @@ describe("deployments table", () => {
     });
     init(page);
     await flushPromises();
-    expect(page.tableBody.innerHTML).toContain("rad-btn--danger-solid");
     const rows = page.tableBody.innerHTML;
-    expect(rows).toContain('data-app="app2"');
+    expect(rows).not.toContain("rad-btn--danger-solid");
+    expect(rows.match(/rad-btn--danger-outline/g)).toHaveLength(2);
+    expect(rows).toMatch(
+      /class="rad-btn rad-btn--danger-outline js-del-dep" data-env="dev" data-app="app"/
+    );
+    expect(rows).toMatch(
+      /class="rad-btn rad-btn--danger-outline js-del-dep" disabled data-env="dev2" data-app="app2"/
+    );
   });
 
   it("shows a retry row on a transient listing error without clobbering state", async () => {
@@ -2755,12 +2763,14 @@ describe("pure helpers", () => {
     expect(opKey("a", "b")).toBe(opKey("a", "b"));
   });
 
-  it("maps every known status to its tone and label, defaulting to pending", () => {
-    expect(deploymentStatusMarkup("success")).toContain("Success");
-    expect(deploymentStatusMarkup("failed")).toContain("Failed");
-    expect(deploymentStatusMarkup("pending")).toContain("Pending");
-    expect(deploymentStatusMarkup("deleting")).toContain("Deleting");
-    expect(deploymentStatusMarkup("unknown-status")).toContain("Pending");
+  it.each([
+    ["success", "Success"],
+    ["failed", "Failed"],
+    ["pending", "Pending"],
+    ["deleting", "Deleting…"],
+    ["unknown-status", "Pending"]
+  ])("renders %s as text without a colored circle", (status, label) => {
+    expect(deploymentStatusMarkup(status)).toBe(label);
   });
 
   it("parses deployments defensively, dropping incomplete entries", () => {
