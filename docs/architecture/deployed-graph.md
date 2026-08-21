@@ -1,6 +1,6 @@
 # Deployed graph retrieval (workflow artifacts)
 
-The canvas "Deployed" tab renders the application graph a deploy actually produced, painted with per-resource deploy status. This document is the normative producer/consumer interface: the artifact the GitHub Actions deploy workflow publishes, and how the canvas finds, validates, and applies it.
+The canvas "Deployed" tab renders the selected branch's modeled application graph, painted with per-resource deploy status. This document is the normative producer/consumer interface: the artifact the GitHub Actions deploy workflow publishes, and how the canvas finds, validates, and applies its deployment metadata.
 
 ## Why workflow artifacts
 
@@ -45,7 +45,7 @@ The two sanitizer implementations agree on multi-byte input even though `sed` co
 | File                      | When         | Purpose                                                |
 |---------------------------|--------------|--------------------------------------------------------|
 | `deploy-progress.json`    | Every upload | Per-resource status map — the status signal            |
-| `deploy-graph.json`       | Final upload | Deployed application graph from `rad app graph`        |
+| `deploy-graph.json`       | Final upload | Terminal deployed metadata from `rad app graph`        |
 | `deploy-state.txt`        | Every upload | Key/value run envelope. Not read by the canvas.        |
 | `deploy-controlplane.log` | Best effort  | Control-plane / recipe output                          |
 | `deploy-activity.log`     | Best effort  | `rad` command result envelope. Not read by the canvas. |
@@ -132,7 +132,7 @@ Reads are cached for a short TTL and de-duplicated with single-flight, so the de
 
 ## Rendering
 
-The Deployed tab is a projection, not a distinct graph: a fixed topology painted with a status map resolved separately. `projectDeployedGraph` in [`packages/core/src/graph/deployed.ts`](../../packages/core/src/graph/deployed.ts) applies the shared visualization filter, strips output resources, and stamps each node with its status. Keeping topology and status independent means the graph renders before any status is known and never changes shape when a deploy starts or ends, so React Flow keeps its viewport across every transition.
+The Deployed tab is a projection, not a distinct graph: the full modeled topology for the selected repository and graph branch, painted with a status map resolved separately. A fresh Deployed page builds that topology through the same modeled-graph workflow and cache as the Graph tab. Neither `deploy-graph.json` nor the in-session cached deployed graph supplies topology: a failed deployment can publish only the resources that reached the control plane, with missing modeled nodes and connections. Those deployed graphs are terminal metadata only. `projectDeployedGraph` in [`packages/core/src/graph/deployed.ts`](../../packages/core/src/graph/deployed.ts) applies the shared visualization filter, strips output resources, and stamps each node with its status. Keeping topology and status independent means the graph renders before any status is known and never changes shape when a deploy starts or ends, so React Flow keeps its viewport across every transition.
 
 `GET /api/deployed-graph` accepts `repo`, and optionally `application` and `environment`. The page's selectors are authoritative: a user can select an environment other than the one the current session deployed to, and the graph follows the selection rather than rendering another environment's deploy under the selected environment's label. The response is `{ resources, repo, branch, mode, updatedAt }`, where `mode` is:
 
