@@ -1,5 +1,7 @@
 import type { DeployStatus } from "@radius-project/core";
 import type { DeployProgress } from "../../deploy-artifacts.js";
+import { recordGraphBuildEvent } from "../../shared.js";
+import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
@@ -94,6 +96,21 @@ export function handleProgress(
   const { response } = context;
   const entry = dependencies.readInstanceEntry(context.instanceId);
   const state = entry?.state;
+  if (
+    state?.graphProgressActive === true &&
+    state.graphProgressAwaitingModel === true &&
+    typeof state.graphProgressDeadlineAtMs === "number" &&
+    dependencies.now() >= state.graphProgressDeadlineAtMs
+  ) {
+    recordGraphBuildEvent(state, {
+      stage: "creating_model",
+      state: "failed",
+      detail: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+    });
+    state.graphProgressActive = false;
+    state.graphProgressAwaitingModel = false;
+    delete state.graphProgressDeadlineAtMs;
+  }
   const payload: Record<string, unknown> = {
     messages: state?.progressMessages || []
   };

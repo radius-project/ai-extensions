@@ -10,6 +10,7 @@ import {
   type GraphsPlanningReadsDependencies
 } from "./graphs-planning.js";
 import type { DeployProgress } from "../../deploy-artifacts.js";
+import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { CanvasServerEntry } from "../types.js";
 
@@ -154,6 +155,10 @@ const KNOWN_STATE_FIELDS: readonly (keyof CanvasState)[] = [
   "graphProgressActive",
   "graphProgressView",
   "graphProgressStartedAtMs",
+  "graphProgressKey",
+  "graphProgressOwner",
+  "graphProgressAwaitingModel",
+  "graphProgressDeadlineAtMs",
   "progressMessages"
 ];
 
@@ -507,6 +512,41 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(payload.active).toBe(false);
     expect(payload.view).toBe("graph");
     expect(payload.elapsedMs).toBe(3_000);
+  });
+
+  it("expires an abandoned app.bicep wait on the server clock", async () => {
+    const calls: Calls = { log: [] };
+    const scriptedState: CanvasState = {
+      graphProgressActive: true,
+      graphProgressAwaitingModel: true,
+      graphProgressDeadlineAtMs: 60_000,
+      graphProgressStartedAtMs: 1_000,
+      graphBuildEvents: [
+        {
+          sequence: 1,
+          stage: "creating_model",
+          state: "running",
+          detail: "Copilot is creating the model."
+        }
+      ]
+    };
+    const { deps, state } = fakes(calls, {
+      nowMs: 60_000,
+      state: scriptedState
+    });
+
+    const payload = JSON.parse(
+      (await run("/api/progress", handleProgress, deps)).body
+    ) as Record<string, unknown>;
+
+    expect(payload.active).toBe(false);
+    expect(state?.graphProgressAwaitingModel).toBe(false);
+    expect(state?.graphProgressDeadlineAtMs).toBeUndefined();
+    expect(state?.graphBuildEvents?.at(-1)).toMatchObject({
+      stage: "creating_model",
+      state: "failed",
+      detail: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+    });
   });
 
   // A clock that jumped backwards must not produce a negative age, which would

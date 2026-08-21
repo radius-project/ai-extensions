@@ -320,6 +320,9 @@ describe("graph chip polling", () => {
     async (id) => {
       const browser = setup();
       const panel = createFakeElement(id);
+      const progress = createFakeElement(`${id}-progress`);
+      progress.className = "rad-graph-progress";
+      panel.appendChild(progress);
       browser.document.add(panel);
       browser.net.handle(GRAPH_PROGRESS_PATH, () => jsonResponse(record()));
 
@@ -327,7 +330,7 @@ describe("graph chip polling", () => {
       await flushPromises();
       expect(browser.chip.hidden).toBe(true);
 
-      panel.style.display = "none";
+      progress.style.display = "none";
       await poll(browser.clock);
       expect(browser.chip.hidden).toBe(false);
     }
@@ -336,7 +339,10 @@ describe("graph chip polling", () => {
   it("treats a detached panel as not on screen", async () => {
     const browser = setup();
     const panel = createFakeElement(GRAPH_PANEL_IDS[0]);
-    panel.offsetParent = null;
+    const progress = createFakeElement("detached-progress");
+    progress.className = "rad-graph-progress";
+    progress.offsetParent = null;
+    panel.appendChild(progress);
     browser.document.add(panel);
     browser.net.handle(GRAPH_PROGRESS_PATH, () => jsonResponse(record()));
 
@@ -346,7 +352,7 @@ describe("graph chip polling", () => {
     expect(browser.chip.hidden).toBe(false);
   });
 
-  it("hides as soon as a panel appears, without waiting for a poll", async () => {
+  it("does not hide for an empty progress host", async () => {
     const browser = setup();
     browser.net.handle(GRAPH_PROGRESS_PATH, () => jsonResponse(record()));
 
@@ -358,7 +364,7 @@ describe("graph chip polling", () => {
     browser.clock.tick(GRAPH_CHIP_TICK_MS);
     await flushPromises();
 
-    expect(browser.chip.hidden).toBe(true);
+    expect(browser.chip.hidden).toBe(false);
   });
 
   it("ignores a stale response that lands after a newer one", async () => {

@@ -97,10 +97,11 @@ export function graphChipHref(view: string): string {
 }
 
 function panelIsOnScreen(panel: DomElement | null): boolean {
+  const progress = panel?.querySelector(".rad-graph-progress") ?? null;
   return (
-    panel !== null &&
-    panel.style.display !== "none" &&
-    panel.offsetParent !== null
+    progress !== null &&
+    progress.style.display !== "none" &&
+    progress.offsetParent !== null
   );
 }
 

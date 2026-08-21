@@ -84,7 +84,6 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
 
       const key = `${repo}::${branches.join(",")}`;
       if (state.appBicepHandoffKey === key) return;
-      state.appBicepHandoffKey = key;
 
       const found = await Promise.all(
         branches.map(async (branch) => {
@@ -113,6 +112,11 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
         })
       );
       if (refusals.every(Boolean)) return;
+      // Validation is asynchronous. Re-check after it completes so concurrent
+      // opens still send once, but do not permanently consume the key when the
+      // skill refused and a later repository change makes the handoff valid.
+      if (state.appBicepHandoffKey === key) return;
+      state.appBicepHandoffKey = key;
 
       try {
         const session = deps.session.get();

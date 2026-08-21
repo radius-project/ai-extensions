@@ -623,10 +623,11 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
   });
 
   it("stays silent when the branch has no Dockerfile for the skill to build from", async () => {
-    const { canvas, deps } = setup({
-      pathsByRepoBranch: {
-        "remote:other/repo@main": ["README.md", "src/index.ts"]
-      }
+    const pathsByRepoBranch = {
+      "remote:other/repo@main": ["README.md", "src/index.ts"]
+    };
+    const { canvas, deps, servers } = setup({
+      pathsByRepoBranch
     });
     const session = deps.session.get();
 
@@ -641,6 +642,20 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     // The skill would refuse this repository outright and say so only in the
     // conversation, so handing off would leave the view waiting forever.
     expect(session.send).not.toHaveBeenCalled();
+    expect(
+      servers.get("radius-panel")?.state.appBicepHandoffKey
+    ).toBeUndefined();
+
+    pathsByRepoBranch["remote:other/repo@main"] = ["Dockerfile"];
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledOnce();
   });
 
   it("hands off when the branch has a Dockerfile", async () => {

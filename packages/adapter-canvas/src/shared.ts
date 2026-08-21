@@ -194,6 +194,10 @@ export interface CanvasState {
   graphProgressStartedAtMs?: number;
   graphProgressActive?: boolean;
   graphProgressView?: GraphProgressView;
+  graphProgressKey?: string;
+  graphProgressOwner?: number;
+  graphProgressAwaitingModel?: boolean;
+  graphProgressDeadlineAtMs?: number;
   plannedRepo?: string;
   plannedProvider?: string;
   plannedResources?: CanvasGraphResource[] | null;

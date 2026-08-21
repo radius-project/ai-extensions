@@ -421,7 +421,8 @@ describe("graph planning workflows", () => {
         "Staged local model artifacts.",
         "Compiling the application model and building the resource graph.",
         "Built a graph with 1 resource(s).",
-        "Laying out and rendering the application graph."
+        "Laying out and rendering the application graph.",
+        "Rendered the application graph."
       ]);
       expect(stages(harness.state)).toEqual([
         "checking_model:running",
@@ -429,7 +430,8 @@ describe("graph planning workflows", () => {
         "building_graph:running",
         "building_graph:running",
         "building_graph:succeeded",
-        "rendering_graph:running"
+        "rendering_graph:running",
+        "rendering_graph:succeeded"
       ]);
     });
 
@@ -756,7 +758,8 @@ describe("graph planning workflows", () => {
         "Built a graph with 1 resource(s).",
         "Resolving azure recipes for the planned resources.",
         "Resolved 2 planned resource(s).",
-        "Laying out and rendering the planned graph."
+        "Laying out and rendering the planned graph.",
+        "Rendered the planned graph."
       ]);
       expect(stages(harness.state)).toEqual([
         "checking_model:running",
@@ -766,7 +769,8 @@ describe("graph planning workflows", () => {
         "building_graph:succeeded",
         "resolving_recipes:running",
         "resolving_recipes:succeeded",
-        "rendering_graph:running"
+        "rendering_graph:running",
+        "rendering_graph:succeeded"
       ]);
     });
 
@@ -1078,7 +1082,8 @@ describe("graph planning workflows", () => {
         "building_head_graph:succeeded",
         "comparing_graphs:running",
         "comparing_graphs:succeeded",
-        "rendering_graph:running"
+        "rendering_graph:running",
+        "rendering_graph:succeeded"
       ]);
     });
 
@@ -1422,6 +1427,68 @@ describe("graph planning workflows", () => {
       expect(harness.state.graphProgressGeneration).toBe(generation);
       expect(harness.state.graphProgressStartedAtMs).toBe(startedAt);
       expect(stages(harness.state)).toEqual(reported);
+    });
+
+    it("closes the model-creation stage when a retry finds app.bicep", async () => {
+      const selections = {
+        main: selectionOf({ content: null })
+      };
+      const harness = start({
+        selections,
+        staged: { main: { dir: "/ws/.radius", remote: false } },
+        compiled: { main: [] }
+      });
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+      selections.main = selectionOf();
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(stages(harness.state)).toContain("creating_model:succeeded");
+      const latestByStage = new Map(
+        harness.state.graphBuildEvents?.map((event) => [event.stage, event])
+      );
+      expect(
+        [...latestByStage.values()].map((event) => event.state)
+      ).not.toContain("running");
+    });
+
+    it("does not let a replaced branch request close the replacement wait", async () => {
+      let harness!: Harness;
+      let replacement: Promise<GraphWorkflowOutcome> | undefined;
+      let replaced = false;
+      harness = start({
+        selections: {
+          main: selectionOf(),
+          "feature/x": selectionOf({
+            branch: "feature/x",
+            content: null
+          })
+        },
+        staged: { main: { dir: "/ws/.radius", remote: false } },
+        compiled: { main: [] },
+        afterStage: () => {
+          if (replaced) return;
+          replaced = true;
+          replacement = harness.run(
+            "loadGraph",
+            '{"repo":"octo/app","branch":"feature/x"}'
+          );
+        }
+      });
+
+      const superseded = await harness.run(
+        "loadGraph",
+        '{"repo":"octo/app","branch":"main"}'
+      );
+      await replacement;
+
+      expect(superseded.status).toBe(409);
+      expect(harness.state.graphProgressActive).toBe(true);
+      expect(harness.state.graphProgressAwaitingModel).toBe(true);
+      expect(harness.state.graphProgressKey).toBe(
+        JSON.stringify({ repo: "octo/app", branch: "feature/x" })
+      );
+      expect(stages(harness.state)).toContain("creating_model:running");
     });
 
     it("starts a new record when another view takes over an open build", async () => {

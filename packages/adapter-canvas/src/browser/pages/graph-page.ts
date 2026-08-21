@@ -23,6 +23,10 @@ import type { GraphResource } from "../graph/model.js";
 import type { GraphController } from "../graph/surface.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";
+import {
+  GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+  GRAPH_APP_BICEP_TIMEOUT_MS
+} from "../../graph-progress-contract.js";
 
 const ENTRY_KEY = "graph-page";
 export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
@@ -33,9 +37,7 @@ export const GRAPH_PROGRESS_MS = 800;
 // gives up. Nothing reports back when the modeling skill finishes or refuses —
 // the page only learns by asking again — so an unbounded retry would spin
 // forever on a repository the skill cannot model at all.
-export const GRAPH_APP_BICEP_TIMEOUT_MS = 300_000;
-export const GRAPH_APP_BICEP_TIMEOUT_MESSAGE =
-  "Copilot has not produced .radius/app.bicep for this branch. It may be unable to model this repository — check the Copilot conversation for the reason, then reload to try again.";
+export { GRAPH_APP_BICEP_TIMEOUT_MESSAGE, GRAPH_APP_BICEP_TIMEOUT_MS };
 
 interface GraphPageState {
   repo: string;
