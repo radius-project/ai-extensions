@@ -13,13 +13,10 @@
 // a run is still in progress, which makes them the only transport that can
 // carry live per-resource detail.
 //
-// Live progress is not yet produced. `publish-deploy-status` runs as a step
-// after `rad deploy` returns, and `actions/upload-artifact` is a `uses:` step,
-// so a composite step cannot invoke it mid-execution — mid-run uploads have to
-// go straight to the artifact REST service with ACTIONS_RUNTIME_TOKEN. That is
-// producer-side work. This reader polls on a timer and merges by `sequence`
-// regardless, so when the producer starts uploading during the deploy, live
-// progress lights up with no change here.
+// During `rad deploy`, the producer rotates changed snapshots through eight
+// run-scoped live artifacts. The fixed-name terminal artifact is uploaded after
+// the deploy step and carries a greater sequence, so this reader treats payload
+// sequence and identity as authoritative rather than artifact list order.
 //
 // Reads GitHub via the gh CLI (see ./gh.ts). Every I/O call is injectable so
 // the whole module is testable without network, Docker, or gh.
@@ -45,6 +42,17 @@ export const DEPLOY_STATUS_FILES = {
   controlPlane: "deploy-controlplane.log"
 } as const;
 
+// A run-scoped live-slot artifact name ends with `-live-<runId>-slot-<0..7>`.
+// Live-slot sequences are only comparable within a single run, so a repo-wide
+// read (which is not scoped to any run) has to exclude them; otherwise a
+// cancelled run's higher-sequenced slot can beat a newer completed run's
+// fixed-name terminal artifact.
+const LIVE_SLOT_NAME_PATTERN = /-live-\d+-slot-\d+$/;
+
+export function isLiveSlotArtifactName(name?: string | null): boolean {
+  return typeof name === "string" && LIVE_SLOT_NAME_PATTERN.test(name);
+}
+
 // The literal prefix every deploy-status artifact name starts with. The
 // producer appends a sanitized "<environment>-<app>".
 export const DEPLOY_STATUS_ARTIFACT_PREFIX = "radius-deploy-status-";
@@ -56,7 +64,7 @@ export const DEPLOY_PROGRESS_SCHEMA_VERSION = 1;
 // How many artifacts a single read will download before giving up. Each one
 // costs a `gh run download` subprocess, so an uncapped candidate list turns one
 // HTTP request into a long serial fan-out.
-export const MAX_ARTIFACT_CANDIDATES = 5;
+export const MAX_ARTIFACT_CANDIDATES = 9;
 
 // Repo-wide artifact listing: page size, and how many pages a single read will
 // walk before giving up. One page covers the newest 100 artifacts in the whole
@@ -256,10 +264,17 @@ export function parseDeployProgressArtifact(
   if (typeof parsed.environment !== "string" || !parsed.environment)
     return null;
   if (!Array.isArray(parsed.resources)) return null;
-  const sequence =
-    typeof parsed.sequence === "number" && Number.isFinite(parsed.sequence) ?
-      parsed.sequence
-    : 0;
+  // The producer contract starts sequences at 1 and increments by 1. Rejecting
+  // missing, non-numeric, zero, negative, and fractional values keeps a
+  // malformed payload from winning the greatest-sequence selection against a
+  // legitimate terminal artifact (which publishes sequence 1 at minimum).
+  if (
+    typeof parsed.sequence !== "number" ||
+    !Number.isInteger(parsed.sequence) ||
+    parsed.sequence < 1
+  )
+    return null;
+  const sequence = parsed.sequence;
   const resources: DeployProgressResource[] = [];
   for (const raw of parsed.resources) {
     if (!isRecord(raw)) continue;
@@ -574,11 +589,15 @@ function ghJsonArray(args: string[], timeout = 20000): Promise<unknown> {
  * application that is in fact deployed — the exact symptom this transport
  * exists to eliminate.
  *
- * Paging stops as soon as a page yields an artifact matching `namePrefix`,
- * because the listing is newest-first and nothing better can appear later; it
- * also stops at a short page (end of the list) or the page budget, so a repo
- * with no deploy-status artifact at all costs a bounded number of calls rather
- * than walking its entire artifact history.
+ * Paging stops as soon as a page yields a non-live-slot artifact matching
+ * `namePrefix`, because the listing is newest-first and nothing better can
+ * appear later. Live-slot names are ignored by the stop predicate even though
+ * they carry the prefix: a repo-wide read discards them (their sequences are
+ * only comparable within one run), and stopping on a page that holds only
+ * live slots would hide the previous deploy's terminal artifact sitting on
+ * the next page. Paging also stops at a short page (end of the list) or the
+ * page budget, so a repo with no deploy-status artifact at all costs a
+ * bounded number of calls rather than walking its entire artifact history.
  */
 export const listWorkflowArtifacts: ListArtifacts = async (
   repo,
@@ -608,7 +627,12 @@ export const listWorkflowArtifacts: ListArtifacts = async (
     );
     found.push(...batch);
     if (
-      batch.some((a) => typeof a.name === "string" && a.name.startsWith(prefix))
+      batch.some(
+        (a) =>
+          typeof a.name === "string" &&
+          a.name.startsWith(prefix) &&
+          !isLiveSlotArtifactName(a.name)
+      )
     )
       break;
     if (batch.length < ARTIFACT_PAGE_SIZE) break; // end of the listing
@@ -729,6 +753,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
   let acceptedRunId: number | null = null;
   let acceptedSequence = -1;
   let lastGood: ReadResult | null = null;
+  const inspectedArtifacts = new Map<number, ReadResult>();
 
   const empty = (status: ReaderStatus, error: unknown = null): ReadResult => ({
     status,
@@ -753,57 +778,120 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     } catch (e) {
       return empty(errorCode(e) === "GH_ARTIFACT_AUTH" ? "auth" : "error", e);
     }
-    const candidates = selectDeployStatusArtifacts(artifacts, environment);
+    let candidates = selectDeployStatusArtifacts(artifacts, environment);
     if (candidates.length === 0) return empty("missing");
 
+    const expectedRunId = Number(runId);
+    const hasExpectedRunId =
+      Number.isFinite(expectedRunId) && expectedRunId > 0;
+    // A repo-wide read is not scoped to any run, and `sequence` restarts at 1
+    // for every run. Live-slot artifacts must therefore be excluded from that
+    // path — otherwise a cancelled run's higher-sequenced slot could beat a
+    // newer completed run's fixed-name terminal artifact.
+    if (!hasExpectedRunId) {
+      candidates = candidates.filter((a) => !isLiveSlotArtifactName(a.name));
+      if (candidates.length === 0) return empty("missing");
+    }
+    // Ring slots overwrite by uploading with new artifact IDs, so an ID that
+    // dropped out of the listing never comes back. Prune the cache to the
+    // current listing so a long-running deploy cannot accumulate payloads that
+    // will never be referenced again.
+    if (inspectedArtifacts.size > 0) {
+      const listedIds = new Set(candidates.map((c) => c.id));
+      for (const cachedId of [...inspectedArtifacts.keys()]) {
+        if (!listedIds.has(cachedId)) inspectedArtifacts.delete(cachedId);
+      }
+    }
+
     let sawMalformed = false;
+    let exactMatch: ReadResult | null = null;
     let envOnlyMatch: ReadResult | null = null;
     for (const artifact of candidates) {
-      let files: ArtifactFiles | null;
-      try {
-        files = await downloadArtifact(repo, artifact);
-      } catch (e) {
-        if (errorCode(e) === "GH_ARTIFACT_AUTH") return empty("auth", e);
-        // A single unreadable artifact should not hide an older readable one.
-        continue;
+      let result =
+        hasExpectedRunId ? inspectedArtifacts.get(artifact.id) : undefined;
+      if (!result) {
+        let files: ArtifactFiles | null;
+        try {
+          files = await downloadArtifact(repo, artifact);
+        } catch (e) {
+          if (errorCode(e) === "GH_ARTIFACT_AUTH") return empty("auth", e);
+          // A single unreadable artifact should not hide an older readable one.
+          continue;
+        }
+        if (!files) continue;
+        const progress = parseDeployProgressArtifact(
+          files[DEPLOY_STATUS_FILES.progress]
+        );
+        if (!progress) {
+          sawMalformed = true;
+          if (hasExpectedRunId)
+            inspectedArtifacts.set(artifact.id, empty("malformed"));
+          continue;
+        }
+        let graph: unknown | null = null;
+        const graphText = files[DEPLOY_STATUS_FILES.graph];
+        if (graphText) {
+          try {
+            graph = JSON.parse(graphText);
+          } catch {
+            sawMalformed = true;
+          }
+        }
+        result = {
+          status: "ok",
+          progress,
+          graph,
+          files,
+          artifact,
+          error: null
+        };
+        if (hasExpectedRunId) inspectedArtifacts.set(artifact.id, result);
       }
-      if (!files) continue;
-      const progress = parseDeployProgressArtifact(
-        files[DEPLOY_STATUS_FILES.progress]
-      );
+      const progress = result.progress;
       if (!progress) {
         sawMalformed = true;
         continue;
       }
       // Confirm identity from the payload rather than from the derived name.
       if (!confirmArtifactIdentity(progress, { environment })) continue;
-      let graph: unknown | null = null;
-      const graphText = files[DEPLOY_STATUS_FILES.graph];
-      if (graphText) {
-        try {
-          graph = JSON.parse(graphText);
-        } catch {
-          sawMalformed = true;
+      if (
+        hasExpectedRunId &&
+        progress.runId !== undefined &&
+        progress.runId !== expectedRunId
+      )
+        continue;
+      if (confirmArtifactIdentity(progress, { environment, application })) {
+        // Within an active run, sequences are comparable and pick the freshest
+        // snapshot regardless of artifact list order. Across runs (repo-wide),
+        // sequences restart at 1, so the first (newest by list order) match
+        // wins instead.
+        if (!exactMatch) {
+          exactMatch = result;
+        } else if (
+          hasExpectedRunId &&
+          progress.sequence > (exactMatch.progress?.sequence ?? -1)
+        ) {
+          exactMatch = result;
         }
+        continue;
       }
-      const result: ReadResult = {
-        status: "ok",
-        progress,
-        graph,
-        files,
-        artifact,
-        error: null
-      };
-      if (confirmArtifactIdentity(progress, { environment, application }))
-        return result;
       // Right environment, different application. Hold it as a fallback rather
-      // than returning it: an exact application match, if one exists, must win.
+      // than selecting it immediately: an exact application match, if one
+      // exists, must win.
       // But the caller's application name can itself be a guess (it falls back
       // to the repository's short name when app.bicep cannot be read), so
       // treating a mismatch as fatal would blank the tab over a name this side
       // never actually knew.
-      if (!envOnlyMatch) envOnlyMatch = result;
+      if (!envOnlyMatch) {
+        envOnlyMatch = result;
+      } else if (
+        hasExpectedRunId &&
+        progress.sequence > (envOnlyMatch.progress?.sequence ?? -1)
+      ) {
+        envOnlyMatch = result;
+      }
     }
+    if (exactMatch) return exactMatch;
     if (envOnlyMatch) return envOnlyMatch;
     return empty(sawMalformed ? "malformed" : "missing");
   }

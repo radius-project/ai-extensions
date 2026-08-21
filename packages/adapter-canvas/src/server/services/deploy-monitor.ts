@@ -416,11 +416,10 @@ export function createDeployMonitorService(
             // Leave nodes gray; each flips to yellow when its own
             // recipe/operation actually starts.
           }
-          // Nothing arrives mid-run yet: the producer publishes after
-          // `rad deploy` returns, because a composite step cannot invoke
-          // actions/upload-artifact while it runs. The poll is here regardless
-          // so that when the producer starts uploading during the deploy, this
-          // lights up unchanged.
+          // The producer rotates changed snapshots through a bounded artifact
+          // ring while `rad deploy` runs. The reader selects the greatest valid
+          // sequence for this run, so artifact list order cannot roll status
+          // backwards.
           await pollDeployStatus();
           // Run this only when the producer has published no progress. This
           // cannot use setStatus because advanced output nodes must be kept.
