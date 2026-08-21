@@ -5,6 +5,13 @@ import * as core from "./index.js";
 // pin the exported surface so a re-export dropped during a refactor breaks here
 // rather than in an adapter build — and so a helper that only core itself uses
 // cannot drift back into the public surface unnoticed.
+//
+// Pending confirmation: `dockerfileDirectories`, `findWorkspaceManifests`, and
+// `WORKSPACE_MANIFEST_FILES` arrived in #450 and still have no consumer outside
+// core — the same category of unused export this change removed elsewhere. They
+// are pinned here as staging for the in-flight monorepo-detection work rather
+// than as a settled contract; if that work does not land, they should be removed
+// along with these entries.
 const EXPECTED_FUNCTIONS = [
   "applicationGraphToResources",
   "computeGraphDiff",

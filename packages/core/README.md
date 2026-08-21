@@ -47,9 +47,10 @@ rather than a fork.
 ## Guide 1: Add a compute platform
 
 Everything provider-specific lives behind the `ComputePlatform` interface
-(`src/platforms/types.ts`): portal deep-links and the provider-gated fragments
-injected into the verify/deploy workflows. Adding a platform never requires
-touching the workflow templates or any UI adapter.
+(`src/platforms/types.ts`): the platform's id, display name, cluster service
+name, and portal deep-links. Workflow selection is *not* behind the interface —
+`workflows/verify.ts` keeps its own `VERIFY_FILE_BY_PLATFORM` map, so a platform
+registered without an entry there resolves no verify template.
 
 1. Create `src/platforms/<id>.ts` exporting a `ComputePlatform` (use
    `azure.ts` / `aws.ts` as the template). Implement `id`, `displayName`,
@@ -57,11 +58,15 @@ touching the workflow templates or any UI adapter.
 2. Register it in `src/platforms/index.ts`: import it and add it to `REGISTRY`.
    Platform objects are reached through `getPlatform(id)`, so they are not
    re-exported from the barrel.
-3. Add its id to any UI `enum`s (e.g. the canvas `provider` action input in
+3. Add the id to `VERIFY_FILE_BY_PLATFORM` in `src/workflows/verify.ts`, naming
+   its upstream `verify-<id>.yml` template. Deploy and delete need no change:
+   they commit every provider workflow and the dispatcher's `detect` job picks
+   one at runtime.
+4. Add its id to any UI `enum`s (e.g. the canvas `provider` action input in
    `packages/adapter-canvas/src/extension.ts`).
-4. `pnpm --filter @radius-project/core typecheck && pnpm build:canvas`.
+5. `pnpm --filter @radius-project/core typecheck && pnpm build:canvas`.
 
-No changes to `workflows/`, `pages.mjs`, or `server.mjs` are needed.
+No changes to `pages.mjs` or `server.mjs` are needed.
 
 ## Guide 2: Add a canvas action / tool
 

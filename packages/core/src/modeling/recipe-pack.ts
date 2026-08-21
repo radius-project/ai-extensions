@@ -203,7 +203,10 @@ export function deriveConcreteResource(
     (provider && PROVIDER_SOURCE_OVERRIDE[provider]?.[key]) ||
     SOURCE_CONCRETE_MAP[key];
   if (!hit) return null;
-  // lastIndexOf returns -1 for an unqualified type, so slice(0) keeps it whole.
+  // lastIndexOf returns -1 for an unqualified type (e.g. "Secret"), so slice(0)
+  // keeps it whole. A type *ending* in "/" would instead yield an empty leaf and
+  // a nameless resource; no entry in the maps above ends in "/", so that case is
+  // unreachable rather than handled.
   const leaf = hit.type.slice(hit.type.lastIndexOf("/") + 1);
   const withLowerInitialism = leaf.replace(/^[A-Z]+(?=[A-Z][a-z])/, (m) =>
     m.toLowerCase()

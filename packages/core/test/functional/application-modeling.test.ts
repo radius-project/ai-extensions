@@ -96,9 +96,7 @@ describe("application modeling journey", () => {
   it("carries a containerized repository from source listing to deployed view", async () => {
     const gh = githubForHead();
 
-    const source = evaluateAppSource(
-      await gh.treePaths(REPO, HEAD_BRANCH).catch(() => [])
-    );
+    const source = evaluateAppSource(await gh.treePaths(REPO, HEAD_BRANCH));
     expect(source).toEqual({ status: "single", dockerfiles: ["Dockerfile"] });
 
     const model = await fetchBicepFromRepo(gh, REPO, HEAD_BRANCH);

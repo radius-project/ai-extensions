@@ -44,6 +44,15 @@ jobs:
 `
 };
 
+// `delete.ts` resolves DELETE_RADIUS_REF at module load, so the tests that
+// exercise it reload the module under a stubbed environment. Cleanup is
+// file-scoped so no suite can leak a stubbed var or a reset module registry
+// into the next one.
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.resetModules();
+});
+
 describe("delete workflow constants", () => {
   it("names the committed dispatcher and provider workflow files", () => {
     expect(DELETE_APP_DISPATCHER_FILE).toBe("delete-application.yml");
@@ -51,19 +60,21 @@ describe("delete workflow constants", () => {
     expect(DELETE_AWS_FILE).toBe("delete-aws.yml");
   });
 
-  it("defaults the delete template ref to the shared radius ref", () => {
-    // No RADIUS_DELETE_REF override is set in the test environment, so the
-    // delete templates track the same ref the deploy templates are fetched at.
-    expect(DELETE_RADIUS_REF).toBe(RADIUS_REF);
+  it("defaults the delete template ref to the shared radius ref", async () => {
+    // Loaded with RADIUS_DELETE_REF explicitly cleared rather than trusting the
+    // ambient environment: `delete.ts` reads the var at module load, and its own
+    // comment invites developers to export it, which would otherwise turn this
+    // into a spurious failure on their machine.
+    vi.stubEnv("RADIUS_DELETE_REF", undefined);
+    vi.resetModules();
+
+    const reloaded = await import("./delete.js");
+
+    expect(reloaded.DELETE_RADIUS_REF).toBe(reloaded.RADIUS_REF);
   });
 });
 
 describe("DELETE_RADIUS_REF override", () => {
-  afterEach(() => {
-    vi.unstubAllEnvs();
-    vi.resetModules();
-  });
-
   it("re-pins the delete templates from RADIUS_DELETE_REF", async () => {
     vi.stubEnv("RADIUS_DELETE_REF", "abc1234");
     vi.resetModules();
@@ -143,7 +154,7 @@ describe("generateDeleteWorkflow", () => {
       delete templates[missing];
 
       expect(() => generateDeleteWorkflow("prod", templates)).toThrow(
-        new RegExp(`Missing delete template "${missing}"`)
+        `Missing delete template "${missing}"`
       );
     }
   );
@@ -158,9 +169,7 @@ describe("generateDeleteWorkflow", () => {
 
   it("names the upstream source in the missing-template error", () => {
     expect(() => generateDeleteWorkflow("prod", {})).toThrow(
-      new RegExp(
-        `radius-project/radius/\\.github/extension at "${DELETE_RADIUS_REF}"`
-      )
+      `radius-project/radius/.github/extension at "${DELETE_RADIUS_REF}"`
     );
   });
 

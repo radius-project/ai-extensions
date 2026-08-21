@@ -80,6 +80,37 @@ describe("addInboundConnections", () => {
     expect(inboundToB.map((c: any) => c.id).sort()).toEqual([aId, cId].sort());
   });
 
+  // The assertion above sorts before comparing, so it says nothing about the
+  // order the inbound edges are appended in — and that order is exactly what the
+  // sort in addInboundConnections exists to stabilize. Inbound edges are appended
+  // in resource-iteration order, so feeding the same graph in reverse order is
+  // what exercises it. Without the sort, computeGraphDiff (which stringifies
+  // connections) reports a spurious "modified" for B purely from rad's ordering.
+  it("produces identical connections regardless of resource order", () => {
+    const aId = buildResourceID("Radius.Compute/containers", "a");
+    const bId = buildResourceID("Radius.Data/mongoDatabases", "b");
+    const cId = buildResourceID("Radius.Compute/containers", "c");
+    const build = () => [
+      { id: aId, connections: [{ id: bId, direction: "Outbound" }] },
+      { id: bId, connections: [] },
+      { id: cId, connections: [{ id: bId, direction: "Outbound" }] }
+    ];
+
+    const forward = { resources: build() };
+    const reversed = { resources: build().reverse() };
+    addInboundConnections(forward);
+    addInboundConnections(reversed);
+
+    const connectionsOf = (graph: { resources: any[] }, id: string) =>
+      graph.resources.find((r) => r.id === id).connections;
+
+    expect(connectionsOf(reversed, bId)).toEqual(connectionsOf(forward, bId));
+    expect(connectionsOf(forward, bId)).toEqual([
+      { id: aId, direction: "Inbound" },
+      { id: cId, direction: "Inbound" }
+    ]);
+  });
+
   it("orders a mutual pair of edges by direction when the ids are equal", () => {
     // A and B point at each other, so A ends up with an Outbound and an Inbound
     // edge that share the same target id; only the direction tiebreak makes the
@@ -130,8 +161,11 @@ describe("addInboundConnections", () => {
     addInboundConnections(graph);
 
     expect(graph.resources[1].connections).toEqual([]);
-    // A null entry must survive the deterministic sort rather than crash it.
-    expect(graph.resources[0].connections).toHaveLength(3);
+    // Null and id-less entries are dropped rather than sorted, so they cannot
+    // reach computeGraphDiff as the literal "undefined" ordered among real ids.
+    expect(graph.resources[0].connections).toEqual([
+      { id: "b", direction: "Inbound" }
+    ]);
   });
 
   it("creates the connections array on a target that has none", () => {

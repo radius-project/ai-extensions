@@ -82,7 +82,12 @@ export function appGraphPayload(options: { withCache: boolean }) {
         ...(options.withCache ? [{ id: CACHE_ID, direction: "Outbound" }] : [])
       ],
       outputResources: [],
-      diffHash: hash(options.withCache ? "1" : "a"),
+      // Deliberately identical across both variants: `computeGraphDiff` compares
+      // connections *and* diffHash, so varying the hash alongside the cache edge
+      // would let the "modified" assertion in branch-diff.test.ts pass even if
+      // connection diffing were broken. A hash-only edit is covered separately by
+      // the unit tests in graph/diff.test.ts.
+      diffHash: hash("a"),
       properties: { codeReference: "src/api/index.ts#L1" }
     },
     {

@@ -27,12 +27,16 @@ const SPECIFIER_PATTERN =
 
 // Derived from the running Node rather than hand-maintained: a list written out
 // by hand silently stops covering built-ins it did not anticipate, which lets a
-// browser-unsafe import land while this suite stays green. `builtinModules`
-// reports prefix-only modules (`node:test`, `node:sqlite`) in prefixed form, so
-// every entry is normalized to its bare specifier and the prefixed form is
-// matched separately below.
+// browser-unsafe import land while this suite stays green.
+//
+// `builtinModules` reports a few modules (`node:test`, `node:sqlite`, `node:sea`,
+// `node:test/reporters`) only in prefixed form, because for those the bare
+// specifier is *not* a built-in — it resolves to an npm package. Stripping the
+// prefix from those would flag a legitimate `import "sqlite"` as a boundary
+// violation, so they stay out of the bare set and are matched by the prefix
+// branch alone.
 const NODE_BUILTINS = new Set(
-  builtinModules.map((name) => name.replace(/^node:/, ""))
+  builtinModules.filter((name) => !name.startsWith("node:"))
 );
 
 function isNodeBuiltin(specifier: string): boolean {
@@ -44,12 +48,31 @@ interface SourceFile {
   specifiers: string[];
 }
 
-// Prose in a header comment can look enough like an import to be picked up by a
-// text scan, so comments are removed before specifiers are collected.
-function stripComments(content: string): string {
-  return content
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^[ \t]*\/\/.*$/gm, "");
+// Comments and template literals can hold prose that looks enough like an import
+// to be collected by a text scan, which would fail the boundary check on an
+// import that does not exist. Both are removed first.
+//
+// The scan is string-aware: quoted strings are matched before the comment
+// branches so a `//` inside a URL is not mistaken for a comment, and they are
+// preserved because a real specifier is a quoted string. Template literals are
+// blanked instead, since a static import specifier can never be one.
+function stripNonCode(content: string): string {
+  return content.replace(
+    /`(?:\\.|[^\\`])*`|"(?:\\.|[^\\"])*"|'(?:\\.|[^\\'])*'|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
+    (match) => {
+      if (match.startsWith("`")) return "``";
+      if (match.startsWith('"') || match.startsWith("'")) return match;
+      return "";
+    }
+  );
+}
+
+function specifiersIn(content: string): string[] {
+  const specifiers: string[] = [];
+  for (const match of stripNonCode(content).matchAll(SPECIFIER_PATTERN)) {
+    specifiers.push(match[1] ?? match[2] ?? match[3]);
+  }
+  return specifiers;
 }
 
 async function collectSourceFiles(): Promise<SourceFile[]> {
@@ -62,14 +85,9 @@ async function collectSourceFiles(): Promise<SourceFile[]> {
     if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
     if (entry.name.includes(".test.")) continue;
     const absolute = join(entry.parentPath, entry.name);
-    const content = stripComments(await readFile(absolute, "utf8"));
-    const specifiers: string[] = [];
-    for (const match of content.matchAll(SPECIFIER_PATTERN)) {
-      specifiers.push(match[1] ?? match[2] ?? match[3]);
-    }
     files.push({
       path: relative(SRC_DIR, absolute).replace(/\\/g, "/"),
-      specifiers
+      specifiers: specifiersIn(await readFile(absolute, "utf8"))
     });
   }
   return files;
@@ -115,6 +133,17 @@ describe("core package boundary", () => {
     expect(isNodeBuiltin(specifier)).toBe(true);
   });
 
+  // `builtinModules` lists these only as `node:`-prefixed because the bare name
+  // belongs to npm. Treating the bare form as built-in would fail the boundary
+  // check on a legitimate dependency and point at the wrong problem.
+  it.each(["sqlite", "test", "sea", "test/reporters"])(
+    "does not treat the bare npm name %s as a Node built-in",
+    (specifier) => {
+      expect(isNodeBuiltin(specifier)).toBe(false);
+      expect(isNodeBuiltin(`node:${specifier}`)).toBe(true);
+    }
+  );
+
   it.each([
     "./graph/index.js",
     "../ports/index.js",
@@ -124,6 +153,45 @@ describe("core package boundary", () => {
     "process-env-parser"
   ])("does not mistake %s for a Node built-in", (specifier) => {
     expect(isNodeBuiltin(specifier)).toBe(false);
+  });
+
+  // The offender list is only as good as the scan that feeds it: a specifier
+  // picked out of prose reports a violation for an import that is not there.
+  describe("import scan", () => {
+    it("collects static, re-export, dynamic, and side-effect specifiers", () => {
+      expect(
+        specifiersIn(
+          [
+            'import { a } from "./a.js";',
+            'export { b } from "./b.js";',
+            'const c = await import("./c.js");',
+            'import "./d.js";'
+          ].join("\n")
+        )
+      ).toEqual(["./a.js", "./b.js", "./c.js", "./d.js"]);
+    });
+
+    it("ignores an import written after code on the same line", () => {
+      expect(
+        specifiersIn('import { x } from "./x.js"; // was: import "fs"')
+      ).toEqual(["./x.js"]);
+    });
+
+    it.each([
+      ["a block comment", '/* import { readFile } from "fs"; */'],
+      ["a leading line comment", '// import { readFile } from "fs";'],
+      ["a template literal", 'const doc = `import { readFile } from "fs";`;']
+    ])("ignores an import inside %s", (_label, content) => {
+      expect(specifiersIn(content)).toEqual([]);
+    });
+
+    it("does not treat a URL in a string as the start of a comment", () => {
+      expect(
+        specifiersIn(
+          ['const docs = "https://example.com/x";', 'import "fs";'].join("\n")
+        )
+      ).toEqual(["fs"]);
+    });
   });
 
   it("imports no adapter, SDK, or HTTP implementation", () => {
@@ -161,8 +229,14 @@ describe("core package in a host without HTTP or DOM globals", () => {
     removed.clear();
   });
 
+  // Only names that were actually present are recorded, so the restore does not
+  // define `window`/`document`/`XMLHttpRequest` as own properties holding
+  // `undefined` under this config's node environment. `typeof` would still read
+  // "undefined", but `"window" in globalThis` would flip to true for everything
+  // running after this suite.
   function withoutGlobals(names: string[]): void {
     for (const name of names) {
+      if (!(name in globals)) continue;
       removed.set(name, globals[name]);
       delete globals[name];
     }
@@ -189,6 +263,31 @@ describe("core package in a host without HTTP or DOM globals", () => {
       /^ghcr\.io\/acme\//
     );
     expect(core.getPlatform("azure")?.id).toBe("azure");
+  });
+
+  it("leaves globals that were never defined absent after the restore", () => {
+    const absentBefore = ["XMLHttpRequest", "document", "window"].filter(
+      (name) => !(name in globals)
+    );
+    expect(absentBefore.length).toBeGreaterThan(0);
+
+    withoutGlobals(["fetch", ...absentBefore]);
+    for (const [name, value] of removed) globals[name] = value;
+    removed.clear();
+
+    for (const name of absentBefore) expect(name in globals).toBe(false);
+  });
+
+  it("restores a global that was present before it was removed", () => {
+    expect("fetch" in globals).toBe(true);
+    const original = globals.fetch;
+
+    withoutGlobals(["fetch"]);
+    expect("fetch" in globals).toBe(false);
+
+    for (const [name, value] of removed) globals[name] = value;
+    removed.clear();
+    expect(globals.fetch).toBe(original);
   });
 
   it("exposes every subpath the package manifest declares, and nothing more", async () => {
