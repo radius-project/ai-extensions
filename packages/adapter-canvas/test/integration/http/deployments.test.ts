@@ -536,7 +536,11 @@ function failedAttempt(state: CanvasState, extra: Partial<CanvasState>): void {
 }
 
 describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
-  it("fails closed through the real monitor and dispatch service when Azure OIDC coverage is missing", async () => {
+  // Each refusal below gets its own harness. Sharing one test made the
+  // case-mismatch half reachable only if the missing-subject half got that
+  // far, so a regression in either path reported a single failure that said
+  // nothing about which one broke.
+  function oidcRefusalHarness(subjects: string[]) {
     const workflowDispatches: string[][] = [];
     const dispatch = createDeployDispatchService({
       deployWorkflowFile: "run-rad-commands.yml",
@@ -546,6 +550,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       ],
       branchNotPushedKind: "branch-not-pushed",
       oidcSubjectMissingKind: "oidc-subject-missing",
+      oidcSubjectCaseMismatchKind: "oidc-subject-case-mismatch",
       getBranchHeadSha: () => Promise.resolve("sha-1"),
       getDefaultBranch: () => Promise.resolve("main"),
       runGh: (args) => {
@@ -558,7 +563,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       runAz: () =>
         Promise.resolve({
           code: 0,
-          stdout: JSON.stringify(["repo:acme/widgets:environment:development"]),
+          stdout: JSON.stringify(subjects),
           stderr: ""
         }),
       runGitHubJson: (path) => {
@@ -654,7 +659,13 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       sleep: () => Promise.resolve(),
       now: () => 1_700_000_000_000
     });
-    const harness = startDeploy(monitor);
+    return { workflowDispatches, harness: startDeploy(monitor) };
+  }
+
+  it("fails closed through the real monitor and dispatch service when no credential covers a subject GitHub could mint", async () => {
+    const { workflowDispatches, harness } = oidcRefusalHarness([
+      "repo:acme/widgets:environment:development"
+    ]);
     const entry = await container!.getOrCreate("panel-a");
     const state = harness.stateOf("panel-a");
     state.plannedResources = [{ id: "r1", name: "db" }];
@@ -673,6 +684,30 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     // The refusal must be marked so the repair loop never opens for a failure
     // the agent cannot fix by editing the model.
     expect(state.deployErrorKind).toBe("oidc-subject-missing");
+    expect(workflowDispatches).toEqual([]);
+    await expect.poll(() => activeDeploymentMutation(state)).toBeUndefined();
+  });
+
+  it("fails closed through the real monitor and dispatch service when the only credential differs by casing", async () => {
+    const { workflowDispatches, harness } = oidcRefusalHarness([
+      "repo:Acme/Widgets:environment:Production"
+    ]);
+    const entry = await container!.getOrCreate("panel-a");
+    const state = harness.stateOf("panel-a");
+    state.plannedResources = [{ id: "r1", name: "db" }];
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      body: deployBody()
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    await expect.poll(() => state.deployStatus).toBe("failed");
+    expect(state.deployError).toContain(
+      'expected "repo:acme/widgets:environment:production" but the app has "repo:Acme/Widgets:environment:Production"'
+    );
+    expect(state.deployErrorKind).toBe("oidc-subject-case-mismatch");
     expect(workflowDispatches).toEqual([]);
     await expect.poll(() => activeDeploymentMutation(state)).toBeUndefined();
   });
