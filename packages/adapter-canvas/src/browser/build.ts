@@ -9,6 +9,7 @@ const BROWSER_SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 export type BrowserEntryName =
   | "graph"
   | "delete-dialog"
+  | "pane-navigation"
   | "heartbeat"
   | "operation-chip"
   | "deploy-result-page"
@@ -51,6 +52,12 @@ export const BROWSER_ENTRIES: readonly BrowserEntrySpec<BrowserEntryName>[] = [
     file: "./entries/delete-dialog.ts",
     initializer: "installDeleteDialogEntry",
     globals: ["radiusCreateDeleteDeploymentDialog"]
+  },
+  {
+    name: "pane-navigation",
+    file: "./entries/pane-navigation.ts",
+    initializer: "installPaneNavigationEntry",
+    globals: []
   },
   {
     name: "heartbeat",

@@ -81,6 +81,7 @@ describe("browser entry specifications", () => {
     expect(BROWSER_ENTRY_NAMES).toEqual([
       "graph",
       "delete-dialog",
+      "pane-navigation",
       "heartbeat",
       "operation-chip",
       "deploy-result-page",
@@ -95,6 +96,7 @@ describe("browser entry specifications", () => {
     expect(BROWSER_ENTRIES.map((entry) => entry.initializer)).toEqual([
       "installGraphEntry",
       "installDeleteDialogEntry",
+      "installPaneNavigationEntry",
       "installHeartbeatEntry",
       "installOperationChipEntry",
       "installDeployResultPageEntry",

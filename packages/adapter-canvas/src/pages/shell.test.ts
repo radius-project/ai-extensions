@@ -4,6 +4,7 @@ import {
   browserScript,
   browserStyle
 } from "../browser/scripts.js";
+import { CRITICAL_SHELL_STYLE_CSS } from "./shell-styles.js";
 import { pageShell } from "./shell.js";
 
 describe("pageShell", () => {
@@ -61,6 +62,15 @@ describe("pageShell", () => {
     expect(html).not.toContain(
       "--rad-neutral-bg: var(--background-color-segmented"
     );
+  });
+
+  it("loads critical document paint before graph styles", () => {
+    const html = pageShell("My Title", "<p>hello</p>");
+    const criticalStyles = html.indexOf(CRITICAL_SHELL_STYLE_CSS);
+    const graphStyles = html.indexOf(browserStyle("graph"));
+
+    expect(criticalStyles).toBeGreaterThan(-1);
+    expect(criticalStyles).toBeLessThan(graphStyles);
   });
 
   it("keeps React Flow chrome transparent over the themed graph surface", () => {
@@ -199,8 +209,8 @@ describe("pageShell document structure", () => {
     expect(html).toContain('<meta charset="utf-8" />');
     const order = [
       "<title>",
-      '<nav class="rad-topnav">',
-      '<div class="main-content">',
+      '<nav class="rad-topnav" id="radius-topnav">',
+      '<div class="main-content" id="radius-main-content">',
       '<p id="body">hello</p>',
       'id="rad-feedback"',
       'id="radius-reconnect-overlay"'
@@ -220,6 +230,13 @@ describe("pageShell document structure", () => {
   it("injects the shared delete dialog entry exactly once", () => {
     expect(html).toContain(browserEntryMarker("delete-dialog"));
     expect(html.split(browserScript("delete-dialog"))).toHaveLength(2);
+  });
+
+  it("renders stable shell regions and initializes pane navigation exactly once", () => {
+    expect(html.split('id="radius-topnav"')).toHaveLength(2);
+    expect(html.split('id="radius-main-content"')).toHaveLength(2);
+    expect(html.split(browserEntryMarker("pane-navigation"))).toHaveLength(2);
+    expect(html.split(browserScript("pane-navigation"))).toHaveLength(2);
   });
 
   it.each([
@@ -274,10 +291,14 @@ describe("pageShell document structure", () => {
   });
 
   it("ships the shared client scripts before the page body that calls them", () => {
+    const paneNavigation = html.indexOf(browserEntryMarker("pane-navigation"));
     const graph = html.indexOf(browserEntryMarker("graph"));
     const deleteDialog = html.indexOf(browserEntryMarker("delete-dialog"));
-    const body = html.indexOf('<div class="main-content">');
-    expect(graph).toBeGreaterThan(-1);
+    const body = html.indexOf(
+      '<div class="main-content" id="radius-main-content">'
+    );
+    expect(paneNavigation).toBeGreaterThan(-1);
+    expect(graph).toBeGreaterThan(paneNavigation);
     expect(deleteDialog).toBeGreaterThan(graph);
     expect(body).toBeGreaterThan(deleteDialog);
   });
@@ -306,7 +327,7 @@ describe("pageShell document structure", () => {
       const marker = browserEntryMarker(name);
       expect(html.split(marker).length - 1).toBe(1);
       expect(html.indexOf(marker)).toBeLessThan(
-        html.indexOf('<div class="main-content">')
+        html.indexOf('<div class="main-content" id="radius-main-content">')
       );
     }
   );
