@@ -9,7 +9,10 @@ import {
 import type { ResolveOidcSubjectResult } from "../../azure-oidc.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
-import { resolveAzureAutoSetupApplication } from "./azure-auto-setup-application.js";
+import {
+  ENTRA_APP_RETENTION_NOTICE,
+  resolveAzureAutoSetupApplication
+} from "./azure-auto-setup-application.js";
 import { configureAzureAutoSetupCredentials } from "./azure-auto-setup-credentials.js";
 import type {
   AzureAutoSetupDependencies,
@@ -595,6 +598,11 @@ export async function handleAzureAutoSetup(
       }))
     ) {
       return;
+    }
+    if (application.state === "created") {
+      steps.push(
+        `ℹ️ Created Entra app registration "${application.appName}". ${ENTRA_APP_RETENTION_NOTICE}`
+      );
     }
 
     dependencies.operations.setStageState(

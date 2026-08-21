@@ -635,6 +635,45 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).toContainText(/could not verify/i);
   });
 
+  test("disables Planned deployment for the selected app and environment while it is pending @safety", async ({
+    page,
+    canvas
+  }) => {
+    const scenario = defaultFakeCliScenario();
+    const deploymentStatus = scenario.commands.find(
+      (command) =>
+        command.tool === "gh" &&
+        command.args?.[1] ===
+          `/repos/${REPOSITORY}/deployments/dep-1/statuses?per_page=1`
+    );
+    if (deploymentStatus) {
+      deploymentStatus.stdout = `pending\thttps://github.com/${REPOSITORY}/actions/runs/1`;
+    }
+    const deploymentWorkflow = scenario.commands.find(
+      (command) =>
+        command.tool === "gh" &&
+        command.args?.[1] === `/repos/${REPOSITORY}/actions/runs/1`
+    );
+    if (deploymentWorkflow) {
+      deploymentWorkflow.stdout =
+        ".github/workflows/run-rad-commands.yml\tin_progress\t";
+    }
+    await canvas.setScenario(scenario);
+
+    await gotoCanvas(page, canvas, "planned");
+
+    await expect(page.locator("#planned-app")).toHaveValue("radius-app");
+    await expect(page.locator("#planned-env")).toHaveValue(
+      "fixture-environment"
+    );
+    const deploy = page.getByRole("button", { name: "Deploy Application" });
+    await expect(deploy).toBeDisabled();
+    await expect(deploy).toHaveAttribute(
+      "title",
+      'A deployment of application "radius-app" to environment "fixture-environment" is already in progress. Wait for it to finish before deploying again.'
+    );
+  });
+
   test("shows deployment-started notification only after workflow confirmation in Chromium", async ({
     page,
     canvas

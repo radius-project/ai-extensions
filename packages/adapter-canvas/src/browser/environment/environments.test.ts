@@ -177,18 +177,16 @@ describe("environment records and markup", () => {
   });
 
   it.each([
-    ["success", "rad-dot--success", "Success"],
-    ["verified", "rad-dot--success", "Verified"],
-    ["failed", "rad-dot--failed", "Failed"],
-    ["pending", "rad-dot--pending", "Pending"],
-    ["unverified", "rad-dot--pending", "Unverified"],
-    ["deleting", "rad-dot--pending", "Deleting…"],
-    ["unknown", "rad-dot--success", "Available"],
-    ["mystery", "rad-dot--pending", "Pending"]
-  ])("renders %s status", (status, tone, label) => {
-    const markup = environmentStatusMarkup(status);
-    expect(markup).toContain(tone);
-    expect(markup).toContain(label);
+    ["success", "Success"],
+    ["verified", "Verified"],
+    ["failed", "Failed"],
+    ["pending", "Pending"],
+    ["unverified", "Unverified"],
+    ["deleting", "Deleting…"],
+    ["unknown", "Available"],
+    ["mystery", "Pending"]
+  ])("renders %s as text without a colored circle", (status, label) => {
+    expect(environmentStatusMarkup(status)).toBe(label);
   });
 
   it("parses valid records and drops malformed or unnamed entries", () => {
@@ -265,6 +263,8 @@ describe("environment records and markup", () => {
     );
     expect(markup).not.toContain("<img");
     expect(markup).toContain("&lt;img");
+    expect(markup).toContain("<td>Success</td>");
+    expect(markup).not.toContain("rad-dot");
     // Editing happens in the canvas rather than on GitHub, so the row carries
     // a button rather than an external link.
     expect(markup).not.toContain("href=");

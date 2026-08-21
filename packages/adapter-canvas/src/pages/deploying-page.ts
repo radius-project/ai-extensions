@@ -105,8 +105,6 @@ ${DELETE_DEPLOYMENT_DIALOG_HTML}
   }
   .rad-btn--danger, .rad-btn--danger-outline { background:var(--rad-neutral-bg); color:var(--rad-danger-text); border:1px solid var(--rad-neutral-border); }
   .rad-btn--danger:hover, .rad-btn--danger-outline:hover { background:var(--rad-danger-solid); border-color:var(--rad-danger-solid-border); color:#fff; }
-  .rad-btn--danger-solid { background:var(--rad-danger-solid); color:#fff; border:1px solid var(--rad-danger-solid-border); }
-  .rad-btn--danger-solid:hover { background:var(--rad-danger-solid-border); border-color:var(--rad-danger-solid-border); color:#fff; }
   .rad-deploy-applink { display:inline-flex; align-items:center; gap:6px; color:var(--rad-link); text-decoration:underline; font-weight:600; font-size:14px; }
   .rad-deploy-applink:hover { color:var(--rad-link-hover); }
   .rad-monitor-link { color:var(--rad-link); text-decoration:underline; font-weight:600; font-size:14px; cursor:pointer; }
