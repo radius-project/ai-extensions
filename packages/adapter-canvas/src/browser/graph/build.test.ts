@@ -497,6 +497,34 @@ describe("planned and deploying graphs", () => {
     expect(built.dataById["cache"].typeLabel).toBe("apps/Deployment");
   });
 
+  it("shows the MySQL root resource instead of its lock and child resources", () => {
+    const built = buildGraph(settings({ deployMode: true }), [
+      {
+        id: "mysql",
+        name: "mysql",
+        type: "Radius.Data/mySqlDatabases",
+        outputResources: [
+          { name: "lock", type: "Microsoft.Authorization/locks" },
+          {
+            name: "server",
+            type: "Microsoft.DBforMySQL/flexibleServers"
+          },
+          {
+            name: "database",
+            type: "Microsoft.DBforMySQL/flexibleServers/databases"
+          },
+          {
+            name: "firewall",
+            type: "Microsoft.DBforMySQL/flexibleServers/firewallRules"
+          }
+        ]
+      }
+    ]);
+    expect(built.dataById.mysql.typeLabel).toBe(
+      "Microsoft.DBforMySQL/flexibleServers"
+    );
+  });
+
   it("keeps the modeled resource's own icon rather than the output's glyph", () => {
     const built = buildGraph(settings({ plannedMode: true }), [
       {
