@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
+import { RadProcessError } from "@radius-project/adapter-shared";
 import { UNSUPPORTED_NO_DOCKERFILE_MESSAGE } from "@radius-project/core";
 import { createRequestContext } from "../request-context.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
@@ -462,11 +463,30 @@ describe("graphs-planning load-graph-stream route", () => {
   });
 
   it("keeps compile diagnostics out of the terminal done frame", async () => {
-    const { deps } = fakes({ buildThrows: new Error("rad failed") });
+    const { deps } = fakes({
+      buildThrows: new Error("rad app graph failed", {
+        cause: new RadProcessError("rad exited", "BCP035: invalid model", "")
+      })
+    });
     const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
     expect(frames(recording.stream).at(-1)).toEqual({
       event: "done",
       data: { error: `formatted:${GRAPH_MODELING_FAILURE_MESSAGE}` }
+    });
+  });
+
+  it("preserves a graph toolchain failure without Bicep diagnostics", async () => {
+    const { deps } = fakes({
+      buildThrows: new RadProcessError(
+        "managed Bicep download failed",
+        "",
+        "connection refused"
+      )
+    });
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+    expect(frames(recording.stream).at(-1)).toEqual({
+      event: "done",
+      data: { error: "formatted:managed Bicep download failed" }
     });
   });
 

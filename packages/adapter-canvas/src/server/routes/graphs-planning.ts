@@ -2,7 +2,11 @@ import {
   evaluateAppSource,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
-import { GraphModelingFailure } from "../../graph-progress-contract.js";
+import {
+  asGraphModelingFailure,
+  graphModelingDiagnostic,
+  GraphModelingFailure
+} from "../../graph-modeling-failure.js";
 import type { DeployStatus } from "@radius-project/core";
 import type {
   DeployProgress,
@@ -700,10 +704,14 @@ export async function handleLoadGraphStream(
         }
       );
     } catch (error) {
+      const failure = asGraphModelingFailure(error);
+      if (!(failure instanceof GraphModelingFailure)) throw error;
+      const diagnostic =
+        graphModelingDiagnostic(error) ?? dependencies.errorMessage(error);
       dependencies.logError(
-        `[radius graph] modeling failed: ${dependencies.errorMessage(error)}`
+        `[radius graph] modeling failed for ${repo}@${branch}: ${diagnostic}`
       );
-      throw new GraphModelingFailure(error);
+      throw failure;
     }
     const resources = dependencies.canvasGraphResources(graphValues);
     sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);

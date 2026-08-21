@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
+import { RadProcessError } from "@radius-project/adapter-shared";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import {
@@ -361,7 +362,9 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
 
   it("keeps compile diagnostics out of the terminal done frame", async () => {
     const harness = start();
-    harness.script.buildThrows = new Error("rad exited 1");
+    harness.script.buildThrows = new Error("rad app graph failed", {
+      cause: new RadProcessError("rad exited 1", "BCP035: invalid model", "")
+    });
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(

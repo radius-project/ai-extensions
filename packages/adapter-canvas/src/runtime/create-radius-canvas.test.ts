@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { APP_ORIGIN_REPO_PATH, serializeAppOrigin } from "@radius-project/core";
+import { RadProcessError } from "@radius-project/adapter-shared";
 import { hashAppBicep } from "../app-bicep-hash.js";
 import { createRadiusCanvas } from "./create-radius-canvas.js";
 import {
@@ -450,7 +451,13 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
       }
     });
     (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new Error("graph compilation failed")
+      new Error("rad app graph failed", {
+        cause: new RadProcessError(
+          "rad exited with code 1",
+          "BCP035: invalid model",
+          ""
+        )
+      })
     );
 
     await canvas.open(
@@ -466,8 +473,38 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
       GRAPH_MODELING_FAILURE_MESSAGE
     );
     expect(deps.logError).toHaveBeenCalledWith(
-      "[radius graph] modeling failed: graph compilation failed"
+      "[radius graph] modeling failed for acme/widgets@main...feat: BCP035: invalid model"
     );
+  });
+
+  it("preserves a graph-diff toolchain failure without Bicep diagnostics", async () => {
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "resource db {}",
+        "remote:acme/widgets@feat": "resource db {}"
+      }
+    });
+    (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new RadProcessError(
+        "managed Bicep download failed",
+        "",
+        "connection refused"
+      )
+    );
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "feat"
+      })
+    );
+
+    expect(deps.servers.get("radius-panel")!.state.diffError).toBe(
+      "managed Bicep download failed"
+    );
+    expect(deps.logError).not.toHaveBeenCalled();
   });
 
   it("only records a diff error for the CURRENT diff request (stale responses are ignored)", async () => {

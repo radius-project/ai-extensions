@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { computeGraphDiff } from "@radius-project/core";
+import { RadProcessError } from "@radius-project/adapter-shared";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createGraphsPlanningWritesRoutes } from "../../../src/server/routes/graphs-planning-writes.js";
@@ -268,7 +269,13 @@ describe("graphs-planning writes real-loopback HIT", () => {
   it("keeps app.bicep validation diagnostics out of the graph response", async () => {
     const harness = start({
       selections: { main: selectionOf("main", "resource app = {}") },
-      compileThrows: new Error("Error BCP035: missing required property")
+      compileThrows: new Error("rad app graph failed", {
+        cause: new RadProcessError(
+          "rad exited with code 1",
+          "Error BCP035: missing required property",
+          ""
+        )
+      })
     });
     const entry = await container!.getOrCreate("panel-a");
 
@@ -284,7 +291,7 @@ describe("graphs-planning writes real-loopback HIT", () => {
     });
     expect(harness.state.graphLoaded).toBeUndefined();
     expect(loggedErrors).toEqual([
-      "[radius graph] modeling failed: Error BCP035: missing required property"
+      "[radius graph] modeling failed for octo/app@main: Error BCP035: missing required property"
     ]);
   });
 

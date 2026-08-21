@@ -3,10 +3,12 @@ import {
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
 import { recordGraphBuildEvent } from "../../shared.js";
+import { GRAPH_APP_BICEP_TIMEOUT_MS } from "../../graph-progress-contract.js";
 import {
-  GRAPH_APP_BICEP_TIMEOUT_MS,
+  asGraphModelingFailure,
+  graphModelingDiagnostic,
   GraphModelingFailure
-} from "../../graph-progress-contract.js";
+} from "../../graph-modeling-failure.js";
 import type {
   CanvasGraphResource,
   CanvasState,
@@ -337,15 +339,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
   }
 
   async function compileResources(
-    input: Parameters<GraphPipeline<TEntry>["compileResources"]>[0]
+    input: Parameters<GraphPipeline<TEntry>["compileResources"]>[0],
+    context: { repo: string; branch: string }
   ): ReturnType<GraphPipeline<TEntry>["compileResources"]> {
     try {
       return await pipeline.compileResources(input);
     } catch (error) {
+      const failure = asGraphModelingFailure(error);
+      if (!(failure instanceof GraphModelingFailure)) throw error;
+      const diagnostic =
+        graphModelingDiagnostic(error) ?? dependencies.errorMessage(error);
       dependencies.logError(
-        `[radius graph] modeling failed: ${dependencies.errorMessage(error)}`
+        `[radius graph] modeling failed for ${context.repo}@${context.branch}: ${diagnostic}`
       );
-      throw new GraphModelingFailure(error);
+      throw failure;
     }
   }
 
@@ -541,12 +548,15 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         "Compiling the application model and building the resource graph."
       );
-      const resources = await compileResources({
-        selection,
-        staged,
-        log: addBuildDetail,
-        saveGraphJsonTo: graphJsonPath
-      });
+      const resources = await compileResources(
+        {
+          selection,
+          staged,
+          log: addBuildDetail,
+          saveGraphJsonTo: graphJsonPath
+        },
+        { repo, branch }
+      );
       addEvent(
         "building_graph",
         "succeeded",
@@ -712,11 +722,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         "Compiling the application model and building the resource graph."
       );
-      const resources = await compileResources({
-        selection,
-        staged,
-        log: addBuildDetail
-      });
+      const resources = await compileResources(
+        {
+          selection,
+          staged,
+          log: addBuildDetail
+        },
+        { repo, branch }
+      );
       addEvent(
         "building_graph",
         "succeeded",
@@ -956,10 +969,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         `Building the graph for ${data.base}.`
       );
-      const baseResources = await compileResources({
-        selection: baseSelection,
-        staged: baseStaged
-      });
+      const baseResources = await compileResources(
+        {
+          selection: baseSelection,
+          staged: baseStaged
+        },
+        { repo, branch: data.base }
+      );
       addEvent(
         "building_base_graph",
         "succeeded",
@@ -970,10 +986,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         `Building the graph for ${data.head}.`
       );
-      const headResources = await compileResources({
-        selection: headSelection,
-        staged: headStaged
-      });
+      const headResources = await compileResources(
+        {
+          selection: headSelection,
+          staged: headStaged
+        },
+        { repo, branch: data.head }
+      );
       addEvent(
         "building_head_graph",
         "succeeded",

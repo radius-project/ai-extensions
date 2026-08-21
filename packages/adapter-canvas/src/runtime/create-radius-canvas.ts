@@ -27,9 +27,10 @@ import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasServerEntry } from "../server.js";
 import type { CanvasGraphResource, CanvasState } from "../shared.js";
 import {
-  GRAPH_MODELING_FAILURE_MESSAGE,
+  asGraphModelingFailure,
+  graphModelingDiagnostic,
   GraphModelingFailure
-} from "../graph-progress-contract.js";
+} from "../graph-modeling-failure.js";
 
 const MAX_DEFERRED_ENVIRONMENT_CLOSE_MS = 46 * 60 * 1000;
 
@@ -439,10 +440,14 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
               }
             );
           } catch (error) {
+            const failure = asGraphModelingFailure(error);
+            if (!(failure instanceof GraphModelingFailure)) throw error;
+            const diagnostic =
+              graphModelingDiagnostic(error) ?? errorMessage(error);
             deps.logError(
-              `[radius graph] modeling failed: ${errorMessage(error)}`
+              `[radius graph] modeling failed for ${repo}@${baseBranch}...${headBranch}: ${diagnostic}`
             );
-            throw new GraphModelingFailure(error);
+            throw failure;
           }
           const diffResources = deps.core.computeGraphDiff(
             baseResources,
@@ -465,10 +470,7 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
           if (
             isCurrentSourceRefToken(entry.state, "diff", sourceRefContext.token)
           ) {
-            entry.state.diffError =
-              e instanceof GraphModelingFailure ?
-                GRAPH_MODELING_FAILURE_MESSAGE
-              : errorMessage(e);
+            entry.state.diffError = errorMessage(e);
           }
         }
       }

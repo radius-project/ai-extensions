@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { RadProcessError } from "@radius-project/adapter-shared";
 import {
   computeGraphDiff,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
@@ -53,6 +54,12 @@ function record(value: unknown): Record<string, unknown> {
 
 function optionalString(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function validationFailure(detail: string): Error {
+  return new Error("rad app graph failed", {
+    cause: new RadProcessError("rad exited with code 1", detail, "")
+  });
 }
 
 interface HandoffCall {
@@ -606,7 +613,7 @@ describe("graph planning workflows", () => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "/tmp/staged", remote: false } },
-        compileThrows: { main: new Error(radOutput) }
+        compileThrows: { main: validationFailure(radOutput) }
       });
 
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
@@ -622,8 +629,29 @@ describe("graph planning workflows", () => {
       expect(stages(harness.state).at(-1)).toBe("building_graph:failed");
       expect(harness.state.graphLoaded).toBeUndefined();
       expect(harness.loggedErrors).toEqual([
-        `[radius graph] modeling failed: ${radOutput}`
+        `[radius graph] modeling failed for octo/app@main: ${radOutput}`
       ]);
+    });
+
+    it("preserves a graph toolchain failure that has no Bicep diagnostic", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: false } },
+        compileThrows: {
+          main: new RadProcessError(
+            "managed Bicep download failed",
+            "",
+            "connection refused"
+          )
+        }
+      });
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toEqual({
+        error: "managed Bicep download failed"
+      });
+      expect(harness.loggedErrors).toEqual([]);
     });
 
     it("does not reuse a cached graph when the definition hash moved", async () => {
@@ -1272,7 +1300,7 @@ describe("graph planning workflows", () => {
           main: { dir: "", remote: false },
           "feature/x": { dir: "", remote: false }
         },
-        compileThrows: { main: new Error("rad exited 1") }
+        compileThrows: { main: validationFailure("BCP035: invalid model") }
       });
 
       const outcome = await harness.run("diffBranches", diffBody);
@@ -1286,7 +1314,7 @@ describe("graph planning workflows", () => {
       // recorded failure is the same short sentence, not rad's output.
       expect(harness.state.diffError).toBe(GRAPH_MODELING_FAILURE_MESSAGE);
       expect(harness.loggedErrors).toEqual([
-        "[radius graph] modeling failed: rad exited 1"
+        "[radius graph] modeling failed for octo/app@main: BCP035: invalid model"
       ]);
     });
 
@@ -1397,7 +1425,9 @@ describe("graph planning workflows", () => {
 
     it("surfaces a compilation failure as 400 after staging and commits no planned state", async () => {
       const harness = planHarness({
-        compileThrows: { main: new Error("rad bicep build-graph exited 1") }
+        compileThrows: {
+          main: validationFailure("BCP035: invalid model")
+        }
       });
 
       const outcome = await harness.run("planGraph", planBody);
@@ -1409,7 +1439,7 @@ describe("graph planning workflows", () => {
       // rad's Bicep diagnostics are the exact text issue #475 kept out of the
       // graph surface: they survive only in the server log.
       expect(harness.loggedErrors).toEqual([
-        "[radius graph] modeling failed: rad bicep build-graph exited 1"
+        "[radius graph] modeling failed for octo/app@main: BCP035: invalid model"
       ]);
       expect(harness.order).toEqual([
         "select:main",
