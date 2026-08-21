@@ -75,6 +75,7 @@ function dependencies(
   overrides: Partial<DeploymentsDependencies> = {}
 ): DeploymentsDependencies {
   return {
+    isValidRepoSlug: (value) => value === "octo/todolist",
     readInstanceEntry: () => {
       throw new Error("readInstanceEntry not stubbed");
     },
@@ -300,7 +301,7 @@ describe("deployments routes (SU-06)", () => {
     const remove = context("POST", "/api/delete-deployment", "{}");
     await routes["POST /api/delete-deployment"](remove.context);
     expect(JSON.parse(remove.recording.body)).toEqual({
-      error: "repo, environment, and application are required."
+      error: "A valid repo, environment, and application are required."
     });
 
     const abandon = context("POST", "/api/abandon-deployment", "{}");
@@ -1239,7 +1240,7 @@ describe("deployments routes (SU-06)", () => {
       return context("POST", "/api/delete-deployment", body);
     }
 
-    it("refuses a request missing any of repo, environment or application", async () => {
+    it("refuses a request missing or malformed repo, environment or application", async () => {
       for (const body of [
         // An absent body is not a parse error: it means "{}", which then fails
         // the required-fields check rather than the JSON check.
@@ -1249,7 +1250,8 @@ describe("deployments routes (SU-06)", () => {
         '{"repo":"octo/todolist","environment":"dev"}',
         '{"environment":"dev","application":"todolist"}',
         // Present but empty is the same refusal: the handler coerces with `||`.
-        '{"repo":"","environment":"dev","application":"todolist"}'
+        '{"repo":"","environment":"dev","application":"todolist"}',
+        '{"repo":"invalid","environment":"dev","application":"todolist"}'
       ]) {
         const { recording, context: ctx } = deleteContext(body);
         await handleDeleteDeployment(
@@ -1262,7 +1264,7 @@ describe("deployments routes (SU-06)", () => {
         );
         expect(recording.status).toBe(400);
         expect(JSON.parse(recording.body)).toEqual({
-          error: "repo, environment, and application are required."
+          error: "A valid repo, environment, and application are required."
         });
       }
     });

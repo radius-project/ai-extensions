@@ -975,6 +975,13 @@ export function createDeployedState(): DeployedEnvState {
 
 export type DeployedMode = "create-env" | "deploy" | "delete" | "abandon";
 
+function setDeploymentStateUnavailableTitle(button: DomInputElement): void {
+  button.setAttribute(
+    "title",
+    "The current deployment state could not be loaded. Retrying…"
+  );
+}
+
 // Adapt the Deployed primary button to the user's actual setup: no environment
 // at all, an environment without a deployment, or an existing deployment. A
 // deployment listing that could not be read disables the destructive path
@@ -1060,20 +1067,14 @@ export function applyDeployedEnvState(
           `This deployment is already being deleted from environment "${environment}". Wait for the delete to finish.`
         );
       } else if (statesUnavailable) {
-        button.setAttribute(
-          "title",
-          "The current deployment state could not be loaded. Retrying…"
-        );
+        setDeploymentStateUnavailableTitle(button);
       }
     } else {
       button.textContent = "Abandon failed deployment";
       button.className = "rad-btn rad-btn--danger-outline";
       button.disabled = !(application && environment) || statesUnavailable;
       if (statesUnavailable) {
-        button.setAttribute(
-          "title",
-          "The current deployment state could not be loaded. Retrying…"
-        );
+        setDeploymentStateUnavailableTitle(button);
       }
     }
   }

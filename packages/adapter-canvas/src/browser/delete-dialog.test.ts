@@ -107,7 +107,7 @@ describe("delete dialog step specs", () => {
   it("builds the confirmation token from the target pair", () => {
     expect(deleteDialogConfirmToken("store", "prod")).toBe("store/prod");
     expect(deleteDialogConfirmToken("store", "prod", "abandon")).toBe(
-      "abandon store/prod"
+      "store/prod"
     );
   });
 
@@ -136,7 +136,7 @@ describe("delete dialog step specs", () => {
       "prod",
       " without changing any cloud resources."
     ]);
-    expect(confirm[0].text).toContain('"abandon store/prod"');
+    expect(confirm[0].text).toContain('"store/prod"');
     expect(confirm[2].text).toBe("Abandon failed deployment");
   });
 });
@@ -217,9 +217,6 @@ describe("delete deployment dialog", () => {
     expect(confirm.disabled).toBe(true);
 
     input.value = "store/prod";
-    input.dispatch("input");
-    expect(confirm.disabled).toBe(true);
-    input.value = "abandon store/prod";
     input.dispatch("input");
     input.dispatch("keydown", { key: "Enter" });
 

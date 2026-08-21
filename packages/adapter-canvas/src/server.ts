@@ -550,6 +550,7 @@ const repositoriesRoutes = createRepositoriesRoutes({
 // because all three are declared further down the module and would otherwise be
 // in the temporal dead zone when this object is built at import time.
 const deploymentsRoutes = createDeploymentsRoutes({
+  isValidRepoSlug,
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   triggerDeployRepairHandoff,
   triggerDeployFailureNotice,

@@ -85,6 +85,7 @@ const productionHandlers = {
     repoMatchesWorkspace: () => false
   }),
   ...createDeploymentsRoutes({
+    isValidRepoSlug: () => true,
     readInstanceEntry: () => undefined,
     triggerDeployRepairHandoff: () => false,
     triggerDeployFailureNotice: () => false,

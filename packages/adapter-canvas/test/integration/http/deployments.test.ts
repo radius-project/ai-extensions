@@ -117,6 +117,7 @@ function start(): Harness {
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
+      isValidRepoSlug,
       readInstanceEntry: () => (entryMissing ? undefined : { state }),
       triggerDeployRepairHandoff: () => false,
       triggerDeployFailureNotice: () => false,
@@ -379,7 +380,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({
-      error: "repo, environment, and application are required."
+      error: "A valid repo, environment, and application are required."
     });
   });
 
@@ -521,6 +522,69 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.state.deploymentMutation).toBeUndefined();
   });
 
+  it("abandons the failed deploy behind GitHub's generic inactive failed-delete status", async () => {
+    const harness = start();
+    harness.setDeploymentResolver((repo, environment, application) =>
+      resolveEnvironmentDeployment(repo, environment, application, {
+        ghOrThrow: (args) => {
+          const path = args[1] ?? "";
+          if (path.includes("/variables?")) return Promise.resolve("");
+          if (path.includes("/deployments?")) {
+            return Promise.resolve("failed-delete\nfailed-deploy");
+          }
+          if (path.includes("/deployments/failed-delete/statuses?per_page=1")) {
+            return Promise.resolve(
+              "inactive\thttps://github.com/octo/todo/actions/runs/30\t"
+            );
+          }
+          if (path.includes("/deployments/failed-deploy/statuses?per_page=1")) {
+            return Promise.resolve(
+              "failure\thttps://github.com/octo/todo/actions/runs/20\t"
+            );
+          }
+          if (path.includes("/actions/runs/30")) {
+            return Promise.resolve(
+              ".github/workflows/delete-application.yml\tcompleted\tfailure"
+            );
+          }
+          if (path.includes("/actions/runs/20")) {
+            return Promise.resolve(
+              ".github/workflows/run-rad-commands.yml\tcompleted\tfailure"
+            );
+          }
+          return Promise.reject(new Error(`unexpected path: ${path}`));
+        },
+        deployWorkflowFile: "run-rad-commands.yml",
+        deleteWorkflowFile: "delete-application.yml",
+        maxParallelRecords: 10
+      })
+    );
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: "abandoned" });
+    expect(harness.ghApiCalls).toContainEqual(
+      expect.arrayContaining([
+        "--method",
+        "POST",
+        "/repos/octo/todo/deployments/failed-deploy/statuses"
+      ])
+    );
+    expect(harness.workflowSyncs).toEqual([]);
+    expect(harness.dispatches).toEqual([]);
+    expect(harness.state.deploymentMutation).toBeUndefined();
+  });
+
   it("delegates methods the typed declarations do not claim", async () => {
     start();
     const entry = await container!.getOrCreate("panel-a");
@@ -621,6 +685,7 @@ function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
+      isValidRepoSlug,
       readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
       triggerDeployRepairHandoff: () => false,
       triggerDeployFailureNotice: () => false,

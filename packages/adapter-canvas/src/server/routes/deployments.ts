@@ -73,6 +73,7 @@ export interface DeploymentsInstanceEntry {
 }
 
 export interface DeploymentsDependencies {
+  isValidRepoSlug(value: unknown): boolean;
   readInstanceEntry(instanceId: string): DeploymentsInstanceEntry | undefined;
   triggerDeployRepairHandoff(
     entry: DeploymentsInstanceEntry | undefined,
@@ -470,9 +471,14 @@ export async function handleDeleteDeployment(
     const repo = data.repo || "";
     const environment = data.environment || "";
     const application = data.application || "";
-    if (!repo || !environment || !application) {
+    if (
+      !repo ||
+      !environment ||
+      !application ||
+      !dependencies.isValidRepoSlug(repo)
+    ) {
       respond(400, {
-        error: "repo, environment, and application are required."
+        error: "A valid repo, environment, and application are required."
       });
       return;
     }

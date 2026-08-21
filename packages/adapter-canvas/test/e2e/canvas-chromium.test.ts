@@ -1135,7 +1135,7 @@ test.describe("Radius Canvas in Chromium", () => {
     const input = page.locator("#del-confirm-input");
     await expect(input).toBeFocused();
     await expectNoWcagViolations(page);
-    await page.keyboard.type("abandon radius-app/fixture-environment");
+    await page.keyboard.type("radius-app/fixture-environment");
     await page.keyboard.press("Enter");
 
     await expect.poll(() => requests).toHaveLength(1);

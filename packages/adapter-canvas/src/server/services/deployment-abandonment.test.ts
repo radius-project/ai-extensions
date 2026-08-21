@@ -278,6 +278,54 @@ describe("createDeploymentAbandonmentService", () => {
     );
   });
 
+  it("retires the matching failed deploy attempt after GitHub records abandonment", async () => {
+    const state = {
+      deployAttempt: {
+        id: "attempt-dev",
+        targetRepo: PAYLOAD.repo,
+        environment: PAYLOAD.environment
+      },
+      deployResult: { error: "failed" },
+      deployStatus: "failed",
+      deployError: "failed",
+      deployErrorKind: "run-unconfirmed" as const,
+      deployErrorBranch: "main",
+      deployStartedAt: 1,
+      deployFinishedAt: 2,
+      deployLogs: ["failed"],
+      deployLogBase: 1,
+      deployRunId: "run-1",
+      deployRunUrl: "https://example.test/run-1",
+      deployRepairing: false,
+      deployHandoffState: "reported",
+      deployHandoffAttempts: 1,
+      deployNoticeState: "reported",
+      deployNoticeAttempts: 1,
+      deployRepairAttempts: 1
+    };
+
+    await expect(
+      abandon({ readInstanceState: () => state })
+    ).resolves.toMatchObject({ status: 200 });
+
+    expect(state).toEqual({});
+  });
+
+  it("does not retire a different deploy attempt", async () => {
+    const deployAttempt = {
+      id: "attempt-prod",
+      targetRepo: PAYLOAD.repo,
+      environment: "prod"
+    };
+    const state = { deployAttempt, deployStatus: "failed" };
+
+    await expect(
+      abandon({ readInstanceState: () => state })
+    ).resolves.toMatchObject({ status: 200 });
+
+    expect(state).toEqual({ deployAttempt, deployStatus: "failed" });
+  });
+
   it("omits a blank run URL from the inactive status request", async () => {
     const ghOrThrow = vi.fn<(args: string[]) => Promise<string>>(() =>
       Promise.resolve("")
@@ -301,7 +349,7 @@ describe("createDeploymentAbandonmentService", () => {
 
     await expect(
       abandon({
-        ghOrThrow: () => Promise.reject(new Error("denied")),
+        ghOrThrow: () => Promise.reject("denied"),
         invalidateDeployListCache,
         releaseDeploymentMutation
       })
@@ -317,5 +365,23 @@ describe("createDeploymentAbandonmentService", () => {
       expect.any(Object),
       ABANDON_LEASE
     );
+  });
+
+  it.each([
+    "HTTP 403: Forbidden",
+    "Resource not accessible by personal access token",
+    "token is missing a required scope"
+  ])("gives an actionable permission hint for %s", async (message) => {
+    await expect(
+      abandon({
+        ghOrThrow: () => Promise.reject(new Error(message))
+      })
+    ).resolves.toEqual({
+      status: 502,
+      body: {
+        error:
+          "Could not abandon deployment tracking on GitHub because the active GitHub token lacks permission to update deployments. Run `gh auth refresh -h github.com -s repo` in a terminal, then retry. Cloud resources were not changed."
+      }
+    });
   });
 });

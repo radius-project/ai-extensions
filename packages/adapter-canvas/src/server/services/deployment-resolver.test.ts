@@ -123,7 +123,7 @@ describe("resolveEnvironmentDeployment", () => {
     ]);
   });
 
-  it("treats a relevant inactive status as a tombstone instead of revealing an older deploy", async () => {
+  it("does not treat a generic inactive deploy status as a Canvas tombstone", async () => {
     const harness = resolver(["20", "10"], {
       "20": {
         state: "inactive",
@@ -141,13 +141,40 @@ describe("resolveEnvironmentDeployment", () => {
       }
     });
 
-    await expect(harness.resolve()).resolves.toBeNull();
+    await expect(harness.resolve()).resolves.toMatchObject({
+      deploymentId: "20",
+      status: "failed"
+    });
     expect(harness.ghOrThrow).not.toHaveBeenCalledWith([
       "api",
       `/repos/${REPO}/deployments/20/statuses?per_page=100`,
       "--jq",
       expect.any(String)
     ]);
+  });
+
+  it("skips a generic inactive failed delete and reveals the preceding failed deploy", async () => {
+    const harness = resolver(["30", "20"], {
+      "30": {
+        state: "inactive",
+        logUrl: "https://github.com/octo/app/actions/runs/300",
+        runPath: `.github/workflows/${DELETE_WORKFLOW}`,
+        runStatus: "completed",
+        runConclusion: "failure"
+      },
+      "20": {
+        state: "failure",
+        logUrl: "https://github.com/octo/app/actions/runs/200",
+        runPath: `.github/workflows/${DEPLOY_WORKFLOW}`,
+        runStatus: "completed",
+        runConclusion: "failure"
+      }
+    });
+
+    await expect(harness.resolve()).resolves.toMatchObject({
+      deploymentId: "20",
+      status: "failed"
+    });
   });
 
   it("recognizes a Canvas abandonment marker even when the inactive status has no run URL", async () => {
@@ -172,6 +199,78 @@ describe("resolveEnvironmentDeployment", () => {
       "--jq",
       expect.any(String)
     ]);
+  });
+
+  it("recognizes a Canvas abandonment marker without resolving its retained workflow run", async () => {
+    const harness = resolver(["20", "10"], {
+      "20": {
+        state: "inactive",
+        description: ABANDONED_DEPLOYMENT_DESCRIPTION,
+        logUrl: "https://github.com/octo/app/actions/runs/200"
+      },
+      "10": {
+        state: "success",
+        logUrl: "https://github.com/octo/app/actions/runs/100",
+        runPath: `.github/workflows/${DEPLOY_WORKFLOW}`,
+        runStatus: "completed",
+        runConclusion: "success"
+      }
+    });
+
+    await expect(harness.resolve()).resolves.toBeNull();
+    expect(harness.ghOrThrow).not.toHaveBeenCalledWith([
+      "api",
+      `/repos/${REPO}/actions/runs/200`,
+      "--jq",
+      expect.any(String)
+    ]);
+  });
+
+  it("lets a newest Canvas tombstone remain decisive when an older record cannot be resolved", async () => {
+    const harness = resolver(["20", "10"], {
+      "20": {
+        state: "inactive",
+        description: ABANDONED_DEPLOYMENT_DESCRIPTION
+      },
+      "10": {
+        state: "success",
+        logUrl: "https://github.com/octo/app/actions/runs/100"
+      }
+    });
+    const original = harness.ghOrThrow.getMockImplementation()!;
+    harness.ghOrThrow.mockImplementation((args) => {
+      if ((args[1] ?? "").includes("/actions/runs/100")) {
+        return Promise.reject(new Error("expired"));
+      }
+      return original(args);
+    });
+
+    await expect(harness.resolve()).resolves.toBeNull();
+  });
+
+  it("fails closed when a record before any decisive result cannot be resolved", async () => {
+    const harness = resolver(["20", "10"], {
+      "20": {
+        state: "failure",
+        logUrl: "https://github.com/octo/app/actions/runs/200"
+      },
+      "10": {
+        state: "success",
+        logUrl: "https://github.com/octo/app/actions/runs/100",
+        runPath: `.github/workflows/${DEPLOY_WORKFLOW}`,
+        runStatus: "completed",
+        runConclusion: "success"
+      }
+    });
+    const original = harness.ghOrThrow.getMockImplementation()!;
+    harness.ghOrThrow.mockImplementation((args) => {
+      if ((args[1] ?? "").includes("/actions/runs/200")) {
+        return Promise.reject(new Error("offline"));
+      }
+      return original(args);
+    });
+
+    await expect(harness.resolve()).rejects.toThrow("offline");
   });
 
   it("does not let an unrelated inactive workflow hide an older Radius deployment", async () => {

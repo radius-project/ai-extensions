@@ -94,13 +94,22 @@ export async function resolveEnvironmentDeployment(
     ]);
     const [state = "", latestLogUrl = "", description = ""] =
       latestStatusRaw.split("\t");
-    let logUrl = latestLogUrl;
     if (
-      !logUrl &&
-      !(
-        state === "inactive" && description === ABANDONED_DEPLOYMENT_DESCRIPTION
-      )
+      state === "inactive" &&
+      description === ABANDONED_DEPLOYMENT_DESCRIPTION
     ) {
+      return {
+        id,
+        state,
+        description,
+        runUrl: "",
+        workflow: "unknown",
+        runStatus: "",
+        runConclusion: ""
+      };
+    }
+    let logUrl = latestLogUrl;
+    if (!logUrl) {
       logUrl = await dependencies.ghOrThrow([
         "api",
         `/repos/${repo}/deployments/${id}/statuses?per_page=100`,
@@ -158,7 +167,6 @@ export async function resolveEnvironmentDeployment(
       );
     }
     if (record.workflow === "unrelated") return "skip";
-    if (record.state === "inactive") return null;
     if (record.workflow === "delete" && record.runConclusion === "success") {
       return null;
     }
@@ -181,9 +189,10 @@ export async function resolveEnvironmentDeployment(
   };
 
   const batch = ids.slice(0, dependencies.maxParallelRecords);
-  const resolved = await Promise.all(batch.map(resolveRecord));
-  for (const record of resolved) {
-    const deployment = decide(record);
+  const resolved = await Promise.allSettled(batch.map(resolveRecord));
+  for (const result of resolved) {
+    if (result.status === "rejected") throw result.reason;
+    const deployment = decide(result.value);
     if (deployment === "skip") continue;
     return deployment;
   }

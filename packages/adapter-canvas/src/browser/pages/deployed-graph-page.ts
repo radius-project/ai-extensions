@@ -638,8 +638,10 @@ export function initializeDeployedGraphPage(
           setInline(
             context,
             "error",
-            readString(payload, "error") ||
-              "Could not abandon deployment tracking."
+            response.status === 403 ?
+              "This Radius Canvas page is out of date. Reload it and try again."
+            : readString(payload, "error") ||
+                "Could not abandon deployment tracking."
           );
           refreshControls();
           return;

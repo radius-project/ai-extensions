@@ -1614,6 +1614,35 @@ describe("initializeDeployedGraphPage", () => {
     );
   });
 
+  it("turns a stale mutation nonce refusal into a reload instruction", async () => {
+    const { browser, action, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse(
+        { error: "This browser mutation request is not trusted." },
+        false,
+        403
+      )
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    action.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe(
+      "This Radius Canvas page is out of date. Reload it and try again."
+    );
+    expect(action.dataset.mode).toBe("abandon");
+    expect(action.disabled).toBe(false);
+  });
+
   it("surfaces a transport-safe abandonment failure and restores the action", async () => {
     const { browser, action, inlineStatus } = fixture({
       deployments: [{ app: "app", environment: "dev", status: "failed" }]

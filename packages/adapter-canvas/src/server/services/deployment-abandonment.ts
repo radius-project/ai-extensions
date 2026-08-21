@@ -82,6 +82,44 @@ function operationDescription(
   return `${operation} operation for ${reservation.repo} in environment ${reservation.environment}`;
 }
 
+function retireMatchingDeployAttempt(
+  state: CanvasState,
+  repo: string,
+  environment: string
+): void {
+  const attempt = state.deployAttempt;
+  if (
+    !attempt ||
+    attempt.targetRepo !== repo ||
+    attempt.environment !== environment
+  ) {
+    return;
+  }
+  delete state.deployAttempt;
+  delete state.deployResult;
+  delete state.deployStatus;
+  delete state.deployError;
+  delete state.deployErrorKind;
+  delete state.deployErrorBranch;
+  delete state.deployStartedAt;
+  delete state.deployFinishedAt;
+  delete state.deployLogs;
+  delete state.deployLogBase;
+  delete state.deployRunId;
+  delete state.deployRunUrl;
+  delete state.deployRepairing;
+  delete state.deployHandoffState;
+  delete state.deployHandoffAttempts;
+  delete state.deployNoticeState;
+  delete state.deployNoticeAttempts;
+  delete state.deployRepairAttempts;
+}
+
+function isGitHubScopeFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : "";
+  return /HTTP 403|forbidden|resource not accessible|scope/i.test(message);
+}
+
 export function createDeploymentAbandonmentService(
   dependencies: DeploymentAbandonmentDependencies
 ): DeploymentAbandonmentService {
@@ -209,16 +247,19 @@ export function createDeploymentAbandonmentService(
         if (current.runUrl) args.push("-f", `log_url=${current.runUrl}`);
         try {
           await dependencies.ghOrThrow(args);
-        } catch {
+        } catch (error) {
           return {
             status: 502,
             body: {
               error:
-                "Could not abandon deployment tracking on GitHub. Cloud resources were not changed."
+                isGitHubScopeFailure(error) ?
+                  "Could not abandon deployment tracking on GitHub because the active GitHub token lacks permission to update deployments. Run `gh auth refresh -h github.com -s repo` in a terminal, then retry. Cloud resources were not changed."
+                : "Could not abandon deployment tracking on GitHub. Cloud resources were not changed."
             }
           };
         }
 
+        retireMatchingDeployAttempt(state, repo, environment);
         dependencies.invalidateDeployListCache(repo);
         return { status: 200, body: { outcome: "abandoned" } };
       } finally {

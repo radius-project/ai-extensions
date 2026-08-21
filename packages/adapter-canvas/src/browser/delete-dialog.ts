@@ -67,10 +67,9 @@ export const DELETE_DIALOG_FOCUSABLE_SELECTOR = FOCUSABLE_SELECTOR;
 export function deleteDialogConfirmToken(
   app: string,
   environment: string,
-  variant: DeploymentDialogVariant = "delete"
+  _variant: DeploymentDialogVariant = "delete"
 ): string {
-  const target = `${app}/${environment}`;
-  return variant === "abandon" ? `abandon ${target}` : target;
+  return `${app}/${environment}`;
 }
 
 export function deleteDialogIntentSpecs(
