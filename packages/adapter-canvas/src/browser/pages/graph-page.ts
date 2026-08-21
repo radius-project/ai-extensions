@@ -245,7 +245,7 @@ export function initializeGraphPage(
     view: GraphProgressView
   ): void => {
     void context.net
-      .fetch("/api/progress")
+      .fetch("/api/progress?view=graph")
       .then((response) => response.json())
       .then((payload) => {
         if (!entry.active || requestGeneration !== generation) return;
@@ -346,11 +346,6 @@ export function initializeGraphPage(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
             "info"
-          );
-          progressView?.append(
-            "creating_model",
-            "running",
-            "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…"
           );
           retry = entry.after(GRAPH_RETRY_MS, () => {
             retry = null;

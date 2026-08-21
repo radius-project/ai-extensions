@@ -94,7 +94,7 @@ function fixture(options: FixtureOptions = {}) {
   // The page polls progress as soon as it starts a build, so every scenario
   // reaches this route whether or not it is what the scenario is about. A test
   // that cares overrides it.
-  browser.net.handle("/api/progress", () => jsonResponse({}));
+  browser.net.handle("/api/progress?view=graph", () => jsonResponse({}));
   return {
     browser,
     state,
@@ -195,7 +195,7 @@ describe("initializeGraphPage", () => {
     browser.net.supportsAbort = false;
     const load = createDeferred<HttpResponse>();
     browser.net.handle("/api/load-graph", () => load.promise);
-    browser.net.handle("/api/progress", () =>
+    browser.net.handle("/api/progress?view=graph", () =>
       jsonResponse({ messages: ["Drafting .radius/app.bicep"] })
     );
     const teardown = initializeGraphPage(browser.context, globals());
@@ -204,12 +204,16 @@ describe("initializeGraphPage", () => {
     // A build already in flight is adopted without waiting out an interval, so
     // a user returning to this page does not watch an empty panel first.
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/progress")
+      browser.net.calls.filter(
+        (call) => call.url === "/api/progress?view=graph"
+      )
     ).toHaveLength(1);
     browser.clock.tick(GRAPH_PROGRESS_MS);
     await flushPromises();
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/progress")
+      browser.net.calls.filter(
+        (call) => call.url === "/api/progress?view=graph"
+      )
     ).toHaveLength(2);
     teardown();
     load.resolve(jsonResponse({ reload: true }));
@@ -759,6 +763,25 @@ describe("initializeGraphPage", () => {
     browser.net.handle("/api/load-graph", () =>
       jsonResponse({ needsAppBicep: true })
     );
+    browser.net.handle("/api/progress?view=graph", () =>
+      jsonResponse({
+        generation: 1,
+        events: [
+          {
+            sequence: 1,
+            stage: "checking_model",
+            state: "succeeded",
+            detail: "No application model exists yet."
+          },
+          {
+            sequence: 2,
+            stage: "creating_model",
+            state: "running",
+            detail: "Copilot is creating the application model."
+          }
+        ]
+      })
+    );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
@@ -832,7 +855,7 @@ describe("initializeGraphPage", () => {
     // Only the first poll is the stale one. Later polls belong to the request
     // the branch change started and never settle, so the assertion can only be
     // satisfied by the guard rejecting the superseded response.
-    browser.net.handle("/api/progress", () => {
+    browser.net.handle("/api/progress?view=graph", () => {
       polls++;
       return polls === 1 ? stale.promise : new Promise<HttpResponse>(() => {});
     });
@@ -851,7 +874,7 @@ describe("initializeGraphPage", () => {
     const { browser } = fixture({ loaded: false });
     const load = createDeferred<HttpResponse>();
     browser.net.handle("/api/load-graph", () => load.promise);
-    browser.net.handle("/api/progress", () =>
+    browser.net.handle("/api/progress?view=graph", () =>
       Promise.reject(new Error("progress unavailable"))
     );
     initializeGraphPage(browser.context, globals());
@@ -884,7 +907,9 @@ describe("initializeGraphPage", () => {
     const { browser, status } = fixture({ loaded: false });
     const load = createDeferred<HttpResponse>();
     browser.net.handle("/api/load-graph", () => load.promise);
-    browser.net.handle("/api/progress", () => jsonResponse({ messages: [] }));
+    browser.net.handle("/api/progress?view=graph", () =>
+      jsonResponse({ messages: [] })
+    );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
     if (status) status.textContent = "unchanged";
@@ -1048,7 +1073,7 @@ describe("initializeGraphPage", () => {
     browser.net.handle("/api/load-graph", () => load.promise);
     // Only the first poll fails, and it belongs to the superseded request; the
     // polls the branch change starts never settle.
-    browser.net.handle("/api/progress", () => {
+    browser.net.handle("/api/progress?view=graph", () => {
       polls++;
       return polls === 1 ? stale.promise : new Promise<HttpResponse>(() => {});
     });
@@ -1070,7 +1095,7 @@ describe("initializeGraphPage", () => {
       const { browser, progressHost } = fixture({ loaded: false });
       const load = createDeferred<HttpResponse>();
       browser.net.handle("/api/load-graph", () => load.promise);
-      browser.net.handle("/api/progress", () =>
+      browser.net.handle("/api/progress?view=graph", () =>
         jsonResponse({
           generation: 1,
           events: [
@@ -1120,7 +1145,9 @@ describe("initializeGraphPage", () => {
     it("clears the panel once the request settles", async () => {
       const { browser, progressHost } = fixture({ loaded: false });
       browser.net.handle("/api/load-graph", () => jsonResponse({}));
-      browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
+      browser.net.handle("/api/progress?view=graph", () =>
+        jsonResponse({ events: [] })
+      );
       initializeGraphPage(browser.context, globals());
       await flushPromises();
 
@@ -1138,7 +1165,7 @@ describe("initializeGraphPage", () => {
         "/api/load-graph",
         () => createDeferred<HttpResponse>().promise
       );
-      browser.net.handle("/api/progress", () =>
+      browser.net.handle("/api/progress?view=graph", () =>
         jsonResponse({
           generation: 1,
           events: [
@@ -1170,11 +1197,30 @@ describe("initializeGraphPage", () => {
       browser.net.handle("/api/load-graph", () =>
         jsonResponse({ needsAppBicep: true })
       );
+      browser.net.handle("/api/progress?view=graph", () =>
+        jsonResponse({
+          generation: 1,
+          events: [
+            {
+              sequence: 1,
+              stage: "checking_model",
+              state: "succeeded",
+              detail: "No application model exists yet."
+            },
+            {
+              sequence: 2,
+              stage: "creating_model",
+              state: "running",
+              detail: "Copilot is creating the application model."
+            }
+          ]
+        })
+      );
       initializeGraphPage(browser.context, globals());
       await flushPromises();
 
       expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.checking_model}:running`,
+        `${GRAPH_STAGE_LABELS.checking_model}:succeeded`,
         `${GRAPH_STAGE_LABELS.creating_model}:running`
       ]);
 
@@ -1187,7 +1233,7 @@ describe("initializeGraphPage", () => {
         formatElapsed(GRAPH_RETRY_MS)
       );
       expect(stageText(progressHost)).toEqual([
-        `${GRAPH_STAGE_LABELS.checking_model}:running`,
+        `${GRAPH_STAGE_LABELS.checking_model}:succeeded`,
         `${GRAPH_STAGE_LABELS.creating_model}:running`
       ]);
     });
@@ -1330,7 +1376,7 @@ describe("initializeGraphPage", () => {
         "/api/load-graph",
         () => createDeferred<HttpResponse>().promise
       );
-      browser.net.handle("/api/progress", () =>
+      browser.net.handle("/api/progress?view=graph", () =>
         jsonResponse({
           events: [
             {

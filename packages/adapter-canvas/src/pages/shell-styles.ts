@@ -211,7 +211,7 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   .rad-graph-progress__spinner { flex: 0 0 auto; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%; background: conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation: spin 1s linear infinite; }
   .rad-graph-progress--failed .rad-graph-progress__spinner { animation: none; background: var(--rad-danger); }
   /* State is never carried by motion or color alone. */
-  @media (prefers-reduced-motion: reduce) { .rad-graph-progress__spinner { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .rad-graph-progress__spinner, .env-progress__spinner { animation: none; } }
   .rad-graph-progress__headtext { flex: 1 1 auto; min-width: 0; }
   .rad-graph-progress__title { font-size: 14px; font-weight: 600; color: var(--rad-text); line-height: 1.4; }
   .rad-graph-progress__activity { font-size: 12px; color: var(--rad-text-tertiary); margin-top: 2px; line-height: 1.4; }

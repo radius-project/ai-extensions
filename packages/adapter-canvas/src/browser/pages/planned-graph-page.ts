@@ -159,7 +159,7 @@ export function initializePlannedGraphPage(
     progressView = view;
     const pollProgress = (): void => {
       void context.net
-        .fetch("/api/progress")
+        .fetch("/api/progress?view=planned")
         .then((response) => response.json())
         .then((payload) => {
           if (!current()) return;

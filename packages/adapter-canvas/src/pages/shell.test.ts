@@ -192,6 +192,9 @@ describe("operation status chip in the top navigation", () => {
     expect(shell).toMatch(
       /prefers-reduced-motion[\s\S]*rad-opchip--running \.rad-opchip__dot \{ animation: none; \}/
     );
+    expect(shell).toMatch(
+      /prefers-reduced-motion[\s\S]*\.rad-graph-progress__spinner, \.env-progress__spinner \{ animation: none; \}/
+    );
   });
 });
 

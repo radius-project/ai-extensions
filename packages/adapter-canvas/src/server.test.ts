@@ -1017,31 +1017,42 @@ describe("addGraphProgress", () => {
   it("accepts progress only from the current graph generation", () => {
     const state: CanvasState = {
       graphBuildGeneration: 2,
-      graphBuildEvents: [
-        {
-          sequence: 1,
-          stage: "checking_model",
-          state: "running",
-          detail: "current"
+      graphProgressRecords: {
+        graph: {
+          graphBuildEvents: [
+            {
+              sequence: 1,
+              stage: "checking_model",
+              state: "running",
+              detail: "current"
+            }
+          ],
+          graphProgressGeneration: 1,
+          graphProgressStartedAtMs: 0,
+          graphProgressActive: true,
+          graphProgressView: "graph",
+          graphProgressKey: "octo/app",
+          graphProgressOwner: 1,
+          graphProgressAwaitingModel: false
         }
-      ]
+      }
     };
 
     expect(
-      addGraphProgress(state, 1, {
+      addGraphProgress(state, 1, "graph", {
         stage: "building_graph",
         state: "running",
         detail: "stale"
       })
     ).toBe(false);
     expect(
-      addGraphProgress(state, 2, {
+      addGraphProgress(state, 2, "graph", {
         stage: "building_graph",
         state: "running",
         detail: "latest"
       })
     ).toBe(true);
-    expect(state.graphBuildEvents).toEqual([
+    expect(state.graphProgressRecords?.graph?.graphBuildEvents).toEqual([
       {
         sequence: 1,
         stage: "checking_model",

@@ -352,6 +352,11 @@ export function createGraphProgress(
       }
       if (generation > appliedGeneration) {
         appliedGeneration = generation;
+        appliedSequence = 0;
+        localAhead = false;
+        events = [];
+        latestEvent = null;
+        renderedSignature = null;
       } else if (
         nextSequence < appliedSequence ||
         (localAhead && nextSequence === appliedSequence)

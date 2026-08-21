@@ -29,12 +29,18 @@ export const GRAPH_PROGRESS_PATH = "/api/progress";
 export const GRAPH_CHIP_POLL_MS = 5000;
 export const GRAPH_CHIP_TICK_MS = 1000;
 
-// Every host a graph page mounts its own progress panel into. The chip defers
-// to any of them, so whichever graph page the user is on wins.
+// Only server-backed graph-build panels suppress the chip, and only when the
+// panel belongs to the same view as the active record. The Deployed page's
+// client-only loading panel narrates deployment status, not this graph build.
+export const GRAPH_PANEL_ID_BY_VIEW: Readonly<Record<string, string>> = {
+  graph: "progress-steps",
+  planned: "progress-steps",
+  diff: "diff-progress-steps"
+};
+
 export const GRAPH_PANEL_IDS: readonly string[] = [
   "progress-steps",
-  "diff-progress-steps",
-  "deployed-progress-steps"
+  "diff-progress-steps"
 ];
 
 const VIEW_PAGES: Readonly<Record<string, string>> = {
@@ -141,9 +147,9 @@ export function initializeGraphChip(
 
   const paint = (): void => {
     // The page's own panel is the better surface whenever it is on screen.
-    const onScreen = GRAPH_PANEL_IDS.some((id) =>
-      panelIsOnScreen(context.dom.byId(id))
-    );
+    const panelId = status ? GRAPH_PANEL_ID_BY_VIEW[status.view] : undefined;
+    const onScreen =
+      panelId !== undefined && panelIsOnScreen(context.dom.byId(panelId));
     if (onScreen || !status) return hide();
     const text = graphChipLabel(status, elapsedNow());
     if (text === "") return hide();

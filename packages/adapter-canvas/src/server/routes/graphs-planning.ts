@@ -7,6 +7,7 @@ import type { DeployProgress } from "../../deploy-artifacts.js";
 import { recordGraphBuildEvent } from "../../shared.js";
 import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import type { GraphProgressRecord, GraphProgressView } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import type { CanvasServerEntry } from "../types.js";
@@ -97,42 +98,71 @@ export function handleProgress(
   context: CanvasRequestContext,
   dependencies: GraphsPlanningReadsDependencies
 ): void {
-  const { response } = context;
+  const { response, url } = context;
   const entry = dependencies.readInstanceEntry(context.instanceId);
   const state = entry?.state;
-  if (
-    state?.graphProgressActive === true &&
-    state.graphProgressAwaitingModel === true &&
-    typeof state.graphProgressDeadlineAtMs === "number" &&
-    dependencies.now() >= state.graphProgressDeadlineAtMs
-  ) {
-    recordGraphBuildEvent(state, {
-      stage: "creating_model",
-      state: "failed",
-      detail: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
-    });
-    state.graphProgressActive = false;
-    state.graphProgressAwaitingModel = false;
-    delete state.graphProgressDeadlineAtMs;
+  const records = Object.values(state?.graphProgressRecords ?? {});
+  for (const record of records) {
+    if (
+      record.graphProgressActive &&
+      record.graphProgressAwaitingModel &&
+      typeof record.graphProgressDeadlineAtMs === "number" &&
+      dependencies.now() >= record.graphProgressDeadlineAtMs
+    ) {
+      recordGraphBuildEvent(record, {
+        stage: "creating_model",
+        state: "failed",
+        detail: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+      });
+      record.graphProgressActive = false;
+      record.graphProgressAwaitingModel = false;
+      delete record.graphProgressDeadlineAtMs;
+    }
   }
+  const requestedView = url.searchParams.get("view");
+  const record =
+    isGraphProgressView(requestedView) ?
+      state?.graphProgressRecords?.[requestedView]
+    : latestGraphProgressRecord(records);
   const payload: Record<string, unknown> = {
     messages: state?.progressMessages || []
   };
-  if (state?.graphBuildEvents) {
-    payload.events = state.graphBuildEvents;
-    payload.generation = state.graphProgressGeneration || 0;
+  if (record) {
+    payload.events = record.graphBuildEvents;
+    payload.generation = record.graphProgressGeneration;
     // The record's own view of itself: whether work is still in flight, which
     // graph it belongs to, and how long it has been running. A page mounted
     // after the build started — or re-mounted when the user navigates back —
     // adopts these rather than measuring from the moment it happened to load.
-    payload.active = state.graphProgressActive === true;
-    payload.view = state.graphProgressView || "";
-    if (typeof state.graphProgressStartedAtMs === "number") {
-      payload.elapsedMs = Math.max(
-        0,
-        dependencies.now() - state.graphProgressStartedAtMs
-      );
-    }
+    payload.active = record.graphProgressActive;
+    payload.view = record.graphProgressView;
+    payload.elapsedMs = Math.max(
+      0,
+      dependencies.now() - record.graphProgressStartedAtMs
+    );
+  }
+
+  function isGraphProgressView(
+    value: string | null
+  ): value is GraphProgressView {
+    return value === "graph" || value === "planned" || value === "diff";
+  }
+
+  function latestGraphProgressRecord(
+    records: GraphProgressRecord[]
+  ): GraphProgressRecord | undefined {
+    const active = records.filter((record) => record.graphProgressActive);
+    const candidates = active.length > 0 ? active : records;
+    return candidates.reduce<GraphProgressRecord | undefined>(
+      (latest, record) =>
+        (
+          !latest ||
+          record.graphProgressStartedAtMs > latest.graphProgressStartedAtMs
+        ) ?
+          record
+        : latest,
+      undefined
+    );
   }
   response.setHeader("Content-Type", "application/json");
   response.writeHead(200);
@@ -174,6 +204,7 @@ export async function handleDeployedGraph(
     return;
   }
   const state = entry?.state || {};
+  if (entry?.state) entry.state.progressMessages = [];
   const branch =
     state.workspaceBranch && dependencies.repoMatchesWorkspace(state, repo) ?
       state.workspaceBranch
@@ -265,10 +296,9 @@ export async function handleDeployedGraph(
     // array `/api/progress` serves, which is the one piece of cross-route state
     // this pair shares.
     if (entry?.state) {
-      if (!entry.state.progressMessages) entry.state.progressMessages = [];
-      entry.state.progressMessages.push(
+      entry.state.progressMessages = [
         `Deployed graph status read failed: ${dependencies.errorMessage(e)}`
-      );
+      ];
     }
   }
   if (!graph && sessionMatchesSelection && state.deployedGraph)

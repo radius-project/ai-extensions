@@ -38,6 +38,7 @@ import type {
   CanvasState,
   DeployErrorKind,
   GraphBuildEvent,
+  GraphProgressView,
   GraphView
 } from "./shared.js";
 import {
@@ -1276,10 +1277,13 @@ export function isCurrentSourceRefToken(
 export function addGraphProgress(
   state: CanvasState,
   generation: number,
+  view: GraphProgressView,
   event: Omit<GraphBuildEvent, "sequence">
 ): boolean {
   if (!state || state.graphBuildGeneration !== generation) return false;
-  recordGraphBuildEvent(state, event);
+  const record = state.graphProgressRecords?.[view];
+  if (!record) return false;
+  recordGraphBuildEvent(record, event);
   return true;
 }
 

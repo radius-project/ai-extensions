@@ -11,6 +11,7 @@ import {
   GRAPH_CHIP_LABEL_ID,
   GRAPH_CHIP_POLL_MS,
   GRAPH_CHIP_TICK_MS,
+  GRAPH_PANEL_ID_BY_VIEW,
   GRAPH_PANEL_IDS,
   GRAPH_PROGRESS_PATH,
   graphChipHref,
@@ -315,16 +316,18 @@ describe("graph chip polling", () => {
 
   // The page's own panel already narrates the build in full. Two widgets
   // reporting the same thing is noise, not redundancy.
-  it.each([...GRAPH_PANEL_IDS])(
-    "stands down while %s is on screen",
-    async (id) => {
+  it.each(Object.entries(GRAPH_PANEL_ID_BY_VIEW))(
+    "stands down while the %s panel is on screen",
+    async (view, id) => {
       const browser = setup();
       const panel = createFakeElement(id);
       const progress = createFakeElement(`${id}-progress`);
       progress.className = "rad-graph-progress";
       panel.appendChild(progress);
       browser.document.add(panel);
-      browser.net.handle(GRAPH_PROGRESS_PATH, () => jsonResponse(record()));
+      browser.net.handle(GRAPH_PROGRESS_PATH, () =>
+        jsonResponse(record({ view }))
+      );
 
       initializeGraphChip(browser.context);
       await flushPromises();
@@ -335,6 +338,21 @@ describe("graph chip polling", () => {
       expect(browser.chip.hidden).toBe(false);
     }
   );
+
+  it("does not hide behind the deployed page's client-only loading panel", async () => {
+    const browser = setup();
+    const panel = createFakeElement("deployed-progress-steps");
+    const progress = createFakeElement("deployed-progress");
+    progress.className = "rad-graph-progress";
+    panel.appendChild(progress);
+    browser.document.add(panel);
+    browser.net.handle(GRAPH_PROGRESS_PATH, () => jsonResponse(record()));
+
+    initializeGraphChip(browser.context);
+    await flushPromises();
+
+    expect(browser.chip.hidden).toBe(false);
+  });
 
   it("treats a detached panel as not on screen", async () => {
     const browser = setup();

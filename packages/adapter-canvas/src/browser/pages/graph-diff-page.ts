@@ -88,7 +88,7 @@ export function initializeGraphDiffPage(
     view: GraphProgressView
   ): void => {
     void context.net
-      .fetch("/api/progress")
+      .fetch("/api/progress?view=diff")
       .then((response) => response.json())
       .then((payload) => {
         if (!entry.active || requestGeneration !== generation) return;

@@ -80,7 +80,7 @@ function fixture(options: FixtureOptions = {}) {
   // The page polls progress as soon as it starts a comparison, so every
   // scenario reaches this route whether or not it is what the scenario is
   // about. A test that cares overrides it.
-  browser.net.handle("/api/progress", () => jsonResponse({}));
+  browser.net.handle("/api/progress?view=diff", () => jsonResponse({}));
 
   return {
     browser,
@@ -438,7 +438,7 @@ describe("initializeGraphDiffPage", () => {
         "/api/diff-branches",
         () => createDeferred<HttpResponse>().promise
       );
-      browser.net.handle("/api/progress", () =>
+      browser.net.handle("/api/progress?view=diff", () =>
         jsonResponse({
           generation: 2,
           events: [
@@ -493,7 +493,7 @@ describe("initializeGraphDiffPage", () => {
           ]
         }
       ];
-      browser.net.handle("/api/progress", () =>
+      browser.net.handle("/api/progress?view=diff", () =>
         jsonResponse(payloads.shift() ?? { events: [] })
       );
       initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
@@ -528,7 +528,9 @@ describe("initializeGraphDiffPage", () => {
     ])("clears the panel when %s", async (_name, body) => {
       const { browser, head, progressHost, status } = fixture();
       browser.net.handle("/api/diff-branches", () => jsonResponse(body));
-      browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
+      browser.net.handle("/api/progress?view=diff", () =>
+        jsonResponse({ events: [] })
+      );
       initializeGraphDiffPage(browser.context, {
         radiusRenderGraph: vi.fn()
       });
@@ -549,7 +551,9 @@ describe("initializeGraphDiffPage", () => {
       browser.net.handle("/api/diff-branches", () =>
         Promise.reject(new Error("offline"))
       );
-      browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
+      browser.net.handle("/api/progress?view=diff", () =>
+        jsonResponse({ events: [] })
+      );
       initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
       await flushPromises();
 
@@ -566,7 +570,9 @@ describe("initializeGraphDiffPage", () => {
       browser.net.handle("/api/diff-branches", () =>
         jsonResponse({ needsAppBicep: true })
       );
-      browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
+      browser.net.handle("/api/progress?view=diff", () =>
+        jsonResponse({ events: [] })
+      );
       initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
       await flushPromises();
 
@@ -580,7 +586,9 @@ describe("initializeGraphDiffPage", () => {
     it("stops polling progress once the diff settles", async () => {
       const { browser, head } = fixture();
       browser.net.handle("/api/diff-branches", () => jsonResponse({}));
-      browser.net.handle("/api/progress", () => jsonResponse({ events: [] }));
+      browser.net.handle("/api/progress?view=diff", () =>
+        jsonResponse({ events: [] })
+      );
       const teardown = initializeGraphDiffPage(browser.context, {
         radiusRenderGraph: vi.fn()
       });
@@ -590,14 +598,16 @@ describe("initializeGraphDiffPage", () => {
       browser.clock.tick(DIFF_DEBOUNCE_MS);
       await flushPromises();
       const polls = browser.net.calls.filter(
-        (call) => call.url === "/api/progress"
+        (call) => call.url === "/api/progress?view=diff"
       ).length;
 
       browser.clock.tick(DIFF_PROGRESS_MS * 5);
       await flushPromises();
 
       expect(
-        browser.net.calls.filter((call) => call.url === "/api/progress")
+        browser.net.calls.filter(
+          (call) => call.url === "/api/progress?view=diff"
+        )
       ).toHaveLength(polls);
       teardown();
       expect(browser.clock.pending).toBe(0);
@@ -609,7 +619,7 @@ describe("initializeGraphDiffPage", () => {
         "/api/diff-branches",
         () => createDeferred<HttpResponse>().promise
       );
-      browser.net.handle("/api/progress", () =>
+      browser.net.handle("/api/progress?view=diff", () =>
         Promise.reject(new Error("progress unavailable"))
       );
       initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
@@ -641,7 +651,7 @@ describe("initializeGraphDiffPage", () => {
       // whatever comparison supersedes this one and never settle, so a guard
       // test can only pass by actually rejecting the superseded reply.
       let polls = 0;
-      browser.net.handle("/api/progress", () => {
+      browser.net.handle("/api/progress?view=diff", () => {
         polls++;
         return polls === 1 ? progress : new Promise<HttpResponse>(() => {});
       });

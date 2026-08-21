@@ -9,6 +9,7 @@ import type {
   CanvasState,
   GraphBuildEvent,
   GraphBuildStage,
+  GraphProgressRecord,
   GraphProgressView,
   GraphView,
   SourceRefContext
@@ -110,6 +111,7 @@ export interface GraphWorkflowDependencies<
   addGraphProgress(
     state: CanvasState,
     generation: number,
+    view: GraphProgressView,
     event: Omit<GraphBuildEvent, "sequence">
   ): boolean;
   beginPlannedGraphRequest(state: CanvasState): number;
@@ -150,8 +152,17 @@ function bare(
 const MISSING_ENTRY_OUTCOME = bare(503, MISSING_ENTRY_PAYLOAD);
 
 interface GraphProgressHandle {
+  view: GraphProgressView;
   generation: number;
   owner: number;
+  record: GraphProgressRecord;
+}
+
+function graphProgressRecord(
+  state: CanvasState,
+  view: GraphProgressView
+): GraphProgressRecord | undefined {
+  return state.graphProgressRecords?.[view];
 }
 
 function beginGraphProgress(
@@ -160,30 +171,39 @@ function beginGraphProgress(
   key: string,
   nowMs: number
 ): GraphProgressHandle {
+  const existing = graphProgressRecord(state, view);
   // A build that is already in flight for this view is continued rather than
   // restarted. The app.bicep wait re-issues its request every few seconds, and
   // a fresh record each time would reset the elapsed clock and discard the
   // stages already reported — exactly the reset a user sees when they leave the
   // page and come back.
   const continuing =
-    state.graphProgressActive === true &&
-    state.graphProgressAwaitingModel === true &&
-    state.graphProgressView === view &&
-    state.graphProgressKey === key;
-  if (!continuing) {
-    state.graphProgressGeneration = (state.graphProgressGeneration || 0) + 1;
-    state.graphBuildEvents = [];
-    state.graphProgressStartedAtMs = nowMs;
-    state.graphProgressView = view;
-    state.graphProgressKey = key;
-    delete state.graphProgressDeadlineAtMs;
-  }
-  state.graphProgressActive = true;
-  state.graphProgressAwaitingModel = false;
-  state.graphProgressOwner = (state.graphProgressOwner || 0) + 1;
+    existing?.graphProgressActive === true &&
+    existing.graphProgressAwaitingModel === true &&
+    existing.graphProgressKey === key;
+  const record: GraphProgressRecord =
+    continuing && existing ? existing : (
+      {
+        graphBuildEvents: [],
+        graphProgressGeneration: (existing?.graphProgressGeneration || 0) + 1,
+        graphProgressStartedAtMs: nowMs,
+        graphProgressActive: true,
+        graphProgressView: view,
+        graphProgressKey: key,
+        graphProgressOwner: 0,
+        graphProgressAwaitingModel: false
+      }
+    );
+  record.graphProgressActive = true;
+  record.graphProgressAwaitingModel = false;
+  record.graphProgressOwner += 1;
+  state.graphProgressRecords ??= {};
+  state.graphProgressRecords[view] = record;
   return {
-    generation: state.graphProgressGeneration || 0,
-    owner: state.graphProgressOwner
+    view,
+    generation: record.graphProgressGeneration,
+    owner: record.graphProgressOwner,
+    record
   };
 }
 
@@ -191,9 +211,10 @@ function isCurrentGraphProgress(
   state: CanvasState,
   handle: GraphProgressHandle
 ): boolean {
+  const record = graphProgressRecord(state, handle.view);
   return (
-    state.graphProgressGeneration === handle.generation &&
-    state.graphProgressOwner === handle.owner
+    record?.graphProgressGeneration === handle.generation &&
+    record.graphProgressOwner === handle.owner
   );
 }
 
@@ -206,9 +227,11 @@ function endGraphProgress(
 ): void {
   if (!state || !handle) return;
   if (!isCurrentGraphProgress(state, handle)) return;
-  state.graphProgressActive = false;
-  state.graphProgressAwaitingModel = false;
-  delete state.graphProgressDeadlineAtMs;
+  const record = graphProgressRecord(state, handle.view);
+  if (!record) return;
+  record.graphProgressActive = false;
+  record.graphProgressAwaitingModel = false;
+  delete record.graphProgressDeadlineAtMs;
 }
 
 // Close the record for every outcome except the app.bicep handoff. That build
@@ -221,9 +244,11 @@ function settleGraphProgress(
   nowMs: number
 ): GraphWorkflowOutcome {
   if (!handle || !isCurrentGraphProgress(state, handle)) return outcome;
+  const record = graphProgressRecord(state, handle.view);
+  if (!record) return outcome;
   if (outcome.payload.needsAppBicep === true) {
-    state.graphProgressAwaitingModel = true;
-    state.graphProgressDeadlineAtMs ??= nowMs + GRAPH_APP_BICEP_TIMEOUT_MS;
+    record.graphProgressAwaitingModel = true;
+    record.graphProgressDeadlineAtMs ??= nowMs + GRAPH_APP_BICEP_TIMEOUT_MS;
   } else {
     endGraphProgress(state, handle);
   }
@@ -231,7 +256,7 @@ function settleGraphProgress(
 }
 
 function appendGraphEvent(
-  state: CanvasState,
+  state: { graphBuildEvents?: GraphBuildEvent[] },
   stage: GraphBuildStage,
   eventState: GraphBuildEvent["state"],
   detail: string
@@ -239,7 +264,9 @@ function appendGraphEvent(
   recordGraphBuildEvent(state, { stage, state: eventState, detail });
 }
 
-function modelCreationIsRunning(state: CanvasState): boolean {
+function modelCreationIsRunning(state: {
+  graphBuildEvents?: GraphBuildEvent[];
+}): boolean {
   const creationEvents = (state.graphBuildEvents || []).filter(
     (event) => event.stage === "creating_model"
   );
@@ -257,10 +284,11 @@ function failRunningGraphEvent(
   if (!state || !handle || !isCurrentGraphProgress(state, handle)) {
     return;
   }
-  const events = state?.graphBuildEvents;
+  const record = graphProgressRecord(state, handle.view);
+  const events = record?.graphBuildEvents;
   const latest = events?.[events.length - 1];
   if (!latest || latest.state !== "running") return;
-  appendGraphEvent(state, latest.stage, "failed", detail);
+  if (record) appendGraphEvent(record, latest.stage, "failed", detail);
 }
 
 export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
@@ -409,7 +437,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         detail: string
       ): void => {
         if (!isCurrentGraphProgress(state, progressHandle)) return;
-        dependencies.addGraphProgress(state, requestGeneration, {
+        dependencies.addGraphProgress(state, requestGeneration, "graph", {
           stage,
           state: eventState,
           detail
@@ -427,7 +455,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       const selection = await pipeline.selectAppBicep(entry, repo, branch);
       const content = selection.content;
       if (content) {
-        if (modelCreationIsRunning(state)) {
+        if (modelCreationIsRunning(progressHandle.record)) {
           addEvent(
             "creating_model",
             "succeeded",
@@ -615,7 +643,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         ) {
           return;
         }
-        appendGraphEvent(state, stage, eventState, detail);
+        appendGraphEvent(progressHandle.record, stage, eventState, detail);
       };
       const addBuildDetail = (detail: string): void => {
         addEvent("building_graph", "running", detail);
@@ -643,7 +671,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           addEvent("creating_model", "failed", detail)
         );
       }
-      if (modelCreationIsRunning(state)) {
+      if (modelCreationIsRunning(progressHandle.record)) {
         addEvent(
           "creating_model",
           "succeeded",
@@ -811,7 +839,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         ) {
           return;
         }
-        appendGraphEvent(state, stage, eventState, detail);
+        appendGraphEvent(progressHandle.record, stage, eventState, detail);
       };
       sourceRefContext = dependencies.prepareSourceRefResources(entry, "diff", {
         repo,
@@ -874,7 +902,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           repo
         });
       }
-      if (modelCreationIsRunning(state)) {
+      if (modelCreationIsRunning(progressHandle.record)) {
         addEvent(
           "creating_model",
           "succeeded",

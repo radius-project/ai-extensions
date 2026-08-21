@@ -11,7 +11,12 @@ import {
 } from "./graphs-planning.js";
 import type { DeployProgress } from "../../deploy-artifacts.js";
 import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
-import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import type {
+  CanvasGraphResource,
+  CanvasState,
+  GraphProgressRecord,
+  GraphProgressView
+} from "../../shared.js";
 import type { CanvasServerEntry } from "../types.js";
 
 interface Recording {
@@ -130,6 +135,27 @@ const ARTIFACT_PROGRESS = progressPayload([
   }
 ]);
 
+function graphProgressState(
+  view: GraphProgressView,
+  overrides: Partial<GraphProgressRecord> = {}
+): CanvasState {
+  return {
+    graphProgressRecords: {
+      [view]: {
+        graphBuildEvents: [],
+        graphProgressGeneration: 1,
+        graphProgressStartedAtMs: 0,
+        graphProgressActive: false,
+        graphProgressView: view,
+        graphProgressKey: "",
+        graphProgressOwner: 1,
+        graphProgressAwaitingModel: false,
+        ...overrides
+      }
+    }
+  };
+}
+
 // Every state field the two routes may read. A case that misspells one would
 // otherwise be completely silent: the override would land on a field nothing
 // reads, and the case would collapse into the plain default while still
@@ -150,15 +176,7 @@ const KNOWN_STATE_FIELDS: readonly (keyof CanvasState)[] = [
   "deployedGraph",
   "plannedResources",
   "graphResources",
-  "graphBuildEvents",
-  "graphProgressGeneration",
-  "graphProgressActive",
-  "graphProgressView",
-  "graphProgressStartedAtMs",
-  "graphProgressKey",
-  "graphProgressOwner",
-  "graphProgressAwaitingModel",
-  "graphProgressDeadlineAtMs",
+  "graphProgressRecords",
   "progressMessages"
 ];
 
@@ -430,22 +448,25 @@ describe("graphs-planning read routes (SU-09)", () => {
     const { deps } = fakes(calls, {
       state: {
         progressMessages: ["diagnostic"],
-        graphBuildEvents: [
-          {
-            sequence: 1,
-            stage: "building_graph",
-            state: "running",
-            detail: "Building graph."
-          }
-        ]
+        ...graphProgressState("graph", {
+          graphBuildEvents: [
+            {
+              sequence: 1,
+              stage: "building_graph",
+              state: "running",
+              detail: "Building graph."
+            }
+          ]
+        })
       }
     });
     const recording = await run("/api/progress", handleProgress, deps);
     expect(JSON.parse(recording.body)).toEqual({
       messages: ["diagnostic"],
-      generation: 0,
+      generation: 1,
       active: false,
-      view: "",
+      view: "graph",
+      elapsedMs: 0,
       events: [
         {
           sequence: 1,
@@ -465,9 +486,8 @@ describe("graphs-planning read routes (SU-09)", () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       nowMs: 61_000,
-      state: {
+      state: graphProgressState("diff", {
         graphProgressActive: true,
-        graphProgressView: "diff",
         graphProgressStartedAtMs: 1_000,
         graphBuildEvents: [
           {
@@ -477,7 +497,7 @@ describe("graphs-planning read routes (SU-09)", () => {
             detail: "Building graph."
           }
         ]
-      }
+      })
     });
     const recording = await run("/api/progress", handleProgress, deps);
     const payload = JSON.parse(recording.body) as Record<string, unknown>;
@@ -486,15 +506,57 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(payload.elapsedMs).toBe(60_000);
   });
 
+  it("serves the requested view without letting a newer view replace it", async () => {
+    const calls: Calls = { log: [] };
+    const graph = graphProgressState("graph", {
+      graphProgressActive: true,
+      graphProgressStartedAtMs: 1_000,
+      graphBuildEvents: [
+        {
+          sequence: 1,
+          stage: "creating_model",
+          state: "running",
+          detail: "Waiting for the modeled application."
+        }
+      ]
+    }).graphProgressRecords?.graph;
+    const planned = graphProgressState("planned", {
+      graphProgressActive: true,
+      graphProgressStartedAtMs: 2_000,
+      graphBuildEvents: [
+        {
+          sequence: 1,
+          stage: "resolving_recipes",
+          state: "running",
+          detail: "Planning the deployment."
+        }
+      ]
+    }).graphProgressRecords?.planned;
+    const { deps } = fakes(calls, {
+      nowMs: 3_000,
+      state: { graphProgressRecords: { graph, planned } }
+    });
+
+    const modeled = JSON.parse(
+      (await run("/api/progress?view=graph", handleProgress, deps)).body
+    ) as Record<string, unknown>;
+    const ambient = JSON.parse(
+      (await run("/api/progress", handleProgress, deps)).body
+    ) as Record<string, unknown>;
+
+    expect(modeled.view).toBe("graph");
+    expect(modeled.elapsedMs).toBe(2_000);
+    expect(ambient.view).toBe("planned");
+  });
+
   // A record that settled still carries its stages so the page can render the
   // finished checklist, but it must not claim to still be running.
   it("reports a settled record as no longer in flight", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       nowMs: 5_000,
-      state: {
+      state: graphProgressState("graph", {
         graphProgressActive: false,
-        graphProgressView: "graph",
         graphProgressStartedAtMs: 2_000,
         graphBuildEvents: [
           {
@@ -504,7 +566,7 @@ describe("graphs-planning read routes (SU-09)", () => {
             detail: ""
           }
         ]
-      }
+      })
     });
     const payload = JSON.parse(
       (await run("/api/progress", handleProgress, deps)).body
@@ -516,7 +578,7 @@ describe("graphs-planning read routes (SU-09)", () => {
 
   it("expires an abandoned app.bicep wait on the server clock", async () => {
     const calls: Calls = { log: [] };
-    const scriptedState: CanvasState = {
+    const scriptedState = graphProgressState("graph", {
       graphProgressActive: true,
       graphProgressAwaitingModel: true,
       graphProgressDeadlineAtMs: 60_000,
@@ -529,7 +591,7 @@ describe("graphs-planning read routes (SU-09)", () => {
           detail: "Copilot is creating the model."
         }
       ]
-    };
+    });
     const { deps, state } = fakes(calls, {
       nowMs: 60_000,
       state: scriptedState
@@ -540,9 +602,15 @@ describe("graphs-planning read routes (SU-09)", () => {
     ) as Record<string, unknown>;
 
     expect(payload.active).toBe(false);
-    expect(state?.graphProgressAwaitingModel).toBe(false);
-    expect(state?.graphProgressDeadlineAtMs).toBeUndefined();
-    expect(state?.graphBuildEvents?.at(-1)).toMatchObject({
+    expect(state?.graphProgressRecords?.graph?.graphProgressAwaitingModel).toBe(
+      false
+    );
+    expect(
+      state?.graphProgressRecords?.graph?.graphProgressDeadlineAtMs
+    ).toBeUndefined();
+    expect(
+      state?.graphProgressRecords?.graph?.graphBuildEvents.at(-1)
+    ).toMatchObject({
       stage: "creating_model",
       state: "failed",
       detail: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
@@ -555,13 +623,13 @@ describe("graphs-planning read routes (SU-09)", () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       nowMs: 500,
-      state: {
+      state: graphProgressState("graph", {
         graphProgressActive: true,
         graphProgressStartedAtMs: 4_000,
         graphBuildEvents: [
           { sequence: 1, stage: "building_graph", state: "running", detail: "" }
         ]
-      }
+      })
     });
     const payload = JSON.parse(
       (await run("/api/progress", handleProgress, deps)).body
@@ -572,7 +640,7 @@ describe("graphs-planning read routes (SU-09)", () => {
   it("identifies the owning stream so a reader can reject a stale snapshot", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
-      state: {
+      state: graphProgressState("graph", {
         graphProgressGeneration: 4,
         graphBuildEvents: [
           {
@@ -582,7 +650,7 @@ describe("graphs-planning read routes (SU-09)", () => {
             detail: "Checking for an application model."
           }
         ]
-      }
+      })
     });
     const recording = await run("/api/progress", handleProgress, deps);
     expect(JSON.parse(recording.body).generation).toBe(4);
@@ -1087,7 +1155,7 @@ describe("graphs-planning read routes (SU-09)", () => {
     );
   });
 
-  it("appends to an existing progress log rather than replacing it", async () => {
+  it("replaces a stale deployed diagnostic instead of growing the log", async () => {
     const calls: Calls = { log: [] };
     const { deps, state } = fakes(calls, {
       state: { contextRepo: CONTEXT_REPO, progressMessages: ["earlier"] },
@@ -1095,9 +1163,19 @@ describe("graphs-planning read routes (SU-09)", () => {
     });
     await run("/api/deployed-graph", handleDeployedGraph, deps);
     expect(state?.progressMessages).toEqual([
-      "earlier",
       "Deployed graph status read failed: formatted:progress exploded"
     ]);
+  });
+
+  it("clears a previous deployed diagnostic after a successful read", async () => {
+    const calls: Calls = { log: [] };
+    const { deps, state } = fakes(calls, {
+      state: { contextRepo: CONTEXT_REPO, progressMessages: ["earlier"] }
+    });
+
+    await run("/api/deployed-graph", handleDeployedGraph, deps);
+
+    expect(state?.progressMessages).toEqual([]);
   });
 
   it("still answers when there is no entry to record the failure on", async () => {

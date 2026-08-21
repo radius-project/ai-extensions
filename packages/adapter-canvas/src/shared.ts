@@ -143,6 +143,18 @@ export interface GraphBuildEvent {
 // nav chip can link back to the page doing the work.
 export type GraphProgressView = "graph" | "planned" | "diff";
 
+export interface GraphProgressRecord {
+  graphBuildEvents: GraphBuildEvent[];
+  graphProgressGeneration: number;
+  graphProgressStartedAtMs: number;
+  graphProgressActive: boolean;
+  graphProgressView: GraphProgressView;
+  graphProgressKey: string;
+  graphProgressOwner: number;
+  graphProgressAwaitingModel: boolean;
+  graphProgressDeadlineAtMs?: number;
+}
+
 // Append one event to the instance's build record.
 //
 // A build that waits for Copilot to author .radius/app.bicep re-issues its
@@ -158,7 +170,7 @@ export type GraphProgressView = "graph" | "planned" | "diff";
 // it would grow a duplicate tail on the checklist with every poll. A repeat
 // that carries new detail is real narration and is kept.
 export function recordGraphBuildEvent(
-  state: CanvasState,
+  state: { graphBuildEvents?: GraphBuildEvent[] },
   event: Omit<GraphBuildEvent, "sequence">
 ): void {
   if (!state.graphBuildEvents) state.graphBuildEvents = [];
@@ -184,19 +196,11 @@ export interface CanvasState {
   graphBranch?: string;
   graphFromWorkspace?: boolean;
   graphLoaded?: boolean;
-  graphBuildEvents?: GraphBuildEvent[];
-  graphProgressGeneration?: number;
-  // When the current build record started, whether it is still in flight, and
-  // which view it belongs to. The server owns these so the elapsed clock and
-  // the reported stages survive the user navigating away and back — the page
-  // that started the build is no longer the only thing that knows about it.
-  graphProgressStartedAtMs?: number;
-  graphProgressActive?: boolean;
-  graphProgressView?: GraphProgressView;
-  graphProgressKey?: string;
-  graphProgressOwner?: number;
-  graphProgressAwaitingModel?: boolean;
-  graphProgressDeadlineAtMs?: number;
+  // Each graph page owns an independent record. Navigating to Planned or Diff
+  // must not erase a modeled-graph build that is waiting for app.bicep.
+  graphProgressRecords?: Partial<
+    Record<GraphProgressView, GraphProgressRecord>
+  >;
   plannedRepo?: string;
   plannedProvider?: string;
   plannedResources?: CanvasGraphResource[] | null;

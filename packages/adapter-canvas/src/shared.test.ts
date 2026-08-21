@@ -10,7 +10,7 @@ import {
   resolveCredentialsFilePath,
   sharedCredentials
 } from "./shared.js";
-import type { CanvasState } from "./shared.js";
+import type { GraphBuildEvent } from "./shared.js";
 
 const REPO = "octo-test/creds-" + Math.random().toString(36).slice(2);
 
@@ -119,14 +119,18 @@ describe("credential profiles", () => {
   });
 });
 describe("graph build record", () => {
-  function stages(state: CanvasState): string[] {
+  interface EventStore {
+    graphBuildEvents?: GraphBuildEvent[];
+  }
+
+  function stages(state: EventStore): string[] {
     return (state.graphBuildEvents ?? []).map(
       (event) => `${event.sequence}:${event.stage}:${event.state}`
     );
   }
 
   it("starts a record on the first event and numbers events in order", () => {
-    const state: CanvasState = {};
+    const state: EventStore = {};
     recordGraphBuildEvent(state, {
       stage: "checking_model",
       state: "running",
@@ -147,7 +151,7 @@ describe("graph build record", () => {
   // re-reports the stages it already completed. Recording those would walk the
   // panel backwards, which reads as a stuck build rather than a wait.
   it("drops a running event for a stage that already settled", () => {
-    const state: CanvasState = {};
+    const state: EventStore = {};
     recordGraphBuildEvent(state, {
       stage: "checking_model",
       state: "running",
@@ -173,7 +177,7 @@ describe("graph build record", () => {
   // deploy that then rejected its output is a real sequence, and suppressing the
   // failure would leave the panel claiming success.
   it("records a settled stage failing after the fact", () => {
-    const state: CanvasState = {};
+    const state: EventStore = {};
     recordGraphBuildEvent(state, {
       stage: "building_graph",
       state: "succeeded",
@@ -191,7 +195,7 @@ describe("graph build record", () => {
   });
 
   it("keeps recording a stage that is still running", () => {
-    const state: CanvasState = {};
+    const state: EventStore = {};
     recordGraphBuildEvent(state, {
       stage: "building_graph",
       state: "running",
@@ -212,7 +216,7 @@ describe("graph build record", () => {
   // Appending those replays would grow a duplicate tail on the checklist once
   // per poll, so an event that repeats a stage's latest one verbatim is dropped.
   it("drops an event that repeats a stage verbatim", () => {
-    const state: CanvasState = {};
+    const state: EventStore = {};
     for (let attempt = 0; attempt < 3; attempt += 1) {
       recordGraphBuildEvent(state, {
         stage: "checking_model",
@@ -232,7 +236,7 @@ describe("graph build record", () => {
   });
 
   it("records a repeat that carries new detail", () => {
-    const state: CanvasState = {};
+    const state: EventStore = {};
     recordGraphBuildEvent(state, {
       stage: "creating_model",
       state: "running",
@@ -252,7 +256,7 @@ describe("graph build record", () => {
   // The verbatim rule keys on the stage's own latest event, not the record's,
   // so two stages narrating in turn do not suppress each other.
   it("compares against the stage's own latest event", () => {
-    const state: CanvasState = {};
+    const state: EventStore = {};
     recordGraphBuildEvent(state, {
       stage: "checking_model",
       state: "running",
@@ -275,7 +279,7 @@ describe("graph build record", () => {
   });
 
   it("does not let one stage settling suppress another", () => {
-    const state: CanvasState = {};
+    const state: EventStore = {};
     recordGraphBuildEvent(state, {
       stage: "checking_model",
       state: "succeeded",
@@ -293,7 +297,7 @@ describe("graph build record", () => {
   });
 
   it("appends to a record that already carries events", () => {
-    const state: CanvasState = {
+    const state: EventStore = {
       graphBuildEvents: [
         { sequence: 1, stage: "checking_model", state: "running", detail: "" }
       ]

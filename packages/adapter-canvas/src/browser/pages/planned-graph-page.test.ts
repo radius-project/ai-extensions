@@ -114,7 +114,7 @@ function fixture(options: FixtureOptions = {}) {
   // The page polls progress as soon as it starts a plan, so every scenario
   // reaches this route whether or not it is what the scenario is about. A test
   // that cares overrides it.
-  browser.net.handle("/api/progress", () => jsonResponse({}));
+  browser.net.handle("/api/progress?view=planned", () => jsonResponse({}));
 
   return {
     browser,
@@ -377,7 +377,7 @@ describe("initializePlannedGraphPage", () => {
     const { browser, status } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () =>
+    browser.net.handle("/api/progress?view=planned", () =>
       jsonResponse({ messages: ["Drafting .radius/app.bicep"] })
     );
     initializePlannedGraphPage(browser.context, globals());
@@ -387,12 +387,16 @@ describe("initializePlannedGraphPage", () => {
 
     // A plan already in flight is adopted without waiting out an interval.
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/progress")
+      browser.net.calls.filter(
+        (call) => call.url === "/api/progress?view=planned"
+      )
     ).toHaveLength(1);
     browser.clock.tick(PLAN_PROGRESS_MS);
     await flushPromises();
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/progress")
+      browser.net.calls.filter(
+        (call) => call.url === "/api/progress?view=planned"
+      )
     ).toHaveLength(2);
     expect(status.textContent).toBe("Drafting .radius/app.bicep");
 
@@ -405,7 +409,9 @@ describe("initializePlannedGraphPage", () => {
     const { browser, status } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => jsonResponse({ messages: [] }));
+    browser.net.handle("/api/progress?view=planned", () =>
+      jsonResponse({ messages: [] })
+    );
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -423,7 +429,7 @@ describe("initializePlannedGraphPage", () => {
     const plan = createDeferred<HttpResponse>();
     const progress = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => progress.promise);
+    browser.net.handle("/api/progress?view=planned", () => progress.promise);
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -442,7 +448,7 @@ describe("initializePlannedGraphPage", () => {
     const { browser } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () =>
+    browser.net.handle("/api/progress?view=planned", () =>
       Promise.reject(new Error("progress unavailable"))
     );
     initializePlannedGraphPage(browser.context, globals());
@@ -465,7 +471,7 @@ describe("initializePlannedGraphPage", () => {
     const plan = createDeferred<HttpResponse>();
     const progress = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => progress.promise);
+    browser.net.handle("/api/progress?view=planned", () => progress.promise);
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -682,7 +688,9 @@ describe("initializePlannedGraphPage", () => {
     const { browser } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => jsonResponse({ messages: [] }));
+    browser.net.handle("/api/progress?view=planned", () =>
+      jsonResponse({ messages: [] })
+    );
     const teardown = initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -784,7 +792,7 @@ describe("initializePlannedGraphPage", () => {
       const { browser, progressHost } = fixture();
       const plan = createDeferred<HttpResponse>();
       browser.net.handle("/api/plan-graph", () => plan.promise);
-      browser.net.handle("/api/progress", () =>
+      browser.net.handle("/api/progress?view=planned", () =>
         jsonResponse({
           generation: 3,
           events: [
@@ -883,7 +891,7 @@ describe("initializePlannedGraphPage", () => {
         "/api/plan-graph",
         () => createDeferred<HttpResponse>().promise
       );
-      browser.net.handle("/api/progress", () =>
+      browser.net.handle("/api/progress?view=planned", () =>
         jsonResponse({
           events: [
             {

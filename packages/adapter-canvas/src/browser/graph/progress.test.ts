@@ -293,7 +293,7 @@ describe("createGraphProgress", () => {
       expect(stageHeading(host)).toBe(GRAPH_STAGE_LABELS.building_graph);
     });
 
-    it("applies a newer generation without un-finishing a stage it already saw succeed", () => {
+    it("clears stage memory when a newer build generation starts", () => {
       const { browser, host, scope } = setup();
       const view = createGraphProgress(browser.context, scope);
       view.sync(
@@ -305,13 +305,12 @@ describe("createGraphProgress", () => {
         1
       );
 
-      // A retry restarts the server's stream from the first stage. The panel
-      // follows the new stream's shape but must not report a finished stage as
-      // running again.
+      // A generation now identifies a different build, so its stages must not
+      // inherit terminal state from the previous build.
       view.sync([serverEvent(1, "checking_model", "running", "Restarted.")], 2);
 
       expect(stageRows(host)).toEqual([
-        { text: GRAPH_STAGE_LABELS.checking_model, state: "succeeded" }
+        { text: GRAPH_STAGE_LABELS.checking_model, state: "running" }
       ]);
       expect(fakeText(detailElement(host)!)).toBe("Restarted.");
     });
@@ -503,7 +502,7 @@ describe("createGraphProgress", () => {
     expect(graphProgressPanel(host)).not.toBe(panel);
   });
 
-  it("keeps the last activity text when a snapshot reports no usable events", () => {
+  it("clears the last activity when a new generation has no usable events", () => {
     const { browser, host, scope } = setup();
     const view = createGraphProgress(browser.context, scope);
     view.sync([serverEvent(1, "building_graph", "running", "Compiling.")], 1);
@@ -511,7 +510,7 @@ describe("createGraphProgress", () => {
     view.sync(["not an event"], 2);
 
     expect(stageRows(host)).toEqual([]);
-    expect(fakeText(detailElement(host)!)).toBe("Compiling.");
+    expect(fakeText(detailElement(host)!)).toBe("");
   });
 
   it("labels the panel with the caller's title", () => {

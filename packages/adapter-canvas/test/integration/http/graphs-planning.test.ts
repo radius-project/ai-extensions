@@ -156,20 +156,30 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
   it("serves typed graph progress events over a real socket", async () => {
     const harness = start();
     harness.state.progressMessages = ["deployed diagnostic"];
-    harness.state.graphProgressGeneration = 7;
-    harness.state.graphProgressActive = true;
-    harness.state.graphProgressView = "graph";
-    harness.state.graphProgressStartedAtMs = 1_000;
-    harness.state.graphBuildEvents = [
-      {
-        sequence: 1,
-        stage: "building_graph",
-        state: "running",
-        detail: "Building graph."
+    harness.state.graphProgressRecords = {
+      graph: {
+        graphProgressGeneration: 7,
+        graphProgressActive: true,
+        graphProgressView: "graph",
+        graphProgressStartedAtMs: 1_000,
+        graphProgressKey: "octo/app",
+        graphProgressOwner: 1,
+        graphProgressAwaitingModel: false,
+        graphBuildEvents: [
+          {
+            sequence: 1,
+            stage: "building_graph",
+            state: "running",
+            detail: "Building graph."
+          }
+        ]
       }
-    ];
+    };
     const entry = await container!.getOrCreate("panel-a");
     harness.advanceClock(5_000);
+    const graphEvents =
+      harness.state.graphProgressRecords.graph?.graphBuildEvents;
+    expect(graphEvents).toBeDefined();
 
     const response = await fetch(`${entry.baseUrl}/api/progress`);
 
@@ -178,7 +188,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     expect(await response.json()).toEqual({
       messages: ["deployed diagnostic"],
       generation: 7,
-      events: harness.state.graphBuildEvents,
+      events: graphEvents,
       active: true,
       view: "graph",
       // The server measures the build's age, so a client whose clock disagrees

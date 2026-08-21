@@ -29,7 +29,11 @@ import {
   isCurrentPlannedGraphRequest,
   isCurrentSourceRefToken
 } from "../../server.js";
-import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import type {
+  CanvasGraphResource,
+  CanvasState,
+  GraphBuildEvent
+} from "../../shared.js";
 
 // `record`, `optionalString` and `errorMessage` are module-private in
 // `server.ts`, so they are mirrored here verbatim rather than exported solely
@@ -264,13 +268,32 @@ function start(script: Partial<PipelineScript> = {}): Harness {
 }
 
 function messages(state: CanvasState): string[] {
-  return (state.graphBuildEvents || []).map((event) => event.detail);
+  return (
+    latestProgressRecord(state)?.graphBuildEvents.map(
+      (event) => event.detail
+    ) ?? []
+  );
 }
 
 function stages(state: CanvasState): string[] {
-  return (state.graphBuildEvents || []).map(
+  return (latestProgressRecord(state)?.graphBuildEvents ?? []).map(
     (event) => `${event.stage}:${event.state}`
   );
+}
+
+function latestProgressRecord(state: CanvasState) {
+  return Object.values(state.graphProgressRecords ?? {}).at(-1);
+}
+
+function replaceProgressRecord(
+  state: CanvasState,
+  view: "graph" | "planned" | "diff",
+  event: GraphBuildEvent
+): void {
+  const record = state.graphProgressRecords?.[view];
+  if (!record) throw new Error(`Missing ${view} progress record.`);
+  record.graphProgressGeneration = 42;
+  record.graphBuildEvents = [event];
 }
 
 describe("graph planning workflows", () => {
@@ -628,22 +651,19 @@ describe("graph planning workflows", () => {
         staged: { main: { dir: "", remote: false } },
         compiled: { main: [] },
         afterStage: () => {
-          harness.state.graphProgressGeneration = 42;
-          harness.state.graphBuildEvents = [
-            {
-              sequence: 1,
-              stage: "resolving_recipes",
-              state: "running",
-              detail: "Planning owns the progress stream."
-            }
-          ];
+          replaceProgressRecord(harness.state, "graph", {
+            sequence: 1,
+            stage: "resolving_recipes",
+            state: "running",
+            detail: "A replacement modeled request owns the progress stream."
+          });
         }
       });
 
       await harness.run("loadGraph", '{"repo":"octo/app"}');
 
       expect(messages(harness.state)).toEqual([
-        "Planning owns the progress stream."
+        "A replacement modeled request owns the progress stream."
       ]);
     });
 
@@ -791,22 +811,19 @@ describe("graph planning workflows", () => {
         staged: { main: { dir: "", remote: false } },
         compiled: { main: [] },
         afterCompile: () => {
-          harness.state.graphProgressGeneration = 42;
-          harness.state.graphBuildEvents = [
-            {
-              sequence: 1,
-              stage: "comparing_graphs",
-              state: "running",
-              detail: "Diff owns the progress stream."
-            }
-          ];
+          replaceProgressRecord(harness.state, "planned", {
+            sequence: 1,
+            stage: "resolving_recipes",
+            state: "running",
+            detail: "A replacement plan owns the progress stream."
+          });
         }
       });
 
       await harness.run("planGraph", '{"repo":"octo/app"}');
 
       expect(messages(harness.state)).toEqual([
-        "Diff owns the progress stream."
+        "A replacement plan owns the progress stream."
       ]);
     });
 
@@ -1110,15 +1127,12 @@ describe("graph planning workflows", () => {
         },
         compiled: { main: [], "feature/x": [] },
         afterCompile: () => {
-          harness.state.graphProgressGeneration = 42;
-          harness.state.graphBuildEvents = [
-            {
-              sequence: 1,
-              stage: "building_graph",
-              state: "running",
-              detail: "Modeled owns the progress stream."
-            }
-          ];
+          replaceProgressRecord(harness.state, "diff", {
+            sequence: 1,
+            stage: "comparing_graphs",
+            state: "running",
+            detail: "A replacement diff owns the progress stream."
+          });
         }
       });
 
@@ -1128,7 +1142,7 @@ describe("graph planning workflows", () => {
       );
 
       expect(messages(harness.state)).toEqual([
-        "Modeled owns the progress stream."
+        "A replacement diff owns the progress stream."
       ]);
     });
 
@@ -1290,7 +1304,9 @@ describe("graph planning workflows", () => {
       expect(harness.state.plannedRepo).toBeUndefined();
       expect(harness.state.resolvedRecipes).toBeUndefined();
       expect(harness.state.activeGraphView).toBeUndefined();
-      expect(harness.state.graphBuildEvents?.at(-1)).toEqual({
+      expect(
+        harness.state.graphProgressRecords?.planned?.graphBuildEvents.at(-1)
+      ).toEqual({
         sequence: 6,
         stage: "resolving_recipes",
         state: "failed",
@@ -1378,8 +1394,12 @@ describe("graph planning workflows", () => {
 
       await harness.run("loadGraph", '{"repo":"octo/app"}');
 
-      expect(harness.state.graphProgressView).toBe("graph");
-      expect(harness.state.graphProgressStartedAtMs).toBe(5_000);
+      expect(harness.state.graphProgressRecords?.graph?.graphProgressView).toBe(
+        "graph"
+      );
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressStartedAtMs
+      ).toBe(5_000);
     });
 
     it("closes the record once the build finishes", async () => {
@@ -1387,7 +1407,9 @@ describe("graph planning workflows", () => {
 
       await harness.run("loadGraph", '{"repo":"octo/app"}');
 
-      expect(harness.state.graphProgressActive).toBe(false);
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressActive
+      ).toBe(false);
       // The stages stay readable: a page that returns after the build ended
       // should see what happened rather than an empty panel.
       expect(stages(harness.state).length).toBeGreaterThan(0);
@@ -1403,7 +1425,9 @@ describe("graph planning workflows", () => {
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
 
       expect(outcome.status).toBe(400);
-      expect(harness.state.graphProgressActive).toBe(false);
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressActive
+      ).toBe(false);
     });
 
     // The wait for Copilot to author .radius/app.bicep genuinely continues off
@@ -1415,8 +1439,12 @@ describe("graph planning workflows", () => {
 
       await harness.run("loadGraph", '{"repo":"octo/app"}');
 
-      expect(harness.state.graphProgressActive).toBe(true);
-      expect(harness.state.graphProgressView).toBe("graph");
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressActive
+      ).toBe(true);
+      expect(harness.state.graphProgressRecords?.graph?.graphProgressView).toBe(
+        "graph"
+      );
     });
 
     // The page polls for the model every few seconds. Each poll used to open a
@@ -1428,15 +1456,21 @@ describe("graph planning workflows", () => {
       });
 
       await harness.run("loadGraph", '{"repo":"octo/app"}');
-      const generation = harness.state.graphProgressGeneration;
-      const startedAt = harness.state.graphProgressStartedAtMs;
+      const generation =
+        harness.state.graphProgressRecords?.graph?.graphProgressGeneration;
+      const startedAt =
+        harness.state.graphProgressRecords?.graph?.graphProgressStartedAtMs;
       const reported = stages(harness.state);
       harness.advanceClock(10_000);
 
       await harness.run("loadGraph", '{"repo":"octo/app"}');
 
-      expect(harness.state.graphProgressGeneration).toBe(generation);
-      expect(harness.state.graphProgressStartedAtMs).toBe(startedAt);
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressGeneration
+      ).toBe(generation);
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressStartedAtMs
+      ).toBe(startedAt);
       expect(stages(harness.state)).toEqual(reported);
     });
 
@@ -1456,7 +1490,9 @@ describe("graph planning workflows", () => {
 
       expect(stages(harness.state)).toContain("creating_model:succeeded");
       const latestByStage = new Map(
-        harness.state.graphBuildEvents?.map((event) => [event.stage, event])
+        harness.state.graphProgressRecords?.graph?.graphBuildEvents.map(
+          (event) => [event.stage, event]
+        )
       );
       expect(
         [...latestByStage.values()].map((event) => event.state)
@@ -1494,21 +1530,25 @@ describe("graph planning workflows", () => {
       await replacement;
 
       expect(superseded.status).toBe(409);
-      expect(harness.state.graphProgressActive).toBe(true);
-      expect(harness.state.graphProgressAwaitingModel).toBe(true);
-      expect(harness.state.graphProgressKey).toBe(
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressActive
+      ).toBe(true);
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressAwaitingModel
+      ).toBe(true);
+      expect(harness.state.graphProgressRecords?.graph?.graphProgressKey).toBe(
         JSON.stringify({ repo: "octo/app", branch: "feature/x" })
       );
       expect(stages(harness.state)).toContain("creating_model:running");
     });
 
-    it("starts a new record when another view takes over an open build", async () => {
+    it("keeps an open modeled record when another view starts", async () => {
       const harness = start({
         selections: { main: selectionOf({ content: null }) }
       });
 
       await harness.run("loadGraph", '{"repo":"octo/app"}');
-      const generation = harness.state.graphProgressGeneration ?? 0;
+      const graphRecord = harness.state.graphProgressRecords?.graph;
       harness.advanceClock(10_000);
 
       await harness.run(
@@ -1516,9 +1556,12 @@ describe("graph planning workflows", () => {
         '{"repo":"octo/app","base":"main","head":"main"}'
       );
 
-      expect(harness.state.graphProgressGeneration).toBe(generation + 1);
-      expect(harness.state.graphProgressStartedAtMs).toBe(11_000);
-      expect(harness.state.graphProgressView).toBe("diff");
+      expect(harness.state.graphProgressRecords?.graph).toBe(graphRecord);
+      expect(graphRecord?.graphProgressActive).toBe(true);
+      expect(graphRecord?.graphProgressStartedAtMs).toBe(1_000);
+      expect(
+        harness.state.graphProgressRecords?.diff?.graphProgressStartedAtMs
+      ).toBe(11_000);
     });
 
     it("names the planned view for a plan request", async () => {
@@ -1528,7 +1571,9 @@ describe("graph planning workflows", () => {
 
       await harness.run("planGraph", '{"repo":"octo/app"}');
 
-      expect(harness.state.graphProgressView).toBe("planned");
+      expect(
+        harness.state.graphProgressRecords?.planned?.graphProgressView
+      ).toBe("planned");
     });
   });
 });
