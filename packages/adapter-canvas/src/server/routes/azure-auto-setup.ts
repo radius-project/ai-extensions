@@ -9,7 +9,10 @@ import {
 import type { ResolveOidcSubjectResult } from "../../azure-oidc.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
-import { resolveAzureAutoSetupApplication } from "./azure-auto-setup-application.js";
+import {
+  ENTRA_APP_RETENTION_NOTICE,
+  resolveAzureAutoSetupApplication
+} from "./azure-auto-setup-application.js";
 import { configureAzureAutoSetupCredentials } from "./azure-auto-setup-credentials.js";
 import type {
   AzureAutoSetupDependencies,
@@ -146,6 +149,10 @@ export async function handleAzureAutoSetup(
     const data = JSON.parse(body);
     const targetRepo = data.repo || "";
     const environment = data.environment || "dev";
+    const operationEnvironment =
+      typeof data.operationEnvironment === "string" ?
+        data.operationEnvironment
+      : environment;
     const resourceGroup = data.resourceGroup || "";
     const clusterName = data.cluster || "";
     const clusterResourceGroup = (data.clusterResourceGroup || "").trim();
@@ -296,7 +303,7 @@ export async function handleAzureAutoSetup(
         !existing ||
         dependencies.operations.isStale(existing) ||
         existing.repo !== targetRepo ||
-        existing.environment !== environment ||
+        existing.environment !== operationEnvironment ||
         existing.provider !== "azure" ||
         existing.currentStage !== dependencies.stageAuthorizeIdentity
       ) {
@@ -588,6 +595,11 @@ export async function handleAzureAutoSetup(
       }))
     ) {
       return;
+    }
+    if (application.state === "created") {
+      steps.push(
+        `ℹ️ Created Entra app registration "${application.appName}". ${ENTRA_APP_RETENTION_NOTICE}`
+      );
     }
 
     dependencies.operations.setStageState(
