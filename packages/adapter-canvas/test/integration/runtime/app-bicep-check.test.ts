@@ -21,7 +21,6 @@ const checker = path.join(
 );
 const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
 const temporaryDirectories = new Set<string>();
-let sharedHomeDirectory: string | undefined;
 
 afterEach(() => {
   for (const directory of temporaryDirectories) {
@@ -30,19 +29,40 @@ afterEach(() => {
   temporaryDirectories.clear();
 });
 
-afterAll(() => {
-  const directory = sharedHomeDirectory;
-  sharedHomeDirectory = undefined;
-  if (directory !== undefined) {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
-
 function temporaryDirectory(): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "app-bicep-check-"));
   temporaryDirectories.add(directory);
   return directory;
 }
+
+interface ExecutableHomeFs {
+  mkdtemp(prefix: string): string;
+  mkdir(directory: string): void;
+  copyFile(source: string, destination: string): void;
+  chmod(file: string, mode: number): void;
+  remove(directory: string): void;
+}
+
+interface ExecutableHome {
+  path(): string;
+  cleanup(): void;
+}
+
+const nodeExecutableHomeFs: ExecutableHomeFs = {
+  mkdtemp: (prefix) => fs.mkdtempSync(prefix),
+  mkdir: (directory) => {
+    fs.mkdirSync(directory, { recursive: true });
+  },
+  copyFile: (source, destination) => {
+    fs.copyFileSync(source, destination);
+  },
+  chmod: (file, mode) => {
+    fs.chmodSync(file, mode);
+  },
+  remove: (directory) => {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+};
 
 // The checker resolves the managed Bicep binary from the home directory but
 // resolves the driver script from the application's own directory, so one home
@@ -50,27 +70,143 @@ function temporaryDirectory(): string {
 // ~78 MB stand-in per case instead made each test copy the Node binary, because
 // Windows refuses to hardlink it out of C:\Program Files, and made each cleanup
 // delete a file that size.
-function sharedBicepHome(): string {
-  if (sharedHomeDirectory === undefined) {
-    const home = fs.mkdtempSync(
-      path.join(os.tmpdir(), "app-bicep-check-home-")
-    );
-    sharedHomeDirectory = home;
-    const bicep = path.join(
-      home,
-      ".radius",
-      "ai-extensions",
-      "bin",
-      executable
-    );
-    fs.mkdirSync(path.dirname(bicep), { recursive: true });
-    fs.copyFileSync(fs.realpathSync(process.execPath), bicep);
-    if (process.platform !== "win32") {
-      fs.chmodSync(bicep, 0o755);
+function executableHome(
+  source: string,
+  io: ExecutableHomeFs = nodeExecutableHomeFs
+): ExecutableHome {
+  // The directory is tracked separately from the installed binary so a failed
+  // installation is still cleaned up, while only a home that actually holds the
+  // binary is ever handed to a case.
+  let created: string | undefined;
+  let installed: string | undefined;
+
+  return {
+    path() {
+      if (installed === undefined) {
+        const home =
+          created ??
+          io.mkdtemp(path.join(os.tmpdir(), "app-bicep-check-home-"));
+        created = home;
+        const bicep = path.join(
+          home,
+          ".radius",
+          "ai-extensions",
+          "bin",
+          executable
+        );
+        io.mkdir(path.dirname(bicep));
+        io.copyFile(source, bicep);
+        if (process.platform !== "win32") {
+          io.chmod(bicep, 0o755);
+        }
+        installed = home;
+      }
+      return installed;
+    },
+    cleanup() {
+      const directory = created;
+      created = undefined;
+      installed = undefined;
+      if (directory !== undefined) {
+        io.remove(directory);
+      }
     }
-  }
-  return sharedHomeDirectory;
+  };
 }
+
+const sharedHome = executableHome(fs.realpathSync(process.execPath));
+
+afterAll(() => {
+  sharedHome.cleanup();
+});
+
+function recordedHomeFs(failedCopies = 0) {
+  const created: string[] = [];
+  const installed: string[] = [];
+  const removed: string[] = [];
+  let directories = 0;
+  let copies = 0;
+  const io: ExecutableHomeFs = {
+    mkdtemp(prefix) {
+      directories += 1;
+      const directory = `${prefix}${directories}`;
+      created.push(directory);
+      return directory;
+    },
+    mkdir() {},
+    copyFile(_source, destination) {
+      copies += 1;
+      if (copies <= failedCopies) {
+        throw new Error("copy failed");
+      }
+      installed.push(destination);
+    },
+    chmod() {},
+    remove(directory) {
+      removed.push(directory);
+    }
+  };
+  return { io, created, installed, removed };
+}
+
+test("installs the shared stand-in binary once for repeated use", () => {
+  const { io, created, installed } = recordedHomeFs();
+  const home = executableHome("node", io);
+
+  const first = home.path();
+
+  assert.equal(home.path(), first);
+  assert.deepEqual(created, [first]);
+  assert.equal(installed.length, 1);
+  assert.equal(
+    installed[0],
+    path.join(first, ".radius", "ai-extensions", "bin", executable)
+  );
+});
+
+test("removes a stand-in home left behind by a failed installation", () => {
+  const { io, created, removed } = recordedHomeFs(1);
+  const home = executableHome("node", io);
+
+  assert.throws(() => home.path(), /copy failed/u);
+  home.cleanup();
+
+  assert.equal(created.length, 1);
+  assert.deepEqual(removed, created);
+});
+
+test("never hands out a stand-in home whose binary failed to install", () => {
+  const { io, created, installed, removed } = recordedHomeFs(1);
+  const home = executableHome("node", io);
+
+  assert.throws(() => home.path(), /copy failed/u);
+  const resolved = home.path();
+
+  assert.deepEqual(created, [resolved]);
+  assert.deepEqual(installed, [
+    path.join(resolved, ".radius", "ai-extensions", "bin", executable)
+  ]);
+  assert.deepEqual(removed, []);
+});
+
+test("removes the shared stand-in home only once", () => {
+  const { io, created, removed } = recordedHomeFs();
+  const home = executableHome("node", io);
+  home.path();
+
+  home.cleanup();
+  home.cleanup();
+
+  assert.deepEqual(removed, created);
+});
+
+test("removes nothing when no stand-in home was created", () => {
+  const { io, removed } = recordedHomeFs();
+
+  executableHome("node", io).cleanup();
+
+  assert.deepEqual(removed, []);
+});
 
 function fakeBicep(
   directory: string,
@@ -78,7 +214,7 @@ function fakeBicep(
   status: number,
   compiledOutput = "{}"
 ): NodeJS.ProcessEnv {
-  const home = sharedBicepHome();
+  const home = sharedHome.path();
   const driver = path.join(directory, "build");
   fs.writeFileSync(
     driver,
