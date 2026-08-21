@@ -218,6 +218,7 @@ let _ghStrategy: GhTokenStrategy | null = null;
 // without spawning a second `gh auth token` per read.
 let _ghPackageCredentialPromise: Promise<GhPackageCredentialResolution> | null =
   null;
+const GH_KEYRING_TOKEN_TIMEOUT_MS = 3000;
 
 // Parse `gh auth status` text into structured accounts. Pure so it can be unit
 // tested against real gh output across versions. Each account block looks like:
@@ -417,6 +418,14 @@ function ghChildEnv(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
+export function ghCommandCredentialSource(
+  env: NodeJS.ProcessEnv = process.env
+): SelectedGhCredentialSource {
+  return getInjectedGhToken(env) !== "" && !ghStrategyCached().useKeyring ?
+      "injected"
+    : "keyring";
+}
+
 // Which login gh will actually act as, given the snapshot and the resolved
 // strategy. Shared by the identity report and the package-credential resolver so
 // the two can never disagree about who setup runs as.
@@ -469,11 +478,7 @@ function ensurePackageCredential(): Promise<GhPackageCredentialResolution> {
         };
       }
     }
-    const injected = (
-      process.env.GH_TOKEN ||
-      process.env.GITHUB_TOKEN ||
-      ""
-    ).trim();
+    const injected = getInjectedGhToken();
     if (injected) {
       return {
         ok: true,
@@ -643,7 +648,7 @@ function ghKeyringTokenForUser(login: string): Promise<string> {
     execFile(
       ghExecutable(),
       ["auth", "token", "--hostname", "github.com", "--user", login],
-      { env, timeout: 8000, windowsHide: true },
+      { env, timeout: GH_KEYRING_TOKEN_TIMEOUT_MS, windowsHide: true },
       (e, stdout) => {
         resolve(e ? "" : (stdout || "").toString().trim());
       }
@@ -742,7 +747,8 @@ export async function createSelectedGhExecutor(
   const snapshot = await ensureGhSnapshot();
   const injectedToken = getInjectedGhToken(env);
   const injectedAccount = snapshot.withTokenAccts.find(
-    (account) => account.login === login && /TOKEN/i.test(account.source)
+    (account) =>
+      account.login === login && isInjectedTokenSource(account.source)
   );
   const keyringAccount = snapshot.keyringAccts.find(
     (account) => account.login === login
@@ -750,34 +756,52 @@ export async function createSelectedGhExecutor(
   const requiredScopeScore = (account: GhAccount | undefined): number =>
     Number(account?.scopes.includes("workflow") === true) +
     Number(account?.scopes.includes("write:packages") === true);
-  const keyringToken = keyringAccount ? await ghKeyringTokenForUser(login) : "";
-  if (keyringAccount && !keyringToken) {
-    const version = await ghVersion();
-    if (version && !supportsGhMultiAccount(version)) {
-      throw new Error(
-        `GitHub CLI 2.40 or newer is required to select @${login} without relying on the active account. Upgrade GitHub CLI and retry.`
-      );
+  let keyringCredential: {
+    token: string;
+    account: GhAccount;
+    source: "keyring";
+  } | null = null;
+  if (keyringAccount) {
+    const keyringToken = await ghKeyringTokenForUser(login);
+    if (keyringToken) {
+      keyringCredential = {
+        token: keyringToken,
+        account: keyringAccount,
+        source: "keyring"
+      };
+    } else {
+      const version = await ghVersion();
+      if (version && !supportsGhMultiAccount(version)) {
+        throw new Error(
+          `GitHub CLI 2.40 or newer is required to select @${login} without relying on the active account. Upgrade GitHub CLI and retry.`
+        );
+      }
     }
   }
+  const injectedCredential =
+    injectedToken !== "" && snapshot.tokenAcct?.login === login ?
+      {
+        token: injectedToken,
+        account: snapshot.tokenAcct,
+        source: "injected" as const
+      }
+    : null;
   const useInjected =
-    injectedToken !== "" &&
-    snapshot.tokenAcct?.login === login &&
-    (!keyringToken ||
-      requiredScopeScore(injectedAccount) > requiredScopeScore(keyringAccount));
-  const token = useInjected ? injectedToken : keyringToken;
-  if (!token) {
+    injectedCredential !== null &&
+    (keyringCredential === null ||
+      requiredScopeScore(injectedAccount) >
+        requiredScopeScore(keyringCredential.account));
+  const selectedCredential =
+    useInjected ? injectedCredential : keyringCredential;
+  if (!selectedCredential) {
     throw new Error(
       `Could not obtain a GitHub credential for @${login}. Authenticate that account with GitHub CLI, then re-check. Note: gh auth login changes the machine-wide active account for github.com.`
     );
   }
+  const token = selectedCredential.token;
   const credentialSource: SelectedGhCredentialSource =
-    useInjected ? "injected" : "keyring";
-  const scopes =
-    credentialSource === "injected" ?
-      snapshot.withTokenAccts.find((account) => account.login === login)
-        ?.scopes || []
-    : snapshot.keyringAccts.find((account) => account.login === login)
-        ?.scopes || [];
+    selectedCredential.source;
+  const scopes = selectedCredential.account.scopes;
   const redact = selectedCredentialRedactor(token);
 
   const runRaw = (

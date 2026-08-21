@@ -32,6 +32,7 @@ import {
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
+  readWorkflowCommitArtifact,
   promoteCreatedGitHubEnvironment,
   reconcileArtifactProvenance,
   recordServicePrincipal,
@@ -306,6 +307,7 @@ function provenWorkflowFile(overrides = {}) {
     blobSha: "b".repeat(40),
     contentSha256: "d".repeat(64),
     previousBlobSha: null,
+    previousBlobKnown: true,
     ...overrides
   };
 }
@@ -917,6 +919,13 @@ describe("client projection", () => {
           target: "Contributor @ /subscriptions/sub/resourceGroups/rg",
           outcome: "not_found",
           detail: null
+        },
+        {
+          attempt: 1,
+          artifactType: "workflow_file",
+          target: ".github/workflows/radius-deploy.yml on main",
+          outcome: "restored",
+          detail: null
         }
       ]
     });
@@ -941,6 +950,12 @@ describe("client projection", () => {
         outcome: "not_found",
         target:
           "Contributor @ /subscriptions/sub/resourceGroups/rg (already absent)"
+      },
+      {
+        kind: "workflow_file",
+        outcome: "restored",
+        target:
+          ".github/workflows/radius-deploy.yml on main (restored previous version)"
       }
     ]);
     expect(view.cleanup.reused).toEqual([
@@ -2358,8 +2373,18 @@ describe("retry eligibility", () => {
     );
 
     const rbac = verifiableOp();
-    finish(rbac, "failed_partial", { failure: { code: "verify-run-failed" } });
+    finish(rbac, "failed_partial", {
+      failure: { code: "verify-run-rbac-failed" }
+    });
     expect(classifyVerificationRetry(rbac)).toBe("azure-rbac-propagation");
+
+    const otherRunFailure = verifiableOp();
+    finish(otherRunFailure, "failed_partial", {
+      failure: { code: "verify-run-failed" }
+    });
+    expect(classifyVerificationRetry(otherRunFailure)).toBe(
+      "verification-run-failed"
+    );
 
     const expired = verifiableOp();
     finish(expired, "failed_partial", {
@@ -2930,6 +2955,17 @@ describe("repository lock", () => {
     reconcileOperationLifecycle(op);
     expect(op.state).toBe("cancelled");
     expect(op.control.stop.boundary).toBe("stale_reconciliation");
+  });
+
+  it("does not terminalize a stale record while its executor is still active", () => {
+    const op = newOp();
+    op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    setExecutionActive(op, true);
+
+    reconcileOperationLifecycle(op);
+
+    expect(op.state).toBe("running");
+    expect(op.endedAt).toBeNull();
   });
 
   it("settles an expired prompt as a partial failure the customer can act on", () => {
@@ -3648,6 +3684,29 @@ describe("a closed operation never looks like work in progress", () => {
 });
 
 describe("an interrupted rollback still offers a way out", () => {
+  it("preserves an active cleanup across restart as an interrupted rollback", () => {
+    const op = stoppedWithCreatedResources();
+    const rollback = canStartRollback(op);
+    beginRetryAttempt(op, "cleanup");
+    acceptCommand(op, {
+      kind: "rollback",
+      attempt: 1,
+      target: rollback.target
+    });
+    recordCleanupPass(op, "running", []);
+
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(op))
+    );
+
+    expect(restored.state).toBe("failed_partial");
+    expect(restored.setupArtifacts.cleanup.state).toBe("running");
+    expect(canStartRollback(restored)).toMatchObject({ ok: true });
+    expect(
+      projectOperationActions(restored).map((entry) => entry.id)
+    ).toContain("rollback");
+  });
+
   it("treats a cleanup left running on a closed record as unfinished, not done", () => {
     const op = stoppedWithCreatedResources();
     // The rollback removed the environment, then the process went away before
@@ -3709,7 +3768,8 @@ describe("committed workflow provenance", () => {
         commitSha: "c".repeat(40),
         blobSha: "b".repeat(40),
         contentSha256: "d".repeat(64),
-        previousBlobSha: "old-blob"
+        previousBlobSha: "old-blob",
+        previousBlobKnown: true
       }
     ]);
     // The head moves with the newest write, which is what a branch deletion is
@@ -3718,21 +3778,96 @@ describe("committed workflow provenance", () => {
   });
 
   it("replaces the provenance of a re-commit rather than recording it twice", () => {
-    const op = committed();
+    const op = committed({ previousBlobSha: "customer-blob" });
     recordCommittedWorkflowFile(
       op,
       provenWorkflowFile({
         commitSha: "e".repeat(40),
-        blobSha: "f".repeat(40)
+        blobSha: "f".repeat(40),
+        previousBlobSha: "b".repeat(40)
       })
     );
 
     expect(op.setupArtifacts.commit.workflowFiles).toHaveLength(1);
     expect(op.setupArtifacts.commit.workflowFiles[0]).toMatchObject({
       commitSha: "e".repeat(40),
-      blobSha: "f".repeat(40)
+      blobSha: "f".repeat(40),
+      previousBlobSha: "customer-blob"
     });
     expect(op.setupArtifacts.commit.headSha).toBe("e".repeat(40));
+  });
+
+  it("does not let a recommit turn an unknown legacy path state into a deletable file", () => {
+    const legacy = toPersistedOperation(newOp());
+    legacy.schemaVersion = 3;
+    legacy.setupArtifacts.commit = {
+      mode: "default_branch",
+      branch: "main",
+      baseBranch: null,
+      pullRequestUrl: null,
+      headSha: "c".repeat(40),
+      workflowFiles: [
+        {
+          path: ".github/workflows/radius-verify-credentials.yml",
+          branch: "main",
+          mode: "default_branch",
+          state: "committed",
+          commitSha: "c".repeat(40),
+          blobSha: "b".repeat(40),
+          contentSha256: "d".repeat(64),
+          previousBlobSha: null
+        }
+      ]
+    };
+    const restored = fromPersistedOperation(legacy);
+
+    recordCommittedWorkflowFile(
+      restored,
+      provenWorkflowFile({
+        commitSha: "e".repeat(40),
+        blobSha: "f".repeat(40),
+        previousBlobSha: "b".repeat(40),
+        previousBlobKnown: true
+      })
+    );
+
+    expect(restored.setupArtifacts.commit.workflowFiles[0]).toMatchObject({
+      commitSha: "e".repeat(40),
+      blobSha: "f".repeat(40),
+      previousBlobSha: null,
+      previousBlobKnown: false
+    });
+    expect(workflowProvenanceGap(restored)).toContain("did not save whether");
+  });
+
+  it("recognizes a legacy non-null previous blob as proven prior state", () => {
+    const restored = readWorkflowCommitArtifact({
+      ...provenWorkflowFile(),
+      previousBlobSha: "customer-blob"
+    });
+
+    expect(restored.previousBlobKnown).toBe(true);
+  });
+
+  it("restores an intervening customer edit instead of the older pre-setup blob", () => {
+    const op = committed({ previousBlobSha: "customer-before-setup" });
+
+    recordCommittedWorkflowFile(
+      op,
+      provenWorkflowFile({
+        commitSha: "e".repeat(40),
+        blobSha: "f".repeat(40),
+        previousBlobSha: "customer-intervening-edit",
+        previousBlobKnown: true
+      })
+    );
+
+    expect(op.setupArtifacts.commit.workflowFiles[0]).toMatchObject({
+      commitSha: "e".repeat(40),
+      blobSha: "f".repeat(40),
+      previousBlobSha: "customer-intervening-edit",
+      previousBlobKnown: true
+    });
   });
 
   it("ignores an entry with no path or no recognised commit mode", () => {
@@ -3804,6 +3939,7 @@ describe("committed workflow provenance", () => {
         blobSha: "b".repeat(40),
         contentSha256: "d".repeat(64),
         previousBlobSha: null,
+        previousBlobKnown: true,
         target: ".github/workflows/radius-verify-credentials.yml on main",
         identity: "main:.github/workflows/radius-verify-credentials.yml",
         key: "workflow_file#main:.github/workflows/radius-verify-credentials.yml"
@@ -3938,7 +4074,8 @@ describe("restoring a ledger written before provenance existed", () => {
         commitSha: null,
         blobSha: null,
         contentSha256: null,
-        previousBlobSha: null
+        previousBlobSha: null,
+        previousBlobKnown: false
       }
     ]);
     // Fields the old record did carry survive untouched.
@@ -4789,7 +4926,7 @@ describe("an unprovable Service Principal", () => {
     });
     recordServicePrincipal(op, {
       state: "created_candidate",
-      origin: "this_operation",
+      origin: "unknown",
       appId: "app-1",
       objectId: "sp-1"
     });
@@ -4912,7 +5049,8 @@ describe("reuse is explained in the customer's terms", () => {
       commitSha: "c".repeat(40),
       blobSha: "b".repeat(40),
       contentSha256: "d".repeat(64),
-      previousBlobSha: null
+      previousBlobSha: null,
+      previousBlobKnown: true
     });
     recordCommitState(op, { mode: "default_branch", branch: "main" });
     addSafeResumeRequest(op);

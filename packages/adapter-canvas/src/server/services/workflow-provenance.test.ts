@@ -25,6 +25,7 @@ function record(
     blobSha: BLOB,
     contentSha256: DIGEST,
     previousBlobSha: null,
+    previousBlobKnown: true,
     ...overrides
   };
 }

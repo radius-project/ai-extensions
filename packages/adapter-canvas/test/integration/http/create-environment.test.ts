@@ -940,13 +940,13 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     );
   });
 
-  it("owns the environment it proved it created, after the identity is saved", async () => {
+  it("checkpoints proven ownership before honoring a stop boundary", async () => {
     const harness = start();
 
     await post({ repo: "octo/app" });
 
-    // Order is the proof: the candidate is recorded, the checkpoint makes the
-    // identity durable, and only then is ownership claimed.
+    // The proof is settled in memory first, then the mutation checkpoint saves
+    // that ownership before the stop boundary can return.
     const recorded = harness.journal.indexOf(
       "recordGitHubEnvironment:created_candidate"
     );
@@ -955,8 +955,8 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       "promoteCreatedGitHubEnvironment:true"
     );
     expect(recorded).toBeGreaterThan(-1);
-    expect(checkpoint).toBeGreaterThan(recorded);
-    expect(promoted).toBeGreaterThan(checkpoint);
+    expect(promoted).toBeGreaterThan(recorded);
+    expect(checkpoint).toBeGreaterThan(promoted);
     expect(harness.operation.setupArtifacts.githubEnvironment).toEqual({
       state: "created",
       origin: "this_operation",
@@ -1004,11 +1004,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     ).toBe(true);
   });
 
-  it("keeps the safer candidate on disk when the promotion cannot be saved", async () => {
-    // The checkpoint that makes the identity durable is the last successful
-    // save; the best-effort save that follows the promotion fails. The claim
-    // survives in memory for the next checkpoint, and the record on disk keeps
-    // the under-claim rather than an unsaved ownership assertion.
+  it("fails closed when promoted ownership cannot be checkpointed", async () => {
     const harness = start({ persistRejectsAfter: 2 });
 
     await post({ repo: "octo/app" });
@@ -1017,13 +1013,9 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       "promoteCreatedGitHubEnvironment:true"
     );
     expect(promoted).toBeGreaterThan(-1);
-    expect(harness.journal[promoted + 1]).toBe("persistBestEffort");
     expect(harness.journal).toContain(
       "diagnostic:operation-store-write-failed"
     );
-    // The claim is real and survives in memory for the next checkpoint. The
-    // best-effort save never ends the run itself: the setup only stops later,
-    // at the next mutation checkpoint, which is a save that is not optional.
     expect(harness.operation.setupArtifacts.githubEnvironment.state).toBe(
       "created"
     );
@@ -1335,7 +1327,8 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
         commitSha: "commit-sha",
         blobSha: "blob-sha",
         contentSha256: WORKFLOW_CONTENT_DIGEST,
-        previousBlobSha: null
+        previousBlobSha: null,
+        previousBlobKnown: true
       },
       {
         path: ".github/workflows/run-rad-commands.yml",
@@ -1344,7 +1337,8 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
         commitSha: "commit-sha",
         blobSha: "blob-sha",
         contentSha256: WORKFLOW_CONTENT_DIGEST,
-        previousBlobSha: null
+        previousBlobSha: null,
+        previousBlobKnown: true
       },
       {
         path: ".github/workflows/radius-delete.yml",
@@ -1353,7 +1347,8 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
         commitSha: "commit-sha",
         blobSha: "blob-sha",
         contentSha256: WORKFLOW_CONTENT_DIGEST,
-        previousBlobSha: null
+        previousBlobSha: null,
+        previousBlobKnown: true
       }
     ]);
     expect(harness.journal).toContain("deleteLegacyDeployWorkflow");
@@ -1774,5 +1769,9 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     );
     expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
     expect(harness.committedFiles).toEqual([]);
+    expect(harness.operation.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "created",
+      origin: "this_operation"
+    });
   });
 });

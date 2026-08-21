@@ -180,6 +180,7 @@ export interface CreateEnvironmentDependencies
       blobSha: string | null;
       contentSha256: string | null;
       previousBlobSha: string | null;
+      previousBlobKnown: boolean;
     }
   ): void;
   deleteLegacyDeployWorkflow(
@@ -460,7 +461,6 @@ export async function handleCreateEnvironment(
         `✅ GitHub resolved requested environment "${requestedEnvName}" as "${envName}".`
       );
     }
-    if (!(await checkpoint())) return;
     const creationEvidence = ensuredEnvironment.creationEvidence;
     if (
       ensuredEnvironment.state === "created_candidate" &&
@@ -481,18 +481,13 @@ export async function handleCreateEnvironment(
         steps.push(
           `✅ GitHub environment "${envName}" created by this setup — Radius owns it and can remove it.`
         );
-        await dependencies.persistBestEffort({
-          operation,
-          persist: () => dependencies.persistOperations(),
-          report: (diagnostic) =>
-            dependencies.reportOperationDiagnostic(diagnostic)
-        });
       } else if (!proof.proven) {
         steps.push(
           `ℹ️ Radius left GitHub environment "${envName}" outside its cleanup scope. ${proof.detail}`
         );
       }
     }
+    if (!(await checkpoint("after-github-environment"))) return;
 
     const defaultBranch =
       (await dependencies.getDefaultBranch(targetRepo, selectedExecutor)) ||

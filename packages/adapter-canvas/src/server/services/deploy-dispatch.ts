@@ -7,7 +7,10 @@ import {
 import type { CanvasState, DeployErrorKind } from "../../shared.js";
 import { buildEnvironmentSuffix } from "@radius-project/core/platforms";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
-import { shouldRetryWithKeyringCredential } from "./workflow-credential-fallback.js";
+import {
+  needsWorkflowScope,
+  shouldRetryWithKeyringCredential
+} from "./workflow-credential-fallback.js";
 
 // Second runtime stage of a background deploy: everything between "we have a
 // graph" and "a workflow run exists". Branch reachability, the rad commands and
@@ -71,6 +74,7 @@ export interface DeployDispatchDependencies {
   runAz(args: string[]): Promise<DeployCommandResult>;
   runGitHubJson: GitHubJsonRunner;
   readProcessEnv(): NodeJS.ProcessEnv;
+  ghCredentialSource(): "injected" | "keyring";
   fetchFileForSelection(
     entry: DeployDispatchInstanceEntry,
     repo: string,
@@ -155,6 +159,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployDispatchDependencies)[] = [
   "runAz",
   "runGitHubJson",
   "readProcessEnv",
+  "ghCredentialSource",
   "fetchFileForSelection",
   "appParams",
   "resolveDeployParams",
@@ -241,19 +246,29 @@ export function createDeployDispatchService(
   const withStrippedToken = async (
     first: DeployCommandResult,
     retry: (env: NodeJS.ProcessEnv) => Promise<DeployCommandResult>
-  ): Promise<DeployCommandResult> => {
+  ): Promise<{
+    result: DeployCommandResult;
+    credentialSource: "injected" | "keyring";
+  }> => {
     const env = dependencies.readProcessEnv();
+    const firstCredentialSource = dependencies.ghCredentialSource();
+    const hasInjectedToken = Boolean(
+      env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim()
+    );
     const retryAllowed = shouldRetryWithKeyringCredential({
       stderr: first.stderr,
       timedOut: first.timedOut,
-      hasInjectedToken: !!(env.GH_TOKEN || env.GITHUB_TOKEN)
+      hasInjectedToken
     });
-    if (!retryAllowed) return first;
+    if (!retryAllowed)
+      return { result: first, credentialSource: firstCredentialSource };
     const fallbackEnv = { ...env };
     delete fallbackEnv.GH_TOKEN;
     delete fallbackEnv.GITHUB_TOKEN;
     const second = await retry(fallbackEnv);
-    return second.code === 0 ? second : first;
+    return second.code === 0 ?
+        { result: second, credentialSource: "keyring" }
+      : { result: first, credentialSource: firstCredentialSource };
   };
 
   // Ensure the environment carries the secret params the deployed app.bicep
@@ -313,7 +328,7 @@ export function createDeployDispatchService(
     if (setRes.code !== 0) {
       const env = dependencies.readProcessEnv();
       const accountHint =
-        env.GH_TOKEN || env.GITHUB_TOKEN ?
+        env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() ?
           " The Copilot session token may not be allowed to write this repository's environment secrets; pick the GitHub account to act as in the Create Environment dialog, then retry."
         : "";
       const failure =
@@ -888,10 +903,13 @@ export function createDeployDispatchService(
           '"...'
       );
       let dispatchDeployRes = await dependencies.runGh(dispatchArgs);
+      let dispatchCredentialSource = dependencies.ghCredentialSource();
       if (dispatchDeployRes.code !== 0) {
-        dispatchDeployRes = await withStrippedToken(dispatchDeployRes, (env) =>
+        const attempt = await withStrippedToken(dispatchDeployRes, (env) =>
           dependencies.runGh(dispatchArgs, { env })
         );
+        dispatchDeployRes = attempt.result;
+        dispatchCredentialSource = attempt.credentialSource;
       }
       if (dispatchDeployRes.code !== 0) {
         const de = (dispatchDeployRes.stderr || "").trim();
@@ -917,8 +935,10 @@ export function createDeployDispatchService(
           return { dispatched: false };
         }
         const scopeHint =
-          /workflow.{0,20}scope/i.test(de) ?
-            ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
+          needsWorkflowScope(de) && dispatchCredentialSource === "injected" ?
+            ' The Copilot session token is missing the "workflow" scope and `gh auth refresh` cannot change it. Authenticate a stored GitHub CLI account with the workflow scope, or restart with a session token that includes it, then retry.'
+          : needsWorkflowScope(de) ?
+            ' Your stored GitHub CLI credential is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
           : " Ensure " +
             deployWorkflowFile +
             ' exists on branch "' +

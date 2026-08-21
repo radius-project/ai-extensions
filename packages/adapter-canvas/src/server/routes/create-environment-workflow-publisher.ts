@@ -244,6 +244,7 @@ export interface WorkflowPublisherPorts {
       blobSha: string | null;
       contentSha256: string | null;
       previousBlobSha: string | null;
+      previousBlobKnown: boolean;
     }
   ): void;
   deleteLegacyDeployWorkflow(repo: string): Promise<boolean>;
@@ -284,7 +285,8 @@ export async function publishWorkflowFiles(
     commitSha: commit.commitSha ?? null,
     blobSha: commit.blobSha ?? null,
     contentSha256: commit.contentSha256 ?? null,
-    previousBlobSha: commit.previousBlobSha ?? null
+    previousBlobSha: commit.previousBlobSha ?? null,
+    previousBlobKnown: commit.previousBlobKnown === true
   });
 
   // Step 3: Commit the verify-credentials workflow

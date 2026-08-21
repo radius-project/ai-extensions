@@ -40,6 +40,7 @@ export const ENVIRONMENT_OPERATIONS_ENTRY_KEY = "environment-operations";
 export const OPERATIONS_PATH = "/api/operations";
 export const VERIFY_STATUS_PATH = "/api/verify-status";
 export const DEPLOY_BUTTON_ID = "deploy-btn";
+export const NEW_ENVIRONMENT_BUTTON_ID = "new-env-btn";
 export const ERROR_BANNER_ID = "env-error-banner";
 export const DEPLOY_BUTTON_IDLE_LABEL = "Create Environment";
 
@@ -276,11 +277,22 @@ export interface OperationPreviewEntry {
   readonly action: string;
 }
 
-export interface OperationActionPreview {
+export interface OperationRollbackPreview {
+  readonly type: "rollback";
   readonly removes: readonly OperationPreviewEntry[];
   readonly keeps: readonly OperationPreviewEntry[];
   readonly manualActionRequired: readonly OperationPreviewEntry[];
 }
+
+export interface OperationContinuationPreview {
+  readonly type: "continuation";
+  readonly resumeFrom: string;
+  readonly resumeLabel: string;
+  readonly reuses: readonly OperationPreviewEntry[];
+}
+
+export type OperationActionPreview =
+  OperationRollbackPreview | OperationContinuationPreview;
 
 /** Why a path the customer might expect is not on offer. */
 export interface OperationGuidanceNote {
@@ -508,9 +520,28 @@ function parsePreviewEntries(value: unknown): OperationPreviewEntry[] {
   return entries;
 }
 
-function parsePreview(value: unknown): OperationActionPreview | null {
+function parsePreview(
+  value: unknown,
+  actionKind: string
+): OperationActionPreview | null {
   if (!isRecord(value)) return null;
+  if (actionKind === "continue_setup" || actionKind === "retry_setup") {
+    return {
+      type: "continuation",
+      resumeFrom: readString(value, "resumeFrom"),
+      resumeLabel: readString(value, "resumeLabel"),
+      reuses: parsePreviewEntries(value["reuses"])
+    };
+  }
+  if (
+    actionKind !== "rollback" &&
+    actionKind !== "retry_cleanup" &&
+    actionKind !== "exit_setup"
+  ) {
+    return null;
+  }
   return {
+    type: "rollback",
     removes: parsePreviewEntries(value["removes"]),
     keeps: parsePreviewEntries(value["keeps"]),
     manualActionRequired: parsePreviewEntries(value["manualActionRequired"])
@@ -526,9 +557,10 @@ function parseActions(value: unknown): OperationAction[] {
     // A control with no path has nothing to submit, so it is dropped rather
     // than rendered as a button that can only fail.
     if (path === "") continue;
+    const kind = readString(entry, "kind");
     actions.push({
       id: readString(entry, "id"),
-      kind: readString(entry, "kind"),
+      kind,
       label: readString(entry, "label"),
       description: readString(entry, "description"),
       path,
@@ -539,7 +571,7 @@ function parseActions(value: unknown): OperationAction[] {
       confirmTitle: readString(entry, "confirmTitle"),
       confirmLabel: readString(entry, "confirmLabel"),
       cancelLabel: readString(entry, "cancelLabel"),
-      preview: parsePreview(entry["preview"])
+      preview: parsePreview(entry["preview"], kind)
     });
   }
   return actions;
@@ -1113,7 +1145,7 @@ export function initializeEnvironmentOperations(
 
   function setCommandStatus(message: string): void {
     const el = dom.byId(PROGRESS_IDS.commandStatus);
-    if (el) el.textContent = message;
+    if (el && el.textContent !== message) el.textContent = message;
   }
 
   function setCommandError(message: string): void {
@@ -1216,7 +1248,7 @@ export function initializeEnvironmentOperations(
     }
     rollbackPending = { action, op };
     rollbackReturnFocus = trigger;
-    const preview = action.preview;
+    const preview = action.preview?.type === "rollback" ? action.preview : null;
     const titleEl = dom.byId(ROLLBACK_IDS.title);
     if (titleEl) {
       titleEl.textContent = action.confirmTitle || DEFAULT_ROLLBACK_TITLE;
@@ -1277,6 +1309,10 @@ export function initializeEnvironmentOperations(
     if (confirm) confirm.disabled = true;
     dismissRollbackDialog();
     rollbackReturnFocus = null;
+    // The control that opened the dialog may be replaced by the command response,
+    // so confirmation returns to the stable panel heading rather than leaving
+    // focus on a button inside the now-hidden dialog.
+    focusPanel();
     sendCommand(pending.action, pending.op);
   }
 
@@ -1470,10 +1506,34 @@ export function initializeEnvironmentOperations(
       setCommandError("");
       setCommandStatus("");
     }
+    if (op !== null && op.terminalState !== null) {
+      setCommandBusy(false);
+      setCommandStatus("");
+    }
+    const activeCommand = context.focus.active();
+    const focusedCommandId =
+      commandButtons.find((entry) => entry.element === activeCommand)?.element
+        .id ?? "";
     releaseCommandButtons();
     buttons.replaceChildren();
     const hasGuidance = renderCommandGuidance(op);
     renderBottomActions(op);
+    const restoreCommandFocus = (): void => {
+      if (focusedCommandId === "") return;
+      const replacement = commandButtons.find(
+        (entry) => entry.element.id === focusedCommandId
+      )?.element;
+      if (replacement && !replacement.disabled) {
+        replacement.focus();
+        return;
+      }
+      const fallback =
+        container.style.display === "none" ?
+          (dom.byId(PROGRESS_IDS.title) ?? panel)
+        : container;
+      fallback.setAttribute("tabindex", "-1");
+      context.focus.focus(fallback);
+    };
     if (op === null || rowActions.length === 0) {
       // A record with no command still has something to say: cleanup running
       // under its own command, or a state whose next move is automatic.
@@ -1485,6 +1545,7 @@ export function initializeEnvironmentOperations(
         hasGuidance || op?.nextTransition || op?.terminalState !== null ?
           ""
         : "none";
+      restoreCommandFocus();
       return;
     }
     const record = op;
@@ -1501,6 +1562,7 @@ export function initializeEnvironmentOperations(
       setCommandStatus(STOPPING_MESSAGE);
     }
     container.style.display = "";
+    restoreCommandFocus();
   }
 
   /**
@@ -1602,6 +1664,18 @@ export function initializeEnvironmentOperations(
     });
   }
 
+  function resetSubmitButton(): void {
+    if (deps.resetSubmitButton) {
+      deps.resetSubmitButton();
+      return;
+    }
+    const button = dom.inputById(DEPLOY_BUTTON_ID);
+    if (button) {
+      button.textContent = DEPLOY_BUTTON_IDLE_LABEL;
+      button.disabled = false;
+    }
+  }
+
   function syncFailureOperation(data: unknown): Promise<boolean> {
     const operationId = readString(data, "operationId");
     if (operationId === "") return Promise.resolve(false);
@@ -1630,22 +1704,16 @@ export function initializeEnvironmentOperations(
     // here too — applyTerminal is reachable without a preceding render (an
     // expired input prompt resolves straight to its terminal record).
     setPanelActive(false);
+    resetSubmitButton();
     // A setup the customer exited has no outcome to announce: the panel closes,
     // the failure banner it replaced comes down, and the table is reloaded
     // because the server has just finished removing what this attempt created.
     if (isExitedSetup(op)) {
+      context.focus.focus(dom.byId(NEW_ENVIRONMENT_BUTTON_ID));
       hideProgress();
       hideErrorBanner();
       deps.reloadEnvironmentsTable();
       return;
-    }
-    if (deps.resetSubmitButton) deps.resetSubmitButton();
-    else {
-      const btn = dom.inputById(DEPLOY_BUTTON_ID);
-      if (btn) {
-        btn.textContent = DEPLOY_BUTTON_IDLE_LABEL;
-        btn.disabled = false;
-      }
     }
     const warnings = op.steps
       .filter((step) => step.state === "warning")
@@ -1746,6 +1814,7 @@ export function initializeEnvironmentOperations(
           if (!active()) return;
           const v = parseVerifyStatus(payload);
           if (v.state === "expired" || v.terminal) {
+            resetSubmitButton();
             stopProgress();
             const expiredActivity = dom.byId(PROGRESS_IDS.activity);
             if (expiredActivity) {
@@ -1761,6 +1830,7 @@ export function initializeEnvironmentOperations(
             context.clock.now() - verifyDispatchedAtMs >
               VERIFY_TRACKING_WINDOW_MS
           ) {
+            resetSubmitButton();
             stopProgress();
             const timedOutActivity = dom.byId(PROGRESS_IDS.activity);
             if (timedOutActivity) {
@@ -1770,22 +1840,23 @@ export function initializeEnvironmentOperations(
             return;
           }
           if (v.state === "success") {
+            resetSubmitButton();
             hideProgress();
             deps.showSuccessBanner(provider || "azure", environment);
             deps.reloadEnvironmentsTable();
             return;
           }
           if (v.state === "failed") {
+            resetSubmitButton();
             stopProgress();
             panel.style.display = "block";
             panel.classList.remove("env-progress--done");
             panel.classList.add("env-progress--failed");
             const activityEl = dom.byId(PROGRESS_IDS.activity);
             if (activityEl)
-              activityEl.textContent = `Credential verification failed. ${v.error}`;
-            const detailsEl = dom.byId(PROGRESS_IDS.details);
-            if (detailsEl && v.runUrl !== "")
-              detailsEl.textContent = `View the run: ${v.runUrl}`;
+              activityEl.textContent =
+                `Credential verification failed. ${v.error}` +
+                (v.runUrl === "" ? "" : ` View the run: ${v.runUrl}`);
             return;
           }
           if (v.activity !== "") verifyActivity = v.activity;

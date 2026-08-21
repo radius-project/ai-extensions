@@ -787,7 +787,8 @@ describe("POST /api/operations/{id}/rollback", () => {
       commitSha: "c".repeat(40),
       blobSha: "b".repeat(40),
       contentSha256: "d".repeat(64),
-      previousBlobSha: null
+      previousBlobSha: null,
+      previousBlobKnown: true
     });
     const out = await drive(handleRollbackOperation, op, "rollback");
 

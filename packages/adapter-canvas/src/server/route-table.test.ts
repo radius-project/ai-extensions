@@ -669,4 +669,44 @@ describe("server route ownership boundary", () => {
       ])
     ).not.toThrow();
   });
+
+  it.each([
+    ["template first", false],
+    ["exact first", true]
+  ])(
+    "rejects an exact path that overlaps a template with %s",
+    (_label, exactFirst) => {
+      const template = table.find(
+        (route) =>
+          route.path === "/api/operations/:operationId/stop" &&
+          route.method === "POST"
+      ) as ServerRoute;
+      const exact = {
+        ...template,
+        path: "/api/operations/op-1/stop",
+        match: "exact"
+      } as ServerRoute;
+      const routes = exactFirst ? [exact, template] : [template, exact];
+
+      expect(() => assertRouteTable(routes)).toThrow(
+        /overlaps earlier template route/
+      );
+    }
+  );
+
+  it("rejects two template shapes that can claim the same request", () => {
+    const first = table.find(
+      (route) =>
+        route.path === "/api/operations/:operationId/stop" &&
+        route.method === "POST"
+    ) as ServerRoute;
+    const second = {
+      ...first,
+      path: "/api/operations/:operationId/:command"
+    } as ServerRoute;
+
+    expect(() => assertRouteTable([first, second])).toThrow(
+      /overlaps earlier template route/
+    );
+  });
 });

@@ -43,7 +43,12 @@ const NO_PROVENANCE = {
   commitSha: null,
   blobSha: null,
   contentSha256: CONTENT_DIGEST,
-  previousBlobSha: null
+  previousBlobSha: null,
+  previousBlobKnown: false
+};
+const KNOWN_ABSENT_PROVENANCE = {
+  ...NO_PROVENANCE,
+  previousBlobKnown: true
 };
 
 // `gh` and the filesystem are isolated behind scripted fakes that throw on any
@@ -152,7 +157,7 @@ describe("isProtectedBranchFailure", () => {
 describe("committing a workflow file", () => {
   it("commits straight to the default branch and reports no pull request", async () => {
     const h = harness({
-      runGh: [{ code: 1 }],
+      runGh: [{ code: 1, stderr: "HTTP 404: Not Found" }],
       runGhWorkflow: [{ code: 0 }]
     });
     const committer = createWorkflowFileCommitter(h.ports, target);
@@ -167,7 +172,7 @@ describe("committing a workflow file", () => {
       ok: true,
       stderr: "",
       viaPr: false,
-      ...NO_PROVENANCE
+      ...KNOWN_ABSENT_PROVENANCE
     });
     expect(committer.pullRequestState()).toBeUndefined();
     expect(h.steps).toEqual([]);
@@ -206,7 +211,7 @@ describe("committing a workflow file", () => {
 
   it("removes the request body file after the commit, success or failure", async () => {
     const h = harness({
-      runGh: [{ code: 1 }],
+      runGh: [{ code: 1, stderr: "HTTP 404: Not Found" }],
       runGhWorkflow: [{ code: 1, stderr: "HTTP 500" }]
     });
     const committer = createWorkflowFileCommitter(h.ports, target);
@@ -217,7 +222,7 @@ describe("committing a workflow file", () => {
 
   it("captures the commit, blob and content identities of a successful write", async () => {
     const h = harness({
-      runGh: [{ code: 1 }],
+      runGh: [{ code: 1, stderr: "HTTP 404: Not Found" }],
       runGhWorkflow: [{ code: 0, stdout: PUT_RESPONSE }]
     });
     const committer = createWorkflowFileCommitter(h.ports, target);
@@ -237,7 +242,8 @@ describe("committing a workflow file", () => {
       commitSha: "commit-1",
       blobSha: "blob-1",
       contentSha256: CONTENT_DIGEST,
-      previousBlobSha: null
+      previousBlobSha: null,
+      previousBlobKnown: true
     });
   });
 
@@ -255,6 +261,15 @@ describe("committing a workflow file", () => {
         "Update a"
       )
     ).resolves.toMatchObject({ previousBlobSha: "existing-blob" });
+    await expect(
+      createWorkflowFileCommitter(
+        harness({
+          runGh: [{ code: 1, stderr: "HTTP 500" }],
+          runGhWorkflow: [{ code: 0, stdout: PUT_RESPONSE }]
+        }).ports,
+        target
+      ).commitWorkflowFileSmart("p", CONTENT, "m")
+    ).resolves.toMatchObject({ previousBlobKnown: false });
   });
 
   it("keeps a failed commit free of provenance", async () => {
@@ -330,7 +345,7 @@ describe("reading a contents-API write back", () => {
 describe("the protected-branch pull-request fallback", () => {
   it("creates a branch off the default branch head and re-commits there", async () => {
     const h = harness({
-      runGh: [{ code: 1 }, { code: 1 }],
+      runGh: [{ code: 1 }, { code: 1, stderr: "HTTP 404: Not Found" }],
       runGhWorkflow: [{ code: 1, stderr: "protected branch" }, { code: 0 }],
       defaultBranch: "trunk",
       headSha: "sha-1",
@@ -344,7 +359,7 @@ describe("the protected-branch pull-request fallback", () => {
       ok: true,
       stderr: "",
       viaPr: true,
-      ...NO_PROVENANCE
+      ...KNOWN_ABSENT_PROVENANCE
     });
     expect(committer.pullRequestState()).toEqual({
       branch: "radius/setup-dev-workflows-1700000000000",
@@ -404,7 +419,11 @@ describe("the protected-branch pull-request fallback", () => {
 
   it("sends every later commit to the established branch without probing the default branch again", async () => {
     const h = harness({
-      runGh: [{ code: 1 }, { code: 1 }, { code: 1 }],
+      runGh: [
+        { code: 1 },
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        { code: 1, stderr: "HTTP 404: Not Found" }
+      ],
       runGhWorkflow: [
         { code: 1, stderr: "protected branch" },
         { code: 0 },
@@ -423,7 +442,7 @@ describe("the protected-branch pull-request fallback", () => {
       ok: true,
       stderr: "",
       viaPr: true,
-      ...NO_PROVENANCE
+      ...KNOWN_ABSENT_PROVENANCE
     });
     // `createBranchRef` is scripted once; a second branch creation would exhaust
     // it and throw, so a single announcement pins the laziness.

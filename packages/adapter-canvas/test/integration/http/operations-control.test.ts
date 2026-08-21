@@ -516,7 +516,8 @@ describe("stop, then continue or roll back, over the socket", () => {
       commitSha: "c".repeat(40),
       blobSha: "b".repeat(40),
       contentSha256: "d".repeat(64),
-      previousBlobSha: null
+      previousBlobSha: null,
+      previousBlobKnown: true
     });
     recordCommitState(op, { mode: "default_branch", branch: "main" });
     op.verification = {

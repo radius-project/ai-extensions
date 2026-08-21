@@ -7,12 +7,13 @@ import type {
   PullRequestState,
   WorkflowRollbackPorts
 } from "./workflow-rollback.js";
+import type { SelectedGhExecutor } from "../../gh.js";
 import { createHash } from "node:crypto";
 import {
   isMergedPullRequestBody,
   parsePullRequestUrl
 } from "./pull-request-url.js";
-import { shouldRetryWithKeyringCredential } from "./workflow-credential-fallback.js";
+import { parseGhHttpStatus } from "./gh-command-result.js";
 
 // The GitHub half of a post-commit rollback, expressed once over a single
 // command seam.
@@ -42,49 +43,33 @@ export type WorkflowRollbackCommand = (input: {
   stdin?: string;
 }) => Promise<WorkflowRollbackCommandResult>;
 
-/** One `gh api` attempt, optionally under a modified environment. */
-export type WorkflowRollbackAttempt = (input: {
-  args: string[];
-  stdin?: string;
-  env?: NodeJS.ProcessEnv;
-}) => Promise<WorkflowRollbackCommandResult & { timedOut: boolean }>;
-
-export interface WorkflowScopeApiCommandPorts {
-  attempt: WorkflowRollbackAttempt;
-  readProcessEnv(): NodeJS.ProcessEnv;
-}
-
-/**
- * A `gh api` seam that can fall back to the stored credential exactly once.
- *
- * Writes under `.github/workflows/` need the `workflow` token scope, and the
- * host-injected token often lacks it. Stripping that token silently changes
- * which account acts, so the retry is gated by the same fail-closed rule the
- * workflow commit path uses: only a positively identified missing-scope
- * refusal, and never a command that was killed rather than answered.
- */
-export function createWorkflowScopeApiCommand(
-  ports: WorkflowScopeApiCommandPorts
+/** Run rollback reads and writes through the account selected for this setup. */
+export function createSelectedWorkflowRollbackCommand(
+  executor: SelectedGhExecutor
 ): WorkflowRollbackCommand {
   return async ({ args, stdin }) => {
-    const first = await ports.attempt({ args, stdin });
-    if (first.ok) return first;
-    const env = ports.readProcessEnv();
-    if (
-      !shouldRetryWithKeyringCredential({
-        stderr: first.stderr,
-        timedOut: first.timedOut,
-        hasInjectedToken: Boolean(env.GH_TOKEN || env.GITHUB_TOKEN)
-      })
-    )
-      return first;
-    const fallbackEnv = { ...env };
-    delete fallbackEnv.GH_TOKEN;
-    delete fallbackEnv.GITHUB_TOKEN;
-    const retry = await ports.attempt({ args, stdin, env: fallbackEnv });
-    // The original failure is usually the more meaningful one, so a retry that
-    // fails too is discarded rather than reported in its place.
-    return retry.ok ? retry : first;
+    try {
+      const result = await executor.run(args, {
+        timeout: 20000,
+        ...(stdin === undefined ? {} : { stdin })
+      });
+      const stderr = result.stderr.trim();
+      const ok = result.code === 0 || result.code === "0";
+      return {
+        ok,
+        status: ok ? 200 : parseGhHttpStatus(stderr),
+        stdout: result.stdout.trim(),
+        stderr
+      };
+    } catch (error) {
+      const detail = executor.errorMessage(error);
+      return {
+        ok: false,
+        status: parseGhHttpStatus(detail),
+        stdout: "",
+        stderr: detail
+      };
+    }
   };
 }
 
@@ -134,6 +119,32 @@ export function createWorkflowRollbackPorts(
 ): WorkflowRollbackPorts {
   const encode = (value: string): string => encodeURIComponent(value);
 
+  const readRepository = async (input: {
+    repo: string;
+  }): Promise<
+    { status: "readable" } | { status: "unreadable"; detail: string }
+  > => {
+    const result = await run({ args: ["api", `/repos/${input.repo}`] });
+    return result.ok ?
+        { status: "readable" }
+      : { status: "unreadable", detail: failureDetail(result) };
+  };
+
+  const confirmAbsent = async (
+    repo: string,
+    result: WorkflowRollbackCommandResult
+  ): Promise<
+    { status: "absent" } | { status: "unreadable"; detail: string }
+  > => {
+    const repository = await readRepository({ repo });
+    return repository.status === "readable" ?
+        { status: "absent" }
+      : {
+          status: "unreadable",
+          detail: `${failureDetail(result)} Radius could not confirm repository access after the 404: ${repository.detail}`
+        };
+  };
+
   const readFile = async (input: {
     repo: string;
     path: string;
@@ -147,7 +158,7 @@ export function createWorkflowRollbackPorts(
     });
     if (!result.ok) {
       return result.status === 404 ?
-          { status: "absent" }
+          await confirmAbsent(input.repo, result)
         : { status: "unreadable", detail: failureDetail(result) };
     }
     const body = parseJson(result.stdout);
@@ -176,7 +187,7 @@ export function createWorkflowRollbackPorts(
     });
     if (!result.ok) {
       return result.status === 404 ?
-          { status: "absent" }
+          await confirmAbsent(input.repo, result)
         : { status: "unreadable", detail: failureDetail(result) };
     }
     const body = parseJson(result.stdout);
@@ -260,6 +271,7 @@ export function createWorkflowRollbackPorts(
   };
 
   return {
+    readRepository,
     readFile,
     readBranchHead,
     readPullRequest,
@@ -319,7 +331,13 @@ export function createWorkflowRollbackPorts(
         ]
       });
       // A branch that is already gone is the state the caller asked for.
-      if (result.ok || result.status === 404) return { ok: true };
+      if (result.ok) return { ok: true };
+      if (result.status === 404) {
+        const absent = await confirmAbsent(input.repo, result);
+        return absent.status === "absent" ?
+            { ok: true }
+          : { ok: false, detail: absent.detail };
+      }
       return { ok: false, detail: failureDetail(result) };
     }
   };

@@ -149,6 +149,7 @@ export function createWorkflowFileCommitter(
   ): Promise<
     CreateEnvironmentCommandResult & {
       previousBlobSha: string | null;
+      previousBlobKnown: boolean;
       commitSha: string | null;
       blobSha: string | null;
     }
@@ -161,6 +162,11 @@ export function createWorkflowFileCommitter(
       ".sha"
     ]);
     const sha = shaRes.code === 0 ? shaRes.stdout.trim() : "";
+    const previousBlobKnown =
+      sha !== "" ||
+      /(?:HTTP\s+404|\bNot Found\b)/i.test(
+        `${shaRes.stderr || ""}\n${shaRes.stdout || ""}`
+      );
     const bodyObj = {
       message,
       content: contentB64,
@@ -180,6 +186,7 @@ export function createWorkflowFileCommitter(
     return {
       ...r,
       previousBlobSha: sha || null,
+      previousBlobKnown,
       ...readWorkflowCommitProvenance(r.stdout)
     };
   };
@@ -195,7 +202,8 @@ export function createWorkflowFileCommitter(
     commitSha: result.commitSha,
     blobSha: result.blobSha,
     contentSha256: workflowContentDigest(contentB64),
-    previousBlobSha: result.previousBlobSha
+    previousBlobSha: result.previousBlobSha,
+    previousBlobKnown: result.previousBlobKnown
   });
 
   // Commit a workflow file, transparently switching to the PR branch (creating

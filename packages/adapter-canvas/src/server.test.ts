@@ -34,6 +34,7 @@ import {
   preflightGhcrPackageWriteAccess,
   resetListingCaches,
   resetDeploymentViewState,
+  resolveCleanupGitHubContext,
   releaseDeploymentMutation,
   reserveDeploymentMutation,
   resolveDeploymentEnvironment,
@@ -68,7 +69,11 @@ import type {
   DeployRepairHandoffInput,
   DeployFailureNoticeInput
 } from "./server.js";
-import type { GitHubIdentity, GitHubIdentityAccount } from "./gh.js";
+import type {
+  GitHubIdentity,
+  GitHubIdentityAccount,
+  SelectedGhExecutor
+} from "./gh.js";
 
 describe("DEPLOY_RAD_COMMANDS_STEP", () => {
   it("matches the step name in the upstream run-rad-commands action", () => {
@@ -424,7 +429,7 @@ describe("ensureServicePrincipal", () => {
     expect(result).toEqual({
       ok: true,
       state: "created_candidate",
-      origin: "this_operation",
+      origin: "unknown",
       objectId: "sp-object-1"
     });
     expect(calls).toHaveLength(3);
@@ -448,6 +453,119 @@ describe("ensureServicePrincipal", () => {
   });
 });
 
+describe("resolveCleanupGitHubContext", () => {
+  function selectedExecutor(overrides: Partial<SelectedGhExecutor> = {}) {
+    return {
+      login: "octocat",
+      credentialSource: "keyring",
+      requiresKeyringSwitch: false,
+      scopes: ["repo", "workflow"],
+      run: vi.fn(() => Promise.resolve({ code: 0, stdout: "{}", stderr: "" })),
+      runOrThrow: vi.fn(() =>
+        Promise.resolve({ code: 0, stdout: "", stderr: "" })
+      ),
+      verifyIdentity: vi.fn(() => Promise.resolve()),
+      packageCredentials: () => ({
+        token: "fixture-token",
+        username: "octocat",
+        source: "keyring" as const
+      }),
+      redact: (value: string) => value,
+      errorMessage: (error: unknown) => String(error),
+      ...overrides
+    } satisfies SelectedGhExecutor;
+  }
+
+  it("pins rollback and environment deletion to the selected executor", async () => {
+    const executor = selectedExecutor();
+    const context = await resolveCleanupGitHubContext({
+      targets: [
+        { artifactType: "workflow_file" },
+        { artifactType: "github_environment" }
+      ],
+      selectedLogin: "octocat",
+      createExecutor: async () => executor
+    });
+
+    await expect(
+      context.rollbackCommand({ args: ["api", "/repos/octo/app"] })
+    ).resolves.toMatchObject({ ok: true });
+    await context.deleteEnvironment([
+      "api",
+      "--method",
+      "DELETE",
+      "/repos/octo/app/environments/dev"
+    ]);
+
+    expect(executor.verifyIdentity).toHaveBeenCalledOnce();
+    expect(executor.run).toHaveBeenCalledWith(
+      ["api", "/repos/octo/app"],
+      expect.objectContaining({ timeout: 20000 })
+    );
+    expect(executor.runOrThrow).toHaveBeenCalledWith(
+      ["api", "--method", "DELETE", "/repos/octo/app/environments/dev"],
+      "Could not delete the GitHub environment",
+      { timeout: 20000 }
+    );
+  });
+
+  it("fails closed when a cleanup record has no selected GitHub account", async () => {
+    const createExecutor = vi.fn();
+    const context = await resolveCleanupGitHubContext({
+      targets: [{ artifactType: "workflow_file" }],
+      selectedLogin: "",
+      createExecutor
+    });
+
+    await expect(
+      context.rollbackCommand({ args: ["api", "/repos/octo/app"] })
+    ).resolves.toMatchObject({
+      ok: false,
+      stderr: expect.stringContaining("does not name the GitHub account")
+    });
+    await expect(context.deleteEnvironment([])).rejects.toThrow(
+      "does not name the GitHub account"
+    );
+    expect(createExecutor).not.toHaveBeenCalled();
+  });
+
+  it("surfaces selected-account resolution failure without using ambient credentials", async () => {
+    const context = await resolveCleanupGitHubContext({
+      targets: [{ artifactType: "github_environment" }],
+      selectedLogin: "octocat",
+      createExecutor: () => Promise.reject(new Error("keyring unavailable")),
+      formatError: () => "selected account unavailable"
+    });
+
+    await expect(
+      context.rollbackCommand({ args: ["api", "/repos/octo/app"] })
+    ).resolves.toMatchObject({
+      ok: false,
+      stderr: "selected account unavailable"
+    });
+    await expect(context.deleteEnvironment([])).rejects.toThrow(
+      "selected account unavailable"
+    );
+  });
+
+  it("does not resolve a GitHub executor for Azure-only cleanup", async () => {
+    const createExecutor = vi.fn();
+    const context = await resolveCleanupGitHubContext({
+      targets: [{ artifactType: "azure_app" }],
+      selectedLogin: "",
+      createExecutor
+    });
+
+    expect(createExecutor).not.toHaveBeenCalled();
+    await expect(
+      context.rollbackCommand({ args: ["api", "/repos/octo/app"] })
+    ).resolves.toMatchObject({
+      ok: false,
+      stderr: "The selected GitHub account is unavailable."
+    });
+  });
+});
+
 describe("rollbackCommittedWorkflowFiles", () => {
   // The ledger half of a post-commit rollback: which files are selected, what
   // the ledger records afterwards, and whether the rest of the rollback is
@@ -467,18 +585,27 @@ describe("rollbackCommittedWorkflowFiles", () => {
       commitSha: "c".repeat(40),
       blobSha: BLOB,
       contentSha256: DIGEST,
-      previousBlobSha: null
+      previousBlobSha: null,
+      previousBlobKnown: true
     });
     return op;
   }
 
-  function rollbackPorts(script: { blobSha?: string; deleteOk?: boolean }) {
+  function rollbackPorts(script: {
+    blobSha?: string;
+    contentSha256?: string;
+    deleteOk?: boolean;
+    previousBlobContent?: string;
+  }) {
     const deleted: string[] = [];
+    const restored: string[] = [];
     const ports = {
+      readRepository: async () => ({ status: "readable" as const }),
       readFile: async () => ({
         status: "present" as const,
         blobSha: script.blobSha ?? BLOB,
-        contentSha256: script.blobSha ? "other" : DIGEST
+        contentSha256:
+          script.contentSha256 ?? (script.blobSha ? "other" : DIGEST)
       }),
       readBranchHead: () => {
         throw new Error("unscripted readBranchHead");
@@ -486,17 +613,22 @@ describe("rollbackCommittedWorkflowFiles", () => {
       readPullRequest: () => {
         throw new Error("unscripted readPullRequest");
       },
-      readBlob: () => {
-        throw new Error("unscripted readBlob");
-      },
+      readBlob: async () =>
+        script.previousBlobContent === undefined ?
+          { ok: false as const, detail: "unscripted readBlob" }
+        : {
+            ok: true as const,
+            contentBase64: script.previousBlobContent
+          },
       deleteFile: async ({ path }: { path: string }) => {
         if (script.deleteOk === false)
           return { ok: false as const, detail: "HTTP 409" };
         deleted.push(path);
         return { ok: true as const };
       },
-      restoreFile: () => {
-        throw new Error("unscripted restoreFile");
+      restoreFile: async ({ path }: { path: string }) => {
+        restored.push(path);
+        return { ok: true as const };
       },
       closePullRequest: () => {
         throw new Error("unscripted closePullRequest");
@@ -505,7 +637,7 @@ describe("rollbackCommittedWorkflowFiles", () => {
         throw new Error("unscripted deleteBranch");
       }
     };
-    return { ports, deleted };
+    return { ports, deleted, restored };
   }
 
   it("does nothing when the operation committed no workflow file", async () => {
@@ -538,6 +670,48 @@ describe("rollbackCommittedWorkflowFiles", () => {
     expect(deleted).toEqual([VERIFY_PATH]);
     expect(op.setupArtifacts.commit.workflowFiles[0].state).toBe("removed");
     expect(steps[0]).toContain("Removed workflow");
+  });
+
+  it("restores the pre-Radius workflow after the same operation recommits it", async () => {
+    const op = newAzureOp();
+    recordCommittedWorkflowFile(op, {
+      path: VERIFY_PATH,
+      mode: "default_branch",
+      branch: "main",
+      commitSha: "c".repeat(40),
+      blobSha: BLOB,
+      contentSha256: DIGEST,
+      previousBlobSha: "customer-blob",
+      previousBlobKnown: true
+    });
+    recordCommittedWorkflowFile(op, {
+      path: VERIFY_PATH,
+      mode: "default_branch",
+      branch: "main",
+      commitSha: "e".repeat(40),
+      blobSha: "f".repeat(40),
+      contentSha256: "a".repeat(64),
+      previousBlobSha: BLOB,
+      previousBlobKnown: true
+    });
+    const { ports, restored } = rollbackPorts({
+      blobSha: "f".repeat(40),
+      contentSha256: "a".repeat(64),
+      previousBlobContent: "Y3VzdG9tZXI="
+    });
+
+    const outcome = await rollbackCommittedWorkflowFiles(op, {
+      attempt: 1,
+      ports
+    });
+
+    expect(outcome).toMatchObject({ blocked: false, attempted: true });
+    expect(outcome.results[0]?.outcome).toBe("restored");
+    expect(restored).toEqual([VERIFY_PATH]);
+    expect(op.setupArtifacts.commit.workflowFiles[0]).toMatchObject({
+      state: "removed",
+      previousBlobSha: "customer-blob"
+    });
   });
 
   it("blocks and keeps the file when it is no longer what Radius wrote", async () => {
@@ -586,7 +760,8 @@ describe("rollbackCommittedWorkflowFiles", () => {
       commitSha: "c".repeat(40),
       blobSha: BLOB,
       contentSha256: DIGEST,
-      previousBlobSha: null
+      previousBlobSha: null,
+      previousBlobKnown: true
     });
     const { ports, deleted } = rollbackPorts({});
 

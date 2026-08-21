@@ -188,7 +188,7 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
       ensureServicePrincipal: async () => ({
         ok: true,
         state: "created_candidate",
-        origin: "this_operation",
+        origin: "unknown",
         objectId: OBJECT_ID
       }),
       checkpoint: async () => false
@@ -199,7 +199,7 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     expect(test.recorded).toEqual([
       {
         state: "created_candidate",
-        origin: "this_operation",
+        origin: "unknown",
         appId: APP_ID,
         objectId: OBJECT_ID
       }

@@ -74,6 +74,9 @@ export interface WorkflowCommitOutcome {
   // The blob the path held before this write, or null when Radius created the
   // file. A revert restores the former and deletes the latter.
   previousBlobSha?: string | null;
+  // True only when the pre-write lookup proved either the previous blob or that
+  // the path was absent. A failed lookup remains unknown and blocks rollback.
+  previousBlobKnown?: boolean;
 }
 
 // The operation record as this route reads and writes it. Declared with every

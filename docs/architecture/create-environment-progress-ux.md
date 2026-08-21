@@ -518,11 +518,15 @@ Success rules:
 
 - The progress panel is a named `region` and receives focus when an error or command result needs attention.
 - The activity line and command status use polite live regions.
+- Polling writes command status only when the text changes, so a pending Stop is announced once rather than on every poll.
 - Errors use `role="alert"`.
 - Stage glyphs are decorative; stage labels include state words.
 - Buttons are native controls with disabled states during submission.
+- Polling restores focus to the same server-projected command when that command remains available. If the command becomes disabled or disappears, focus moves to the command region.
 - Destructive controls declare dialog behavior.
 - Rollback confirmation traps keyboard focus and restores it on cancel.
+- Confirming rollback moves focus to the stable progress panel before the hidden dialog is removed.
+- A successful Exit moves focus to **New environment** before it hides the progress panel.
 - Spinner animation honors reduced-motion preferences.
 - No state relies on color alone.
 
@@ -557,6 +561,7 @@ Other long-running Radius experiences should align with these rules:
 
 - Create Environment is scoped to one active operation per repository because concurrent attempts would race on shared identity, workflow, and environment resources.
 - Polling is used instead of an event stream because Canvas navigation and reload are normal and polling can resume from the durable operation ID.
+- Every terminal path releases the page's Create Environment latch, including Stop, Retry, Rollback, and Exit, so the customer can start another setup without reloading the Canvas.
 - The artifact ledger records created versus reused ownership and cleanup results; this distinction drives both copy and deletion eligibility.
 - Exit setup is separate from rollback because its product intent is to close the interaction, even when nothing needs deletion.
 - Deployment remains user-initiated. Create Environment completion, retry, rollback, and exit never deploy an application.

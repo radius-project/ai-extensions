@@ -921,6 +921,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         return Promise.resolve({ ok: false, status: 404 });
       },
       readProcessEnv: () => ({}),
+      ghCredentialSource: () => "keyring",
       fetchFileForSelection: () => {
         throw new Error("OIDC refusal must happen before reading app.bicep");
       },

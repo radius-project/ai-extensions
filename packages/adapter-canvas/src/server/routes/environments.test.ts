@@ -1296,11 +1296,124 @@ describe("environments — verify-status", () => {
       })
     );
     expect(finish).toHaveBeenCalledOnce();
+    expect(finish).toHaveBeenCalledWith(
+      op,
+      "failed_partial",
+      expect.objectContaining({
+        failure: expect.objectContaining({ code: "verify-run-failed" })
+      })
+    );
     const parsed = JSON.parse(recording.body);
     expect(parsed.state).toBe("failed");
     expect(parsed.error).toContain("OIDC help");
     expect(parsed.error).toContain("Failed step: Verify.");
     expect(parsed.error).toContain("boom");
+  });
+
+  it.each([
+    [
+      "a missing Azure subscription",
+      "Azure Login (OIDC)",
+      "The identity cannot see a subscription.",
+      "No subscriptions found"
+    ],
+    [
+      "the AKS access verification step with an authorization refusal",
+      "Verify AKS Access",
+      "",
+      "Error from server (Forbidden): service account cannot get resource pods"
+    ]
+  ])(
+    "classifies %s as an RBAC verification failure",
+    async (_label, stepName, rbacHelp, runLog) => {
+      const finish = vi.fn();
+      const { ctx } = context(
+        "GET",
+        "/api/verify-status?repo=o/r&operationId=op1"
+      );
+      const op = {
+        repo: "o/r",
+        environment: "dev",
+        currentStage: "verify",
+        verification: { dispatchedAt: 1, runId: 9 }
+      };
+
+      await handleVerifyStatus(
+        ctx,
+        deps({
+          readInstanceEntry: () => undefined,
+          getOperation: () => op,
+          hasCompleteVerificationIdentity: () => true,
+          getRunDetail: () =>
+            Promise.resolve(
+              detail({
+                conclusion: "failure",
+                steps: [{ name: stepName, conclusion: "failure" }]
+              })
+            ),
+          fetchRunLog: () => Promise.resolve(runLog),
+          extractErrorLines: () => [],
+          extractGitHubActionsStepLog: () => "No subscriptions found",
+          explainOidcEnterpriseClaim: () => "",
+          explainNoSubscriptions: () => rbacHelp,
+          finish,
+          persistBestEffort: () => Promise.resolve(true)
+        })
+      );
+
+      expect(finish).toHaveBeenCalledWith(
+        op,
+        "failed_partial",
+        expect.objectContaining({
+          failure: expect.objectContaining({ code: "verify-run-rbac-failed" })
+        })
+      );
+    }
+  );
+
+  it("does not call a runner failure in the AKS access step RBAC propagation", async () => {
+    const finish = vi.fn();
+    const { ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&operationId=op1"
+    );
+    const op = {
+      repo: "o/r",
+      environment: "dev",
+      currentStage: "verify",
+      verification: { dispatchedAt: 1, runId: 9 }
+    };
+
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => op,
+        hasCompleteVerificationIdentity: () => true,
+        getRunDetail: () =>
+          Promise.resolve(
+            detail({
+              conclusion: "failure",
+              steps: [{ name: "Verify AKS Access", conclusion: "failure" }]
+            })
+          ),
+        fetchRunLog: () => Promise.resolve(null),
+        extractErrorLines: () => [],
+        extractGitHubActionsStepLog: () => "",
+        explainOidcEnterpriseClaim: () => "",
+        explainNoSubscriptions: () => "",
+        finish,
+        persistBestEffort: () => Promise.resolve(true)
+      })
+    );
+
+    expect(finish).toHaveBeenCalledWith(
+      op,
+      "failed_partial",
+      expect.objectContaining({
+        failure: expect.objectContaining({ code: "verify-run-failed" })
+      })
+    );
   });
 
   it("maps a thrown collaborator to an unknown state", async () => {

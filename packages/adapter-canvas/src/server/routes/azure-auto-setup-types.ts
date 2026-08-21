@@ -152,7 +152,7 @@ export interface AzureAutoSetupDependencies {
     | {
         ok: true;
         state: "created" | "reused" | "created_candidate";
-        origin: "pre_existing" | "this_operation";
+        origin: "unknown" | "pre_existing" | "this_operation";
         objectId: string | null;
       }
     | { ok: false; stderr: string }

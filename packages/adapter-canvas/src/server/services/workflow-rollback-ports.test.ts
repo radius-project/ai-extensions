@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  createSelectedWorkflowRollbackCommand,
   createWorkflowRollbackPorts,
-  createWorkflowScopeApiCommand,
   decodeContentDigest,
   type WorkflowRollbackCommandResult
 } from "./workflow-rollback-ports.js";
+import type { SelectedGhExecutor } from "../../gh.js";
 
 // The wire half of a post-commit rollback: what Radius asks `gh` for, and how
 // it reads the answers. `gh` is a scripted fake keyed on the exact argv, so an
@@ -32,6 +33,7 @@ function harness(script: Script) {
 }
 
 const REPO = "contoso/store";
+const REPO_PATH = `api /repos/${REPO}`;
 const WORKFLOW_PATH = ".github/workflows/verify.yml";
 const CONTENTS_PATH = `api /repos/${REPO}/contents/${WORKFLOW_PATH}?ref=main`;
 
@@ -58,6 +60,106 @@ describe("decodeContentDigest", () => {
   });
 });
 
+describe("selected-account rollback command", () => {
+  it("runs through the pinned executor and preserves GitHub HTTP status", async () => {
+    const calls: Array<{ args: string[]; stdin?: string }> = [];
+    const executor: SelectedGhExecutor = {
+      login: "octocat",
+      credentialSource: "keyring",
+      requiresKeyringSwitch: false,
+      scopes: ["repo", "workflow"],
+      run: async (args, options) => {
+        calls.push({ args, stdin: options?.stdin });
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "gh: Not Found (HTTP 404)"
+        };
+      },
+      runOrThrow: () => {
+        throw new Error("unused");
+      },
+      verifyIdentity: () => Promise.resolve(),
+      packageCredentials: () => ({
+        token: "fixture-token",
+        username: "octocat",
+        source: "keyring"
+      }),
+      redact: (value) => value,
+      errorMessage: (error) => String(error)
+    };
+
+    const command = createSelectedWorkflowRollbackCommand(executor);
+
+    await expect(
+      command({ args: ["api", "/repos/contoso/store"], stdin: "{}" })
+    ).resolves.toEqual({
+      ok: false,
+      status: 404,
+      stdout: "",
+      stderr: "gh: Not Found (HTTP 404)"
+    });
+    expect(calls).toEqual([
+      { args: ["api", "/repos/contoso/store"], stdin: "{}" }
+    ]);
+  });
+
+  it("turns selected-account verification failure into an unreadable command result", async () => {
+    const executor: SelectedGhExecutor = {
+      login: "octocat",
+      credentialSource: "keyring",
+      requiresKeyringSwitch: false,
+      scopes: [],
+      run: () => Promise.reject(new Error("credential unavailable")),
+      runOrThrow: () => {
+        throw new Error("unused");
+      },
+      verifyIdentity: () => Promise.resolve(),
+      packageCredentials: () => ({
+        token: "fixture-token",
+        username: "octocat",
+        source: "keyring"
+      }),
+      redact: (value) => value,
+      errorMessage: () => "selected credential unavailable"
+    };
+
+    await expect(
+      createSelectedWorkflowRollbackCommand(executor)({
+        args: ["api", "/repos/contoso/store"]
+      })
+    ).resolves.toEqual({
+      ok: false,
+      status: null,
+      stdout: "",
+      stderr: "selected credential unavailable"
+    });
+  });
+});
+
+describe("reading repository access", () => {
+  it("distinguishes a readable repository from an inaccessible one", async () => {
+    const readable = harness({ [`api /repos/${REPO}`]: {} });
+    const hidden = harness({
+      [`api /repos/${REPO}`]: {
+        ok: false,
+        status: 404,
+        stderr: "Not Found"
+      }
+    });
+
+    await expect(
+      readable.ports.readRepository({ repo: REPO })
+    ).resolves.toEqual({
+      status: "readable"
+    });
+    await expect(hidden.ports.readRepository({ repo: REPO })).resolves.toEqual({
+      status: "unreadable",
+      detail: "Not Found"
+    });
+  });
+});
+
 describe("reading a workflow file", () => {
   it("reports the blob id and content digest GitHub returned", async () => {
     const { ports } = harness({
@@ -76,10 +178,25 @@ describe("reading a workflow file", () => {
 
   it("reports a 404 as absent", async () => {
     const { ports } = harness({
-      [CONTENTS_PATH]: { ok: false, status: 404, stderr: "Not Found" }
+      [CONTENTS_PATH]: { ok: false, status: 404, stderr: "Not Found" },
+      [REPO_PATH]: {}
     });
 
     await expect(readVerify(ports)).resolves.toEqual({ status: "absent" });
+  });
+
+  it("treats a file 404 as unreadable when repository access disappeared", async () => {
+    const { ports } = harness({
+      [CONTENTS_PATH]: { ok: false, status: 404, stderr: "Not Found" },
+      [REPO_PATH]: { ok: false, status: 404, stderr: "Not Found" }
+    });
+
+    await expect(readVerify(ports)).resolves.toEqual({
+      status: "unreadable",
+      detail: expect.stringContaining(
+        "could not confirm repository access after the 404"
+      )
+    });
   });
 
   it.each([
@@ -161,7 +278,8 @@ describe("reading a branch head", () => {
 
   it("reports a 404 as absent", async () => {
     const { ports } = harness({
-      [HEAD_PATH]: { ok: false, status: 404, stderr: "Not Found" }
+      [HEAD_PATH]: { ok: false, status: 404, stderr: "Not Found" },
+      [REPO_PATH]: {}
     });
 
     await expect(
@@ -342,10 +460,25 @@ describe("writing the revert", () => {
 
   it("deletes a branch ref, treating an already absent branch as done", async () => {
     const { ports } = harness({
-      [DELETE_BRANCH]: { ok: false, status: 404, stderr: "Not Found" }
+      [DELETE_BRANCH]: { ok: false, status: 404, stderr: "Not Found" },
+      [REPO_PATH]: {}
     });
 
     await expect(deleteSetupBranch(ports)).resolves.toEqual({ ok: true });
+  });
+
+  it("does not call an inaccessible branch absent after a delete 404", async () => {
+    const { ports } = harness({
+      [DELETE_BRANCH]: { ok: false, status: 404, stderr: "Not Found" },
+      [REPO_PATH]: { ok: false, status: 404, stderr: "Not Found" }
+    });
+
+    await expect(deleteSetupBranch(ports)).resolves.toEqual({
+      ok: false,
+      detail: expect.stringContaining(
+        "could not confirm repository access after the 404"
+      )
+    });
   });
 
   it("surfaces a refused branch deletion", async () => {
@@ -364,118 +497,5 @@ describe("writing the revert", () => {
 
     await expect(deleteSetupBranch(ports)).resolves.toEqual({ ok: true });
     expect(calls[0]?.stdin).toBeUndefined();
-  });
-});
-
-describe("createWorkflowScopeApiCommand", () => {
-  const SCOPE_REFUSAL =
-    "HTTP 403: refusing to allow an OAuth App to create or update workflow `.github/workflows/verify.yml` without `workflow` scope";
-
-  function harnessFor(script: {
-    results: Array<
-      Partial<WorkflowRollbackCommandResult & { timedOut: boolean }>
-    >;
-    env?: NodeJS.ProcessEnv;
-  }) {
-    const attempts: Array<{ args: string[]; env?: NodeJS.ProcessEnv }> = [];
-    const queue = [...script.results];
-    const command = createWorkflowScopeApiCommand({
-      attempt: ({ args, env }) => {
-        attempts.push({ args, env });
-        const next = queue.shift();
-        if (!next) throw new Error("unscripted gh attempt");
-        return Promise.resolve({
-          ok: next.ok ?? false,
-          status: next.status ?? null,
-          stdout: next.stdout ?? "",
-          stderr: next.stderr ?? "",
-          timedOut: next.timedOut ?? false
-        });
-      },
-      readProcessEnv: () => script.env ?? {}
-    });
-    return { command, attempts };
-  }
-
-  it("runs the command once when it succeeds", async () => {
-    const { command, attempts } = harnessFor({
-      results: [{ ok: true, status: 200, stdout: "{}" }]
-    });
-
-    await expect(
-      command({ args: ["api", "/repos/o/r"] })
-    ).resolves.toMatchObject({ ok: true });
-    expect(attempts).toHaveLength(1);
-  });
-
-  it("retries a missing workflow scope with the injected token stripped", async () => {
-    const { command, attempts } = harnessFor({
-      results: [
-        { ok: false, status: 403, stderr: SCOPE_REFUSAL },
-        { ok: true, status: 200, stdout: "{}" }
-      ],
-      env: { GH_TOKEN: "injected", PATH: "/usr/bin" }
-    });
-
-    await expect(
-      command({
-        args: ["api", "--method", "DELETE", "/repos/o/r"],
-        stdin: "{}"
-      })
-    ).resolves.toMatchObject({ ok: true });
-    expect(attempts).toHaveLength(2);
-    // The retry keeps the rest of the environment and drops only the token.
-    expect(attempts[1]?.env).toEqual({ PATH: "/usr/bin" });
-  });
-
-  it.each([
-    ["there is no injected token to strip", { env: {} }],
-    [
-      "the command was killed rather than answered",
-      { env: { GITHUB_TOKEN: "injected" }, timedOut: true }
-    ]
-  ])("does not change identity when %s", async (_label, script) => {
-    const { command, attempts } = harnessFor({
-      results: [
-        {
-          ok: false,
-          status: 403,
-          stderr: SCOPE_REFUSAL,
-          timedOut: "timedOut" in script ? script.timedOut : false
-        }
-      ],
-      env: script.env
-    });
-
-    await expect(
-      command({ args: ["api", "/repos/o/r"] })
-    ).resolves.toMatchObject({ ok: false });
-    expect(attempts).toHaveLength(1);
-  });
-
-  it("keeps the original failure when the retry fails too", async () => {
-    const { command } = harnessFor({
-      results: [
-        { ok: false, status: 403, stderr: SCOPE_REFUSAL },
-        { ok: false, status: 404, stderr: "Not Found" }
-      ],
-      env: { GH_TOKEN: "injected" }
-    });
-
-    await expect(
-      command({ args: ["api", "/repos/o/r"] })
-    ).resolves.toMatchObject({ status: 403, stderr: SCOPE_REFUSAL });
-  });
-
-  it("does not retry a failure that is not a scope refusal", async () => {
-    const { command, attempts } = harnessFor({
-      results: [{ ok: false, status: 409, stderr: "conflict" }],
-      env: { GH_TOKEN: "injected" }
-    });
-
-    await expect(
-      command({ args: ["api", "/repos/o/r"] })
-    ).resolves.toMatchObject({ ok: false, status: 409 });
-    expect(attempts).toHaveLength(1);
   });
 });

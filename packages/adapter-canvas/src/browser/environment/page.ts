@@ -272,6 +272,11 @@ export function initializeEnvironmentPage(
   }
   environments = initializedEnvironments;
 
+  const restoreCreateButton = (): void => {
+    creating = false;
+    environments.resetSubmitButton();
+  };
+
   const operations = initializeEnvironmentOperations(context, {
     repo: state.repo,
     mutationNonce: state.mutationNonce,
@@ -281,7 +286,10 @@ export function initializeEnvironmentPage(
       showSetupWarnings: environments.showWarnings,
       showError: environments.showError,
       reloadEnvironmentsTable: environments.loadEnvironmentTable,
-      resetSubmitButton: environments.resetSubmitButton,
+      // The page owns the `creating` latch. Every terminal path, including one
+      // reached after Stop, Retry, Rollback, or Exit, must release it before the
+      // user can start another setup without reloading the page.
+      resetSubmitButton: restoreCreateButton,
       promptServiceManagementReference:
         discovery.promptServiceManagementReference,
       promptAppSelection: discovery.promptAppSelection
@@ -302,11 +310,6 @@ export function initializeEnvironmentPage(
     formStatus.className = "status error";
     formStatus.textContent = message;
     formStatus.style.display = "block";
-  };
-
-  const restoreCreateButton = (): void => {
-    creating = false;
-    environments.resetSubmitButton();
   };
 
   const failCreate = (message: string): void => {

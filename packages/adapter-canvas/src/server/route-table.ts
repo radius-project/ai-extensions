@@ -308,6 +308,36 @@ function methodsOverlap(a: RouteMethod, b: RouteMethod): boolean {
   return a === "ANY" || b === "ANY" || a === b;
 }
 
+function templatesOverlap(a: string, b: string): boolean {
+  const left = a.split("/");
+  const right = b.split("/");
+  if (left.length !== right.length) return false;
+  return left.every(
+    (segment, index) =>
+      segment.startsWith(":") ||
+      right[index].startsWith(":") ||
+      segment === right[index]
+  );
+}
+
+function templateRouteOverlap(
+  earlier: ServerRoute,
+  later: ServerRoute
+): boolean {
+  if (!methodsOverlap(earlier.method, later.method)) return false;
+  if (earlier.match === "template" && later.match === "exact") {
+    return templatePathParameters(earlier.path, later.path) !== undefined;
+  }
+  if (earlier.match === "exact" && later.match === "template") {
+    return templatePathParameters(later.path, earlier.path) !== undefined;
+  }
+  return (
+    earlier.match === "template" &&
+    later.match === "template" &&
+    templatesOverlap(earlier.path, later.path)
+  );
+}
+
 export function assertRouteTable(routes: readonly ServerRoute[]): void {
   const seen = new Set<string>();
   // `matchRoute` takes the first declaration that matches, mirroring the legacy
@@ -316,36 +346,37 @@ export function assertRouteTable(routes: readonly ServerRoute[]): void {
   // construction instead of ranking exact over prefix at dispatch time.
   const precedingPrefixes: ServerRoute[] = [];
   // Templates shadow by shape rather than by prefix: they match a fixed segment
-  // count, so only a later concrete path with the same shape can disappear
-  // behind one.
-  const precedingTemplates: ServerRoute[] = [];
+  // count. Reject an overlap in either declaration order: an exact route before
+  // a template still splits one concrete path away from the template's owner,
+  // and two overlapping templates make the later owner unreachable.
+  const precedingRoutes: ServerRoute[] = [];
   for (const route of routes) {
     const key = routeKey(route);
     if (seen.has(key)) throw new Error(`Duplicate server route: ${key}`);
     seen.add(key);
-    const shadow =
-      precedingPrefixes.find(
-        (prefix) =>
-          methodsOverlap(prefix.method, route.method) &&
-          route.path.startsWith(prefix.path)
-      ) ||
-      (route.match === "exact" ?
-        precedingTemplates.find(
-          (template) =>
-            methodsOverlap(template.method, route.method) &&
-            templatePathParameters(template.path, route.path) !== undefined
-        )
-      : undefined);
-    if (shadow) {
+    const prefixShadow = precedingPrefixes.find(
+      (prefix) =>
+        methodsOverlap(prefix.method, route.method) &&
+        route.path.startsWith(prefix.path)
+    );
+    if (prefixShadow) {
       throw new Error(
-        `Server route ${key} is unreachable behind earlier prefix route ${routeKey(shadow)}`
+        `Server route ${key} is unreachable behind earlier prefix route ${routeKey(prefixShadow)}`
+      );
+    }
+    const templateOverlap = precedingRoutes.find((earlier) =>
+      templateRouteOverlap(earlier, route)
+    );
+    if (templateOverlap) {
+      throw new Error(
+        `Server route ${key} overlaps earlier template route ${routeKey(templateOverlap)}`
       );
     }
     if (route.match === "prefix") precedingPrefixes.push(route);
     if (route.match === "template") {
       compileRouteTemplate(route.path);
-      precedingTemplates.push(route);
     }
+    precedingRoutes.push(route);
     if (route.method === "POST" && route.mutationPolicy === "none") {
       throw new Error(`POST server route has no mutation policy: ${key}`);
     }

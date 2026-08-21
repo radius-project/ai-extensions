@@ -520,6 +520,21 @@ export async function handleListEnvironments(
 // tracked operation's repo/environment and carry a complete dispatch identity,
 // or the poll is rejected as expired. Every response is 200 with
 // `Cache-Control: no-store`; the state field carries the verdict.
+export function isAzureRbacVerificationFailure(
+  failedSteps: readonly { name?: string }[],
+  log: string,
+  noSubscriptionsHelp: string
+): boolean {
+  if (noSubscriptionsHelp !== "") return true;
+  const failedAtAzureAccess = failedSteps.some((step) =>
+    /verify.*(?:aks|azure).*access/i.test(String(step.name))
+  );
+  if (!failedAtAzureAccess) return false;
+  return /(?:AuthorizationFailed|\bForbidden\b|does not have authorization|not authorized|insufficient privileges|role assignment|cannot (?:get|list|create|update|patch|delete) resource)/i.test(
+    log
+  );
+}
+
 export async function handleVerifyStatus(
   context: CanvasRequestContext,
   dependencies: EnvironmentsDependencies
@@ -697,17 +712,28 @@ export async function handleVerifyStatus(
     // Distinct failure stages (OIDC enterprise-claim rejection vs. a successful
     // login with no visible subscription — issue #219), so at most one applies;
     // take the first match so the raw-error separator is never emitted twice.
-    const failureHelp =
-      dependencies.explainOidcEnterpriseClaim(azureLoginLog) ||
-      dependencies.explainNoSubscriptions(log);
+    const oidcHelp = dependencies.explainOidcEnterpriseClaim(azureLoginLog);
+    const noSubscriptionsHelp =
+      oidcHelp === "" ? dependencies.explainNoSubscriptions(log) : "";
+    const failureHelp = oidcHelp || noSubscriptionsHelp;
     if (failureHelp)
       errMsg = failureHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
     if (verifyOp && verifyOp.currentStage === dependencies.stageVerify) {
+      const failedAtAzureAccess = isAzureRbacVerificationFailure(
+        failed,
+        log || "",
+        noSubscriptionsHelp
+      );
       // Everything before verification succeeded and still exists, so this is
-      // partial rather than total failure.
+      // partial rather than total failure. Only a positively identified Azure
+      // access failure gets propagation copy; OIDC, workflow, and runner failures
+      // retain the generic verification classification.
       dependencies.finish(verifyOp, "failed_partial", {
         failure: {
-          code: "verify-run-failed",
+          code:
+            failedAtAzureAccess ?
+              "verify-run-rbac-failed"
+            : "verify-run-failed",
           stage: dependencies.stageVerify,
           message:
             "Credential verification failed. " +

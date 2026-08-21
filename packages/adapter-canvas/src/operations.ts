@@ -34,13 +34,15 @@ import {
 // Version 2 adds the cooperative control record (stop, attempts, commands,
 // outcome history). Version 3 adds workflow provenance to the artifact ledger
 // (commit, blob and content digests) so a rollback after the workflow commit
-// point can prove the files it would revert are still exactly what Radius
-// wrote. Version 1 and 2 records still load: `readOperationControl` and
+// point can prove the files it would revert are still exactly what Radius wrote.
+// Version 4 distinguishes a path proven absent before setup from an older record
+// that never observed the previous path state. Versions 1 through 3 still load:
+// `readOperationControl` and
 // `readSetupArtifactLedger` fill the new fields with safe defaults rather than
 // discarding the operation, and a default of "no provenance" fails a
 // post-commit rollback closed instead of guessing.
-export const OPERATION_SCHEMA_VERSION = 3;
-export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([1, 2, 3]);
+export const OPERATION_SCHEMA_VERSION = 4;
+export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4]);
 
 // `deleted` is written only after a cleanup attempt proved the resource is gone
 // (removed by Radius, or already absent). It keeps a rolled-back artifact out of
@@ -122,12 +124,12 @@ export type GitHubEnvironmentArtifact = {
 // the record still has to prove this operation crossed the commit point, and a
 // cleanup retry still needs the provenance of the write it is repeating.
 //
-// The three hashes are what makes a post-commit rollback safe. `blobSha` is the
-// git blob id GitHub returned for the write, `contentSha256` is the digest of
-// the exact bytes Radius sent, and `previousBlobSha` is the blob the path held
-// beforehand — null when Radius created the file, so a revert deletes it rather
-// than restoring something that never existed. All four are null on a record
-// written before this field existed, which fails the rollback closed.
+// The hashes are what make a post-commit rollback safe. `blobSha` is the git blob
+// id GitHub returned for the write, `contentSha256` is the digest of the exact
+// bytes Radius sent, and `previousBlobSha` is the blob the path held beforehand.
+// `previousBlobKnown` distinguishes a proven absent path from an old record that
+// never observed the path at all; both have a null SHA, but only the former may
+// be deleted. Older records restore it as false and fail rollback closed.
 export type WorkflowCommitArtifact = {
   path: string;
   branch: string | null;
@@ -137,6 +139,7 @@ export type WorkflowCommitArtifact = {
   blobSha: string | null;
   contentSha256: string | null;
   previousBlobSha: string | null;
+  previousBlobKnown: boolean;
 };
 
 export type SetupArtifactCommitState = {
@@ -160,7 +163,7 @@ export type SetupCleanupArtifactType =
   | "azure_app";
 
 export type SetupCleanupOutcome =
-  "deleted" | "not_found" | "warning" | "skipped";
+  "deleted" | "restored" | "not_found" | "warning" | "skipped";
 
 // `identity` is the artifact's stable key (an appId, an object id, a
 // `repo:name` pair), never the display label. The label is built for a human and
@@ -539,7 +542,12 @@ export function readWorkflowCommitArtifact(value: any): WorkflowCommitArtifact {
     commitSha: optionalShaString(value && value.commitSha),
     blobSha: optionalShaString(value && value.blobSha),
     contentSha256: optionalShaString(value && value.contentSha256),
-    previousBlobSha: optionalShaString(value && value.previousBlobSha)
+    previousBlobSha: optionalShaString(value && value.previousBlobSha),
+    // A saved non-null SHA proves the path existed even before version 4 named
+    // that fact separately. Only a legacy null remains ambiguous.
+    previousBlobKnown:
+      value?.previousBlobKnown === true ||
+      optionalShaString(value && value.previousBlobSha) !== null
   };
 }
 
@@ -1092,11 +1100,12 @@ export function recordGitHubEnvironment(op: any, patch: any): any {
  * GitHub's environment PUT is idempotent, so a 200 on its own never proves the
  * request created anything — which is why the write is first recorded as
  * `created_candidate`. Ownership becomes provable only when three facts line up
- * and the caller has established all three before calling: this operation read
- * the environment and GitHub answered "not found", the PUT that followed
- * succeeded, and the exact identity was durably checkpointed. The caller owns
- * the proof; this function owns the invariant that a promotion may only ever
- * touch a candidate carrying that identity.
+ * and the caller has established the first two before calling: this operation
+ * read the environment and GitHub answered "not found", and the PUT that
+ * followed succeeded with matching creation evidence. The caller must persist
+ * the promoted identity in the mutation checkpoint immediately after this call.
+ * This function owns the invariant that a promotion may only ever touch a
+ * candidate carrying that identity.
  *
  * Anything else — a different repo or environment name, a state that is already
  * `reused`, a ledger that never recorded the candidate — is refused, so a
@@ -1144,10 +1153,10 @@ export function recordCommitState(op: any, patch: any): any {
  * Save one committed workflow file together with the provenance a rollback
  * needs to prove it is still the artifact Radius wrote.
  *
- * A re-commit of the same path on the same branch replaces the earlier
- * provenance rather than appending a second entry: the newest write is the one
- * a revert has to match, and two entries for one path would let a rollback
- * verify the stale digest and delete the newer file.
+ * A re-commit of the same path on the same branch replaces the current-write
+ * provenance rather than appending a second entry. It must retain the first
+ * pre-Radius blob, however: the newest blob is what rollback verifies, while the
+ * original blob is what rollback restores.
  */
 export function recordCommittedWorkflowFile(op: any, entry: any): any {
   const ledger = getSetupArtifactLedger(op);
@@ -1164,8 +1173,31 @@ export function recordCommittedWorkflowFile(op: any, entry: any): any {
     (file: WorkflowCommitArtifact) =>
       file.path === path && file.mode === mode && file.branch === branch
   );
-  if (existing === -1) ledger.commit.workflowFiles.push(record);
-  else ledger.commit.workflowFiles[existing] = record;
+  if (existing === -1) {
+    ledger.commit.workflowFiles.push(record);
+  } else {
+    const previous = ledger.commit.workflowFiles[existing];
+    const continuesRadiusWrite =
+      previous.previousBlobKnown &&
+      record.previousBlobKnown &&
+      previous.blobSha !== null &&
+      record.previousBlobSha === previous.blobSha;
+    ledger.commit.workflowFiles[existing] = {
+      ...record,
+      // Preserve the original customer state only while each retry proves it
+      // replaced the blob from Radius's preceding write. If another actor edited
+      // the file between attempts, the immediately overwritten blob is the state
+      // rollback must restore. An unknown lookup remains unknown and blocks.
+      previousBlobSha:
+        !previous.previousBlobKnown ? previous.previousBlobSha
+        : continuesRadiusWrite ? previous.previousBlobSha
+        : record.previousBlobSha,
+      previousBlobKnown:
+        !previous.previousBlobKnown ? false
+        : continuesRadiusWrite ? previous.previousBlobKnown
+        : record.previousBlobKnown
+    };
+  }
   if (record.commitSha) ledger.commit.headSha = record.commitSha;
   if (ledger.commit.mode === "not_started") {
     ledger.commit.mode = mode;
@@ -1284,9 +1316,12 @@ function cleanupResultTarget(result: any): string {
   const target =
     result && typeof result.target === "string" ? result.target : "";
   if (!target) return "";
-  return result && result.outcome === "not_found" ?
-      `${target} (already absent)`
-    : target;
+  return (
+    result && result.outcome === "not_found" ? `${target} (already absent)`
+    : result && result.outcome === "restored" ?
+      `${target} (restored previous version)`
+    : target
+  );
 }
 
 function formatAzureAppLabel(app: any): string {
@@ -1841,7 +1876,9 @@ function projectPartialState(
   const cleaned = results
     .filter(
       (entry: any) =>
-        entry.outcome === "deleted" || entry.outcome === "not_found"
+        entry.outcome === "deleted" ||
+        entry.outcome === "restored" ||
+        entry.outcome === "not_found"
     )
     .map((entry: any) => ({
       kind: entry.artifactType,
@@ -1918,7 +1955,8 @@ function projectPartialState(
 // costs a duplicated cloud resource, while refusing costs one support message.
 
 const VERIFICATION_RETRY_CLASSIFICATIONS: Record<string, string> = {
-  "verify-run-failed": "azure-rbac-propagation",
+  "verify-run-rbac-failed": "azure-rbac-propagation",
+  "verify-run-failed": "verification-run-failed",
   "verification-tracking-expired": "verification-tracking-expired",
   // The dispatch call itself failed, so no run was ever created: nothing was
   // verified, nothing was written, and asking GitHub again is the whole fix.
@@ -2323,6 +2361,8 @@ export function workflowProvenanceGap(op: any): string | null {
       return `Radius did not save the content it committed for "${file.path}", so it cannot prove the file is unchanged.`;
     if (!file.commitSha)
       return `Radius did not save the commit it created for "${file.path}".`;
+    if (!file.previousBlobKnown)
+      return `Radius did not save whether "${file.path}" existed before setup, so it cannot safely delete or restore the file.`;
   }
   if (ledger.commit.mode === "pull_request" && !ledger.commit.headSha)
     return "Radius did not save the head commit of the setup branch, so it cannot prove the branch still holds only its own work.";
@@ -2485,6 +2525,7 @@ export function workflowRollbackTargets(
         blobSha: file.blobSha,
         contentSha256: file.contentSha256,
         previousBlobSha: file.previousBlobSha,
+        previousBlobKnown: file.previousBlobKnown,
         target,
         identity,
         key: cleanupTargetKey({
@@ -2648,7 +2689,9 @@ const VERIFICATION_RETRY_DESCRIPTIONS: Record<string, string> = {
   "workflow-installation-pending":
     "Merge the setup pull request first. Radius then checks the installed workflows again.",
   "azure-rbac-propagation":
-    "Azure role assignments can take a few minutes to propagate. Radius checks the same workflow run identity again.",
+    "Azure access is not effective yet. Wait for a recent role assignment to propagate, or correct the assignment, then Radius starts the same verification workflow again.",
+  "verification-run-failed":
+    "The verification workflow failed for a reason other than Azure role propagation. Review the run, correct the problem, then Radius starts the same verification workflow again.",
   "verification-tracking-expired":
     "Radius stopped following the previous verification run. It starts the same workflow again on the same branch.",
   "verification-dispatch-failed":
@@ -3818,7 +3861,12 @@ export function reconcileOperationLifecycle(op: any, now = Date.now()): any {
   ) {
     return stopAtBoundary(op, "input_prompt");
   }
-  if (!isStale(op, now)) return op;
+  // An executor that still owns this in-memory record is authoritative. Its
+  // current mutation may legitimately outlive the quiet-record threshold, and
+  // terminalizing the record underneath it would lose the result it is about to
+  // checkpoint. Restart recovery handles the corresponding persisted record
+  // after a process loss, when executionActive is no longer true.
+  if (op.executionActive || !isStale(op, now)) return op;
   if (shouldStop(op)) return stopAtBoundary(op, "stale_reconciliation");
   if (op.state === INPUT_REQUIRED_STATE) {
     return finish(op, "failed_partial", {
@@ -3939,9 +3987,9 @@ export function fromPersistedOperation(value: any): any {
     throw new Error("Invalid persisted operation stages or steps.");
   }
   record.control = readOperationControl(value.control);
-  // A version 1 or 2 ledger has no workflow provenance. Normalizing it here
-  // means every later reader sees the current shape, and the null provenance
-  // that results is what refuses a post-commit rollback on an old record.
+  // Versions 1 and 2 have no workflow provenance, and version 3 does not say
+  // whether a null previous blob means "absent" or "unknown". Normalizing here
+  // gives every reader the current shape; the missing proof refuses rollback.
   record.setupArtifacts = readSetupArtifactLedger(value.setupArtifacts);
   record.stopRequested = Boolean(record.control.stop.requestedAt);
   record.schemaVersion = OPERATION_SCHEMA_VERSION;
@@ -3971,6 +4019,13 @@ export function reconcileRestoredOperation(op: any): any {
     op.recoveryState = "verification_pending";
     return op;
   }
+  const activeCommand = latestCommand(op);
+  const cleanupInterrupted =
+    activeCommand &&
+    (activeCommand.state === "accepted" || activeCommand.state === "running") &&
+    (activeCommand.kind === "rollback" ||
+      activeCommand.kind === "retry_cleanup" ||
+      activeCommand.kind === "exit_setup");
   const now = nowIso();
   op.state = "failed_partial";
   op.endedAt = now;
@@ -3984,7 +4039,13 @@ export function reconcileRestoredOperation(op: any): any {
     classification: "user-fixable"
   };
   const ledger = getSetupArtifactLedger(op);
-  if (ledger) ledger.cleanup.state = "not_needed";
+  if (ledger) {
+    // A cleanup runner cannot survive the process that owned it. Keeping the
+    // state as running makes hasAttemptedCleanup treat the pass as interrupted,
+    // so the terminal record offers Rollback again against the ledger's remaining
+    // proven-owned artifacts. Results checkpointed before the restart stay put.
+    ledger.cleanup.state = cleanupInterrupted ? "running" : "not_needed";
+  }
   for (const stage of op.stages || []) {
     if (stage.state === "running") stage.state = "failed";
     else if (stage.state === "pending") stage.state = "skipped";

@@ -13,6 +13,7 @@ interface LoadGhOptions {
   withToken?: string;
   keyring?: string;
   token?: string | null;
+  githubToken?: string | null;
   userTokens?: Record<string, string>;
   apiLogin?: string;
   commandResult?: {
@@ -132,13 +133,13 @@ const STATUS = {
   ✓ Logged in to github.com account storeduser (oauth_token)
     - Active account: true
     - Token scopes: 'repo', 'read:org', 'workflow', 'read:packages', 'write:packages'`,
-  // An injected token is present in the environment, but gh reports only the
-  // stored credential — the token is for another host, or gh rejected it — and
-  // that credential has neither `workflow` nor the package scopes.
-  storedOauthNarrow: `github.com
-  ✓ Logged in to github.com account storeduser (oauth_token)
+  oauthBeforeSameLoginToken: `github.com
+  ✓ Logged in to github.com account dupuser (oauth_token)
+    - Active account: false
+    - Token scopes: 'repo', 'workflow', 'write:packages'
+  ✓ Logged in to github.com account dupuser (GH_TOKEN)
     - Active account: true
-    - Token scopes: 'repo'`
+    - Token scopes: 'repo', 'workflow'`
 };
 
 function setPlatform(platform: NodeJS.Platform): void {
@@ -160,6 +161,7 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
     withToken = "",
     keyring = "",
     token = null,
+    githubToken,
     userTokens = {},
     apiLogin = "",
     commandResult,
@@ -173,6 +175,8 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
   } else {
     process.env.GH_TOKEN = token;
   }
+  if (githubToken === null) delete process.env.GITHUB_TOKEN;
+  else if (githubToken !== undefined) process.env.GITHUB_TOKEN = githubToken;
   // The identity layer now drives `gh auth status` and `gh auth token` through
   // async execFile (the read-only probes used to be synchronous execFileSync),
   // so one router serves them all.
@@ -763,6 +767,41 @@ describe("getInjectedGhToken", () => {
   );
 });
 
+describe.sequential("ghCommandCredentialSource", () => {
+  it("reports the injected credential when the resolved strategy keeps it", async () => {
+    const gh = await loadGh("linux", {
+      token: "session-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      prime: true
+    });
+
+    expect(gh.ghCommandCredentialSource()).toBe("injected");
+  });
+
+  it("reports the stored credential when strategy strips an ambient token", async () => {
+    const gh = await loadGh("linux", {
+      token: "session-token",
+      withToken: STATUS.tokenNoWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      prime: true
+    });
+
+    expect(gh.ghCommandCredentialSource()).toBe("keyring");
+  });
+
+  it("reports the stored credential when no injected token exists", async () => {
+    const gh = await loadGh("linux", {
+      token: null,
+      withToken: STATUS.empty,
+      keyring: STATUS.keyringWithWorkflow,
+      prime: true
+    });
+
+    expect(gh.ghCommandCredentialSource({})).toBe("keyring");
+  });
+});
+
 describe("GitHub diagnostic redaction", () => {
   it("redacts injected and credential-shaped tokens from surfaced errors", async () => {
     const { redactGhCredentials } = await import("./gh.js");
@@ -859,6 +898,7 @@ describe.sequential("selected GitHub executor", () => {
     expect(tokenLookup?.[2].env.GH_TOKEN).toBeUndefined();
     expect(tokenLookup?.[2].env.GITHUB_TOKEN).toBeUndefined();
     expect(tokenLookup?.[2].env.GH_HOST).toBeUndefined();
+    expect(tokenLookup?.[2].timeout).toBe(3000);
 
     childProcess.execFile.mockClear();
     await executor.verifyIdentity();
@@ -878,6 +918,19 @@ describe.sequential("selected GitHub executor", () => {
 
     await expect(gh.createSelectedGhExecutor("keyuser")).rejects.toThrow(
       "GitHub CLI 2.40 or newer"
+    );
+  });
+
+  it("reports a missing account token on a modern multi-account GitHub CLI", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      ghVersion: "gh version 2.96.0"
+    });
+
+    await expect(gh.createSelectedGhExecutor("keyuser")).rejects.toThrow(
+      "Could not obtain a GitHub credential for @keyuser"
     );
   });
 
@@ -917,6 +970,48 @@ describe.sequential("selected GitHub executor", () => {
     expect(executor.requiresKeyringSwitch).toBe(false);
     expect(childProcess.execFile.mock.calls[0]?.[2].env.GH_TOKEN).toBe(
       "sso-authorized-keyring-token"
+    );
+  });
+
+  it("uses the injected account entry rather than a same-login oauth_token entry", async () => {
+    const gh = await loadGh("linux", {
+      token: "injected-token",
+      withToken: STATUS.oauthBeforeSameLoginToken,
+      keyring: STATUS.keyringDuplicateLoginNarrow,
+      userTokens: { dupuser: "narrow-keyring-token" },
+      apiLogin: "dupuser"
+    });
+
+    const executor = await gh.createSelectedGhExecutor("dupuser");
+
+    expect(executor.credentialSource).toBe("injected");
+    expect(executor.scopes).toEqual(["repo", "workflow"]);
+  });
+
+  it("treats a hosts.yml oauth_token as a stored credential", async () => {
+    const gh = await loadGh("linux", {
+      token: "host-injected-token",
+      withToken: STATUS.tokenAfterStoredOauth,
+      keyring: STATUS.keyringStoredOauth,
+      userTokens: { storeduser: "stored-oauth-secret" },
+      apiLogin: "storeduser"
+    });
+
+    const executor = await gh.createSelectedGhExecutor("storeduser");
+
+    expect(executor.credentialSource).toBe("keyring");
+    expect(executor.scopes).toContain("write:packages");
+  });
+
+  it("fails closed when the selected login has no matching credential", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow
+    });
+
+    await expect(gh.createSelectedGhExecutor("missinguser")).rejects.toThrow(
+      "Could not obtain a GitHub credential for @missinguser"
     );
   });
 
@@ -1193,6 +1288,22 @@ describe.sequential("getGhPackageCredentials", () => {
     });
     expect(await getGhPackageCredentials()).toEqual({
       token: "injected-solo",
+      username: "tokuser",
+      source: "injected-token"
+    });
+  });
+
+  it("ignores a whitespace-only GH_TOKEN when GITHUB_TOKEN is usable", async () => {
+    const { getGhPackageCredentials } = await loadGh("linux", {
+      token: "   ",
+      githubToken: "github-fallback-token",
+      withToken: STATUS.tokenNoWorkflow,
+      keyring: STATUS.empty,
+      userTokens: {}
+    });
+
+    await expect(getGhPackageCredentials()).resolves.toEqual({
+      token: "github-fallback-token",
       username: "tokuser",
       source: "injected-token"
     });
