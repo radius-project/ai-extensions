@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, it, test } from "vitest";
+import { afterAll, afterEach, it, test } from "vitest";
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -21,6 +21,7 @@ const checker = path.join(
 );
 const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
 const temporaryDirectories = new Set<string>();
+let sharedHomeDirectory: string | undefined;
 
 afterEach(() => {
   for (const directory of temporaryDirectories) {
@@ -29,10 +30,46 @@ afterEach(() => {
   temporaryDirectories.clear();
 });
 
+afterAll(() => {
+  const directory = sharedHomeDirectory;
+  sharedHomeDirectory = undefined;
+  if (directory !== undefined) {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 function temporaryDirectory(): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "app-bicep-check-"));
   temporaryDirectories.add(directory);
   return directory;
+}
+
+// The checker resolves the managed Bicep binary from the home directory but
+// resolves the driver script from the application's own directory, so one home
+// shared by every case still gives each case its own driver. Installing the
+// ~78 MB stand-in per case instead made each test copy the Node binary, because
+// Windows refuses to hardlink it out of C:\Program Files, and made each cleanup
+// delete a file that size.
+function sharedBicepHome(): string {
+  if (sharedHomeDirectory === undefined) {
+    const home = fs.mkdtempSync(
+      path.join(os.tmpdir(), "app-bicep-check-home-")
+    );
+    const bicep = path.join(
+      home,
+      ".radius",
+      "ai-extensions",
+      "bin",
+      executable
+    );
+    fs.mkdirSync(path.dirname(bicep), { recursive: true });
+    fs.copyFileSync(fs.realpathSync(process.execPath), bicep);
+    if (process.platform !== "win32") {
+      fs.chmodSync(bicep, 0o755);
+    }
+    sharedHomeDirectory = home;
+  }
+  return sharedHomeDirectory;
 }
 
 function fakeBicep(
@@ -41,23 +78,8 @@ function fakeBicep(
   status: number,
   compiledOutput = "{}"
 ): NodeJS.ProcessEnv {
-  const bicep = path.join(
-    directory,
-    ".radius",
-    "ai-extensions",
-    "bin",
-    executable
-  );
+  const home = sharedBicepHome();
   const driver = path.join(directory, "build");
-  fs.mkdirSync(path.dirname(bicep), { recursive: true });
-  try {
-    fs.linkSync(fs.realpathSync(process.execPath), bicep);
-  } catch {
-    fs.copyFileSync(process.execPath, bicep);
-  }
-  if (process.platform !== "win32") {
-    fs.chmodSync(bicep, 0o755);
-  }
   fs.writeFileSync(
     driver,
     [
@@ -68,7 +90,7 @@ function fakeBicep(
       ""
     ].join("\n")
   );
-  return { HOME: directory, USERPROFILE: directory };
+  return { HOME: home, USERPROFILE: home };
 }
 
 function runChecker(directory: string, env: NodeJS.ProcessEnv, appSource = "") {
