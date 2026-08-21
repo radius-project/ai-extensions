@@ -61,7 +61,7 @@ Two alternatives were considered and rejected explicitly: a GHCR OCI artifact (t
 
 Each node is matched to a status entry by exact `id`, then lowercased `name|type` with the API version stripped, then lowercased `name`.
 
-The original design proposed `id || name`. The middle tier is added because modeled resource ids are synthesized locally by `buildResourceID` and are not guaranteed to equal the UCP ids the control plane reports — with id-then-name alone, an id mismatch silently degrades every node to bare-name matching, which collides across resource types.
+The original design proposed `id || name`. The middle tier is added because modeled resource ids are synthesized by the modeling side and are not guaranteed to equal the UCP ids the control plane reports — with id-then-name alone, an id mismatch silently degrades every node to bare-name matching, which collides across resource types.
 
 ### Merging
 

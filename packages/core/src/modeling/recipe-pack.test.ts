@@ -270,6 +270,68 @@ resource p 'Radius.Core/recipePacks@2025-08-01-preview' = {
       "mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1"
     );
   });
+
+  it("defaults the kind to bicep when an entry declares only a source", () => {
+    const pack = `
+    recipes: {
+      'Radius.Data/redisCaches': {
+        source: 'ghcr.io/radius-project/kube-recipes/rediscaches:latest'
+      }
+    }
+`;
+    const entries = parseRecipePack(pack);
+
+    expect(entries).toEqual([
+      {
+        resourceType: "Radius.Data/redisCaches",
+        kind: "bicep",
+        source: "ghcr.io/radius-project/kube-recipes/rediscaches:latest"
+      }
+    ]);
+  });
+
+  it("preserves a non-bicep kind", () => {
+    const pack = `
+    recipes: {
+      'Radius.Data/redisCaches': {
+        kind: 'terraform'
+        source: 'ghcr.io/radius-project/kube-recipes/rediscaches:latest'
+      }
+    }
+`;
+    expect(parseRecipePack(pack)[0].kind).toBe("terraform");
+  });
+
+  it("ignores a resource type outside the Radius namespace", () => {
+    const pack = `
+    recipes: {
+      'Applications.Core/containers': {
+        kind: 'bicep'
+        source: 'ghcr.io/radius-project/kube-recipes/containers:latest'
+      }
+    }
+`;
+    expect(parseRecipePack(pack)).toEqual([]);
+  });
+
+  it("still yields the entry when the pack is truncated before its closing brace", () => {
+    // A partially fetched pack ends mid-entry; the final line is still scanned so
+    // a truncated file degrades to the entries it did contain rather than none.
+    const pack = `recipes: {
+      'Radius.Data/redisCaches': {
+        kind: 'bicep'
+        source: 'ghcr.io/radius-project/kube-recipes/rediscaches:latest'`;
+
+    const entries = parseRecipePack(pack);
+
+    expect(entries).toEqual([
+      {
+        resourceType: "Radius.Data/redisCaches",
+        kind: "bicep",
+        source: "ghcr.io/radius-project/kube-recipes/rediscaches:latest"
+      }
+    ]);
+  });
 });
 
 // Hermetic regression test against committed snapshots of the real packs. Guards
