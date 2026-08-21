@@ -5,6 +5,7 @@ import {
 } from "@radius-project/core";
 import {
   createGraphPlanningWorkflows,
+  GRAPH_MODELING_FAILURE_MESSAGE,
   type GraphPlanningWorkflows,
   type GraphWorkflowDependencies,
   type GraphWorkflowOutcome
@@ -98,6 +99,8 @@ interface Harness {
   }>;
   recipes: unknown[];
   plannedOutputs: unknown[];
+  // Everything the workflows sent to the diagnostics sink instead of the canvas.
+  loggedErrors: string[];
   workflows: GraphPlanningWorkflows;
   setEntryMissing(missing: boolean): void;
   advanceClock(ms: number): void;
@@ -147,6 +150,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   };
   const recipes: unknown[] = [];
   const plannedOutputs: unknown[] = [];
+  const loggedErrors: string[] = [];
 
   function requireScripted<T>(
     table: Record<string, T>,
@@ -238,6 +242,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     record,
     optionalString,
     errorMessage,
+    logError: (message) => {
+      loggedErrors.push(message);
+    },
     now: () => clockMs
   };
 
@@ -258,6 +265,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     recipeResolutions,
     recipes,
     plannedOutputs,
+    loggedErrors,
     setEntryMissing(missing) {
       entryMissing = missing;
     },
@@ -298,12 +306,13 @@ function replaceProgressRecord(
 
 describe("graph planning workflows", () => {
   describe("POST /api/load-graph", () => {
-    it("answers 400 with the parse failure for a malformed body", async () => {
+    it("answers 400 with the modeling failure message for a malformed body", async () => {
       const harness = start();
       const outcome = await harness.run("loadGraph", "{not json");
       expect(outcome.status).toBe(400);
       expect(outcome.kind).toBe("json");
-      expect(outcome.payload.error).toContain("JSON");
+      expect(outcome.payload.error).toBe(GRAPH_MODELING_FAILURE_MESSAGE);
+      expect(harness.loggedErrors.at(-1)).toContain("JSON");
     });
 
     it("answers 503 without a Content-Type when the instance entry is gone", async () => {
@@ -580,7 +589,45 @@ describe("graph planning workflows", () => {
       );
 
       expect(outcome.status).toBe(400);
-      expect(outcome.payload).toEqual({ error: "EBUSY" });
+      expect(outcome.payload).toEqual({
+        error: GRAPH_MODELING_FAILURE_MESSAGE
+      });
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] modeling failed: EBUSY"
+      ]);
+    });
+
+    // Issue #475: the graph pages render a failed load as graph content, so
+    // rad's Bicep diagnostics used to appear in the canvas where the
+    // application graph belongs.
+    it("keeps rad's Bicep validation output out of the response and the progress stages", async () => {
+      const radOutput = [
+        "rad app graph failed: rad exited with code 1",
+        '/tmp/rad-bicep-abc/app.bicep(31,5) : Error BCP035: The specified "object" declaration is missing the following required properties: "application".',
+        '/tmp/rad-bicep-abc/app.bicep(42,18) : Error BCP062: The referenced declaration with name "redis" is not valid.',
+        "Compiled with radius extension: br:ghcr.io/radius-project/bicep-types-radius:latest"
+      ].join("\n");
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: false } },
+        compileThrows: { main: new Error(radOutput) }
+      });
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.status).toBe(400);
+      expect(outcome.payload).toEqual({
+        error: GRAPH_MODELING_FAILURE_MESSAGE
+      });
+      expect(messages(harness.state)).not.toContain(radOutput);
+      expect(
+        messages(harness.state).some((detail) => detail.includes("BCP035"))
+      ).toBe(false);
+      expect(stages(harness.state).at(-1)).toBe("building_graph:failed");
+      expect(harness.state.graphLoaded).toBeUndefined();
+      expect(harness.loggedErrors).toEqual([
+        `[radius graph] modeling failed: ${radOutput}`
+      ]);
     });
 
     it("does not reuse a cached graph when the definition hash moved", async () => {
@@ -1236,8 +1283,15 @@ describe("graph planning workflows", () => {
 
       expect(outcome.status).toBe(400);
       expect(outcome.kind).toBe("json");
-      expect(outcome.payload).toEqual({ error: "rad exited 1" });
-      expect(harness.state.diffError).toBe("rad exited 1");
+      expect(outcome.payload).toEqual({
+        error: GRAPH_MODELING_FAILURE_MESSAGE
+      });
+      // The compare page reads `diffError` straight into its markup, so the
+      // recorded failure is the same short sentence, not rad's output.
+      expect(harness.state.diffError).toBe(GRAPH_MODELING_FAILURE_MESSAGE);
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] modeling failed: rad exited 1"
+      ]);
     });
 
     it("leaves the diff error alone when a newer selection already replaced it", async () => {
@@ -1296,7 +1350,7 @@ describe("graph planning workflows", () => {
       expect(outcome.status).toBe(400);
       expect(outcome.kind).toBe("json");
       expect(outcome.payload).toEqual({
-        error: "recipe pack fetch failed: 502"
+        error: GRAPH_MODELING_FAILURE_MESSAGE
       });
       expect(harness.recipePackCalls).toEqual(["azure"]);
       // The resolution stage must never run on a pack that failed to load.
@@ -1304,13 +1358,18 @@ describe("graph planning workflows", () => {
       expect(harness.state.plannedRepo).toBeUndefined();
       expect(harness.state.resolvedRecipes).toBeUndefined();
       expect(harness.state.activeGraphView).toBeUndefined();
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] modeling failed: recipe pack fetch failed: 502"
+      ]);
+      // The progress panel is part of the graph surface, so the failed stage
+      // carries the same sentence the response does.
       expect(
         harness.state.graphProgressRecords?.planned?.graphBuildEvents.at(-1)
       ).toEqual({
         sequence: 6,
         stage: "resolving_recipes",
         state: "failed",
-        detail: "recipe pack fetch failed: 502"
+        detail: GRAPH_MODELING_FAILURE_MESSAGE
       });
     });
 
@@ -1322,7 +1381,9 @@ describe("graph planning workflows", () => {
       const outcome = await harness.run("planGraph", planBody);
 
       expect(outcome.status).toBe(400);
-      expect(outcome.payload).toEqual({ error: "recipe outputs unavailable" });
+      expect(outcome.payload).toEqual({
+        error: GRAPH_MODELING_FAILURE_MESSAGE
+      });
       expect(harness.recipeResolutions).toHaveLength(1);
       expect(harness.state.plannedRepo).toBeUndefined();
       expect(harness.state.plannedProvider).toBeUndefined();
@@ -1337,10 +1398,15 @@ describe("graph planning workflows", () => {
       const outcome = await harness.run("planGraph", planBody);
 
       expect(outcome.status).toBe(400);
-      expect(outcome.payload).toEqual({ error: "app.bicep lookup failed" });
+      expect(outcome.payload).toEqual({
+        error: GRAPH_MODELING_FAILURE_MESSAGE
+      });
       expect(harness.order).toEqual(["select:main"]);
       expect(harness.handoffs).toEqual([]);
       expect(harness.state.plannedRepo).toBeUndefined();
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] modeling failed: app.bicep lookup failed"
+      ]);
     });
 
     it("surfaces a compilation failure as 400 after staging and commits no planned state", async () => {
@@ -1352,8 +1418,13 @@ describe("graph planning workflows", () => {
 
       expect(outcome.status).toBe(400);
       expect(outcome.payload).toEqual({
-        error: "rad bicep build-graph exited 1"
+        error: GRAPH_MODELING_FAILURE_MESSAGE
       });
+      // rad's Bicep diagnostics are the exact text issue #475 kept out of the
+      // graph surface: they survive only in the server log.
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] modeling failed: rad bicep build-graph exited 1"
+      ]);
       expect(harness.order).toEqual([
         "select:main",
         "stage:main",
@@ -1363,7 +1434,7 @@ describe("graph planning workflows", () => {
       expect(harness.state.plannedRepo).toBeUndefined();
     });
 
-    it("surfaces a non-Error rejection as its string form", async () => {
+    it("logs a non-Error rejection in its string form", async () => {
       const harness = planHarness({
         recipePackThrows: "recipe pack offline" as unknown as Error
       });
@@ -1371,7 +1442,12 @@ describe("graph planning workflows", () => {
       const outcome = await harness.run("planGraph", planBody);
 
       expect(outcome.status).toBe(400);
-      expect(outcome.payload).toEqual({ error: "recipe pack offline" });
+      expect(outcome.payload).toEqual({
+        error: GRAPH_MODELING_FAILURE_MESSAGE
+      });
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] modeling failed: recipe pack offline"
+      ]);
     });
   });
 

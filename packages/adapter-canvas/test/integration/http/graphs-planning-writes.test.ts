@@ -4,7 +4,10 @@ import { computeGraphDiff } from "@radius-project/core";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createGraphsPlanningWritesRoutes } from "../../../src/server/routes/graphs-planning-writes.js";
-import { createGraphPlanningWorkflows } from "../../../src/server/routes/graph-workflows.js";
+import {
+  createGraphPlanningWorkflows,
+  GRAPH_MODELING_FAILURE_MESSAGE
+} from "../../../src/server/routes/graph-workflows.js";
 import type {
   AppBicepSelection,
   GraphPipeline
@@ -26,10 +29,13 @@ import type { CanvasServerContainer } from "../../../src/server/create-canvas-se
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
 
 let container: CanvasServerContainer | undefined;
+// Everything the workflows sent to the server log instead of the canvas.
+let loggedErrors: string[] = [];
 
 afterEach(async () => {
   await container?.stopAll();
   container = undefined;
+  loggedErrors = [];
 });
 
 interface PipelineScript {
@@ -134,6 +140,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         optionalString: (value) => (typeof value === "string" ? value : ""),
         errorMessage: (error) =>
           error instanceof Error ? error.message : String(error),
+        logError: (message) => {
+          loggedErrors.push(message);
+        },
         now: () => nowMs
       })
     })
@@ -237,7 +246,7 @@ describe("graphs-planning writes real-loopback HIT", () => {
     );
   });
 
-  it("answers 400 for a malformed body on every write route", async () => {
+  it("answers 400 with the modeling failure message for a malformed body on every write route", async () => {
     start();
     const entry = await container!.getOrCreate("panel-a");
 
@@ -249,10 +258,14 @@ describe("graphs-planning writes real-loopback HIT", () => {
       const response = await post(entry.baseUrl, path, "{not json");
       expect(response.status).toBe(400);
       expect(response.headers.get("content-type")).toBe("application/json");
-      expect(((await response.json()) as { error: string }).error).toContain(
-        "JSON"
-      );
+      expect(await response.json()).toEqual({
+        error: GRAPH_MODELING_FAILURE_MESSAGE
+      });
     }
+    expect(loggedErrors).toHaveLength(3);
+    expect(loggedErrors.every((message) => message.includes("JSON"))).toBe(
+      true
+    );
   });
 
   it("plans the graph through the recipe pack over a real socket", async () => {

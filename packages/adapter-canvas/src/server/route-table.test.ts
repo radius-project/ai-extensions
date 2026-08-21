@@ -249,6 +249,7 @@ const productionHandlers = {
       record: () => ({}),
       optionalString: () => "",
       errorMessage: (error) => String(error),
+      logError: () => {},
       now: () => 0
     })
   }),

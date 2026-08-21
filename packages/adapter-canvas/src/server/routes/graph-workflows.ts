@@ -38,6 +38,16 @@ const MISSING_ENTRY_PAYLOAD = {
 const GENERATING_APP_BICEP_MESSAGE =
   "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.";
 
+// What the canvas says when modeling fails. The thrown detail is `rad`'s raw
+// compile output — pages of Bicep diagnostics with file offsets into
+// .radius/app.bicep — and the graph pages render a failure as graph content, so
+// forwarding it puts a compiler transcript where the application graph belongs
+// (issue #475). A failed compile is a defect in the generated model rather than
+// something the user acts on in the graph, so the response carries one sentence
+// and the detail goes to the server log through `logError`.
+export const GRAPH_MODELING_FAILURE_MESSAGE =
+  "Radius could not build the application graph from .radius/app.bicep. Ask Copilot to review the application model, then try again.";
+
 // `bare` responses are written without a `Content-Type` header, exactly as the
 // legacy branches wrote them: the missing-entry 503 on all three routes, and
 // load-graph's pre-compile 409. Every other response sets the header first.
@@ -131,6 +141,9 @@ export interface GraphWorkflowDependencies<
   record(value: unknown): Record<string, unknown>;
   optionalString(value: unknown): string;
   errorMessage(error: unknown): string;
+  // Server-side diagnostics sink. Modeling failures are reported to the canvas
+  // as one sentence, so this is the only place their detail survives.
+  logError(message: string): void;
   // Wall clock for the build record's elapsed time.
   now(): number;
 }
@@ -313,9 +326,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     try {
       outcome = await run();
     } catch (e) {
-      const error = dependencies.errorMessage(e);
-      hooks.onError(error);
-      outcome = json(400, { error });
+      dependencies.logError(
+        `[radius graph] modeling failed: ${dependencies.errorMessage(e)}`
+      );
+      hooks.onError(GRAPH_MODELING_FAILURE_MESSAGE);
+      outcome = json(400, { error: GRAPH_MODELING_FAILURE_MESSAGE });
     }
     const state = hooks.state();
     if (state) {

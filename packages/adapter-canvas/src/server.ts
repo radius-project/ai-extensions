@@ -874,6 +874,7 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   record,
   optionalString,
   errorMessage,
+  logError: (message) => console.error(message),
   now: () => Date.now()
 });
 
