@@ -196,16 +196,35 @@ describe("evaluateAppModelFreshness", () => {
     expect(result.requiresConfirmation).toBe(false);
   });
 
-  it("requires confirmation when the model was edited after generation", () => {
+  // An edit on its own is not a reason to regenerate. The source and the
+  // generator still match, so the model describes the current source, and
+  // reporting it would ask the user to justify their own edit on every open.
+  it("leaves a hand edit alone when nothing else calls for a regeneration", () => {
     const result = evaluateAppModelFreshness({
       ...current,
       model: `${MODEL}// hand edit\n`,
       originText: serializeAppOrigin(origin())
     });
 
-    expect(result.status).toBe("edited");
+    expect(result.status).toBe("up-to-date");
+    expect(result.stale).toBe(false);
+    expect(result.requiresConfirmation).toBe(false);
+    expect(result.reason).toContain("edited after it was generated");
+  });
+
+  it("requires confirmation when a hand-edited model also needs regenerating", () => {
+    const result = evaluateAppModelFreshness({
+      ...current,
+      sourceChanged: true,
+      model: `${MODEL}// hand edit\n`,
+      originText: serializeAppOrigin(origin())
+    });
+
+    expect(result.status).toBe("manually-edited");
     expect(result.stale).toBe(true);
     expect(result.requiresConfirmation).toBe(true);
+    expect(result.reason).toContain("the source has changed");
+    expect(result.reason).toContain("would discard those edits");
   });
 
   it("does not call a line-ending-only difference an edit", () => {
@@ -322,7 +341,7 @@ describe("evaluateAppModelFreshness", () => {
         model: `${MODEL}// hand edit\n`,
         originText: serializeAppOrigin(origin())
       }).status
-    ).toBe("edited");
+    ).toBe("manually-edited");
   });
 
   it.each([

@@ -305,8 +305,9 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.requiresConfirmation).toBe(false);
   });
 
-  it("reports a hand-edited model as requiring confirmation", async () => {
+  it("reports a hand-edited stale model as requiring confirmation", async () => {
     const { resolveAppModelStatus } = helpers({
+      sourceChangedSince: true,
       bicepByRepoBranch: { "workspace:acme/widgets@main": `${MODEL}\n// edit` },
       filesByRepoBranch: {
         [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: origin()
@@ -320,8 +321,28 @@ describe("resolveAppModelStatus", () => {
       WORKSPACE_STATE
     );
 
-    expect(status.freshness.status).toBe("edited");
+    expect(status.freshness.status).toBe("manually-edited");
     expect(status.freshness.requiresConfirmation).toBe(true);
+  });
+
+  it("stays quiet about a hand edit when nothing else needs regenerating", async () => {
+    const { resolveAppModelStatus } = helpers({
+      sourceChangedSince: false,
+      bicepByRepoBranch: { "workspace:acme/widgets@main": `${MODEL}\n// edit` },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: origin()
+      },
+      headCommits: { "workspace:/workspace": COMMIT }
+    });
+
+    const status = await resolveAppModelStatus(
+      "acme/widgets",
+      "main",
+      WORKSPACE_STATE
+    );
+
+    expect(status.freshness.stale).toBe(false);
+    expect(status.freshness.requiresConfirmation).toBe(false);
   });
 
   it("fails open when the origin record cannot be read", async () => {

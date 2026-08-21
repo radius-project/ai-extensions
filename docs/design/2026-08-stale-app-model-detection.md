@@ -53,17 +53,21 @@ The file is JSON because only code reads and writes it, so `JSON.parse` is enoug
 
 ### Checking the app model
 
-Five checks run in order. The first one that fails decides what happens.
+Four checks run in order, and the first one that fails decides what happens. A fifth question, whether the file was manually edited after we generated it, is asked last and only changes the answer when one of the four already failed.
 
-| Check                                 | If it fails                         |
-|---------------------------------------|-------------------------------------|
-| Does an app model exist?              | `missing`, so the skill writes one  |
-| Does its origin record parse?         | `unrecorded`, so regenerate         |
-| Does the fingerprint match the file?  | `edited`, so ask before overwriting |
-| Has source changed since it was made? | `source-changed`, so regenerate     |
-| Is the same skill installed?          | `generator-changed`, so regenerate  |
+| Check                                 | If it fails                                  |
+|---------------------------------------|----------------------------------------------|
+| Does an app model exist?              | `missing`, so the skill writes one           |
+| Does its origin record parse?         | `unrecorded`, so regenerate                  |
+| Has source changed since it was made? | `source-changed`, so regenerate              |
+| Is the same skill installed?          | `generator-changed`, so regenerate           |
+| Was it manually edited since?         | `manually-edited`, so ask before overwriting |
 
-If all five pass, the app model is current and the view renders it.
+If all of them pass, the app model is current and the view renders it.
+
+A manual edit is checked against the others rather than on its own, because on its own it is not a reason to regenerate anything. If the source and the skill both still match, the app model describes the current source, and the only thing we cannot say about it is that we wrote it. Reporting that would ask the user to justify their own edit every time they open a graph, forever, because an edit is permanent and there is no way for them to accept it. The edit only starts to matter once something else already calls for a regeneration, which is the moment the overwrite would cost them work and their answer changes what we do.
+
+It is not what keeps a broken app model out of the view either. `rad app graph` compiles the app model to build the graph, so a manual edit that breaks the Bicep fails the build and puts the compiler's own error on the graph surface, which tells the user more than a warning from us would.
 
 `evaluateAppModelFreshness` in `packages/core/src/modeling/app-origin.ts` does the deciding and nothing else. It is handed the app model text, the origin record, and the answers above, and returns one of those results. Anything it cannot be told is skipped rather than counted as a failure.
 
@@ -76,12 +80,12 @@ The canvas can already render a graph for a branch other than the one the worksp
 | Situation                                                                                | What happens                                                                                                                        |
 |------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
 | Source or skill changed, or there is no origin record, on the branch the workspace is on | The graph waits. The skill regenerates the app model, then the view opens with a current one.                                       |
-| The app model was edited by hand after it was generated                                  | The view opens. The agent explains what would be lost and asks before regenerating, and offers to fix the problem in place instead. |
+| Any of those, on an app model that was also manually edited                              | The view opens. The agent explains what would be lost and asks before regenerating, and offers to fix the problem in place instead. |
 | Any stale app model on another branch                                                    | The view opens with a note. Modeling only writes the local working tree, so there is nothing we can regenerate.                     |
 
 The second and third rows still open the view because the file on disk is the one that would be deployed, so showing it is the honest thing to do. Blocking those would also leave the user with nothing they can act on.
 
-Only a hand edit earns that question. A model with no origin record is regenerated without asking: nothing about it shows a person ever touched it, and every model written before records existed would otherwise prompt on its first graph open, which is the whole installed base.
+Only a manual edit earns that question. An app model with no origin record is regenerated without asking: nothing about it shows a person ever touched it, and every app model written before records existed would otherwise prompt on its first graph open, which is the whole installed base.
 
 Two places in the code handle this. `evaluateAppBicepHook` holds the graph back when regenerating is safe. `maybeHandoffAppBicep` covers everything else, including openings the first one never sees, such as a reload after source links are attached, or the user simply clicking the panel open. Without it, those openings would quietly show a stale app model, which is the original problem in a different place.
 

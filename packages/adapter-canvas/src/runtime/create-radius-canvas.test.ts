@@ -771,7 +771,7 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     ).resolves.toMatchObject({ title: "Radius" });
   });
 
-  it("asks the user before regenerating a hand-edited workspace model", async () => {
+  it("asks the user before regenerating a hand-edited stale workspace model", async () => {
     const model = "resource db {}";
     const { canvas, deps } = setup({
       bicepByRepoBranch: { "workspace:acme/widgets@main": `${model}\n// edit` },
@@ -784,7 +784,8 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
             appBicepHash: hashAppBicep(model)
           })
       },
-      headCommits: { "workspace:/workspace": "a".repeat(40) }
+      headCommits: { "workspace:/workspace": "b".repeat(40) },
+      sourceChangedSince: true
     });
     const session = deps.session.get();
 
@@ -799,9 +800,40 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(session.send).toHaveBeenCalledTimes(1);
     const message = (session.send as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as { prompt: string; displayPrompt: string };
-    expect(message.prompt).toContain("changed after it was generated");
+    expect(message.prompt).toContain("edited after it was generated");
     expect(message.prompt).toContain("would be lost");
     expect(message.displayPrompt).toContain("acme/widgets");
+  });
+
+  // A hand edit is permanent and the user cannot accept it, so raising it while
+  // the model is otherwise current would ask the same question every session.
+  it("says nothing about a hand edit that needs no regeneration", async () => {
+    const model = "resource db {}";
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": `${model}\n// edit` },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
+          serializeAppOrigin({
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: "a".repeat(40),
+            skillVersion: "0.1.0-test",
+            appBicepHash: hashAppBicep(model)
+          })
+      },
+      headCommits: { "workspace:/workspace": "a".repeat(40) },
+      sourceChangedSince: false
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).not.toHaveBeenCalled();
   });
 
   // Every model written before origin records existed has no record, so asking
@@ -1040,7 +1072,7 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(session.send).toHaveBeenCalledTimes(2);
     expect(
       (session.send as ReturnType<typeof vi.fn>).mock.calls[1][0].prompt
-    ).toContain("changed after it was generated");
+    ).toContain("edited after it was generated");
   });
 
   it("stays quiet when the same problem is seen again", async () => {

@@ -372,7 +372,7 @@ function modelStatus(
       status,
       stale: status !== "up-to-date" && status !== "missing",
       requiresConfirmation:
-        overrides.requiresConfirmation ?? status === "edited",
+        overrides.requiresConfirmation ?? status === "manually-edited",
       reason: overrides.reason ?? `because it is ${status}`,
       origin:
         overrides.sourceCommit === undefined ?
@@ -786,7 +786,7 @@ describe("evaluateAppBicepHook", () => {
     const deps = makeDeps({
       state: { contextRepo: "a/b" },
       appModelStatus: vi.fn(async (repo: string, branch: string) =>
-        modelStatus(repo, branch, { status: "edited" })
+        modelStatus(repo, branch, { status: "manually-edited" })
       )
     });
 
@@ -997,14 +997,16 @@ describe("appModelRefreshReminder", () => {
 
   it("omits the repo phrase when the repo is unknown", () => {
     expect(
-      appModelRefreshReminder(modelStatus("", "feat", { status: "edited" }))
+      appModelRefreshReminder(
+        modelStatus("", "feat", { status: "manually-edited" })
+      )
     ).toContain("The application model on branch `feat`");
   });
 });
 
 describe("appModelUnverifiedPrompt", () => {
   const status = modelStatus("octo/app", "feat", {
-    status: "edited",
+    status: "manually-edited",
     reason: "the model no longer matches its origin record"
   });
 
@@ -1020,7 +1022,9 @@ describe("appModelUnverifiedPrompt", () => {
 
   it("omits the repo phrase when the repo is unknown", () => {
     expect(
-      appModelUnverifiedPrompt(modelStatus("", "feat", { status: "edited" }))
+      appModelUnverifiedPrompt(
+        modelStatus("", "feat", { status: "manually-edited" })
+      )
     ).toContain("The Radius graph rendered");
   });
 

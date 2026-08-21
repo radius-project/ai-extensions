@@ -253,11 +253,13 @@ function resolveTargetBranches(
 //   • A model on a branch that is not the workspace's. Refreshing it would need
 //     a commit and a push, so blocking the view would strand the user with no
 //     action the skill is allowed to take.
-//   • A model that was changed after it was generated. Overwriting it destroys
-//     the user's own work, so it needs their agreement. The canvas raises that
-//     conversation while the graph renders, rather than blocking the view on it
-//     here. A model with no record at all is not in this group: it is
-//     regenerated like any other untrustworthy model, without asking.
+//   • A model that needs regenerating AND was edited after it was generated.
+//     Overwriting it destroys the user's own work, so it needs their agreement.
+//     The canvas raises that conversation while the graph renders, rather than
+//     blocking the view on it here. A model with no record at all is not in this
+//     group: it is regenerated like any other untrustworthy model, without
+//     asking. Nor is an edit on a model that is otherwise current, which is not
+//     reported at all.
 export async function evaluateAppBicepHook(
   input: AppBicepHookInput,
   deps: AppBicepHookDependencies
@@ -481,15 +483,16 @@ export function appModelRefreshMessage(status: AppModelStatus): HandoffMessage {
   };
 }
 
-// Prompt sent when a graph canvas renders a model this extension cannot prove it
-// generated, because it was hand-edited after generation.
+// Prompt sent when a graph canvas renders a model that needs regenerating AND
+// was hand-edited after generation, so the refresh would take work with it.
 // The view is NOT blocked for these: the file on disk is what would deploy, so it
 // is the honest thing to render. But regenerating would destroy content the user
-// may have written deliberately, so the refresh is offered rather than taken.
+// wrote deliberately, so the refresh is offered rather than taken. A hand edit on
+// a model that needs no refresh never reaches here, and is not mentioned at all.
 export function appModelUnverifiedPrompt(status: AppModelStatus): string {
   const where = status.repo ? ` for ${status.repo}` : "";
   return [
-    `The Radius graph${where} rendered from the existing .radius/app.bicep on branch \`${status.branch}\`, but that model was changed after it was generated.`,
+    `The Radius graph${where} rendered from the existing .radius/app.bicep on branch \`${status.branch}\`, but that model needs to be regenerated and was edited after it was generated.`,
     "",
     status.freshness.reason,
     "",
