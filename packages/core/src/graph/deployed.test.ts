@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   deployStatusKeys,
   lookupDeployStatus,
+  mergeDeployedGraphMetadata,
   projectDeployedGraph
 } from "./deployed.js";
 import type { DeployStatus } from "./deployed.js";
@@ -40,6 +41,25 @@ describe("deployStatusKeys", () => {
     expect(deployStatusKeys({ name: "solo" })).toEqual(["solo"]);
     expect(deployStatusKeys({ id: "  " })).toEqual([]);
     expect(deployStatusKeys(null)).toEqual([]);
+  });
+
+  it("adds exact output ids before weaker name keys and removes duplicates", () => {
+    expect(
+      deployStatusKeys({
+        id: "parent",
+        name: "api",
+        type: "Radius.Compute/containers",
+        outputResourceIds: ["deployment", "service", "deployment", null],
+        outputResources: [{ id: "service" }, { id: "secret" }, {}]
+      })
+    ).toEqual([
+      "parent",
+      "deployment",
+      "service",
+      "secret",
+      "api|radius.compute/containers",
+      "api"
+    ]);
   });
 });
 
@@ -81,7 +101,7 @@ describe("lookupDeployStatus", () => {
 });
 
 describe("projectDeployedGraph", () => {
-  it("strips output resources from every node", () => {
+  it("retains cloned output metadata without expanding the topology", () => {
     const resources = [
       makeResource("Radius.Compute/containers", "api", {
         outputResources: [
@@ -90,8 +110,12 @@ describe("projectDeployedGraph", () => {
       })
     ];
     const projected = projectDeployedGraph(resources);
-    expect(projected[0].outputResources).toEqual([]);
-    // The input is never mutated.
+    expect(projected[0].outputResources).toEqual([
+      { id: "/subscriptions/x", type: "Microsoft.Web/sites" }
+    ]);
+    projected[0].outputResources[0].type = "changed";
+    // The input is never mutated, including its nested metadata.
+    expect(resources[0].outputResources[0].type).toBe("Microsoft.Web/sites");
     expect(resources[0].outputResources).toHaveLength(1);
   });
 
@@ -174,5 +198,116 @@ describe("projectDeployedGraph", () => {
   it("returns an empty array for non-array input", () => {
     expect(projectDeployedGraph(undefined as any)).toEqual([]);
     expect(projectDeployedGraph(null as any)).toEqual([]);
+  });
+});
+
+describe("mergeDeployedGraphMetadata", () => {
+  const modeled = [
+    makeResource("Radius.Compute/containers", "api", {
+      outputResources: [{ id: "planned", type: "apps/Deployment" }],
+      connections: [{ id: "db", direction: "Outbound" }]
+    }),
+    makeResource("Radius.Data/mySqlDatabases", "db")
+  ];
+
+  it.each([
+    [
+      "array",
+      [
+        {
+          ...modeled[0],
+          outputResources: [
+            {
+              id: "deployed",
+              type: "apps/Deployment",
+              portalUrl: "https://k8s"
+            }
+          ]
+        }
+      ]
+    ],
+    [
+      "wrapped object",
+      {
+        resources: [
+          {
+            ...modeled[0],
+            outputResources: [
+              {
+                id: "deployed",
+                type: "apps/Deployment",
+                portalUrl: "https://k8s"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  ])(
+    "merges explicit output metadata from a deployed %s",
+    (_name, deployed) => {
+      const merged = mergeDeployedGraphMetadata(modeled, deployed);
+      expect(merged[0].outputResources).toEqual([
+        {
+          id: "deployed",
+          type: "apps/Deployment",
+          portalUrl: "https://k8s"
+        }
+      ]);
+      expect(merged.map((resource) => resource.id)).toEqual(
+        modeled.map((resource) => resource.id)
+      );
+      expect(merged[0].connections).toEqual(modeled[0].connections);
+    }
+  );
+
+  it("matches parents only by exact id and preserves legacy metadata on misses", () => {
+    const merged = mergeDeployedGraphMetadata(modeled, {
+      resources: [
+        {
+          id: "different-id",
+          name: "api",
+          type: "Radius.Compute/containers",
+          outputResources: [{ id: "wrong", type: "Microsoft.Web/sites" }]
+        }
+      ]
+    });
+    expect(merged[0].outputResources).toEqual(modeled[0].outputResources);
+  });
+
+  it("keeps the first duplicate parent and never mutates either input", () => {
+    const first = {
+      ...modeled[0],
+      outputResources: [{ id: "first", type: "apps/Deployment" }]
+    };
+    const second = {
+      ...modeled[0],
+      outputResources: [{ id: "second", type: "core/Service" }]
+    };
+    const merged = mergeDeployedGraphMetadata(modeled, [first, second]);
+    merged[0].outputResources[0].type = "changed";
+    merged[0].connections[0].direction = "Inbound";
+    expect(first.outputResources[0].type).toBe("apps/Deployment");
+    expect(modeled[0].connections[0].direction).toBe("Outbound");
+  });
+
+  it("handles malformed inputs without guessing", () => {
+    expect(mergeDeployedGraphMetadata(undefined as any, [])).toEqual([]);
+    const merged = mergeDeployedGraphMetadata(modeled, {
+      resources: "invalid"
+    });
+    expect(merged[0].outputResources).toEqual(modeled[0].outputResources);
+    expect(merged[1].outputResources).toEqual([]);
+    expect(mergeDeployedGraphMetadata([{ name: "no-id" }], null)).toEqual([
+      { name: "no-id", connections: [], outputResources: [] }
+    ]);
+  });
+
+  it("ignores malformed deployed parents and output collections", () => {
+    const merged = mergeDeployedGraphMetadata(modeled, [
+      { name: "missing-id", outputResources: [{ id: "ignored" }] },
+      { id: modeled[0].id, outputResources: "invalid" }
+    ]);
+    expect(merged[0].outputResources).toEqual(modeled[0].outputResources);
   });
 });
