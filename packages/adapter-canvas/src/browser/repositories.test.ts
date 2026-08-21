@@ -1200,6 +1200,22 @@ describe("planned primary button state", () => {
     }
   );
 
+  it("blocks deployment while the selected plan is updating", () => {
+    const { browser, button, created } = plannedButtons();
+    created["planned-app"].value = "store";
+    created["planned-branch"].value = "feature";
+    created["planned-env"].value = "dev";
+    const state = readyPlanState();
+    state.planPending = true;
+
+    applyPlanEnvState(browser.context, state, true, false);
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "deployment plan is still updating"
+    );
+  });
+
   it("does not block a different application or environment pair", () => {
     const { browser, button, created } = plannedButtons();
     created["planned-app"].value = "store";

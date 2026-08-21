@@ -696,6 +696,66 @@ describe("initializePlannedGraphPage", () => {
     expect(button.disabled).toBe(true);
   });
 
+  it("keeps deployment closed when deployment states resolve during the plan debounce", async () => {
+    const { browser, button, branch } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    const deployments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      `${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`,
+      () => deployments.promise
+    );
+    browser.net.handle("/api/plan-graph", () => jsonResponse({ reload: true }));
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    deployments.resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "deployment plan is still updating"
+    );
+
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+    expect(button.disabled).toBe(false);
+  });
+
+  it("keeps deployment closed when deployment states resolve during an active plan", async () => {
+    const { browser, button, branch } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    const deployments = createDeferred<HttpResponse>();
+    const plan = createDeferred<HttpResponse>();
+    browser.net.handle(
+      `${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`,
+      () => deployments.promise
+    );
+    browser.net.handle("/api/plan-graph", () => plan.promise);
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    branch.value = "another";
+    branch.dispatch("change");
+    browser.clock.tick(0);
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    deployments.resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "deployment plan is still updating"
+    );
+
+    plan.resolve(jsonResponse({ reload: true }));
+    await flushPromises();
+    expect(button.disabled).toBe(false);
+  });
+
   it("abandons a queued plan when the page is torn down before it drains", async () => {
     const { browser, branch } = fixture();
     let calls = 0;

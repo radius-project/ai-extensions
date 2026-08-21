@@ -98,6 +98,7 @@ export interface PlanState {
   envsStale: boolean;
   deploymentsStale: boolean;
   deploymentsPending: boolean;
+  planPending: boolean;
   requestFailed: boolean;
   environmentStatuses: Record<string, string>;
   deploymentStatuses: Record<string, string>;
@@ -109,6 +110,7 @@ export function createPlanState(): PlanState {
     envsStale: false,
     deploymentsStale: false,
     deploymentsPending: false,
+    planPending: false,
     requestFailed: false,
     environmentStatuses: {},
     deploymentStatuses: {}
@@ -759,6 +761,7 @@ export function applyPlanEnvState(
         !(application && branch && environment) ||
         !environmentReady ||
         state.deploymentsPending ||
+        state.planPending ||
         state.deploymentsStale ||
         deploymentBlocked;
       if (!application) {
@@ -781,6 +784,11 @@ export function applyPlanEnvState(
         button.setAttribute(
           "title",
           "Deployment states are still loading. Deployment is available once they arrive."
+        );
+      } else if (state.planPending) {
+        button.setAttribute(
+          "title",
+          "The deployment plan is still updating. Deployment is available once it finishes."
         );
       } else if (state.deploymentsStale) {
         button.setAttribute(

@@ -250,6 +250,7 @@ export function initializePlannedGraphPage(
     run,
     () => {
       if (entry.active) {
+        plan.planPending = false;
         applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
       }
     },
@@ -260,6 +261,7 @@ export function initializePlannedGraphPage(
   // deploy does not exist yet, and the request may still fail.
   const queue = (immediate = false): void => {
     plan.requestFailed = false;
+    plan.planPending = true;
     if (button && button.dataset.mode === "deploy") button.disabled = true;
     schedule(immediate);
   };
