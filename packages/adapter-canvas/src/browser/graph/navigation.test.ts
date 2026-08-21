@@ -94,7 +94,7 @@ describe("graphPageUrl", () => {
 });
 
 describe("graph navigation", () => {
-  it("tears down the outgoing page, swaps content, focuses, and pushes once", async () => {
+  it("tears down the outgoing page, swaps content, preserves keyboard focus, and pushes once", async () => {
     const harness = setup();
     harness.browser.net.handle("/?page=planned", () => {
       // The outgoing page is torn down before the request goes out, so its
@@ -119,7 +119,7 @@ describe("graph navigation", () => {
     let prevented = 0;
 
     harness.navigation.navigateTo(
-      { preventDefault: () => prevented++ },
+      { detail: 0, preventDefault: () => prevented++ },
       "planned"
     );
     await flushPromises();
@@ -131,6 +131,28 @@ describe("graph navigation", () => {
     expect(harness.browser.nav.pushed).toEqual(["?page=planned"]);
     expect(harness.browser.nav.assigned).toEqual([]);
     expect(liveActive.focusCount).toBe(1);
+  });
+
+  it("does not transfer focus after pointer navigation", async () => {
+    const harness = setup();
+    harness.browser.net.handle("/?page=planned", () =>
+      textResponse("<html>planned</html>")
+    );
+    harness.browser.nav.parsed = () =>
+      parsedPage("<div>new content</div>", "<a>planned</a>", "planned");
+    const liveActive = createFakeElement("live-active", "a");
+    harness.browser.document.addSelector(
+      `#${GRAPH_NAV_ID} [${GRAPH_PAGE_ATTRIBUTE}="planned"]`,
+      liveActive
+    );
+
+    harness.navigation.navigateTo(
+      { detail: 1, preventDefault() {} },
+      "planned"
+    );
+    await flushPromises();
+
+    expect(liveActive.focusCount).toBe(0);
   });
 
   it("re-executes incoming inline scripts and leaves an absent nav alone", async () => {
