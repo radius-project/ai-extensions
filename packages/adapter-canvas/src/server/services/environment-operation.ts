@@ -4,6 +4,7 @@ import {
   GitHubEnvironmentEnsureError,
   type EnsuredGitHubEnvironment
 } from "./github-environment.js";
+import type { GitHubEnvironmentReadResult } from "./github-environment.js";
 
 export interface EnvironmentOperationRecord {
   operationId: string;
@@ -45,6 +46,10 @@ export interface EnvironmentOperationWorkflowDependencies {
         code: string;
       }
   >;
+  readGitHubJson(
+    apiPath: string,
+    executor: SelectedGhExecutor
+  ): Promise<GitHubEnvironmentReadResult>;
   setCanonicalEnvironment(
     operation: EnvironmentOperationRecord,
     environment: string
@@ -154,6 +159,8 @@ export async function runEnvironmentOperationWorkflow(
     ensured = await ensureGitHubEnvironment({
       repo: operation.repo,
       requestedName: operation.environment,
+      readGitHubJson: (apiPath) =>
+        dependencies.readGitHubJson(apiPath, executor),
       runGh: (args) => executor.run(args)
     });
   } catch (error) {

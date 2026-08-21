@@ -21,7 +21,8 @@ import {
 import {
   ensureGitHubEnvironment,
   GitHubEnvironmentEnsureError,
-  readEnsuredGitHubEnvironment
+  readEnsuredGitHubEnvironment,
+  type GitHubEnvironmentReadResult
 } from "../services/github-environment.js";
 import type { WorkflowTempFilePort } from "./create-environment-workflow-committer.js";
 import type {
@@ -92,6 +93,10 @@ export interface CreateEnvironmentDependencies
   preflightGhcrPackageWriteAccess(
     executor?: SelectedGhExecutor
   ): Promise<GhcrPreflightResult>;
+  readGitHubJson(
+    apiPath: string,
+    executor?: SelectedGhExecutor
+  ): Promise<GitHubEnvironmentReadResult>;
   bootstrapGHCRStatePackage(input: {
     targetRepository: string;
     registry: string;
@@ -263,6 +268,13 @@ export async function handleCreateEnvironment(
       );
     }
     await selectedExecutor.verifyIdentity();
+    deleteGitHubEnvironmentRunner = async (args) => {
+      const result = await selectedExecutor.run(args);
+      if (result.code !== 0 && result.code !== "0") {
+        const detail = (result.stderr || result.stdout || "").trim();
+        throw new Error(detail || "GitHub API request failed.");
+      }
+    };
 
     steps = [];
     const rawPush = steps.push.bind(steps);
@@ -295,7 +307,8 @@ export async function handleCreateEnvironment(
         runAz:
           provider === "azure" ?
             (args: string[]) => dependencies.runAzCommand(args)
-          : null
+          : null,
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner
       });
       respond(failure.status, failure.body);
       return;
@@ -308,7 +321,8 @@ export async function handleCreateEnvironment(
         status: 403,
         error: ghcrPreflight.error,
         code: ghcrPreflight.code,
-        steps
+        steps,
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner
       });
       respond(failure.status, failure.body);
       return;
@@ -324,6 +338,8 @@ export async function handleCreateEnvironment(
       ensuredEnvironment ??= await ensureGitHubEnvironment({
         repo: targetRepo,
         requestedName: envName,
+        readGitHubJson: (apiPath) =>
+          dependencies.readGitHubJson(apiPath, selectedExecutor),
         runGh: (args) => selectedExecutor.run(args)
       });
     } catch (error) {
@@ -352,14 +368,6 @@ export async function handleCreateEnvironment(
       selectedExecutor
     );
     const { runGh, setEnvironmentVariable, runGhWorkflow } = runner;
-
-    deleteGitHubEnvironmentRunner = async (args) => {
-      const result = await runGh(args);
-      if (result.code !== 0 && result.code !== "0") {
-        const detail = (result.stderr || result.stdout || "").trim();
-        throw new Error(detail || "GitHub API request failed.");
-      }
-    };
 
     const fail = async (
       status: number,

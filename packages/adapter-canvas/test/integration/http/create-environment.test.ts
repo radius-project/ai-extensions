@@ -101,6 +101,10 @@ const DEFAULT_GH_RULES: GhRule[] = [
     result: { code: 1, stderr: "HTTP 404: Not Found" }
   },
   {
+    match: /^api \/repos\/octo\/app$/,
+    result: { code: 0, stdout: '{"full_name":"octo/app"}' }
+  },
+  {
     match: /^api --method PUT \/repos\/octo\/app\/environments\/dev$/,
     result: { code: 0, stdout: '{"name":"dev"}' }
   },
@@ -320,6 +324,35 @@ function start(script: Script = {}): Harness {
           credentials: { username: "octo" }
         }
       );
+    },
+    readGitHubJson: async (apiPath, executor) => {
+      const result =
+        executor ?
+          await executor.run(["api", apiPath])
+        : runGhArgs(["api", apiPath]);
+      let json: unknown = null;
+      if (result.stdout.trim()) {
+        try {
+          json = JSON.parse(result.stdout);
+        } catch {
+          return {
+            ok: false,
+            status: null,
+            json: null,
+            stderr: "GitHub returned an invalid JSON response."
+          };
+        }
+      }
+      const statusMatch = result.stderr.match(/\bHTTP\s+(\d{3})\b/i);
+      return {
+        ok: result.code === 0 || result.code === "0",
+        status:
+          result.code === 0 || result.code === "0" ? 200
+          : statusMatch ? Number(statusMatch[1])
+          : null,
+        json,
+        stderr: result.stderr
+      };
     },
     bootstrapGHCRStatePackage: async () => {
       journal.push("bootstrapGHCRStatePackage");
@@ -614,6 +647,57 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
     });
     expect(harness.journal).not.toContain("bootstrapGHCRStatePackage");
   });
+
+  it.each([
+    {
+      name: "repository administration",
+      script: { repoAdminRefusal: "You need admin on octo/app." }
+    },
+    {
+      name: "GHCR package access",
+      script: {
+        ghcrPreflight: {
+          ok: false as const,
+          status: 403 as const,
+          error: "Your token cannot write packages.",
+          code: "ghcr-package-write-required"
+        }
+      }
+    }
+  ])(
+    "provides the GitHub environment cleanup runner to $name preflight finalization",
+    async ({ script }) => {
+      const harness = start({
+        ...script,
+        preparedEnvironment: {
+          requestedName: "dev",
+          canonicalName: "dev",
+          state: "created_candidate"
+        },
+        exerciseCleanupDelete: true,
+        gh: [
+          {
+            match:
+              /^api --method DELETE \/repos\/octo\/app\/environments\/dev$/,
+            result: { code: "0" }
+          }
+        ]
+      });
+
+      const response = await post({
+        repo: "octo/app",
+        environment: "dev",
+        operationEnvironment: "dev",
+        operationId: "op-http"
+      });
+
+      expect(response.status).toBe(403);
+      expect(harness.cleanupErrors).toEqual([]);
+      expect(harness.ghCalls).toContain(
+        "api --method DELETE /repos/octo/app/environments/dev"
+      );
+    }
+  );
 });
 
 describe("create-environment real-loopback HIT: the seven-step workflow", () => {
@@ -884,6 +968,51 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     ).toBe(false);
   });
 
+  it.each([
+    {
+      status: 404,
+      stderr: "HTTP 404: Not Found",
+      detail: "HTTP 404: Not Found"
+    },
+    {
+      status: 403,
+      stderr: "HTTP 403: Resource not accessible",
+      detail: "HTTP 403: Resource not accessible"
+    },
+    {
+      status: null,
+      stderr: "connection closed",
+      detail: "connection closed"
+    }
+  ])(
+    "does not create the environment when repository confirmation fails with status $status",
+    async ({ stderr, detail }) => {
+      const harness = start({
+        gh: [
+          {
+            match: /^api \/repos\/octo\/app$/,
+            result: { code: 1, stderr }
+          }
+        ]
+      });
+
+      const response = await post({ repo: "octo/app" });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: `Could not confirm repository "octo/app" before creating GitHub environment "dev". ${detail}`,
+        code: "create-environment-unhandled"
+      });
+      expect(
+        harness.ghCalls.some((call) => call.startsWith("api --method PUT"))
+      ).toBe(false);
+      expect(harness.ghCalls).toEqual([
+        "api /repos/octo/app/environments/dev",
+        "api /repos/octo/app"
+      ]);
+    }
+  );
+
   it("records candidate provenance when create omits the canonical name", async () => {
     const harness = start({
       gh: [
@@ -909,6 +1038,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     });
     expect(harness.ghCalls).toEqual([
       "api /repos/octo/app/environments/dev",
+      "api /repos/octo/app",
       "api --method PUT /repos/octo/app/environments/dev"
     ]);
   });
@@ -1331,6 +1461,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     );
     expect(harness.ghCalls).toEqual([
       "api /repos/octo/app/environments/dev",
+      "api /repos/octo/app",
       "api --method PUT /repos/octo/app/environments/dev"
     ]);
   });

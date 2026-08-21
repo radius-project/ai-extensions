@@ -315,6 +315,8 @@ const productionHandlers = {
     preflightRepoAdmin: () => Promise.resolve(""),
     preflightGhcrPackageWriteAccess: () =>
       Promise.resolve({ ok: true, credentials: null }),
+    readGitHubJson: () =>
+      Promise.resolve({ ok: true, status: 200, json: {}, stderr: "" }),
     bootstrapGHCRStatePackage: () => Promise.resolve({ visibility: undefined }),
     stateRegistryForEnvironment: () => "",
     getDefaultBranch: () => Promise.resolve("main"),

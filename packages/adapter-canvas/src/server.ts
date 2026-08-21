@@ -1014,6 +1014,8 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
       getGitHubIdentity,
       executor
     ),
+  readGitHubJson: (apiPath, executor) =>
+    runGitHubJsonRequest(apiPath, executor),
   bootstrapGHCRStatePackage: (input) =>
     bootstrapGHCRStatePackage({
       targetRepository: input.targetRepository,
@@ -3828,6 +3830,8 @@ function createInstanceRequestCoordinator(
                 getGitHubIdentity,
                 selectedExecutor
               ),
+            readGitHubJson: (apiPath, selectedExecutor) =>
+              runGitHubJsonRequest(apiPath, selectedExecutor),
             setCanonicalEnvironment: (operation, environment) => {
               setCanonicalEnvironment(operation, environment);
             },

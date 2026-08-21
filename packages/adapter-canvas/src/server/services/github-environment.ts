@@ -4,6 +4,13 @@ export interface GitHubEnvironmentCommandResult {
   stderr: string;
 }
 
+export interface GitHubEnvironmentReadResult {
+  ok: boolean;
+  status?: number | null;
+  json?: unknown;
+  stderr?: string;
+}
+
 export interface EnsuredGitHubEnvironment {
   name: string;
   state: "created_candidate" | "reused";
@@ -46,32 +53,31 @@ function succeeded(result: GitHubEnvironmentCommandResult): boolean {
   return result.code === 0 || result.code === "0";
 }
 
-function isNotFound(result: GitHubEnvironmentCommandResult): boolean {
-  return /\bHTTP\s+404\b/i.test(`${result.stderr}\n${result.stdout}`);
-}
-
 function responseDetail(result: GitHubEnvironmentCommandResult): string {
   return (result.stderr || result.stdout || "").trim();
 }
 
-function parseEnvironmentName(
+function parseEnvironmentName(value: unknown): string | null {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "name" in value &&
+    typeof value.name === "string" &&
+    value.name.trim()
+  ) {
+    return value.name.trim();
+  }
+  return null;
+}
+
+function parseCommandEnvironmentName(
   result: GitHubEnvironmentCommandResult
 ): string | null {
   try {
-    const parsed: unknown = JSON.parse(result.stdout);
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      "name" in parsed &&
-      typeof parsed.name === "string" &&
-      parsed.name.trim()
-    ) {
-      return parsed.name.trim();
-    }
+    return parseEnvironmentName(JSON.parse(result.stdout));
   } catch {
     return null;
   }
-  return null;
 }
 
 export function readEnsuredGitHubEnvironment(
@@ -101,14 +107,15 @@ export function readEnsuredGitHubEnvironment(
 export async function ensureGitHubEnvironment(input: {
   repo: string;
   requestedName: string;
+  readGitHubJson(apiPath: string): Promise<GitHubEnvironmentReadResult>;
   runGh(args: string[]): Promise<GitHubEnvironmentCommandResult>;
 }): Promise<EnsuredGitHubEnvironment> {
   const path =
     `/repos/${input.repo}/environments/` +
     encodeURIComponent(input.requestedName);
-  const lookup = await input.runGh(["api", path]);
-  if (succeeded(lookup)) {
-    const name = parseEnvironmentName(lookup);
+  const lookup = await input.readGitHubJson(path);
+  if (lookup.ok) {
+    const name = parseEnvironmentName(lookup.json);
     if (!name) {
       throw new GitHubEnvironmentEnsureError(
         `GitHub did not report the canonical name for environment "${input.requestedName}".`,
@@ -117,11 +124,22 @@ export async function ensureGitHubEnvironment(input: {
     }
     return { name, state: "reused" };
   }
-  if (!isNotFound(lookup)) {
-    const detail = responseDetail(lookup) || "The GitHub API lookup failed.";
+  if (lookup.status !== 404) {
+    const detail = lookup.stderr?.trim() || "The GitHub API lookup failed.";
     throw new GitHubEnvironmentEnsureError(
       `Could not resolve GitHub environment "${input.requestedName}". ${detail}`,
       "github-environment-lookup-failed"
+    );
+  }
+
+  const repository = await input.readGitHubJson(`/repos/${input.repo}`);
+  if (!repository.ok) {
+    const detail =
+      repository.stderr?.trim() ||
+      "The repository is missing or inaccessible to the selected GitHub account.";
+    throw new GitHubEnvironmentEnsureError(
+      `Could not confirm repository "${input.repo}" before creating GitHub environment "${input.requestedName}". ${detail}`,
+      "github-environment-repository-unavailable"
     );
   }
 
@@ -137,7 +155,7 @@ export async function ensureGitHubEnvironment(input: {
     repo: input.repo,
     name: input.requestedName
   };
-  const name = parseEnvironmentName(created);
+  const name = parseCommandEnvironmentName(created);
   if (!name) {
     throw new GitHubEnvironmentEnsureError(
       `GitHub created environment "${input.requestedName}" but did not report its canonical name. The environment was left in place because Radius cannot prove this request created it.`,

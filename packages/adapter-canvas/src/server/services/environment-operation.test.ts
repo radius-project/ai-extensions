@@ -58,6 +58,31 @@ function dependencies(
         events.push("preflight-ghcr");
         return { ok: true };
       },
+      readGitHubJson: async (apiPath, executor) => {
+        if (apiPath === "/repos/octo/app") {
+          return {
+            ok: true,
+            status: 200,
+            json: { full_name: "octo/app" },
+            stderr: ""
+          };
+        }
+        const result = await executor.run(["api", apiPath]);
+        const statusMatch = result.stderr.match(/\bHTTP\s+(\d{3})\b/i);
+        let json: unknown = null;
+        if (result.stdout.trim()) {
+          json = JSON.parse(result.stdout);
+        }
+        return {
+          ok: result.code === 0 || result.code === "0",
+          status:
+            result.code === 0 || result.code === "0" ? 200
+            : statusMatch ? Number(statusMatch[1])
+            : null,
+          json,
+          stderr: result.stderr
+        };
+      },
       setCanonicalEnvironment: (target, environment) => {
         events.push(`canonical:${environment}`);
         setCanonicalEnvironment(target, environment);
