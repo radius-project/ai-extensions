@@ -160,7 +160,7 @@ export interface CanvasState {
   deploymentMutation?: {
     repo: string;
     environment: string;
-    kind: "deploy" | "delete";
+    kind: "deploy" | "delete" | "abandon";
     expiresAt: number;
     attemptId?: string;
   };

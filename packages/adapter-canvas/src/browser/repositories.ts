@@ -857,7 +857,7 @@ export function createDeployedState(): DeployedEnvState {
   return { hasEnv: false, hasDeployment: false };
 }
 
-export type DeployedMode = "create-env" | "deploy" | "delete";
+export type DeployedMode = "create-env" | "deploy" | "delete" | "abandon";
 
 // Adapt the Deployed primary button to the user's actual setup: no environment
 // at all, an environment without a deployment, or an existing deployment. A
@@ -885,6 +885,7 @@ export function applyDeployedEnvState(
   const mode: DeployedMode =
     environmentsUnavailable ? "deploy"
     : !hasEnv ? "create-env"
+    : hasDeployment && deploymentStatus === "failed" ? "abandon"
     : hasDeployment ? "delete"
     : "deploy";
 
@@ -921,7 +922,7 @@ export function applyDeployedEnvState(
           environmentNotReadyReason(environment, environmentCreationStatus)
         );
       }
-    } else {
+    } else if (mode === "delete") {
       button.textContent =
         pending ? "Deploying…"
         : deleting ? "Deleting…"
@@ -948,6 +949,16 @@ export function applyDeployedEnvState(
           "The current deployment state could not be loaded. Retrying…"
         );
       }
+    } else {
+      button.textContent = "Abandon failed deployment";
+      button.className = "rad-btn rad-btn--danger-outline";
+      button.disabled = !(application && environment) || statesUnavailable;
+      if (statesUnavailable) {
+        button.setAttribute(
+          "title",
+          "The current deployment state could not be loaded. Retrying…"
+        );
+      }
     }
   }
 
@@ -965,6 +976,8 @@ export function applyDeployedEnvState(
         !environmentAllowsDeploy(environmentCreationStatus) ?
           ` The environment (${envLabel}) ${environmentNotReadyPhrase(environmentCreationStatus)}, so this application cannot be deployed to it yet.`
         : ` To deploy this application (${appLabel}) to the environment (${envLabel}), click "Deploy Application".`;
+    } else if (mode === "abandon") {
+      hint.innerHTML = ` The deployment of (${appLabel}) to (${envLabel}) failed. You can stop tracking it, but cloud resources will not be deleted and resources created before the failure may remain.`;
     } else if (pending) {
       hint.innerHTML = ` The application (${appLabel}) is currently being deployed to the environment (${envLabel}). Watch its progress on the Deployments tab.`;
     } else if (deleting) {

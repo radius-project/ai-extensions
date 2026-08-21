@@ -79,7 +79,8 @@ function fixture(options: FixtureOptions = {}) {
     repo,
     branch: branchField,
     graphBranch: graphBranchField,
-    provider: providerField
+    provider: providerField,
+    mutationNonce: "nonce-1"
   });
   const appSelect = createFakeSelect("deployed-app-select");
   const envSelect = createFakeSelect("deployed-env-select");
@@ -313,7 +314,7 @@ describe("initializeDeployedGraphPage", () => {
     );
     await flushPromises();
 
-    expect(createDialog).toHaveBeenCalledTimes(1);
+    expect(createDialog).toHaveBeenCalledTimes(2);
     expect(action.dataset.mode).toBe("delete");
     appSelect.value = "app";
     envSelect.value = "dev";
@@ -321,7 +322,7 @@ describe("initializeDeployedGraphPage", () => {
 
     expect(opens).toEqual([["app", "dev"]]);
     teardown();
-    expect(dialogTeardown).toHaveBeenCalledTimes(1);
+    expect(dialogTeardown).toHaveBeenCalledTimes(2);
   });
 
   it("ignores an invalid delete dialog factory result", async () => {
@@ -1513,6 +1514,162 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.nav.assigned).toEqual(["/?page=deploying"]);
     expect(modal.style.display).toBe("none");
   });
+
+  it("offers a separate abandonment dialog only for a failed deployment and sends its identity", async () => {
+    const { browser, action, appSelect, envSelect, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "failed" }]
+    });
+    const { createDialog, confirm, wasOpened } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse({ outcome: "abandoned" })
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    expect(action.dataset.mode).toBe("abandon");
+    expect(action.textContent).toBe("Abandon failed deployment");
+    expect(createDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variant: "abandon",
+        modalId: "deploy-abandon-modal"
+      })
+    );
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    expect(wasOpened()).toBe(true);
+    confirm();
+    expect(action.textContent).toBe("Abandoning…");
+    await flushPromises();
+
+    const request = browser.net.calls.find(
+      (call) => call.url === "/api/abandon-deployment"
+    );
+    expect(request?.init).toEqual({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Radius-Mutation-Nonce": "nonce-1"
+      },
+      body: JSON.stringify({
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      })
+    });
+    expect(inlineStatus.textContent).toContain(
+      "Cloud resources were not deleted"
+    );
+    expect(inlineStatus.textContent).toContain("may remain");
+    expect(action.dataset.mode).toBe("deploy");
+    expect(browser.nav.assigned).toEqual([]);
+  });
+
+  it("surfaces an abandonment refusal from the server", async () => {
+    const { browser, action, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse({ error: "not failed" }, false, 409)
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    action.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe("not failed");
+    expect(action.dataset.mode).toBe("abandon");
+    expect(action.disabled).toBe(false);
+  });
+
+  it("uses a generic abandonment refusal when the server omits an error", async () => {
+    const { browser, action, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse({}, false, 500)
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    action.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe(
+      "Could not abandon deployment tracking."
+    );
+  });
+
+  it("surfaces a transport-safe abandonment failure and restores the action", async () => {
+    const { browser, action, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      Promise.reject(new Error("secret-shaped detail"))
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    action.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe(
+      "Could not abandon deployment tracking. Please try again."
+    );
+    expect(inlineStatus.textContent).not.toContain("secret-shaped");
+    expect(action.dataset.mode).toBe("abandon");
+    expect(action.disabled).toBe(false);
+    expect(browser.logger.errors).toHaveLength(1);
+  });
+
+  it.each(["success", "failure"] as const)(
+    "ignores a stale abandonment %s after teardown",
+    async (outcome) => {
+      const { browser, action, inlineStatus } = fixture({
+        deployments: [{ app: "app", environment: "dev", status: "failed" }]
+      });
+      const { createDialog, confirm } = createConfirmingDialog();
+      const request = createDeferred<HttpResponse>();
+      browser.net.handle("/api/abandon-deployment", () => request.promise);
+      const teardown = initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+
+      action.dispatch("click");
+      confirm();
+      teardown();
+      if (outcome === "success") {
+        request.resolve(jsonResponse({ outcome: "abandoned" }));
+      } else {
+        request.reject(new Error("stale"));
+      }
+      await flushPromises();
+
+      expect(inlineStatus.textContent).toBe("");
+      expect(browser.logger.errors).toHaveLength(0);
+    }
+  );
 
   it("surfaces a delete failure returned by the server", async () => {
     const { browser, action, appSelect, envSelect, inlineStatus } = fixture();

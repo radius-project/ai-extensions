@@ -1482,6 +1482,42 @@ describe("deployed pane state", () => {
     expect(hint.innerHTML).toContain("Delete Deployment");
   });
 
+  it("offers abandonment only for a failed deployment and warns that resources may remain", () => {
+    const { browser, button, hint } = deployedPage();
+
+    const mode = applyDeployedEnvState(
+      browser.context,
+      createDeployedState(),
+      true,
+      true,
+      "failed",
+      false
+    );
+
+    expect(mode).toBe("abandon");
+    expect(button.textContent).toBe("Abandon failed deployment");
+    expect(button.className).toBe("rad-btn rad-btn--danger-outline");
+    expect(button.disabled).toBe(false);
+    expect(hint.innerHTML).toContain("cloud resources will not be deleted");
+    expect(hint.innerHTML).toContain("may remain");
+  });
+
+  it("fails abandonment closed when the deployment listing is unavailable", () => {
+    const { browser, button } = deployedPage();
+
+    applyDeployedEnvState(
+      browser.context,
+      createDeployedState(),
+      true,
+      true,
+      "failed",
+      true
+    );
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain("could not be loaded");
+  });
+
   it("blocks deletion when the deployment state cannot be read", () => {
     const { browser, button } = deployedPage();
 

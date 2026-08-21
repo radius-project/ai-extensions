@@ -14,6 +14,7 @@ describe("deployedGraphPage", () => {
     expect(html).toContain('id="deployed-app-select"');
     expect(html).toContain('id="deployed-env-select"');
     expect(html).toContain('id="deploy-delete-modal"');
+    expect(html).toContain('id="deploy-abandon-modal"');
     expect(html).toContain('id="deployed-deleting-modal"');
     expect(html).toContain(browserEntryMarker("deployed-graph-page"));
     expect(html.split(browserScript("deployed-graph-page"))).toHaveLength(2);
@@ -21,7 +22,8 @@ describe("deployedGraphPage", () => {
       repo: "octo/app",
       branch: "feature",
       graphBranch: "feature",
-      provider: "azure"
+      provider: "azure",
+      mutationNonce: ""
     });
   });
 
@@ -34,8 +36,20 @@ describe("deployedGraphPage", () => {
       readBrowserPageState(html, "radius-deployed-graph-state")
     ).toMatchObject({
       repo: "octo/app",
-      graphBranch: "worktree"
+      graphBranch: "worktree",
+      mutationNonce: ""
     });
+  });
+
+  it("serializes the browser mutation nonce for abandonment", () => {
+    const html = deployedGraphPage({
+      contextRepo: "octo/app",
+      browserMutationNonce: "nonce-1"
+    });
+
+    expect(
+      readBrowserPageState(html, "radius-deployed-graph-state")
+    ).toMatchObject({ mutationNonce: "nonce-1" });
   });
 
   it("keeps hostile state inert", () => {

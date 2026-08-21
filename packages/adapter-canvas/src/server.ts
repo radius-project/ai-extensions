@@ -217,9 +217,12 @@ import { createDeployMonitorService } from "./server/services/deploy-monitor.js"
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
+import { resolveEnvironmentDeployment } from "./server/services/deployment-resolver.js";
+import type { DeploymentRow } from "./server/services/deployment-resolver.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
+export { resolveDeployStatus } from "./server/services/deployment-resolver.js";
 
 interface CommandResult {
   code: string | number;
@@ -458,31 +461,6 @@ function canvasGraphResources(values: unknown[]): CanvasGraphResource[] {
   });
 }
 
-interface DeploymentRecord {
-  id: string;
-  state: string;
-  runUrl: string;
-  isDeploy: boolean;
-  isDelete: boolean;
-  runStatus: string;
-  runConclusion: string;
-}
-
-interface DeploymentRow {
-  app: string;
-  environment: string;
-  provider: string;
-  status: string;
-  deploymentId: string;
-  runUrl: string;
-}
-
-interface DeployStatusRecord {
-  runConclusion?: string;
-  runStatus?: string;
-  state?: string;
-}
-
 // Composition root for the migrated `liveness-source` family. The handlers
 // receive only the three seams they use; the open handler is read through a
 // getter so the SDK entry can still register it after construction.
@@ -561,13 +539,15 @@ const repositoriesRoutes = createRepositoriesRoutes({
 });
 
 // Composition root for the migrated `deployments` family: the read routes, the
-// destructive POST /api/delete-deployment, and POST /api/deploy, whose
-// multi-stage runtime behavior lives in the deploy services composed below.
+// destructive POST /api/delete-deployment, GitHub-only
+// POST /api/abandon-deployment, and POST /api/deploy, whose multi-stage runtime
+// behavior lives in the deploy services composed below.
 //
 // The listing cache, its TTL and the deploy service are read through getters
 // because all three are declared further down the module and would otherwise be
 // in the temporal dead zone when this object is built at import time.
 const deploymentsRoutes = createDeploymentsRoutes({
+  isValidRepoSlug,
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   triggerDeployRepairHandoff,
   triggerDeployFailureNotice,
@@ -1369,7 +1349,7 @@ const deployListCache = new Map<string, CachedPayload>();
 export interface DeploymentDispatchReservation {
   repo: string;
   environment: string;
-  kind: "deploy" | "delete";
+  kind: "deploy" | "delete" | "abandon";
   expiresAt: number;
   attemptId?: string;
 }
@@ -3235,27 +3215,6 @@ async function resolveRepoAppName(
   return appName;
 }
 
-// Derive the deployment status for a single deploy record from the linked
-// workflow run's completion state, falling back to the deployment-status record
-// when no run information is available.  Exported for unit tests.
-//
-// `rec` must carry: { runConclusion, runStatus, state }
-// Returns one of: "success" | "failed" | "pending"
-export function resolveDeployStatus(rec: DeployStatusRecord): string {
-  if (rec.runConclusion === "success") return "success";
-  if (rec.runConclusion) return "failed"; // completed, non-success (failure/cancelled/timed_out/…)
-  if (rec.runStatus && rec.runStatus !== "completed") return "pending"; // genuinely still running
-  // No linked run (or unknown run state): fall back to the deployment
-  // record's own state so we still reflect a terminal outcome.
-  if (rec.state === "success") return "success";
-  if (rec.state === "failure" || rec.state === "error") return "failed";
-  return "pending";
-}
-
-// Read the `default:` of the `environment` input under `on.workflow_dispatch.inputs`.
-// Indentation-aware rather than a bare regex, because `environment:` also appears as a
-// job-level key and matching the wrong one would silently mis-target a deploy. Kept as
-// hand-rolled parsing to avoid pulling a YAML dependency into the adapter for one field.
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
 // succeeded). Scoped to the environment's OWN deployment history (the GitHub
@@ -3273,122 +3232,12 @@ async function resolveEnvDeployment(
   environment: string,
   appName: string
 ): Promise<DeploymentRow | null> {
-  appName = appName || repo.split("/").pop() || repo;
-  // Provider is cosmetic (drives portal links only), so a lookup failure here
-  // must not block the whole resolution — soft-fail to an empty provider.
-  let provider = "";
-  try {
-    const varsRaw = await ghOrThrow([
-      "api",
-      `/repos/${repo}/environments/${encodeURIComponent(
-        environment
-      )}/variables?per_page=100`,
-      "--jq",
-      ".variables[].name"
-    ]);
-    if (/AZURE_/.test(varsRaw)) provider = "azure";
-    else if (/AWS_/.test(varsRaw)) provider = "aws";
-  } catch {
-    /* provider stays "" */
-  }
-
-  // Newest-first deployment records for THIS environment only.
-  const idsRaw = await ghOrThrow([
-    "api",
-    `/repos/${repo}/deployments?per_page=100&environment=${encodeURIComponent(
-      environment
-    )}`,
-    "--jq",
-    ".[].id"
-  ]);
-  const ids = idsRaw ? idsRaw.split("\n").filter(Boolean) : [];
-
-  const resolveRecord = async (id: string): Promise<DeploymentRecord> => {
-    const stateRaw = await ghOrThrow([
-      "api",
-      `/repos/${repo}/deployments/${id}/statuses?per_page=1`,
-      "--jq",
-      '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "")'
-    ]);
-    const tab = stateRaw.indexOf("\t");
-    const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
-    const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
-    let runUrl = "";
-    const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
-    if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
-    else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
-    let runPath = "";
-    let runStatus = "";
-    let runConclusion = "";
-    if (m) {
-      const runInfo = await ghOrThrow([
-        "api",
-        `/repos/${repo}/actions/runs/${m[1]}`,
-        "--jq",
-        '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
-      ]);
-      const parts = runInfo.split("\t");
-      runPath = parts[0] || "";
-      runStatus = parts[1] || "";
-      runConclusion = parts[2] || "";
-    }
-    const isDeploy = new RegExp(
-      `(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`
-    ).test(runPath);
-    const isDelete = new RegExp(
-      `(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`
-    ).test(runPath);
-    return { id, state, runUrl, isDeploy, isDelete, runStatus, runConclusion };
-  };
-
-  // Apply the selection rules to a resolved record:
-  //   'skip'  → not relevant (verify-credentials, or a failed delete); keep walking
-  //   null    → app deleted; environment has no active deployment
-  //   object  → the deployment row for this environment
-  const decide = (rec: DeploymentRecord): DeploymentRow | "skip" | null => {
-    if (!rec.isDeploy && !rec.isDelete) return "skip";
-    if (rec.isDelete && rec.runConclusion === "success") return null;
-    if (rec.isDelete && rec.runConclusion && rec.runConclusion !== "success")
-      return "skip";
-    let status: string;
-    if (rec.isDelete) {
-      status = "deleting"; // delete still in progress
-    } else {
-      // Deploy status is derived from the WORKFLOW RUN's completion, not the
-      // GitHub deployment-status record. A failed deploy often leaves that
-      // record stuck at "pending"/"in_progress" (the workflow never posts a
-      // terminal "failure" status), which previously mis-reported a failed
-      // deploy as "pending" and wrongly kept the Deploy button greyed out.
-      // Treat the run as authoritative: only a run that has NOT completed is
-      // "pending"; a completed run is "success" or "failed" by its
-      // conclusion, and a failed deploy does not block a redeploy.
-      status = resolveDeployStatus(rec);
-    }
-    return {
-      app: appName,
-      environment,
-      provider,
-      status,
-      deploymentId: rec.id,
-      runUrl: rec.runUrl
-    };
-  };
-
-  // Resolve the newest batch concurrently, then apply the rules newest-first.
-  const batch = ids.slice(0, DEPLOY_MAX_PARALLEL_RECORDS);
-  const resolved = await Promise.all(batch.map(resolveRecord));
-  for (const rec of resolved) {
-    const r = decide(rec);
-    if (r === "skip") continue;
-    return r;
-  }
-  // Rare fallback: nothing decisive in the newest batch — walk the rest serially.
-  for (const id of ids.slice(DEPLOY_MAX_PARALLEL_RECORDS)) {
-    const r = decide(await resolveRecord(id));
-    if (r === "skip") continue;
-    return r;
-  }
-  return null;
+  return resolveEnvironmentDeployment(repo, environment, appName, {
+    ghOrThrow,
+    deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
+    deleteWorkflowFile: DELETE_WORKFLOW_FILE,
+    maxParallelRecords: DEPLOY_MAX_PARALLEL_RECORDS
+  });
 }
 
 /**

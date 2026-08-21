@@ -562,6 +562,18 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         stdout: `success\thttps://github.com/${REPOSITORY}/actions/runs/1`
       },
       {
+        // The deployed-page resolver reads the complete status history so an
+        // inactive tombstone can retain the preceding run URL for auditability.
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/deployments/dep-1/statuses?per_page=100`,
+          "--jq",
+          '(.[0].state // "") + "\\t" + ([.[] | (.log_url // .target_url // "") | select(. != "")][0] // "") + "\\t" + (.[0].description // "")'
+        ],
+        stdout: `success\thttps://github.com/${REPOSITORY}/actions/runs/1\t`
+      },
+      {
         tool: "gh",
         args: [
           "api",

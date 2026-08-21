@@ -85,6 +85,7 @@ const productionHandlers = {
     repoMatchesWorkspace: () => false
   }),
   ...createDeploymentsRoutes({
+    isValidRepoSlug: () => false,
     readInstanceEntry: () => undefined,
     triggerDeployRepairHandoff: () => false,
     triggerDeployFailureNotice: () => false,
@@ -385,6 +386,7 @@ describe("server route ownership boundary", () => {
     ).toEqual([
       "POST /api/github-account",
       "POST /api/operations",
+      "POST /api/abandon-deployment",
       "POST /api/operations/:operationId/resume/:code",
       "POST /api/operations/:operationId/abandon"
     ]);

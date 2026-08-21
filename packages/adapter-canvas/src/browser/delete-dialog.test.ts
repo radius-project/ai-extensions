@@ -106,6 +106,38 @@ describe("delete dialog step specs", () => {
 
   it("builds the confirmation token from the target pair", () => {
     expect(deleteDialogConfirmToken("store", "prod")).toBe("store/prod");
+    expect(deleteDialogConfirmToken("store", "prod", "abandon")).toBe(
+      "abandon store/prod"
+    );
+  });
+
+  it("builds a distinct abandonment warning and confirmation state", () => {
+    const intent = deleteDialogIntentSpecs("abandon");
+    const effects = deleteDialogEffectsSpecs(
+      { app: "store", environment: "prod" },
+      "abandon"
+    );
+    const confirm = deleteDialogConfirmSpecs(
+      { app: "store", environment: "prod" },
+      "abandon"
+    );
+
+    expect(intent[0].text).toContain("does not delete cloud resources");
+    expect(intent[1].text).toBe("I want to abandon this failed deployment");
+    expect(effects[0].children?.[1].text).toContain(
+      "Resources created before the deployment failed may remain"
+    );
+    expect(
+      effects[1].children?.[0].children?.map((child) => child.text)
+    ).toEqual([
+      "This will stop tracking ",
+      "store",
+      " in environment ",
+      "prod",
+      " without changing any cloud resources."
+    ]);
+    expect(confirm[0].text).toContain('"abandon store/prod"');
+    expect(confirm[2].text).toBe("Abandon failed deployment");
   });
 });
 
@@ -159,6 +191,40 @@ describe("delete deployment dialog", () => {
     expect(confirmed).toEqual([["store", "prod"]]);
     expect(browser.modal.style.display).toBe("none");
     expect(browser.body.children).toHaveLength(0);
+  });
+
+  it("requires the abandonment token and supports keyboard confirmation", () => {
+    const browser = setup();
+    const confirmed: Array<[string, string]> = [];
+    const dialog = createDeleteDeploymentDialog(browser.context, {
+      variant: "abandon",
+      onConfirm: (app, environment) => confirmed.push([app, environment])
+    });
+
+    dialog?.open("store", "prod");
+    expect(fakeText(browser.body)).toContain("does not delete cloud resources");
+    fakeById(browser.body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+    expect(fakeText(browser.body)).toContain(
+      "Resources created before the deployment failed may remain"
+    );
+    fakeById(browser.body, DELETE_DIALOG_STEP2_BUTTON_ID).dispatch("click");
+    const input = fakeInputById(browser.body, DELETE_DIALOG_CONFIRM_INPUT_ID);
+    const confirm = fakeInputById(
+      browser.body,
+      DELETE_DIALOG_CONFIRM_BUTTON_ID
+    );
+    expect(input.value).toBe("");
+    expect(confirm.disabled).toBe(true);
+
+    input.value = "store/prod";
+    input.dispatch("input");
+    expect(confirm.disabled).toBe(true);
+    input.value = "abandon store/prod";
+    input.dispatch("input");
+    input.dispatch("keydown", { key: "Enter" });
+
+    expect(confirmed).toEqual([["store", "prod"]]);
+    expect(browser.modal.style.display).toBe("none");
   });
 
   it("keeps deletion disabled until the token matches exactly", () => {

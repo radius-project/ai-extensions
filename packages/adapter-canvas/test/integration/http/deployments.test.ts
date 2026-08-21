@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createDeploymentsRoutes } from "../../../src/server/routes/deployments.js";
+import { isValidRepoSlug } from "../../../src/azure-oidc.js";
 import { createDeployRequestService } from "../../../src/server/services/deploy-request.js";
 import { createDeployDispatchService } from "../../../src/server/services/deploy-dispatch.js";
 import {
@@ -43,15 +44,18 @@ interface Harness {
   environments: string[];
   resets: unknown[];
   dispatches: string[][];
+  workflowSyncs: unknown[][];
+  ghApiCalls: string[][];
   setEntryMissing(missing: boolean): void;
+  setDeploymentStatus(status: string): void;
 }
 
-function row(environment: string): DeploymentRow {
+function row(environment: string, status = "deployed"): DeploymentRow {
   return {
     app: "todo-app",
     environment,
     provider: "azure",
-    status: "deployed",
+    status,
     deploymentId: `dep-${environment}`,
     runUrl: `https://example.test/${environment}`
   };
@@ -63,10 +67,14 @@ function start(): Harness {
   const environments: string[] = [];
   const resets: unknown[] = [];
   const dispatches: string[][] = [];
+  const workflowSyncs: unknown[][] = [];
+  const ghApiCalls: string[][] = [];
   let entryMissing = false;
+  let deploymentStatus = "deployed";
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
+      isValidRepoSlug,
       readInstanceEntry: () => (entryMissing ? undefined : { state }),
       triggerDeployRepairHandoff: () => false,
       triggerDeployFailureNotice: () => false,
@@ -79,8 +87,13 @@ function start(): Harness {
       resolveRepoAppName: (_repo, branch) =>
         Promise.resolve(`todo-app@${branch}`),
       resolveEnvDeployment: (_repo, environment) =>
-        Promise.resolve(row(environment)),
-      ghOrThrow: () => Promise.resolve(environments.join("\n")),
+        Promise.resolve(row(environment, deploymentStatus)),
+      ghOrThrow: (args) => {
+        ghApiCalls.push(args);
+        return Promise.resolve(
+          args.includes("--method") ? "" : environments.join("\n")
+        );
+      },
       resetDeploymentViewState: (_target, attemptId) => {
         resets.push(attemptId);
       },
@@ -97,8 +110,10 @@ function start(): Harness {
       releaseDeploymentMutation: () => {},
       deploymentStatusBlocksMutation: () => false,
       localDeploymentBlocksMutation: () => false,
-      ensureWorkflowsCurrent: () =>
-        Promise.resolve({ created: [], failed: [] }),
+      ensureWorkflowsCurrent: (...args) => {
+        workflowSyncs.push(args);
+        return Promise.resolve({ created: [], failed: [] });
+      },
       findWorkflowRun: () => Promise.resolve(7),
       runGh: (args) => {
         dispatches.push(args);
@@ -124,6 +139,7 @@ function start(): Harness {
         instances,
         routes,
         markActivity,
+        validateBrowserMutation: () => true,
         handleUnmatchedRequest: (_request, response) => {
           response.writeHead(404);
           response.end("unmatched");
@@ -142,8 +158,13 @@ function start(): Harness {
     environments,
     resets,
     dispatches,
+    workflowSyncs,
+    ghApiCalls,
     setEntryMissing(missing) {
       entryMissing = missing;
+    },
+    setDeploymentStatus(status) {
+      deploymentStatus = status;
     }
   };
 }
@@ -325,6 +346,74 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     });
   });
 
+  it("abandons failed deployment tracking without synchronizing or dispatching a workflow", async () => {
+    const harness = start();
+    harness.setDeploymentStatus("failed");
+    harness.cache.set("octo/todo", { at: Date.now(), payload: {} });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: "abandoned" });
+    expect(harness.workflowSyncs).toEqual([]);
+    expect(harness.dispatches).toEqual([]);
+    expect(harness.ghApiCalls).toContainEqual([
+      "api",
+      "--method",
+      "POST",
+      "/repos/octo/todo/deployments/dep-dev/statuses",
+      "-f",
+      "state=inactive",
+      "-f",
+      "description=Tracking abandoned in Radius Canvas; cloud resources were not deleted.",
+      "-f",
+      "log_url=https://example.test/dev"
+    ]);
+    expect(harness.cache.has("octo/todo")).toBe(false);
+  });
+
+  it("rejects malformed and non-failed abandonment over a real socket", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const malformed = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify({
+        repo: "not-a-repo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+    expect(malformed.status).toBe(400);
+
+    harness.setDeploymentStatus("success");
+    const successful = await post(
+      entry.baseUrl,
+      "/api/abandon-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+    expect(successful.status).toBe(409);
+    expect(await successful.json()).toEqual({
+      error: "Only a failed deployment can be abandoned."
+    });
+    expect(harness.workflowSyncs).toEqual([]);
+    expect(harness.dispatches).toEqual([]);
+  });
+
   it("delegates methods the typed declarations do not claim", async () => {
     start();
     const entry = await container!.getOrCreate("panel-a");
@@ -340,7 +429,11 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       const posted = await post(entry.baseUrl, path, "");
       expect(posted.status, path).toBe(404);
     }
-    for (const path of ["/api/deploy-reset", "/api/delete-deployment"]) {
+    for (const path of [
+      "/api/deploy-reset",
+      "/api/delete-deployment",
+      "/api/abandon-deployment"
+    ]) {
       const got = await fetch(`${entry.baseUrl}${path}`);
       expect(got.status, path).toBe(404);
     }
@@ -421,6 +514,7 @@ function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
+      isValidRepoSlug,
       readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
       triggerDeployRepairHandoff: () => false,
       triggerDeployFailureNotice: () => false,

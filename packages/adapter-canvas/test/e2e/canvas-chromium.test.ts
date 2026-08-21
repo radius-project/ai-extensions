@@ -97,6 +97,75 @@ function bodyFor(canvas: CanvasHarness, pathName: string): unknown {
   )?.body;
 }
 
+async function routeDeployedPage(
+  page: Page,
+  deploymentStatus: () => string,
+  abandon?: (body: unknown, nonce: string) => void
+): Promise<void> {
+  await page.route("**/api/list-applications**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ applications: [{ name: "radius-app" }] })
+    });
+  });
+  await page.route("**/api/list-environments**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        environments: [
+          {
+            name: "fixture-environment",
+            provider: "azure",
+            status: "success"
+          }
+        ]
+      })
+    });
+  });
+  await page.route("**/api/list-deployments**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        deployments: [
+          {
+            app: "radius-app",
+            environment: "fixture-environment",
+            status: deploymentStatus()
+          }
+        ]
+      })
+    });
+  });
+  await page.route("**/api/deployed-graph**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ resources: [], mode: "greyed" })
+    });
+  });
+  await page.route("**/api/deploy-status**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ status: "pending", logTotal: 0 })
+    });
+  });
+  await page.route("**/api/abandon-deployment", async (route) => {
+    abandon?.(
+      route.request().postDataJSON(),
+      route.request().headers()["x-radius-mutation-nonce"] ?? ""
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ outcome: "abandoned" })
+    });
+  });
+}
+
 // Environment creation is a two-step wizard: step 1 picks the cloud credential
 // profile, step 2 holds the environment name and the GitHub identity block.
 // Step 2 is hidden until a profile is chosen, so any journey that asserts on
@@ -799,6 +868,87 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect
       .poll(() => bodyFor(canvas, "/api/delete-deployment"))
       .toMatchObject({ environment: "fixture-environment" });
+  });
+
+  test("shows abandonment only for failed deployments in Chromium @safety", async ({
+    page,
+    canvas
+  }) => {
+    let status = "success";
+    await routeDeployedPage(page, () => status);
+    await gotoCanvas(page, canvas, "deployed");
+
+    await expect(
+      page.getByRole("button", { name: "Delete Deployment" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Abandon failed deployment" })
+    ).toHaveCount(0);
+
+    status = "failed";
+    await page.reload();
+    await expect(
+      page.getByRole("button", { name: "Abandon failed deployment" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Delete Deployment" })
+    ).toHaveCount(0);
+  });
+
+  test("confirms abandonment warning by keyboard and sends the failed deployment identity @safety", async ({
+    page,
+    canvas
+  }) => {
+    const requests: Array<{ body: unknown; nonce: string }> = [];
+    await routeDeployedPage(
+      page,
+      () => "failed",
+      (body, nonce) => {
+        requests.push({ body, nonce });
+      }
+    );
+    await gotoCanvas(page, canvas, "deployed");
+
+    const action = page.getByRole("button", {
+      name: "Abandon failed deployment"
+    });
+    await action.focus();
+    await page.keyboard.press("Enter");
+
+    const dialog = page.getByRole("dialog", {
+      name: "Abandon Failed Deployment"
+    });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("does not delete cloud resources");
+    const intent = page.getByRole("button", {
+      name: "I want to abandon this failed deployment"
+    });
+    await expect(intent).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toContainText(
+      "Resources created before the deployment failed may remain"
+    );
+    await page.keyboard.press("Enter");
+
+    const input = page.locator("#del-confirm-input");
+    await expect(input).toBeFocused();
+    await expectNoWcagViolations(page);
+    await page.keyboard.type("abandon radius-app/fixture-environment");
+    await page.keyboard.press("Enter");
+
+    await expect.poll(() => requests).toHaveLength(1);
+    expect(requests[0].body).toEqual({
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      application: "radius-app"
+    });
+    expect(requests[0].nonce).not.toBe("");
+    await expect(page.locator("#deployed-inline-status")).toContainText(
+      "Cloud resources were not deleted"
+    );
+    await expect(page.locator("#deployed-delete-btn")).toHaveText(
+      "Deploy Application"
+    );
   });
 
   test("reveals the environment form by keyboard and returns focus to the reveal control", async ({

@@ -30,12 +30,15 @@ export const DELETE_DIALOG_STEP2_BUTTON_ID = "del-step2-btn";
 export const DELETE_DIALOG_CONFIRM_INPUT_ID = "del-confirm-input";
 export const DELETE_DIALOG_CONFIRM_BUTTON_ID = "del-confirm-btn";
 
+export type DeploymentDialogVariant = "delete" | "abandon";
+
 export interface DeleteDialogOptions {
   modalId?: string;
   bodyId?: string;
   appId?: string;
   envId?: string;
   closeId?: string;
+  variant?: DeploymentDialogVariant;
   onConfirm?: (app: string, environment: string) => void;
 }
 
@@ -63,12 +66,32 @@ export const DELETE_DIALOG_FOCUSABLE_SELECTOR = FOCUSABLE_SELECTOR;
 
 export function deleteDialogConfirmToken(
   app: string,
-  environment: string
+  environment: string,
+  variant: DeploymentDialogVariant = "delete"
 ): string {
-  return `${app}/${environment}`;
+  const target = `${app}/${environment}`;
+  return variant === "abandon" ? `abandon ${target}` : target;
 }
 
-export function deleteDialogIntentSpecs(): readonly ElementSpec[] {
+export function deleteDialogIntentSpecs(
+  variant: DeploymentDialogVariant = "delete"
+): readonly ElementSpec[] {
+  if (variant === "abandon") {
+    return [
+      {
+        tag: "p",
+        className: "rad-ddlg__text",
+        text: "Abandoning this failed deployment stops Radius Canvas and GitHub from tracking it. It does not delete cloud resources."
+      },
+      {
+        tag: "button",
+        id: DELETE_DIALOG_STEP1_BUTTON_ID,
+        className: "rad-ddlg__btn",
+        attrs: { type: "button" },
+        text: "I want to abandon this failed deployment"
+      }
+    ];
+  }
   return [
     {
       tag: "p",
@@ -86,8 +109,50 @@ export function deleteDialogIntentSpecs(): readonly ElementSpec[] {
 }
 
 export function deleteDialogEffectsSpecs(
-  target: DeleteTarget
+  target: DeleteTarget,
+  variant: DeploymentDialogVariant = "delete"
 ): readonly ElementSpec[] {
+  if (variant === "abandon") {
+    return [
+      {
+        tag: "div",
+        className: "rad-ddlg__warn",
+        children: [
+          { tag: "span", attrs: { "aria-hidden": "true" }, text: "⚠" },
+          {
+            tag: "span",
+            text: "Cloud resources will not be deleted. Resources created before the deployment failed may remain and must be cleaned up separately."
+          }
+        ]
+      },
+      {
+        tag: "div",
+        className: "rad-ddlg__bullet",
+        children: [
+          {
+            tag: "span",
+            children: [
+              { tag: "span", text: "This will stop tracking " },
+              { tag: "strong", text: target.app },
+              { tag: "span", text: " in environment " },
+              { tag: "strong", text: target.environment },
+              {
+                tag: "span",
+                text: " without changing any cloud resources."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        tag: "button",
+        id: DELETE_DIALOG_STEP2_BUTTON_ID,
+        className: "rad-ddlg__btn",
+        attrs: { type: "button" },
+        text: "I understand cloud resources may remain"
+      }
+    ];
+  }
   return [
     {
       tag: "div",
@@ -130,9 +195,14 @@ export function deleteDialogEffectsSpecs(
 }
 
 export function deleteDialogConfirmSpecs(
-  target: DeleteTarget
+  target: DeleteTarget,
+  variant: DeploymentDialogVariant = "delete"
 ): readonly ElementSpec[] {
-  const token = deleteDialogConfirmToken(target.app, target.environment);
+  const token = deleteDialogConfirmToken(
+    target.app,
+    target.environment,
+    variant
+  );
   return [
     {
       tag: "p",
@@ -156,7 +226,10 @@ export function deleteDialogConfirmSpecs(
       id: DELETE_DIALOG_CONFIRM_BUTTON_ID,
       className: "rad-ddlg__delete",
       attrs: { type: "button" },
-      text: "Delete this deployment"
+      text:
+        variant === "abandon" ?
+          "Abandon failed deployment"
+        : "Delete this deployment"
     }
   ];
 }
@@ -183,6 +256,7 @@ export function createDeleteDeploymentDialog(
   const appEl = dom.byId(options.appId ?? DELETE_DIALOG_IDS.app);
   const envEl = dom.byId(options.envId ?? DELETE_DIALOG_IDS.environment);
   const closeEl = dom.byId(options.closeId ?? DELETE_DIALOG_IDS.close);
+  const variant = options.variant ?? "delete";
 
   const owned: Registration[] = [];
   const stepBindings: Registration[] = [];
@@ -244,7 +318,7 @@ export function createDeleteDeploymentDialog(
   };
 
   const showIntent = (target: DeleteTarget): void => {
-    const nodes = renderStep(deleteDialogIntentSpecs());
+    const nodes = renderStep(deleteDialogIntentSpecs(variant));
     bind(stepBindings, nodes[1], "click", () => {
       showEffects(target);
     });
@@ -252,7 +326,7 @@ export function createDeleteDeploymentDialog(
   };
 
   const showEffects = (target: DeleteTarget): void => {
-    const nodes = renderStep(deleteDialogEffectsSpecs(target));
+    const nodes = renderStep(deleteDialogEffectsSpecs(target, variant));
     bind(stepBindings, nodes[2], "click", () => {
       showConfirm(target);
     });
@@ -260,8 +334,12 @@ export function createDeleteDeploymentDialog(
   };
 
   const showConfirm = (target: DeleteTarget): void => {
-    const nodes = renderStep(deleteDialogConfirmSpecs(target));
-    const token = deleteDialogConfirmToken(target.app, target.environment);
+    const nodes = renderStep(deleteDialogConfirmSpecs(target, variant));
+    const token = deleteDialogConfirmToken(
+      target.app,
+      target.environment,
+      variant
+    );
     const input = asInput(nodes[1]);
     const confirm = asInput(nodes[2]);
     confirm.disabled = true;

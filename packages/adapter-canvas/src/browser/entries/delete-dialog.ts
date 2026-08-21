@@ -16,6 +16,7 @@ function readOptions(value: unknown): DeleteDialogOptions {
     appId: readString(value, "appId") || undefined,
     envId: readString(value, "envId") || undefined,
     closeId: readString(value, "closeId") || undefined,
+    variant: readString(value, "variant") === "abandon" ? "abandon" : "delete",
     onConfirm:
       isCallable(onConfirm) ?
         (app, environment) => {
