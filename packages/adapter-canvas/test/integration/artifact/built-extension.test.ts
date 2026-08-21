@@ -348,6 +348,7 @@ describe("P0-C built Radius extension artifact", () => {
     expect(BROWSER_ENTRY_NAMES).toEqual([
       "graph",
       "delete-dialog",
+      "pane-navigation",
       "heartbeat",
       "operation-chip",
       "deploy-result-page",
