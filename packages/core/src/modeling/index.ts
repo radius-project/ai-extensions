@@ -22,6 +22,32 @@ export type {
 } from "./app-origin.js";
 
 export {
+  CONCURRENT_EDIT_MESSAGE,
+  CUSTOM_TYPE_STAGED_FILES,
+  REQUIRED_STAGED_FILES,
+  STAGING_DIR_PREFIX,
+  STAGING_IGNORE_PATTERN,
+  STAGING_RUN_RECORD,
+  UNRECORDED_RUN_MESSAGE,
+  changedManagedFiles,
+  concurrentEditMessage,
+  evaluateStagedRun,
+  isPublishableExtraArtifact,
+  isStagingDirName,
+  publishableFiles,
+  requiredStagedFiles,
+  sanitizeRunId,
+  stagingDirName
+} from "./app-staging.js";
+export type {
+  ManagedFileHashes,
+  StagedRunEvaluation,
+  StagedRunInput,
+  StagedRunRecord,
+  StagedRunStatus
+} from "./app-staging.js";
+
+export {
   IGNORED_SOURCE_DIRS,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
   UNIDENTIFIED_APPLICATION_MESSAGE,

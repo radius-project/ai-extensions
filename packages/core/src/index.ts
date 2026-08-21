@@ -39,6 +39,7 @@ export {
   evaluateAppSource,
   findWorkspaceManifests,
   unsupportedAppSourceReport,
+  STAGING_DIR_PREFIX,
   fetchBicepFromRepo,
   fetchRecipePack,
   resolveRecipeOutputs
