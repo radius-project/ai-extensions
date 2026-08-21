@@ -151,7 +151,8 @@ Rules:
 
 The canvas asks for a refresh when an existing model is stale: its branch has moved past the recorded commit, a different generator version is installed, the model no longer matches its origin record, or there is no usable origin record at all. Regenerate from current source and write a new origin record, with one guard:
 
-- **When the model is reported as edited or unrecorded, ask the user before overwriting it.** Those two states mean the file on disk contains content this skill cannot prove it wrote: hand-tuned properties, a custom type, or a recipe pack reference someone added deliberately. Say what would be lost and regenerate only after the user agrees. Offer to repair the specific problem in place (see [Repairing an existing app.bicep](#repairing-an-existing-appbicep)) as the alternative, since that preserves their edits.
+- **When the model is reported as edited, ask the user before overwriting it.** That state means the file was changed after it was generated: hand-tuned properties, a custom type, or a recipe pack reference someone added deliberately. Say what would be lost and regenerate only after the user agrees. Offer to repair the specific problem in place (see [Repairing an existing app.bicep](#repairing-an-existing-appbicep)) as the alternative, since that preserves their edits.
+- **When the model has no origin record, regenerate it and write one. Do not ask.** Nothing about a missing record shows the model was edited, so there is no decision to put to the user. Regenerate from current source and record it as you would for any other generation.
 - A model that is stale only because the source or generator moved on carries no unproven content, so refresh it without asking.
 - Refresh only the current workspace branch, where writing the working tree is enough. A model on a **different** branch cannot be refreshed by modeling: report the staleness to the user and let them decide, rather than committing or pushing a regenerated model to that branch.
 
@@ -391,7 +392,7 @@ Before returning the Bicep, verify:
 - [ ] The generated Bicep contains no explanatory comments. `.radius/bicepconfig.json` resolves the `radius` extension for `app.bicep`: created or updated in place (a parent `bicepconfig.json` is used only as input, never modified).
 - [ ] The output follows the [deterministic output](#deterministic-output) rules, so regenerating from unchanged source would produce the identical file.
 - [ ] `.radius/app.origin.json` was written by `write-app-origin.mjs` after the checker passed, describes the final `app.bicep` byte-for-byte, and is staged with it (see [Origin record](#origin-record-apporiginjson)).
-- [ ] An existing model reported as edited or unrecorded was not overwritten without the user's agreement (see [Refreshing a stale model](#refreshing-a-stale-model)).
+- [ ] An existing model reported as edited was not overwritten without the user's agreement. A model with no origin record was regenerated without asking (see [Refreshing a stale model](#refreshing-a-stale-model)).
 
 ## Example
 

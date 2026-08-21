@@ -64,8 +64,11 @@ export interface AppModelFreshness {
   // trusted. `missing` is not stale, since there is nothing to refresh and it
   // has to be generated, so callers can keep the two paths distinct.
   stale: boolean;
-  // True when regenerating would destroy content this module cannot prove came
-  // from the generator, so the user has to approve the overwrite first.
+  // True when the model was changed after it was generated, so regenerating
+  // would destroy work someone did deliberately and the user has to approve the
+  // overwrite first. A model with no origin record does not qualify: nothing
+  // shows anyone touched it, and every model written before records existed
+  // would otherwise prompt on its first graph open.
   requiresConfirmation: boolean;
   // Human-readable statement of the evidence, safe to put in an agent prompt.
   reason: string;
@@ -193,8 +196,7 @@ export function evaluateAppModelFreshness(
     return freshness(
       "unrecorded",
       `The model has no usable ${APP_ORIGIN_REPO_PATH} origin record, so the source revision it was generated from and whether it still compiles cannot be established.`,
-      null,
-      true
+      null
     );
   }
 

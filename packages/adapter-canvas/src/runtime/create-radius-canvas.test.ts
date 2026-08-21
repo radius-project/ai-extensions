@@ -771,7 +771,43 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     ).resolves.toMatchObject({ title: "Radius" });
   });
 
-  it("asks the user before regenerating a workspace model it cannot verify", async () => {
+  it("asks the user before regenerating a hand-edited workspace model", async () => {
+    const model = "resource db {}";
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": `${model}\n// edit` },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
+          serializeAppOrigin({
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: "a".repeat(40),
+            skillVersion: "0.1.0-test",
+            appBicepHash: hashAppBicep(model)
+          })
+      },
+      headCommits: { "workspace:/workspace": "a".repeat(40) }
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledTimes(1);
+    const message = (session.send as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as { prompt: string; displayPrompt: string };
+    expect(message.prompt).toContain("changed after it was generated");
+    expect(message.prompt).toContain("would be lost");
+    expect(message.displayPrompt).toContain("acme/widgets");
+  });
+
+  // Every model written before origin records existed has no record, so asking
+  // about them would put a question in front of the entire installed base for
+  // something no one edited. These are refreshed like any other stale model.
+  it("does not ask about a workspace model that has no origin record", async () => {
     const { canvas, deps } = setup({
       bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" }
     });
@@ -787,10 +823,9 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
 
     expect(session.send).toHaveBeenCalledTimes(1);
     const message = (session.send as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as { prompt: string; displayPrompt: string };
-    expect(message.prompt).toContain("could not be verified");
-    expect(message.prompt).toContain("would be lost");
-    expect(message.displayPrompt).toContain("acme/widgets");
+      .calls[0][0] as { prompt: string };
+    expect(message.prompt).toContain("needs to be regenerated");
+    expect(message.prompt).not.toContain("would be lost");
   });
 
   // The pre-tool-use hook denies an agent-driven open before the canvas ever
@@ -825,7 +860,7 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(session.send).toHaveBeenCalledTimes(1);
     const message = (session.send as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as { prompt: string; displayPrompt: string };
-    expect(message.prompt).toContain("no longer describes the current source");
+    expect(message.prompt).toContain("needs to be regenerated");
     expect(message.prompt).toContain("radius_generate_app");
     expect(message.displayPrompt).toContain("Refreshing the application model");
   });
@@ -995,7 +1030,7 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(session.send).toHaveBeenCalledTimes(1);
     expect(
       (session.send as ReturnType<typeof vi.fn>).mock.calls[0][0].prompt
-    ).toContain("no longer describes the current source");
+    ).toContain("needs to be regenerated");
 
     // The user edits the model by hand between opens.
     deps.workspace.fetchWorkspaceBicep = (async () =>
@@ -1005,7 +1040,7 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(session.send).toHaveBeenCalledTimes(2);
     expect(
       (session.send as ReturnType<typeof vi.fn>).mock.calls[1][0].prompt
-    ).toContain("could not be verified");
+    ).toContain("changed after it was generated");
   });
 
   it("stays quiet when the same problem is seen again", async () => {

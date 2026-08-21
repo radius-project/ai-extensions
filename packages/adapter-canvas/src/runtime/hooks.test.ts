@@ -372,8 +372,7 @@ function modelStatus(
       status,
       stale: status !== "up-to-date" && status !== "missing",
       requiresConfirmation:
-        overrides.requiresConfirmation ??
-        (status === "unrecorded" || status === "edited"),
+        overrides.requiresConfirmation ?? status === "edited",
       reason: overrides.reason ?? `because it is ${status}`,
       origin:
         overrides.sourceCommit === undefined ?
@@ -760,7 +759,10 @@ describe("evaluateAppBicepHook", () => {
     expect(out?.additionalContext).toContain("No .radius/app.bicep exists");
   });
 
-  it.each(["source-changed", "generator-changed"] as const)(
+  // `unrecorded` is denied like any other refreshable model. A missing origin
+  // record says nothing about whether a person edited the file, and every model
+  // written before records existed has none, so asking would prompt everyone.
+  it.each(["source-changed", "generator-changed", "unrecorded"] as const)(
     "denies and asks for a refresh when the workspace model is %s",
     async (status) => {
       const deps = makeDeps({
@@ -773,26 +775,23 @@ describe("evaluateAppBicepHook", () => {
       const out = await evaluateAppBicepHook(OPEN_GRAPH, deps);
 
       expect(out?.permissionDecision).toBe("deny");
-      expect(out?.permissionDecisionReason).toContain("out of date");
+      expect(out?.permissionDecisionReason).toContain("must be regenerated");
       expect(out?.permissionDecisionReason).toContain("feat");
       expect(out?.additionalContext).toContain(`because it is ${status}`);
       expect(out?.additionalContext).toContain("Refresh it now");
     }
   );
 
-  it.each(["unrecorded", "edited"] as const)(
-    "allows a %s model rather than overwriting content the user may own",
-    async (status) => {
-      const deps = makeDeps({
-        state: { contextRepo: "a/b" },
-        appModelStatus: vi.fn(async (repo: string, branch: string) =>
-          modelStatus(repo, branch, { status })
-        )
-      });
+  it("allows an edited model rather than overwriting content the user owns", async () => {
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "edited" })
+      )
+    });
 
-      expect(await evaluateAppBicepHook(OPEN_GRAPH, deps)).toBeUndefined();
-    }
-  );
+    expect(await evaluateAppBicepHook(OPEN_GRAPH, deps)).toBeUndefined();
+  });
 
   // A regeneration that does not clear the drift must not block every later
   // open: the user would be stuck with a view they cannot reach at all.

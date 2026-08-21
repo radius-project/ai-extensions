@@ -172,7 +172,7 @@ describe("evaluateAppModelFreshness", () => {
     expect(result.origin).toEqual(origin());
   });
 
-  it("requires confirmation for a model with no origin", () => {
+  it("regenerates without confirmation a model with no origin", () => {
     const result = evaluateAppModelFreshness({
       ...current,
       model: MODEL,
@@ -181,18 +181,19 @@ describe("evaluateAppModelFreshness", () => {
 
     expect(result.status).toBe("unrecorded");
     expect(result.stale).toBe(true);
-    expect(result.requiresConfirmation).toBe(true);
+    expect(result.requiresConfirmation).toBe(false);
     expect(result.reason).toContain(APP_ORIGIN_REPO_PATH);
   });
 
-  it("requires confirmation for a model with an unparseable origin", () => {
-    expect(
-      evaluateAppModelFreshness({
-        ...current,
-        model: MODEL,
-        originText: "{ not json"
-      }).status
-    ).toBe("unrecorded");
+  it("regenerates without confirmation a model with an unparseable origin", () => {
+    const result = evaluateAppModelFreshness({
+      ...current,
+      model: MODEL,
+      originText: "{ not json"
+    });
+
+    expect(result.status).toBe("unrecorded");
+    expect(result.requiresConfirmation).toBe(false);
   });
 
   it("requires confirmation when the model was edited after generation", () => {

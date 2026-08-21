@@ -55,13 +55,13 @@ The file is JSON because only code reads and writes it, so `JSON.parse` is enoug
 
 Five checks run in order. The first one that fails decides what happens.
 
-| Check                                 | If it fails                             |
-|---------------------------------------|-----------------------------------------|
-| Does an app model exist?              | `missing`, so the skill writes one      |
-| Does its origin record parse?         | `unrecorded`, so ask before overwriting |
-| Does the fingerprint match the file?  | `edited`, so ask before overwriting     |
-| Has source changed since it was made? | `source-changed`, so regenerate         |
-| Is the same skill installed?          | `generator-changed`, so regenerate      |
+| Check                                 | If it fails                         |
+|---------------------------------------|-------------------------------------|
+| Does an app model exist?              | `missing`, so the skill writes one  |
+| Does its origin record parse?         | `unrecorded`, so regenerate         |
+| Does the fingerprint match the file?  | `edited`, so ask before overwriting |
+| Has source changed since it was made? | `source-changed`, so regenerate     |
+| Is the same skill installed?          | `generator-changed`, so regenerate  |
 
 If all five pass, the app model is current and the view renders it.
 
@@ -73,13 +73,15 @@ It depends on whether we can safely regenerate it ourselves.
 
 The canvas can already render a graph for a branch other than the one the workspace is on. A PR diff compares two branches, and a graph can be opened against another repo or branch directly, both read from GitHub. So the check runs on those too, but a regeneration there would mean committing and pushing to someone else's branch, which modeling does not do.
 
-| Situation                                                  | What happens                                                                                                                        |
-|------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
-| Source or skill changed, on the branch the workspace is on | The graph waits. The skill regenerates the app model, then the view opens with a current one.                                       |
-| The app model was edited by hand, or has no origin record  | The view opens. The agent explains what would be lost and asks before regenerating, and offers to fix the problem in place instead. |
-| Any stale app model on another branch                      | The view opens with a note. Modeling only writes the local working tree, so there is nothing we can regenerate.                     |
+| Situation                                                                                | What happens                                                                                                                        |
+|------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| Source or skill changed, or there is no origin record, on the branch the workspace is on | The graph waits. The skill regenerates the app model, then the view opens with a current one.                                       |
+| The app model was edited by hand after it was generated                                  | The view opens. The agent explains what would be lost and asks before regenerating, and offers to fix the problem in place instead. |
+| Any stale app model on another branch                                                    | The view opens with a note. Modeling only writes the local working tree, so there is nothing we can regenerate.                     |
 
 The second and third rows still open the view because the file on disk is the one that would be deployed, so showing it is the honest thing to do. Blocking those would also leave the user with nothing they can act on.
+
+Only a hand edit earns that question. A model with no origin record is regenerated without asking: nothing about it shows a person ever touched it, and every model written before records existed would otherwise prompt on its first graph open, which is the whole installed base.
 
 Two places in the code handle this. `evaluateAppBicepHook` holds the graph back when regenerating is safe. `maybeHandoffAppBicep` covers everything else, including openings the first one never sees, such as a reload after source links are attached, or the user simply clicking the panel open. Without it, those openings would quietly show a stale app model, which is the original problem in a different place.
 
@@ -99,11 +101,11 @@ That command only works on the branch the workspace has checked out. On any othe
 
 ### Error handling
 
-| If we cannot                                               | What happens                                                                             |
-|------------------------------------------------------------|------------------------------------------------------------------------------------------|
-| Read the app model                                         | Treated as if there is none, and the skill writes one                                    |
-| Read or parse the origin record                            | Treated as if it was never recorded, so the user is asked before anything is overwritten |
-| Work out the source commit, or the installed skill version | That check is skipped                                                                    |
+| If we cannot                                               | What happens                                              |
+|------------------------------------------------------------|-----------------------------------------------------------|
+| Read the app model                                         | Treated as if there is none, and the skill writes one     |
+| Read or parse the origin record                            | Treated as if it was never recorded, so it is regenerated |
+| Work out the source commit, or the installed skill version | That check is skipped                                     |
 
 The rule is the same in each case: a failed read never causes us to overwrite an app model. Regenerating replaces the user's file, so it should follow evidence.
 

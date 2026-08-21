@@ -289,7 +289,7 @@ describe("resolveAppModelStatus", () => {
     );
   });
 
-  it("reports a model with no origin record as requiring confirmation", async () => {
+  it("reports a model with no origin record as refreshable without confirmation", async () => {
     const { resolveAppModelStatus } = helpers({
       bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
       headCommits: { "workspace:/workspace": COMMIT }
@@ -302,7 +302,7 @@ describe("resolveAppModelStatus", () => {
     );
 
     expect(status.freshness.status).toBe("unrecorded");
-    expect(status.freshness.requiresConfirmation).toBe(true);
+    expect(status.freshness.requiresConfirmation).toBe(false);
   });
 
   it("reports a hand-edited model as requiring confirmation", async () => {
