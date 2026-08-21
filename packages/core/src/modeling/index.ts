@@ -24,7 +24,12 @@ export type {
 export {
   IGNORED_SOURCE_DIRS,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+  UNIDENTIFIED_APPLICATION_MESSAGE,
+  WORKSPACE_MANIFEST_FILES,
+  ambiguousAppSourceBrief,
+  dockerfileDirectories,
   evaluateAppSource,
+  findWorkspaceManifests,
   unsupportedAppSourceReport
 } from "./app-source.js";
 export type { AppSourceEvaluation, AppSourceStatus } from "./app-source.js";
