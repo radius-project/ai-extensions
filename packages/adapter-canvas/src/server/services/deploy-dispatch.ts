@@ -46,6 +46,9 @@ export interface DeployDispatchDependencies {
   // Marks the Azure OIDC preflight refusal below, so the repair guard can tell
   // it apart from a failure the agent could fix by editing the model.
   oidcSubjectMissingKind: DeployErrorKind;
+  // A case-only mismatch needs different remediation from a genuinely absent
+  // subject: recreating the environment preserves the wrong spelling.
+  oidcSubjectCaseMismatchKind: DeployErrorKind;
   getBranchHeadSha(repo: string, branch: string): Promise<string | null>;
   getDefaultBranch(repo: string): Promise<string | null>;
   // Resolves rather than rejects on a non-zero exit, so the caller can inspect
@@ -208,6 +211,11 @@ export function createDeployDispatchService(
   if (!dependencies.oidcSubjectMissingKind) {
     throw new Error(
       "createDeployDispatchService is missing required dependencies: oidcSubjectMissingKind"
+    );
+  }
+  if (!dependencies.oidcSubjectCaseMismatchKind) {
+    throw new Error(
+      "createDeployDispatchService is missing required dependencies: oidcSubjectCaseMismatchKind"
     );
   }
   if (
@@ -407,7 +415,7 @@ export function createDeployDispatchService(
     return !!repoDefault;
   };
 
-  // The preflight answers one of four things, and the difference matters more
+  // The preflight answers one of five things, and the difference matters more
   // than the check itself:
   //
   // - "covered": every subject GitHub could mint has a federated credential.
@@ -416,6 +424,10 @@ export function createDeployDispatchService(
   //   the possible subjects is present. The workflow could only fail its login,
   //   so refusing here is strictly better than a late AADSTS700213 (also written
   //   AADSTS7002138 in some Entra responses).
+  // - "case-mismatch": no exact subject exists, but credentials differ only by
+  //   casing. Re-running environment creation preserves that mismatch, so this
+  //   needs distinct manual remediation, and it reports every mis-cased subject
+  //   so fixing them all takes one pass.
   // - "unverified": we could not complete the check, or coverage is partial.
   //   This dispatches with a warning rather than blocking. Blocking here would
   //   regress every user whose deploy works today but whose machine cannot run
@@ -428,6 +440,7 @@ export function createDeployDispatchService(
     | { status: "covered" }
     | { status: "skipped"; message: string }
     | { status: "missing"; message: string }
+    | { status: "case-mismatch"; message: string }
     | { status: "unverified"; message: string };
 
   const validationUnverified = (
@@ -645,6 +658,40 @@ export function createDeployDispatchService(
       );
     }
 
+    // Report every mis-cased subject, not just the first. `expectedSubjects`
+    // holds the mutable and immutable pair, and a credential typed by hand
+    // that got one spelling wrong usually got both wrong. Naming one would
+    // send the user back for a second round, and correcting only that one
+    // lands in the partial-coverage branch above, which warns and dispatches
+    // into the very login failure this check exists to prevent.
+    const caseMismatches: { expected: string; existing: string }[] = [];
+    for (const expected of expectedSubjects) {
+      for (const existing of subjects) {
+        if (existing.toLowerCase() !== expected.toLowerCase()) continue;
+        caseMismatches.push({ expected, existing });
+        break;
+      }
+    }
+    if (caseMismatches.length > 0) {
+      const mismatchText = caseMismatches
+        .map(
+          ({ expected, existing }) =>
+            `expected "${expected}" but the app has "${existing}"`
+        )
+        .join("; ");
+      return {
+        status: "case-mismatch",
+        message:
+          `Azure deploy to environment "${envName}" is blocked because App Registration ${clientId} has federated credential subjects that differ from the ones GitHub mints only by letter casing: ${mismatchText}. ` +
+          // Predicted, not quoted: nothing here calls Entra, so saying so keeps
+          // a user from hunting for a run that never happened. The codes are
+          // still spelled out because that is what they would search for, and
+          // both spellings appear because Entra is not consistent about them.
+          'Entra compares subjects case-sensitively, so this deploy\'s Azure login would be rejected with "No matching federated identity record found for presented assertion subject" (AADSTS700213, also written AADSTS7002138 in some Entra responses). No workflow run was started, so that rejection will not appear in the Actions logs. ' +
+          `Correct the existing credentials rather than re-running Create Environment, which rebuilds the subject from the same spelling. List their ids with: az ad app federated-credential list --id ${clientId} --query "[].{id:id,subject:subject}" -o table. Then fix each one with: az ad app federated-credential update --id ${clientId} --federated-credential-id <id> --parameters "{\\"subject\\":\\"<expected subject>\\"}".`
+      };
+    }
+
     // Every subject on the app is a near match worth showing: on a repository
     // covered by GitHub's immutable-default rollout the existing subjects carry
     // `owner@id/name@id`, and a prefix filter built from the mutable spelling
@@ -722,6 +769,14 @@ export function createDeployDispatchService(
           log("❌ " + validation.message);
           entry.state.deployError = validation.message;
           entry.state.deployErrorKind = dependencies.oidcSubjectMissingKind;
+          entry.state.deployStatus = "failed";
+          return { dispatched: false };
+        }
+        if (validation.status === "case-mismatch") {
+          log("❌ " + validation.message);
+          entry.state.deployError = validation.message;
+          entry.state.deployErrorKind =
+            dependencies.oidcSubjectCaseMismatchKind;
           entry.state.deployStatus = "failed";
           return { dispatched: false };
         }
