@@ -101,9 +101,11 @@ pnpm test -- packages/core/src/graph/diff.test.ts
 
 ### Canvas visual baselines
 
-`pnpm test:visual` compares against Linux PNGs produced on the pinned Ubuntu 24.04 functional runner with the lockfile-pinned Playwright browser. The scheduled functional workflow runs every visual test twice with retries disabled so either a mismatch or an unstable repeat fails the run. Direct pixel comparison is expected to fail on Windows and macOS because their font rasterization differs; use `pnpm test:visual -- --ignore-snapshots` to run the semantic visual journeys locally without comparing platform-specific pixels.
+Run `pnpm test:visual:canonical` before opening a pull request that can affect Canvas UI. The command works from Linux, macOS, and Windows by building and running the same pinned Linux AMD64, Ubuntu 24.04, Node.js, pnpm, Playwright, and Chromium container used by **Canvas Functional Tests**. It compares every visual state twice with retries disabled, exits nonzero for a mismatch or unstable repeat, and cannot rewrite the committed PNGs because check mode mounts the baseline directory read-only. Docker Desktop or Docker Engine with Linux container support must be installed and running; Apple Silicon and other non-AMD64 hosts use Docker's AMD64 emulation. The command reports which prerequisite is unavailable before attempting a build.
 
-To regenerate canonical baselines, manually dispatch the **Canvas Functional Tests** workflow with **Regenerate and upload the canonical visual baselines** enabled, then download the `canvas-visual-functional` artifact. Review every changed PNG before committing it.
+When a check fails, inspect `packages/adapter-canvas/test-results/visual/` for actual, expected, and diff images or open `packages/adapter-canvas/playwright-visual-report/index.html`. If the UX change is intentional, run `pnpm test:visual:canonical:update`, review every changed file under `packages/adapter-canvas/test/visual/__screenshots__/`, rerun `pnpm test:visual:canonical`, and commit the reviewed PNGs with the product change. Do not use update mode to accept an unexplained rendering difference.
+
+The container supplies canonical Linux rasterization on every developer host; it does not prove native Canvas functionality on that host. The separate reliability workflow continues to qualify behavioral checks natively on Ubuntu, Windows, and macOS.
 
 ## Before you open a pull request
 
