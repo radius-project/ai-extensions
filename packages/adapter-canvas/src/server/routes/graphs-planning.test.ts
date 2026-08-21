@@ -918,7 +918,9 @@ describe("graphs-planning read routes (SU-09)", () => {
       const recording = await run(url, handleDeployedGraph, deps);
 
       expect(payloadOf(recording).mode).toBe("greyed");
-      expect(calls.log.some((call) => call.includes('"runId":null'))).toBe(true);
+      expect(calls.log.some((call) => call.includes('"runId":null'))).toBe(
+        true
+      );
     }
   );
 
