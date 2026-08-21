@@ -398,6 +398,37 @@ describe("initializePlannedGraphPage", () => {
     expect(container.innerHTML).toBe("");
   });
 
+  it("plans a deployment for a selection made while the deployment listing is still in flight", async () => {
+    const { browser, branch, status, container } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    const deployments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      `${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`,
+      () => deployments.promise
+    );
+    browser.net.handle("/api/plan-graph", () => jsonResponse({ reload: true }));
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    const planCalls = browser.net.calls.filter(
+      (call) => call.url === "/api/plan-graph"
+    );
+    expect(planCalls.at(-1)?.init?.body).toContain('"branch":"another"');
+    expect(status.textContent).not.toBe(
+      "Create an environment to preview the planned deployment for this application."
+    );
+    expect(container.innerHTML).not.toContain("Create an environment");
+
+    deployments.resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+  });
+
   it("polls progress immediately and then per interval, ignoring a late message", async () => {
     const { browser, status } = fixture();
     const plan = createDeferred<HttpResponse>();

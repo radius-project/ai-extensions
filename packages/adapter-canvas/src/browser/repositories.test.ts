@@ -806,6 +806,52 @@ describe("planned selectors", () => {
     );
   });
 
+  it("settles environment availability before the deployment listing resolves and holds deployment closed until it arrives", async () => {
+    const { browser, created, button } = plannedPage();
+    browser.net.handle(`${APPLICATIONS_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({ applications: [{ name: "store" }] })
+    );
+    browser.net.handle(BRANCHES_PATH, () =>
+      jsonResponse({
+        branches: [{ name: "feature", sha: "worktree" }],
+        workspaceBranch: "feature"
+      })
+    );
+    browser.net.handle(`${ENVIRONMENTS_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [{ name: "dev", provider: "azure", status: "success" }]
+      })
+    );
+    const deployments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      `${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`,
+      () => deployments.promise
+    );
+
+    const state = createPlanState();
+    const populated = populatePlannedSelectors(browser.context, state, {
+      repo: "octo/app",
+      environmentProviders: {},
+      defaultBranch: "feature",
+      defaultEnvironment: "dev"
+    });
+    await flushPromises();
+
+    expect(created["planned-env"].value).toBe("dev");
+    expect(state.hasEnv).toBe(true);
+    expect(state.deploymentsPending).toBe(true);
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "Deployment states are still loading"
+    );
+
+    deployments.resolve(jsonResponse({ deployments: [] }));
+    await populated;
+
+    expect(state.deploymentsPending).toBe(false);
+    expect(button.disabled).toBe(false);
+  });
+
   it("fails closed when the deployment listing request rejects", async () => {
     const { browser, button } = plannedPage();
     browser.net.handle(`${APPLICATIONS_PATH}?repo=octo%2Fapp`, () =>

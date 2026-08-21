@@ -97,6 +97,7 @@ export interface PlanState {
   hasEnv: boolean;
   envsStale: boolean;
   deploymentsStale: boolean;
+  deploymentsPending: boolean;
   requestFailed: boolean;
   environmentStatuses: Record<string, string>;
   deploymentStatuses: Record<string, string>;
@@ -107,6 +108,7 @@ export function createPlanState(): PlanState {
     hasEnv: false,
     envsStale: false,
     deploymentsStale: false,
+    deploymentsPending: false,
     requestFailed: false,
     environmentStatuses: {},
     deploymentStatuses: {}
@@ -651,35 +653,49 @@ export function populatePlannedSelectors(
 
   const deploymentsPromise =
     appSelect && envSelect ?
-      getJson(
-        context,
-        `${DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}&fresh=1`
-      )
-        .then((payload) => {
-          const listing = parseRequiredDeploymentListing(payload);
-          if (listing.error !== "") {
+      ((): Promise<void> => {
+        state.deploymentsPending = true;
+        return getJson(
+          context,
+          `${DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}&fresh=1`
+        )
+          .then((payload) => {
+            const listing = parseRequiredDeploymentListing(payload);
+            if (listing.error !== "") {
+              state.deploymentsStale = true;
+              return;
+            }
+            state.deploymentsStale = false;
+            state.deploymentStatuses = {};
+            for (const deployment of listing.deployments) {
+              state.deploymentStatuses[
+                deploymentKey(deployment.app, deployment.environment)
+              ] = deployment.status;
+            }
+          })
+          .catch(() => {
             state.deploymentsStale = true;
-            return;
-          }
-          state.deploymentsStale = false;
-          state.deploymentStatuses = {};
-          for (const deployment of listing.deployments) {
-            state.deploymentStatuses[
-              deploymentKey(deployment.app, deployment.environment)
-            ] = deployment.status;
-          }
-        })
-        .catch(() => {
-          state.deploymentsStale = true;
-        })
+          })
+          .then(() => {
+            state.deploymentsPending = false;
+          });
+      })()
     : Promise.resolve();
 
-  return Promise.all([
+  // Environment availability is settled as soon as the selectors themselves are
+  // usable. Waiting for the deployment listing too would leave `state.hasEnv`
+  // false while the page already accepts input, so a selection made in that
+  // window would be answered with "create an environment" for an application
+  // that has one.
+  const selectorsReady = Promise.all([
     appPromise,
     branchPromise,
-    envPromise,
-    deploymentsPromise
+    envPromise
   ]).then(() => {
+    applyPlanEnvState(context, state, hasEnvironments, environmentsUnavailable);
+  });
+
+  return Promise.all([selectorsReady, deploymentsPromise]).then(() => {
     applyPlanEnvState(context, state, hasEnvironments, environmentsUnavailable);
   });
 }
@@ -742,6 +758,7 @@ export function applyPlanEnvState(
       button.disabled =
         !(application && branch && environment) ||
         !environmentReady ||
+        state.deploymentsPending ||
         state.deploymentsStale ||
         deploymentBlocked;
       if (!application) {
@@ -759,6 +776,11 @@ export function applyPlanEnvState(
         button.setAttribute(
           "title",
           environmentNotReadyReason(environment, environmentStatus)
+        );
+      } else if (state.deploymentsPending) {
+        button.setAttribute(
+          "title",
+          "Deployment states are still loading. Deployment is available once they arrive."
         );
       } else if (state.deploymentsStale) {
         button.setAttribute(
