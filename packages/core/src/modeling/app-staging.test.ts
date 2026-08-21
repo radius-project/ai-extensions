@@ -287,6 +287,32 @@ describe("evaluateStagedRun", () => {
     expect(result.status).toBe("concurrent-edit");
   });
 
+  // The authored-recipe name is a pattern, so a baseline taken before the run
+  // may not mention one. An uncovered file carries no evidence and must not be
+  // read as having appeared mid-run.
+  it("ignores a publishable file the baseline never covered", () => {
+    const result = stagedRun({
+      stagedFiles: [...REQUIRED_STAGED_FILES, "postgres-recipe.bicep"],
+      record: { baseline: { "app.bicep": null } },
+      currentHashes: {
+        "app.bicep": null,
+        "postgres-recipe.bicep": "sha256:already-on-disk"
+      }
+    });
+    expect(result.status).toBe("ready");
+    expect(result.files).toContain("postgres-recipe.bicep");
+  });
+
+  it("still refuses when a covered authored recipe changed", () => {
+    const result = stagedRun({
+      stagedFiles: [...REQUIRED_STAGED_FILES, "postgres-recipe.bicep"],
+      record: { baseline: { "postgres-recipe.bicep": "sha256:before" } },
+      currentHashes: { "postgres-recipe.bicep": "sha256:after" }
+    });
+    expect(result.status).toBe("concurrent-edit");
+    expect(result.reason).toContain(".radius/postgres-recipe.bicep");
+  });
+
   it("names every file that changed", () => {
     const result = stagedRun({
       record: {

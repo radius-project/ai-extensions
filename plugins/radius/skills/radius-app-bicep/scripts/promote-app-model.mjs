@@ -120,6 +120,39 @@ function readFile(file) {
   }
 }
 
+// Fingerprint of a file in `.radius/`, distinguishing the three states the
+// publish has to tell apart: absent, readable, and present-but-unreadable.
+//
+// Collapsing the third into "absent" makes a file that is merely locked by an
+// editor compare as changed, so the run is refused with a concurrent-edit
+// message about an edit that never happened. The refusal is the safe direction
+// either way; this is about the explanation being true.
+//
+// Binary members are hashed as raw bytes. Reading a `.tgz` as UTF-8 is lossy —
+// invalid sequences collapse to U+FFFD, so two different archives can fingerprint
+// the same — and normalizing line endings in an archive is meaningless besides.
+function fingerprintManagedFile(file) {
+  let bytes;
+  try {
+    bytes = readFileSync(file);
+  } catch (error) {
+    if (error.code === "ENOENT") return { state: "absent", hash: null };
+    return { state: "unreadable", hash: null, reason: error.message };
+  }
+  if (TEXT_MANAGED_FILE.test(file)) {
+    return { state: "present", hash: hashAppBicep(bytes.toString("utf8")) };
+  }
+  return {
+    state: "present",
+    hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`
+  };
+}
+
+// Which managed files are text, and so are compared with the same normalization
+// the origin record uses (line endings and trailing whitespace are checkout
+// artifacts, not edits). Everything else is compared byte for byte.
+const TEXT_MANAGED_FILE = /\.(bicep|json|yaml)$/u;
+
 function stagedOriginHash(text) {
   if (typeof text !== "string" || !text.trim()) return null;
   let parsed;
@@ -175,47 +208,80 @@ function publishableFiles(present, required) {
 function managedFileHashes(radiusDir, files) {
   const hashes = {};
   for (const file of files) {
-    const content = readFile(path.join(radiusDir, file));
-    hashes[file] = content === null ? null : hashAppBicep(content);
+    const { state, hash } = fingerprintManagedFile(path.join(radiusDir, file));
+    // An unreadable file is recorded as its own marker rather than as absent, so
+    // the publish can say what actually happened.
+    hashes[file] = state === "unreadable" ? "unreadable" : hash;
   }
   return hashes;
 }
 
-// Every file a run could ever publish, so `--begin` can fingerprint them all
-// before knowing which ones this particular run will produce.
-const MANAGED_FILES = [
-  ...REQUIRED_STAGED_FILES,
-  ...CUSTOM_TYPE_STAGED_FILES,
-  "custom-recipe-pack.bicep"
-];
+// The fixed part of what a run could publish. `--begin` runs before the run has
+// produced anything, so it cannot know which authored recipes this run will
+// write — hence managedFilesFor, which adds whatever is already on disk.
+const MANAGED_FILES = [...REQUIRED_STAGED_FILES, ...CUSTOM_TYPE_STAGED_FILES];
+
+// Every file the publish could replace, so the baseline covers exactly the set
+// `publishableFiles` is allowed to publish.
+//
+// The authored-recipe name is a pattern, not a fixed list, so the files already
+// in `.radius/` are folded in: a repository whose previous run published
+// `postgres-recipe.bicep` must have that file fingerprinted, or the next run
+// sees an unfingerprinted file on disk, reads it as having appeared mid-run, and
+// refuses forever with a concurrent-edit message naming a file nobody touched.
+function managedFilesFor(radiusDir) {
+  const existing =
+    existsSync(radiusDir) ?
+      readdirSync(radiusDir, { withFileTypes: true })
+        .filter(
+          (entry) => entry.isFile() && isPublishableExtraArtifact(entry.name)
+        )
+        .map((entry) => entry.name)
+    : [];
+  return [...new Set([...MANAGED_FILES, ...existing])].sort();
+}
 
 // Removes every staging directory under `.radius/`. A run that finished always
 // removes its own, so anything still here belongs to a run that did not, and is
 // not something the user needs: a directory of half-finished files is mostly a
 // way to mistake a discarded run for a real application model.
-function purgeStagingDirs(radiusDir, keep = null) {
+// Runs are given unique directory names so two of them cannot collide, so the
+// sweep leaves recently-started ones alone rather than immediately undoing that.
+// A directory this young belongs to a run that is plausibly still working; an
+// older one belongs to a run that was interrupted, since a run that finished
+// always removes its own.
+const STAGING_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
+
+function purgeStagingDirs(radiusDir, staleAfterMs = STAGING_STALE_AFTER_MS) {
+  const now = Date.now();
   if (!existsSync(radiusDir)) return [];
   const removed = [];
   for (const entry of readdirSync(radiusDir, { withFileTypes: true })) {
     // `isDirectory()` on a Dirent is already an lstat, so a symlink named
     // `.staging-*` is skipped rather than followed and deleted through.
     if (!entry.isDirectory() || !isStagingDirName(entry.name)) continue;
-    if (keep && entry.name === keep) continue;
-    rmSync(path.join(radiusDir, entry.name), { recursive: true, force: true });
+    const dir = path.join(radiusDir, entry.name);
+    let startedAt;
+    try {
+      startedAt = lstatSync(dir).mtimeMs;
+    } catch {
+      // Unreadable: treat it as old enough to sweep rather than keeping it
+      // forever on the strength of a stat that did not work.
+      startedAt = 0;
+    }
+    if (startedAt && now - startedAt < staleAfterMs) continue;
+    rmSync(dir, { recursive: true, force: true });
     removed.push(entry.name);
   }
   return removed;
 }
 
+// Adds the staging-directory ignore rule to `.radius/.gitignore`, at PUBLISH
+// time.
+//
 // `.radius/.gitignore` rather than the repository root's: the rule is about this
 // directory, the directory is created by modeling anyway, and writing here
 // cannot disturb an ignore file the user maintains.
-//
-// This is the one thing a run writes outside its staging directory, so what it
-// wrote is recorded and undone if the run is refused. Otherwise a failed run
-// would leave `.radius/` different from how it found it, which is the guarantee
-// this script exists to provide.
-// Adds the staging-directory ignore rule, at PUBLISH time.
 //
 // It is deliberately NOT written when the run starts. A run that fails must
 // leave `.radius/` byte-identical, and a file written at `--begin` would have to
@@ -241,6 +307,24 @@ function ensureStagingIgnored(radiusDir) {
   const body = text && !text.endsWith("\n") ? `${text}\n` : text;
   writeFileSync(ignoreFile, `${body}${STAGING_IGNORE_PATTERN}\n`, "utf8");
   return true;
+}
+
+// The repository root, asked of git rather than assumed to be `.radius/`'s
+// parent. `resolveRadiusDir` canonicalizes through realpath, so a symlinked
+// `.radius` would otherwise put the parent of the REAL location here, which may
+// be outside the repository entirely.
+function repositoryRoot(radiusDir) {
+  const result = spawnSync(
+    "git",
+    ["-C", radiusDir, "rev-parse", "--show-toplevel"],
+    {
+      encoding: "utf8",
+      timeout: 15_000,
+      windowsHide: true
+    }
+  );
+  if (result.error || result.status !== 0) return path.dirname(radiusDir);
+  return (result.stdout || "").trim() || path.dirname(radiusDir);
 }
 
 function gitAdd(repoRoot, files) {
@@ -281,7 +365,16 @@ function isRealDirectory(target) {
 function begin() {
   const radiusDir = resolveRadiusDir();
   mkdirSync(radiusDir, { recursive: true });
-  purgeStagingDirs(radiusDir);
+  // `--stale-after-ms` exists so the sweep can be exercised deterministically
+  // instead of by waiting hours; runs use the default.
+  const requestedStaleAfter = flag("stale-after-ms");
+  const staleAfter = requestedStaleAfter ? Number(requestedStaleAfter) : NaN;
+  purgeStagingDirs(
+    radiusDir,
+    Number.isFinite(staleAfter) && staleAfter >= 0 ?
+      staleAfter
+    : STAGING_STALE_AFTER_MS
+  );
 
   // A unique id by default: two runs sharing `.staging-run` would sweep each
   // other away, and the sweep cannot tell a live run from an abandoned one.
@@ -303,7 +396,7 @@ function begin() {
     version: 1,
     runId: dirName.slice(STAGING_DIR_PREFIX.length),
     startedAt: new Date().toISOString(),
-    baseline: managedFileHashes(radiusDir, MANAGED_FILES)
+    baseline: managedFileHashes(radiusDir, managedFilesFor(radiusDir))
   };
   writeFileSync(
     path.join(stagingDir, STAGING_RUN_RECORD),
@@ -320,7 +413,17 @@ function begin() {
 // leave the product with two places an application model might live.
 function refuseWith(stagingDir) {
   return (message) => {
-    rmSync(stagingDir, { recursive: true, force: true });
+    // Best-effort: if the staging directory cannot be removed, the run is still
+    // refused and the user still needs to be told so in the words below. Dying
+    // here would replace the explanation with a stack trace while still exiting
+    // non-zero, which reads as "refused, nothing written" either way.
+    try {
+      rmSync(stagingDir, { recursive: true, force: true });
+    } catch (error) {
+      console.error(
+        `Note: the staged run at ${stagingDir} could not be removed (${error.message}). It is ignored by git and the next modeling run will clear it.`
+      );
+    }
     fail(
       `${message}\n\nNothing was written: .radius/ is exactly as it was before this run, and nothing was staged in git.`
     );
@@ -361,10 +464,21 @@ function readRunRecord(stagingDir) {
 // compared, not just `app.bicep`: a hand-tuned `bicepconfig.json` or custom-type
 // manifest is exactly as much the user's work as the model is.
 function changedManagedFiles(baseline, radiusDir, files) {
-  const current = managedFileHashes(radiusDir, files);
-  return files
+  // Only files the baseline actually covers can be compared. One it does not
+  // cover carries no evidence either way, and treating "not fingerprinted" as
+  // "was absent" would report an untouched file as a concurrent edit.
+  const comparable = files.filter((file) =>
+    Object.prototype.hasOwnProperty.call(baseline, file)
+  );
+  const current = managedFileHashes(radiusDir, comparable);
+  return comparable
     .filter((file) => (baseline[file] ?? null) !== (current[file] ?? null))
     .sort();
+}
+
+function unreadableFileMessage(files) {
+  const names = files.map((file) => `.radius/${file}`).join(", ");
+  return `${names} could not be read, so this run could not establish whether publishing would overwrite a change. Nothing was published. Close anything holding the file open, or check its permissions, then run modeling again.`;
 }
 
 function concurrentEditMessage(changed) {
@@ -445,6 +559,14 @@ function publish() {
 
   const files = publishableFiles(present, required);
   const changed = changedManagedFiles(record.baseline, radiusDir, files);
+  const unreadable = changed.filter(
+    (file) =>
+      managedFileHashes(radiusDir, [file])[file] === "unreadable" ||
+      record.baseline[file] === "unreadable"
+  );
+  if (unreadable.length > 0) {
+    refuse(unreadableFileMessage(unreadable));
+  }
   if (changed.length > 0) {
     refuse(concurrentEditMessage(changed));
   }
@@ -470,23 +592,30 @@ function publish() {
   // replaced is moved aside first, and if any rename fails the ones already done
   // are put back. That leaves the repository as it was rather than half
   // published, which is the whole point of the exercise.
-  const backups = [];
+  // An entry is recorded for EVERY destination the loop touches, including the
+  // ones that did not exist before. A first-ever run creates `app.bicep` fresh,
+  // so without an entry for it a later failure would leave it published by a run
+  // that was refused — the common case, not an exotic one.
+  const moves = [];
   try {
     for (const file of files) {
       const destination = path.join(radiusDir, file);
-      if (existsSync(destination)) {
-        const backup = path.join(stagingDir, `${file}.published-backup`);
-        renameSync(destination, backup);
-        backups.push({ destination, backup, moved: false });
-      }
+      const existed = existsSync(destination);
+      const backup =
+        existed ? path.join(stagingDir, `${file}.published-backup`) : null;
+      if (existed) renameSync(destination, backup);
+      const entry = { destination, backup, published: false };
+      moves.push(entry);
       renameSync(path.join(stagingDir, file), destination);
-      const record = backups[backups.length - 1];
-      if (record && record.destination === destination) record.moved = true;
+      entry.published = true;
     }
   } catch (error) {
-    for (const entry of backups.reverse()) {
-      if (entry.moved) rmSync(entry.destination, { force: true });
-      renameSync(entry.backup, entry.destination);
+    for (const entry of moves.reverse()) {
+      // Remove what this run put there, then restore what it displaced. A
+      // destination with no backup simply did not exist before, so removing it
+      // is the whole of the undo.
+      if (entry.published) rmSync(entry.destination, { force: true });
+      if (entry.backup) renameSync(entry.backup, entry.destination);
     }
     refuse(
       `Publishing the application model failed partway (${error.message}), so every file was put back as it was.`
@@ -497,7 +626,7 @@ function publish() {
 
   // Staging in git is the last thing that happens, so a run that failed anywhere
   // above leaves nothing in the index.
-  const repoRoot = path.dirname(radiusDir);
+  const repoRoot = repositoryRoot(radiusDir);
   const published = files.map((file) => path.join(radiusDir, file));
   // The ignore rule is staged only when THIS run wrote it. A `.gitignore` that
   // was already there may hold unrelated changes of the user's, and staging

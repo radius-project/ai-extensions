@@ -176,8 +176,25 @@ describe("--begin", () => {
     const leftover = path.join(target.radiusDir, `${STAGING_DIR_PREFIX}old`);
     fs.mkdirSync(leftover);
     fs.writeFileSync(path.join(leftover, "app.bicep"), "half written\n");
-    begin(target);
+
+    // Anything older than the staleness window is fair game: a run that
+    // finished always removed its own.
+    const result = run(target.root, ["--begin", "--stale-after-ms", "0"]);
+
+    expect(result.status).toBe(0);
     expect(fs.existsSync(leftover)).toBe(false);
+  });
+
+  // Runs get unique directory names so two cannot collide; sweeping a
+  // just-started one away would immediately undo that.
+  it("leaves a recently started run alone", () => {
+    const target = repo();
+    const inFlight = begin(target, "first");
+    fs.writeFileSync(path.join(inFlight, "app.bicep"), "in progress\n");
+
+    begin(target, "second");
+
+    expect(fs.existsSync(path.join(inFlight, "app.bicep"))).toBe(true);
   });
 
   it("leaves non-staging entries in .radius alone", () => {
@@ -606,6 +623,140 @@ describe("publish", () => {
     expect(fs.existsSync(path.join(outside, "keep.txt"))).toBe(true);
   });
 
+  // A repository whose previous run published an authored recipe must remain
+  // re-modelable. The recipe name is a pattern, so the baseline has to pick up
+  // whatever is already on disk or the next run reads it as having appeared
+  // mid-run and refuses forever, blaming the user for an edit nobody made.
+  it("re-models a repository that already has an authored recipe", () => {
+    const target = repo(MODEL);
+    fs.writeFileSync(
+      path.join(target.radiusDir, "postgres-recipe.bicep"),
+      "// authored\n"
+    );
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+    fs.writeFileSync(
+      path.join(stagingDir, "postgres-recipe.bicep"),
+      "// regenerated\n"
+    );
+
+    const result = run(target.root, ["--staging", stagingDir]);
+
+    expect(result.status).toBe(0);
+    expect(
+      fs.readFileSync(
+        path.join(target.radiusDir, "postgres-recipe.bicep"),
+        "utf8"
+      )
+    ).toBe("// regenerated\n");
+  });
+
+  it("still refuses when an authored recipe is edited during the run", () => {
+    const target = repo(MODEL);
+    const recipe = path.join(target.radiusDir, "postgres-recipe.bicep");
+    fs.writeFileSync(recipe, "// authored\n");
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+    fs.writeFileSync(
+      path.join(stagingDir, "postgres-recipe.bicep"),
+      "// new\n"
+    );
+    fs.writeFileSync(recipe, "// hand edited\n");
+
+    const result = run(target.root, ["--staging", stagingDir]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(".radius/postgres-recipe.bicep");
+    expect(fs.readFileSync(recipe, "utf8")).toBe("// hand edited\n");
+  });
+
+  // A publish that fails PARTWAY: the first renames succeed, then a later one
+  // cannot. macOS `chflags uchg` makes one destination immutable, which is the
+  // only way to reach the rollback — every other failure is caught by the
+  // checks above, before anything has moved.
+  describe.runIf(process.platform === "darwin")(
+    "when a publish fails partway",
+    () => {
+      const locked = new Set<string>();
+      afterEach(() => {
+        for (const file of locked) {
+          spawnSync("chflags", ["nouchg", file]);
+        }
+        locked.clear();
+      });
+
+      // `bicepconfig.json` publishes after `app.bicep`, so locking it fails the
+      // loop with the model already moved into place.
+      function lockSecondDestination(target: Repo): void {
+        const file = path.join(target.radiusDir, "bicepconfig.json");
+        if (!fs.existsSync(file)) fs.writeFileSync(file, CONFIG);
+        const result = spawnSync("chflags", ["uchg", file]);
+        if (result.status !== 0) throw new Error("could not lock the file");
+        locked.add(file);
+      }
+
+      it("removes files it created, leaving .radius as it was", () => {
+        // A repository with no model: `app.bicep` is created fresh, so the
+        // rollback has to REMOVE it rather than restore anything.
+        const target = repo();
+        fs.writeFileSync(
+          path.join(target.radiusDir, "bicepconfig.json"),
+          CONFIG
+        );
+        git(target.root, ["add", "."]);
+        git(target.root, ["commit", "--quiet", "-m", "config only"]);
+        const before = radiusSnapshot(target.radiusDir);
+        const stagingDir = begin(target);
+        stageCompleteRun(stagingDir);
+        lockSecondDestination(target);
+
+        const result = run(target.root, ["--staging", stagingDir]);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("put back as it was");
+        // app.bicep was published by a run that was refused; it must be gone.
+        expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(
+          false
+        );
+        expect(radiusSnapshot(target.radiusDir)).toEqual(before);
+        expect(stagedInGit(target.root)).toEqual([]);
+      });
+
+      it("restores a model it displaced", () => {
+        const target = repo(MODEL);
+        const before = radiusSnapshot(target.radiusDir);
+        const stagingDir = begin(target);
+        stageCompleteRun(stagingDir, `${MODEL}// regenerated\n`);
+        lockSecondDestination(target);
+
+        expect(run(target.root, ["--staging", stagingDir]).status).toBe(1);
+
+        expect(radiusSnapshot(target.radiusDir)).toEqual(before);
+      });
+    }
+  );
+
+  // The cleanup can fail too; the refusal must still explain itself rather than
+  // dying with a stack trace on an exit code that reads the same.
+  it.runIf(process.platform !== "win32")(
+    "still reports the refusal when the staging directory cannot be removed",
+    () => {
+      const target = repo();
+      const stagingDir = begin(target);
+      stageCompleteRun(stagingDir);
+      fs.chmodSync(stagingDir, 0o555);
+      try {
+        const result = run(target.root, ["--staging", stagingDir]);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("Nothing was written");
+        expect(result.stderr).not.toContain("at rmSync");
+      } finally {
+        fs.chmodSync(stagingDir, 0o755);
+      }
+    }
+  );
+
   it("requires a staging directory", () => {
     const target = repo();
     const result = run(target.root, []);
@@ -775,6 +926,21 @@ describe("agreement with the core rules", () => {
       }
     },
     {
+      name: "re-modeling a repository that already has an authored recipe",
+      existingModel: MODEL,
+      stage: (dir, radiusDir) => {
+        fs.writeFileSync(
+          path.join(radiusDir, "postgres-recipe.bicep"),
+          "// authored\n"
+        );
+        stageCompleteRun(dir);
+        fs.writeFileSync(
+          path.join(dir, "postgres-recipe.bicep"),
+          "// regenerated\n"
+        );
+      }
+    },
+    {
       name: "a run with unexpected files in the staging directory",
       stage: (dir) => {
         stageCompleteRun(dir);
@@ -796,8 +962,15 @@ describe("agreement with the core rules", () => {
       const file = path.join(dir, name);
       return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
     };
+    // Derived from what the run can PUBLISH, not from the baseline's own keys.
+    // Deriving it from the baseline made the two sides agree by construction on
+    // any file the script publishes but never fingerprints, which is exactly
+    // how the authored-recipe gap stayed invisible.
     const currentHashes: Record<string, string | null> = {};
-    for (const name of Object.keys(record.baseline)) {
+    for (const name of new Set([
+      ...Object.keys(record.baseline),
+      ...publishableFiles(staged)
+    ])) {
       const content = read(target.radiusDir, name);
       currentHashes[name] = content === null ? null : hashAppBicep(content);
     }

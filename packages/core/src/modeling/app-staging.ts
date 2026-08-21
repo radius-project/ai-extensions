@@ -243,7 +243,13 @@ export function changedManagedFiles(
   current: ManagedFileHashes,
   files: ReadonlyArray<string>
 ): string[] {
+  // Only files the baseline actually covers can be compared. The authored-recipe
+  // name is a pattern rather than a fixed name, so a baseline taken before the
+  // run may legitimately not mention one; treating "not fingerprinted" as "was
+  // absent" would report an untouched file as a concurrent edit and refuse
+  // forever, which is exactly the bug this guard exists to prevent.
   return files
+    .filter((file) => Object.prototype.hasOwnProperty.call(baseline, file))
     .filter((file) => (baseline[file] ?? null) !== (current[file] ?? null))
     .sort();
 }
