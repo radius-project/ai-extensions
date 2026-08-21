@@ -55,6 +55,7 @@ function sharedBicepHome(): string {
     const home = fs.mkdtempSync(
       path.join(os.tmpdir(), "app-bicep-check-home-")
     );
+    sharedHomeDirectory = home;
     const bicep = path.join(
       home,
       ".radius",
@@ -67,7 +68,6 @@ function sharedBicepHome(): string {
     if (process.platform !== "win32") {
       fs.chmodSync(bicep, 0o755);
     }
-    sharedHomeDirectory = home;
   }
   return sharedHomeDirectory;
 }
