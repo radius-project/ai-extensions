@@ -97,7 +97,7 @@ A modeling run that stops partway must leave the repository exactly as it was. S
 node "<loaded-skill-base>/scripts/promote-app-model.mjs" --begin
 ```
 
-It removes any staging directory a previous interrupted run left behind, adds `.staging-*/` to `.radius/.gitignore`, records the fingerprint of the application model as it is right now, and prints the staging directory. Write every file the run produces into that directory and nowhere else: `app.bicep`, `bicepconfig.json`, the origin record, and any custom-type artifacts (`custom-types.yaml`, `custom-types.tgz`, `custom-recipe-pack.bicep`, and `<type>-recipe.bicep`) (pass the directory to `radius_publish_custom_type_extension` as `stagingDir` so its published package lands there too). Run the Bicep checker against the staged `app.bicep`, so what is verified is exactly what will be published.
+It removes any staging directory a previous interrupted run left behind, records the fingerprints of the files in `.radius/` this run may replace, and prints the staging directory. It writes nothing outside that directory, which is what lets a failed run leave `.radius/` byte-identical without having to undo anything. Write every file the run produces into that directory and nowhere else: `app.bicep`, `bicepconfig.json`, the origin record, and any custom-type artifacts (`custom-types.yaml`, `custom-types.tgz`, `custom-recipe-pack.bicep`, and `<type>-recipe.bicep`) (pass the directory to `radius_publish_custom_type_extension` as `stagingDir` so its published package lands there too). Run the Bicep checker against the staged `app.bicep`, so what is verified is exactly what will be published.
 
 **Finish every run** with:
 
@@ -105,7 +105,7 @@ It removes any staging directory a previous interrupted run left behind, adds `.
 node "<loaded-skill-base>/scripts/promote-app-model.mjs" --staging "<staging-dir>"
 ```
 
-It refuses unless the staging directory holds a complete set of files, the origin record describes the staged `app.bicep`, and `.radius/app.bicep` is still the file the run started from. On success it moves the files into `.radius/`, deletes the staging directory, and stages the published files with `git add` — which is why you never run `git add` yourself. On any refusal it discards the staged run and writes nothing.
+It refuses unless the staging directory holds a complete set of files, the origin record describes the staged `app.bicep`, and `.radius/app.bicep` is still the file the run started from. On success it moves the files into `.radius/`, deletes the staging directory, adds `.staging-*/` to `.radius/.gitignore`, and stages the published files with `git add` — which is why you never run `git add` yourself. On any refusal it discards the staged run and writes nothing.
 
 It exits `0` when the run was published and staged, `1` when it refused and nothing was written, and `2` when the files were published but `git add` failed. On `2` the model IS on disk: report that it was written but not staged, and do not re-run the run.
 
@@ -124,7 +124,7 @@ When any step of the run fails, discard the run with:
 node "<loaded-skill-base>/scripts/promote-app-model.mjs" --abort --staging "<staging-dir>"
 ```
 
-Use this rather than deleting the directory yourself: it also undoes the ignore-file entry the run added, so the repository is left exactly as the run found it. Then report the failure. Say plainly that **nothing was written**: `.radius/` is exactly as it was, nothing was staged in git, and any application model the user already had is intact. Never keep the staging directory for inspection.
+Use this rather than deleting the directory yourself, so a run is always discarded the same way. Then report the failure. Say plainly that **nothing was written**: `.radius/` is exactly as it was, nothing was staged in git, and any application model the user already had is intact. Never keep the staging directory for inspection.
 
 Do not retry on your own. Say which kind of failure it looks like and let the user decide:
 

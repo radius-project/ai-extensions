@@ -215,47 +215,32 @@ function purgeStagingDirs(radiusDir, keep = null) {
 // wrote is recorded and undone if the run is refused. Otherwise a failed run
 // would leave `.radius/` different from how it found it, which is the guarantee
 // this script exists to provide.
-// Returns what the run did to the file, plus the EXACT bytes that were there
-// before, so a discarded run can restore it rather than reconstructing it by
-// deleting the line it thinks it added. Reconstructing gets trailing newlines
-// and interleaved user edits wrong; restoring the original bytes cannot.
+// Adds the staging-directory ignore rule, at PUBLISH time.
+//
+// It is deliberately NOT written when the run starts. A run that fails must
+// leave `.radius/` byte-identical, and a file written at `--begin` would have to
+// be un-written on every failure path — including the ones where the run record
+// is gone and there is nothing left to say what to restore. Writing it only on
+// the path that already modifies `.radius/` means a failed run has nothing
+// outside its staging directory to undo, so the guarantee holds by construction
+// rather than by a revert that has to be correct.
+//
+// The cost is that a run interrupted mid-flight leaves its staging directory
+// untracked until the next run sweeps it up. That is visible in `git status` and
+// harmless, which is a better trade than a revert that can get it wrong.
+//
+// Returns true when the file was written, so only a rule this run added is
+// staged in git.
 function ensureStagingIgnored(radiusDir) {
   const ignoreFile = path.join(radiusDir, ".gitignore");
   const existing = readFile(ignoreFile);
   const text = existing || "";
-  const lines = text.split("\n").map((line) => line.trim());
-  if (lines.includes(STAGING_IGNORE_PATTERN)) {
-    return { ignoreWrite: "unchanged", ignoreBefore: existing };
+  if (text.split("\n").some((line) => line.trim() === STAGING_IGNORE_PATTERN)) {
+    return false;
   }
   const body = text && !text.endsWith("\n") ? `${text}\n` : text;
   writeFileSync(ignoreFile, `${body}${STAGING_IGNORE_PATTERN}\n`, "utf8");
-  return {
-    ignoreWrite: existing === null ? "created" : "appended",
-    ignoreBefore: existing
-  };
-}
-
-// Undoes ensureStagingIgnored for a run that is being discarded, by restoring
-// the exact bytes recorded at `--begin`.
-//
-// Compare-and-swap: if the file no longer holds what this run left there, the
-// user has touched it since, and their version wins. Restoring blindly would
-// destroy an edit, which is the very thing this script exists to prevent.
-function revertStagingIgnore(radiusDir, record) {
-  const write = record?.ignoreWrite;
-  if (write !== "created" && write !== "appended") return;
-  const ignoreFile = path.join(radiusDir, ".gitignore");
-  const before = record.ignoreBefore ?? null;
-  const expected =
-    write === "created" ?
-      `${STAGING_IGNORE_PATTERN}\n`
-    : `${before.endsWith("\n") || !before ? before : `${before}\n`}${STAGING_IGNORE_PATTERN}\n`;
-  if (readFile(ignoreFile) !== expected) return;
-  if (write === "created") {
-    rmSync(ignoreFile, { force: true });
-    return;
-  }
-  writeFileSync(ignoreFile, before, "utf8");
+  return true;
 }
 
 function gitAdd(repoRoot, files) {
@@ -297,7 +282,6 @@ function begin() {
   const radiusDir = resolveRadiusDir();
   mkdirSync(radiusDir, { recursive: true });
   purgeStagingDirs(radiusDir);
-  const { ignoreWrite, ignoreBefore } = ensureStagingIgnored(radiusDir);
 
   // A unique id by default: two runs sharing `.staging-run` would sweep each
   // other away, and the sweep cannot tell a live run from an abandoned one.
@@ -319,9 +303,7 @@ function begin() {
     version: 1,
     runId: dirName.slice(STAGING_DIR_PREFIX.length),
     startedAt: new Date().toISOString(),
-    baseline: managedFileHashes(radiusDir, MANAGED_FILES),
-    ignoreWrite,
-    ignoreBefore
+    baseline: managedFileHashes(radiusDir, MANAGED_FILES)
   };
   writeFileSync(
     path.join(stagingDir, STAGING_RUN_RECORD),
@@ -336,10 +318,9 @@ function begin() {
 // Every refusal discards the staged run. It is never kept for inspection: what
 // the user needs in order to act is in the failure message, and keeping it would
 // leave the product with two places an application model might live.
-function refuseWith(stagingDir, radiusDir, record) {
+function refuseWith(stagingDir) {
   return (message) => {
     rmSync(stagingDir, { recursive: true, force: true });
-    revertStagingIgnore(radiusDir, record);
     fail(
       `${message}\n\nNothing was written: .radius/ is exactly as it was before this run, and nothing was staged in git.`
     );
@@ -372,13 +353,7 @@ function readRunRecord(stagingDir) {
   for (const value of Object.values(baseline)) {
     if (value !== null && typeof value !== "string") return null;
   }
-  return {
-    baseline,
-    ignoreWrite:
-      typeof parsed.ignoreWrite === "string" ? parsed.ignoreWrite : "unchanged",
-    ignoreBefore:
-      typeof parsed.ignoreBefore === "string" ? parsed.ignoreBefore : null
-  };
+  return { baseline };
 }
 
 // Managed files whose content differs from what the run started with, limited to
@@ -426,7 +401,7 @@ function publish() {
   }
 
   const record = readRunRecord(stagingDir);
-  const refuse = refuseWith(stagingDir, radiusDir, record);
+  const refuse = refuseWith(stagingDir);
   // Checked before anything else: without the record there is no evidence of
   // what `.radius/` held when the run started, and a publish that cannot see
   // that cannot promise not to destroy it.
@@ -518,6 +493,7 @@ function publish() {
     );
   }
   rmSync(stagingDir, { recursive: true, force: true });
+  const wroteIgnore = ensureStagingIgnored(radiusDir);
 
   // Staging in git is the last thing that happens, so a run that failed anywhere
   // above leaves nothing in the index.
@@ -526,12 +502,9 @@ function publish() {
   // The ignore rule is staged only when THIS run wrote it. A `.gitignore` that
   // was already there may hold unrelated changes of the user's, and staging
   // those on their behalf is not this script's business.
-  const ignoreFile = path.join(radiusDir, ".gitignore");
-  const wroteIgnore =
-    record.ignoreWrite === "created" || record.ignoreWrite === "appended";
   const staged =
-    wroteIgnore && existsSync(ignoreFile) ?
-      [...published, ignoreFile]
+    wroteIgnore ?
+      [...published, path.join(radiusDir, ".gitignore")]
     : published;
   const gitError = gitAdd(repoRoot, staged);
   for (const file of published) console.log(file);
@@ -569,9 +542,7 @@ function abort() {
       `The staging directory must be a ${STAGING_DIR_PREFIX}* directory directly inside ${radiusDir}. Received: ${requested}`
     );
   }
-  const record = isRealDirectory(stagingDir) ? readRunRecord(stagingDir) : null;
   rmSync(stagingDir, { recursive: true, force: true });
-  revertStagingIgnore(radiusDir, record);
   console.log(
     "Discarded the staged modeling run. Nothing was written: .radius/ is exactly as it was before this run, and nothing was staged in git."
   );

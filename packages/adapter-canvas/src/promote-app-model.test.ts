@@ -155,28 +155,18 @@ describe("--begin", () => {
     expect(fs.existsSync(begin(target))).toBe(true);
   });
 
-  it("ignores staging directories exactly once", () => {
-    const target = repo();
+  // Starting a run writes NOTHING outside its staging directory, including the
+  // ignore rule. That is what lets a failed run be byte-identical by
+  // construction rather than by a revert that has to be correct.
+  it("writes nothing outside the staging directory", () => {
+    const target = repo(MODEL);
+    const before = radiusSnapshot(target.radiusDir);
     begin(target, "one");
     begin(target, "two");
-    const ignore = fs.readFileSync(
-      path.join(target.radiusDir, ".gitignore"),
-      "utf8"
+    expect(radiusSnapshot(target.radiusDir)).toEqual(before);
+    expect(fs.existsSync(path.join(target.radiusDir, ".gitignore"))).toBe(
+      false
     );
-    expect(
-      ignore
-        .split("\n")
-        .filter((line) => line.trim() === STAGING_IGNORE_PATTERN)
-    ).toHaveLength(1);
-  });
-
-  it("preserves an existing ignore file that lacks a trailing newline", () => {
-    const target = repo();
-    fs.writeFileSync(path.join(target.radiusDir, ".gitignore"), "*.tmp");
-    begin(target);
-    expect(
-      fs.readFileSync(path.join(target.radiusDir, ".gitignore"), "utf8")
-    ).toBe(`*.tmp\n${STAGING_IGNORE_PATTERN}\n`);
   });
 
   // A run that finished always removed its own staging directory, so anything
@@ -397,40 +387,70 @@ describe("publish", () => {
     ).toBe("appeared\n");
   });
 
-  it("removes an ignore file it created when the run is refused", () => {
-    const target = repo(MODEL);
-    const before = radiusSnapshot(target.radiusDir);
+  it("ignores staging directories once the run publishes", () => {
+    const target = repo();
     const stagingDir = begin(target);
-    expect(fs.existsSync(path.join(target.radiusDir, ".gitignore"))).toBe(true);
+    stageCompleteRun(stagingDir);
 
-    expect(run(target.root, ["--staging", stagingDir]).status).toBe(1);
+    expect(run(target.root, ["--staging", stagingDir]).status).toBe(0);
 
-    expect(radiusSnapshot(target.radiusDir)).toEqual(before);
-  });
-
-  it("restores an ignore file it appended to when the run is refused", () => {
-    const target = repo(MODEL);
-    fs.writeFileSync(path.join(target.radiusDir, ".gitignore"), "*.tmp\n");
-    const before = radiusSnapshot(target.radiusDir);
-    const stagingDir = begin(target);
-
-    expect(run(target.root, ["--staging", stagingDir]).status).toBe(1);
-
-    expect(radiusSnapshot(target.radiusDir)).toEqual(before);
-  });
-
-  it("leaves an ignore rule the user already had when the run is refused", () => {
-    const target = repo(MODEL);
-    fs.writeFileSync(
+    const ignore = fs.readFileSync(
       path.join(target.radiusDir, ".gitignore"),
-      `${STAGING_IGNORE_PATTERN}\n`
+      "utf8"
     );
+    expect(
+      ignore
+        .split("\n")
+        .filter((line) => line.trim() === STAGING_IGNORE_PATTERN)
+    ).toHaveLength(1);
+    expect(stagedInGit(target.root)).toContain(".radius/.gitignore");
+  });
+
+  it("appends the ignore rule without disturbing an existing file", () => {
+    const target = repo();
+    fs.writeFileSync(path.join(target.radiusDir, ".gitignore"), "*.tmp");
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+
+    expect(run(target.root, ["--staging", stagingDir]).status).toBe(0);
+
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, ".gitignore"), "utf8")
+    ).toBe(`*.tmp\n${STAGING_IGNORE_PATTERN}\n`);
+  });
+
+  it("leaves an ignore file alone when it already has the rule", () => {
+    const target = repo();
+    const original = `${STAGING_IGNORE_PATTERN}\n*.tmp\n`;
+    fs.writeFileSync(path.join(target.radiusDir, ".gitignore"), original);
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+
+    expect(run(target.root, ["--staging", stagingDir]).status).toBe(0);
+
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, ".gitignore"), "utf8")
+    ).toBe(original);
+  });
+
+  // The lost-record case: the refusal claims `.radius/` is byte-identical, and
+  // it must actually be, with nothing left over for a revert to have to undo.
+  it("leaves .radius byte-identical when the run record is gone", () => {
+    const target = repo(MODEL);
     const before = radiusSnapshot(target.radiusDir);
     const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+    fs.rmSync(path.join(stagingDir, STAGING_RUN_RECORD));
 
-    expect(run(target.root, ["--staging", stagingDir]).status).toBe(1);
+    const result = run(target.root, ["--staging", stagingDir]);
 
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Nothing was written");
     expect(radiusSnapshot(target.radiusDir)).toEqual(before);
+    expect(fs.existsSync(path.join(target.radiusDir, ".gitignore"))).toBe(
+      false
+    );
+    expect(stagedInGit(target.root)).toEqual([]);
   });
 
   it("refuses when the run record was lost", () => {
@@ -641,7 +661,7 @@ describe("publish", () => {
     ).toBe(0);
   });
 
-  it("stages the ignore file only when this run wrote it", () => {
+  it("does not stage an ignore file this run did not write", () => {
     const target = repo();
     fs.writeFileSync(
       path.join(target.radiusDir, ".gitignore"),
@@ -649,10 +669,13 @@ describe("publish", () => {
     );
     git(target.root, ["add", "."]);
     git(target.root, ["commit", "--quiet", "-m", "ignore"]);
+    fs.appendFileSync(path.join(target.radiusDir, ".gitignore"), "*.user\n");
     const stagingDir = begin(target);
     stageCompleteRun(stagingDir);
 
     expect(run(target.root, ["--staging", stagingDir]).status).toBe(0);
+    // The user's unrelated edit is left unstaged rather than committed on
+    // their behalf.
     expect(stagedInGit(target.root)).not.toContain(".radius/.gitignore");
   });
 });
@@ -673,7 +696,7 @@ describe("--abort", () => {
     expect(stagedInGit(target.root)).toEqual([]);
   });
 
-  it("keeps an ignore file the user changed during the run", () => {
+  it("leaves an ignore file the user wrote during the run alone", () => {
     const target = repo(MODEL);
     const stagingDir = begin(target);
     const userEdit = "*.log\n";
