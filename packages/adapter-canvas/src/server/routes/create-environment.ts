@@ -18,6 +18,12 @@ import {
   applyProviderConfiguration,
   publishWorkflowFiles
 } from "./create-environment-workflow-publisher.js";
+import {
+  ensureGitHubEnvironment,
+  GitHubEnvironmentEnsureError,
+  readEnsuredGitHubEnvironment,
+  type GitHubEnvironmentReadResult
+} from "../services/github-environment.js";
 import type { WorkflowTempFilePort } from "./create-environment-workflow-committer.js";
 import type {
   CreateEnvironmentCommandResult,
@@ -87,6 +93,10 @@ export interface CreateEnvironmentDependencies
   preflightGhcrPackageWriteAccess(
     executor?: SelectedGhExecutor
   ): Promise<GhcrPreflightResult>;
+  readGitHubJson(
+    apiPath: string,
+    executor?: SelectedGhExecutor
+  ): Promise<GitHubEnvironmentReadResult>;
   bootstrapGHCRStatePackage(input: {
     targetRepository: string;
     registry: string;
@@ -113,9 +123,10 @@ export interface CreateEnvironmentDependencies
   tempFile: WorkflowTempFilePort;
 
   // --- GitHub environment ---
-  resolveGitHubEnvironmentCreateState(
-    result: Partial<CreateEnvironmentCommandResult> | null | undefined
-  ): "created_candidate" | "reused" | null;
+  setCanonicalEnvironment(
+    operation: CreateEnvironmentOperation,
+    environment: string
+  ): void;
   recordGitHubEnvironment(
     operation: CreateEnvironmentOperation,
     patch: { state: string; repo: string; name: string }
@@ -244,7 +255,8 @@ export async function handleCreateEnvironment(
       respond(admission.refusal.status, admission.refusal.body);
       return;
     }
-    const { targetRepo, envName, provider } = admission;
+    const { targetRepo, provider } = admission;
+    let { envName } = admission;
     op = admission.operation;
     const operation = admission.operation;
     const selectedExecutor = dependencies.getSelectedGitHubExecutor(
@@ -256,6 +268,13 @@ export async function handleCreateEnvironment(
       );
     }
     await selectedExecutor.verifyIdentity();
+    deleteGitHubEnvironmentRunner = async (args) => {
+      const result = await selectedExecutor.run(args);
+      if (result.code !== 0 && result.code !== "0") {
+        const detail = (result.stderr || result.stdout || "").trim();
+        throw new Error(detail || "GitHub API request failed.");
+      }
+    };
 
     steps = [];
     const rawPush = steps.push.bind(steps);
@@ -288,11 +307,57 @@ export async function handleCreateEnvironment(
         runAz:
           provider === "azure" ?
             (args: string[]) => dependencies.runAzCommand(args)
-          : null
+          : null,
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner
       });
       respond(failure.status, failure.body);
       return;
     }
+
+    const ghcrPreflight =
+      await dependencies.preflightGhcrPackageWriteAccess(selectedExecutor);
+    if (!ghcrPreflight.ok) {
+      const failure = await dependencies.finalizeSetupFailure(operation, {
+        status: 403,
+        error: ghcrPreflight.error,
+        code: ghcrPreflight.code,
+        steps,
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner
+      });
+      respond(failure.status, failure.body);
+      return;
+    }
+    const packageCredentials = ghcrPreflight.credentials;
+
+    let ensuredEnvironment = readEnsuredGitHubEnvironment(
+      operation,
+      targetRepo,
+      envName
+    );
+    try {
+      ensuredEnvironment ??= await ensureGitHubEnvironment({
+        repo: targetRepo,
+        requestedName: envName,
+        readGitHubJson: (apiPath) =>
+          dependencies.readGitHubJson(apiPath, selectedExecutor),
+        runGh: (args) => selectedExecutor.run(args)
+      });
+    } catch (error) {
+      if (
+        error instanceof GitHubEnvironmentEnsureError &&
+        error.createdCandidate
+      ) {
+        dependencies.recordGitHubEnvironment(operation, {
+          state: "created_candidate",
+          repo: error.createdCandidate.repo,
+          name: error.createdCandidate.name
+        });
+      }
+      throw error;
+    }
+    const requestedEnvName = envName;
+    envName = ensuredEnvironment.name;
+    dependencies.setCanonicalEnvironment(operation, envName);
 
     const runner = createWorkflowScopeGhRunner(
       dependencies,
@@ -302,16 +367,7 @@ export async function handleCreateEnvironment(
       },
       selectedExecutor
     );
-    const { runGh, runGhOrThrow, setEnvironmentVariable, runGhWorkflow } =
-      runner;
-
-    deleteGitHubEnvironmentRunner = async (args) => {
-      const result = await runGh(args);
-      if (result.code !== 0) {
-        const detail = (result.stderr || result.stdout || "").trim();
-        throw new Error(detail || "GitHub API request failed.");
-      }
-    };
+    const { runGh, setEnvironmentVariable, runGhWorkflow } = runner;
 
     const fail = async (
       status: number,
@@ -346,6 +402,20 @@ export async function handleCreateEnvironment(
         fail
       });
 
+    dependencies.recordGitHubEnvironment(operation, {
+      state: ensuredEnvironment.state,
+      repo: targetRepo,
+      name: envName
+    });
+    if (requestedEnvName === envName) {
+      steps.push(`✅ GitHub environment "${envName}" resolved.`);
+    } else {
+      steps.push(
+        `✅ GitHub resolved requested environment "${requestedEnvName}" as "${envName}".`
+      );
+    }
+    if (!(await checkpoint())) return;
+
     const defaultBranch =
       (await dependencies.getDefaultBranch(targetRepo, selectedExecutor)) ||
       "main";
@@ -357,13 +427,6 @@ export async function handleCreateEnvironment(
     steps.push(
       'Creating private GHCR state package "' + stateRegistry + '"...'
     );
-    const ghcrPreflight =
-      await dependencies.preflightGhcrPackageWriteAccess(selectedExecutor);
-    if (!ghcrPreflight.ok) {
-      await fail(403, ghcrPreflight.error, ghcrPreflight.code, { steps });
-      return;
-    }
-    const packageCredentials = ghcrPreflight.credentials;
     const statePackage = await dependencies.bootstrapGHCRStatePackage({
       targetRepository: targetRepo,
       registry: stateRegistry,
@@ -396,31 +459,6 @@ export async function handleCreateEnvironment(
     const prBranch = (): string | null =>
       committer.pullRequestState()?.branch || null;
 
-    // Step 1: Create the GitHub environment
-    const environmentPath =
-      "/repos/" + targetRepo + "/environments/" + encodeURIComponent(envName);
-    const environmentLookup = await runGh(["api", environmentPath]);
-    const environmentState =
-      dependencies.resolveGitHubEnvironmentCreateState(environmentLookup);
-    if (!environmentState) {
-      const detail =
-        (environmentLookup.stderr || environmentLookup.stdout || "").trim() ||
-        "The GitHub API lookup failed.";
-      throw new Error(
-        `Could not determine whether GitHub environment "${envName}" already exists before creating it. ${detail}`
-      );
-    }
-    steps.push('Creating GitHub environment "' + envName + '"...');
-    await runGhOrThrow(
-      ["api", "--method", "PUT", environmentPath],
-      'Failed to create GitHub environment "' + envName + '"'
-    );
-    dependencies.recordGitHubEnvironment(operation, {
-      state: environmentState,
-      repo: targetRepo,
-      name: envName
-    });
-    if (!(await checkpoint())) return;
     // Tag the environment as Radius-managed so the listing can filter out
     // environments created outside this extension.
     await setEnvironmentVariable("RADIUS_MANAGED", "true");

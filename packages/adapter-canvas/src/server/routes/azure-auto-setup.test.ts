@@ -628,7 +628,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     const existing: AzureAutoSetupOperation = {
       operationId: "op-resume",
       repo: "octo/app",
-      environment: "dev",
+      environment: "production",
       provider: "azure",
       currentStage: "authorize_identity",
       inputRequired: { code: "app-selection-required" }
@@ -640,6 +640,8 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     const response = await invoke(
       JSON.stringify({
         ...VALID_SETUP,
+        environment: "Production",
+        operationEnvironment: "production",
         operationId: existing.operationId,
         clientId: APP_ID
       }),
