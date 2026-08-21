@@ -27,6 +27,21 @@ A Dockerfile means a file named `Dockerfile`, `Dockerfile.<suffix>`, or `<prefix
 
 > I could not find a Dockerfile in this repository. I can only create application definitions for containerized applications. Add a Dockerfile first, then I can create an application definition.
 
+### Identifying the application
+
+A repository with several Dockerfiles is normally still one application. A microservices repository builds many images, and this skill models a microservices repository into a single `Radius.Core/applications` named after the repository, with the services wired to each other through the addressing rules in [connection-conventions.md](references/connection-conventions.md). A Dockerfile count is never decisive on its own, and it is never by itself a reason to put a question to the user. Nor does a Dockerfile prove there is a service to model: it may build a CI image, a migration or tooling image, an unused example, or an alternative to another one. A root workspace manifest such as `pnpm-workspace.yaml` or `go.work` describes how the repository is organized, not that its projects form one application — independent applications use those tools too, so weigh it against the source rather than concluding from it.
+
+Establish from the source which directories hold application services that share a runtime and deploy together, and model those as one application. Ask the user only when, after reading the source, you cannot identify an application at all. That happens in two cases:
+
+- the repository holds more than one **independent** application, which a single definition cannot represent, or
+- nothing in the repository is an application — for example the Dockerfiles build only tooling or CI images.
+
+In either case, ask exactly:
+
+> I looked through the repository but could not identify an application or application resources. Which directory contains your application source code and Dockerfile?
+
+Then stop, and write nothing: no `.radius/app.bicep`, no `.radius/bicepconfig.json`, no origin record, no branch, no commit. Do not guess a directory on the user's behalf or model one candidate to "make progress" — a directory you chose yourself is not an answer to the question you just asked. The user replies with a directory and asks for analysis again, which scopes the next run to it; the skill already supports a subdirectory through the `build.source` rule.
+
 ## Response
 
 When asked to model a repository:

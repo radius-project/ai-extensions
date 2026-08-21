@@ -73,6 +73,7 @@ import {
   isResourceGroupName,
   GITHUB_API_VERSION
 } from "./azure-oidc.js";
+import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage } from "./ghcr.js";
 import {
   appParams,
@@ -397,6 +398,37 @@ function record(value: unknown): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value));
 }
 
+// The one adapter from `ghApiJson` to the `GitHubJsonRunner` port. Both the
+// auto-setup routes and the deploy preflight read GitHub variables and OIDC
+// customization through it, so status, body shape, and API version cannot drift
+// between them. `executor` routes the read through a specific signed-in account
+// when the caller has one; the deploy path has no operation context, so it uses
+// the default `gh` credentials, the same identity the rest of the deploy uses.
+async function runGitHubJsonRequest(
+  apiPath: string,
+  executor?: SelectedGhExecutor
+): Promise<GitHubJsonResponse> {
+  const result =
+    executor ?
+      await selectedGhApiJson(executor, apiPath)
+    : await ghApiJson(apiPath, {
+        headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
+      });
+  return {
+    ok: result.ok,
+    status: result.status,
+    json:
+      (
+        result.json !== null &&
+        typeof result.json === "object" &&
+        !Array.isArray(result.json)
+      ) ?
+        record(result.json)
+      : null,
+    stderr: result.stderr
+  };
+}
+
 function optionalString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
@@ -664,27 +696,8 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
           getGitHubIdentity,
           executor
         ),
-      runGitHubJson: async (apiPath, executor) => {
-        const result =
-          executor ?
-            await selectedGhApiJson(executor, apiPath)
-          : await ghApiJson(apiPath, {
-              headers: { "X-GitHub-Api-Version": GITHUB_API_VERSION }
-            });
-        return {
-          ok: result.ok,
-          status: result.status,
-          json:
-            (
-              result.json !== null &&
-              typeof result.json === "object" &&
-              !Array.isArray(result.json)
-            ) ?
-              record(result.json)
-            : null,
-          stderr: result.stderr
-        };
-      },
+      runGitHubJson: (apiPath, executor) =>
+        runGitHubJsonRequest(apiPath, executor),
       runAz: (args) => runCliCommand("az", args)
     },
     tempFile: {
@@ -1761,7 +1774,9 @@ function triggerAppBicepHandoff(
 // per repair loop: once the agent owns the loop it redeploys and re-reads status
 // itself, so re-handing off every failed attempt would double-drive it.
 // `branch-not-pushed` is excluded: the user fixes that with a push, not by
-// editing the model.
+// editing the model. `oidc-subject-missing` is excluded for the same reason: the
+// remedy is re-running Create Environment or adding a federated credential in
+// Azure, neither of which the agent can reach by editing app.bicep.
 //
 // Delivery is tracked explicitly (pending -> delivered | failed) because the
 // browser stops polling once a deploy is terminal: a rejected send has no later
@@ -1795,6 +1810,19 @@ export const DEPLOY_BRANCH_NOT_PUSHED_KIND: DeployErrorKind =
 // kind a repair redeploy may act on, because it is the only kind that cannot
 // leave a run in flight for a redeploy to race.
 export const DEPLOY_RUN_UNCONFIRMED_KIND: DeployErrorKind = "run-unconfirmed";
+
+// Marks a deploy refused by the Azure OIDC preflight: the app registration the
+// target environment names holds no federated credential GitHub's token could
+// match, so the workflow could only fail its login. Nothing was dispatched, and
+// the fix is in Azure and GitHub configuration rather than in the model, so this
+// never opens a repair loop.
+export const DEPLOY_OIDC_SUBJECT_MISSING_KIND: DeployErrorKind =
+  "oidc-subject-missing";
+
+// Ceiling for the preflight's `az` call. The check is advisory — it can only
+// block on a definitive answer — so a slow or hung `az` must not hold up a
+// deploy that authenticates in Actions rather than locally.
+const AZURE_PREFLIGHT_TIMEOUT_MS = 15000;
 
 // Split a failed `gh workflow run` by whether it proves no run was created.
 // GitHub naming the branch as unresolvable is proof: it rejected the request.
@@ -1965,6 +1993,9 @@ export function triggerDeployRepairHandoff(
     if (!state || state.deployStatus !== "failed") return false;
     if (
       state.deployErrorKind === DEPLOY_BRANCH_NOT_PUSHED_KIND ||
+      // Refused before dispatch because no federated credential can match the
+      // token GitHub would mint. Repairing the model cannot change that.
+      state.deployErrorKind === DEPLOY_OIDC_SUBJECT_MISSING_KIND ||
       // An attempt whose run may still be in flight can never be repaired: the
       // resolver refuses its redeploy. Opening a loop only to refuse its first
       // call would spend a cycle and tell the agent two different things.
@@ -2246,10 +2277,24 @@ const deployDispatchService = createDeployDispatchService({
   deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
   deployWorkflowFiles: [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
   branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
+  oidcSubjectMissingKind: DEPLOY_OIDC_SUBJECT_MISSING_KIND,
   getBranchHeadSha,
   getDefaultBranch,
   runGh: runGhForDeploy,
   runGhWithStdin: runGhWithStdinForDeploy,
+  runAz: async (args) => {
+    // Short timeout on purpose: this runs before every Azure deploy, including
+    // redeploys and repair attempts, and an unusable check is only ever a
+    // warning. Waiting out the default 60s would add a minute of dead time to a
+    // deploy that was always going to succeed.
+    const result = await runCliCommand("az", args, AZURE_PREFLIGHT_TIMEOUT_MS);
+    return {
+      code: result.code ?? 1,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? ""
+    };
+  },
+  runGitHubJson: (apiPath) => runGitHubJsonRequest(apiPath),
   readProcessEnv: () => process.env,
   fetchFileForSelection: (entry, repo, branch, repoPath) =>
     fetchFileForSelection(entry as CanvasServerEntry, repo, branch, repoPath),

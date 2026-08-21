@@ -1,0 +1,95 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Canvas Reliability
+
+on:
+  # GitHub can disable scheduled workflows after 60 days without repository
+  # activity. A manual dispatch or repository update re-enables the schedule.
+  schedule:
+    # Three cross-platform resilience sweeps per day, offset from visual runs.
+    - cron: "47 */8 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resilience:
+    name: Reliability (${{ matrix.os }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run extended reliability checks
+        run: pnpm run test:reliability
+
+      - name: Run native Windows process checks
+        if: runner.os == 'Windows'
+        run: pnpm run test:integration:windows-process
+
+  notify-scheduled-result:
+    name: Scheduled reliability alert
+    if: ${{ always() && github.event_name == 'schedule' }}
+    needs:
+      - resilience
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Report or clear scheduled failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTS: resilience=${{ needs.resilience.result }}
+          SCHEDULE_FAILED: ${{ needs.resilience.result != 'success' }}
+        shell: bash
+        run: |
+          title="Canvas Reliability scheduled failure"
+          issue_number="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "\"$title\" in:title" \
+            --json number \
+            --jq '.[0].number // empty')"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+          if [[ "$SCHEDULE_FAILED" == "true" ]]; then
+            body="The scheduled Canvas Reliability workflow failed: $RESULTS. Run: $run_url"
+            if [[ -n "$issue_number" ]]; then
+              gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body "$body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            fi
+          elif [[ -n "$issue_number" ]]; then
+            gh issue close "$issue_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --comment "The scheduled Canvas Reliability workflow recovered. Run: $run_url"
+          fi
