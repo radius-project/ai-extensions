@@ -26,7 +26,7 @@ Otherwise, do not generate a type. Report the gap to the user.
 
 ## Generation flow
 
-### 1. Author the schema: `.radius/custom-types.yaml`
+### 1. Author the schema: `<staging-dir>/custom-types.yaml`
 
 The manifest shape is fixed; only the type name and the `properties` vary. Model it on an existing type such as `Data/mySqlDatabases/mySqlDatabases.yaml` in `resource-types-contrib`:
 
@@ -86,7 +86,7 @@ Re-run this tool after ANY edit to `custom-types.yaml` — the compiled `custom-
 
 `--target` is a local file path here (not an OCI reference), so the extension ships alongside `app.bicep` and needs no registry. The tool runs the extension-managed `rad` binary internally.
 
-### 3. Wire the extension into `.radius/bicepconfig.json`
+### 3. Wire the extension into the staged `bicepconfig.json`
 
 Add an alias for the local extension tgz next to the existing `radius` alias, for example an entry that points `customTypes` at `./custom-types.tgz`. Keep the `radius` extension. In `app.bicep`, declare `extension customTypes` in addition to `extension radius`.
 
@@ -106,7 +106,7 @@ For example `mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.
 
 Do NOT guess the module's parameter or output names. Verify them against the module's real interface: an existing recipe pack that already uses the same AVM module (in `resource-types-contrib/recipepack/azure/`) or the module's published spec. Use the exact output names the module emits (for example the AVM `service-bus/namespace` module emits `primaryConnectionString`, not an invented name like `serviceBusConnectionString`), set the parameters the module requires (such as the SKU), and set auth-relevant parameters the connection depends on (for example `disableLocalAuth: false` when the output is a shared-access connection string). Pin the exact version whose interface you verified: if you confirmed the parameter and output names from a recipe pack that pins `:x.y.z`, pin `:x.y.z`, not a different version (an older or newer module may rename parameters or outputs).
 
-#### 4b. Authored recipe (fallback): `.radius/<type>-recipe.bicep`
+#### 4b. Authored recipe (fallback): `<staging-dir>/<type>-recipe.bicep`
 
 When no AVM module fits, author a Bicep recipe. A recipe takes a single `context` object and returns a `result` object with exactly three maps. Model it on an existing recipe such as `Data/mySqlDatabases/recipes/kubernetes/bicep/kubernetes-mysql.bicep`:
 
@@ -140,7 +140,7 @@ output result object = {
 Then publish it to the user's GitHub Container Registry for the repository being modeled by calling the `radius_publish_recipe` tool (never invoke `rad` directly), and use the resulting path as the recipe pack `source`. Pass `file` (the recipe path) and `target` (`br:ghcr.io/<owner>/<repo>/<recipe>:<tag>`):
 
 ```
-file: .radius/<type>-recipe.bicep
+file: <staging-dir>/<type>-recipe.bicep
 target: br:ghcr.io/<owner>/<repo>/<recipe>:<tag>
 ```
 
@@ -148,7 +148,7 @@ target: br:ghcr.io/<owner>/<repo>/<recipe>:<tag>
 - Pin an immutable `<tag>`; do not publish `latest`.
 - The push needs `write:packages` on the stored GitHub credential. If the tool reports the push was not authorized, stop and surface it (refresh with `gh auth refresh -s write:packages`) rather than guessing credentials.
 
-### 5. Author the recipe pack: `.radius/custom-recipe-pack.bicep`
+### 5. Author the recipe pack: `<staging-dir>/custom-recipe-pack.bicep`
 
 The recipe pack registers the recipe for the custom type. It is a `Radius.Core/recipePacks` resource whose `recipes` map is keyed by the full type name. Model it on `recipepack/azure/aks-recipepack.bicep` in `resource-types-contrib`:
 

@@ -11,6 +11,7 @@ import {
   STAGING_IGNORE_PATTERN,
   STAGING_RUN_RECORD,
   evaluateStagedRun,
+  publishableFiles,
   serializeAppOrigin
 } from "@radius-project/core";
 import { hashAppBicep } from "./app-bicep-hash.js";
@@ -197,20 +198,26 @@ describe("--begin", () => {
     ).toBe(MODEL);
   });
 
-  it("records the fingerprint of the model the run starts from", () => {
+  it("fingerprints every file the run could replace", () => {
     const target = repo(MODEL);
     const record = JSON.parse(
       fs.readFileSync(path.join(begin(target), STAGING_RUN_RECORD), "utf8")
-    ) as { baselineAppBicepHash: string | null; runId: string };
-    expect(record.baselineAppBicepHash).toBe(hashAppBicep(MODEL));
+    ) as { baseline: Record<string, string | null>; runId: string };
+    expect(record.baseline["app.bicep"]).toBe(hashAppBicep(MODEL));
+    expect(record.baseline["bicepconfig.json"]).toBe(hashAppBicep(CONFIG));
+    // A file that does not exist is recorded as absent, which is as meaningful
+    // as a hash: one that appears during the run is a change too.
+    expect(record.baseline["custom-types.yaml"]).toBeNull();
     expect(record.runId).toBe("test-run");
   });
 
-  it("records no baseline when the repository has no model", () => {
+  it("records every managed file as absent when the repository has no model", () => {
     const record = JSON.parse(
       fs.readFileSync(path.join(begin(repo()), STAGING_RUN_RECORD), "utf8")
-    ) as { baselineAppBicepHash: string | null };
-    expect(record.baselineAppBicepHash).toBeNull();
+    ) as { baseline: Record<string, string | null> };
+    expect(Object.values(record.baseline).every((hash) => hash === null)).toBe(
+      true
+    );
   });
 
   it("sanitizes a run id that would escape .radius", () => {
@@ -223,11 +230,16 @@ describe("--begin", () => {
     expect(path.dirname(stagingDir)).toBe(target.radiusDir);
   });
 
-  it("names the directory deterministically when no run id is given", () => {
+  // Two runs sharing one directory name would sweep each other away, and the
+  // sweep cannot tell a live run from an abandoned one.
+  it("gives each run its own directory when no run id is given", () => {
     const target = repo();
-    expect(path.basename(run(target.root, ["--begin"]).stdout)).toBe(
-      `${STAGING_DIR_PREFIX}run`
+    const first = run(target.root, ["--begin"]).stdout;
+    const second = run(target.root, ["--begin"]).stdout;
+    expect(path.basename(first)).toMatch(
+      new RegExp(`^\\${STAGING_DIR_PREFIX}.+`)
     );
+    expect(first).not.toBe(second);
   });
 });
 
@@ -440,6 +452,140 @@ describe("publish", () => {
     expect(run(target.root, ["--staging", stagingDir]).status).toBe(1);
   });
 
+  // Without the run record there is no evidence of what `.radius/` held when
+  // the run started, which is what makes `--begin` mandatory rather than
+  // merely recommended.
+  it("refuses a staging directory an agent assembled without --begin", () => {
+    const target = repo(MODEL);
+    const before = radiusSnapshot(target.radiusDir);
+    const stagingDir = path.join(target.radiusDir, `${STAGING_DIR_PREFIX}hand`);
+    fs.mkdirSync(stagingDir);
+    stageCompleteRun(stagingDir);
+
+    const result = run(target.root, ["--staging", stagingDir]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("--begin");
+    expect(radiusSnapshot(target.radiusDir)).toEqual(before);
+  });
+
+  it("refuses a run whose record was tampered with", () => {
+    const target = repo();
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+    fs.writeFileSync(
+      path.join(stagingDir, STAGING_RUN_RECORD),
+      JSON.stringify({ baseline: "not-an-object" })
+    );
+
+    expect(run(target.root, ["--staging", stagingDir]).status).toBe(1);
+  });
+
+  it("refuses when a supporting file was edited during the run", () => {
+    const target = repo(MODEL);
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+    const edited = '{"hand":"tuned"}\n';
+    fs.writeFileSync(path.join(target.radiusDir, "bicepconfig.json"), edited);
+
+    const result = run(target.root, ["--staging", stagingDir]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(".radius/bicepconfig.json");
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, "bicepconfig.json"), "utf8")
+    ).toBe(edited);
+  });
+
+  it("does not publish files it does not recognize", () => {
+    const target = repo();
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+    fs.writeFileSync(path.join(stagingDir, "notes.md"), "scratch\n");
+    fs.writeFileSync(path.join(stagingDir, ".env"), "TOKEN=secret\n");
+
+    expect(run(target.root, ["--staging", stagingDir]).status).toBe(0);
+    expect(fs.existsSync(path.join(target.radiusDir, "notes.md"))).toBe(false);
+    expect(fs.existsSync(path.join(target.radiusDir, ".env"))).toBe(false);
+    expect(stagedInGit(target.root)).not.toContain(".radius/.env");
+  });
+
+  // Each rename is atomic; the set of them is not. A destination that cannot be
+  // replaced has to be found before anything moves.
+  it("refuses rather than half-publishing when a destination is not a file", () => {
+    const target = repo(MODEL);
+    const before = radiusSnapshot(target.radiusDir);
+    // A directory where a published file goes, in a repository whose managed
+    // files are otherwise exactly as the run found them.
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+    fs.mkdirSync(path.join(target.radiusDir, "custom-recipe-pack.bicep"));
+    fs.writeFileSync(
+      path.join(stagingDir, "custom-recipe-pack.bicep"),
+      "pack\n"
+    );
+
+    const result = run(target.root, ["--staging", stagingDir]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("not a regular file");
+    // The model that was already there is untouched, not replaced by the run.
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+    ).toBe(before["app.bicep"]);
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it("reports a distinct status when the files are published but not staged", () => {
+    const target = repo();
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+    fs.rmSync(path.join(target.root, ".git"), { recursive: true, force: true });
+
+    const result = run(target.root, ["--staging", stagingDir]);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("NOT staged");
+    expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(true);
+  });
+
+  // Confinement is not lexical only: a symlink named like a staging directory
+  // must never be followed, written through, or published from.
+  it("refuses a staging path that is a symlink", () => {
+    const target = repo();
+    const outside = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "promote-outside-"))
+    );
+    temporaryDirectories.add(outside);
+    stageCompleteRun(outside);
+    const link = path.join(target.radiusDir, `${STAGING_DIR_PREFIX}link`);
+    fs.symlinkSync(outside, link);
+
+    const result = run(target.root, ["--staging", link]);
+
+    expect(result.status).toBe(1);
+    expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(false);
+    // The linked-to directory is not deleted either.
+    expect(fs.existsSync(path.join(outside, "app.bicep"))).toBe(true);
+  });
+
+  it("does not delete through a symlink while sweeping up leftovers", () => {
+    const target = repo();
+    const outside = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "promote-outside-"))
+    );
+    temporaryDirectories.add(outside);
+    fs.writeFileSync(path.join(outside, "keep.txt"), "keep\n");
+    fs.symlinkSync(
+      outside,
+      path.join(target.radiusDir, `${STAGING_DIR_PREFIX}link`)
+    );
+
+    begin(target);
+
+    expect(fs.existsSync(path.join(outside, "keep.txt"))).toBe(true);
+  });
+
   it("requires a staging directory", () => {
     const target = repo();
     const result = run(target.root, []);
@@ -495,17 +641,71 @@ describe("publish", () => {
     ).toBe(0);
   });
 
-  it("publishes even when git cannot stage the result", () => {
+  it("stages the ignore file only when this run wrote it", () => {
     const target = repo();
+    fs.writeFileSync(
+      path.join(target.radiusDir, ".gitignore"),
+      `${STAGING_IGNORE_PATTERN}\n`
+    );
+    git(target.root, ["add", "."]);
+    git(target.root, ["commit", "--quiet", "-m", "ignore"]);
     const stagingDir = begin(target);
     stageCompleteRun(stagingDir);
-    fs.rmSync(path.join(target.root, ".git"), { recursive: true, force: true });
 
-    const result = run(target.root, ["--staging", stagingDir]);
+    expect(run(target.root, ["--staging", stagingDir]).status).toBe(0);
+    expect(stagedInGit(target.root)).not.toContain(".radius/.gitignore");
+  });
+});
+
+describe("--abort", () => {
+  it("discards the run and leaves .radius byte-identical", () => {
+    const target = repo(MODEL);
+    const before = radiusSnapshot(target.radiusDir);
+    const stagingDir = begin(target);
+    fs.writeFileSync(path.join(stagingDir, "app.bicep"), "half written\n");
+
+    const result = run(target.root, ["--abort", "--staging", stagingDir]);
 
     expect(result.status).toBe(0);
-    expect(result.stderr).toContain("could not stage it with git");
-    expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(true);
+    expect(result.stdout).toContain("Nothing was written");
+    expect(fs.existsSync(stagingDir)).toBe(false);
+    expect(radiusSnapshot(target.radiusDir)).toEqual(before);
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  it("keeps an ignore file the user changed during the run", () => {
+    const target = repo(MODEL);
+    const stagingDir = begin(target);
+    const userEdit = "*.log\n";
+    fs.writeFileSync(path.join(target.radiusDir, ".gitignore"), userEdit);
+
+    run(target.root, ["--abort", "--staging", stagingDir]);
+
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, ".gitignore"), "utf8")
+    ).toBe(userEdit);
+  });
+
+  it("is safe to run twice", () => {
+    const target = repo();
+    const stagingDir = begin(target);
+    expect(run(target.root, ["--abort", "--staging", stagingDir]).status).toBe(
+      0
+    );
+    expect(run(target.root, ["--abort", "--staging", stagingDir]).status).toBe(
+      0
+    );
+  });
+
+  it("rejects a directory outside .radius", () => {
+    const target = repo();
+    const result = run(target.root, ["--abort", "--staging", target.root]);
+    expect(result.status).toBe(1);
+    expect(fs.existsSync(target.root)).toBe(true);
+  });
+
+  it("requires a staging directory", () => {
+    expect(run(repo().root, ["--abort"]).status).toBe(1);
   });
 });
 
@@ -533,11 +733,29 @@ describe("agreement with the core rules", () => {
       }
     },
     {
-      name: "a concurrent edit",
+      name: "an edit to the model during the run",
       existingModel: MODEL,
       stage: (dir, radiusDir) => {
         stageCompleteRun(dir);
         fs.writeFileSync(path.join(radiusDir, "app.bicep"), "edited\n");
+      }
+    },
+    {
+      name: "an edit to a supporting file during the run",
+      existingModel: MODEL,
+      stage: (dir, radiusDir) => {
+        stageCompleteRun(dir);
+        fs.writeFileSync(
+          path.join(radiusDir, "bicepconfig.json"),
+          '{"edited":true}\n'
+        );
+      }
+    },
+    {
+      name: "a run with unexpected files in the staging directory",
+      stage: (dir) => {
+        stageCompleteRun(dir);
+        fs.writeFileSync(path.join(dir, "notes.md"), "scratch\n");
       }
     }
   ];
@@ -549,28 +767,38 @@ describe("agreement with the core rules", () => {
 
     const record = JSON.parse(
       fs.readFileSync(path.join(stagingDir, STAGING_RUN_RECORD), "utf8")
-    ) as { baselineAppBicepHash: string | null };
-    const currentModelPath = path.join(target.radiusDir, "app.bicep");
+    ) as { baseline: Record<string, string | null> };
+    const staged = stagedNames(stagingDir);
+    const read = (dir: string, name: string): string | null => {
+      const file = path.join(dir, name);
+      return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
+    };
+    const currentHashes: Record<string, string | null> = {};
+    for (const name of Object.keys(record.baseline)) {
+      const content = read(target.radiusDir, name);
+      currentHashes[name] = content === null ? null : hashAppBicep(content);
+    }
     const core = evaluateStagedRun({
-      stagedFiles: stagedNames(stagingDir),
-      appBicep:
-        fs.existsSync(path.join(stagingDir, "app.bicep")) ?
-          fs.readFileSync(path.join(stagingDir, "app.bicep"), "utf8")
-        : null,
-      originText:
-        fs.existsSync(path.join(stagingDir, "app.origin.json")) ?
-          fs.readFileSync(path.join(stagingDir, "app.origin.json"), "utf8")
-        : null,
-      currentModel:
-        fs.existsSync(currentModelPath) ?
-          fs.readFileSync(currentModelPath, "utf8")
-        : null,
-      baselineHash: record.baselineAppBicepHash,
+      stagedFiles: staged,
+      appBicep: read(stagingDir, "app.bicep"),
+      originText: read(stagingDir, "app.origin.json"),
+      record,
+      currentHashes,
       hashAppBicep
     });
 
     const result = run(target.root, ["--staging", stagingDir]);
 
     expect(result.status === 0).toBe(core.publishable);
+    if (core.publishable) {
+      expect(publishableFiles(staged)).toEqual(
+        expect.arrayContaining(
+          fs
+            .readdirSync(target.radiusDir, { withFileTypes: true })
+            .filter((entry) => entry.isFile() && entry.name !== ".gitignore")
+            .map((entry) => entry.name)
+        )
+      );
+    }
   });
 });

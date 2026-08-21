@@ -84,6 +84,10 @@ export function isStagingDirName(name: unknown): boolean {
 
 // Why a staged run may not be published, or that it may.
 export type StagedRunStatus =
+  // The staged run carries no usable record of the run that produced it, so
+  // there is no evidence of what `.radius/` looked like when it started. A run
+  // that did not go through `--begin` lands here.
+  | "unrecorded"
   // The staging directory does not hold a complete set of files.
   | "incomplete"
   // No origin record, or one that does not describe the staged `app.bicep`. The
@@ -107,6 +111,18 @@ export interface StagedRunEvaluation {
   files: string[];
 }
 
+// Fingerprints of the files a run may replace, taken when the run started. A
+// name maps to null when that file did not exist then, which is as meaningful as
+// a hash: a file that appeared during the run is a change too.
+export type ManagedFileHashes = Readonly<Record<string, string | null>>;
+
+// What `--begin` recorded about the run. Its absence is never treated as "no
+// baseline"; it means the run cannot be published at all.
+export interface StagedRunRecord {
+  // Fingerprints of every file in `.radius/` this run may overwrite.
+  baseline: ManagedFileHashes;
+}
+
 export interface StagedRunInput {
   // Entry names present in the staging directory.
   stagedFiles: ReadonlyArray<unknown> | null | undefined;
@@ -114,11 +130,10 @@ export interface StagedRunInput {
   appBicep: string | null | undefined;
   // Staged `app.origin.json` text, when it could be read.
   originText: string | null | undefined;
-  // Current `.radius/app.bicep` text, or null when there is no model on disk.
-  currentModel?: string | null;
-  // Fingerprint of `.radius/app.bicep` taken when the run started, or null when
-  // there was no model then.
-  baselineHash?: string | null;
+  // The run record `--begin` wrote, or null when it is missing or unusable.
+  record: StagedRunRecord | null | undefined;
+  // Current fingerprints of the same files, read at publish time.
+  currentHashes: ManagedFileHashes;
   // Fingerprints a model the same way the origin writer did. Injected because
   // this package cannot import `node:crypto` (see app-origin.ts).
   hashAppBicep(content: string): string;
@@ -157,6 +172,14 @@ export function requiredStagedFiles(
 // Every refusal is total. There is no partial publish, because a partial publish
 // is precisely the damage this replaces.
 export function evaluateStagedRun(input: StagedRunInput): StagedRunEvaluation {
+  // Checked before anything else: without the record there is no evidence of
+  // what the run started from, and a publish that cannot see that cannot promise
+  // not to destroy it. This is also what makes `--begin` mandatory rather than
+  // merely recommended — a directory an agent assembled by hand has no record
+  // and is refused.
+  if (!input.record) {
+    return evaluation("unrecorded", UNRECORDED_RUN_MESSAGE);
+  }
   const required = requiredStagedFiles(input.stagedFiles);
   const present = new Set(
     (Array.isArray(input.stagedFiles) ? input.stagedFiles : []).filter(
@@ -193,16 +216,16 @@ export function evaluateStagedRun(input: StagedRunInput): StagedRunEvaluation {
     );
   }
 
-  const currentHash =
-    typeof input.currentModel === "string" && input.currentModel.trim() ?
-      input.hashAppBicep(input.currentModel)
-    : null;
-  const baseline =
-    typeof input.baselineHash === "string" && input.baselineHash.trim() ?
-      input.baselineHash.trim()
-    : null;
-  if (currentHash !== baseline) {
-    return evaluation("concurrent-edit", CONCURRENT_EDIT_MESSAGE);
+  // Every file the publish would replace is compared, not just `app.bicep`. A
+  // hand-tuned `bicepconfig.json` or custom-type manifest is exactly as much the
+  // user's work as the model is, and overwriting one is the same failure.
+  const changed = changedManagedFiles(
+    input.record.baseline,
+    input.currentHashes,
+    publishableFiles(input.stagedFiles)
+  );
+  if (changed.length > 0) {
+    return evaluation("concurrent-edit", concurrentEditMessage(changed));
   }
 
   return evaluation(
@@ -210,6 +233,19 @@ export function evaluateStagedRun(input: StagedRunInput): StagedRunEvaluation {
     "The modeling run is complete and its application model compiled.",
     publishableFiles(input.stagedFiles)
   );
+}
+
+// Managed files whose content on disk differs from what the run started with,
+// limited to the ones this run would actually replace. A file the run does not
+// publish is not this run's business, even if it changed.
+export function changedManagedFiles(
+  baseline: ManagedFileHashes,
+  current: ManagedFileHashes,
+  files: ReadonlyArray<string>
+): string[] {
+  return files
+    .filter((file) => (baseline[file] ?? null) !== (current[file] ?? null))
+    .sort();
 }
 
 // Everything the run produced, in a stable order, minus its own bookkeeping.
@@ -225,9 +261,27 @@ export function publishableFiles(
   );
   const required = requiredStagedFiles(names);
   const extra = [...new Set(names)]
-    .filter((name) => name !== STAGING_RUN_RECORD && !required.includes(name))
+    .filter(
+      (name) => !required.includes(name) && isPublishableExtraArtifact(name)
+    )
     .sort();
   return [...required, ...extra];
+}
+
+// A custom type brings artifacts beyond the required set — the recipe pack, and
+// an authored recipe when no Azure Verified Module fits — and leaving those
+// behind would publish a model whose supporting files never arrived.
+//
+// They are matched by an explicit pattern rather than "everything else in the
+// directory". The staging directory is written by an agent, so a note, a
+// scratch file, or a credential dropped there must not be published into the
+// repository and staged in git on the strength of merely being present.
+export function isPublishableExtraArtifact(name: unknown): boolean {
+  return (
+    typeof name === "string" &&
+    (name === "custom-recipe-pack.bicep" ||
+      /^[a-z0-9-]+-recipe\.bicep$/u.test(name))
+  );
 }
 
 // The single user-facing statement for the concurrent-edit refusal. The user's
@@ -238,6 +292,29 @@ export const CONCURRENT_EDIT_MESSAGE =
   "model was discarded rather than written over it. Your version of the file " +
   "is intact and nothing was published. Re-run modeling when you are ready to " +
   "replace it.";
+
+// The same statement for whichever files actually changed. `app.bicep` alone
+// keeps the exact wording above, since that is the common case and the sentence
+// was written for it.
+export function concurrentEditMessage(changed: ReadonlyArray<string>): string {
+  if (changed.length === 1 && changed[0] === "app.bicep") {
+    return CONCURRENT_EDIT_MESSAGE;
+  }
+  const names = changed.map((file) => `.radius/${file}`).join(", ");
+  return (
+    `${names} changed while modeling was running, so the generated model was ` +
+    "discarded rather than written over it. Your versions of those files are " +
+    "intact and nothing was published. Re-run modeling when you are ready to " +
+    "replace them."
+  );
+}
+
+// The single user-facing statement for a staged run with no record of what it
+// started from.
+export const UNRECORDED_RUN_MESSAGE =
+  "This staged modeling run carries no record of the state it started from, " +
+  "so publishing it could overwrite work without being able to tell. Nothing " +
+  "was published. Start modeling runs with promote-app-model.mjs --begin.";
 
 // Reads only the field the publish check needs from an origin record. This is a
 // deliberately narrow reader rather than a call into parseAppOrigin: the promote
@@ -256,119 +333,4 @@ function parseStagedOriginHash(text: unknown): string | null {
   }
   const hash = (parsed as Record<string, unknown>).appBicepHash;
   return typeof hash === "string" && hash.trim() ? hash.trim() : null;
-}
-
-// ---------------------------------------------------------------------------
-// Reporting a failed run
-// ---------------------------------------------------------------------------
-
-// Whether re-running the same modeling run could plausibly succeed.
-export type ModelingFailureKind =
-  // A network, registry, or download failure: the same run may well work.
-  | "transient"
-  // Something about the repository or the target that a second identical run
-  // would hit again.
-  | "permanent"
-  // Not classifiable from the evidence available.
-  | "unknown";
-
-// Phrases that identify a failure as worth retrying. Matched against the failure
-// text case-insensitively. Kept narrow on purpose: offering a retry for a
-// permanent failure wastes the user's time and teaches them to ignore the offer.
-const TRANSIENT_MARKERS: readonly string[] = [
-  "etimedout",
-  "econnreset",
-  "econnrefused",
-  "enotfound",
-  "eai_again",
-  "socket hang up",
-  "timed out",
-  "timeout",
-  "network",
-  "temporarily unavailable",
-  "service unavailable",
-  "too many requests",
-  "rate limit",
-  "connection reset",
-  "download failed",
-  "failed to download",
-  "unexpected end of",
-  "502",
-  "503",
-  "504"
-];
-
-// Phrases that identify a failure as one the same run would hit again.
-const PERMANENT_MARKERS: readonly string[] = [
-  "no dockerfile",
-  "could not find a dockerfile",
-  "not supported",
-  "unsupported",
-  "no radius type",
-  "cannot be provisioned",
-  "could not identify an application",
-  "no runnable",
-  "cannot be resolved to a runnable"
-];
-
-function includesAny(text: string, markers: readonly string[]): boolean {
-  return markers.some((marker) => text.includes(marker));
-}
-
-// Classifies a modeling failure from its message. Permanent markers are checked
-// first: a permanent failure whose text happens to mention a timeout is still
-// permanent, and wrongly offering a retry is the worse of the two mistakes.
-export function classifyModelingFailure(message: unknown): ModelingFailureKind {
-  const text = typeof message === "string" ? message.toLowerCase() : "";
-  if (!text.trim()) return "unknown";
-  if (includesAny(text, PERMANENT_MARKERS)) return "permanent";
-  if (includesAny(text, TRANSIENT_MARKERS)) return "transient";
-  return "unknown";
-}
-
-export interface ModelingFailureInput {
-  // What the run was doing when it failed, in user-facing words
-  // (e.g. "resolving the Radius schemas").
-  stage?: string | null;
-  // The underlying failure text.
-  message: string;
-  // Overrides the classification derived from the message, for a caller that
-  // knows better than the text does.
-  kind?: ModelingFailureKind;
-}
-
-// The single user-facing report for a failed modeling run.
-//
-// Every failed run says the same three things in the same order: what failed,
-// that nothing was written, and whether trying again is worth it. The "nothing
-// was written" sentence is the point of the whole feature, so it is stated
-// plainly and unconditionally rather than being left for the user to infer.
-export function modelingFailureReport(input: ModelingFailureInput): string {
-  const message = String(input.message ?? "").trim() || "Modeling failed.";
-  const kind = input.kind ?? classifyModelingFailure(message);
-  const stage = String(input.stage ?? "").trim();
-  const lines = [
-    stage ?
-      `Modeling failed while ${stage}: ${message}`
-    : `Modeling failed: ${message}`,
-    "",
-    "Nothing was written. The generated files were discarded, `.radius/` is exactly as it was before this run, and nothing was staged in git, so any application model you already had is intact."
-  ];
-  if (kind === "transient") {
-    lines.push(
-      "",
-      "This looks like a temporary failure, so running modeling again may well succeed. Would you like me to try again?"
-    );
-  } else if (kind === "permanent") {
-    lines.push(
-      "",
-      "Running modeling again would fail the same way, so this needs to be resolved before it is worth another attempt."
-    );
-  } else {
-    lines.push(
-      "",
-      "I cannot tell from this failure whether another attempt would behave differently, so tell me if you would like me to try again."
-    );
-  }
-  return lines.join("\n");
 }

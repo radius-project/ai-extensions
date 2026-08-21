@@ -45,10 +45,12 @@ export {
   STAGING_DIR_PREFIX,
   STAGING_IGNORE_PATTERN,
   STAGING_RUN_RECORD,
-  classifyModelingFailure,
+  UNRECORDED_RUN_MESSAGE,
+  changedManagedFiles,
+  concurrentEditMessage,
   evaluateStagedRun,
+  isPublishableExtraArtifact,
   isStagingDirName,
-  modelingFailureReport,
   publishableFiles,
   requiredStagedFiles,
   sanitizeRunId,
@@ -60,10 +62,10 @@ export {
 export type { ConcreteResource, RecipePackEntry } from "./modeling/index.js";
 export type { AppSourceEvaluation, AppSourceStatus } from "./modeling/index.js";
 export type {
-  ModelingFailureInput,
-  ModelingFailureKind,
+  ManagedFileHashes,
   StagedRunEvaluation,
   StagedRunInput,
+  StagedRunRecord,
   StagedRunStatus
 } from "./modeling/index.js";
 export type {

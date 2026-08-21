@@ -40,9 +40,11 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync
@@ -118,16 +120,6 @@ function readFile(file) {
   }
 }
 
-// The application model as it stands in `.radius/`, or null when there is none.
-// A model that cannot be read is reported as absent rather than as an error: the
-// publish compares this to the same reading taken at the start of the run, so
-// "unreadable then, unreadable now" is legitimately unchanged, and "readable
-// then, unreadable now" is a change the publish must refuse on.
-function currentModelHash(radiusDir) {
-  const model = readFile(path.join(radiusDir, "app.bicep"));
-  return model && model.trim() ? hashAppBicep(model) : null;
-}
-
 function stagedOriginHash(text) {
   if (typeof text !== "string" || !text.trim()) return null;
   let parsed;
@@ -152,16 +144,50 @@ function requiredStagedFiles(present) {
     : [...REQUIRED_STAGED_FILES];
 }
 
-// Everything the run produced, minus its own bookkeeping. The required set is
-// what a run must hold, not the whole of what it may hold — a custom type also
-// brings a recipe pack and possibly an authored recipe — and leaving those
-// behind would publish a model whose supporting artifacts never arrived.
+// A custom type brings artifacts beyond the required set — the recipe pack, and
+// an authored recipe when no Azure Verified Module fits — and leaving those
+// behind would publish a model whose supporting files never arrived.
+//
+// They are matched by an explicit pattern rather than "everything else in the
+// directory". The staging directory is written by an agent, so a note, a scratch
+// file, or a credential dropped there must not be published into the repository
+// and staged in git on the strength of merely being present.
+function isPublishableExtraArtifact(name) {
+  return (
+    name === "custom-recipe-pack.bicep" ||
+    /^[a-z0-9-]+-recipe\.bicep$/u.test(name)
+  );
+}
+
 function publishableFiles(present, required) {
   const extra = [...present]
-    .filter((name) => name !== STAGING_RUN_RECORD && !required.includes(name))
+    .filter(
+      (name) => !required.includes(name) && isPublishableExtraArtifact(name)
+    )
     .sort();
   return [...required, ...extra];
 }
+
+// Fingerprints of every file this run could replace, so a concurrent edit to any
+// of them is detected — not just one to `app.bicep`. A file that does not exist
+// is recorded as null, which is as meaningful as a hash: a file that appeared
+// during the run is a change too.
+function managedFileHashes(radiusDir, files) {
+  const hashes = {};
+  for (const file of files) {
+    const content = readFile(path.join(radiusDir, file));
+    hashes[file] = content === null ? null : hashAppBicep(content);
+  }
+  return hashes;
+}
+
+// Every file a run could ever publish, so `--begin` can fingerprint them all
+// before knowing which ones this particular run will produce.
+const MANAGED_FILES = [
+  ...REQUIRED_STAGED_FILES,
+  ...CUSTOM_TYPE_STAGED_FILES,
+  "custom-recipe-pack.bicep"
+];
 
 // Removes every staging directory under `.radius/`. A run that finished always
 // removes its own, so anything still here belongs to a run that did not, and is
@@ -171,6 +197,8 @@ function purgeStagingDirs(radiusDir, keep = null) {
   if (!existsSync(radiusDir)) return [];
   const removed = [];
   for (const entry of readdirSync(radiusDir, { withFileTypes: true })) {
+    // `isDirectory()` on a Dirent is already an lstat, so a symlink named
+    // `.staging-*` is skipped rather than followed and deleted through.
     if (!entry.isDirectory() || !isStagingDirName(entry.name)) continue;
     if (keep && entry.name === keep) continue;
     rmSync(path.join(radiusDir, entry.name), { recursive: true, force: true });
@@ -187,31 +215,47 @@ function purgeStagingDirs(radiusDir, keep = null) {
 // wrote is recorded and undone if the run is refused. Otherwise a failed run
 // would leave `.radius/` different from how it found it, which is the guarantee
 // this script exists to provide.
+// Returns what the run did to the file, plus the EXACT bytes that were there
+// before, so a discarded run can restore it rather than reconstructing it by
+// deleting the line it thinks it added. Reconstructing gets trailing newlines
+// and interleaved user edits wrong; restoring the original bytes cannot.
 function ensureStagingIgnored(radiusDir) {
   const ignoreFile = path.join(radiusDir, ".gitignore");
   const existing = readFile(ignoreFile);
   const text = existing || "";
   const lines = text.split("\n").map((line) => line.trim());
-  if (lines.includes(STAGING_IGNORE_PATTERN)) return "unchanged";
+  if (lines.includes(STAGING_IGNORE_PATTERN)) {
+    return { ignoreWrite: "unchanged", ignoreBefore: existing };
+  }
   const body = text && !text.endsWith("\n") ? `${text}\n` : text;
   writeFileSync(ignoreFile, `${body}${STAGING_IGNORE_PATTERN}\n`, "utf8");
-  return existing === null ? "created" : "appended";
+  return {
+    ignoreWrite: existing === null ? "created" : "appended",
+    ignoreBefore: existing
+  };
 }
 
-// Undoes ensureStagingIgnored for a run that is being discarded.
-function revertStagingIgnore(radiusDir, ignoreWrite) {
+// Undoes ensureStagingIgnored for a run that is being discarded, by restoring
+// the exact bytes recorded at `--begin`.
+//
+// Compare-and-swap: if the file no longer holds what this run left there, the
+// user has touched it since, and their version wins. Restoring blindly would
+// destroy an edit, which is the very thing this script exists to prevent.
+function revertStagingIgnore(radiusDir, record) {
+  const write = record?.ignoreWrite;
+  if (write !== "created" && write !== "appended") return;
   const ignoreFile = path.join(radiusDir, ".gitignore");
-  if (ignoreWrite === "created") {
+  const before = record.ignoreBefore ?? null;
+  const expected =
+    write === "created" ?
+      `${STAGING_IGNORE_PATTERN}\n`
+    : `${before.endsWith("\n") || !before ? before : `${before}\n`}${STAGING_IGNORE_PATTERN}\n`;
+  if (readFile(ignoreFile) !== expected) return;
+  if (write === "created") {
     rmSync(ignoreFile, { force: true });
     return;
   }
-  if (ignoreWrite !== "appended") return;
-  const text = readFile(ignoreFile);
-  if (text === null) return;
-  const kept = text
-    .split("\n")
-    .filter((line) => line.trim() !== STAGING_IGNORE_PATTERN);
-  writeFileSync(ignoreFile, kept.join("\n"), "utf8");
+  writeFileSync(ignoreFile, before, "utf8");
 }
 
 function gitAdd(repoRoot, files) {
@@ -228,7 +272,23 @@ function gitAdd(repoRoot, files) {
 
 function resolveRadiusDir() {
   const requested = flag("radius-dir");
-  return path.resolve(requested || ".radius");
+  const resolved = path.resolve(requested || ".radius");
+  // Canonicalized so the confinement below compares real paths. A symlinked
+  // `.radius` would otherwise let every later path check pass while the writes
+  // landed somewhere else entirely.
+  return existsSync(resolved) ? realpathSync(resolved) : resolved;
+}
+
+// True when the path exists and is a real directory rather than a symlink to
+// one. Used for both the staging directory and the leftovers sweep: a symlink
+// named `.staging-*` is never something this script created, so it is never
+// followed, written through, or published from.
+function isRealDirectory(target) {
+  try {
+    return lstatSync(target).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 // --- begin -----------------------------------------------------------------
@@ -237,20 +297,31 @@ function begin() {
   const radiusDir = resolveRadiusDir();
   mkdirSync(radiusDir, { recursive: true });
   purgeStagingDirs(radiusDir);
-  const ignoreWrite = ensureStagingIgnored(radiusDir);
+  const { ignoreWrite, ignoreBefore } = ensureStagingIgnored(radiusDir);
 
-  const dirName = stagingDirName(flag("run-id"));
+  // A unique id by default: two runs sharing `.staging-run` would sweep each
+  // other away, and the sweep cannot tell a live run from an abandoned one.
+  const dirName = stagingDirName(
+    flag("run-id") || `${Date.now().toString(36)}-${process.pid.toString(36)}`
+  );
   const stagingDir = path.join(radiusDir, dirName);
+  if (existsSync(stagingDir) && !isRealDirectory(stagingDir)) {
+    fail(
+      `Cannot stage a modeling run at ${stagingDir}: it exists and is not a real directory. Remove it and start the run again.`
+    );
+  }
   mkdirSync(stagingDir, { recursive: true });
 
   // The baseline fingerprint travels with the run rather than through the
   // agent, so the concurrent-edit check cannot be defeated by an agent that
   // forgets to pass it along or passes the wrong one.
   const record = {
+    version: 1,
     runId: dirName.slice(STAGING_DIR_PREFIX.length),
     startedAt: new Date().toISOString(),
-    baselineAppBicepHash: currentModelHash(radiusDir),
-    ignoreWrite
+    baseline: managedFileHashes(radiusDir, MANAGED_FILES),
+    ignoreWrite,
+    ignoreBefore
   };
   writeFileSync(
     path.join(stagingDir, STAGING_RUN_RECORD),
@@ -265,39 +336,66 @@ function begin() {
 // Every refusal discards the staged run. It is never kept for inspection: what
 // the user needs in order to act is in the failure message, and keeping it would
 // leave the product with two places an application model might live.
-function refuseWith(stagingDir, radiusDir, ignoreWrite) {
+function refuseWith(stagingDir, radiusDir, record) {
   return (message) => {
     rmSync(stagingDir, { recursive: true, force: true });
-    revertStagingIgnore(radiusDir, ignoreWrite);
+    revertStagingIgnore(radiusDir, record);
     fail(
       `${message}\n\nNothing was written: .radius/ is exactly as it was before this run, and nothing was staged in git.`
     );
   };
 }
 
-// The run's own bookkeeping: the fingerprint of the application model as it was
-// when the run started, and what the run wrote to the ignore file. A record that
-// is missing or unreadable yields nulls, which makes the concurrent-edit check
-// refuse for any repository that had a model — the safe direction.
+// The run's own bookkeeping, written by `--begin`: fingerprints of every file in
+// `.radius/` this run may replace, and what the run wrote to the ignore file.
+//
+// Returns null for anything unusable. That is not a missing baseline that
+// defaults to "nothing was there" — it refuses the publish outright, which is
+// what makes `--begin` mandatory rather than merely recommended. A staging
+// directory an agent assembled by hand has no record, so it cannot be published.
 function readRunRecord(stagingDir) {
+  let parsed;
   try {
-    const parsed = JSON.parse(
+    parsed = JSON.parse(
       readFile(path.join(stagingDir, STAGING_RUN_RECORD)) || ""
     );
-    const baseline = parsed?.baselineAppBicepHash;
-    return {
-      baseline:
-        typeof baseline === "string" && baseline.trim() ?
-          baseline.trim()
-        : null,
-      ignoreWrite:
-        typeof parsed?.ignoreWrite === "string" ?
-          parsed.ignoreWrite
-        : "unchanged"
-    };
   } catch {
-    return { baseline: null, ignoreWrite: "unchanged" };
+    return null;
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const baseline = parsed.baseline;
+  if (!baseline || typeof baseline !== "object" || Array.isArray(baseline)) {
+    return null;
+  }
+  for (const value of Object.values(baseline)) {
+    if (value !== null && typeof value !== "string") return null;
+  }
+  return {
+    baseline,
+    ignoreWrite:
+      typeof parsed.ignoreWrite === "string" ? parsed.ignoreWrite : "unchanged",
+    ignoreBefore:
+      typeof parsed.ignoreBefore === "string" ? parsed.ignoreBefore : null
+  };
+}
+
+// Managed files whose content differs from what the run started with, limited to
+// the ones this run would actually replace. Every file the publish overwrites is
+// compared, not just `app.bicep`: a hand-tuned `bicepconfig.json` or custom-type
+// manifest is exactly as much the user's work as the model is.
+function changedManagedFiles(baseline, radiusDir, files) {
+  const current = managedFileHashes(radiusDir, files);
+  return files
+    .filter((file) => (baseline[file] ?? null) !== (current[file] ?? null))
+    .sort();
+}
+
+function concurrentEditMessage(changed) {
+  const names = changed.map((file) => `.radius/${file}`).join(", ");
+  const plural = changed.length === 1 ? "" : "s";
+  return `${names} changed while modeling was running, so the generated model was discarded rather than written over it. Your version${plural} of ${changed.length === 1 ? "that file is" : "those files are"} intact. Re-run modeling when you are ready to replace ${changed.length === 1 ? "it" : "them"}.`;
 }
 
 function publish() {
@@ -321,8 +419,22 @@ function publish() {
     );
   }
 
-  const { baseline, ignoreWrite } = readRunRecord(stagingDir);
-  const refuse = refuseWith(stagingDir, radiusDir, ignoreWrite);
+  if (!isRealDirectory(stagingDir)) {
+    fail(
+      `The staged modeling run at ${stagingDir} is not a real directory, so it was not published.`
+    );
+  }
+
+  const record = readRunRecord(stagingDir);
+  const refuse = refuseWith(stagingDir, radiusDir, record);
+  // Checked before anything else: without the record there is no evidence of
+  // what `.radius/` held when the run started, and a publish that cannot see
+  // that cannot promise not to destroy it.
+  if (!record) {
+    refuse(
+      "This staged modeling run carries no record of the state it started from, so publishing it could overwrite work without being able to tell. Start modeling runs with promote-app-model.mjs --begin."
+    );
+  }
 
   const present = new Set(
     readdirSync(stagingDir, { withFileTypes: true })
@@ -356,17 +468,54 @@ function publish() {
     );
   }
 
-  if (currentModelHash(radiusDir) !== baseline) {
-    refuse(
-      ".radius/app.bicep changed while modeling was running, so the generated model was discarded rather than written over it. Your version of the file is intact. Re-run modeling when you are ready to replace it."
-    );
+  const files = publishableFiles(present, required);
+  const changed = changedManagedFiles(record.baseline, radiusDir, files);
+  if (changed.length > 0) {
+    refuse(concurrentEditMessage(changed));
+  }
+
+  // Preflight: every destination is checked before ANY of them is replaced.
+  // Each rename is atomic on its own, but the set of them is not, so a
+  // destination that cannot be written — a directory in the way, a symlink, a
+  // read-only file — must be found now rather than after half the files have
+  // already moved.
+  for (const file of files) {
+    const destination = path.join(radiusDir, file);
+    if (existsSync(destination) && !lstatSync(destination).isFile()) {
+      refuse(
+        `Cannot publish ${file}: ${destination} exists and is not a regular file, so this run was discarded rather than half-published.`
+      );
+    }
   }
 
   // Past this point every check has passed, so the moves happen. Each is a
   // rename inside one directory.
-  const files = publishableFiles(present, required);
-  for (const file of files) {
-    renameSync(path.join(stagingDir, file), path.join(radiusDir, file));
+  //
+  // The individual renames are atomic; the SET of them is not. So the file being
+  // replaced is moved aside first, and if any rename fails the ones already done
+  // are put back. That leaves the repository as it was rather than half
+  // published, which is the whole point of the exercise.
+  const backups = [];
+  try {
+    for (const file of files) {
+      const destination = path.join(radiusDir, file);
+      if (existsSync(destination)) {
+        const backup = path.join(stagingDir, `${file}.published-backup`);
+        renameSync(destination, backup);
+        backups.push({ destination, backup, moved: false });
+      }
+      renameSync(path.join(stagingDir, file), destination);
+      const record = backups[backups.length - 1];
+      if (record && record.destination === destination) record.moved = true;
+    }
+  } catch (error) {
+    for (const entry of backups.reverse()) {
+      if (entry.moved) rmSync(entry.destination, { force: true });
+      renameSync(entry.backup, entry.destination);
+    }
+    refuse(
+      `Publishing the application model failed partway (${error.message}), so every file was put back as it was.`
+    );
   }
   rmSync(stagingDir, { recursive: true, force: true });
 
@@ -374,22 +523,64 @@ function publish() {
   // above leaves nothing in the index.
   const repoRoot = path.dirname(radiusDir);
   const published = files.map((file) => path.join(radiusDir, file));
-  // The ignore rule is part of what modeling produced, so it is staged with the
-  // run that wrote it rather than being left as an untracked change.
+  // The ignore rule is staged only when THIS run wrote it. A `.gitignore` that
+  // was already there may hold unrelated changes of the user's, and staging
+  // those on their behalf is not this script's business.
   const ignoreFile = path.join(radiusDir, ".gitignore");
+  const wroteIgnore =
+    record.ignoreWrite === "created" || record.ignoreWrite === "appended";
   const staged =
-    existsSync(ignoreFile) ? [...published, ignoreFile] : published;
+    wroteIgnore && existsSync(ignoreFile) ?
+      [...published, ignoreFile]
+    : published;
   const gitError = gitAdd(repoRoot, staged);
+  for (const file of published) console.log(file);
   if (gitError) {
+    // The model IS published, so this is not a failure of the publish and the
+    // staged run must not be resurrected. It is still not success: the caller
+    // has to tell the user the files are on disk but not staged, so it gets its
+    // own exit code rather than being buried in a warning on a zero exit.
     console.error(
-      `Published the application model, but could not stage it with git: ${gitError}`
+      `Published the application model, but could not stage it with git: ${gitError}. Report that the files were written but NOT staged; the user can stage them themselves.`
+    );
+    process.exit(2);
+  }
+}
+
+// --- abort -----------------------------------------------------------------
+
+// Discards a run that failed partway. The skill calls this instead of deleting
+// the staging directory itself, so the ignore-file write is undone too and the
+// repository is left exactly as the run found it.
+function abort() {
+  const radiusDir = resolveRadiusDir();
+  const requested = flag("staging");
+  if (!requested) {
+    fail(
+      "A staging directory is required: pass --staging <dir> naming the directory this run wrote into."
     );
   }
-  for (const file of published) console.log(file);
+  const stagingDir = path.resolve(requested);
+  if (
+    path.dirname(stagingDir) !== radiusDir ||
+    !isStagingDirName(path.basename(stagingDir))
+  ) {
+    fail(
+      `The staging directory must be a ${STAGING_DIR_PREFIX}* directory directly inside ${radiusDir}. Received: ${requested}`
+    );
+  }
+  const record = isRealDirectory(stagingDir) ? readRunRecord(stagingDir) : null;
+  rmSync(stagingDir, { recursive: true, force: true });
+  revertStagingIgnore(radiusDir, record);
+  console.log(
+    "Discarded the staged modeling run. Nothing was written: .radius/ is exactly as it was before this run, and nothing was staged in git."
+  );
 }
 
 if (hasFlag("begin")) {
   begin();
+} else if (hasFlag("abort")) {
+  abort();
 } else {
   publish();
 }

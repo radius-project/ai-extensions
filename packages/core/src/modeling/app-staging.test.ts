@@ -7,10 +7,8 @@ import {
   STAGING_DIR_PREFIX,
   STAGING_IGNORE_PATTERN,
   STAGING_RUN_RECORD,
-  classifyModelingFailure,
   evaluateStagedRun,
   isStagingDirName,
-  modelingFailureReport,
   publishableFiles,
   requiredStagedFiles,
   sanitizeRunId,
@@ -43,8 +41,8 @@ function stagedRun(
     stagedFiles: [...REQUIRED_STAGED_FILES, STAGING_RUN_RECORD],
     appBicep: MODEL,
     originText: origin(),
-    currentModel: null,
-    baselineHash: null,
+    record: { baseline: {} },
+    currentHashes: {},
     hashAppBicep,
     ...overrides
   });
@@ -115,7 +113,7 @@ describe("requiredStagedFiles", () => {
 });
 
 describe("publishableFiles", () => {
-  it("publishes extra artifacts after the required set, and never the run record", () => {
+  it("publishes the known supporting artifacts after the required set", () => {
     expect(
       publishableFiles([
         "custom-recipe-pack.bicep",
@@ -129,6 +127,21 @@ describe("publishableFiles", () => {
       ...CUSTOM_TYPE_STAGED_FILES,
       "custom-recipe-pack.bicep",
       "widget-recipe.bicep"
+    ]);
+  });
+
+  // The staging directory is written by an agent, so being present is not
+  // enough to be published into the repository and staged in git.
+  it.each([
+    STAGING_RUN_RECORD,
+    "notes.md",
+    ".env",
+    "scratch.bicep",
+    "app.bicep.published-backup",
+    "Widget-Recipe.bicep"
+  ])("does not publish %s", (name) => {
+    expect(publishableFiles([...REQUIRED_STAGED_FILES, name])).toEqual([
+      ...REQUIRED_STAGED_FILES
     ]);
   });
 
@@ -146,11 +159,42 @@ describe("evaluateStagedRun", () => {
   });
 
   it("publishes over an untouched existing model", () => {
-    const previous =
-      "resource old 'Radius.Core/applications@2025-08-01-preview' = {}\n";
+    const previous = hashAppBicep(
+      "resource old 'Radius.Core/applications@2025-08-01-preview' = {}\n"
+    );
     const result = stagedRun({
-      currentModel: previous,
-      baselineHash: hashAppBicep(previous)
+      record: { baseline: { "app.bicep": previous } },
+      currentHashes: { "app.bicep": previous }
+    });
+    expect(result.status).toBe("ready");
+  });
+
+  // Without the run record there is no evidence of what `.radius/` held when
+  // the run started, so a directory an agent assembled by hand — skipping
+  // `--begin` entirely — cannot publish.
+  it("refuses a staged run that never went through --begin", () => {
+    const result = stagedRun({ record: null });
+    expect(result.status).toBe("unrecorded");
+    expect(result.publishable).toBe(false);
+    expect(result.files).toEqual([]);
+    expect(result.reason).toContain("--begin");
+  });
+
+  it("refuses a run whose supporting file changed during the run", () => {
+    const result = stagedRun({
+      record: { baseline: { "bicepconfig.json": "sha256:before" } },
+      currentHashes: { "bicepconfig.json": "sha256:after" }
+    });
+    expect(result.status).toBe("concurrent-edit");
+    expect(result.reason).toContain(".radius/bicepconfig.json");
+  });
+
+  // A file this run does not publish is not this run's business, even if it
+  // changed while the run was going.
+  it("ignores a change to a file this run would not publish", () => {
+    const result = stagedRun({
+      record: { baseline: { "custom-types.yaml": null } },
+      currentHashes: { "custom-types.yaml": "sha256:appeared" }
     });
     expect(result.status).toBe("ready");
   });
@@ -218,8 +262,8 @@ describe("evaluateStagedRun", () => {
 
   it("refuses when the model on disk changed during the run", () => {
     const result = stagedRun({
-      currentModel: "hand edited\n",
-      baselineHash: hashAppBicep("as it was\n")
+      record: { baseline: { "app.bicep": hashAppBicep("as it was\n") } },
+      currentHashes: { "app.bicep": hashAppBicep("hand edited\n") }
     });
     expect(result.status).toBe("concurrent-edit");
     expect(result.publishable).toBe(false);
@@ -229,28 +273,33 @@ describe("evaluateStagedRun", () => {
 
   it("refuses when a model appeared during a run that started with none", () => {
     const result = stagedRun({
-      currentModel: "written mid-run\n",
-      baselineHash: null
+      record: { baseline: { "app.bicep": null } },
+      currentHashes: { "app.bicep": hashAppBicep("written mid-run\n") }
     });
     expect(result.status).toBe("concurrent-edit");
   });
 
   it("refuses when the model the run started from was deleted", () => {
     const result = stagedRun({
-      currentModel: null,
-      baselineHash: hashAppBicep(MODEL)
+      record: { baseline: { "app.bicep": hashAppBicep(MODEL) } },
+      currentHashes: {}
     });
     expect(result.status).toBe("concurrent-edit");
   });
 
-  it("treats a blank baseline and a blank model as unchanged", () => {
-    expect(stagedRun({ currentModel: "  ", baselineHash: "  " }).status).toBe(
-      "ready"
-    );
+  it("names every file that changed", () => {
+    const result = stagedRun({
+      record: {
+        baseline: { "app.bicep": "sha256:a", "bicepconfig.json": "sha256:b" }
+      },
+      currentHashes: { "app.bicep": "sha256:x", "bicepconfig.json": "sha256:y" }
+    });
+    expect(result.reason).toContain(".radius/app.bicep");
+    expect(result.reason).toContain(".radius/bicepconfig.json");
   });
 
   it("refuses a run with no listing at all", () => {
-    const result = stagedRun({ stagedFiles: null });
+    const result = stagedRun({ stagedFiles: null, record: { baseline: {} } });
     expect(result.status).toBe("incomplete");
     expect(result.reason).toContain("app.bicep");
   });
@@ -259,101 +308,9 @@ describe("evaluateStagedRun", () => {
     const result = stagedRun({
       stagedFiles: ["app.bicep"],
       originText: null,
-      currentModel: "edited\n",
-      baselineHash: null
+      record: { baseline: { "app.bicep": "sha256:a" } },
+      currentHashes: { "app.bicep": "sha256:b" }
     });
     expect(result.status).toBe("incomplete");
   });
-});
-
-describe("classifyModelingFailure", () => {
-  it.each([
-    "getaddrinfo ENOTFOUND ghcr.io",
-    "Request timed out after 30s",
-    "socket hang up",
-    "HTTP 503 from the registry",
-    "download failed"
-  ])("classifies %s as transient", (message) => {
-    expect(classifyModelingFailure(message)).toBe("transient");
-  });
-
-  it.each([
-    "I could not find a Dockerfile in this repository.",
-    "This backing service cannot be provisioned on Azure",
-    "could not identify an application"
-  ])("classifies %s as permanent", (message) => {
-    expect(classifyModelingFailure(message)).toBe("permanent");
-  });
-
-  // Wrongly offering a retry for a permanent failure is the worse mistake, so a
-  // permanent failure that happens to mention a timeout stays permanent.
-  it("prefers permanent when both kinds of evidence are present", () => {
-    expect(
-      classifyModelingFailure("No Dockerfile found after the lookup timed out")
-    ).toBe("permanent");
-  });
-
-  it.each([["" as const], ["   "], [null], [undefined], [42]])(
-    "classifies %s as unknown",
-    (message) => {
-      expect(classifyModelingFailure(message)).toBe("unknown");
-    }
-  );
-
-  it("classifies an unrecognized failure as unknown", () => {
-    expect(classifyModelingFailure("the widget exploded")).toBe("unknown");
-  });
-});
-
-describe("modelingFailureReport", () => {
-  it("always states that nothing was written", () => {
-    const report = modelingFailureReport({
-      stage: "resolving the Radius schemas",
-      message: "ETIMEDOUT"
-    });
-    expect(report).toContain("resolving the Radius schemas");
-    expect(report).toContain("Nothing was written.");
-    expect(report).toContain("intact");
-  });
-
-  it("offers a retry for a transient failure", () => {
-    expect(modelingFailureReport({ message: "network unreachable" })).toContain(
-      "try again?"
-    );
-  });
-
-  it("does not offer a retry for a permanent failure", () => {
-    const report = modelingFailureReport({
-      message: "I could not find a Dockerfile in this repository."
-    });
-    expect(report).toContain("would fail the same way");
-    expect(report).not.toContain("try again?");
-  });
-
-  it("asks the user when the failure cannot be classified", () => {
-    expect(modelingFailureReport({ message: "the widget exploded" })).toContain(
-      "cannot tell"
-    );
-  });
-
-  it("honors an explicit classification over the message text", () => {
-    expect(
-      modelingFailureReport({
-        message: "the widget exploded",
-        kind: "transient"
-      })
-    ).toContain("try again?");
-  });
-
-  it.each([["" as const], [null], [undefined]])(
-    "reports a missing stage and message (%s) without leaving blanks",
-    (message) => {
-      const report = modelingFailureReport({
-        message: message as string,
-        stage: null
-      });
-      expect(report).toContain("Modeling failed: Modeling failed.");
-      expect(report).toContain("Nothing was written.");
-    }
-  );
 });

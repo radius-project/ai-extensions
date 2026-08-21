@@ -28,20 +28,22 @@ export {
   STAGING_DIR_PREFIX,
   STAGING_IGNORE_PATTERN,
   STAGING_RUN_RECORD,
-  classifyModelingFailure,
+  UNRECORDED_RUN_MESSAGE,
+  changedManagedFiles,
+  concurrentEditMessage,
   evaluateStagedRun,
+  isPublishableExtraArtifact,
   isStagingDirName,
-  modelingFailureReport,
   publishableFiles,
   requiredStagedFiles,
   sanitizeRunId,
   stagingDirName
 } from "./app-staging.js";
 export type {
-  ModelingFailureInput,
-  ModelingFailureKind,
+  ManagedFileHashes,
   StagedRunEvaluation,
   StagedRunInput,
+  StagedRunRecord,
   StagedRunStatus
 } from "./app-staging.js";
 
