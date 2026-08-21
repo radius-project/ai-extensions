@@ -831,29 +831,6 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   errorMessage
 });
 
-// Composition root for the read-only half of the `graphs-planning` family. Ten
-// narrow function seams: the instance-state reader, the cached deploy-status
-// reader factory, the two artifact map builders, the status-key and projection
-// helpers from `@radius-project/core`, the canvas resource normalizer, the
-// message applier, and the record/error/workspace-repo helpers that stay defined
-// here. The reader factory is injected already-cached so the route module owns
-// no cache of its own.
-const graphsPlanningRoutes = createGraphsPlanningRoutes({
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  createDeployStatusReader: (options) => cachedDeployStatusReader(options),
-  buildDeployStatusMap,
-  buildDeployMessageMap,
-  deployStatusKeys,
-  projectDeployedGraph: (modeled, statusByKey) =>
-    projectDeployedGraph(modeled as any[], statusByKey),
-  canvasGraphResources,
-  applyDeployMessages,
-  record,
-  errorMessage,
-  repoMatchesWorkspace,
-  now: () => Date.now()
-});
-
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   defaultBranchForState,
@@ -926,6 +903,42 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   record,
   optionalString,
   errorMessage,
+  now: () => Date.now()
+});
+
+// Composition root for the read-only half of the `graphs-planning` family. The
+// Deployed route reads status through the cached artifact reader, but obtains its
+// fixed topology through the same modeled-graph workflow and cache as the Graph
+// route. It never parses Bicep or invokes rad through a second path.
+const graphsPlanningRoutes = createGraphsPlanningRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  createDeployStatusReader: (options) => cachedDeployStatusReader(options),
+  loadModeledGraph: async (instanceId, repo, branch) => {
+    const outcome = await graphPlanningWorkflows.loadGraph({
+      instanceId,
+      body: JSON.stringify({ repo, branch, refresh: true })
+    });
+    const workflowError = optionalString(outcome.payload.error);
+    return {
+      status: outcome.status,
+      retry: outcome.payload.needsAppBicep === true,
+      error:
+        workflowError ||
+        (outcome.status >= 400 ?
+          `Modeled graph load failed with status ${outcome.status}.`
+        : undefined)
+    };
+  },
+  buildDeployStatusMap,
+  buildDeployMessageMap,
+  deployStatusKeys,
+  projectDeployedGraph: (modeled, statusByKey) =>
+    projectDeployedGraph(modeled as any[], statusByKey),
+  canvasGraphResources,
+  applyDeployMessages,
+  settleDeployStatuses,
+  errorMessage,
+  repoMatchesWorkspace,
   now: () => Date.now()
 });
 
