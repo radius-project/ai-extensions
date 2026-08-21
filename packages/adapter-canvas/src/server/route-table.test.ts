@@ -321,7 +321,7 @@ const productionHandlers = {
     getBranchHeadSha: () => Promise.resolve(null),
     createBranchRef: () => Promise.resolve({ ok: false, stderr: "" }),
     tempFile: { write: () => "", remove: () => {} },
-    resolveGitHubEnvironmentCreateState: () => null,
+    setCanonicalEnvironment: () => {},
     recordGitHubEnvironment: () => {},
     envListCacheDelete: () => {},
     ociStateBackend: "oci",

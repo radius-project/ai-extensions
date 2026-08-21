@@ -114,6 +114,7 @@ import {
   hasWarnings,
   addLegacyStep,
   setContext,
+  setCanonicalEnvironment,
   setCloudContext,
   getSetupArtifactLedger,
   recordAzureApp,
@@ -217,6 +218,7 @@ import { createDeployMonitorService } from "./server/services/deploy-monitor.js"
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
+import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -1050,7 +1052,9 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
       } catch {}
     }
   },
-  resolveGitHubEnvironmentCreateState,
+  setCanonicalEnvironment: (operation, environment) => {
+    setCanonicalEnvironment(operation, environment);
+  },
   recordGitHubEnvironment: (operation, patch) => {
     recordGitHubEnvironment(operation, patch);
   },
@@ -2399,15 +2403,6 @@ function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
       else resolve((stdout || "").trim());
     });
   });
-}
-
-export function resolveGitHubEnvironmentCreateState(
-  result: Partial<CommandResult> | null | undefined
-): "created_candidate" | "reused" | null {
-  if (!result) return null;
-  if (result.code === 0 || result.code === "0") return "reused";
-  const detail = `${result.stderr || ""}\n${result.stdout || ""}`;
-  return /HTTP 404|Not Found|404\b/i.test(detail) ? "created_candidate" : null;
 }
 
 export async function deleteNewlyCreatedGitHubEnvironment(
@@ -3824,36 +3819,74 @@ function createInstanceRequestCoordinator(
         async (executor) => {
           selectedGitHubExecutorsByOperation.set(operationId, executor);
           executorRegistered = true;
-          let setupResult: any = null;
-          if (op.provider === "azure" && request.needsAzureCredentials) {
-            setupResult = await postInternal("/api/azure-auto-setup", {
-              ...request.azure,
-              repo: op.repo,
-              environment: op.environment,
-              operationId
-            });
-            if (setupResult?.inputRequired || op.state === "input_required") {
-              return { shouldMonitor: false };
-            }
-          }
-          const current = operations.get(operationId);
-          if (
-            !current ||
-            current.state === "input_required" ||
-            current.endedAt
-          ) {
-            return { shouldMonitor: false };
-          }
-          await postInternal("/api/create-environment", {
-            ...request.environment,
-            repo: op.repo,
-            environment: op.environment,
-            provider: op.provider,
-            operationId,
-            clientId:
-              setupResult?.clientId || request.environment?.clientId || ""
+          return runEnvironmentOperationWorkflow(op, executor, {
+            preflightRepoAdmin: (repo, selectedExecutor) =>
+              preflightRepoAdmin(repo, selectedExecutor),
+            preflightGhcrPackageWriteAccess: (selectedExecutor) =>
+              preflightGhcrPackageWriteAccess(
+                getGhPackageCredentials,
+                getGitHubIdentity,
+                selectedExecutor
+              ),
+            setCanonicalEnvironment: (operation, environment) => {
+              setCanonicalEnvironment(operation, environment);
+            },
+            recordGitHubEnvironment: (operation, patch) => {
+              recordGitHubEnvironment(operation, patch);
+            },
+            addLegacyStep: (operation, text) => {
+              addLegacyStep(operation, text);
+            },
+            persistEnvironmentResolution: (operation) =>
+              persistMutationCheckpoint({
+                operation,
+                persist: () => operations.persist(),
+                report: (diagnostic) => operations.report?.(diagnostic),
+                fail: async (status, error, code) => {
+                  await finalizeSetupFailure(operation, {
+                    status,
+                    error,
+                    code,
+                    stage: operation.currentStage,
+                    classification: "unknown",
+                    runDeleteEnvironment: async (args) => {
+                      const result = await executor.run(args);
+                      if (result.code !== 0 && result.code !== "0") {
+                        throw new Error(
+                          (result.stderr || result.stdout || "").trim() ||
+                            "GitHub API request failed."
+                        );
+                      }
+                    }
+                  });
+                }
+              }),
+            finalizeEnvironmentResolutionFailure: async (
+              operation,
+              input,
+              selectedExecutor
+            ) => {
+              await finalizeSetupFailure(operation, {
+                ...input,
+                stage: operation.currentStage,
+                classification:
+                  input.code === "repo-admin-required" ?
+                    "needs-someone-else"
+                  : "unknown",
+                runDeleteEnvironment: async (args) => {
+                  const result = await selectedExecutor.run(args);
+                  if (result.code !== 0 && result.code !== "0") {
+                    throw new Error(
+                      (result.stderr || result.stdout || "").trim() ||
+                        "GitHub API request failed."
+                    );
+                  }
+                }
+              });
+            },
+            getOperation: (id) => operations.get(id),
+            postInternal
           });
-          return { shouldMonitor: true };
         },
         30000
       );

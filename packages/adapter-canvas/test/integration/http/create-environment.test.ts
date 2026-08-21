@@ -10,9 +10,12 @@ import {
 } from "../../../src/verification-plan.js";
 import {
   persistBestEffort,
-  persistMutationCheckpoint,
-  resolveGitHubEnvironmentCreateState
+  persistMutationCheckpoint
 } from "../../../src/server.js";
+import {
+  recordGitHubEnvironment,
+  setCanonicalEnvironment
+} from "../../../src/operations.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
@@ -60,6 +63,13 @@ interface Script {
     stderr?: string;
   };
   persistRejectsAfter?: number;
+  statePackageError?: string;
+  exerciseCleanupDelete?: boolean;
+  preparedEnvironment?: {
+    requestedName: string;
+    canonicalName: string;
+    state: "created_candidate" | "reused";
+  };
 }
 
 interface Harness {
@@ -73,6 +83,7 @@ interface Harness {
   commitStates: Record<string, unknown>[];
   committedFiles: Array<{ path: string; branch: string | null; mode: string }>;
   failures: Array<Record<string, unknown>>;
+  cleanupErrors: string[];
 }
 
 const TEMP_BODY_PATH = "/tmp/create-environment-body.json";
@@ -82,7 +93,7 @@ const TEMP_BODY_PATH = "/tmp/create-environment-body.json";
 // rule it is about. Anything that would reach a real binary, the network or the
 // filesystem is a scripted fake that throws on an unmodelled call; the pure
 // helpers (`isValidRepoSlug`, `planCredentialVerification`,
-// `buildVerifyWorkflowDispatchArgs`, `resolveGitHubEnvironmentCreateState`) are
+// `buildVerifyWorkflowDispatchArgs`) are
 // the real production functions, injected exactly as `server.ts` injects them.
 const DEFAULT_GH_RULES: GhRule[] = [
   {
@@ -91,7 +102,7 @@ const DEFAULT_GH_RULES: GhRule[] = [
   },
   {
     match: /^api --method PUT \/repos\/octo\/app\/environments\/dev$/,
-    result: { code: 0 }
+    result: { code: 0, stdout: '{"name":"dev"}' }
   },
   { match: /^variable set /, result: { code: 0 } },
   {
@@ -123,6 +134,7 @@ function start(script: Script = {}): Harness {
   const commitStates: Record<string, unknown>[] = [];
   const committedFiles: Harness["committedFiles"] = [];
   const failures: Array<Record<string, unknown>> = [];
+  const cleanupErrors: string[] = [];
   let persistCalls = 0;
 
   const operation: CreateEnvironmentOperation = {
@@ -133,6 +145,20 @@ function start(script: Script = {}): Harness {
     currentStage: STAGE_CONFIGURE,
     inputRequired: null
   };
+  if (script.preparedEnvironment) {
+    operation.environment = script.preparedEnvironment.requestedName;
+    operation.context = {
+      requestedEnvironment: script.preparedEnvironment.requestedName,
+      canonicalEnvironment: script.preparedEnvironment.canonicalName
+    };
+    operation.setupArtifacts = {
+      githubEnvironment: {
+        state: script.preparedEnvironment.state,
+        repo: "octo/app",
+        name: script.preparedEnvironment.canonicalName
+      }
+    };
+  }
 
   const rules = [...(script.gh ?? []), ...DEFAULT_GH_RULES];
 
@@ -174,9 +200,17 @@ function start(script: Script = {}): Harness {
 
     // --- admission ---
     isValidRepoSlug,
-    getOperation: () => null,
+    getOperation: (operationId) =>
+      script.preparedEnvironment && operationId === operation.operationId ?
+        operation
+      : null,
     isStale: () => false,
-    createOperation: () => operation,
+    createOperation: (input) => {
+      operation.repo = input.repo;
+      operation.environment = input.environment;
+      operation.provider = input.provider;
+      return operation;
+    },
     buildStages: () => [],
     startOperation: () => ({ ok: true }),
     persistOperations: async () => {
@@ -234,6 +268,24 @@ function start(script: Script = {}): Harness {
     finalizeSetupFailure: async (_operation, input) => {
       failures.push(input);
       journal.push(`finalizeSetupFailure:${String(input.code)}`);
+      const runDeleteEnvironment = input.runDeleteEnvironment;
+      if (
+        script.exerciseCleanupDelete &&
+        typeof runDeleteEnvironment === "function"
+      ) {
+        try {
+          await runDeleteEnvironment([
+            "api",
+            "--method",
+            "DELETE",
+            "/repos/octo/app/environments/dev"
+          ]);
+        } catch (error) {
+          cleanupErrors.push(
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+      }
       return {
         status: Number(input.status),
         body: { error: String(input.error), code: String(input.code) }
@@ -271,10 +323,15 @@ function start(script: Script = {}): Harness {
     },
     bootstrapGHCRStatePackage: async () => {
       journal.push("bootstrapGHCRStatePackage");
+      if (script.statePackageError) {
+        throw new Error(script.statePackageError);
+      }
       return { visibility: "private" };
     },
-    stateRegistryForEnvironment: (repo, environment) =>
-      `ghcr.io/${repo}/radius-state-${environment}`,
+    stateRegistryForEnvironment: (repo, environment) => {
+      journal.push(`stateRegistry:${environment}`);
+      return `ghcr.io/${repo}/radius-state-${environment}`;
+    },
 
     // --- committer ports ---
     getDefaultBranch: async () => script.defaultBranch ?? "main",
@@ -306,8 +363,11 @@ function start(script: Script = {}): Harness {
     },
 
     // --- GitHub environment ---
-    resolveGitHubEnvironmentCreateState,
-    recordGitHubEnvironment: (_operation, patch) => {
+    setCanonicalEnvironment: (target, environment) => {
+      setCanonicalEnvironment(target, environment);
+    },
+    recordGitHubEnvironment: (target, patch) => {
+      recordGitHubEnvironment(target, patch);
       journal.push(`recordGitHubEnvironment:${patch.state}`);
     },
     envListCacheDelete: (repo) => {
@@ -324,13 +384,22 @@ function start(script: Script = {}): Harness {
     optionalString: (value) => (typeof value === "string" ? value : ""),
 
     // --- workflow generation and commit ---
-    generateVerifyWorkflow: async () => "on: workflow_dispatch\njobs:\n",
-    generateDeployWorkflow: async () => ({
-      "run-rad-commands.yml": "on: workflow_dispatch\njobs:\n"
-    }),
-    generateDeleteWorkflow: async () => ({
-      "radius-delete.yml": "on: workflow_dispatch\njobs:\n"
-    }),
+    generateVerifyWorkflow: async (environment) => {
+      journal.push(`generateVerifyWorkflow:${environment}`);
+      return "on: workflow_dispatch\njobs:\n";
+    },
+    generateDeployWorkflow: async (environment) => {
+      journal.push(`generateDeployWorkflow:${environment}`);
+      return {
+        "run-rad-commands.yml": "on: workflow_dispatch\njobs:\n"
+      };
+    },
+    generateDeleteWorkflow: async (environment) => {
+      journal.push(`generateDeleteWorkflow:${environment}`);
+      return {
+        "radius-delete.yml": "on: workflow_dispatch\njobs:\n"
+      };
+    },
     recordCommittedWorkflowFile: (_operation, committed) => {
       committedFiles.push(committed);
     },
@@ -412,7 +481,8 @@ function start(script: Script = {}): Harness {
     finished,
     commitStates,
     committedFiles,
-    failures
+    failures,
+    cleanupErrors
   };
 }
 
@@ -706,6 +776,89 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(harness.journal).toContain("recordGitHubEnvironment:reused");
   });
 
+  it("uses GitHub's canonical name for state, variables, workflows, and verification", async () => {
+    const harness = start({
+      gh: [
+        {
+          match: /^api \/repos\/octo\/app\/environments\/production$/,
+          result: { code: 0, stdout: '{"name":"Production"}' }
+        }
+      ]
+    });
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "production"
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      environment: "Production",
+      stateRegistry: "ghcr.io/octo/app/radius-state-Production"
+    });
+    expect(harness.operation.environment).toBe("production");
+    expect(harness.operation.context).toMatchObject({
+      requestedEnvironment: "production",
+      canonicalEnvironment: "Production"
+    });
+    expect(harness.journal).toEqual(
+      expect.arrayContaining([
+        "stateRegistry:Production",
+        "generateVerifyWorkflow:Production",
+        "generateDeployWorkflow:Production",
+        "generateDeleteWorkflow:Production"
+      ])
+    );
+    expect(
+      harness.ghCalls
+        .filter((call) => call.startsWith("variable set "))
+        .every((call) => call.includes("--env Production"))
+    ).toBe(true);
+    expect(
+      harness.ghCalls.some(
+        (call) =>
+          call.startsWith("workflow run ") &&
+          call.includes("environment=Production")
+      )
+    ).toBe(true);
+    expect(
+      harness.ghCalls.some(
+        (call) =>
+          call === "api --method PUT /repos/octo/app/environments/production"
+      )
+    ).toBe(false);
+  });
+
+  it("reuses the operation's persisted canonical resolution without another environment lookup", async () => {
+    const harness = start({
+      preparedEnvironment: {
+        requestedName: "production",
+        canonicalName: "Production",
+        state: "created_candidate"
+      }
+    });
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "Production",
+      operationEnvironment: "production",
+      operationId: "op-http"
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      environment: "Production"
+    });
+    expect(
+      harness.ghCalls.some((call) =>
+        call.includes("/repos/octo/app/environments/")
+      )
+    ).toBe(false);
+    expect(harness.journal).toContain(
+      "recordGitHubEnvironment:created_candidate"
+    );
+  });
+
   it("aborts without creating anything when the environment lookup is ambiguous", async () => {
     // A lookup that neither succeeded nor proved absence must fail closed: a PUT
     // here could silently adopt someone else's environment.
@@ -723,13 +876,76 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({
       error:
-        'Could not determine whether GitHub environment "dev" already exists before creating it. HTTP 500: upstream unavailable',
+        'Could not resolve GitHub environment "dev". HTTP 500: upstream unavailable',
       code: "create-environment-unhandled"
     });
     expect(
       harness.ghCalls.some((call) => call.startsWith("api --method PUT"))
     ).toBe(false);
   });
+
+  it("records candidate provenance when create omits the canonical name", async () => {
+    const harness = start({
+      gh: [
+        {
+          match: /^api --method PUT \/repos\/octo\/app\/environments\/dev$/,
+          result: { code: 0, stdout: "{}" }
+        }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error:
+        'GitHub created environment "dev" but did not report its canonical name. The environment was left in place because Radius cannot prove this request created it.',
+      code: "create-environment-unhandled"
+    });
+    expect(harness.operation.setupArtifacts?.githubEnvironment).toEqual({
+      state: "created_candidate",
+      repo: "octo/app",
+      name: "dev"
+    });
+    expect(harness.ghCalls).toEqual([
+      "api /repos/octo/app/environments/dev",
+      "api --method PUT /repos/octo/app/environments/dev"
+    ]);
+  });
+
+  it.each([
+    { code: 0, expectedErrors: [] },
+    { code: "0", expectedErrors: [] },
+    { code: 1, expectedErrors: ["cleanup failed"] }
+  ])(
+    "handles cleanup command result code $code",
+    async ({ code, expectedErrors }) => {
+      const harness = start({
+        gh: [
+          {
+            match: /^api \/repos\/octo\/app\/environments\/dev$/,
+            result: { code: 0, stdout: '{"name":"dev"}' }
+          },
+          {
+            match:
+              /^api --method DELETE \/repos\/octo\/app\/environments\/dev$/,
+            result: { code, stderr: "cleanup failed" }
+          }
+        ],
+        statePackageError: "state setup failed",
+        exerciseCleanupDelete: true
+      });
+
+      const response = await post({ repo: "octo/app" });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: "state setup failed",
+        code: "create-environment-unhandled"
+      });
+      expect(harness.cleanupErrors).toEqual(expectedErrors);
+    }
+  );
 
   it("tags the environment as Radius-managed and drops the cached listing", async () => {
     const harness = start();
