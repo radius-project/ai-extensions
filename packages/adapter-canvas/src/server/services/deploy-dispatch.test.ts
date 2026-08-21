@@ -487,12 +487,15 @@ describe("deploy dispatch environment and branch preflight", () => {
     ]);
   });
 
-  it("fails fast with the expected and existing spellings when a subject differs only by case", async () => {
+  it("names every mis-cased subject, marks the rejection as predicted, and carries the az fix", async () => {
     const { input, state } = request();
     input.provider = "azure";
     const gh = recordingGh();
     const preflight = azurePreflight({
-      subjects: ["repo:Acme/Widgets:environment:Production"]
+      subjects: [
+        "repo:Acme/Widgets:environment:Production",
+        "repo:acme@101/Widgets@202:environment:PRODUCTION"
+      ]
     });
     const service = createDeployDispatchService(
       dependencies({
@@ -506,19 +509,27 @@ describe("deploy dispatch environment and branch preflight", () => {
     });
     expect(state.deployStatus).toBe("failed");
     expect(state.deployErrorKind).toBe("oidc-subject-case-mismatch");
+    // Both halves of the mutable/immutable pair are reported, so one pass of
+    // the fix below clears the block rather than leaving the second spelling
+    // to trip the partial-coverage warning on the next attempt.
     expect(state.deployError).toContain(
-      "AADSTS700213: No matching federated identity record found for presented assertion subject 'repo:acme/widgets:environment:production'."
+      'expected "repo:acme/widgets:environment:production" but the app has "repo:Acme/Widgets:environment:Production"'
     );
     expect(state.deployError).toContain(
-      "Please note that matching is done using a case-sensitive comparison. Check your federated identity credential Subject, Audience, and Issuer against the presented assertion."
+      'expected "repo:acme@101/widgets@202:environment:production" but the app has "repo:acme@101/Widgets@202:environment:PRODUCTION"'
+    );
+    // Predicted rather than quoted: no run exists to search for the code in.
+    expect(state.deployError).toContain("would be rejected");
+    expect(state.deployError).toContain("No workflow run was started");
+    expect(state.deployError).toContain("AADSTS700213");
+    expect(state.deployError).toContain("AADSTS7002138");
+    expect(state.deployError).toContain(
+      'az ad app federated-credential list --id client-123 --query "[].{id:id,subject:subject}" -o table'
     );
     expect(state.deployError).toContain(
-      'Expected subject: "repo:acme/widgets:environment:production".'
+      "az ad app federated-credential update --id client-123 --federated-credential-id <id> --parameters"
     );
-    expect(state.deployError).toContain(
-      'Existing credential subject: "repo:Acme/Widgets:environment:Production".'
-    );
-    expect(state.deployError).not.toContain("Create Environment");
+    expect(state.deployError).not.toContain("Create Environment with");
     expect(gh.calls.some(({ args }) => args[0] === "workflow")).toBe(false);
   });
 
@@ -540,10 +551,7 @@ describe("deploy dispatch environment and branch preflight", () => {
     });
     expect(state.deployErrorKind).toBe("oidc-subject-case-mismatch");
     expect(state.deployError).toContain(
-      'Expected subject: "repo:acme@101/widgets@202:environment:production".'
-    );
-    expect(state.deployError).toContain(
-      'Existing credential subject: "repo:Acme@101/Widgets@202:environment:Production".'
+      'expected "repo:acme@101/widgets@202:environment:production" but the app has "repo:Acme@101/Widgets@202:environment:Production"'
     );
   });
 

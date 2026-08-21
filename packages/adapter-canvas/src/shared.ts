@@ -209,8 +209,8 @@ export interface CanvasState {
 }
 
 // Why a deploy failed, in the one dimension the repair guard cares about:
-// The pre-dispatch kinds all mean an automatic repair must not redeploy, so
-// these strings are matched across server, tests and client. A union rather than
+// the kinds below all mean an automatic repair must not redeploy, so these
+// strings are matched across server, tests and client. A union rather than
 // string makes a typo in any of them a compile error instead of a guard that
 // silently never fires.
 export type DeployErrorKind =
