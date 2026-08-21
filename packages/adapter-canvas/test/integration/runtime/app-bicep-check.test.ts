@@ -1373,16 +1373,26 @@ describe("repair budget", () => {
     assert.deepEqual(record.baseline, { "app.bicep": null });
   });
 
-  it("does not fail a passing compile when the attempt cannot be recorded", () => {
-    const directory = temporaryDirectory();
-    stagedRun(directory);
-    fs.chmodSync(path.join(directory, STAGING_RUN_RECORD), 0o444);
+  // A read-only file is still writable by root and the mode is not enforced on
+  // Windows, so this runs only where the permission genuinely holds.
+  const unwritable =
+    process.platform !== "win32" &&
+    typeof process.getuid === "function" &&
+    process.getuid() !== 0;
 
-    const result = runChecker(directory, fakeBicep(directory, sarif([]), 0));
+  it.runIf(unwritable)(
+    "does not fail a passing compile when the attempt cannot be recorded",
+    () => {
+      const directory = temporaryDirectory();
+      stagedRun(directory);
+      fs.chmodSync(path.join(directory, STAGING_RUN_RECORD), 0o444);
 
-    assert.equal(result.status, 0);
-    assert.match(result.stderr, /repair budget is not being counted/u);
-  });
+      const result = runChecker(directory, fakeBicep(directory, sarif([]), 0));
+
+      assert.equal(result.status, 0);
+      assert.match(result.stderr, /repair budget is not being counted/u);
+    }
+  );
 
   it("counts a run that never leaves a staging directory separately", () => {
     const first = temporaryDirectory();
@@ -1425,49 +1435,87 @@ describe("agreement with the core repair rules", () => {
     }
   );
 
+  // Repeat detection compares two pure implementations over the same compiler
+  // output, so the matrix is checked without spawning anything: core's
+  // fingerprint of what the checker printed, against the fingerprint the
+  // checker itself recorded. One end-to-end case below proves the script is
+  // actually wired to its own copy.
   it.each([
     {
       name: "an identical failure",
-      first: failure,
-      second: failure,
+      first: "app.bicep:12:5: error BCP057: missing",
+      second: "app.bicep:12:5: error BCP057: missing",
       repeated: true
     },
     {
       name: "the same failure at a shifted line",
-      first: failure,
-      second: shiftedFailure,
+      first: "app.bicep:12:5: error BCP057: missing",
+      second: "app.bicep:48:9: error BCP057: missing",
+      repeated: true
+    },
+    {
+      name: "the same failures in a different order",
+      first: "app.bicep:1:1: error one\napp.bicep:2:1: error two",
+      second: "app.bicep:9:1: error two\napp.bicep:3:1: error one",
       repeated: true
     },
     {
       name: "a different failure",
-      first: failure,
-      second: otherFailure,
+      first: "app.bicep:12:5: error BCP057: missing",
+      second: "app.bicep:12:5: error BCP062: invalid",
       repeated: false
     }
-  ])(
-    "agrees on whether $name is a repeat",
-    ({ first: firstOutput, second: secondOutput, repeated }) => {
-      const directory = temporaryDirectory();
-      stagedRun(directory);
+  ])("agrees on whether $name is a repeat", ({ first, second, repeated }) => {
+    const recorded = parseRepairState({
+      attempts: 1,
+      fingerprint: fingerprintCompilerOutput(first)
+    });
 
-      runChecker(directory, fakeBicep(directory, firstOutput, 1));
-      const recorded = parseRepairState(readRepair(directory));
-      const second = runChecker(
-        directory,
-        fakeBicep(directory, secondOutput, 1)
-      );
+    assert.equal(
+      isRepeatedFailure(recorded, fingerprintCompilerOutput(second)),
+      repeated
+    );
+  });
 
-      const after = parseRepairState(readRepair(directory));
-      assert.equal(isRepeatedFailure(recorded, after.fingerprint), repeated);
-      assert.equal(/same compiler failure/u.test(second.stderr), repeated);
-      if (repeated) {
-        assert.match(
-          second.stderr,
-          new RegExp(escapeRegExp(REPEATED_FAILURE_MESSAGE), "u")
-        );
-      }
-    }
-  );
+  it("wires the checker's own copy of the rules to core's", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+
+    // The compiler is installed once and only its output varies, because
+    // reinstalling a currently executing binary raises ETXTBSY.
+    const env = fakeBicep(directory, failure, 1);
+    runChecker(directory, env);
+    const recorded = parseRepairState(readRepair(directory));
+
+    // The same diagnostic at a line that moved: the checker must recognize it
+    // through its own fingerprint, exactly as core would.
+    const second = runChecker(
+      directory,
+      fakeBicep(directory, shiftedFailure, 1)
+    );
+    const after = parseRepairState(readRepair(directory));
+
+    assert.equal(isRepeatedFailure(recorded, after.fingerprint), true);
+    assert.match(
+      second.stderr,
+      new RegExp(escapeRegExp(REPEATED_FAILURE_MESSAGE), "u")
+    );
+  });
+
+  it("does not call a changed failure a repeat end to end", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+
+    const env = fakeBicep(directory, failure, 1);
+    runChecker(directory, env);
+    const recorded = parseRepairState(readRepair(directory));
+
+    const second = runChecker(directory, fakeBicep(directory, otherFailure, 1));
+    const after = parseRepairState(readRepair(directory));
+
+    assert.equal(isRepeatedFailure(recorded, after.fingerprint), false);
+    assert.doesNotMatch(second.stderr, /same compiler failure/u);
+  });
 });
 
 function escapeRegExp(value: string): string {
