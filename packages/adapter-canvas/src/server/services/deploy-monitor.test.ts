@@ -1273,6 +1273,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
         return Promise.resolve({ ok: false, status: 404 });
       },
       readProcessEnv: () => ({}),
+      ghCredentialSource: () => "keyring",
       fetchFileForSelection: (_entry, _repo, _branch, repoPath) => {
         record(`fetch-file:${repoPath}`);
         return Promise.resolve("deploy bicep");

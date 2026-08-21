@@ -37,6 +37,7 @@ function file(
     blobSha: BLOB,
     contentSha256: DIGEST,
     previousBlobSha: null,
+    previousBlobKnown: true,
     target: `${path} on ${branch}`,
     identity: `${branch}:${path}`,
     ...overrides
@@ -64,6 +65,7 @@ interface Journal {
 }
 
 function ports(script: {
+  repositoryError?: string;
   files?: Record<string, RepositoryFileState>;
   heads?: Record<string, BranchHeadState>;
   pullRequest?: PullRequestState;
@@ -82,6 +84,12 @@ function ports(script: {
   return {
     journal,
     ports: {
+      readRepository: () =>
+        Promise.resolve(
+          script.repositoryError ?
+            { status: "unreadable" as const, detail: script.repositoryError }
+          : { status: "readable" as const }
+        ),
       readFile: ({ path, ref }) => {
         const state = script.files?.[`${ref}:${path}`];
         if (!state) throw new Error(`unscripted readFile ${ref}:${path}`);
@@ -343,6 +351,97 @@ describe("runWorkflowRollback", () => {
     expect(journal.restored).toEqual([
       { path: VERIFY_PATH, branch: "main", contentBase64: "cHJldmlvdXM=" }
     ]);
+    expect(outcome.results[0]?.outcome).toBe("restored");
+  });
+
+  it("blocks before file reads when the selected account cannot read the repository", async () => {
+    const { ports: p, journal } = ports({
+      repositoryError: "HTTP 404: Not Found"
+    });
+
+    const outcome = await rollback(p);
+
+    expect(outcome.blocked).toBe(true);
+    expect(outcome.warnings[0]).toContain(
+      'could not read repository "contoso/store"'
+    );
+    expect(outcome.results[0]).toMatchObject({
+      outcome: "warning",
+      detail: expect.stringContaining("HTTP 404")
+    });
+    expect(journal.deleted).toEqual([]);
+  });
+
+  it("closes an open setup pull request when mixed-branch files require individual reverts", async () => {
+    const setupBranch = "radius/setup";
+    const { ports: p, journal } = ports({
+      pullRequest: { status: "open", number: 17 },
+      files: {
+        [`main:${VERIFY_PATH}`]: unchanged,
+        [`${setupBranch}:${DEPLOY_PATH}`]: unchanged
+      }
+    });
+
+    const outcome = await rollback(p, {
+      commit: commit({
+        mode: "pull_request",
+        branch: setupBranch,
+        baseBranch: "main",
+        pullRequestUrl: "https://github.com/contoso/store/pull/17"
+      }),
+      files: [
+        file(),
+        file({
+          path: DEPLOY_PATH,
+          branch: setupBranch,
+          mode: "pull_request"
+        })
+      ]
+    });
+
+    expect(outcome.blocked).toBe(false);
+    expect(journal.closed).toEqual([17]);
+    expect(journal.deleted.map(({ branch }) => branch)).toEqual([
+      "main",
+      setupBranch
+    ]);
+  });
+
+  it("reports but does not block on an open mixed-branch pull request that cannot close", async () => {
+    const setupBranch = "radius/setup";
+    const { ports: p } = ports({
+      pullRequest: { status: "open", number: 17 },
+      closeFails: true,
+      files: {
+        [`main:${VERIFY_PATH}`]: unchanged,
+        [`${setupBranch}:${DEPLOY_PATH}`]: unchanged
+      }
+    });
+
+    const outcome = await rollback(p, {
+      commit: commit({
+        mode: "pull_request",
+        branch: setupBranch,
+        baseBranch: "main",
+        pullRequestUrl: "https://github.com/contoso/store/pull/17"
+      }),
+      files: [
+        file(),
+        file({
+          path: DEPLOY_PATH,
+          branch: setupBranch,
+          mode: "pull_request"
+        })
+      ]
+    });
+
+    expect(outcome.blocked).toBe(false);
+    expect(outcome.warnings[0]).toContain(
+      "Could not close setup pull request #17"
+    );
+    expect(outcome.steps).toContain(
+      "⚠️ Setup pull request #17 remains open after its workflow files were reverted."
+    );
   });
 
   it("leaves a file alone and blocks the rollback when it changed", async () => {
@@ -430,6 +529,18 @@ describe("runWorkflowRollback", () => {
     expect(outcome.blocked).toBe(true);
     expect(journal.deleted).toEqual([]);
     expect(outcome.results[0]?.outcome).toBe("warning");
+  });
+
+  it("blocks a file whose previous path state was never proven", async () => {
+    const { ports: p, journal } = ports({});
+
+    const outcome = await rollback(p, {
+      files: [file({ previousBlobKnown: false })]
+    });
+
+    expect(outcome.blocked).toBe(true);
+    expect(journal.deleted).toEqual([]);
+    expect(outcome.results[0]?.detail).toContain("did not save whether");
   });
 
   it("reports a target with no stable identity as unidentified rather than blank", async () => {

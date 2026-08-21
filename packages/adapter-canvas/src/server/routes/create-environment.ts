@@ -169,6 +169,7 @@ export interface CreateEnvironmentDependencies
       blobSha: string | null;
       contentSha256: string | null;
       previousBlobSha: string | null;
+      previousBlobKnown: boolean;
     }
   ): void;
   deleteLegacyDeployWorkflow(
@@ -467,16 +468,14 @@ export async function handleCreateEnvironment(
       state: environmentState,
       repo: targetRepo,
       name: envName,
-      // A candidate claims nothing about who created it; the promotion below is
-      // the only thing that may write "this operation".
+      // A candidate claims nothing about who created it; only a complete proof
+      // may write "this operation".
       origin: environmentState === "reused" ? "pre_existing" : "unknown"
     });
-    if (!(await checkpoint("after-github-environment"))) return;
-    // The identity is durable now, so the third leg of the ownership proof is
-    // in place and the candidate can be settled either way. A promotion that
-    // does not survive the best-effort save is not lost: the in-memory record
-    // carries it into the next mutation checkpoint, and until then the saved
-    // record keeps the safer candidate.
+    // Settle a provable candidate before the mutation checkpoint. The checkpoint
+    // then persists the promoted ownership and honors a pending stop in one
+    // boundary, so a stop cannot strand a proven-created environment as an
+    // undeletable candidate.
     if (environmentState === "created_candidate") {
       const proof = proveGitHubEnvironmentCreated({
         preflight: environmentState,
@@ -493,18 +492,13 @@ export async function handleCreateEnvironment(
         steps.push(
           `✅ GitHub environment "${envName}" created by this setup — Radius owns it and can remove it.`
         );
-        await dependencies.persistBestEffort({
-          operation,
-          persist: () => dependencies.persistOperations(),
-          report: (diagnostic) =>
-            dependencies.reportOperationDiagnostic(diagnostic)
-        });
       } else if (!proof.proven) {
         steps.push(
           `ℹ️ Radius left GitHub environment "${envName}" outside its cleanup scope. ${proof.detail}`
         );
       }
     }
+    if (!(await checkpoint("after-github-environment"))) return;
     // Tag the environment as Radius-managed so the listing can filter out
     // environments created outside this extension.
     await setEnvironmentVariable("RADIUS_MANAGED", "true");

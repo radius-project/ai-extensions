@@ -51,7 +51,7 @@ import {
   ghApiJson,
   getGitHubIdentity,
   getGhPackageCredentials,
-  redactGhCredentials,
+  ghCommandCredentialSource,
   resetGhIdentityCache,
   createSelectedGhExecutor,
   getActiveKeyringLogin,
@@ -225,8 +225,9 @@ import { runWorkflowRollback } from "./server/services/workflow-rollback.js";
 import type { WorkflowRollbackPorts } from "./server/services/workflow-rollback.js";
 import {
   createWorkflowRollbackPorts,
-  createWorkflowScopeApiCommand
+  createSelectedWorkflowRollbackCommand
 } from "./server/services/workflow-rollback-ports.js";
+import type { WorkflowRollbackCommand } from "./server/services/workflow-rollback-ports.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
@@ -251,10 +252,7 @@ import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
-import {
-  parseGhHttpStatus,
-  toGhCommandResult
-} from "./server/services/gh-command-result.js";
+import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import type { CanvasServerEntry } from "./server/types.js";
@@ -2424,6 +2422,7 @@ const deployDispatchService = createDeployDispatchService({
   },
   runGitHubJson: (apiPath) => runGitHubJsonRequest(apiPath),
   readProcessEnv: () => process.env,
+  ghCredentialSource: ghCommandCredentialSource,
   fetchFileForSelection: (entry, repo, branch, repoPath) =>
     fetchFileForSelection(entry as CanvasServerEntry, repo, branch, repoPath),
   appParams,
@@ -2522,41 +2521,6 @@ function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
   });
 }
 
-// The `gh api` seam a post-commit rollback runs on. The credential-fallback
-// decision lives in `createWorkflowScopeApiCommand`; what stays here is the one
-// thing only this module can do — spawn the CLI.
-const runRollbackGhCommand = createWorkflowScopeApiCommand({
-  attempt: ({ args, stdin, env }) =>
-    new Promise((resolve) => {
-      const options: CliOptions = { timeout: 20000 };
-      if (env) options.env = env;
-      const child = cliExec("gh", args, options, (err, stdout, stderr) => {
-        const result = toGhCommandResult(err, stdout, stderr, {
-          trimStdout: true
-        });
-        const detail = redactGhCredentials(
-          result.stderr.trim() || (err ? err.message : "")
-        );
-        resolve({
-          ok: !err,
-          status: err ? parseGhHttpStatus(detail) : 200,
-          stdout: result.stdout,
-          stderr: detail,
-          timedOut: Boolean(result.timedOut)
-        });
-      });
-      if (stdin === undefined) endChildInput(child);
-      else {
-        try {
-          child.stdin?.end(stdin);
-        } catch (_error: unknown) {
-          // Closing stdin is best-effort; the command callback is authoritative.
-        }
-      }
-    }),
-  readProcessEnv: () => process.env
-});
-
 export function resolveGitHubEnvironmentCreateState(
   result: Partial<CommandResult> | null | undefined
 ): "created_candidate" | "reused" | null {
@@ -2564,6 +2528,68 @@ export function resolveGitHubEnvironmentCreateState(
   if (result.code === 0 || result.code === "0") return "reused";
   const detail = `${result.stderr || ""}\n${result.stdout || ""}`;
   return /HTTP 404|Not Found|404\b/i.test(detail) ? "created_candidate" : null;
+}
+
+export interface CleanupGitHubContext {
+  rollbackCommand: WorkflowRollbackCommand;
+  deleteEnvironment(args: string[]): Promise<void>;
+}
+
+export async function resolveCleanupGitHubContext({
+  targets,
+  selectedLogin,
+  createExecutor = createSelectedGhExecutor,
+  formatError = errorMessage
+}: {
+  targets: readonly { artifactType: string }[];
+  selectedLogin: string;
+  createExecutor?: (login: string) => Promise<SelectedGhExecutor>;
+  formatError?: (error: unknown) => string;
+}): Promise<CleanupGitHubContext> {
+  const needsGitHub = targets.some(
+    (entry) =>
+      entry.artifactType === "workflow_file" ||
+      entry.artifactType === "github_environment"
+  );
+  let executor: SelectedGhExecutor | null = null;
+  let unavailable = "";
+  if (needsGitHub) {
+    if (!selectedLogin) {
+      unavailable =
+        "The operation record does not name the GitHub account that created these artifacts.";
+    } else {
+      try {
+        executor = await createExecutor(selectedLogin);
+        await executor.verifyIdentity();
+      } catch (error) {
+        unavailable = formatError(error);
+      }
+    }
+  }
+  const failure = unavailable || "The selected GitHub account is unavailable.";
+  return {
+    rollbackCommand:
+      executor ?
+        createSelectedWorkflowRollbackCommand(executor)
+      : async () => ({
+          ok: false,
+          status: null,
+          stdout: "",
+          stderr: failure
+        }),
+    deleteEnvironment:
+      executor ?
+        async (args) => {
+          await executor.runOrThrow(
+            args,
+            "Could not delete the GitHub environment",
+            { timeout: 20000 }
+          );
+        }
+      : async () => {
+          throw new Error(failure);
+        }
+  };
 }
 
 export async function deleteNewlyCreatedGitHubEnvironment(
@@ -2694,7 +2720,7 @@ export async function ensureServicePrincipal(
   | {
       ok: true;
       state: "created" | "reused" | "created_candidate";
-      origin: "pre_existing" | "this_operation";
+      origin: "unknown" | "pre_existing" | "this_operation";
       objectId: string | null;
     }
   | { ok: false; stderr: string }
@@ -2753,7 +2779,7 @@ export async function ensureServicePrincipal(
     return {
       ok: true,
       state: "created_candidate",
-      origin: "this_operation",
+      origin: "unknown",
       objectId: racedObjectId
     };
   }
@@ -3109,7 +3135,11 @@ export async function rollbackCommittedWorkflowFiles(
     ports
   );
   for (const entry of outcome.results) {
-    if (entry.outcome === "deleted" || entry.outcome === "not_found") {
+    if (
+      entry.outcome === "deleted" ||
+      entry.outcome === "restored" ||
+      entry.outcome === "not_found"
+    ) {
       recordCleanupDeletion(op, {
         artifactType: "workflow_file",
         identity: entry.identity ?? undefined
@@ -4380,6 +4410,10 @@ function createInstanceRequestCoordinator(
       ...priorResults.filter((entry) => entry.attempt < attempt),
       ...results
     ];
+    const cleanupGitHub = await resolveCleanupGitHubContext({
+      targets: selected,
+      selectedLogin: optionalString(op.context?.githubLogin)
+    });
 
     // The workflow files come first and gate everything after them. Removing
     // the GitHub environment or the cloud identity while an installed workflow
@@ -4388,7 +4422,7 @@ function createInstanceRequestCoordinator(
     // cannot finish stops the whole rollback here.
     const workflowPass = await rollbackCommittedWorkflowFiles(op, {
       attempt,
-      ports: createWorkflowRollbackPorts(runRollbackGhCommand),
+      ports: createWorkflowRollbackPorts(cleanupGitHub.rollbackCommand),
       only: new Set<string>(
         selected
           .filter(
@@ -4438,7 +4472,7 @@ function createInstanceRequestCoordinator(
     ) {
       const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
         attempt,
-        runDeleteEnvironment: (args) => ghOrThrow(args, 20000),
+        runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
         invalidateEnvironmentListing: (repo) => {
           envListCache.invalidate(repo);
         },

@@ -314,7 +314,8 @@ function publisherRecorder(script: PublisherScript = {}) {
           commitSha: `commit-${commitCalls.length}`,
           blobSha: `blob-${commitCalls.length}`,
           contentSha256: `digest-${commitCalls.length}`,
-          previousBlobSha: null
+          previousBlobSha: null,
+          previousBlobKnown: true
         }
       );
     },
@@ -383,7 +384,8 @@ describe("publishWorkflowFiles", () => {
         commitSha: "commit-1",
         blobSha: "blob-1",
         contentSha256: "digest-1",
-        previousBlobSha: null
+        previousBlobSha: null,
+        previousBlobKnown: true
       },
       {
         path: ".github/workflows/run-rad-commands.yml",
@@ -392,7 +394,8 @@ describe("publishWorkflowFiles", () => {
         commitSha: "commit-2",
         blobSha: "blob-2",
         contentSha256: "digest-2",
-        previousBlobSha: null
+        previousBlobSha: null,
+        previousBlobKnown: true
       },
       {
         path: ".github/workflows/radius-delete.yml",
@@ -401,7 +404,8 @@ describe("publishWorkflowFiles", () => {
         commitSha: "commit-3",
         blobSha: "blob-3",
         contentSha256: "digest-3",
-        previousBlobSha: null
+        previousBlobSha: null,
+        previousBlobKnown: true
       }
     ]);
   });
@@ -425,7 +429,8 @@ describe("publishWorkflowFiles", () => {
       commitSha: null,
       blobSha: null,
       contentSha256: null,
-      previousBlobSha: null
+      previousBlobSha: null,
+      previousBlobKnown: false
     });
   });
 

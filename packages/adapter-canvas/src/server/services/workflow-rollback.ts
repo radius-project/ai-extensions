@@ -58,6 +58,11 @@ export type PullRequestState =
   | { status: "unknown"; detail: string };
 
 export interface WorkflowRollbackPorts extends WorkflowProvenancePorts {
+  readRepository(input: {
+    repo: string;
+  }): Promise<
+    { status: "readable" } | { status: "unreadable"; detail: string }
+  >;
   readPullRequest(input: {
     repo: string;
     pullRequestUrl: string;
@@ -205,6 +210,21 @@ export async function runWorkflowRollback(
   const accumulated: Accumulated = { results: [], warnings: [], steps: [] };
   if (input.files.length === 0) return { ...accumulated, blocked: false };
 
+  // GitHub deliberately answers 404 both when a file is absent and when the
+  // acting credential cannot see a private repository. Prove repository access
+  // with the same pinned credential before any file-level 404 can count as
+  // absence.
+  const repository = await ports.readRepository({ repo: input.repo });
+  if (repository.status === "unreadable") {
+    const detail = `Radius could not read repository "${input.repo}" with the GitHub account selected for this setup, so it left every workflow and dependent resource in place. ${repository.detail}`;
+    accumulated.warnings.push(detail);
+    accumulated.steps.push(`⚠️ ${detail}`);
+    for (const file of input.files) {
+      accumulated.results.push(result(input.attempt, file, "warning", detail));
+    }
+    return { ...accumulated, blocked: true };
+  }
+
   const pullRequest =
     input.commit.pullRequestUrl ?
       await ports.readPullRequest({
@@ -229,7 +249,8 @@ export async function runWorkflowRollback(
   for (const file of input.files) {
     const ref = resolveWorkflowRollbackRef(file, input.commit, merged);
     const blobSha = file.blobSha;
-    if (ref && blobSha) located.push({ ...file, branch: ref, blobSha });
+    if (ref && blobSha && file.previousBlobKnown)
+      located.push({ ...file, branch: ref, blobSha });
     else unlocatable.push(file);
   }
   if (unlocatable.length > 0) {
@@ -237,7 +258,9 @@ export async function runWorkflowRollback(
     for (const file of input.files) {
       const detail =
         unlocatableFiles.has(file) ?
-          `Radius cannot tell where "${file.path}" is now, or what it committed there, so it left the file in place.`
+          file.previousBlobKnown ?
+            `Radius cannot tell where "${file.path}" is now, or what it committed there, so it left the file in place.`
+          : `Radius did not save whether "${file.path}" existed before setup, so it left the file in place.`
         : `Radius left "${file.path}" in place because another workflow file from this setup could not be located.`;
       accumulated.warnings.push(detail);
       accumulated.results.push(result(input.attempt, file, "warning", detail));
@@ -283,7 +306,44 @@ export async function runWorkflowRollback(
       accumulated
     );
   }
+  if (pullRequest?.status === "open") {
+    const closed = await closeOpenPullRequest(
+      input,
+      pullRequest,
+      ports,
+      accumulated
+    );
+    if (!closed) {
+      // An open but now-empty setup pull request does not keep a workflow
+      // installed, so it is a warning rather than a reason to retain the cloud
+      // identity. The warning remains in the cleanup result for manual action.
+      accumulated.steps.push(
+        `⚠️ Setup pull request #${pullRequest.number} remains open after its workflow files were reverted.`
+      );
+    }
+  }
   return await revertFiles(input, verdicts.files, ports, accumulated);
+}
+
+async function closeOpenPullRequest(
+  input: WorkflowRollbackInput,
+  pullRequest: { number: number },
+  ports: WorkflowRollbackPorts,
+  accumulated: Accumulated
+): Promise<boolean> {
+  const closed = await ports.closePullRequest({
+    repo: input.repo,
+    number: pullRequest.number
+  });
+  if (closed.ok) {
+    accumulated.steps.push(
+      `✅ Closed setup pull request #${pullRequest.number}.`
+    );
+    return true;
+  }
+  const detail = `Could not close setup pull request #${pullRequest.number}: ${closed.detail}`;
+  accumulated.warnings.push(detail);
+  return false;
 }
 
 async function deleteSetupBranch(
@@ -318,17 +378,17 @@ async function deleteSetupBranch(
   // Closing first is best effort only: GitHub closes the pull request itself
   // when the head branch goes away, so a refusal here is narrated rather than
   // treated as a failure to remove the workflows.
-  if (pullRequest && pullRequest.status === "open") {
-    const closed = await ports.closePullRequest({
-      repo: input.repo,
-      number: pullRequest.number
-    });
-    if (closed.ok) {
-      steps.push(`✅ Closed setup pull request #${pullRequest.number}.`);
-    } else {
-      const detail = `Could not close setup pull request #${pullRequest.number}: ${closed.detail}`;
-      warnings.push(detail);
-      steps.push(`⚠️ ${detail}`);
+  if (pullRequest?.status === "open") {
+    const closed = await closeOpenPullRequest(
+      input,
+      pullRequest,
+      ports,
+      accumulated
+    );
+    if (!closed) {
+      steps.push(
+        `⚠️ Setup pull request #${pullRequest.number} remains open; deleting its head branch may close it automatically.`
+      );
     }
   }
 
@@ -376,13 +436,15 @@ async function revertFiles(
       continue;
     }
     const previous = file.previousBlobSha;
+    const cleanupOutcome: SetupCleanupOutcome =
+      previous ? "restored" : "deleted";
     const outcome =
       previous ?
         await restoreOne(input, file, ref, file.blobSha, previous, ports)
       : await deleteOne(input, file, ref, file.blobSha, ports);
     if (outcome.ok) {
       steps.push(outcome.step);
-      results.push(result(input.attempt, file, "deleted", null));
+      results.push(result(input.attempt, file, cleanupOutcome, null));
       continue;
     }
     blocked = true;

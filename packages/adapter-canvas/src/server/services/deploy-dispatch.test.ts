@@ -41,6 +41,7 @@ function dependencies(
       throw new Error("runGitHubJson not stubbed");
     },
     readProcessEnv: () => ({}),
+    ghCredentialSource: () => "keyring",
     fetchFileForSelection: () => Promise.resolve(null),
     appParams: () => [],
     resolveDeployParams: () => ({}),
@@ -1581,6 +1582,81 @@ describe("deploy dispatch workflow publication and dispatch", () => {
     expect(state.deployError).toContain(
       "gh auth refresh -h github.com -s workflow"
     );
+  });
+
+  it("does not tell an injected session token to run gh auth refresh", async () => {
+    const { input, state } = request();
+    const gh = recordingGh([
+      {
+        code: 1,
+        stderr: "the token is missing the workflow scope",
+        stdout: ""
+      },
+      { code: 1, stderr: "stored credential also refused", stdout: "" }
+    ]);
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        readProcessEnv: () => ({ GH_TOKEN: "session-token" }),
+        ghCredentialSource: () => "injected"
+      })
+    );
+
+    await service.prepareAndDispatch(input);
+
+    expect(state.deployError).toContain(
+      'Copilot session token is missing the "workflow" scope'
+    );
+    expect(state.deployError).toContain("cannot change it");
+    expect(state.deployError).not.toContain("Run `gh auth refresh");
+  });
+
+  it("gives refresh guidance when gh used the stored credential despite an ambient token", async () => {
+    const { input, state } = request();
+    const gh = recordingGh([
+      {
+        code: 1,
+        stderr: "the token is missing the workflow scope",
+        stdout: ""
+      },
+      { code: 1, stderr: "stored credential also refused", stdout: "" }
+    ]);
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        readProcessEnv: () => ({ GH_TOKEN: "ambient-token" }),
+        ghCredentialSource: () => "keyring"
+      })
+    );
+
+    await service.prepareAndDispatch(input);
+
+    expect(state.deployError).toContain(
+      "Your stored GitHub CLI credential is missing"
+    );
+    expect(state.deployError).toContain("gh auth refresh");
+  });
+
+  it("does not treat a whitespace-only injected token as a fallback credential", async () => {
+    const { input } = request();
+    const gh = recordingGh([
+      {
+        code: 1,
+        stderr: "the token is missing the workflow scope",
+        stdout: ""
+      },
+      { code: 0, stderr: "", stdout: "" }
+    ]);
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        readProcessEnv: () => ({ GH_TOKEN: "   " })
+      })
+    );
+
+    await service.prepareAndDispatch(input);
+
+    expect(gh.calls).toHaveLength(1);
   });
 
   it("hints at the workflow file and Actions for any other failure", async () => {

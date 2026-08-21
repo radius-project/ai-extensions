@@ -80,6 +80,7 @@ Rollback rule:
 Fields:
 
 - `state`
+- `origin`
 - `appId`
 - `objectId`
 
@@ -87,6 +88,7 @@ Rollback rule:
 
 - `created`: Radius deletes it.
 - `reused`: rollback never deletes it.
+- `created_candidate`: the principal was absent before Radius tried to create it and present afterward, but the create command did not prove ownership. Radius records `origin: unknown`, leaves it in place, and reports a manual action.
 - Without a target ID Radius cannot delete precisely, so it records a warning or a manual action.
 
 ### Federated credentials
@@ -130,6 +132,7 @@ Rollback rule:
 - `created`: Radius deletes it.
 - `reused`: rollback never deletes it.
 - `created_candidate`: Radius cannot prove whether its idempotent request created the environment, so rollback leaves it in place and reports a manual action.
+- A pre-create 404, a successful PUT with matching creation evidence, and the mutation checkpoint promote the candidate to `created`. Radius settles the proof before the checkpoint, so a Stop honored by that checkpoint cannot strand a proven creation as a candidate.
 - After a successful deletion, Radius invalidates the server environment-list cache and the browser reloads the list.
 
 ### Workflow files
@@ -143,7 +146,8 @@ For each committed workflow file, Radius records:
 - Commit SHA
 - Blob SHA
 - SHA-256 digest of the exact content Radius wrote
-- Previous blob SHA, or `null` when Radius created the path
+- The first pre-Radius blob SHA, or `null` when Radius created the path. A retry that writes the same workflow again updates the current commit, blob, and digest but preserves this original rollback target.
+- Whether the pre-write lookup proved that previous state. A non-null saved previous blob already proves the path existed, including in older records. An older null or a failed lookup remains unknown; a later retry cannot turn that unknown state into permission to delete the path.
 
 Radius also records the overall commit state:
 
@@ -167,7 +171,7 @@ For every cleanup result, Radius records:
 - Artifact type
 - Human-readable target
 - Stable identity when available
-- Outcome: `deleted`, `not_found`, `warning`, or `skipped`
+- Outcome: `deleted`, `restored`, `not_found`, `warning`, or `skipped`
 - Safe detail
 
 Radius keeps results across cleanup attempts. A retry targets only unresolved warnings on proven-owned artifacts, and it repeats no deletion that already succeeded or already found nothing.
@@ -294,6 +298,8 @@ If persistence or scheduling fails, the route restores the preceding terminal st
 
 Radius rolls back workflows before it deletes the GitHub environment or the cloud identity.
 
+Rollback creates a pinned executor for the GitHub login saved on the operation. It does not use the process's ambient GitHub credential. Before it treats a file-level 404 as absence, it proves that the selected account can still read the repository; it repeats that repository check after each file, branch, or deletion 404 because GitHub also uses 404 when access to a private repository disappears.
+
 ```mermaid
 sequenceDiagram
     participant Runner as Cleanup executor
@@ -335,11 +341,12 @@ If the branch head moved, Radius refuses to delete the branch because it contain
 When workflows already live on a repository branch, Radius:
 
 1. Resolves the branch where each workflow currently lives.
-2. Reads the current file.
-3. Compares the current blob SHA and content digest with the saved provenance.
-4. Commits a deletion if it created the file.
-5. Reads the previous blob and commits a restore if it replaced a file.
-6. Records each result.
+2. Closes an open setup pull request, best effort, when a mixed default/setup-branch write requires individual file reverts.
+3. Reads the current file.
+4. Compares the current blob SHA and content digest with the saved provenance.
+5. Commits a deletion if it created the file.
+6. Reads the first pre-Radius blob and commits a restore if it replaced a file.
+7. Records deletion as `deleted` and restoration as `restored`.
 
 One file that Radius cannot locate, cannot verify, or finds changed blocks the whole workflow pass before Radius modifies anything. The repository never ends up with half its workflows reverted.
 
@@ -393,11 +400,11 @@ Radius persists the operation after each meaningful result:
 - Final cleanup state.
 - Command completion and terminal result.
 
-If the extension stops mid-rollback, the restored ledger shows what is already gone. A later rollback recomputes the target set from the surviving artifacts and repeats no deletion the ledger proved complete.
+If the extension stops mid-rollback, the restored ledger keeps cleanup in the interrupted `running` state. The terminal record offers Rollback again, recomputes the target set from the surviving artifacts, and repeats no deletion or restoration the ledger proved complete.
 
 ## Rollback completion
 
-Rollback completes when every selected target is `deleted` or `not_found`.
+Rollback completes when every selected target is `deleted`, `restored`, or `not_found`.
 
 The operation moves to `cancelled` with terminal reason `rollback-complete`. The UI:
 
@@ -445,6 +452,8 @@ Results from earlier attempts stay in the ledger, so the final report separates 
 | Failure                                            | Behavior                                                                        |
 |----------------------------------------------------|---------------------------------------------------------------------------------|
 | Missing workflow provenance                        | Refuse post-commit rollback                                                     |
+| Selected GitHub account unavailable                | Treat repository as unreadable; leave workflows and dependent resources         |
+| Repository-hidden GitHub 404                       | Treat repository as unreadable, not as proof that a workflow is absent          |
 | Workflow file changed                              | Leave all workflow and dependent resources                                      |
 | Setup branch moved                                 | Leave branch and dependent resources                                            |
 | GitHub read failed                                 | Record retryable warning; remove nothing dependent                              |
@@ -466,6 +475,7 @@ Results from earlier attempts stay in the ledger, so the final report separates 
 7. **No secret exposure:** the browser preview never receives tokens, secret values, CLI output, or diagnostic evidence.
 8. **Idempotent convergence:** missing resources count as complete.
 9. **No application deployment:** rollback never deploys or deletes deployed applications.
+10. **Pinned GitHub identity:** workflow proof, workflow reversion, and GitHub environment deletion use the account saved on the operation, never an ambient account.
 
 ## Discussion points for PR #398
 

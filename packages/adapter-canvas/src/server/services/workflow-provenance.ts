@@ -22,6 +22,7 @@ export interface WorkflowProvenanceRecord {
   blobSha: string | null;
   contentSha256: string | null;
   previousBlobSha: string | null;
+  previousBlobKnown: boolean;
 }
 
 /** What the repository currently holds at one path on one ref. */

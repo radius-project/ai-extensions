@@ -4,6 +4,7 @@ import {
   DEPLOY_BUTTON_IDLE_LABEL,
   ENVIRONMENT_OPERATIONS_ENTRY_KEY,
   ERROR_BANNER_ID,
+  NEW_ENVIRONMENT_BUTTON_ID,
   OPERATIONS_PATH,
   OperationResumeError,
   PROGRESS_IDS,
@@ -80,7 +81,8 @@ function setupWithout(missingIds: readonly string[] = []) {
   for (const id of [
     ...Object.values(PROGRESS_IDS),
     ...Object.values(ROLLBACK_IDS),
-    ERROR_BANNER_ID
+    ERROR_BANNER_ID,
+    NEW_ENVIRONMENT_BUTTON_ID
   ]) {
     if (missingIds.includes(id)) continue;
     // The rollback confirm control is disabled while its request is in
@@ -162,6 +164,7 @@ const EXIT_ACTION_WITH_DELETIONS = {
   confirmLabel: "Exit setup",
   cancelLabel: "Keep this setup",
   preview: {
+    type: "rollback",
     removes: [{ kind: "github_environment", target: "octo/widgets:dev" }],
     keeps: [{ kind: "azure_app", target: "radius-deploy (app-1)" }],
     manualActionRequired: []
@@ -549,6 +552,7 @@ describe("parseOperationResponse", () => {
         confirmLabel: "Roll back",
         cancelLabel: "Keep",
         preview: {
+          type: "rollback",
           removes: [{ kind: "azure_app", target: "radius-dev", action: "" }],
           keeps: [],
           manualActionRequired: [
@@ -572,6 +576,32 @@ describe("parseOperationResponse", () => {
     });
   });
 
+  it("keeps continuation previews distinct from destructive previews", () => {
+    const parsed = parseOperationResponse(
+      op({
+        actions: [
+          {
+            id: "continue-setup",
+            kind: "continue_setup",
+            path: "/api/operations/op-1/continue",
+            preview: {
+              resumeFrom: "service_principal",
+              resumeLabel: "Create the Service Principal",
+              reuses: [{ kind: "azure_app", target: "radius-dev" }]
+            }
+          }
+        ]
+      })
+    );
+
+    expect(parsed?.actions[0].preview).toEqual({
+      type: "continuation",
+      resumeFrom: "service_principal",
+      resumeLabel: "Create the Service Principal",
+      reuses: [{ kind: "azure_app", target: "radius-dev", action: "" }]
+    });
+  });
+
   it.each([
     ["a non-array action list", { actions: "stop" }],
     ["a non-array guidance list", { guidance: 7 }]
@@ -590,6 +620,20 @@ describe("parseOperationResponse", () => {
       })
     );
     expect(parsed?.actions[0].preview).toBeNull();
+    expect(
+      parseOperationResponse(
+        op({
+          actions: [
+            {
+              id: "stop",
+              kind: "stop",
+              path: "/api/x",
+              preview: { removes: [] }
+            }
+          ]
+        })
+      )?.actions[0].preview
+    ).toBeNull();
   });
 
   it.each([
@@ -1013,6 +1057,8 @@ describe("verify status polling", () => {
       expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
         expectedActivity
       );
+      expect(browser.deployButton.disabled).toBe(false);
+      expect(browser.deployButton.textContent).toBe(DEPLOY_BUTTON_IDLE_LABEL);
       expect(browser.clock.pending).toBe(0);
     }
   );
@@ -1035,6 +1081,8 @@ describe("verify status polling", () => {
     expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
       "Credential verification exceeded its tracking window. Check the GitHub Actions run before retrying."
     );
+    expect(browser.deployButton.disabled).toBe(false);
+    expect(browser.deployButton.textContent).toBe(DEPLOY_BUTTON_IDLE_LABEL);
     expect(browser.clock.pending).toBe(0);
   });
 
@@ -1053,6 +1101,7 @@ describe("verify status polling", () => {
     ]);
     expect(deps.reloadCount).toBe(1);
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.deployButton.disabled).toBe(false);
   });
 
   it("defaults the success banner provider to azure when trackProgress was called without one", async () => {
@@ -1081,6 +1130,7 @@ describe("verify status polling", () => {
     const browser = setup();
     const controller = controllerFor(browser);
     await primeVerifyPoll(browser, controller);
+    browser.els[PROGRESS_IDS.details].textContent = "Existing details";
     browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
       jsonResponse({
         state: "failed",
@@ -1094,12 +1144,28 @@ describe("verify status polling", () => {
       browser.els[PROGRESS_IDS.panel].classList.contains("env-progress--failed")
     ).toBe(true);
     expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
-      "Credential verification failed. Actions run failed"
+      "Credential verification failed. Actions run failed View the run: https://github.test/octo/widgets/actions/runs/9"
     );
     expect(browser.els[PROGRESS_IDS.details].textContent).toBe(
-      "View the run: https://github.test/octo/widgets/actions/runs/9"
+      "Existing details"
     );
+    expect(browser.deployButton.disabled).toBe(false);
     expect(browser.clock.pending).toBe(0);
+  });
+
+  it("reports verification failure without inventing a missing run url", async () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({ state: "failed", error: "Actions run failed", runUrl: "" })
+    );
+
+    await tickClock(browser.clock, 1500);
+
+    expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
+      "Credential verification failed. Actions run failed"
+    );
   });
 
   it("ignores a stale verify-status response that resolves after its session was superseded", async () => {
@@ -1598,6 +1664,57 @@ describe("operation commands", () => {
     );
   });
 
+  it("preserves keyboard focus when polling rebuilds the same command", () => {
+    const browser = setup();
+    const controller = renderActions(browser, [STOP_ACTION]);
+    const first = buttons(browser)[0];
+    browser.document.activeElement = first;
+
+    controller?.renderProgress(record({ actions: [STOP_ACTION] }));
+
+    const replacement = buttons(browser)[0];
+    expect(replacement).not.toBe(first);
+    expect(replacement.focusCount).toBe(1);
+  });
+
+  it("moves focus to the command region when the focused action becomes disabled", () => {
+    const browser = setup();
+    const controller = renderActions(browser, [STOP_ACTION]);
+    browser.document.activeElement = buttons(browser)[0];
+
+    controller?.renderProgress(
+      record({ actions: [{ ...STOP_ACTION, pending: true }] })
+    );
+
+    expect(browser.els[PROGRESS_IDS.commands].getAttribute("tabindex")).toBe(
+      "-1"
+    );
+    expect(browser.els[PROGRESS_IDS.commands].focusCount).toBe(1);
+  });
+
+  it("moves focus to the visible heading when polling hides the command region", () => {
+    const browser = setup();
+    const controller = renderActions(browser, [STOP_ACTION]);
+    browser.document.activeElement = buttons(browser)[0];
+
+    controller?.renderProgress(record({ actions: [] }));
+
+    expect(browser.els[PROGRESS_IDS.commands].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.commands].focusCount).toBe(0);
+    expect(browser.els[PROGRESS_IDS.title].focusCount).toBe(1);
+  });
+
+  it("falls back to the visible panel when the command region and heading disappear", () => {
+    const browser = setupWithout([PROGRESS_IDS.title]);
+    const controller = renderActions(browser, [STOP_ACTION]);
+    browser.document.activeElement = buttons(browser)[0];
+
+    controller?.renderProgress(record({ actions: [] }));
+
+    expect(browser.els[PROGRESS_IDS.commands].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.panel].focusCount).toBe(1);
+  });
+
   it("clears a stale status and error when a different operation takes over", () => {
     const browser = setup();
     const controller = renderActions(browser, [
@@ -1652,6 +1769,7 @@ describe("operation commands", () => {
     );
     expect(browser.clock.intervals).toBe(0);
     expect(deps.reloadCount).toBe(1);
+    expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe("");
   });
 
   it("re-reads the operation directly when there is no repository to track", async () => {
@@ -1968,6 +2086,7 @@ describe("rollback confirmation", () => {
     confirmLabel: "Roll back resources",
     cancelLabel: "Keep resources",
     preview: {
+      type: "rollback",
       removes: [{ kind: "azure_app", target: "radius-dev" }],
       keeps: [
         {
@@ -2057,6 +2176,7 @@ describe("rollback confirmation", () => {
       description:
         "Radius reverts the workflow files it committed with a new commit.",
       preview: {
+        type: "rollback",
         removes: [
           {
             kind: "workflow_file",
@@ -2122,6 +2242,7 @@ describe("rollback confirmation", () => {
     expect(Reflect.get(browser.els[ROLLBACK_IDS.confirm], "disabled")).toBe(
       true
     );
+    expect(browser.els[PROGRESS_IDS.panel].focusCount).toBe(1);
   });
 
   it("sends nothing when the customer keeps the resources", () => {
@@ -2289,6 +2410,7 @@ describe("rollback confirmation", () => {
     const browser = setup();
     open(browser, {
       preview: {
+        type: "rollback",
         removes: [],
         keeps: [],
         manualActionRequired: [
@@ -4221,7 +4343,7 @@ describe("graceful degradation when optional DOM elements are missing", () => {
         state: "failed",
         terminal: false,
         error: "Actions run failed",
-        runUrl: "https://github.test/octo/widgets/actions/runs/9",
+        runUrl: "",
         activity: ""
       })
     );
@@ -4435,6 +4557,7 @@ describe("exiting a setup", () => {
     expect(browser.net.calls[0].init?.method).toBe("POST");
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
     expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
+    expect(browser.els[NEW_ENVIRONMENT_BUTTON_ID].focusCount).toBe(1);
     expect(harness.reloadCount).toBeGreaterThanOrEqual(1);
     expect(harness.errors).toEqual([]);
     expect(harness.setupWarnings).toEqual([]);
