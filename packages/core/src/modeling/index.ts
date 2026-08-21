@@ -3,15 +3,7 @@
 // the GitHub port) that fetches the skill-generated app.bicep and resolves the
 // default recipe pack's outputs for the planned graph.
 
-export {
-  RECIPE_PACK_REPO,
-  RECIPE_PACK_REF,
-  recipePackPathForProvider,
-  recipePackContentPath,
-  normalizeRecipeSource,
-  deriveConcreteResource,
-  parseRecipePack
-} from "./recipe-pack.js";
+export { RECIPE_PACK_REF } from "./recipe-pack.js";
 export type { ConcreteResource, RecipePackEntry } from "./recipe-pack.js";
 
 export {
@@ -37,10 +29,7 @@ export {
   ambiguousAppSourceBrief,
   dockerfileDirectories,
   evaluateAppSource,
-  findDockerfiles,
   findWorkspaceManifests,
-  isDockerfilePath,
-  isIgnoredSourcePath,
   unsupportedAppSourceReport
 } from "./app-source.js";
 export type { AppSourceEvaluation, AppSourceStatus } from "./app-source.js";

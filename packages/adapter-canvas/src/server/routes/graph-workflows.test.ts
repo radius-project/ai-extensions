@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { computeGraphDiff } from "@radius-project/core";
+import {
+  computeGraphDiff,
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+} from "@radius-project/core";
 import {
   createGraphPlanningWorkflows,
   type GraphPlanningWorkflows,
@@ -26,7 +29,11 @@ import {
   isCurrentPlannedGraphRequest,
   isCurrentSourceRefToken
 } from "../../server.js";
-import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import type {
+  CanvasGraphResource,
+  CanvasState,
+  GraphBuildEvent
+} from "../../shared.js";
 
 // `record`, `optionalString` and `errorMessage` are module-private in
 // `server.ts`, so they are mirrored here verbatim rather than exported solely
@@ -65,7 +72,12 @@ interface PipelineScript {
   recipePackThrows?: Error;
   recipeOutputsThrows?: Error;
   selectThrows?: Record<string, Error>;
+  // Every path on a branch, keyed by branch. Empty models a tree that could not
+  // be read, which is what the default leaves in place.
+  branchPaths?: Record<string, string[]>;
   compileThrows?: Record<string, Error>;
+  stageLogs?: Record<string, string>;
+  compileLogs?: Record<string, string>;
   // Runs after the named stage, so a test can move the world on mid-request.
   afterStage?: () => void;
   afterCompile?: () => void;
@@ -88,6 +100,7 @@ interface Harness {
   plannedOutputs: unknown[];
   workflows: GraphPlanningWorkflows;
   setEntryMissing(missing: boolean): void;
+  advanceClock(ms: number): void;
   run(
     workflow: keyof GraphPlanningWorkflows,
     body: string
@@ -116,6 +129,10 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   const state: CanvasState = {};
   const entry: GraphInstanceEntry = { state };
   let entryMissing = false;
+  // A controllable clock, so a build record's elapsed time is asserted rather
+  // than observed. Starts at a non-zero instant so a record that failed to
+  // capture a start time is distinguishable from one that started at 0.
+  let clockMs = 1_000;
   const order: string[] = [];
   const handoffs: HandoffCall[] = [];
   const recipePackCalls: string[] = [];
@@ -151,17 +168,19 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       );
     },
     bicepPathOf: (selection) => selection.bicepPath || ".radius/app.bicep",
-    stageArtifacts: ({ branch }: StageArtifactsInput) => {
+    stageArtifacts: ({ branch, log }: StageArtifactsInput) => {
       order.push(`stage:${branch}`);
       const staged = requireScripted(
         harnessScript.staged,
         branch,
         "stageArtifacts"
       );
+      const detail = harnessScript.stageLogs?.[branch];
+      if (detail) log?.(detail);
       harnessScript.afterStage?.();
       return Promise.resolve(staged);
     },
-    compileResources: ({ selection }: CompileResourcesInput) => {
+    compileResources: ({ selection, log }: CompileResourcesInput) => {
       order.push(`compile:${selection.branch}`);
       const failure = harnessScript.compileThrows?.[selection.branch];
       if (failure) return Promise.reject(failure);
@@ -170,6 +189,8 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         selection.branch,
         "compileResources"
       );
+      const detail = harnessScript.compileLogs?.[selection.branch];
+      if (detail) log?.(detail);
       harnessScript.afterCompile?.();
       return Promise.resolve(compiled);
     },
@@ -188,6 +209,8 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     triggerAppBicepHandoff: (handoffEntry, repo, branches, page) => {
       handoffs.push({ repo, branches, page, hasEntry: !!handoffEntry });
     },
+    listBranchPaths: (_entry, _repo, branch) =>
+      Promise.resolve(harnessScript.branchPaths?.[branch] ?? []),
     prepareSourceRefResources,
     setSourceRefResources,
     isCurrentSourceRefToken,
@@ -214,7 +237,8 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       computeGraphDiff(baseResources, headResources) as CanvasGraphResource[],
     record,
     optionalString,
-    errorMessage
+    errorMessage,
+    now: () => clockMs
   };
 
   const workflows = createGraphPlanningWorkflows(dependencies);
@@ -225,6 +249,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     dependencies,
     workflows,
     script: harnessScript,
+    advanceClock(ms: number) {
+      clockMs += ms;
+    },
     order,
     handoffs,
     recipePackCalls,
@@ -241,7 +268,32 @@ function start(script: Partial<PipelineScript> = {}): Harness {
 }
 
 function messages(state: CanvasState): string[] {
-  return state.progressMessages || [];
+  return (
+    latestProgressRecord(state)?.graphBuildEvents.map(
+      (event) => event.detail
+    ) ?? []
+  );
+}
+
+function stages(state: CanvasState): string[] {
+  return (latestProgressRecord(state)?.graphBuildEvents ?? []).map(
+    (event) => `${event.stage}:${event.state}`
+  );
+}
+
+function latestProgressRecord(state: CanvasState) {
+  return Object.values(state.graphProgressRecords ?? {}).at(-1);
+}
+
+function replaceProgressRecord(
+  state: CanvasState,
+  view: "graph" | "planned" | "diff",
+  event: GraphBuildEvent
+): void {
+  const record = state.graphProgressRecords?.[view];
+  if (!record) throw new Error(`Missing ${view} progress record.`);
+  record.graphProgressGeneration = 42;
+  record.graphBuildEvents = [event];
 }
 
 describe("graph planning workflows", () => {
@@ -301,8 +353,53 @@ describe("graph planning workflows", () => {
         }
       ]);
       expect(messages(harness.state)).toEqual([
-        "Checking octo/app for existing app.bicep...",
-        ".radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill."
+        "Checking octo/app for .radius/app.bicep.",
+        "No application model exists yet.",
+        "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
+      ]);
+    });
+
+    it("still hands off when the branch tree cannot be read", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchPaths: { main: [] }
+      });
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
+    it("hands off when the branch has a Dockerfile the skill can build from", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchPaths: { main: ["README.md", "services/api/Dockerfile"] }
+      });
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
+    it("refuses instead of handing off when the branch has no Dockerfile", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchPaths: {
+          main: ["README.md", "src/index.ts", ".devcontainer/Dockerfile"]
+        }
+      });
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(outcome.status).toBe(200);
+      expect(outcome.payload).toEqual({
+        error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+        appBicepUnsupported: true,
+        repo: "octo/app",
+        branch: "main"
+      });
+      expect(harness.handoffs).toEqual([]);
+      expect(messages(harness.state)).toEqual([
+        "Checking octo/app for .radius/app.bicep.",
+        "No application model exists yet.",
+        "Copilot is creating .radius/app.bicep with the Radius app-bicep skill.",
+        UNSUPPORTED_NO_DOCKERFILE_MESSAGE
       ]);
     });
 
@@ -317,6 +414,7 @@ describe("graph planning workflows", () => {
         },
         staged: { "feature/x": { dir: "/ws/.radius", remote: false } },
         compiled: { "feature/x": [{ id: "res-a" } as CanvasGraphResource] },
+        stageLogs: { "feature/x": "Staged local model artifacts." },
         jsonPath: "/ws/infra/app-graph.json",
         definitionHash: "hash-x"
       });
@@ -346,9 +444,22 @@ describe("graph planning workflows", () => {
       });
       expect(harness.state.graphResources).toEqual([{ id: "res-a" }]);
       expect(messages(harness.state)).toEqual([
-        "Checking octo/app for existing app.bicep...",
-        "Found existing app.bicep — parsing resources...",
-        "Mapped 1 resource(s) — rendering graph..."
+        "Checking octo/app for .radius/app.bicep.",
+        "Found the application model.",
+        "Staged local model artifacts.",
+        "Compiling the application model and building the resource graph.",
+        "Built a graph with 1 resource(s).",
+        "Laying out and rendering the application graph.",
+        "Rendered the application graph."
+      ]);
+      expect(stages(harness.state)).toEqual([
+        "checking_model:running",
+        "checking_model:succeeded",
+        "building_graph:running",
+        "building_graph:running",
+        "building_graph:succeeded",
+        "rendering_graph:running",
+        "rendering_graph:succeeded"
       ]);
     });
 
@@ -528,8 +639,31 @@ describe("graph planning workflows", () => {
 
       // "Mapped N resource(s)" is generation-gated and must not appear.
       expect(messages(harness.state)).toEqual([
-        "Checking octo/app for existing app.bicep...",
-        "Found existing app.bicep — parsing resources..."
+        "Checking octo/app for .radius/app.bicep.",
+        "Found the application model.",
+        "Compiling the application model and building the resource graph."
+      ]);
+    });
+
+    it("does not append modeled events after another workflow owns progress", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "", remote: false } },
+        compiled: { main: [] },
+        afterStage: () => {
+          replaceProgressRecord(harness.state, "graph", {
+            sequence: 1,
+            stage: "resolving_recipes",
+            state: "running",
+            detail: "A replacement modeled request owns the progress stream."
+          });
+        }
+      });
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(messages(harness.state)).toEqual([
+        "A replacement modeled request owns the progress stream."
       ]);
     });
 
@@ -588,11 +722,30 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs[0]?.page).toBe("graph");
     });
 
+    it("refuses the plan when the branch has no Dockerfile", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchPaths: { main: ["README.md"] }
+      });
+
+      const outcome = await harness.run("planGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toEqual({
+        error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+        appBicepUnsupported: true,
+        repo: "octo/app",
+        branch: "main"
+      });
+      expect(harness.handoffs).toEqual([]);
+      expect(stages(harness.state)).toContain("creating_model:failed");
+    });
+
     it("resolves recipes for the default provider and records the planned view", async () => {
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "", remote: false } },
-        compiled: { main: [{ id: "res-a" } as CanvasGraphResource] }
+        compiled: { main: [{ id: "res-a" } as CanvasGraphResource] },
+        compileLogs: { main: "Compiled the Radius model." }
       });
       harness.recipes.push({
         resourceType: "Radius.Data/redisCaches",
@@ -629,13 +782,48 @@ describe("graph planning workflows", () => {
         { id: "redis" }
       ]);
       expect(messages(harness.state)).toEqual([
-        "Checking octo/app for app.bicep...",
-        "Found app.bicep — parsing resources...",
-        "Parsed 1 resource(s) — resolving azure recipes...",
-        "Fetching the default recipe pack from GitHub...",
-        "Loaded 1 recipe(s) from the default recipe pack.",
-        "Resolving recipe outputs for planned resources...",
-        "Planned 2 resource(s) — rendering graph..."
+        "Checking octo/app for .radius/app.bicep.",
+        "Found the application model.",
+        "Compiling the application model and building the resource graph.",
+        "Compiled the Radius model.",
+        "Built a graph with 1 resource(s).",
+        "Resolving azure recipes for the planned resources.",
+        "Resolved 2 planned resource(s).",
+        "Laying out and rendering the planned graph.",
+        "Rendered the planned graph."
+      ]);
+      expect(stages(harness.state)).toEqual([
+        "checking_model:running",
+        "checking_model:succeeded",
+        "building_graph:running",
+        "building_graph:running",
+        "building_graph:succeeded",
+        "resolving_recipes:running",
+        "resolving_recipes:succeeded",
+        "rendering_graph:running",
+        "rendering_graph:succeeded"
+      ]);
+    });
+
+    it("does not append planned events after another workflow owns progress", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "", remote: false } },
+        compiled: { main: [] },
+        afterCompile: () => {
+          replaceProgressRecord(harness.state, "planned", {
+            sequence: 1,
+            stage: "resolving_recipes",
+            state: "running",
+            detail: "A replacement plan owns the progress stream."
+          });
+        }
+      });
+
+      await harness.run("planGraph", '{"repo":"octo/app"}');
+
+      expect(messages(harness.state)).toEqual([
+        "A replacement plan owns the progress stream."
       ]);
     });
 
@@ -719,7 +907,9 @@ describe("graph planning workflows", () => {
 
       expect(outcome.status).toBe(200);
       expect(harness.state.plannedRepo).toBe("");
-      expect(messages(harness.state)[0]).toBe("Checking  for app.bicep...");
+      expect(messages(harness.state)[0]).toBe(
+        "Checking  for .radius/app.bicep."
+      );
     });
 
     it("abandons a superseded plan with a Content-Type and keeps no planned state", async () => {
@@ -739,10 +929,8 @@ describe("graph planning workflows", () => {
       expect(outcome.kind).toBe("json");
       expect(JSON.stringify(outcome.payload)).toBe('{"stale":true}');
       expect(harness.state.plannedRepo).toBeUndefined();
-      // Unlike load-graph's, this progress log is not generation-gated, so the
-      // superseded request's final message is still there.
-      expect(messages(harness.state)).toContain(
-        "Planned 0 resource(s) — rendering graph..."
+      expect(messages(harness.state)).not.toContain(
+        "Laying out and rendering the planned graph."
       );
     });
 
@@ -815,6 +1003,53 @@ describe("graph planning workflows", () => {
       expect(harness.order).toEqual(["select:main", "select:feature/x"]);
     });
 
+    it("still hands both branches off when only one side lacks a Dockerfile", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main", content: null }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        },
+        branchPaths: {
+          main: ["README.md"],
+          "feature/x": ["README.md", "Dockerfile"]
+        }
+      });
+
+      const outcome = await harness.run("diffBranches", diffBody);
+
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
+    it("refuses the diff when neither branch has a Dockerfile", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main", content: null }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        },
+        branchPaths: {
+          main: ["README.md"],
+          "feature/x": ["README.md", "src/index.ts"]
+        }
+      });
+
+      const outcome = await harness.run("diffBranches", diffBody);
+
+      expect(outcome.status).toBe(200);
+      expect(outcome.payload).toEqual({
+        error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+        appBicepUnsupported: true,
+        repo: "octo/app"
+      });
+      expect(harness.handoffs).toEqual([]);
+      expect(stages(harness.state)).toEqual([
+        "checking_model:running",
+        "checking_model:succeeded",
+        "creating_model:running",
+        "creating_model:failed"
+      ]);
+    });
+
     it("stages both branches before compiling either", async () => {
       const harness = start({
         selections: {
@@ -866,6 +1101,49 @@ describe("graph planning workflows", () => {
       expect(
         diffed.find((resource) => resource.id === "res-b")?.diffStatus
       ).toBe("added");
+      expect(stages(harness.state)).toEqual([
+        "checking_model:running",
+        "checking_model:succeeded",
+        "building_base_graph:running",
+        "building_base_graph:succeeded",
+        "building_head_graph:running",
+        "building_head_graph:succeeded",
+        "comparing_graphs:running",
+        "comparing_graphs:succeeded",
+        "rendering_graph:running",
+        "rendering_graph:succeeded"
+      ]);
+    });
+
+    it("does not append diff events after another workflow owns progress", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
+        },
+        staged: {
+          main: { dir: "", remote: false },
+          "feature/x": { dir: "", remote: false }
+        },
+        compiled: { main: [], "feature/x": [] },
+        afterCompile: () => {
+          replaceProgressRecord(harness.state, "diff", {
+            sequence: 1,
+            stage: "comparing_graphs",
+            state: "running",
+            detail: "A replacement diff owns the progress stream."
+          });
+        }
+      });
+
+      await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x"}'
+      );
+
+      expect(messages(harness.state)).toEqual([
+        "A replacement diff owns the progress stream."
+      ]);
     });
 
     it("still compares when only one branch carries an app.bicep", async () => {
@@ -1026,6 +1304,14 @@ describe("graph planning workflows", () => {
       expect(harness.state.plannedRepo).toBeUndefined();
       expect(harness.state.resolvedRecipes).toBeUndefined();
       expect(harness.state.activeGraphView).toBeUndefined();
+      expect(
+        harness.state.graphProgressRecords?.planned?.graphBuildEvents.at(-1)
+      ).toEqual({
+        sequence: 6,
+        stage: "resolving_recipes",
+        state: "failed",
+        detail: "recipe pack fetch failed: 502"
+      });
     });
 
     it("surfaces a recipe-output resolution failure as 400 and commits no planned state", async () => {
@@ -1086,6 +1372,208 @@ describe("graph planning workflows", () => {
 
       expect(outcome.status).toBe(400);
       expect(outcome.payload).toEqual({ error: "recipe pack offline" });
+    });
+  });
+
+  // The build record is what survives the page. A user can leave a graph page
+  // mid-build and come back, and the app.bicep wait runs entirely outside the
+  // panel, so the server owns when the build started, whether it is still
+  // running, and which view it belongs to.
+  describe("build record lifecycle", () => {
+    function successHarness(): Harness {
+      return start({
+        selections: { main: selectionOf({}) },
+        staged: { main: { dir: "/ws/.radius", remote: false } },
+        compiled: { main: [{ id: "res-a" } as CanvasGraphResource] }
+      });
+    }
+
+    it("opens a record naming the view and the instant work began", async () => {
+      const harness = successHarness();
+      harness.advanceClock(4_000);
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(harness.state.graphProgressRecords?.graph?.graphProgressView).toBe(
+        "graph"
+      );
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressStartedAtMs
+      ).toBe(5_000);
+    });
+
+    it("closes the record once the build finishes", async () => {
+      const harness = successHarness();
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressActive
+      ).toBe(false);
+      // The stages stay readable: a page that returns after the build ended
+      // should see what happened rather than an empty panel.
+      expect(stages(harness.state).length).toBeGreaterThan(0);
+    });
+
+    it("closes the record when the build fails", async () => {
+      const harness = start({
+        selections: { main: selectionOf({}) },
+        staged: { main: { dir: "/ws/.radius", remote: false } },
+        compileThrows: { main: new Error("the compiler is unavailable") }
+      });
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.status).toBe(400);
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressActive
+      ).toBe(false);
+    });
+
+    // The wait for Copilot to author .radius/app.bicep genuinely continues off
+    // page, so the record stays open and keeps narrating it.
+    it("leaves the record open while app.bicep is being authored", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressActive
+      ).toBe(true);
+      expect(harness.state.graphProgressRecords?.graph?.graphProgressView).toBe(
+        "graph"
+      );
+    });
+
+    // The page polls for the model every few seconds. Each poll used to open a
+    // fresh record, which reset the elapsed clock to zero and discarded the
+    // stages already reported — the reset a user sees on returning to the page.
+    it("continues the open record instead of restarting it on a repeat request", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+      const generation =
+        harness.state.graphProgressRecords?.graph?.graphProgressGeneration;
+      const startedAt =
+        harness.state.graphProgressRecords?.graph?.graphProgressStartedAtMs;
+      const reported = stages(harness.state);
+      harness.advanceClock(10_000);
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressGeneration
+      ).toBe(generation);
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressStartedAtMs
+      ).toBe(startedAt);
+      expect(stages(harness.state)).toEqual(reported);
+    });
+
+    it("closes the model-creation stage when a retry finds app.bicep", async () => {
+      const selections = {
+        main: selectionOf({ content: null })
+      };
+      const harness = start({
+        selections,
+        staged: { main: { dir: "/ws/.radius", remote: false } },
+        compiled: { main: [] }
+      });
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+      selections.main = selectionOf();
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(stages(harness.state)).toContain("creating_model:succeeded");
+      const latestByStage = new Map(
+        harness.state.graphProgressRecords?.graph?.graphBuildEvents.map(
+          (event) => [event.stage, event]
+        )
+      );
+      expect(
+        [...latestByStage.values()].map((event) => event.state)
+      ).not.toContain("running");
+    });
+
+    it("does not let a replaced branch request close the replacement wait", async () => {
+      let harness!: Harness;
+      let replacement: Promise<GraphWorkflowOutcome> | undefined;
+      let replaced = false;
+      harness = start({
+        selections: {
+          main: selectionOf(),
+          "feature/x": selectionOf({
+            branch: "feature/x",
+            content: null
+          })
+        },
+        staged: { main: { dir: "/ws/.radius", remote: false } },
+        compiled: { main: [] },
+        afterStage: () => {
+          if (replaced) return;
+          replaced = true;
+          replacement = harness.run(
+            "loadGraph",
+            '{"repo":"octo/app","branch":"feature/x"}'
+          );
+        }
+      });
+
+      const superseded = await harness.run(
+        "loadGraph",
+        '{"repo":"octo/app","branch":"main"}'
+      );
+      await replacement;
+
+      expect(superseded.status).toBe(409);
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressActive
+      ).toBe(true);
+      expect(
+        harness.state.graphProgressRecords?.graph?.graphProgressAwaitingModel
+      ).toBe(true);
+      expect(harness.state.graphProgressRecords?.graph?.graphProgressKey).toBe(
+        JSON.stringify({ repo: "octo/app", branch: "feature/x" })
+      );
+      expect(stages(harness.state)).toContain("creating_model:running");
+    });
+
+    it("keeps an open modeled record when another view starts", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+      const graphRecord = harness.state.graphProgressRecords?.graph;
+      harness.advanceClock(10_000);
+
+      await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"main"}'
+      );
+
+      expect(harness.state.graphProgressRecords?.graph).toBe(graphRecord);
+      expect(graphRecord?.graphProgressActive).toBe(true);
+      expect(graphRecord?.graphProgressStartedAtMs).toBe(1_000);
+      expect(
+        harness.state.graphProgressRecords?.diff?.graphProgressStartedAtMs
+      ).toBe(11_000);
+    });
+
+    it("names the planned view for a plan request", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+
+      await harness.run("planGraph", '{"repo":"octo/app"}');
+
+      expect(
+        harness.state.graphProgressRecords?.planned?.graphProgressView
+      ).toBe("planned");
     });
   });
 });

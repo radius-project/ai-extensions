@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { filterGraphVisualizationResources } from "./visualization.js";
-import { buildResourceID } from "./model.js";
+import { buildResourceID } from "../../test/support/resource-id.js";
 
 const containerId = buildResourceID("Radius.Compute/containers", "api");
 const imageId = buildResourceID("Radius.Compute/containerImages", "apiImage");
@@ -249,5 +249,135 @@ describe("filterGraphVisualizationResources", () => {
     ];
     const result = filterGraphVisualizationResources(resources);
     expect(result.map((r) => r.name)).toEqual(["realService"]);
+  });
+});
+
+describe("filterGraphVisualizationResources — degenerate resource shapes", () => {
+  it("returns the input unchanged when the array holds only null entries", () => {
+    const resources = [null, undefined];
+
+    expect(filterGraphVisualizationResources(resources as any)).toBe(resources);
+  });
+
+  it("drops null entries once a containerImage forces a rebuild", () => {
+    const resources = [
+      null,
+      makeResource("Radius.Compute/containers", "api"),
+      makeResource("Radius.Compute/containerImages", "apiImage")
+    ];
+
+    const result = filterGraphVisualizationResources(resources as any);
+
+    expect(result.map((r) => r.name)).toEqual(["api"]);
+  });
+
+  it("ignores resources with no type when classifying", () => {
+    const resources = [
+      { name: "untyped", connections: [] },
+      makeResource("Radius.Compute/containerImages", "apiImage")
+    ];
+
+    const result = filterGraphVisualizationResources(resources);
+
+    expect(result.map((r) => r.name)).toEqual(["untyped"]);
+  });
+
+  it("keeps a nameless secret because it can never match the reserved names", () => {
+    const image = makeResource("Radius.Compute/containerImages", "apiImage");
+    const resources = [
+      { id: "secret-1", type: "Radius.Security/secrets", connections: [] },
+      image
+    ];
+
+    const result = filterGraphVisualizationResources(resources);
+
+    expect(result.map((r) => r.id)).toEqual(["secret-1"]);
+  });
+
+  it("removes a containerImage identified only by name, with no id", () => {
+    const resources = [
+      makeResource("Radius.Compute/containers", "api", {
+        connections: [{ name: "apiImage", direction: "Outbound" }]
+      }),
+      { name: "apiImage", type: "Radius.Compute/containerImages" }
+    ];
+
+    const result = filterGraphVisualizationResources(resources);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].connections).toEqual([]);
+  });
+
+  it("removes a containerImage identified only by id, with no name", () => {
+    const resources = [
+      makeResource("Radius.Compute/containers", "api", {
+        connections: [{ id: imageId, direction: "Outbound" }]
+      }),
+      { id: imageId, type: "Radius.Compute/containerImages" }
+    ];
+
+    const result = filterGraphVisualizationResources(resources);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].connections).toEqual([]);
+  });
+
+  it("ignores connection entries that are null or reference nothing", () => {
+    const resources = [
+      makeResource("Radius.Compute/containers", "api", {
+        connections: [null, {}, { id: imageId, direction: "Outbound" }]
+      }),
+      { id: imageId, name: "apiImage", type: "Radius.Compute/containerImages" }
+    ];
+
+    const result = filterGraphVisualizationResources(resources as any);
+
+    expect(result[0].connections).toEqual([null, {}]);
+  });
+
+  it("does not associate the registry secret through a null connection", () => {
+    const resources = [
+      {
+        id: secretId,
+        name: "radius-ghcr-registry-creds",
+        type: "Radius.Security/secrets",
+        connections: [null]
+      },
+      { id: imageId, name: "apiImage", type: "Radius.Compute/containerImages" }
+    ];
+
+    const result = filterGraphVisualizationResources(resources as any);
+
+    expect(result.map((r) => r.id)).toEqual([secretId]);
+  });
+
+  it("keeps a resource whose connections value is not an array", () => {
+    const resources = [
+      { id: containerId, name: "api", type: "Radius.Compute/containers" },
+      { id: imageId, name: "apiImage", type: "Radius.Compute/containerImages" }
+    ];
+
+    const result = filterGraphVisualizationResources(resources);
+
+    expect(result).toEqual([resources[0]]);
+    expect(result[0]).toBe(resources[0]);
+  });
+
+  it("keeps a db untouched while rewriting only the resources that referenced the image", () => {
+    const db = makeResource("Radius.Data/postgreSQLDatabases", "db");
+    const resources = [
+      makeResource("Radius.Compute/containers", "api", {
+        connections: [{ id: imageId, direction: "Outbound" }]
+      }),
+      db,
+      { id: imageId, name: "apiImage", type: "Radius.Compute/containerImages" }
+    ];
+
+    const result = filterGraphVisualizationResources(resources);
+
+    // Untouched resources keep their identity; only rewritten ones are cloned.
+    expect(result.find((r) => r.name === "db")).toBe(db);
+    expect(result.find((r) => r.name === "api")).not.toBe(resources[0]);
+    expect(result.map((r) => r.id)).toEqual([containerId, dbId]);
   });
 });

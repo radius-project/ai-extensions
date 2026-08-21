@@ -188,7 +188,8 @@ const productionHandlers = {
     applyDeployMessages: () => {},
     record: () => ({}),
     errorMessage: (error) => String(error),
-    repoMatchesWorkspace: () => false
+    repoMatchesWorkspace: () => false,
+    now: () => 0
   }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
@@ -203,6 +204,7 @@ const productionHandlers = {
         branch: "main",
         bicepPath: ""
       }),
+    listBranchPaths: () => Promise.resolve([]),
     workspaceGraphJsonPath: () => "",
     radArtifactsDirForSelection: () =>
       Promise.resolve({ dir: "", remote: false }),
@@ -231,6 +233,7 @@ const productionHandlers = {
         removeDirectory: () => {}
       }),
       triggerAppBicepHandoff: () => {},
+      listBranchPaths: () => Promise.resolve([]),
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,
       isCurrentSourceRefToken: () => false,
@@ -244,7 +247,8 @@ const productionHandlers = {
       computeGraphDiff: () => [],
       record: () => ({}),
       optionalString: () => "",
-      errorMessage: (error) => String(error)
+      errorMessage: (error) => String(error),
+      now: () => 0
     })
   }),
   ...createEnvironmentsRoutes({

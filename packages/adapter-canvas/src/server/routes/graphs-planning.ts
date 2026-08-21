@@ -1,6 +1,13 @@
+import {
+  evaluateAppSource,
+  UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+} from "@radius-project/core";
 import type { DeployStatus } from "@radius-project/core";
 import type { DeployProgress } from "../../deploy-artifacts.js";
+import { recordGraphBuildEvent } from "../../shared.js";
+import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import type { GraphProgressRecord, GraphProgressView } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import type { CanvasServerEntry } from "../types.js";
@@ -76,20 +83,90 @@ export interface GraphsPlanningReadsDependencies {
   record(value: unknown): Record<string, unknown>;
   errorMessage(error: unknown): string;
   repoMatchesWorkspace(state: CanvasState, repo: string): boolean;
+  // Wall clock for the build record's elapsed time.
+  now(): number;
 }
 
-// The progress log the deploying page polls. Read-only and synchronous: the
-// messages are appended elsewhere, including by `/api/deployed-graph` below.
+// Graph workflows publish typed events. Keep legacy messages for deployed-graph
+// diagnostics until that independent status-read path is migrated.
+//
+// `generation` identifies which workflow owns the event stream. Polling is
+// concurrent with the workflow request itself, so a reader that only saw
+// `events` could apply an older in-flight response over a newer snapshot and
+// visibly regress the reported stage.
 export function handleProgress(
   context: CanvasRequestContext,
   dependencies: GraphsPlanningReadsDependencies
 ): void {
-  const { response } = context;
+  const { response, url } = context;
   const entry = dependencies.readInstanceEntry(context.instanceId);
-  const messages = entry?.state?.progressMessages || [];
+  const state = entry?.state;
+  const records = Object.values(state?.graphProgressRecords ?? {});
+  for (const record of records) {
+    if (
+      record.graphProgressActive &&
+      record.graphProgressAwaitingModel &&
+      typeof record.graphProgressDeadlineAtMs === "number" &&
+      dependencies.now() >= record.graphProgressDeadlineAtMs
+    ) {
+      recordGraphBuildEvent(record, {
+        stage: "creating_model",
+        state: "failed",
+        detail: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+      });
+      record.graphProgressActive = false;
+      record.graphProgressAwaitingModel = false;
+      delete record.graphProgressDeadlineAtMs;
+    }
+  }
+  const requestedView = url.searchParams.get("view");
+  const record =
+    isGraphProgressView(requestedView) ?
+      state?.graphProgressRecords?.[requestedView]
+    : latestGraphProgressRecord(records);
+  const payload: Record<string, unknown> = {
+    messages: state?.progressMessages || []
+  };
+  if (record) {
+    payload.events = record.graphBuildEvents;
+    payload.generation = record.graphProgressGeneration;
+    // The record's own view of itself: whether work is still in flight, which
+    // graph it belongs to, and how long it has been running. A page mounted
+    // after the build started — or re-mounted when the user navigates back —
+    // adopts these rather than measuring from the moment it happened to load.
+    payload.active = record.graphProgressActive;
+    payload.view = record.graphProgressView;
+    payload.elapsedMs = Math.max(
+      0,
+      dependencies.now() - record.graphProgressStartedAtMs
+    );
+  }
+
+  function isGraphProgressView(
+    value: string | null
+  ): value is GraphProgressView {
+    return value === "graph" || value === "planned" || value === "diff";
+  }
+
+  function latestGraphProgressRecord(
+    records: GraphProgressRecord[]
+  ): GraphProgressRecord | undefined {
+    const active = records.filter((record) => record.graphProgressActive);
+    const candidates = active.length > 0 ? active : records;
+    return candidates.reduce<GraphProgressRecord | undefined>(
+      (latest, record) =>
+        (
+          !latest ||
+          record.graphProgressStartedAtMs > latest.graphProgressStartedAtMs
+        ) ?
+          record
+        : latest,
+      undefined
+    );
+  }
   response.setHeader("Content-Type", "application/json");
   response.writeHead(200);
-  response.end(JSON.stringify({ messages }));
+  response.end(JSON.stringify(payload));
 }
 
 // The Deployed view is a projection: a fixed topology (the modeled application)
@@ -127,6 +204,7 @@ export async function handleDeployedGraph(
     return;
   }
   const state = entry?.state || {};
+  if (entry?.state) entry.state.progressMessages = [];
   const branch =
     state.workspaceBranch && dependencies.repoMatchesWorkspace(state, repo) ?
       state.workspaceBranch
@@ -218,10 +296,9 @@ export async function handleDeployedGraph(
     // array `/api/progress` serves, which is the one piece of cross-route state
     // this pair shares.
     if (entry?.state) {
-      if (!entry.state.progressMessages) entry.state.progressMessages = [];
-      entry.state.progressMessages.push(
+      entry.state.progressMessages = [
         `Deployed graph status read failed: ${dependencies.errorMessage(e)}`
-      );
+      ];
     }
   }
   if (!graph && sessionMatchesSelection && state.deployedGraph)
@@ -378,6 +455,11 @@ export interface GraphsPlanningStreamDependencies {
     repo: string,
     branch: string
   ): Promise<LoadGraphStreamBicepSelection>;
+  listBranchPaths(
+    entry: CanvasServerEntry,
+    repo: string,
+    branch: string
+  ): Promise<string[]>;
   workspaceGraphJsonPath(state: CanvasState, bicepRepoPath: string): string;
   radArtifactsDirForSelection(
     options: LoadGraphStreamRadArtifactsOptions
@@ -452,6 +534,18 @@ export async function handleLoadGraphStream(
     if (content) {
       sendProgress("Found existing app.bicep — parsing resources...");
     } else {
+      const source = evaluateAppSource(
+        await dependencies.listBranchPaths(entry, repo, branch)
+      );
+      if (source.status === "none") {
+        sendDone({
+          error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+          appBicepUnsupported: true,
+          repo,
+          branch
+        });
+        return;
+      }
       dependencies.triggerAppBicepHandoff(entry, repo, branch);
       sendDone({
         error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,

@@ -11,6 +11,8 @@ import {
   RADIUS_BUILD_ARCH_MODE_VAR,
   RADIUS_BUILD_PLATFORMS_VAR,
   RADIUS_REF,
+  RADIUS_WORKFLOW_DIR,
+  RADIUS_WORKFLOW_REPO,
   defaultDeployTemplateVars,
   generateDeployWorkflow
 } from "./deploy.js";
@@ -189,6 +191,53 @@ describe("generateDeployWorkflow", () => {
     expect(DEFAULT_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS).toBe(
       "linux/amd64,linux/arm64"
     );
+  });
+
+  it.each([DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE])(
+    "fails closed when the %s template is missing",
+    (missing) => {
+      const templates: Record<string, string> = { ...BASE_TEMPLATES };
+      delete templates[missing];
+
+      expect(() =>
+        generateDeployWorkflow("prod", ".radius/app.bicep", templates)
+      ).toThrow(new RegExp(`Missing deploy template "${missing}"`));
+    }
+  );
+
+  it("fails closed when a supplied template body is empty", () => {
+    const templates = { ...BASE_TEMPLATES, [DEPLOY_AZURE_FILE]: "" };
+
+    expect(() =>
+      generateDeployWorkflow("prod", ".radius/app.bicep", templates)
+    ).toThrow(/Missing deploy template "run-rad-commands-azure\.yml"/);
+  });
+
+  it("names the upstream template source and ref in the missing-template error", () => {
+    expect(() =>
+      generateDeployWorkflow("prod", ".radius/app.bicep", {})
+    ).toThrow(
+      new RegExp(
+        `${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR} at "${RADIUS_REF}"`
+      )
+    );
+  });
+
+  it("does not mutate the supplied templates or caller template vars", () => {
+    const templates = { ...BASE_TEMPLATES };
+    const templateVars = {
+      [DEPLOY_TEMPLATE_VAR_TARGET_CLUSTER_ARCH_MODE]: "x"
+    };
+    const templatesSnapshot = JSON.stringify(templates);
+
+    generateDeployWorkflow("prod", ".radius/app.bicep", templates, {
+      templateVars
+    });
+
+    expect(JSON.stringify(templates)).toBe(templatesSnapshot);
+    expect(templateVars).toEqual({
+      [DEPLOY_TEMPLATE_VAR_TARGET_CLUSTER_ARCH_MODE]: "x"
+    });
   });
 });
 

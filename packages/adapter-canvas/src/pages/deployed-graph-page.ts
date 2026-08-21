@@ -43,6 +43,7 @@ ${graphHeader("deployed")}
   <div id="deployed-graph-label" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:12px; line-height:1.5; white-space:pre-line;"></div>
   <div id="deployed-mode-note" style="display:none; font-size:12px; color:var(--rad-text-secondary); margin-bottom:12px;"></div>
   <div id="deployed-status" class="status info">Loading deployed application graph…</div>
+  <div id="deployed-progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>
   <div id="graph-container"></div>
 </div>
 <div id="deployed-log-section" class="rad-card" style="margin:16px 0 0; display:none;">

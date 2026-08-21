@@ -195,6 +195,169 @@ test.describe("Radius Canvas in Chromium", () => {
     ]);
   });
 
+  test("keeps the document canvas dark while navigating between top-level panes", async ({
+    page,
+    canvas
+  }) => {
+    await gotoCanvas(page, canvas, "graph");
+    await page.evaluate(`
+      document.documentElement.style.setProperty("--color-scheme", "dark");
+      document.documentElement.style.setProperty(
+        "--background-color-default",
+        "#0d1117"
+      );
+      document.documentElement.style.setProperty(
+        "--text-color-default",
+        "#e6edf3"
+      );
+    `);
+    let documentNavigations = 0;
+    page.on("request", (request) => {
+      if (request.isNavigationRequest()) documentNavigations += 1;
+    });
+    let environmentRequests = 0;
+    let releaseEnvironment = (): void => undefined;
+    const environmentGate = new Promise<void>((resolve) => {
+      releaseEnvironment = resolve;
+    });
+    const environmentRoute = /\/\?page=environment$/;
+    await page.route(environmentRoute, async (route) => {
+      environmentRequests += 1;
+      await environmentGate;
+      if (route.request().failure() === null) await route.continue();
+    });
+
+    try {
+      await page.evaluate(`
+        document.querySelector('a[href="/?page=environment"]').click();
+      `);
+      await expect.poll(() => environmentRequests).toBe(1);
+      // The outgoing pane stays mounted while the request is in flight, so the
+      // webview never unloads and exposes the host surface.
+      await expect(page.locator("#radius-main-content")).toHaveAttribute(
+        "aria-busy",
+        "true"
+      );
+      await expect(page.locator("#graph-page-content")).toBeVisible();
+      await expect(page.locator("#env-subtabs")).toHaveCount(0);
+      await page.evaluate(`
+        document.querySelector('a[href="/?page=deploying"]').click();
+      `);
+      await expect(page).toHaveURL(/page=deploying/);
+      await expect(page.locator("#deploy-table-body")).toBeVisible();
+    } finally {
+      releaseEnvironment();
+    }
+    await page.unroute(environmentRoute);
+
+    const panes = [
+      ["environment", "Environments"],
+      ["deploying", "Deployments"],
+      ["graph", "Applications"]
+    ] as const;
+
+    for (const [canvasPage, linkName] of panes) {
+      await page.getByRole("link", { name: linkName }).click();
+      await expect(page).toHaveURL(new RegExp(`page=${canvasPage}`));
+      await expect(page.locator("html")).toHaveCSS(
+        "background-color",
+        "rgb(13, 17, 23)"
+      );
+      await expect(page.locator("body")).toHaveCSS(
+        "background-color",
+        "rgb(13, 17, 23)"
+      );
+    }
+    const backPanes = [
+      ["deploying", "#deploy-table-body"],
+      ["environment", "#env-subtabs"],
+      ["deploying", "#deploy-table-body"],
+      ["graph", "#graph-page-content"]
+    ] as const;
+    for (const [canvasPage, selector] of backPanes) {
+      await page.goBack();
+      await expect(page).toHaveURL(new RegExp(`page=${canvasPage}`));
+      await expect(page.locator(selector)).toBeVisible();
+      await expect(page.locator("html")).toHaveCSS(
+        "background-color",
+        "rgb(13, 17, 23)"
+      );
+    }
+    expect(documentNavigations).toBe(0);
+  });
+
+  test("swaps environment sub-tabs in place and leaves graph sub-tabs to the graph navigator", async ({
+    page,
+    canvas
+  }) => {
+    await gotoCanvas(page, canvas, "graph");
+    let documentNavigations = 0;
+    page.on("request", (request) => {
+      if (request.isNavigationRequest()) documentNavigations += 1;
+    });
+
+    await page.getByRole("link", { name: "Environments" }).first().click();
+    await expect(page.locator("#env-subtabs")).toBeVisible();
+    await expect(page).toHaveTitle(/Environments/);
+
+    const subtabs = page.locator("#env-subtabs");
+    await subtabs.getByRole("link", { name: "Credentials" }).click();
+    await expect(page).toHaveURL(/page=credentials/);
+    await expect(page.locator("#cred-table-body")).toBeVisible();
+    await expect(subtabs.locator("a.rad-subtab--active")).toHaveText(
+      "Credentials"
+    );
+    await expect(page.locator("#graph-page-content")).toHaveCount(0);
+
+    await page.getByRole("link", { name: "Applications" }).click();
+    await expect(page.locator("#graph-nav")).toBeVisible();
+
+    // Graph sub-tabs carry data-radius-graph-page and stay owned by the graph
+    // navigator, so pane navigation must not also handle the click.
+    await page
+      .locator('#graph-nav a[data-radius-graph-page="planned"]')
+      .click();
+    await expect(page).toHaveURL(/page=planned/);
+    await expect(page.locator("#graph-page-content")).toBeVisible();
+    await expect(page.locator("#graph-nav a.rad-subtab--active")).toHaveText(
+      "Planned"
+    );
+
+    expect(documentNavigations).toBe(0);
+  });
+
+  test("ignores a click on the pane already on screen", async ({
+    page,
+    canvas
+  }) => {
+    await gotoCanvas(page, canvas, "graph");
+    let documentNavigations = 0;
+    page.on("request", (request) => {
+      if (request.isNavigationRequest()) documentNavigations += 1;
+    });
+
+    await page.getByRole("link", { name: "Environments" }).first().click();
+    await expect(page.locator("#env-subtabs")).toBeVisible();
+    const paneRequests = () =>
+      canvas.requests.filter((request) => request.path.includes("environment"))
+        .length;
+    const before = paneRequests();
+
+    await page.getByRole("link", { name: "Environments" }).first().click();
+    await expect(page).toHaveURL(/page=environment/);
+    await expect(page.locator("#radius-main-content")).not.toHaveAttribute(
+      "aria-busy",
+      "true"
+    );
+    expect(paneRequests()).toBe(before);
+
+    // The skipped click pushed no history entry, so Back lands on the graph.
+    await page.goBack();
+    await expect(page).toHaveURL(/page=graph/);
+    await expect(page.locator("#graph-page-content")).toBeVisible();
+    expect(documentNavigations).toBe(0);
+  });
+
   test("opens node details from the card by keyboard and returns focus when the panel closes", async ({
     page,
     canvas

@@ -52,8 +52,12 @@ function isCurrentSourceRefToken(
 // over `deps` instead of module-level imports of server.ts/gh.ts/workspace.ts.
 export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
   const closeGenerations = new Map<string, number>();
-  const { workspaceState, fetchBicepForBranch, resolveAppModelStatus } =
-    createGraphContextHelpers(deps);
+  const {
+    workspaceState,
+    fetchBicepForBranch,
+    evaluateAppSourceForBranch,
+    resolveAppModelStatus
+  } = createGraphContextHelpers(deps);
 
   function sendToSession(message: {
     prompt: string;
@@ -137,16 +141,27 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
         })
       ].join("::");
       if (state.appBicepHandoffKey === key) return;
-      state.appBicepHandoffKey = key;
       const present = statuses.filter(
         (status) => status.freshness.status !== "missing"
       );
 
       if (!present.length) {
+        const source = await Promise.all(
+          branches.map((branch) =>
+            evaluateAppSourceForBranch(repo, branch as string, state)
+          )
+        );
+        // The app-modeling skill cannot author this repository. Do not consume
+        // the dedupe key: adding a Dockerfile later must make the next open
+        // eligible for the handoff.
+        if (source.every((evaluation) => evaluation.status === "none")) return;
+        if (state.appBicepHandoffKey === key) return;
+        state.appBicepHandoffKey = key;
         sendToSession(appBicepHandoffMessage(repo, page, branches));
         return;
       }
 
+      state.appBicepHandoffKey = key;
       const unverified = present.find(
         (status) => status.refreshable && status.freshness.requiresConfirmation
       );

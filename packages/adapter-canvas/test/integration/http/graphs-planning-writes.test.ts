@@ -35,6 +35,7 @@ afterEach(async () => {
 interface PipelineScript {
   selections: Record<string, AppBicepSelection>;
   compiled: Record<string, CanvasGraphResource[]>;
+  branchPaths?: string[];
   afterCompile?: () => void;
 }
 
@@ -42,6 +43,7 @@ interface Harness {
   state: CanvasState;
   script: PipelineScript;
   setEntryMissing(missing: boolean): void;
+  advanceClock(ms: number): void;
 }
 
 function selectionOf(
@@ -58,6 +60,7 @@ function selectionOf(
 function start(script: Partial<PipelineScript> = {}): Harness {
   const state: CanvasState = {};
   let entryMissing = false;
+  let nowMs = 1_000;
   const active: PipelineScript = {
     selections: {},
     compiled: {},
@@ -102,6 +105,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         readInstanceEntry: () => (entryMissing ? undefined : { state }),
         pipeline,
         triggerAppBicepHandoff: () => {},
+        listBranchPaths: () => Promise.resolve(active.branchPaths ?? []),
         prepareSourceRefResources,
         setSourceRefResources,
         isCurrentSourceRefToken,
@@ -129,7 +133,8 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         },
         optionalString: (value) => (typeof value === "string" ? value : ""),
         errorMessage: (error) =>
-          error instanceof Error ? error.message : String(error)
+          error instanceof Error ? error.message : String(error),
+        now: () => nowMs
       })
     })
   );
@@ -159,6 +164,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     script: active,
     setEntryMissing(missing) {
       entryMissing = missing;
+    },
+    advanceClock(ms) {
+      nowMs += ms;
     }
   };
 }
