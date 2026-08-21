@@ -5,12 +5,7 @@
 // graph from Bicep/ARM templates (modeled.go) and computing diff hashes
 // (diffhash.go). This module provides only the lightweight utilities that
 // the TypeScript layer needs to post-process rad's output: deterministic
-// inbound-edge synthesis, resource-ID construction, and API-version stripping.
-
-export const MODELED_GRAPH_DEFAULTS = {
-  plane: "local",
-  resourceGroup: "default"
-};
+// inbound-edge synthesis and API-version stripping.
 
 export function stripAPIVersion(t: string): string {
   const i = t.indexOf("@");
@@ -46,8 +41,4 @@ export function addInboundConnections(graph: any): void {
       return String(a?.direction).localeCompare(String(b?.direction));
     });
   }
-}
-
-export function buildResourceID(resourceType: string, name: string): string {
-  return `/planes/radius/${MODELED_GRAPH_DEFAULTS.plane}/resourcegroups/${MODELED_GRAPH_DEFAULTS.resourceGroup}/providers/${resourceType}/${name}`;
 }

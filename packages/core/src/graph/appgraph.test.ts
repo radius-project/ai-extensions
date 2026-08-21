@@ -3,7 +3,7 @@ import {
   applicationGraphToResources,
   findResourceDefinitionLines
 } from "./appgraph.js";
-import { buildResourceID } from "./model.js";
+import { buildResourceID } from "../../test/support/resource-id.js";
 
 const frontendId = buildResourceID("Radius.Compute/containers", "frontend");
 const cacheId = buildResourceID("Radius.Data/redisCaches", "cache");

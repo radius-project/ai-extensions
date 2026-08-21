@@ -23,12 +23,12 @@ import {
   filterGraphVisualizationResources,
   normalizeAppBicep,
   projectDeployedGraph,
-  recipePackContentPath,
   resolveRecipeOutputs,
   serializeAppOrigin,
   unsupportedAppSourceReport,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "../../src/index.js";
+import { recipePackContentPath } from "../../src/modeling/recipe-pack.js";
 import { createFakeGitHub } from "../support/fake-github.js";
 import {
   API_ID,

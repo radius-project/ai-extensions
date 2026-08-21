@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { computeGraphDiff } from "./diff.js";
-import { buildResourceID } from "./model.js";
+import { buildResourceID } from "../../test/support/resource-id.js";
 
 function makeResource(type: string, name: string, extra: any = {}) {
   return {

@@ -203,7 +203,8 @@ export function deriveConcreteResource(
     (provider && PROVIDER_SOURCE_OVERRIDE[provider]?.[key]) ||
     SOURCE_CONCRETE_MAP[key];
   if (!hit) return null;
-  const leaf = hit.type.split("/").pop() || hit.type;
+  // lastIndexOf returns -1 for an unqualified type, so slice(0) keeps it whole.
+  const leaf = hit.type.slice(hit.type.lastIndexOf("/") + 1);
   const withLowerInitialism = leaf.replace(/^[A-Z]+(?=[A-Z][a-z])/, (m) =>
     m.toLowerCase()
   );

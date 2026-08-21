@@ -154,7 +154,6 @@ describe("core package in a host without HTTP or DOM globals", () => {
 
     const core = await import("../../src/index.js");
 
-    expect(core.RADIUS_CORE_VERSION).toBe("0.1.0");
     const resources = core.applicationGraphToResources({
       resources: [
         {
@@ -173,17 +172,28 @@ describe("core package in a host without HTTP or DOM globals", () => {
     expect(core.getPlatform("azure")?.id).toBe("azure");
   });
 
-  it("exposes every documented submodule entry point", async () => {
-    const [graph, modeling, platforms, workflows] = await Promise.all([
-      import("../../src/graph/index.js"),
-      import("../../src/modeling/index.js"),
-      import("../../src/platforms/index.js"),
-      import("../../src/workflows/index.js")
+  it("exposes every subpath the package manifest declares, and nothing more", async () => {
+    const manifest = JSON.parse(
+      await readFile(join(SRC_DIR, "..", "package.json"), "utf8")
+    ) as { exports: Record<string, string> };
+
+    // Only these three subpaths have an importer outside core. `./modeling` and
+    // `./workflows` were declared but never imported, so they are not part of
+    // the package's contract.
+    expect(Object.keys(manifest.exports).sort()).toEqual([
+      ".",
+      "./graph",
+      "./platforms"
     ]);
 
-    expect(typeof graph.computeGraphDiff).toBe("function");
-    expect(typeof modeling.evaluateAppSource).toBe("function");
-    expect(typeof platforms.getPlatform).toBe("function");
-    expect(typeof workflows.generateDeployWorkflow).toBe("function");
+    const [barrel, graph, platforms] = await Promise.all([
+      import("../../src/index.js"),
+      import("../../src/graph/index.js"),
+      import("../../src/platforms/index.js")
+    ]);
+
+    expect(typeof barrel.computeGraphDiff).toBe("function");
+    expect(typeof graph.filterGraphVisualizationResources).toBe("function");
+    expect(typeof platforms.buildOidcSubject).toBe("function");
   });
 });

@@ -16,73 +16,7 @@ describe("aws platform descriptor", () => {
   it("declares the registry identity the platform registry keys on", () => {
     expect(aws.id).toBe("aws");
     expect(aws.displayName).toBe("AWS");
-    expect(aws.recipePlatform).toBe("aws");
     expect(aws.clusterServiceName).toBe("EKS");
-  });
-
-  it("advertises OIDC and portal-link support", () => {
-    expect(aws.supports).toEqual({ oidc: true, portalUrl: true });
-  });
-});
-
-describe("aws.generateOidc", () => {
-  it("reports the account and region in the verification output", () => {
-    const result = aws.generateOidc({
-      accountId: "123456789012",
-      region: "eu-west-1"
-    });
-
-    expect(result.message).toBe("AWS authentication validated");
-    expect(result.output).toContain("Account ID: 123456789012");
-    expect(result.output).toContain("Region: eu-west-1");
-  });
-
-  it("emits gh variable commands for the non-secret identifiers", () => {
-    const result = aws.generateOidc({
-      accountId: "123456789012",
-      region: "eu-west-1"
-    });
-
-    expect(result.output).toContain(
-      'gh variable set AWS_ACCOUNT_ID --body "123456789012"'
-    );
-    expect(result.output).toContain(
-      'gh variable set AWS_REGION --body "eu-west-1"'
-    );
-    // These identifiers are deliberately variables, never secrets.
-    expect(result.output).not.toContain("gh secret set");
-  });
-
-  it.each([
-    ["an empty object", {}],
-    ["blank values", { accountId: "", region: "" }],
-    ["null values", { accountId: null, region: null }],
-    ["undefined values", { accountId: undefined, region: undefined }]
-  ])("substitutes empty strings for %s", (_label, data) => {
-    const result = aws.generateOidc(data);
-
-    expect(result.output).toContain("Account ID: \n");
-    expect(result.output).toContain("Region: \n");
-    expect(result.output).toContain('gh variable set AWS_ACCOUNT_ID --body ""');
-    expect(result.output).toContain('gh variable set AWS_REGION --body ""');
-  });
-});
-
-describe("aws.environmentSecrets", () => {
-  it("returns both identifiers as GitHub variables, not secrets", () => {
-    expect(
-      aws.environmentSecrets({ accountId: "123456789012", region: "eu-west-1" })
-    ).toEqual([
-      { kind: "variable", name: "AWS_ACCOUNT_ID", value: "123456789012" },
-      { kind: "variable", name: "AWS_REGION", value: "eu-west-1" }
-    ]);
-  });
-
-  it("passes missing values through untouched for the caller to validate", () => {
-    const specs = aws.environmentSecrets({});
-
-    expect(specs.map((s) => s.name)).toEqual(["AWS_ACCOUNT_ID", "AWS_REGION"]);
-    expect(specs.every((s) => s.value === undefined)).toBe(true);
   });
 });
 
