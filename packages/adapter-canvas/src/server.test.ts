@@ -29,6 +29,7 @@ import {
   invokeSessionPrompt,
   localDeploymentBlocksMutation,
   preflightGhcrPackageWriteAccess,
+  resetListingCaches,
   resetDeploymentViewState,
   releaseDeploymentMutation,
   reserveDeploymentMutation,
@@ -67,6 +68,18 @@ describe("DEPLOY_RAD_COMMANDS_STEP", () => {
     // nowhere in radius-project/radius, so that entire code path never ran on
     // a real deploy. Pin the value so the same silent break cannot recur.
     expect(DEPLOY_RAD_COMMANDS_STEP).toBe("Run rad commands");
+  });
+
+  describe("resetListingCaches", () => {
+    it("clears environment and deployment listing entries", () => {
+      const environments = new Map([["octo/app", { environments: ["dev"] }]]);
+      const deployments = new Map([["octo/app", { deployments: ["run-1"] }]]);
+
+      resetListingCaches(environments, deployments);
+
+      expect(environments.get("octo/app")).toBeUndefined();
+      expect(deployments.get("octo/app")).toBeUndefined();
+    });
   });
 });
 
