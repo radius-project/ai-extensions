@@ -75,7 +75,7 @@ export interface PaneNavigation {
 
 export function createPaneNavigation(
   context: BrowserContext,
-  registry: Pick<PageRegistry, "teardownPage">
+  registry: Pick<PageRegistry, "teardownPage" | "beginNavigation">
 ): PaneNavigation {
   let generation = 0;
   let request: AbortHandle | null = null;
@@ -106,6 +106,7 @@ export function createPaneNavigation(
     }
 
     cancelPendingWork();
+    registry.beginNavigation(cancelRequest);
     content.setAttribute("aria-busy", "true");
     const requestGeneration = generation;
     request = context.net.createAbort();

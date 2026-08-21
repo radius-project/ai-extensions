@@ -29,6 +29,9 @@ function setup(options: { withContent?: boolean; withNav?: boolean } = {}) {
   const navigation = createGraphNavigation(browser.context, {
     teardownPage() {
       pageTeardowns++;
+    },
+    beginNavigation() {
+      return undefined;
     }
   });
   return {

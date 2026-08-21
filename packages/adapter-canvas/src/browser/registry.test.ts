@@ -107,4 +107,24 @@ describe("page-scoped browser registry", () => {
     registry.teardownAll();
     expect(order).toEqual(["page", "document"]);
   });
+
+  it("keeps one same-document navigation live and cancels the one it replaces", () => {
+    const { scope } = createFakeBrowserScope();
+    const registry = resolvePageRegistry(scope);
+    const cancelled: string[] = [];
+    const cancelFirst = () => cancelled.push("first");
+    const cancelSecond = () => cancelled.push("second");
+
+    registry.beginNavigation(cancelFirst);
+    expect(cancelled).toEqual([]);
+
+    registry.beginNavigation(cancelSecond);
+    expect(cancelled).toEqual(["first"]);
+
+    registry.beginNavigation(cancelSecond);
+    expect(cancelled).toEqual(["first"]);
+
+    registry.beginNavigation(cancelFirst);
+    expect(cancelled).toEqual(["first", "second"]);
+  });
 });

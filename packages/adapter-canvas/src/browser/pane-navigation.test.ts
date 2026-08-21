@@ -16,6 +16,8 @@ import {
   flushPromises,
   textResponse
 } from "../../test/support/browser/fakes.js";
+import { createGraphNavigation, GRAPH_CONTENT_ID } from "./graph/navigation.js";
+import { resolvePageRegistry } from "./registry.js";
 import type { DomEvent, HttpResponse } from "./ports.js";
 
 function parsedPane(
@@ -62,10 +64,12 @@ function setup(options: { content?: boolean; nav?: boolean } = {}) {
   if (options.content !== false) browser.document.add(content);
   if (options.nav !== false) browser.document.add(topNav);
   let pageTeardowns = 0;
+  const registry = resolvePageRegistry({});
   const navigation = createPaneNavigation(browser.context, {
     teardownPage() {
       pageTeardowns += 1;
-    }
+    },
+    beginNavigation: registry.beginNavigation
   });
   return {
     ...browser,
@@ -75,6 +79,7 @@ function setup(options: { content?: boolean; nav?: boolean } = {}) {
     environments,
     deployments,
     navigation,
+    registry,
     get pageTeardowns() {
       return pageTeardowns;
     }
@@ -144,6 +149,74 @@ describe("top-level pane navigation", () => {
     expect(harness.content.innerHTML).not.toContain("environment");
     expect(harness.nav.pushed).toEqual(["/?page=deploying"]);
     expect(harness.nav.assigned).toEqual([]);
+  });
+
+  it("supersedes an in-flight graph sub-tab navigation instead of letting it push history", async () => {
+    const harness = setup();
+    const graphContent = createFakeElement(GRAPH_CONTENT_ID);
+    graphContent.innerHTML = "<div>modeled</div>";
+    harness.document.add(graphContent);
+    const graphNavigation = createGraphNavigation(harness.context, {
+      teardownPage() {
+        return undefined;
+      },
+      beginNavigation: harness.registry.beginNavigation
+    });
+    const pendingGraph = createDeferred<HttpResponse>();
+    harness.net.handle("/?page=planned", () => pendingGraph.promise);
+    harness.net.handle("/?page=environment", () =>
+      textResponse("<html>environment</html>")
+    );
+    harness.nav.parsed = () =>
+      parsedPane("<section>environment</section>", "/?page=environment");
+
+    graphNavigation.navigateTo(null, "planned");
+    harness.navigation.navigateTo(null, "/?page=environment");
+    await flushPromises();
+    pendingGraph.resolve(textResponse("<html>planned</html>"));
+    await flushPromises();
+
+    expect(harness.content.innerHTML).toContain("environment");
+    expect(graphContent.innerHTML).toBe("<div>modeled</div>");
+    expect(harness.nav.pushed).toEqual(["/?page=environment"]);
+    expect(harness.nav.assigned).toEqual([]);
+    expect(harness.logger.errors).toEqual([]);
+  });
+
+  it("is superseded by a later graph sub-tab navigation instead of overwriting it", async () => {
+    const harness = setup();
+    const graphContent = createFakeElement(GRAPH_CONTENT_ID);
+    harness.document.add(graphContent);
+    const graphNavigation = createGraphNavigation(harness.context, {
+      teardownPage() {
+        return undefined;
+      },
+      beginNavigation: harness.registry.beginNavigation
+    });
+    const pendingPane = createDeferred<HttpResponse>();
+    harness.net.handle("/?page=environment", () => pendingPane.promise);
+    harness.net.handle("/?page=planned", () =>
+      textResponse("<html>planned</html>")
+    );
+    harness.nav.parsed = () => {
+      const parsed = createFakeDocument();
+      const incoming = createFakeElement(GRAPH_CONTENT_ID);
+      incoming.innerHTML = "<div>planned</div>";
+      parsed.add(incoming);
+      return parsed;
+    };
+
+    harness.navigation.navigateTo(null, "/?page=environment");
+    graphNavigation.navigateTo(null, "planned");
+    await flushPromises();
+    pendingPane.resolve(textResponse("<html>environment</html>"));
+    await flushPromises();
+
+    expect(graphContent.innerHTML).toBe("<div>planned</div>");
+    expect(harness.content.innerHTML).toBe("");
+    expect(harness.nav.pushed).toEqual(["?page=planned"]);
+    expect(harness.nav.assigned).toEqual([]);
+    expect(harness.logger.errors).toEqual([]);
   });
 
   it("does not push history while restoring a pane from browser history", async () => {

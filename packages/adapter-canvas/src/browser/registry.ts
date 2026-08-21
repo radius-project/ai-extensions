@@ -12,6 +12,11 @@ import type { BindingRegistry, BrowserContext } from "./ports.js";
 export interface PageRegistry {
   readonly bindings: BindingRegistry;
   register(teardown: BrowserTeardown, lifetime: BrowserLifetime): void;
+  // Same-document navigators are document-lifetime, so `teardownPage` cannot
+  // cancel each other's in-flight requests. Claiming here keeps at most one
+  // navigation live so a superseded response can never swap content or push
+  // history for the pane the user already left.
+  beginNavigation(cancel: BrowserTeardown): void;
   teardownPage(): void;
   teardownAll(): void;
 }
@@ -28,6 +33,7 @@ function createPageRegistry(): PageRegistry {
     teardown: BrowserTeardown;
     lifetime: BrowserLifetime;
   }> = [];
+  let cancelActiveNavigation: BrowserTeardown | null = null;
 
   function teardownWhere(
     shouldRun: (lifetime: BrowserLifetime) => boolean
@@ -55,6 +61,11 @@ function createPageRegistry(): PageRegistry {
     register(teardown, lifetime) {
       teardowns.push({ teardown, lifetime });
     },
+    beginNavigation(cancel) {
+      const previous = cancelActiveNavigation;
+      cancelActiveNavigation = cancel;
+      if (previous !== null && previous !== cancel) previous();
+    },
     teardownPage() {
       teardownWhere((lifetime) => lifetime === "page");
     },
@@ -78,6 +89,7 @@ function isPageRegistry(value: unknown): value is PageRegistry {
     isRecord(value) &&
     isBindingRegistry(value.bindings) &&
     isCallable(value.register) &&
+    isCallable(value.beginNavigation) &&
     isCallable(value.teardownPage) &&
     isCallable(value.teardownAll)
   );

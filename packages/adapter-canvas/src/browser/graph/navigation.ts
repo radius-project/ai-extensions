@@ -59,7 +59,7 @@ export interface GraphNavigation {
 
 export function createGraphNavigation(
   context: BrowserContext,
-  registry: Pick<PageRegistry, "teardownPage">
+  registry: Pick<PageRegistry, "teardownPage" | "beginNavigation">
 ): GraphNavigation {
   let generation = 0;
   let request: AbortHandle | null = null;
@@ -91,6 +91,7 @@ export function createGraphNavigation(
     // arrives: its debounced timers can otherwise fire mid-navigation and act
     // on a page the user has already left.
     cancelPendingWork();
+    registry.beginNavigation(cancelRequest);
     const requestGeneration = generation;
     request = context.net.createAbort();
     void context.net
