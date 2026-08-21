@@ -16,6 +16,7 @@ import {
   PLAN_DEBOUNCE_MS,
   PLAN_PROGRESS_MS
 } from "./planned-graph-page.js";
+import { DEPLOYMENTS_PATH } from "../repositories.js";
 
 type EnvListing = "ok" | "empty" | "error";
 
@@ -33,6 +34,7 @@ interface FixtureOptions {
   withButton?: boolean;
   withContainer?: boolean;
   envListing?: EnvListing;
+  deploymentsPayload?: unknown;
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -49,7 +51,8 @@ function fixture(options: FixtureOptions = {}) {
     withEnvironment = true,
     withButton = true,
     withContainer = true,
-    envListing = "ok"
+    envListing = "ok",
+    deploymentsPayload = { deployments: [] }
   } = options;
   const browser = createFakeBrowser();
   const state = createFakeElement(PLANNED_GRAPH_STATE_ID);
@@ -102,6 +105,10 @@ function fixture(options: FixtureOptions = {}) {
   browser.net.handle(
     `/api/list-environments?repo=${encodeURIComponent(repo)}`,
     () => jsonResponse(envPayload)
+  );
+  browser.net.handle(
+    `${DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}&fresh=1`,
+    () => jsonResponse(deploymentsPayload)
   );
   browser.net.handle("/api/deploy", () => jsonResponse({}));
 
@@ -219,6 +226,24 @@ describe("initializePlannedGraphPage", () => {
     expect(browser.net.calls.some((call) => call.url === "/api/deploy")).toBe(
       true
     );
+  });
+
+  it("disables deployment when the selected application and environment already have a pending deployment", async () => {
+    const { browser, button } = fixture({
+      deploymentsPayload: {
+        deployments: [
+          { app: "app", environment: "dev", status: "pending", runUrl: "" },
+          { app: "other", environment: "dev", status: "success", runUrl: "" }
+        ]
+      }
+    });
+
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("deploy");
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain("already in progress");
   });
 
   it("hides status silently when no status element exists", async () => {
