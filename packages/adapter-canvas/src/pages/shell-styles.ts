@@ -309,12 +309,6 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   .rad-table__provider { color: var(--rad-text-tertiary); }
   .rad-table__creds { color: var(--rad-text-secondary); }
   .rad-table__actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; white-space: nowrap; }
-  .rad-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
-  .rad-dot--success { background: var(--rad-success); }
-  .rad-dot--failed { background: var(--rad-danger); }
-  .rad-dot--pending { background: var(--rad-text-tertiary); }
-  .rad-dot--deleting { background: var(--rad-warning); }
-  .rad-status-label { vertical-align: middle; }
 
   /* ─── Graph + node cards ──────────────────────────────────────────────── */
   #graph-container { width: 100%; height: 450px; border-radius: var(--rad-radius-lg); position: relative; background: var(--rad-bg-subtle); }

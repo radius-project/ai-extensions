@@ -110,3 +110,9 @@ describe("status color tokens", () => {
     );
   });
 });
+
+describe("resource table status styles", () => {
+  it("does not define decorative colored status circles", () => {
+    expect(SHELL_STYLE_CSS).not.toContain(".rad-dot");
+  });
+});
