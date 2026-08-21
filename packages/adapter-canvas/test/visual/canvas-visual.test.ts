@@ -368,6 +368,18 @@ async function routeGraphControls(
       });
     }
   );
+  // The Planned pane reads deployment states before it opens its deploy
+  // action, so leaving this route to the real server would make the captured
+  // button state depend on the host the run happens to use.
+  await page.route(
+    `${canvas.baseUrl}/api/list-deployments?*`,
+    async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ deployments: [] })
+      });
+    }
+  );
   return { loadGraph, planGraph };
 }
 
