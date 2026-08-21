@@ -8,7 +8,7 @@ import { afterAll, afterEach, it, test } from "vitest";
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  "../../.."
+  "../../../../.."
 );
 const checker = path.join(
   root,
