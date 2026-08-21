@@ -443,10 +443,10 @@ export async function workspaceHeadCommit(
 // does not read as a reason to regenerate it again.
 const GENERATED_PATHS = [".radius", "app.bicep", "app.origin.json"];
 
-// Whether application source changed between `sinceCommit` and HEAD, ignoring
-// the paths the generator owns. Resolves undefined when git cannot answer (no
-// workspace, unknown commit, shallow clone), so the caller can fall back rather
-// than read silence as "nothing changed".
+// Whether application source changed between `sinceCommit` and the current
+// working tree, ignoring paths the generator owns. This includes committed,
+// staged, unstaged, and untracked source so a model cannot be reported current
+// merely because newer work has not been committed yet.
 //
 // The exclusion is the point: committing a freshly generated model advances HEAD
 // past the commit that model recorded, so a plain commit comparison would make
@@ -461,13 +461,21 @@ export async function workspaceSourceChangedSince(
     "diff",
     "--name-only",
     sinceCommit,
-    "HEAD",
     "--",
     ".",
     ...GENERATED_PATHS.map((path) => `:(exclude)${path}`)
   ]);
   if (!result.ok) return undefined;
-  return result.stdout.length > 0;
+  const untracked = await runGitResult(workspacePath, [
+    "ls-files",
+    "--others",
+    "--exclude-standard",
+    "--",
+    ".",
+    ...GENERATED_PATHS.map((path) => `:(exclude)${path}`)
+  ]);
+  if (!untracked.ok) return undefined;
+  return result.stdout.length > 0 || untracked.stdout.length > 0;
 }
 
 // Absolute path to the app-graph.json that should sit next to the given

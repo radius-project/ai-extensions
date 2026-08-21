@@ -287,4 +287,158 @@ describe("resolveRecipeOutputs", () => {
     expect(resolved[0].recipe).toBeNull();
     expect(resolved[0].outputResources).toEqual([]);
   });
+
+  it("falls back to the raw type when a pack keys a legacy Applications.* type", async () => {
+    // The pack still lists the pre-rename type, so normalization finds nothing
+    // and the raw lookup has to resolve it.
+    const gh = fakeGitHub();
+    const recipes = [
+      {
+        name: "containers",
+        resourceType: "Applications.Core/containers",
+        templateKind: "bicep",
+        templatePath: "ghcr.io/radius-project/kube-recipes/containers:latest",
+        concreteResources: [
+          {
+            name: "deployment",
+            type: "apps/Deployment",
+            provider: "kubernetes",
+            displayType: "Deployment"
+          }
+        ]
+      }
+    ];
+
+    const resolved = await resolveRecipeOutputs(
+      gh,
+      [{ name: "api", type: "Applications.Core/containers" }],
+      recipes,
+      "aws"
+    );
+
+    expect(resolved[0].recipe?.name).toBe("containers");
+    expect(resolved[0].outputResources[0].displayType).toBe("Deployment (EKS)");
+  });
+
+  it("leaves a Deployment display type alone when it already names a cluster service", async () => {
+    const gh = fakeGitHub();
+    const recipes = [
+      {
+        name: "containers",
+        resourceType: "Radius.Compute/containers",
+        templateKind: "bicep",
+        templatePath: "ghcr.io/...",
+        concreteResources: [
+          {
+            name: "deployment",
+            type: "apps/Deployment",
+            provider: "kubernetes",
+            displayType: "Deployment (AKS)"
+          }
+        ]
+      }
+    ];
+
+    const resolved = await resolveRecipeOutputs(
+      gh,
+      [{ name: "api", type: "Radius.Compute/containers" }],
+      recipes,
+      "azure"
+    );
+
+    expect(resolved[0].outputResources[0].displayType).toBe("Deployment (AKS)");
+  });
+
+  it("leaves non-Deployment outputs and Deployments without a display type unannotated", async () => {
+    const gh = fakeGitHub();
+    const recipes = [
+      {
+        name: "containers",
+        resourceType: "Radius.Compute/containers",
+        templateKind: "bicep",
+        templatePath: "ghcr.io/...",
+        concreteResources: [
+          {
+            name: "service",
+            type: "core/Service",
+            provider: "kubernetes",
+            displayType: "Service"
+          },
+          {
+            name: "deployment",
+            type: "apps/Deployment",
+            provider: "kubernetes",
+            displayType: ""
+          }
+        ]
+      }
+    ];
+
+    const resolved = await resolveRecipeOutputs(
+      gh,
+      [{ name: "api", type: "Radius.Compute/containers" }],
+      recipes,
+      "azure"
+    );
+
+    expect(resolved[0].outputResources.map((r: any) => r.displayType)).toEqual([
+      "Service",
+      ""
+    ]);
+  });
+
+  it("falls back to K8s when the provider has no registered platform", async () => {
+    const gh = fakeGitHub();
+    const recipes = [
+      {
+        name: "containers",
+        resourceType: "Radius.Compute/containers",
+        templateKind: "bicep",
+        templatePath: "ghcr.io/...",
+        concreteResources: [
+          {
+            name: "deployment",
+            type: "apps/Deployment",
+            provider: "kubernetes",
+            displayType: "Deployment"
+          }
+        ]
+      }
+    ];
+
+    const resolved = await resolveRecipeOutputs(
+      gh,
+      [{ name: "api", type: "Radius.Compute/containers" }],
+      recipes,
+      "kubernetes"
+    );
+
+    expect(resolved[0].outputResources[0].displayType).toBe("Deployment (K8s)");
+  });
+
+  it("preserves every field of the app resource on the planned entry", async () => {
+    const gh = fakeGitHub();
+    const appResource = {
+      id: "/planes/radius/local/resourcegroups/default/providers/Radius.Compute/containers/api",
+      name: "api",
+      type: "Radius.Compute/containers@2025-08-01-preview",
+      connections: [{ id: "db", direction: "Outbound" }],
+      diffHash: `sha256:${"a".repeat(64)}`
+    };
+
+    const resolved = await resolveRecipeOutputs(gh, [appResource], [], "azure");
+
+    expect(resolved[0]).toMatchObject({
+      id: appResource.id,
+      name: "api",
+      connections: appResource.connections,
+      diffHash: appResource.diffHash
+    });
+  });
+
+  it("returns an empty list for no app resources", async () => {
+    expect(await resolveRecipeOutputs(fakeGitHub(), [], [], "azure")).toEqual(
+      []
+    );
+  });
 });

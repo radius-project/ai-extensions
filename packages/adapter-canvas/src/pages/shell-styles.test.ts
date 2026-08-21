@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SHELL_STYLE_CSS } from "./shell-styles.js";
+import { CRITICAL_SHELL_STYLE_CSS, SHELL_STYLE_CSS } from "./shell-styles.js";
 
 type Rgb = [number, number, number];
 
@@ -64,6 +64,47 @@ const hostStatusColors = {
 
 const statuses = ["success", "warning", "danger"] as const;
 
+describe("document canvas background", () => {
+  it("paints the host background before the full shell stylesheet loads", () => {
+    expect(CRITICAL_SHELL_STYLE_CSS).toContain(
+      "background: var(--background-color-default, Canvas)"
+    );
+  });
+
+  it("paints both document roots with the host background during navigation", () => {
+    const documentRootStyles = SHELL_STYLE_CSS.match(
+      /html, body\s*\{([^}]*)\}/
+    )?.[1];
+
+    expect(documentRootStyles).toContain("background: var(--rad-bg)");
+  });
+});
+
+describe("busy pane affordance", () => {
+  const busyStyles = SHELL_STYLE_CSS.match(
+    /\.main-content\[aria-busy="true"\]\s*\{([^}]*)\}/
+  )?.[1];
+
+  it("dims the outgoing pane it makes inert so it reads as unavailable", () => {
+    expect(busyStyles).toContain("opacity: 0.55");
+    expect(busyStyles).toContain("cursor: progress");
+  });
+
+  it("delays the dim so a fast pane swap never flickers", () => {
+    expect(busyStyles).toContain("transition: opacity 120ms linear 200ms");
+  });
+
+  it("drops the transition under a reduced-motion preference", () => {
+    const reducedMotion = SHELL_STYLE_CSS.slice(
+      SHELL_STYLE_CSS.indexOf("@media (prefers-reduced-motion: reduce)")
+    );
+
+    expect(reducedMotion).toContain(
+      '.main-content[aria-busy="true"] { transition: none; }'
+    );
+  });
+});
+
 describe("status color tokens", () => {
   const cases = statuses.flatMap((status) =>
     Object.entries(palettes).flatMap(([canvas, palette]) =>
@@ -108,5 +149,11 @@ describe("status color tokens", () => {
     expect(SHELL_STYLE_CSS).toContain(
       `--rad-${status}-bg: color-mix(in srgb, var(--rad-${status})`
     );
+  });
+});
+
+describe("resource table status styles", () => {
+  it("does not define decorative colored status circles", () => {
+    expect(SHELL_STYLE_CSS).not.toContain(".rad-dot");
   });
 });

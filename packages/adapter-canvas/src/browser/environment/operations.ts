@@ -10,6 +10,7 @@
 
 import { setChildren } from "../dom.js";
 import { beginEntry } from "../lifecycle.js";
+import { formatElapsed, stageGlyph } from "../progress-format.js";
 import {
   isRecord,
   readBoolean,
@@ -57,15 +58,6 @@ export const PROGRESS_IDS = {
   cleanupWarningsList: "env-progress-cleanup-warnings",
   cleanupWarningsBlock: "env-progress-cleanup-warnings-block"
 } as const;
-
-const STAGE_GLYPH: Readonly<Record<string, string>> = {
-  pending: "○",
-  running: "◐",
-  succeeded: "✓",
-  warning: "⚠",
-  failed: "✗",
-  skipped: "–"
-};
 
 const TERMINAL_STATES: ReadonlySet<string> = new Set([
   "succeeded",
@@ -444,15 +436,8 @@ function parseResumeFailure(payload: unknown): OperationResumeError {
   return new OperationResumeError(message, retryPrompt, operation);
 }
 
-export function formatElapsed(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const mins = Math.floor(total / 60);
-  const secs = total % 60;
-  return `${mins}:${secs < 10 ? "0" : ""}${secs}`;
-}
-
 function stageSpec(stage: OperationStageOrStep): ElementSpec {
-  const glyph = STAGE_GLYPH[stage.state] ?? "○";
+  const glyph = stageGlyph(stage.state);
   return {
     tag: "li",
     className: `env-progress__stage env-progress__stage--${stage.state}`,
@@ -469,7 +454,7 @@ function stageSpec(stage: OperationStageOrStep): ElementSpec {
 }
 
 function stepSpec(step: OperationStageOrStep): ElementSpec {
-  const glyph = STAGE_GLYPH[step.state] ?? "·";
+  const glyph = stageGlyph(step.state, "·");
   return {
     tag: "li",
     className: `env-progress__step env-progress__step--${step.state}`,
