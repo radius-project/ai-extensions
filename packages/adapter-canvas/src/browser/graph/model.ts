@@ -458,9 +458,9 @@ export function radiusFormatTypeLabel(type?: string): string {
   return ns + "/" + name;
 }
 
-// Planned nodes keep the modeled graph's names and topology, but show the
-// concrete resource type selected by the recipe pack. Preserve the provider
-// namespace so users can see the exact deployment target.
+// Planned and deployed nodes keep the modeled graph's names and topology, but
+// show a concrete resource type selected from explicit recipe/deployment
+// outputs. Preserve the provider namespace so users can see the exact target.
 export function radiusFormatResolvedTypeLabel(type?: string): string {
   return type ? String(type).split("@")[0] : "";
 }
@@ -486,6 +486,7 @@ const RADIUS_SUPPORTING_OUTPUT_KINDS: Record<string, boolean> = {
   networkpolicy: true,
   persistentvolumeclaim: true,
   endpoints: true,
+  locks: true,
   roleassignments: true,
   privateendpoints: true,
   privatednszones: true,

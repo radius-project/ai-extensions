@@ -188,13 +188,15 @@ const productionHandlers = {
       graph: () => Promise.resolve({ graph: null, status: "missing" }),
       progress: () => Promise.resolve(null)
     }),
+    loadModeledGraph: () => Promise.resolve({ status: 200 }),
     buildDeployStatusMap: () => new Map(),
     buildDeployMessageMap: () => new Map(),
     deployStatusKeys: () => [],
+    mergeDeployedGraphMetadata: (modeled) => modeled,
     projectDeployedGraph: () => [],
     canvasGraphResources: () => [],
     applyDeployMessages: () => {},
-    record: () => ({}),
+    settleDeployStatuses: () => {},
     errorMessage: (error) => String(error),
     repoMatchesWorkspace: () => false,
     now: () => 0
