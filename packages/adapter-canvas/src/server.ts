@@ -191,7 +191,8 @@ import {
   extractRadDeployError,
   explainOidcEnterpriseClaim,
   explainNoSubscriptions,
-  explainRepoAccessForEnvSetup
+  explainRepoAccessForEnvSetup,
+  isSelectedGhAuthorizationError
 } from "./deploy.js";
 import {
   applyDeployMessages,
@@ -1104,6 +1105,8 @@ const environmentsRoutes = createEnvironmentsRoutes({
   getOperation: (operationId) => operations.get(operationId),
   getSelectedGitHubExecutor: (operationId) =>
     selectedGitHubExecutorsByOperation.get(operationId),
+  isSelectedGitHubAuthorizationError: (error) =>
+    isSelectedGhAuthorizationError(error),
   hasCompleteVerificationIdentity,
   findWorkflowRun: (repo, workflowFile, sinceMs, knownId, executor) =>
     findWorkflowRun(repo, workflowFile, sinceMs, knownId, executor),

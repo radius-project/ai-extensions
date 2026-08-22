@@ -131,6 +131,7 @@ export interface EnvironmentsDependencies {
   getSelectedGitHubExecutor(
     operationId: string
   ): SelectedGhExecutor | null | undefined;
+  isSelectedGitHubAuthorizationError(error: unknown): boolean;
   hasCompleteVerificationIdentity(operation: unknown): boolean;
   findWorkflowRun(
     repo: string,

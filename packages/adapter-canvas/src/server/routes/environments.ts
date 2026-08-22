@@ -745,6 +745,52 @@ export async function handleVerifyStatus(
     }
     respond({ state: "failed", runId, runUrl, error: errMsg });
   } catch (e) {
+    const failedOperation: any =
+      operationId ? dependencies.getOperation(operationId) : null;
+    const failedExecutor =
+      operationId ?
+        dependencies.getSelectedGitHubExecutor(operationId) || undefined
+      : undefined;
+    const failedLogin =
+      typeof failedOperation?.context?.githubLogin === "string" ?
+        failedOperation.context.githubLogin.trim()
+      : "";
+    if (
+      failedOperation &&
+      failedExecutor &&
+      dependencies.isSelectedGitHubAuthorizationError(e)
+    ) {
+      const account = failedLogin ? `@${failedLogin}` : "the selected account";
+      const message = `Radius could not use ${account} to monitor credential verification. Re-check that account and retry verification.`;
+      dependencies.addLegacyStep(
+        failedOperation,
+        `❌ Could not use ${account} to monitor credential verification.`
+      );
+      dependencies.finish(failedOperation, "failed_partial", {
+        failure: {
+          code: "verification-retry-github-account-unavailable",
+          stage: dependencies.stageVerify,
+          stepSeq: null,
+          message,
+          classification: "user-fixable",
+          evidence: dependencies.errorMessage(e)
+        }
+      });
+      await dependencies.persistBestEffort({
+        operation: failedOperation,
+        persist: () => dependencies.persistOperations(),
+        report: (diagnostic) =>
+          dependencies.reportOperationDiagnostic(diagnostic)
+      });
+      respond({
+        state: "failed",
+        terminal: true,
+        code: "verification-retry-github-account-unavailable",
+        runId: failedOperation?.verification?.runId || null,
+        error: message
+      });
+      return;
+    }
     respond({ state: "unknown", error: dependencies.errorMessage(e) });
   }
 }

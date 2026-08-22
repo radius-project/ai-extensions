@@ -288,6 +288,7 @@ const productionHandlers = {
     now: () => 0,
     getOperation: () => null,
     getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
+    isSelectedGitHubAuthorizationError: () => false,
     hasCompleteVerificationIdentity: () => false,
     findWorkflowRun: () => Promise.resolve(null),
     getRunDetail: () => Promise.resolve(null),

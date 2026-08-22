@@ -56,6 +56,28 @@ interface WorkflowRunDetail extends WorkflowRun {
   steps: WorkflowStep[];
 }
 
+export class SelectedGhAuthorizationError extends Error {
+  readonly login: string;
+  readonly status: 401 | 403;
+
+  constructor(login: string, status: 401 | 403, detail: string) {
+    super(
+      `GitHub rejected @${login} while reading workflow state (HTTP ${status})${
+        detail ? `: ${detail}` : "."
+      }`
+    );
+    this.name = "SelectedGhAuthorizationError";
+    this.login = login;
+    this.status = status;
+  }
+}
+
+export function isSelectedGhAuthorizationError(
+  error: unknown
+): error is SelectedGhAuthorizationError {
+  return error instanceof SelectedGhAuthorizationError;
+}
+
 interface RepoPermissions {
   admin?: boolean;
   maintain?: boolean;
@@ -93,6 +115,42 @@ function parseWorkflowRun(value: unknown): WorkflowRun | null {
   };
 }
 
+function selectedAuthorizationStatus(
+  stdout: string,
+  stderr: string
+): 401 | 403 | null {
+  const match = /\bHTTP\s+(401|403)\b/i.exec(`${stderr}\n${stdout}`);
+  if (!match) return null;
+  return match[1] === "401" ? 401 : 403;
+}
+
+function selectedAuthorizationError(
+  executor: SelectedGhExecutor,
+  stdout: string,
+  stderr: string
+): SelectedGhAuthorizationError | null {
+  const status = selectedAuthorizationStatus(stdout, stderr);
+  return status === null ? null : (
+      new SelectedGhAuthorizationError(
+        executor.login,
+        status,
+        (stderr || stdout).trim()
+      )
+    );
+}
+
+function rejectedSelectedAuthorizationError(
+  executor: SelectedGhExecutor,
+  error: unknown
+): SelectedGhAuthorizationError | null {
+  if (isSelectedGhAuthorizationError(error)) return error;
+  const detail = executor.errorMessage(error);
+  const status = selectedAuthorizationStatus("", detail);
+  return status === null ? null : (
+      new SelectedGhAuthorizationError(executor.login, status, detail)
+    );
+}
+
 export function ghJson(
   args: string[],
   fallback: unknown = null,
@@ -100,14 +158,32 @@ export function ghJson(
   executor?: SelectedGhExecutor
 ): Promise<unknown> {
   if (executor) {
-    return executor.run(args, { timeout }).then((result) => {
-      if (result.code !== 0) return fallback;
-      try {
-        return JSON.parse(result.stdout.trim());
-      } catch {
-        return fallback;
-      }
-    });
+    return executor
+      .run(args, { timeout })
+      .then((result) => {
+        if (Number(result.code) !== 0) {
+          const authorizationError = selectedAuthorizationError(
+            executor,
+            result.stdout,
+            result.stderr
+          );
+          if (authorizationError) throw authorizationError;
+          return fallback;
+        }
+        try {
+          return JSON.parse(result.stdout.trim());
+        } catch {
+          return fallback;
+        }
+      })
+      .catch((error: unknown) => {
+        const authorizationError = rejectedSelectedAuthorizationError(
+          executor,
+          error
+        );
+        if (authorizationError) throw authorizationError;
+        throw error;
+      });
   }
   return new Promise((resolve) => {
     cliExec("gh", args, { timeout }, (err, stdout) => {
@@ -313,9 +389,26 @@ export function fetchRunLog(
         timeout: 30000,
         maxBuffer: 1024 * 1024 * 20
       })
-      .then((result) =>
-        result.code === 0 && result.stdout ? result.stdout : null
-      );
+      .then((result) => {
+        if (Number(result.code) !== 0) {
+          const authorizationError = selectedAuthorizationError(
+            executor,
+            result.stdout,
+            result.stderr
+          );
+          if (authorizationError) throw authorizationError;
+          return null;
+        }
+        return result.stdout || null;
+      })
+      .catch((error: unknown) => {
+        const authorizationError = rejectedSelectedAuthorizationError(
+          executor,
+          error
+        );
+        if (authorizationError) throw authorizationError;
+        throw error;
+      });
   }
   return new Promise((resolve) => {
     cliExec(

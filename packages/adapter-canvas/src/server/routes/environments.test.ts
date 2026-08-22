@@ -28,6 +28,10 @@ import {
   finishSucceeded as finishSetupSucceeded,
   isTerminalState as isSetupTerminalState
 } from "../../operations.js";
+import {
+  isSelectedGhAuthorizationError,
+  SelectedGhAuthorizationError
+} from "../../deploy.js";
 import { createTestRouteTable } from "../../../test/support/server/route-table.js";
 
 interface Recording {
@@ -118,6 +122,7 @@ function deps(
     now: unset("now") as never,
     getOperation: unset("getOperation") as never,
     getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
+    isSelectedGitHubAuthorizationError: () => false,
     hasCompleteVerificationIdentity: unset(
       "hasCompleteVerificationIdentity"
     ) as never,
@@ -1040,6 +1045,153 @@ describe("environments — verify-status", () => {
       state: "pending",
       runId: "55"
     });
+  });
+
+  it.each([
+    {
+      phase: "run discovery",
+      status: 401 as const,
+      runId: null,
+      findWorkflowRun: () =>
+        Promise.reject(
+          new SelectedGhAuthorizationError(
+            "alice",
+            401,
+            "gh: Unauthorized (HTTP 401)"
+          )
+        ),
+      getRunDetail: () => {
+        throw new Error("run detail must not be read");
+      }
+    },
+    {
+      phase: "run detail",
+      status: 403 as const,
+      runId: "55",
+      findWorkflowRun: () => {
+        throw new Error("known run must not be discovered");
+      },
+      getRunDetail: () =>
+        Promise.reject(
+          new SelectedGhAuthorizationError(
+            "alice",
+            403,
+            "gh: Forbidden (HTTP 403)"
+          )
+        )
+    }
+  ])(
+    "terminalizes selected-account $phase authorization failure immediately",
+    async ({ status, runId, findWorkflowRun, getRunDetail }) => {
+      const operation: any = {
+        operationId: "op1",
+        repo: "o/r",
+        environment: "dev",
+        state: "running",
+        currentStage: "verify",
+        context: { githubLogin: "alice" },
+        verification: {
+          dispatchedAt: 123,
+          workflow: "verify.yml",
+          ref: "main",
+          environment: "dev",
+          runId
+        }
+      };
+      const steps: string[] = [];
+      const persistOperations = vi.fn(() => Promise.resolve());
+      const { recording, ctx } = context(
+        "GET",
+        "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
+      );
+
+      await handleVerifyStatus(
+        ctx,
+        deps({
+          readInstanceEntry: () => undefined,
+          getOperation: () => operation,
+          getSelectedGitHubExecutor: () =>
+            successfulSelectedGhExecutor({ login: "alice" }),
+          isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+          hasCompleteVerificationIdentity: () => true,
+          findWorkflowRun,
+          getRunDetail,
+          addLegacyStep: (_operation, text) => {
+            steps.push(text);
+          },
+          finish: (target: any, state, options: any) => {
+            target.state = state;
+            target.endedAt = "finished";
+            target.failure = options.failure;
+          },
+          persistBestEffort,
+          persistOperations,
+          reportOperationDiagnostic: () => {}
+        })
+      );
+
+      expect(JSON.parse(recording.body)).toEqual({
+        state: "failed",
+        terminal: true,
+        code: "verification-retry-github-account-unavailable",
+        runId,
+        error:
+          "Radius could not use @alice to monitor credential verification. Re-check that account and retry verification."
+      });
+      expect(operation).toMatchObject({
+        state: "failed_partial",
+        failure: {
+          code: "verification-retry-github-account-unavailable",
+          evidence: expect.stringContaining(`HTTP ${status}`)
+        }
+      });
+      expect(steps).toEqual([
+        "❌ Could not use @alice to monitor credential verification."
+      ]);
+      expect(persistOperations).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it("keeps a selected-account transient discovery failure pollable", async () => {
+    const operation = {
+      operationId: "op1",
+      repo: "o/r",
+      environment: "dev",
+      state: "running",
+      currentStage: "verify",
+      context: { githubLogin: "alice" },
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "main",
+        environment: "dev",
+        runId: null
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
+    );
+
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => operation,
+        getSelectedGitHubExecutor: () =>
+          successfulSelectedGhExecutor({ login: "alice" }),
+        isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+        hasCompleteVerificationIdentity: () => true,
+        findWorkflowRun: () =>
+          Promise.reject(new Error("gh: Service Unavailable (HTTP 503)"))
+      })
+    );
+
+    expect(JSON.parse(recording.body)).toEqual({
+      state: "unknown",
+      error: "gh: Service Unavailable (HTTP 503)"
+    });
+    expect(operation.state).toBe("running");
   });
 
   it("uses legacy ambient verification for pre-pinning operations", async () => {
