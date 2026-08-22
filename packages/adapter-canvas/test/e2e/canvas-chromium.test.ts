@@ -286,7 +286,7 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(documentNavigations).toBe(0);
   });
 
-  test("swaps environment sub-tabs in place and leaves graph sub-tabs to the graph navigator", async ({
+  test("swaps sub-tabs in place and preserves keyboard-only graph focus", async ({
     page,
     canvas
   }) => {
@@ -314,14 +314,24 @@ test.describe("Radius Canvas in Chromium", () => {
 
     // Graph sub-tabs carry data-radius-graph-page and stay owned by the graph
     // navigator, so pane navigation must not also handle the click.
-    await page
-      .locator('#graph-nav a[data-radius-graph-page="planned"]')
-      .click();
+    const planned = page.locator(
+      '#graph-nav a[data-radius-graph-page="planned"]'
+    );
+    await planned.click();
     await expect(page).toHaveURL(/page=planned/);
     await expect(page.locator("#graph-page-content")).toBeVisible();
     await expect(page.locator("#graph-nav a.rad-subtab--active")).toHaveText(
       "Planned"
     );
+    await expect(planned).not.toBeFocused();
+
+    const modeled = page.locator(
+      '#graph-nav a[data-radius-graph-page="graph"]'
+    );
+    await modeled.focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/page=graph/);
+    await expect(modeled).toBeFocused();
 
     expect(documentNavigations).toBe(0);
   });
