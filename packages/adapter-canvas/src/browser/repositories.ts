@@ -96,6 +96,7 @@ export type EnvironmentProviders = Record<string, unknown>;
 export interface PlanState {
   hasEnv: boolean;
   envsStale: boolean;
+  selectorsPending: boolean;
   deploymentsStale: boolean;
   deploymentsPending: boolean;
   planPending: boolean;
@@ -108,6 +109,7 @@ export function createPlanState(): PlanState {
   return {
     hasEnv: false,
     envsStale: false,
+    selectorsPending: false,
     deploymentsStale: false,
     deploymentsPending: false,
     planPending: false,
@@ -541,12 +543,13 @@ export interface PlannedSelectorOptions {
   environmentProviders: EnvironmentProviders;
   defaultBranch?: string;
   defaultEnvironment?: string;
+  onSelectorsReady?: () => void;
 }
 
 // Populate the Application / Branch / Environment selectors on the Planned
-// pane. The button and hint state is applied only after the application and
-// environment lists have both settled, so the hint can name the selection
-// instead of falling back to generic text.
+// pane. The button and hint state is applied only after all selector listings
+// have settled, so the hint can name the selection instead of falling back to
+// generic text.
 export function populatePlannedSelectors(
   context: BrowserContext,
   state: PlanState,
@@ -562,8 +565,10 @@ export function populatePlannedSelectors(
     if (appSelect) dom.setOptions(appSelect, empty);
     if (branchSelect) dom.setOptions(branchSelect, empty);
     if (envSelect) dom.setOptions(envSelect, empty);
+    state.selectorsPending = false;
     return Promise.resolve();
   }
+  state.selectorsPending = true;
 
   const appPromise =
     appSelect ?
@@ -653,35 +658,42 @@ export function populatePlannedSelectors(
         })
     : Promise.resolve();
 
+  let selectorsSettled = false;
+  if (appSelect && envSelect) state.deploymentsPending = true;
   const deploymentsPromise =
     appSelect && envSelect ?
-      ((): Promise<void> => {
-        state.deploymentsPending = true;
-        return getJson(
-          context,
-          `${DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}&fresh=1`
-        )
-          .then((payload) => {
-            const listing = parseRequiredDeploymentListing(payload);
-            if (listing.error !== "") {
-              state.deploymentsStale = true;
-              return;
-            }
-            state.deploymentsStale = false;
-            state.deploymentStatuses = {};
-            for (const deployment of listing.deployments) {
-              state.deploymentStatuses[
-                deploymentKey(deployment.app, deployment.environment)
-              ] = deployment.status;
-            }
-          })
-          .catch(() => {
+      getJson(
+        context,
+        `${DEPLOYMENTS_PATH}?repo=${encodeURIComponent(repo)}&fresh=1`
+      )
+        .then((payload) => {
+          const listing = parseRequiredDeploymentListing(payload);
+          if (listing.error !== "") {
             state.deploymentsStale = true;
-          })
-          .then(() => {
-            state.deploymentsPending = false;
-          });
-      })()
+            return;
+          }
+          state.deploymentsStale = false;
+          state.deploymentStatuses = {};
+          for (const deployment of listing.deployments) {
+            state.deploymentStatuses[
+              deploymentKey(deployment.app, deployment.environment)
+            ] = deployment.status;
+          }
+        })
+        .catch(() => {
+          state.deploymentsStale = true;
+        })
+        .then(() => {
+          state.deploymentsPending = false;
+          if (selectorsSettled) {
+            applyPlanEnvState(
+              context,
+              state,
+              hasEnvironments,
+              environmentsUnavailable
+            );
+          }
+        })
     : Promise.resolve();
 
   // Environment availability is settled as soon as the selectors themselves are
@@ -694,12 +706,15 @@ export function populatePlannedSelectors(
     branchPromise,
     envPromise
   ]).then(() => {
+    selectorsSettled = true;
+    state.selectorsPending = false;
     applyPlanEnvState(context, state, hasEnvironments, environmentsUnavailable);
+    options.onSelectorsReady?.();
   });
 
-  return Promise.all([selectorsReady, deploymentsPromise]).then(() => {
-    applyPlanEnvState(context, state, hasEnvironments, environmentsUnavailable);
-  });
+  return Promise.all([selectorsReady, deploymentsPromise]).then(
+    () => undefined
+  );
 }
 
 function readQueryParameter(search: string, name: string): string {
@@ -752,6 +767,14 @@ export function applyPlanEnvState(
         "title",
         "Environments could not be loaded. Try again before deploying."
       );
+    } else if (state.selectorsPending) {
+      button.dataset.mode = "deploy";
+      button.textContent = "Deploy Application";
+      button.disabled = true;
+      button.setAttribute(
+        "title",
+        "Application, branch, and environment selections are still loading."
+      );
     } else if (hasEnv) {
       button.dataset.mode = "deploy";
       button.textContent = "Deploy Application";
@@ -785,11 +808,6 @@ export function applyPlanEnvState(
           "title",
           "Deployment states are still loading. Deployment is available once they arrive."
         );
-      } else if (state.planPending) {
-        button.setAttribute(
-          "title",
-          "The deployment plan is still updating. Deployment is available once it finishes."
-        );
       } else if (state.deploymentsStale) {
         button.setAttribute(
           "title",
@@ -799,6 +817,11 @@ export function applyPlanEnvState(
         button.setAttribute(
           "title",
           `A deployment of application "${application}" to environment "${environment}" is already in progress. Wait for it to finish before deploying again.`
+        );
+      } else if (state.planPending) {
+        button.setAttribute(
+          "title",
+          "The deployment plan is still updating. Deployment is available once it finishes."
         );
       } else if (state.requestFailed) {
         button.disabled = true;
@@ -818,6 +841,9 @@ export function applyPlanEnvState(
     if (statesUnavailable) {
       hint.textContent =
         " Environments could not be loaded, so deployment planning is temporarily unavailable.";
+    } else if (state.selectorsPending) {
+      hint.textContent =
+        " Application, branch, and environment selections are still loading, so deployment planning is temporarily unavailable.";
     } else if (hasEnv) {
       const appName = application || "this application";
       const envName = environment || "the selected environment";
@@ -826,12 +852,12 @@ export function applyPlanEnvState(
           ` The environment (<strong>${escapeBrowserHtml(envName)}</strong>) ${environmentNotReadyPhrase(environmentStatus)}, so it cannot be deployed to yet.`
         : state.deploymentsPending ?
           " Deployment states are still loading, so deployment is temporarily unavailable."
-        : state.planPending ?
-          " The deployment plan is still updating, so deployment is temporarily unavailable."
         : state.deploymentsStale ?
           " Deployment states could not be loaded, so deployment is temporarily unavailable."
         : deploymentBlocked ?
           ` A deployment of this application (<strong>${escapeBrowserHtml(appName)}</strong>) to the environment (<strong>${escapeBrowserHtml(envName)}</strong>) is already in progress. Watch its progress on the Deployments tab.`
+        : state.planPending ?
+          " The deployment plan is still updating, so deployment is temporarily unavailable."
         : ` To deploy this application (<strong>${escapeBrowserHtml(appName)}</strong>) to the environment (<strong>${escapeBrowserHtml(envName)}</strong>), click "Deploy Application".`;
     } else {
       hint.textContent =

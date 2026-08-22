@@ -800,6 +800,7 @@ describe("planned selectors", () => {
     });
 
     expect(state.deploymentsStale).toBe(true);
+    expect(state.deploymentsPending).toBe(false);
     expect(button.disabled).toBe(true);
     expect(button.getAttribute("title")).toContain(
       "Deployment states could not be loaded"
@@ -1181,6 +1182,7 @@ describe("planned primary button state", () => {
 
   function readyPlanState(environment = "dev") {
     const state = createPlanState();
+    state.selectorsPending = false;
     state.environmentStatuses[environment] = "success";
     return state;
   }

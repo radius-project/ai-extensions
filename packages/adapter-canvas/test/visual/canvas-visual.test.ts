@@ -286,7 +286,7 @@ async function openEnvironmentCreateForm(page: Page): Promise<void> {
 async function routeDeployments(
   page: Page,
   canvas: CanvasHarness,
-  status: "failed" | "success"
+  status?: "failed" | "success"
 ): Promise<void> {
   await page.route(
     `${canvas.baseUrl}/api/list-deployments?*`,
@@ -294,14 +294,17 @@ async function routeDeployments(
       await route.fulfill({
         contentType: "application/json",
         body: JSON.stringify({
-          deployments: [
-            {
-              app: "radius-app",
-              environment: "fixture-environment",
-              status,
-              runUrl: `https://github.com/${REPOSITORY}/actions/runs/1`
-            }
-          ]
+          deployments:
+            status ?
+              [
+                {
+                  app: "radius-app",
+                  environment: "fixture-environment",
+                  status,
+                  runUrl: `https://github.com/${REPOSITORY}/actions/runs/1`
+                }
+              ]
+            : []
         })
       });
     }
@@ -371,15 +374,7 @@ async function routeGraphControls(
   // The Planned pane reads deployment states before it opens its deploy
   // action, so leaving this route to the real server would make the captured
   // button state depend on the host the run happens to use.
-  await page.route(
-    `${canvas.baseUrl}/api/list-deployments?*`,
-    async (route) => {
-      await route.fulfill({
-        contentType: "application/json",
-        body: JSON.stringify({ deployments: [] })
-      });
-    }
-  );
+  await routeDeployments(page, canvas);
   return { loadGraph, planGraph };
 }
 

@@ -76,11 +76,12 @@ function fixture(options: FixtureOptions = {}) {
   const environmentSelect = createFakeSelect("planned-env");
   environmentSelect.value = environment;
   const button = createFakeInput("plan-btn");
+  const hint = createFakeElement("planned-subtitle-hint");
   const status = createFakeElement("plan-status");
   const container = createFakeElement("graph-container");
   const wrapper = createFakeElement("graph-container-wrapper");
   const progressHost = createFakeElement("progress-steps");
-  const elements = [state, progressHost];
+  const elements = [state, hint, progressHost];
   if (withContainer) elements.push(container);
   if (withApp) elements.push(app);
   if (withBranch) elements.push(branch);
@@ -129,6 +130,7 @@ function fixture(options: FixtureOptions = {}) {
     branch,
     environment: environmentSelect,
     button,
+    hint,
     status,
     container,
     wrapper,
@@ -429,6 +431,50 @@ describe("initializePlannedGraphPage", () => {
     await flushPromises();
   });
 
+  it("defers a selection made while environments are loading and plans it once selectors are ready", async () => {
+    const { browser, branch, button, status, container } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    const environments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      "/api/list-environments?repo=octo%2Fapp",
+      () => environments.promise
+    );
+    browser.net.handle("/api/plan-graph", () => jsonResponse({ reload: true }));
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(
+      browser.net.calls.filter((call) => call.url === "/api/plan-graph")
+    ).toHaveLength(0);
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "selections are still loading"
+    );
+    expect(status.textContent).not.toContain("Create an environment");
+    expect(container.innerHTML).not.toContain("Create an environment");
+
+    environments.resolve(
+      jsonResponse({
+        environments: [{ name: "dev", provider: "azure", status: "success" }]
+      })
+    );
+    await flushPromises();
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    const planCalls = browser.net.calls.filter(
+      (call) => call.url === "/api/plan-graph"
+    );
+    expect(planCalls).toHaveLength(1);
+    expect(planCalls[0]?.init?.body).toContain('"branch":"another"');
+  });
+
   it("polls progress immediately and then per interval, ignoring a late message", async () => {
     const { browser, status } = fixture();
     const plan = createDeferred<HttpResponse>();
@@ -697,7 +743,7 @@ describe("initializePlannedGraphPage", () => {
   });
 
   it("keeps deployment closed when deployment states resolve during the plan debounce", async () => {
-    const { browser, button, branch } = fixture({
+    const { browser, button, branch, hint } = fixture({
       resources: [{ id: "app/web" }]
     });
     const deployments = createDeferred<HttpResponse>();
@@ -718,6 +764,9 @@ describe("initializePlannedGraphPage", () => {
     expect(button.getAttribute("title")).toContain(
       "deployment plan is still updating"
     );
+    expect(hint.innerHTML).toContain(
+      "deployment plan is still updating, so deployment is temporarily unavailable"
+    );
 
     browser.clock.tick(PLAN_DEBOUNCE_MS);
     await flushPromises();
@@ -725,7 +774,7 @@ describe("initializePlannedGraphPage", () => {
   });
 
   it("keeps deployment closed when deployment states resolve during an active plan", async () => {
-    const { browser, button, branch } = fixture({
+    const { browser, button, branch, hint } = fixture({
       resources: [{ id: "app/web" }]
     });
     const deployments = createDeferred<HttpResponse>();
@@ -749,6 +798,9 @@ describe("initializePlannedGraphPage", () => {
     expect(button.disabled).toBe(true);
     expect(button.getAttribute("title")).toContain(
       "deployment plan is still updating"
+    );
+    expect(hint.innerHTML).toContain(
+      "deployment plan is still updating, so deployment is temporarily unavailable"
     );
 
     plan.resolve(jsonResponse({ reload: true }));
