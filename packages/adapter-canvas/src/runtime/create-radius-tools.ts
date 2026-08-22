@@ -9,6 +9,11 @@ import {
 } from "@radius-project/core";
 import { errorMessage } from "./util.js";
 import { createGraphContextHelpers } from "./graph-context.js";
+import {
+  failedGraphDiffResult,
+  successfulGraphDiffResult,
+  unavailableGraphDiffResult
+} from "./pr-graph-diff-result.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
 
@@ -126,7 +131,9 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
           ]);
 
           if (!baseContent && !headContent) {
-            return `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch, so author it with the Radius app-bicep skill (run the radius_generate_app tool) and make sure each branch you are comparing contains the committed file, then re-run this tool.`;
+            return unavailableGraphDiffResult(
+              `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
+            );
           }
 
           const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
@@ -180,30 +187,40 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
             baseResources,
             headResources
           );
-          return deps.renderPrDiffMarkdown(
-            diffResources,
-            baseBranch,
-            headBranch
+          return successfulGraphDiffResult(
+            deps.renderPrDiffMarkdown(diffResources, baseBranch, headBranch)
           );
         } catch (err) {
-          return `⚠️ Could not generate app graph diff: ${errorMessage(err)}`;
+          return failedGraphDiffResult(
+            `Could not generate app graph diff: ${errorMessage(err)}`
+          );
         }
       }
     },
     {
       ...declarationByName.get("radius_publish_custom_type_extension")!,
+      // Modeling now writes its whole run into `.radius/.staging-<runId>/` and
+      // publishes it only once it is complete, so the custom-type package this
+      // tool produces has to land there with the rest of the run rather than in
+      // `.radius/` where the product reads it. `stagingDir` moves the defaults
+      // into that directory; path confinement is unchanged, and the staging
+      // directory is itself confined to a `.staging-*` child of `.radius/`.
       handler: async (args: ToolArgs) => {
         try {
           const { workspacePath } = await workspaceState();
+          const stagingPrefix = deps.publishTargets.resolveStagingDirPrefix(
+            workspacePath,
+            args.stagingDir
+          );
           const fromFile = deps.publishTargets.resolveExistingRadiusArtifact(
             workspacePath,
             args.manifestPath,
-            ".radius/custom-types.yaml"
+            `.radius/${stagingPrefix}custom-types.yaml`
           );
           const target = deps.publishTargets.resolveRadiusArtifactTarget(
             workspacePath,
             args.targetPath,
-            ".radius/custom-types.tgz"
+            `.radius/${stagingPrefix}custom-types.tgz`
           );
           if (!deps.process.existsSync(fromFile)) {
             return `Resource-type manifest not found at ${fromFile}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;

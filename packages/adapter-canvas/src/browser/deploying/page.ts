@@ -7,13 +7,7 @@
 
 import { createDeleteDeploymentDialog } from "../delete-dialog.js";
 import { escapeBrowserHtml } from "../html.js";
-import {
-  isRecord,
-  readArray,
-  readBoolean,
-  readRecord,
-  readString
-} from "../json.js";
+import { isRecord, readBoolean, readRecord, readString } from "../json.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";
 import { DEPLOYING_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
@@ -21,14 +15,18 @@ import {
   APPLICATIONS_PATH,
   BRANCHES_PATH,
   DEFAULT_APP_FILE,
+  DEPLOYMENTS_PATH,
   DEPLOY_PATH,
   ENVIRONMENTS_PATH,
   WORKTREE_SHA,
   buildEnvironmentOptions,
   environmentAllowsDeploy,
   environmentNotReadyReason,
+  deploymentKey,
+  deploymentStatusBlocksMutation,
   parseApplicationListing,
   parseBranchListing,
+  parseDeploymentListing,
   parseEnvironmentListing
 } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
@@ -40,12 +38,16 @@ import type {
   OptionSpec
 } from "../ports.js";
 
-import type { ApplicationInfo, BranchListing } from "../repositories.js";
+import type {
+  ApplicationInfo,
+  BranchListing,
+  DeploymentInfo
+} from "../repositories.js";
 
 const ENTRY_KEY = "deploying-page";
 
 export { DEPLOYING_PAGE_STATE_ID };
-export const LIST_DEPLOYMENTS_PATH = "/api/list-deployments";
+export const LIST_DEPLOYMENTS_PATH = DEPLOYMENTS_PATH;
 export const DELETE_DEPLOYMENT_PATH = "/api/delete-deployment";
 export const DEPLOY_STATUS_PATH = "/api/deploy-status";
 
@@ -81,12 +83,7 @@ export interface DeployingPageOptions {
   branch: string;
 }
 
-export interface DeploymentRecord {
-  app: string;
-  environment: string;
-  status: string;
-  runUrl: string;
-}
+export type DeploymentRecord = DeploymentInfo;
 
 interface DeploymentRow extends DeploymentRecord {
   synthetic: boolean;
@@ -155,22 +152,17 @@ function release(registrations: Registration[]): void {
 // an in-flight operation on one pair can never be mistaken for, or clobber,
 // the state of a different app/environment pair.
 export function opKey(app: string, environment: string): string {
-  return `${app}\u0000${environment}`;
-}
-
-function envIsBlocked(status: string): boolean {
-  return status === "pending" || status === "deleting";
+  return deploymentKey(app, environment);
 }
 
 export function deploymentStatusMarkup(status: string): string {
-  const mapped: Record<string, readonly [string, string]> = {
-    success: ["success", "Success"],
-    failed: ["failed", "Failed"],
-    pending: ["pending", "Pending"],
-    deleting: ["deleting", "Deleting…"]
+  const labels: Record<string, string> = {
+    success: "Success",
+    failed: "Failed",
+    pending: "Pending",
+    deleting: "Deleting…"
   };
-  const [tone, label] = mapped[status] ?? mapped.pending;
-  return `<span class="rad-dot rad-dot--${tone}"></span><span class="rad-status-label">${label}</span>`;
+  return labels[status] ?? labels.pending;
 }
 
 function hasDeploymentsArray(payload: unknown): boolean {
@@ -178,14 +170,7 @@ function hasDeploymentsArray(payload: unknown): boolean {
 }
 
 export function parseDeploymentRecords(payload: unknown): DeploymentRecord[] {
-  return readArray(payload, "deployments")
-    .map((entry) => ({
-      app: readString(entry, "app"),
-      environment: readString(entry, "environment"),
-      status: readString(entry, "status"),
-      runUrl: readString(entry, "runUrl")
-    }))
-    .filter((entry) => entry.app !== "" && entry.environment !== "");
+  return parseDeploymentListing(payload);
 }
 
 function parseHandoff(payload: unknown): DeployHandoff {
@@ -307,7 +292,9 @@ function computeBlockedEnvironments(
   for (const row of rows) {
     const forced = overrides.get(opKey(row.app, row.environment))?.status;
     const status = forced ?? row.status;
-    if (envIsBlocked(status)) blocked.set(row.environment, status);
+    if (deploymentStatusBlocksMutation(status)) {
+      blocked.set(row.environment, status);
+    }
   }
   return blocked;
 }
@@ -325,8 +312,6 @@ function renderDeploymentRow(
     row.runUrl ?
       `<a class="rad-deploy-applink" href="${escapeBrowserHtml(row.runUrl)}" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">${ARROW_SVG}View Run</a>`
     : '<span class="rad-cell-empty">—</span>';
-  const deleteClass =
-    status === "failed" ? "rad-btn--danger-solid" : "rad-btn--danger-outline";
   const deleteDisabled =
     status === "pending" || status === "deleting" || row.synthetic ?
       " disabled"
@@ -340,7 +325,7 @@ function renderDeploymentRow(
     `<td>${statusHtml}</td>` +
     `<td>${monitorCell}</td>` +
     `<td>${workflowCell}</td>` +
-    `<td class="rad-table__actions"><button class="rad-btn ${deleteClass} js-del-dep"${deleteDisabled} data-env="${envName}" data-app="${appName}" style="margin:0;">Delete Deployment</button></td>` +
+    `<td class="rad-table__actions"><button class="rad-btn rad-btn--danger-outline js-del-dep"${deleteDisabled} data-env="${envName}" data-app="${appName}" style="margin:0;">Delete Deployment</button></td>` +
     "</tr>"
   );
 }
@@ -846,6 +831,23 @@ export function initializeDeployingPage(
             `<div style="margin-top:10px; color:var(--rad-text-secondary);">${escapeBrowserHtml(details.errorText)}</div>`
           : "") +
           `<div style="margin-top:12px;"><button type="button" id="deploy-fix-credentials" class="rad-btn rad-btn--primary" style="margin:0;">Set up Azure credentials</button></div>`;
+      }
+    } else if (details.errorKind === "oidc-subject-case-mismatch") {
+      // Refused at the same point as the missing-subject panel, so this must
+      // read as "nothing ran" rather than as a workflow that failed. It gets
+      // its own panel instead of that one because Create Environment cannot
+      // fix a credential that differs only by casing — it would rebuild the
+      // same spelling — so the preflight's `az` remediation is the only route.
+      if (progressTitle) {
+        progressTitle.innerHTML = "Azure credentials don't match GitHub";
+      }
+      if (progressSubtitle) {
+        progressSubtitle.style.color = "var(--rad-text-secondary)";
+        progressSubtitle.innerHTML =
+          `<div style="color:var(--rad-text);">Environment <strong>${escapeBrowserHtml(details.environment)}</strong> has an Azure federated credential whose subject differs from GitHub's only by letter casing, so signing in to deploy <strong>${escapeBrowserHtml(details.app)}</strong> would be rejected. Nothing was deployed.</div>` +
+          (details.errorText ?
+            `<div style="margin-top:10px; color:var(--rad-text-secondary);">${escapeBrowserHtml(details.errorText)}</div>`
+          : "");
       }
     } else {
       if (progressTitle) {

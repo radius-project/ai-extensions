@@ -27,6 +27,7 @@ import {
 import {
   resolveExistingRadiusArtifact,
   resolveRadiusArtifactTarget,
+  resolveStagingDirPrefix,
   validateGhcrTargetForRepo
 } from "../../../src/publish-targets.js";
 import {
@@ -87,6 +88,8 @@ export function createFakeSession(
 }
 
 export interface FakeDependenciesOptions {
+  radiusEnabled?: boolean;
+  defaultBranch?: string;
   workspaceContext?: WorkspaceContext;
   bicepByRepoBranch?: Record<string, string | null>;
   // Keyed `workspace:<repo>@<branch>:<repoPath>` / `remote:<repo>@<branch>:<repoPath>`.
@@ -183,6 +186,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     getOrCreateServer,
     getLastWebviewActivityAt: vi.fn(() => lastWebviewActivityAt),
     workspace: {
+      hasRadiusApplicationModel: vi.fn(
+        async () => options.radiusEnabled ?? false
+      ),
       detectWorkspaceContext: vi.fn(async () => workspaceContext),
       defaultBranchForState: vi.fn(
         (state) => (state?.contextBranch as string) || "main"
@@ -226,7 +232,8 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       treePaths: vi.fn(
         async (requestedRepo: string, branch = "main") =>
           remoteTreeByRepoBranch[`${requestedRepo}@${branch}`] ?? []
-      )
+      ),
+      getDefaultBranch: vi.fn(async () => options.defaultBranch ?? "main")
     },
     core: {
       computeGraphDiff: vi.fn(
@@ -283,6 +290,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     publishTargets: {
       resolveExistingRadiusArtifact: vi.fn(resolveExistingRadiusArtifact),
       resolveRadiusArtifactTarget: vi.fn(resolveRadiusArtifactTarget),
+      resolveStagingDirPrefix: vi.fn(resolveStagingDirPrefix),
       validateGhcrTargetForRepo: vi.fn(validateGhcrTargetForRepo)
     },
     hostCallbacks: {

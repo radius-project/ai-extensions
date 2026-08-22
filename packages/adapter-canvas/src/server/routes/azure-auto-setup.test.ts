@@ -1,6 +1,8 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildRadiusAppProvenanceTags } from "../../azure-oidc.js";
 import { createRequestContext } from "../request-context.js";
+import { ENTRA_APP_RETENTION_NOTICE } from "./azure-auto-setup-application.js";
 import {
   createAzureAutoSetupRoutes,
   handleAzureAutoSetup
@@ -629,7 +631,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     const existing: AzureAutoSetupOperation = {
       operationId: "op-resume",
       repo: "octo/app",
-      environment: "dev",
+      environment: "production",
       provider: "azure",
       currentStage: "authorize_identity",
       inputRequired: { code: "app-selection-required" }
@@ -641,6 +643,8 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     const response = await invoke(
       JSON.stringify({
         ...VALID_SETUP,
+        environment: "Production",
+        operationEnvironment: "production",
         operationId: existing.operationId,
         clientId: APP_ID
       }),
@@ -723,6 +727,69 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
 
     expect(response.status).toBe(200);
     expect(test.events).toContain("stage:warning");
+  });
+
+  it("does not announce retention when credential setup fails for a newly created app", async () => {
+    const requiredTags = buildRadiusAppProvenanceTags({
+      repo: "octo/app",
+      environment: "dev",
+      operationId: "op-orchestration"
+    });
+    const runAz = async (
+      args: string[]
+    ): Promise<AzureAutoSetupCommandResult> => {
+      const line = args.join(" ");
+      if (line.startsWith("account set "))
+        return { code: 0, stdout: "", stderr: "" };
+      if (line === "account show --output json") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+          stderr: ""
+        };
+      }
+      if (line.startsWith("ad app list "))
+        return { code: 0, stdout: "[]", stderr: "" };
+      if (line.startsWith("ad app create "))
+        return { code: 0, stdout: APP_ID, stderr: "" };
+      if (line.startsWith("ad signed-in-user show "))
+        return { code: 0, stdout: USER_ID, stderr: "" };
+      if (line.startsWith(`ad app owner add --id ${APP_ID}`))
+        return { code: 0, stdout: "", stderr: "" };
+      if (line.startsWith(`ad app owner list --id ${APP_ID}`))
+        return { code: 0, stdout: USER_ID, stderr: "" };
+      if (line.startsWith("rest --method PATCH "))
+        return { code: 0, stdout: "", stderr: "" };
+      if (line.startsWith(`ad app show --id ${APP_ID} --query tags`)) {
+        return {
+          code: 0,
+          stdout: JSON.stringify(requiredTags),
+          stderr: ""
+        };
+      }
+      throw new Error(`unscripted az call: ${line}`);
+    };
+    const test = orchestrationHarness({
+      runAz,
+      ensureServicePrincipal: async () => ({
+        ok: false,
+        stderr: "service principal denied"
+      })
+    });
+    const response = await invoke(
+      JSON.stringify({
+        repo: "octo/app",
+        environment: "dev",
+        resourceGroup: "rg-radius",
+        cluster: "aks-radius",
+        subscriptionId: SUBSCRIPTION,
+        appName: "radius-deploy-octo-app"
+      }),
+      test.dependencies
+    );
+
+    expect(response.status).toBe(400);
+    expect(test.events.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
   });
 
   it("returns the credential failure without completing the operation stage", async () => {

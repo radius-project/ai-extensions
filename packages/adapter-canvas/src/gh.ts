@@ -1425,7 +1425,8 @@ export const github = {
   getContent: (apiPath: string) => ghApiGetContent(apiPath),
   getContentBytes: (apiPath: string) => ghApiGetContentBytes(apiPath),
   listNames: (apiPath: string) => ghApiListNames(apiPath),
-  treePaths: (repo: string, branch = "main") => fetchRepoTree(repo, branch)
+  treePaths: (repo: string, branch = "main") => fetchRepoTree(repo, branch),
+  getDefaultBranch: (repo: string) => getDefaultBranch(repo)
 };
 
 // Look up a file's blob SHA on a branch; resolves '' when the file is absent.

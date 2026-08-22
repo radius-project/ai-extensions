@@ -646,6 +646,8 @@ describe("deployments table", () => {
     await flushPromises();
     expect(page.tableBody.innerHTML).not.toContain("<img");
     expect(page.tableBody.innerHTML).toContain("&lt;img");
+    expect(page.tableBody.innerHTML).toContain("<td>Success</td>");
+    expect(page.tableBody.innerHTML).not.toContain("rad-dot");
     expect(page.tableBody.innerHTML).toContain("View Run");
     expect(page.tableBody.innerHTML).toContain("https://example.test/run/1");
   });
@@ -661,7 +663,7 @@ describe("deployments table", () => {
     expect(page.tableBody.innerHTML).toContain("rad-cell-empty");
   });
 
-  it("disables Delete for pending, deleting, and synthetic rows and solidifies it for failed", async () => {
+  it("uses the neutral danger style for failed and pending rows while disabling pending deletion", async () => {
     const page = fixture({
       deploymentsPayload: {
         deployments: [
@@ -672,9 +674,15 @@ describe("deployments table", () => {
     });
     init(page);
     await flushPromises();
-    expect(page.tableBody.innerHTML).toContain("rad-btn--danger-solid");
     const rows = page.tableBody.innerHTML;
-    expect(rows).toContain('data-app="app2"');
+    expect(rows).not.toContain("rad-btn--danger-solid");
+    expect(rows.match(/rad-btn--danger-outline/g)).toHaveLength(2);
+    expect(rows).toMatch(
+      /class="rad-btn rad-btn--danger-outline js-del-dep" data-env="dev" data-app="app"/
+    );
+    expect(rows).toMatch(
+      /class="rad-btn rad-btn--danger-outline js-del-dep" disabled data-env="dev2" data-app="app2"/
+    );
   });
 
   it("shows a retry row on a transient listing error without clobbering state", async () => {
@@ -1637,6 +1645,71 @@ describe("deploy flow", () => {
     expect(page.browser.nav.assigned).toContain("/?page=environment&new=1");
   });
 
+  it("gives a case-sensitive OIDC mismatch its own panel instead of the generic failure", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-case-mismatch",
+        error:
+          'expected "repo:acme/widgets:environment:production" but the app has "repo:Acme/Widgets:environment:Production"',
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    // Nothing was dispatched, so this must not read like a run that failed.
+    expect(page.progressTitle.innerHTML).not.toContain("Deployment of");
+    expect(page.progressTitle.innerHTML).toContain(
+      "Azure credentials don't match GitHub"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain("Nothing was deployed.");
+    expect(page.progressSubtitle.style.color).toBe("var(--rad-text-secondary)");
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "repo:acme/widgets:environment:production"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "repo:Acme/Widgets:environment:Production"
+    );
+    // Create Environment would rebuild the same spelling, so the route that
+    // the missing-subject panel offers must not appear here.
+    expect(page.progressSubtitle.innerHTML).not.toContain(
+      "Set up Azure credentials"
+    );
+    expect(page.browser.nav.assigned).toEqual([]);
+  });
+
+  it("omits the preflight detail from the case-mismatch panel when the failure carries no text", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-case-mismatch",
+        error: "",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(page.progressTitle.innerHTML).toContain(
+      "Azure credentials don't match GitHub"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain("Nothing was deployed.");
+    expect(page.progressSubtitle.innerHTML).not.toContain("margin-top:10px");
+  });
+
   it("omits the preflight detail from the OIDC panel when the failure carries no text", async () => {
     const page = fixture();
     init(page);
@@ -1786,6 +1859,26 @@ describe("deploy flow", () => {
         status: "failed",
         errorKind: "oidc-subject-missing",
         error: "no federated credential",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.deployBtn.disabled).toBe(false);
+  });
+
+  it("runs the case-mismatch failure flow with no progress-modal chrome present", async () => {
+    const page = fixture({ withProgressModal: false });
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-case-mismatch",
+        error: "differs only by letter casing",
         handoff: { pending: false, state: "idle" }
       })
     );
@@ -2670,12 +2763,14 @@ describe("pure helpers", () => {
     expect(opKey("a", "b")).toBe(opKey("a", "b"));
   });
 
-  it("maps every known status to its tone and label, defaulting to pending", () => {
-    expect(deploymentStatusMarkup("success")).toContain("Success");
-    expect(deploymentStatusMarkup("failed")).toContain("Failed");
-    expect(deploymentStatusMarkup("pending")).toContain("Pending");
-    expect(deploymentStatusMarkup("deleting")).toContain("Deleting");
-    expect(deploymentStatusMarkup("unknown-status")).toContain("Pending");
+  it.each([
+    ["success", "Success"],
+    ["failed", "Failed"],
+    ["pending", "Pending"],
+    ["deleting", "Deleting…"],
+    ["unknown-status", "Pending"]
+  ])("renders %s as text without a colored circle", (status, label) => {
+    expect(deploymentStatusMarkup(status)).toBe(label);
   });
 
   it("parses deployments defensively, dropping incomplete entries", () => {

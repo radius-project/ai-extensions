@@ -179,8 +179,8 @@ describe("compiled page entry API contracts", () => {
         "/api/discover-branches",
         "/api/list-applications",
         "/api/list-environments",
-        "/api/deploy",
         "/api/list-deployments",
+        "/api/deploy",
         "/api/delete-deployment",
         "/api/deploy-status"
       ]
@@ -512,6 +512,7 @@ describe("compiled graph page network contracts", () => {
         "/api/discover-branches",
         "/api/list-applications",
         "/api/list-environments",
+        "/api/list-deployments",
         "/api/deploy",
         "/api/progress",
         "/api/plan-graph"
@@ -519,7 +520,12 @@ describe("compiled graph page network contracts", () => {
     ],
     [
       "graph-diff-page",
-      ["/api/discover-branches", "/api/list-applications", "/api/diff-branches"]
+      [
+        "/api/discover-branches",
+        "/api/list-applications",
+        "/api/progress",
+        "/api/diff-branches"
+      ]
     ],
     [
       "deployed-graph-page",

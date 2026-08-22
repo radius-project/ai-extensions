@@ -32,9 +32,9 @@ import {
   invokeSessionPrompt,
   localDeploymentBlocksMutation,
   preflightGhcrPackageWriteAccess,
+  resetListingCaches,
   resetDeploymentViewState,
   resolveCleanupGitHubContext,
-  resolveGitHubEnvironmentCreateState,
   releaseDeploymentMutation,
   reserveDeploymentMutation,
   resolveDeploymentEnvironment,
@@ -46,6 +46,7 @@ import {
   triggerDeployFailureNotice,
   classifyDeployDispatchFailure,
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
+  DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
   DEPLOY_RUN_UNCONFIRMED_KIND
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
@@ -81,6 +82,18 @@ describe("DEPLOY_RAD_COMMANDS_STEP", () => {
     // nowhere in radius-project/radius, so that entire code path never ran on
     // a real deploy. Pin the value so the same silent break cannot recur.
     expect(DEPLOY_RAD_COMMANDS_STEP).toBe("Run rad commands");
+  });
+
+  describe("resetListingCaches", () => {
+    it("clears environment and deployment listing entries", () => {
+      const environments = new Map([["octo/app", { environments: ["dev"] }]]);
+      const deployments = new Map([["octo/app", { deployments: ["run-1"] }]]);
+
+      resetListingCaches(environments, deployments);
+
+      expect(environments.get("octo/app")).toBeUndefined();
+      expect(deployments.get("octo/app")).toBeUndefined();
+    });
   });
 });
 
@@ -282,38 +295,6 @@ describe("preflightGhcrPackageWriteAccess", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected GHCR preflight to fail");
     expect(result.code).toBe("ghcr-scope-required");
-  });
-});
-
-describe("resolveGitHubEnvironmentCreateState", () => {
-  it("treats a successful GET as a reused environment", () => {
-    expect(
-      resolveGitHubEnvironmentCreateState({
-        code: 0,
-        stdout: '{"name":"dev"}',
-        stderr: ""
-      })
-    ).toBe("reused");
-  });
-
-  it("treats a 404 lookup as a created-candidate environment", () => {
-    expect(
-      resolveGitHubEnvironmentCreateState({
-        code: 1,
-        stdout: "",
-        stderr: "gh: Not Found (HTTP 404)"
-      })
-    ).toBe("created_candidate");
-  });
-
-  it("fails closed when the lookup error is ambiguous", () => {
-    expect(
-      resolveGitHubEnvironmentCreateState({
-        code: 1,
-        stdout: "",
-        stderr: "gh: Forbidden (HTTP 403)"
-      })
-    ).toBeNull();
   });
 });
 
@@ -2008,11 +1989,57 @@ describe("resolveDeployStatus", () => {
 
 describe("addGraphProgress", () => {
   it("accepts progress only from the current graph generation", () => {
-    const state = { graphBuildGeneration: 2, progressMessages: ["current"] };
+    const state: CanvasState = {
+      graphBuildGeneration: 2,
+      graphProgressRecords: {
+        graph: {
+          graphBuildEvents: [
+            {
+              sequence: 1,
+              stage: "checking_model",
+              state: "running",
+              detail: "current"
+            }
+          ],
+          graphProgressGeneration: 1,
+          graphProgressStartedAtMs: 0,
+          graphProgressActive: true,
+          graphProgressView: "graph",
+          graphProgressKey: "octo/app",
+          graphProgressOwner: 1,
+          graphProgressAwaitingModel: false
+        }
+      }
+    };
 
-    expect(addGraphProgress(state, 1, "stale")).toBe(false);
-    expect(addGraphProgress(state, 2, "latest")).toBe(true);
-    expect(state.progressMessages).toEqual(["current", "latest"]);
+    expect(
+      addGraphProgress(state, 1, "graph", {
+        stage: "building_graph",
+        state: "running",
+        detail: "stale"
+      })
+    ).toBe(false);
+    expect(
+      addGraphProgress(state, 2, "graph", {
+        stage: "building_graph",
+        state: "running",
+        detail: "latest"
+      })
+    ).toBe(true);
+    expect(state.graphProgressRecords?.graph?.graphBuildEvents).toEqual([
+      {
+        sequence: 1,
+        stage: "checking_model",
+        state: "running",
+        detail: "current"
+      },
+      {
+        sequence: 2,
+        stage: "building_graph",
+        state: "running",
+        detail: "latest"
+      }
+    ]);
   });
 });
 
@@ -2369,6 +2396,21 @@ describe("triggerDeployRepairHandoff", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("does not hand off an OIDC subject case mismatch", () => {
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+    });
+    expect(
+      triggerDeployRepairHandoff(
+        failedEntry({
+          deployErrorKind: DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND
+        })
+      )
+    ).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
   it("does not hand off unless the deploy actually failed", () => {
     const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
@@ -2688,6 +2730,31 @@ describe("triggerDeployRepairHandoff", () => {
     });
     expect(entry.state.deployNoticeState).toBe("idle");
     expect(entry.state.deployNoticeAttempts).toBe(0);
+  });
+
+  it("clears concrete metadata from the previous deployment attempt", () => {
+    const entry = failedEntry();
+    entry.state.deployedGraph = [
+      {
+        id: "mysql",
+        outputResources: [
+          { id: "old-server", type: "Microsoft.DBforMySQL/flexibleServers" }
+        ]
+      }
+    ];
+    entry.state.deployedGraphRepo = "octo/app";
+
+    beginDeployAttempt(entry.state, {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep",
+      repairLoop: false
+    });
+
+    expect(entry.state.deployedGraph).toBeNull();
+    expect(entry.state.deployedGraphRepo).toBeUndefined();
   });
 
   describe("resolveDeployRepairLoop", () => {

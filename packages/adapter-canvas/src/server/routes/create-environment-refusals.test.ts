@@ -317,10 +317,18 @@ describe("the create-environment refusal ladder", () => {
 
 describe("admitting a create-environment request", () => {
   it("adopts the operation the identity route left running and enters the configure stage", async () => {
-    const existing = operation({ currentStage: STAGE_IDENTITY });
+    const existing = operation({
+      currentStage: STAGE_IDENTITY,
+      environment: "production"
+    });
     const recorder = ports({ existing });
     const result = await admitCreateEnvironmentRequest(
-      { repo: "octo/app", operationId: "op-1" },
+      {
+        repo: "octo/app",
+        environment: "Production",
+        operationEnvironment: "production",
+        operationId: "op-1"
+      },
       recorder.ports
     );
 
@@ -328,7 +336,7 @@ describe("admitting a create-environment request", () => {
       outcome: "admitted",
       operation: existing,
       targetRepo: "octo/app",
-      envName: "dev",
+      envName: "Production",
       provider: "azure"
     });
     expect(recorder.entered).toEqual([

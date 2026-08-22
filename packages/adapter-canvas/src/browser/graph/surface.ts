@@ -35,15 +35,13 @@ const FLOW_HOST_CLASS = "rad-flow-host";
 const FLOW_HOST_STYLE = "position:absolute; inset:0; width:100%; height:100%;";
 const LEGEND_CLASS = "legend";
 
+// The panel rendered by src/browser/graph/progress.ts supplies the spinner,
+// title, activity line, elapsed clock and stage list, so this fragment only
+// mounts the host it draws into.
 export const GRAPH_LOADING_HTML =
-  '<div style="padding:20px; max-width:500px; margin:0 auto;">' +
-  '<div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">' +
-  '<div class="spinner"></div>' +
-  '<span style="font-size:14px; font-weight:600; color:var(--rad-text);">Generating Application Graph</span>' +
-  "</div>" +
-  '<div id="progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>' +
-  "</div>" +
-  '<style>.spinner{width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-brand);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rad-success);margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--rad-text);font-weight:500}</style>';
+  '<div style="padding:20px; max-width:560px; margin:0 auto;">' +
+  '<div id="progress-steps"></div>' +
+  "</div>";
 
 // A rendered graph. update() re-lays out a new resource list and pushes it into
 // the mounted view, preserving the viewport; destroy() unmounts everything the

@@ -3,7 +3,10 @@ import {
   buildRadiusAppProvenanceTags,
   type ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
-import { resolveAzureAutoSetupApplication } from "./azure-auto-setup-application.js";
+import {
+  ENTRA_APP_RETENTION_NOTICE,
+  resolveAzureAutoSetupApplication
+} from "./azure-auto-setup-application.js";
 import type {
   AzureAutoSetupApplicationInput,
   AzureAutoSetupCommandResult,
@@ -34,6 +37,7 @@ interface Harness {
   recorded: Record<string, unknown>[];
   failures: Record<string, unknown>[];
   responses: Array<{ status: number; payload: unknown }>;
+  steps: string[];
 }
 
 function command(
@@ -112,6 +116,7 @@ function harness(
     recorded,
     failures,
     responses,
+    steps: workflow.steps,
     input: {
       workflow,
       dependencies: { operations: dependencies.operations },
@@ -180,11 +185,16 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
 
     expect(await resolveAzureAutoSetupApplication(test.input)).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "reused"
     });
     expect(githubCalls).toEqual([
       "/repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID"
     ]);
+    expect(test.steps).toContain(
+      `✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
   });
 
   it("reuses the repository's owned client id and persists before returning", async () => {
@@ -209,7 +219,8 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     const result = await resolveAzureAutoSetupApplication(test.input);
     expect(result).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "reused"
     });
     expect(test.calls).toEqual(["record:reused", "persist"]);
     // The tag read is the fourth call: reuse now records where the application
@@ -220,6 +231,10 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       `ad app owner list --id ${APP_ID} --query [].id -o tsv`,
       `ad app show --id ${APP_ID} --query tags -o json`
     ]);
+    expect(test.steps).toContain(
+      `✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
   });
 
   it.each([
@@ -398,12 +413,17 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
 
     expect(await resolveAzureAutoSetupApplication(test.input)).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "reused"
     });
     expect(test.calls).toEqual(["record:reused"]);
     expect(test.recorded).toEqual([
       expect.objectContaining({ state: "reused", origin: "pre_existing" })
     ]);
+    expect(test.steps).toContain(
+      `✅ Using the selected App Registration: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
   });
 
   it("fails closed when ownership of an explicit application cannot be read", async () => {
@@ -530,12 +550,17 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
 
     expect(await resolveAzureAutoSetupApplication(test.input)).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "reused"
     });
     expect(test.calls).toEqual(["record:reused", "persist"]);
     // The list projection already carries tags, so an untagged match is decided
     // without a second lookup.
     expect(test.recorded[0]).toMatchObject({ origin: "pre_existing" });
+    expect(test.steps).toContain(
+      `✅ Reusing existing App Registration: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
   });
 
   it("names an earlier Radius setup as the source of a reused name match", async () => {
@@ -570,7 +595,8 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
 
     expect(await resolveAzureAutoSetupApplication(test.input)).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "reused"
     });
     expect(test.recorded[0]).toMatchObject({
       state: "reused",
@@ -852,7 +878,8 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     const result = await resolveAzureAutoSetupApplication(test.input);
     expect(result).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "created"
     });
     expect(test.calls).toEqual(["record:created", "checkpoint"]);
     expect(test.recorded[0]).toMatchObject({
@@ -860,6 +887,10 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       origin: "this_operation",
       appId: APP_ID
     });
+    expect(test.steps).toContain(
+      `✅ Entra app registration created: ${APP_ID}`
+    );
+    expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
     const create = azCalls.findIndex((line) =>
       line.startsWith("ad app create ")
     );

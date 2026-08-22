@@ -8,7 +8,7 @@
 
 The Radius side panel renders four views of an application: **Modeled** (the app as authored in `.radius/app.bicep`), **Planned** (Modeled with recipe outputs resolved), **Diff** (Planned changes between two branches), and **Deployed**. The Deployed tab showed "Nothing deployed yet" after a successful deploy, and showed no per-resource progress during one.
 
-This design makes Deployed a first-class view of the application in a target environment. The graph mirrors the Modeled topology — one node per Radius resource, no output resources — starts fully greyed when the user opens it, and transitions each node individually through a per-node lifecycle as deployment status arrives. A legend explains the three states.
+This design makes Deployed a first-class view of the application in a target environment. The graph mirrors the Modeled topology — one node per Radius resource and no separate output-resource nodes — starts fully greyed when the user opens it, and transitions each node individually through a per-node lifecycle as deployment status arrives. A legend explains the three states.
 
 The projection design, the greyed-at-open behavior, the status legend, and the per-node lifecycle are @nithyatsu's, from PR [#200](https://github.com/radius-project/ai-extensions/pull/200) ("live graph support") and its design note `docs/design/2026-07-deployed-application-graph.md` on branch `deployedgraphsidecar`. That PR's transport does not work (see [Transport](#transport)), and PR #267 restructured the repository underneath it, so this document carries the design forward on the current layout with a different status signal.
 
@@ -23,7 +23,7 @@ The projection design, the greyed-at-open behavior, the status legend, and the p
 
 ### Goals
 
-1. Give Deployed a stable topology — the Modeled resources with no output resources — so the shape does not shift when a deploy starts or finishes.
+1. Give Deployed a stable topology — the Modeled resources with no separate output-resource nodes — so the shape does not shift when a deploy starts or finishes.
 2. Render the view as a greyed skeleton the moment the user lands on it, before any status is known.
 3. Drive per-node status: progress badge while pending or deploying, green check on success, red cross on failure.
 4. Render a legend mapping the three badges to their meanings.
@@ -41,7 +41,7 @@ Deployed is a **projection**: a fixed topology rendered with a per-node status m
 
 Three components:
 
-1. **`@radius-project/core`** — `projectDeployedGraph` builds the Deployed skeleton from Modeled resources: apply the shared visualization filter, strip `outputResources`, stamp `deployStatus`. Pure.
+1. **`@radius-project/core`** — `mergeDeployedGraphMetadata` enriches exact modeled parents from the final graph, and `projectDeployedGraph` applies the shared visualization filter, retains nested resolved metadata without expanding it into nodes, and stamps `deployStatus`. Pure.
 2. **Canvas server** — `/api/deployed-graph` returns the projection with an explicit `mode` of `greyed`, `live`, or `terminal`, scoped to the application and environment the page's selectors request. The deploy monitor folds published status into the resources it is already tracking.
 3. **Canvas UI** — `deployedGraphPage` mounts the skeleton on first paint with `deployMode` and `showLegend`, and updates through the renderer's controller so React Flow keeps its viewport.
 
@@ -59,13 +59,13 @@ Two alternatives were considered and rejected explicitly: a GHCR OCI artifact (t
 
 ### Status keying
 
-Each node is matched to a status entry by exact `id`, then lowercased `name|type` with the API version stripped, then lowercased `name`.
+Each node is matched to a status entry by exact modeled `id`, then exact producer-supplied `outputResourceIds`, then lowercased `name|type` with the API version stripped, then lowercased `name`.
 
-The original design proposed `id || name`. The middle tier is added because modeled resource ids are synthesized locally by `buildResourceID` and are not guaranteed to equal the UCP ids the control plane reports — with id-then-name alone, an id mismatch silently degrades every node to bare-name matching, which collides across resource types.
+The original design proposed `id || name`. The middle tier is added because modeled resource ids are synthesized by the modeling side and are not guaranteed to equal the UCP ids the control plane reports — with id-then-name alone, an id mismatch silently degrades every node to bare-name matching, which collides across resource types.
 
 ### Merging
 
-Each payload is an independent snapshot, not a stream of transitions, so merging is conservative: `failed` is terminal within a run, `success` regresses only on an explicit `failed`, and a resource absent from a payload keeps its current status rather than resetting. The run's own conclusion settles the graph at the end — success forces every node green, any other conclusion fails whatever is still unfinished while leaving already-terminal values alone. This resolves open question 3 from the original design the way it proposed.
+Each payload is an independent monotonic snapshot, not a stream of transitions, so merging is conservative: `failed` is terminal within a run, `success` regresses only on an explicit `failed`, and a resource absent from a payload keeps its current status rather than resetting. For a validated active run, the newest accepted artifact overwrites stale monitor values for keys it contains while monitor values fill misses. The run's own conclusion settles the graph at the end — success forces every node green, any other conclusion fails whatever is still unfinished while leaving already-terminal values alone. This resolves open question 3 from the original design the way it proposed.
 
 ## Two bugs found while implementing
 

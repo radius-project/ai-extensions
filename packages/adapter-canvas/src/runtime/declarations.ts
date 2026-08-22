@@ -158,14 +158,14 @@ export const RADIUS_ACTION_DECLARATIONS: readonly ActionDeclaration[] =
 export const RADIUS_SESSION_START_CONTEXT = `When opening the Radius Canvas (canvasId: "radius"), ALWAYS:
 1. Use instanceId "radius-panel" — this ensures only ONE Radius Canvas panel is ever open (reusing the same panel for all views).
 2. Pass the current session's repository as the "repo" input in owner/repo format.
-                3. Treat the current Copilot session worktree branch as the graph branch. Do not default graph views to main for the session repo.
+3. Treat the current Copilot session worktree branch as the graph branch. Do not default graph views to main for the session repo.
 
 IMPORTANT — Automatic PR Graph Diff: When a pull request is created (via create_pull_request tool or any PR creation action):
-1. FIRST, call the radius_generate_pr_diff_markdown tool with the repo, base branch, and head branch. This returns a Mermaid application graph diff diagram and summary.
-2. Include the returned markdown at the TOP of the PR description/body (before any other content).
-3. THEN open the Radius Canvas to the graph-diff page:
+1. FIRST, call the radius_generate_pr_diff_markdown tool with the repo, base branch, and head branch.
+2. If it returns a Mermaid application graph diff diagram and summary, include the exact returned markdown at the TOP of the PR description/body (before any other content), and THEN open the Radius Canvas to the graph-diff page:
    open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph-diff", repo: "<current-repo>", baseBranch: "<pr-base-branch>", headBranch: "<pr-head-branch>" } })
-The PR description will show the app graph diff inline on GitHub, and the canvas provides the interactive version.
+   The PR description will show the app graph diff inline on GitHub, and the canvas provides the interactive version.
+3. If the call is denied, the graph is unavailable, branch resolution fails, or the tool reports an error, create the pull request without a graph diff section. Do not add a sentence to the PR body explaining why the graph is missing. Report the reason in chat, and do not open the graph-diff Canvas. This rule governs only the graph diff section; describe the change itself normally, including any Radius modeling changes.
 
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
 1. First, check whether .radius/app.bicep (or app.bicep) exists in the working tree.
@@ -212,7 +212,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_generate_pr_diff_markdown",
     description:
-      "Generates a Mermaid application graph diff diagram and summary markdown for embedding in a PR description. Call this BEFORE creating the PR and include the returned markdown in the PR body.",
+      "Generates a Mermaid application graph diff diagram and summary markdown for embedding in a PR description. Call this BEFORE creating the PR. Include the exact returned markdown at the top of the PR body only when the result contains a diff. If the result says the diff is unavailable or the tool fails, create the PR without a graph diff section, report the reason in chat, and do not open the graph-diff Canvas.",
     parameters: {
       type: "object",
       properties: {
@@ -242,12 +242,17 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         manifestPath: {
           type: "string",
           description:
-            "Path to the resource-type manifest, relative to the workspace .radius/ directory. Defaults to .radius/custom-types.yaml."
+            "Path to the resource-type manifest, relative to the workspace .radius/ directory. Defaults to .radius/custom-types.yaml, or to the staging directory when stagingDir is given."
         },
         targetPath: {
           type: "string",
           description:
-            "Path for the compiled extension package (.tgz), relative to the workspace .radius/ directory. Defaults to .radius/custom-types.tgz."
+            "Path for the compiled extension package (.tgz), relative to the workspace .radius/ directory. Defaults to .radius/custom-types.tgz, or to the staging directory when stagingDir is given."
+        },
+        stagingDir: {
+          type: "string",
+          description:
+            "Staging directory of the modeling run, relative to the workspace .radius/ directory (for example .staging-<runId>). Pass the directory promote-app-model.mjs --begin printed so the published package lands with the rest of the run instead of in .radius/."
         }
       }
     }

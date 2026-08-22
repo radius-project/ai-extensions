@@ -98,4 +98,17 @@ describe("createEnvironmentListingCache", () => {
     expect(cache.generation(repo)).toBe(startedAt);
     expect(cache.get(repo)).toEqual({ at: 9, payload: { environments: [] } });
   });
+
+  it("clears every entry and invalidates listings already in flight", () => {
+    const cache = createEnvironmentListingCache();
+    const startedAt = cache.generation("octo/app");
+    cache.set("octo/app", { at: 9, payload: { environments: [] } });
+    cache.set("octo/other", { at: 10, payload: { environments: [] } });
+
+    cache.clear();
+
+    expect(cache.get("octo/app")).toBeUndefined();
+    expect(cache.get("octo/other")).toBeUndefined();
+    expect(cache.generation("octo/app")).not.toBe(startedAt);
+  });
 });

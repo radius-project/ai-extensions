@@ -235,7 +235,8 @@ describe("credential profile parsing and markup", () => {
     expect(markup).toContain("js-cred-createenv");
     expect(markup).toContain("js-cred-delete");
     expect(markup).toContain("AWS");
-    expect(markup).toContain("Verified");
+    expect(markup).toContain("<td>Verified</td>");
+    expect(markup).not.toContain("rad-dot");
   });
 });
 

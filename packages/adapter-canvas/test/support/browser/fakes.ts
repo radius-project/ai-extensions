@@ -121,6 +121,10 @@ export class FakeElement extends FakeEventTarget implements DomElement {
     return this.attributes.get(name) ?? null;
   }
 
+  getAttributeNames(): readonly string[] {
+    return [...this.attributes.keys()];
+  }
+
   removeAttribute(name: string): void {
     this.attributes.delete(name);
   }

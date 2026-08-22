@@ -28,15 +28,28 @@ export type DeployStatus = "pending" | "in_progress" | "success" | "failed";
  *   2. `name|type` lowercased, with the API version stripped.
  *   3. `name` lowercased.
  *
- * The middle tier exists because modeled resource ids are synthesized locally by
- * `buildResourceID` and are not guaranteed to equal the UCP ids the control
- * plane reports. Without it, an id mismatch would silently degrade every node to
+ * The middle tier exists because modeled resource ids are synthesized by the
+ * modeling side and are not guaranteed to equal the UCP ids the control plane
+ * reports. Without it, an id mismatch would silently degrade every node to
  * bare-name matching, which collides across types.
  */
 export function deployStatusKeys(resource: any): string[] {
   const keys: string[] = [];
+  const seen = new Set<string>();
+  const addKey = (value: unknown): void => {
+    const key = typeof value === "string" ? value.trim() : "";
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    keys.push(key);
+  };
   const id = typeof resource?.id === "string" ? resource.id.trim() : "";
-  if (id) keys.push(id);
+  addKey(id);
+  if (Array.isArray(resource?.outputResourceIds)) {
+    for (const outputId of resource.outputResourceIds) addKey(outputId);
+  }
+  if (Array.isArray(resource?.outputResources)) {
+    for (const output of resource.outputResources) addKey(output?.id);
+  }
   const name =
     typeof resource?.name === "string" ?
       resource.name.trim().toLowerCase()
@@ -45,9 +58,54 @@ export function deployStatusKeys(resource: any): string[] {
     typeof resource?.type === "string" ?
       stripAPIVersion(resource.type.trim()).toLowerCase()
     : "";
-  if (name && type) keys.push(`${name}|${type}`);
-  if (name) keys.push(name);
+  if (name && type) addKey(`${name}|${type}`);
+  addKey(name);
   return keys;
+}
+
+function deployedResources(value: unknown): any[] {
+  if (Array.isArray(value)) return value;
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    Array.isArray((value as { resources?: unknown }).resources)
+  ) {
+    return (value as { resources: any[] }).resources;
+  }
+  return [];
+}
+
+/**
+ * mergeDeployedGraphMetadata - enrich modeled parents with exact deployment
+ * metadata without changing their topology. Parent ids are the producer's
+ * authoritative linkage; names and types are never used to guess a match.
+ */
+export function mergeDeployedGraphMetadata(
+  modeled: any[],
+  deployed: unknown
+): any[] {
+  if (!Array.isArray(modeled)) return [];
+  const deployedById = new Map<string, any>();
+  for (const resource of deployedResources(deployed)) {
+    const id = typeof resource?.id === "string" ? resource.id.trim() : "";
+    if (id && !deployedById.has(id)) deployedById.set(id, resource);
+  }
+  return modeled.map((resource) => {
+    const id = typeof resource?.id === "string" ? resource.id.trim() : "";
+    const metadata = id ? deployedById.get(id) : undefined;
+    const outputs =
+      Array.isArray(metadata?.outputResources) ? metadata.outputResources
+      : Array.isArray(resource?.outputResources) ? resource.outputResources
+      : [];
+    return {
+      ...resource,
+      connections:
+        Array.isArray(resource?.connections) ?
+          resource.connections.map((connection: any) => ({ ...connection }))
+        : [],
+      outputResources: outputs.map((output: any) => ({ ...output }))
+    };
+  });
 }
 
 /**
@@ -75,12 +133,12 @@ export function lookupDeployStatus(
 /**
  * projectDeployedGraph - build the Deployed view's resources from the modeled
  * ones: drop visualization-only noise (containerImages and their registry-creds
- * secret), strip output resources, and stamp each node with its deploy status.
+ * secret), retain resolved metadata for the parent card, and stamp each node
+ * with its deploy status.
  *
- * Output resources are removed because the Deployed view renders one node per
- * Radius resource; the concrete cloud resources a recipe expands to are detail
- * that would make the topology shift between "before deploy" and "after
- * deploy". They stay untouched in the underlying graph JSON.
+ * Output resources remain nested metadata. Deploy mode never expands them into
+ * child nodes, so retaining them lets the parent show its concrete resolved type
+ * without changing the one-node-per-Radius-resource topology.
  *
  * A resource absent from `statusByKey` keeps whatever `deployStatus` it already
  * carries, falling back to `pending` only when it has none. A status map that
@@ -103,7 +161,10 @@ export function projectDeployedGraph(
       Array.isArray(resource?.connections) ?
         resource.connections.map((c: any) => ({ ...c }))
       : [],
-    outputResources: [],
+    outputResources:
+      Array.isArray(resource?.outputResources) ?
+        resource.outputResources.map((output: any) => ({ ...output }))
+      : [],
     deployStatus:
       lookupDeployStatus(resource, statusByKey) ||
       resource?.deployStatus ||

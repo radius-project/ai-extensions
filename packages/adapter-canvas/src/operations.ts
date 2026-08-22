@@ -881,6 +881,31 @@ export function setContext(op: any, patch: any): any {
   return op;
 }
 
+export function setCanonicalEnvironment(op: any, environment: any): any {
+  const canonical = typeof environment === "string" ? environment.trim() : "";
+  if (!op || !canonical) return op;
+  const requested =
+    typeof op.context?.requestedEnvironment === "string" ?
+      op.context.requestedEnvironment
+    : String(op.environment || "");
+  setContext(op, {
+    requestedEnvironment: requested,
+    canonicalEnvironment: canonical
+  });
+  for (const requestName of ["request", "resumeRequest"]) {
+    const request = op[requestName];
+    if (
+      request &&
+      typeof request === "object" &&
+      request.environment &&
+      typeof request.environment === "object"
+    ) {
+      request.environment.environment = canonical;
+    }
+  }
+  return op;
+}
+
 /**
  * Record the resolved cloud context as a discriminated union.
  *

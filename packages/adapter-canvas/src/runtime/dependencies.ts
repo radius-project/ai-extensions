@@ -26,6 +26,9 @@ export interface WorkspaceContext {
 }
 
 export interface WorkspaceDependencies {
+  hasRadiusApplicationModel(
+    workspacePath: string | null | undefined
+  ): Promise<boolean>;
   detectWorkspaceContext(session: {
     cwd?: string;
     workspacePath?: string;
@@ -64,6 +67,7 @@ export interface GitHubContentReader {
   getContentBytes(apiPath: string): Promise<Buffer | { tooLarge: true } | null>;
   listNames(apiPath: string): Promise<string[]>;
   treePaths(requestedRepo: string, branch?: string): Promise<string[]>;
+  getDefaultBranch(repo: string): Promise<string>;
 }
 
 export interface CoreGraphDependencies {
@@ -195,6 +199,10 @@ export interface PublishTargetsDependencies {
     workspacePath: string | null | undefined,
     value: unknown,
     fallback: string | null | undefined
+  ): string;
+  resolveStagingDirPrefix(
+    workspacePath: string | null | undefined,
+    value: unknown
   ): string;
   validateGhcrTargetForRepo(
     target: unknown,

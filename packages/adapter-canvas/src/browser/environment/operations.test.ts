@@ -10,7 +10,6 @@ import {
   PROGRESS_IDS,
   ROLLBACK_IDS,
   VERIFY_STATUS_PATH,
-  formatElapsed,
   initializeEnvironmentOperations,
   previewEntryLabel,
   previewResourceLabel,
@@ -363,20 +362,6 @@ async function tickClock(
     await flushPromises();
   }
 }
-
-describe("formatElapsed", () => {
-  it.each([
-    [0, "0:00"],
-    [999, "0:00"],
-    [1000, "0:01"],
-    [5000, "0:05"],
-    [65000, "1:05"],
-    [600000, "10:00"],
-    [-5000, "0:00"]
-  ])("formats %i ms as %s", (ms, expected) => {
-    expect(formatElapsed(ms)).toBe(expected);
-  });
-});
 
 describe("parseOperationResponse", () => {
   it.each([

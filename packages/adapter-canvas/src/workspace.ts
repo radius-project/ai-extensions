@@ -361,6 +361,36 @@ export async function workspaceFileExists(
 // JSON is saved next to whichever one is actually found.
 const WORKSPACE_BICEP_PATHS = [".radius/app.bicep", "app.bicep"];
 
+// A root app.bicep is a common Azure convention, so its filename alone cannot
+// activate Radius. Accept the current extension declaration or either supported
+// Radius application resource type used by legacy models.
+function isLegacyRadiusAppModel(content: string): boolean {
+  return (
+    /^\s*extension\s+radius\b/im.test(content) ||
+    /^\s*resource\s+\w+\s+['"](?:Radius|Applications)\.Core\/applications@/im.test(
+      content
+    )
+  );
+}
+
+export async function hasRadiusApplicationModel(
+  workspacePath: string | null | undefined
+): Promise<boolean> {
+  // `.radius` is Radius-owned, so any non-empty model is an activation signal
+  // even before it compiles. The ambiguous root filename must prove it is Radius.
+  const radiusModel = await readWorkspaceFile(
+    workspacePath,
+    WORKSPACE_BICEP_PATHS[0]
+  );
+  if (radiusModel?.trim()) return true;
+
+  const legacyModel = await readWorkspaceFile(
+    workspacePath,
+    WORKSPACE_BICEP_PATHS[1]
+  );
+  return legacyModel ? isLegacyRadiusAppModel(legacyModel) : false;
+}
+
 // Reads the workspace app.bicep and reports which repo-relative path it came
 // from, so callers can persist sibling artifacts (e.g. app-graph.json) next to
 // the exact file that was graphed. Returns null when the selection is not the
@@ -413,10 +443,10 @@ export async function workspaceHeadCommit(
 // does not read as a reason to regenerate it again.
 const GENERATED_PATHS = [".radius", "app.bicep", "app.origin.json"];
 
-// Whether application source changed between `sinceCommit` and HEAD, ignoring
-// the paths the generator owns. Resolves undefined when git cannot answer (no
-// workspace, unknown commit, shallow clone), so the caller can fall back rather
-// than read silence as "nothing changed".
+// Whether application source changed between `sinceCommit` and the current
+// working tree, ignoring paths the generator owns. This includes committed,
+// staged, unstaged, and untracked source so a model cannot be reported current
+// merely because newer work has not been committed yet.
 //
 // The exclusion is the point: committing a freshly generated model advances HEAD
 // past the commit that model recorded, so a plain commit comparison would make
@@ -431,13 +461,21 @@ export async function workspaceSourceChangedSince(
     "diff",
     "--name-only",
     sinceCommit,
-    "HEAD",
     "--",
     ".",
     ...GENERATED_PATHS.map((path) => `:(exclude)${path}`)
   ]);
   if (!result.ok) return undefined;
-  return result.stdout.length > 0;
+  const untracked = await runGitResult(workspacePath, [
+    "ls-files",
+    "--others",
+    "--exclude-standard",
+    "--",
+    ".",
+    ...GENERATED_PATHS.map((path) => `:(exclude)${path}`)
+  ]);
+  if (!untracked.ok) return undefined;
+  return result.stdout.length > 0 || untracked.stdout.length > 0;
 }
 
 // Absolute path to the app-graph.json that should sit next to the given

@@ -12,6 +12,7 @@ import {
   resolveSessionId,
   resolvePersistedSessionId,
   workspaceFileExists,
+  hasRadiusApplicationModel,
   fetchWorkspaceTree,
   isWorkspacePath,
   workspaceHeadCommit,
@@ -286,6 +287,80 @@ describe("workspaceFileExists", () => {
   });
 });
 
+describe("hasRadiusApplicationModel", () => {
+  async function workspace(
+    files: Record<string, string>
+  ): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "radius-enabled-"));
+    for (const [repoPath, content] of Object.entries(files)) {
+      const filePath = path.join(dir, ...repoPath.split("/"));
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, content);
+    }
+    return {
+      dir,
+      cleanup: () => fs.rm(dir, { recursive: true, force: true })
+    };
+  }
+
+  it("recognizes a non-empty .radius/app.bicep without repository metadata or a Git remote", async () => {
+    const testWorkspace = await workspace({
+      ".radius/app.bicep": "resource app {}\n"
+    });
+    try {
+      expect(await hasRadiusApplicationModel(testWorkspace.dir)).toBe(true);
+    } finally {
+      await testWorkspace.cleanup();
+    }
+  });
+
+  it.each([
+    ["the radius extension", "extension radius\n"],
+    [
+      "the current Radius application type",
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {}\n"
+    ],
+    [
+      "the legacy Radius application type",
+      "resource app 'Applications.Core/applications@2023-10-01-preview' = {}\n"
+    ]
+  ])("recognizes a root app.bicep containing %s", async (_label, content) => {
+    const testWorkspace = await workspace({ "app.bicep": content });
+    try {
+      expect(await hasRadiusApplicationModel(testWorkspace.dir)).toBe(true);
+    } finally {
+      await testWorkspace.cleanup();
+    }
+  });
+
+  it("rejects a generic Azure root app.bicep", async () => {
+    const testWorkspace = await workspace({
+      "app.bicep":
+        "resource site 'Microsoft.Web/sites@2024-04-01' = { name: 'web' }\n"
+    });
+    try {
+      expect(await hasRadiusApplicationModel(testWorkspace.dir)).toBe(false);
+    } finally {
+      await testWorkspace.cleanup();
+    }
+  });
+
+  it("rejects empty and missing application models", async () => {
+    const emptyWorkspace = await workspace({
+      ".radius/app.bicep": " \n",
+      "app.bicep": ""
+    });
+    const missingWorkspace = await workspace({});
+    try {
+      expect(await hasRadiusApplicationModel(emptyWorkspace.dir)).toBe(false);
+      expect(await hasRadiusApplicationModel(missingWorkspace.dir)).toBe(false);
+      expect(await hasRadiusApplicationModel("")).toBe(false);
+    } finally {
+      await Promise.all([emptyWorkspace.cleanup(), missingWorkspace.cleanup()]);
+    }
+  });
+});
+
 // The origin record records the commit a model was generated from, and this
 // is the other half of that comparison. An unresolvable commit must read as
 // "unknown" ("") rather than as drift, because drift triggers a regeneration
@@ -378,6 +453,38 @@ describe("workspaceSourceChangedSince", () => {
       await fs.writeFile(path.join(dir, "src", "app.js"), "console.log(2)\n");
       commitAll(dir, "change source");
 
+      expect(await workspaceSourceChangedSince(dir, first)).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["unstaged", false],
+    ["staged", true]
+  ])("is true for %s tracked source changes", async (_label, staged) => {
+    const { dir, first } = await checkout();
+    try {
+      await fs.writeFile(path.join(dir, "src", "app.js"), "console.log(4)\n");
+      if (staged) execFileSync("git", ["add", "src/app.js"], { cwd: dir });
+
+      expect(await workspaceSourceChangedSince(dir, first)).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is true for untracked source and ignores untracked generated files", async () => {
+    const { dir, first } = await checkout();
+    try {
+      await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+      await fs.writeFile(
+        path.join(dir, ".radius", "app.bicep"),
+        "resource {}\n"
+      );
+      expect(await workspaceSourceChangedSince(dir, first)).toBe(false);
+
+      await fs.writeFile(path.join(dir, "src", "new.js"), "export {};\n");
       expect(await workspaceSourceChangedSince(dir, first)).toBe(true);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });

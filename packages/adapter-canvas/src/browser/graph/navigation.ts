@@ -1,4 +1,5 @@
 import { isDomElement } from "../context.js";
+import { activateInlineScripts } from "../dom.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type {
@@ -20,11 +21,11 @@ export const GRAPH_PAGES = [
 ] as const;
 
 export type GraphPageId = (typeof GRAPH_PAGES)[number];
-export type NavigationHistory = "push" | "none";
 
 const NAVIGATION_ENTRY_KEY = "graph-navigation";
 
 export interface NavigationEvent {
+  readonly detail?: number;
   preventDefault(): void;
 }
 
@@ -51,44 +52,18 @@ export function graphPageUrl(search: string, pageId: GraphPageId): string {
   }`;
 }
 
-function currentPage(search: string): GraphPageId | null {
-  const query = search.startsWith("?") ? search.slice(1) : search;
-  for (const part of query.split("&")) {
-    if (!part) continue;
-    const separator = part.indexOf("=");
-    const key = decode(separator < 0 ? part : part.slice(0, separator));
-    if (key !== "page") continue;
-    const value = decode(separator < 0 ? "" : part.slice(separator + 1));
-    return isGraphPage(value) ? value : null;
-  }
-  return "graph";
-}
-
-function runInlineScripts(context: BrowserContext, root: DomElement): void {
-  for (const stale of context.dom.all(root, "script")) {
-    const parent = stale.parentNode;
-    if (!parent) continue;
-    const next = context.dom.createElement("script");
-    const src = stale.getAttribute("src");
-    if (src) next.setAttribute("src", src);
-    else next.textContent = stale.textContent;
-    parent.replaceChild(next, stale);
-  }
-}
-
 export interface GraphNavigation {
-  navigateTo(
-    event: NavigationEvent | null,
-    pageId: GraphPageId,
-    history?: NavigationHistory
-  ): void;
+  navigateTo(event: NavigationEvent | null, pageId: GraphPageId): void;
   cancelPendingWork(): void;
   teardown(): void;
 }
 
 export function createGraphNavigation(
   context: BrowserContext,
-  registry: Pick<PageRegistry, "teardownPage">
+  registry: Pick<
+    PageRegistry,
+    "teardownPage" | "beginNavigation" | "endNavigation"
+  >
 ): GraphNavigation {
   let generation = 0;
   let request: AbortHandle | null = null;
@@ -97,6 +72,7 @@ export function createGraphNavigation(
     generation++;
     request?.abort();
     request = null;
+    registry.endNavigation(cancelRequest);
   }
 
   function cancelPendingWork(): void {
@@ -106,9 +82,12 @@ export function createGraphNavigation(
 
   function navigateTo(
     event: NavigationEvent | null,
-    pageId: GraphPageId,
-    history: NavigationHistory = "push"
+    pageId: GraphPageId
   ): void {
+    // Clicks synthesized by keyboard activation have detail 0. Pointer clicks
+    // must not regain focus after the navigation replaces their original link.
+    const transferFocus =
+      event === null || event.detail === undefined || event.detail === 0;
     event?.preventDefault();
     const url = graphPageUrl(context.nav.search, pageId);
     const content = context.dom.byId(GRAPH_CONTENT_ID);
@@ -121,6 +100,7 @@ export function createGraphNavigation(
     // arrives: its debounced timers can otherwise fire mid-navigation and act
     // on a page the user has already left.
     cancelPendingWork();
+    registry.beginNavigation(cancelRequest);
     const requestGeneration = generation;
     request = context.net.createAbort();
     void context.net
@@ -133,6 +113,7 @@ export function createGraphNavigation(
       })
       .then((html) => {
         if (requestGeneration !== generation) return;
+        registry.endNavigation(cancelRequest);
         const parsed = context.nav.parseDocument(html);
         const newContentValue = parsed.getElementById(GRAPH_CONTENT_ID);
         if (!isDomElement(newContentValue)) {
@@ -140,21 +121,24 @@ export function createGraphNavigation(
         }
         const newNavValue = parsed.getElementById(GRAPH_NAV_ID);
         content.innerHTML = newContentValue.innerHTML;
-        runInlineScripts(context, content);
+        activateInlineScripts(context, content);
         if (isDomElement(newNavValue)) {
           const nav = context.dom.byId(GRAPH_NAV_ID);
           if (nav) nav.innerHTML = newNavValue.innerHTML;
         }
-        if (history === "push") context.nav.pushState(url);
-        const active = context.dom.document.querySelector(
-          `#${GRAPH_NAV_ID} [${GRAPH_PAGE_ATTRIBUTE}="${pageId}"]`
-        );
-        context.focus.focus(isDomElement(active) ? active : null);
+        context.nav.pushState(url);
+        if (transferFocus) {
+          const active = context.dom.document.querySelector(
+            `#${GRAPH_NAV_ID} [${GRAPH_PAGE_ATTRIBUTE}="${pageId}"]`
+          );
+          context.focus.focus(isDomElement(active) ? active : null);
+        }
         request = null;
       })
       .catch((error: unknown) => {
         if (requestGeneration !== generation) return;
         request = null;
+        registry.endNavigation(cancelRequest);
         context.logger.error("Radius graph navigation failed.", error);
         context.nav.assign(url);
       });
@@ -187,11 +171,7 @@ export function initializeGraphNavigation(
   scope.on(context.dom.document, "click", (event) => {
     const target = graphLinkFromEvent(event);
     if (!target) return;
-    navigation.navigateTo(event, target.page, "push");
-  });
-  scope.on(context.page, "popstate", () => {
-    const page = currentPage(context.nav.search);
-    if (page) navigation.navigateTo(null, page, "none");
+    navigation.navigateTo(event, target.page);
   });
   scope.onTeardown(navigation.teardown);
   return () => scope.teardown();

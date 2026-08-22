@@ -22,6 +22,7 @@ import {
   recordCommittedWorkflowFile,
   recordCleanupState,
   recordServicePrincipal,
+  setCanonicalEnvironment,
   setStageState,
   STAGE_CONFIGURE_ENVIRONMENT,
   STAGE_VERIFY
@@ -190,8 +191,10 @@ describe("POST /api/operations server-owned execution", () => {
   it("resumes only the prompt currently owned by the operation", async () => {
     operations.clear();
     setEnvironmentOperationTestRunner(async () => {});
-    const op = seed("contoso/resume");
+    const op = seed("contoso/resume", { environment: "production" });
     op.request = { azure: {}, environment: {}, needsAzureCredentials: true };
+    op.resumeRequest = structuredClone(op.request);
+    setCanonicalEnvironment(op, "Production");
     requireInput(op, {
       code: "service-management-reference-required",
       checkpoint: "azure-service-management-reference",
@@ -224,13 +227,15 @@ describe("POST /api/operations server-owned execution", () => {
       {
         checkpoint: "azure-service-management-reference",
         repo: op.repo,
-        environment: op.environment,
+        environment: "production",
         provider: op.provider,
         serviceManagementReference: "11111111-1111-1111-1111-111111111111"
       }
     );
     expect(resumed.status).toBe(202);
     expect(op.state).toBe("running");
+    expect(op.environment).toBe("production");
+    expect(op.request.environment.environment).toBe("Production");
     expect(op.request.azure.serviceManagementReference).toBe(
       "11111111-1111-1111-1111-111111111111"
     );

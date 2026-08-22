@@ -26,6 +26,7 @@ export interface EnvironmentListingCache {
    * for it as stale. This is the only eviction path.
    */
   invalidate(repo: string): void;
+  clear(): void;
   /** How many times this repository's listing has been invalidated. */
   generation(repo: string): number;
 }
@@ -33,7 +34,10 @@ export interface EnvironmentListingCache {
 export function createEnvironmentListingCache(): EnvironmentListingCache {
   const entries = new Map<string, CachedEnvironmentListing>();
   const generations = new Map<string, number>();
-  const generation = (repo: string): number => generations.get(repo) ?? 0;
+  let sequence = 0;
+  let clearGeneration = 0;
+  const generation = (repo: string): number =>
+    generations.get(repo) ?? clearGeneration;
   return {
     get: (repo) => entries.get(repo),
     set: (repo, entry) => {
@@ -41,7 +45,12 @@ export function createEnvironmentListingCache(): EnvironmentListingCache {
     },
     invalidate: (repo) => {
       entries.delete(repo);
-      generations.set(repo, generation(repo) + 1);
+      generations.set(repo, ++sequence);
+    },
+    clear: () => {
+      entries.clear();
+      generations.clear();
+      clearGeneration = ++sequence;
     },
     generation
   };

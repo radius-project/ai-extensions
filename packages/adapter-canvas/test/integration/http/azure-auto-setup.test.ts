@@ -2,7 +2,10 @@ import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
+import { addLegacyStep } from "../../../src/operations.js";
+import { ENTRA_APP_RETENTION_NOTICE } from "../../../src/server/routes/azure-auto-setup-application.js";
 import { createAzureAutoSetupRoutes } from "../../../src/server/routes/azure-auto-setup.js";
+import { buildRadiusAppProvenanceTags } from "../../../src/azure-oidc.js";
 import type {
   AzureAutoSetupCommandResult,
   AzureAutoSetupDependencies,
@@ -25,7 +28,10 @@ afterEach(async () => {
   container = undefined;
 });
 
-function start(dependencies: AzureAutoSetupDependencies): void {
+function start(
+  dependencies: AzureAutoSetupDependencies,
+  unmatchedCalls: string[] = []
+): void {
   const routes = createTestRouteTable(createAzureAutoSetupRoutes(dependencies));
   container = createCanvasServer({
     createHttpServer: (handler) => createServer(handler),
@@ -35,7 +41,8 @@ function start(dependencies: AzureAutoSetupDependencies): void {
         instances,
         routes,
         markActivity,
-        handleUnmatchedRequest: (_request, response) => {
+        handleUnmatchedRequest: (request, response) => {
+          unmatchedCalls.push(request.url || "");
           response.writeHead(404);
           response.end("unmatched");
         }
@@ -71,6 +78,145 @@ const VALID_BODY = {
   subscriptionId: SUBSCRIPTION,
   clientId: APP_ID
 };
+
+const CREATE_BODY = {
+  repo: "octo/app",
+  environment: "dev",
+  resourceGroup: "rg-radius",
+  cluster: "aks-radius",
+  subscriptionId: SUBSCRIPTION,
+  appName: "radius-deploy-octo-app"
+};
+
+async function successfulSetup(createApp: boolean) {
+  const unmatchedCalls: string[] = [];
+  const operation = {
+    operationId: createApp ? "op-http-create" : "op-http-reuse",
+    repo: "octo/app",
+    environment: "dev",
+    provider: "azure",
+    currentStage: "authorize_identity",
+    steps: [] as Array<{ label: string }>
+  };
+  const requiredTags = buildRadiusAppProvenanceTags({
+    repo: "octo/app",
+    environment: "dev",
+    operationId: operation.operationId
+  });
+  const runAz = async (
+    args: string[]
+  ): Promise<AzureAutoSetupCommandResult> => {
+    const line = args.join(" ");
+    if (line.startsWith("account set "))
+      return { code: 0, stdout: "", stderr: "" };
+    if (line === "account show --output json") {
+      return {
+        code: 0,
+        stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+        stderr: ""
+      };
+    }
+    if (!createApp && line.startsWith(`ad app show --id ${APP_ID} `)) {
+      return { code: 0, stdout: "app-object", stderr: "" };
+    }
+    if (createApp && line.startsWith("ad app list ")) {
+      return { code: 0, stdout: "[]", stderr: "" };
+    }
+    if (createApp && line.startsWith("ad app create ")) {
+      return { code: 0, stdout: APP_ID, stderr: "" };
+    }
+    if (line.startsWith("ad signed-in-user show ")) {
+      return { code: 0, stdout: OBJECT_ID, stderr: "" };
+    }
+    if (createApp && line.startsWith(`ad app owner add --id ${APP_ID}`)) {
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (line.startsWith(`ad app owner list --id ${APP_ID}`)) {
+      return { code: 0, stdout: OBJECT_ID, stderr: "" };
+    }
+    if (createApp && line.startsWith("rest --method PATCH ")) {
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (
+      createApp &&
+      line.startsWith(`ad app show --id ${APP_ID} --query tags`)
+    ) {
+      return {
+        code: 0,
+        stdout: JSON.stringify(requiredTags),
+        stderr: ""
+      };
+    }
+    if (line.includes("federated-credential list")) {
+      return { code: 0, stdout: "[]", stderr: "" };
+    }
+    if (line.includes("federated-credential create")) {
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (line.startsWith("role assignment create ")) {
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    throw new Error(`unscripted az call: ${line}`);
+  };
+  const dependencies = createAzureAutoSetupTestDependencies({
+    isServerOwnedRequest: (_instanceId, request) =>
+      request.headers["x-radius-server-owned"] === "token-a",
+    operations: {
+      create: () => operation,
+      addLegacyStep
+    },
+    external: {
+      getGitHubIdentity: async () => null,
+      preflightRepoAdmin: async () => "",
+      preflightGhcrPackageWriteAccess: async () => ({ ok: true }),
+      runGitHubJson: async (path) => {
+        if (path === "/repos/octo/app") {
+          return {
+            ok: true,
+            status: 200,
+            json: {
+              full_name: "octo/app",
+              id: 5,
+              owner: { id: 7 }
+            }
+          };
+        }
+        if (path === "/repos/octo/app/actions/oidc/customization/sub") {
+          return { ok: false, status: 404, json: null };
+        }
+        if (
+          createApp &&
+          path === "/repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID"
+        ) {
+          return { ok: false, status: 404, json: null };
+        }
+        throw new Error(`unscripted GitHub call: ${path}`);
+      },
+      runAz
+    },
+    tempFile: {
+      createPath: () => "C:\\temp\\fic.json",
+      write: () => {},
+      remove: () => {}
+    },
+    ensureServicePrincipal: async () => ({
+      ok: true,
+      state: "reused",
+      origin: "pre_existing",
+      objectId: OBJECT_ID
+    }),
+    persistMutationCheckpoint: async (input) => {
+      await input.persist();
+      return true;
+    },
+    finalizeSetupFailure: async (_setup, input) => {
+      throw new Error(`unexpected setup failure: ${String(input.code)}`);
+    },
+    sleep: async () => {}
+  });
+  start(dependencies, unmatchedCalls);
+  return { operation, running: await entry(), unmatchedCalls };
+}
 
 describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () => {
   it("preserves method mismatch, malformed-body, refusal, and unmatched behavior", async () => {
@@ -289,13 +435,51 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       body: JSON.stringify(VALID_BODY)
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    const payload = (await response.json()) as {
+      steps: string[];
+      [key: string]: unknown;
+    };
+    expect(payload).toMatchObject({
       success: true,
       operationId: "op-http-success",
       clientId: APP_ID,
       tenantId: TENANT,
       subscriptionId: SUBSCRIPTION
     });
+    expect(payload.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
+    expect(unmatchedCalls).toEqual([]);
+  });
+
+  it("records retention only after a newly created app completes setup", async () => {
+    const { operation, running, unmatchedCalls } = await successfulSetup(true);
+    const response = await fetch(`${running.baseUrl}/api/azure-auto-setup`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Radius-Server-Owned": "token-a"
+      },
+      body: JSON.stringify(CREATE_BODY)
+    });
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      steps: string[];
+      [key: string]: unknown;
+    };
+    expect(payload).toMatchObject({
+      success: true,
+      operationId: "op-http-create",
+      clientId: APP_ID,
+      tenantId: TENANT,
+      subscriptionId: SUBSCRIPTION
+    });
+    const retentionStep = `ℹ️ Created Entra app registration "radius-deploy-octo-app". ${ENTRA_APP_RETENTION_NOTICE}`;
+    expect(payload.steps).toContain(
+      `✅ Entra app registration created: ${APP_ID}`
+    );
+    expect(payload.steps).toContain(retentionStep);
+    expect(operation.steps.map((step) => step.label)).toContain(
+      `Created Entra app registration "radius-deploy-octo-app". ${ENTRA_APP_RETENTION_NOTICE}`
+    );
     expect(unmatchedCalls).toEqual([]);
   });
 });

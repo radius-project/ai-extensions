@@ -27,7 +27,11 @@ export interface DomEvent {
   readonly target?: unknown;
   readonly currentTarget?: unknown;
   readonly key?: string;
+  readonly button?: number;
   readonly shiftKey?: boolean;
+  readonly altKey?: boolean;
+  readonly ctrlKey?: boolean;
+  readonly metaKey?: boolean;
   preventDefault(): void;
   stopPropagation(): void;
 }
@@ -61,6 +65,7 @@ export interface DomElement extends DomEventTarget {
   offsetParent: unknown;
   setAttribute(name: string, value: string): void;
   getAttribute(name: string): string | null;
+  getAttributeNames(): readonly string[];
   removeAttribute(name: string): void;
   focus(): void;
   scrollIntoView(options?: ScrollOptions): void;
@@ -168,7 +173,6 @@ export interface NavigationPort {
 }
 
 export type TimerHandle = number;
-
 export interface ClockPort {
   setTimeout(handler: () => void, timeoutMs: number): TimerHandle;
   clearTimeout(handle: TimerHandle): void;

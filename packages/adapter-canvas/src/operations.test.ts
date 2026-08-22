@@ -38,6 +38,7 @@ import {
   recordServicePrincipal,
   reconcileRestoredOperation,
   sanitizeResumeTarget,
+  setCanonicalEnvironment,
   setCloudContext,
   setStageState,
   shouldStop,
@@ -197,6 +198,122 @@ function provenWorkflowFile(overrides = {}) {
     ...overrides
   };
 }
+
+describe("canonical environment identity", () => {
+  it("keeps operation identity stable while canonicalizing downstream requests", () => {
+    const op = newOp({ environment: "production" });
+    op.request = {
+      environment: { environment: "production", provider: "azure" }
+    };
+    op.resumeRequest = {
+      environment: { environment: "production", provider: "azure" }
+    };
+
+    setCanonicalEnvironment(op, "Production");
+    setCanonicalEnvironment(op, "Production");
+
+    expect(op.environment).toBe("production");
+    expect(op.context).toMatchObject({
+      requestedEnvironment: "production",
+      canonicalEnvironment: "Production"
+    });
+    expect(op.request.environment.environment).toBe("Production");
+    expect(op.resumeRequest.environment.environment).toBe("Production");
+    expect(toClientView(op).environment).toBe("production");
+
+    requireInput(op, {
+      code: "app-selection-required",
+      checkpoint: "azure-app-selection",
+      message: "Choose an app."
+    });
+    expect(
+      canResumeInput(op, {
+        code: "app-selection-required",
+        checkpoint: "azure-app-selection",
+        repo: "contoso/store",
+        environment: "production",
+        provider: "azure"
+      })
+    ).toBe(true);
+  });
+
+  it.each([null, "", "   "])(
+    "ignores an unusable canonical value %j",
+    (environment) => {
+      const op = newOp({ environment: "production" });
+
+      expect(setCanonicalEnvironment(op, environment)).toBe(op);
+      expect(op.environment).toBe("production");
+      expect(op.context).toEqual({});
+    }
+  );
+
+  it("keeps uncertain create provenance when a later ensure observes reuse", () => {
+    const op = newOp({ environment: "Production" });
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "Contoso/Store",
+      name: "production"
+    });
+
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      repo: "contoso/store",
+      name: "Production"
+    });
+
+    expect(op.setupArtifacts.githubEnvironment).toEqual({
+      state: "created_candidate",
+      origin: "unknown",
+      repo: "contoso/store",
+      name: "Production"
+    });
+  });
+
+  it("allows a different environment artifact to replace earlier provenance", () => {
+    const op = newOp({ environment: "Production" });
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "Production"
+    });
+
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      repo: "contoso/store",
+      name: "Staging"
+    });
+
+    expect(op.setupArtifacts.githubEnvironment).toEqual({
+      state: "reused",
+      origin: "unknown",
+      repo: "contoso/store",
+      name: "Staging"
+    });
+  });
+
+  it("does not carry provenance across repositories", () => {
+    const op = newOp({ environment: "Production" });
+    recordGitHubEnvironment(op, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "Production"
+    });
+
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      repo: "fabrikam/store",
+      name: "production"
+    });
+
+    expect(op.setupArtifacts.githubEnvironment).toEqual({
+      state: "reused",
+      origin: "unknown",
+      repo: "fabrikam/store",
+      name: "production"
+    });
+  });
+});
 
 describe("stage inventory", () => {
   it("omits a stage that will not run rather than showing it as skipped", () => {

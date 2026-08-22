@@ -1,7 +1,10 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
-import type { DeployStatus } from "@radius-project/core";
+import {
+  mergeDeployedGraphMetadata,
+  type DeployStatus
+} from "@radius-project/core";
 import { createRequestContext } from "../request-context.js";
 import {
   createGraphsPlanningRoutes,
@@ -9,8 +12,17 @@ import {
   handleProgress,
   type GraphsPlanningReadsDependencies
 } from "./graphs-planning.js";
-import type { DeployProgress } from "../../deploy-artifacts.js";
-import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import type {
+  DeployProgress,
+  WorkflowArtifact
+} from "../../deploy-artifacts.js";
+import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
+import type {
+  CanvasGraphResource,
+  CanvasState,
+  GraphProgressRecord,
+  GraphProgressView
+} from "../../shared.js";
 import type { CanvasServerEntry } from "../types.js";
 
 interface Recording {
@@ -129,36 +141,69 @@ const ARTIFACT_PROGRESS = progressPayload([
   }
 ]);
 
+function graphProgressState(
+  view: GraphProgressView,
+  overrides: Partial<GraphProgressRecord> = {}
+): CanvasState {
+  return {
+    graphProgressRecords: {
+      [view]: {
+        graphBuildEvents: [],
+        graphProgressGeneration: 1,
+        graphProgressStartedAtMs: 0,
+        graphProgressActive: false,
+        graphProgressView: view,
+        graphProgressKey: "",
+        graphProgressOwner: 1,
+        graphProgressAwaitingModel: false,
+        ...overrides
+      }
+    }
+  };
+}
+
 // Every state field the two routes may read. A case that misspells one would
 // otherwise be completely silent: the override would land on a field nothing
 // reads, and the case would collapse into the plain default while still
 // asserting the same outcome.
 const KNOWN_STATE_FIELDS: readonly (keyof CanvasState)[] = [
   "contextRepo",
+  "contextBranch",
   "deployingRepo",
+  "deployingBranch",
   "plannedRepo",
+  "plannedBranch",
   "graphTargetRepo",
+  "graphBranch",
   "workspaceRepo",
   "workspaceBranch",
   "deployEnvName",
   "envName",
   "deployAppName",
   "deployStatus",
+  "deployErrorKind",
   "deployingResources",
+  "deployStartedAt",
+  "deployFinishedAt",
   "deployRunId",
   "deployedGraph",
   "plannedResources",
   "graphResources",
+  "graphProgressRecords",
   "progressMessages"
 ];
 
 // Default reader outcomes. A scripted outcome must *override* one of these,
 // never add a new key.
 const DEFAULT_READER: {
-  graph: { graph: unknown | null; status: string };
+  graph: {
+    graph: unknown | null;
+    status: string;
+    artifact: WorkflowArtifact | null;
+  };
   progress: DeployProgress | null;
 } = {
-  graph: { graph: null, status: "missing" },
+  graph: { graph: null, status: "missing", artifact: null },
   progress: null
 };
 
@@ -170,11 +215,20 @@ interface FakeOptions {
   missingEntry?: boolean;
   state?: CanvasState;
   reader?: {
-    graph?: { graph: unknown | null; status: string };
+    graph?: {
+      graph: unknown | null;
+      status: string;
+      artifact?: WorkflowArtifact | null;
+    };
     progress?: DeployProgress | null;
   };
   graphThrows?: Error;
   progressThrows?: Error;
+  modeledError?: string;
+  modeledRetry?: boolean;
+  modeledStatus?: number;
+  modeledResources?: CanvasGraphResource[];
+  nowMs?: number;
 }
 
 // Key derivation shared by the `deployStatusKeys` fake and the two map-builder
@@ -215,6 +269,7 @@ function fakes(
   // builds from its source text.
   const entry = state === undefined ? undefined : { state };
   const reader = { ...DEFAULT_READER, ...(options.reader ?? {}) };
+  const nowMs = options.nowMs ?? 0;
   const deps: GraphsPlanningReadsDependencies = {
     readInstanceEntry: (instanceId) => {
       calls.log.push(`readInstanceEntry(${instanceId})`);
@@ -228,7 +283,7 @@ function fakes(
         graph: () => {
           calls.log.push("reader.graph");
           if (options.graphThrows) return Promise.reject(options.graphThrows);
-          return Promise.resolve(reader.graph);
+          return Promise.resolve({ artifact: null, ...reader.graph });
         },
         progress: () => {
           calls.log.push("reader.progress");
@@ -238,6 +293,19 @@ function fakes(
           return Promise.resolve(reader.progress);
         }
       };
+    },
+    loadModeledGraph: (_instanceId, repo, branch) => {
+      calls.log.push(`loadModeledGraph(${repo}|${branch})`);
+      if (state) {
+        state.graphTargetRepo = repo;
+        state.graphBranch = branch;
+        state.graphResources = structuredClone(options.modeledResources ?? []);
+      }
+      return Promise.resolve({
+        status: options.modeledStatus ?? 200,
+        error: options.modeledError,
+        retry: options.modeledRetry
+      });
     },
     buildDeployStatusMap: (progress) => {
       calls.log.push(`buildDeployStatusMap(${JSON.stringify(progress)})`);
@@ -264,6 +332,14 @@ function fakes(
     deployStatusKeys: (resource) => {
       calls.log.push(`deployStatusKeys(${JSON.stringify(resource)})`);
       return keysOf(resource);
+    },
+    mergeDeployedGraphMetadata: (modeled, deployed) => {
+      calls.log.push(
+        `mergeDeployedGraphMetadata(${JSON.stringify(modeled)}|${JSON.stringify(
+          deployed
+        )})`
+      );
+      return mergeDeployedGraphMetadata(modeled, deployed);
     },
     projectDeployedGraph: (modeled, statusByKey) => {
       calls.log.push(
@@ -292,12 +368,19 @@ function fakes(
         if (message) resource.deployMessage = message;
       }
     },
-    record: (value) => {
-      calls.log.push(`record(${JSON.stringify(value)})`);
-      if (value === null || typeof value !== "object" || Array.isArray(value)) {
-        return {};
+    settleDeployStatuses: (resources, conclusion) => {
+      calls.log.push(`settleDeployStatuses(${conclusion})`);
+      for (const resource of resources) {
+        if (conclusion === "success") {
+          resource.deployStatus = "success";
+        } else if (
+          resource.deployStatus === undefined ||
+          resource.deployStatus === "pending" ||
+          resource.deployStatus === "in_progress"
+        ) {
+          resource.deployStatus = "failed";
+        }
       }
-      return Object.fromEntries(Object.entries(value));
     },
     // Deliberately distinct from the raw message, so a handler that formats the
     // read failure itself instead of using the injected formatter is detectable.
@@ -306,7 +389,8 @@ function fakes(
     repoMatchesWorkspace: (current, repo) => {
       calls.log.push(`repoMatchesWorkspace(${current.workspaceRepo}|${repo})`);
       return !!current.workspaceRepo && current.workspaceRepo === repo;
-    }
+    },
+    now: () => nowMs
   };
   return { deps, state };
 }
@@ -410,6 +494,219 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(recording.headerSteps).toEqual(SET_THEN_WRITE);
     expect(recording.body).toBe('{"messages":["first","second"]}');
     expect(calls.log).toEqual(["readInstanceEntry(panel-a)"]);
+  });
+
+  it("serves typed graph events without dropping deployed diagnostics", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        progressMessages: ["diagnostic"],
+        ...graphProgressState("graph", {
+          graphBuildEvents: [
+            {
+              sequence: 1,
+              stage: "building_graph",
+              state: "running",
+              detail: "Building graph."
+            }
+          ]
+        })
+      }
+    });
+    const recording = await run("/api/progress", handleProgress, deps);
+    expect(JSON.parse(recording.body)).toEqual({
+      messages: ["diagnostic"],
+      generation: 1,
+      active: false,
+      view: "graph",
+      elapsedMs: 0,
+      events: [
+        {
+          sequence: 1,
+          stage: "building_graph",
+          state: "running",
+          detail: "Building graph."
+        }
+      ]
+    });
+  });
+
+  // A build outlives the page that started it: the user can navigate away and
+  // come back, and the app.bicep handoff runs entirely outside the panel. The
+  // record therefore reports its own liveness, owner and age, and a returning
+  // page adopts those instead of restarting its clock at zero.
+  it("reports the record as live, its owning view, and real elapsed time", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      nowMs: 61_000,
+      state: graphProgressState("diff", {
+        graphProgressActive: true,
+        graphProgressStartedAtMs: 1_000,
+        graphBuildEvents: [
+          {
+            sequence: 1,
+            stage: "building_graph",
+            state: "running",
+            detail: "Building graph."
+          }
+        ]
+      })
+    });
+    const recording = await run("/api/progress", handleProgress, deps);
+    const payload = JSON.parse(recording.body) as Record<string, unknown>;
+    expect(payload.active).toBe(true);
+    expect(payload.view).toBe("diff");
+    expect(payload.elapsedMs).toBe(60_000);
+  });
+
+  it("serves the requested view without letting a newer view replace it", async () => {
+    const calls: Calls = { log: [] };
+    const graph = graphProgressState("graph", {
+      graphProgressActive: true,
+      graphProgressStartedAtMs: 1_000,
+      graphBuildEvents: [
+        {
+          sequence: 1,
+          stage: "creating_model",
+          state: "running",
+          detail: "Waiting for the modeled application."
+        }
+      ]
+    }).graphProgressRecords?.graph;
+    const planned = graphProgressState("planned", {
+      graphProgressActive: true,
+      graphProgressStartedAtMs: 2_000,
+      graphBuildEvents: [
+        {
+          sequence: 1,
+          stage: "resolving_recipes",
+          state: "running",
+          detail: "Planning the deployment."
+        }
+      ]
+    }).graphProgressRecords?.planned;
+    const { deps } = fakes(calls, {
+      nowMs: 3_000,
+      state: { graphProgressRecords: { graph, planned } }
+    });
+
+    const modeled = JSON.parse(
+      (await run("/api/progress?view=graph", handleProgress, deps)).body
+    ) as Record<string, unknown>;
+    const ambient = JSON.parse(
+      (await run("/api/progress", handleProgress, deps)).body
+    ) as Record<string, unknown>;
+
+    expect(modeled.view).toBe("graph");
+    expect(modeled.elapsedMs).toBe(2_000);
+    expect(ambient.view).toBe("planned");
+  });
+
+  // A record that settled still carries its stages so the page can render the
+  // finished checklist, but it must not claim to still be running.
+  it("reports a settled record as no longer in flight", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      nowMs: 5_000,
+      state: graphProgressState("graph", {
+        graphProgressActive: false,
+        graphProgressStartedAtMs: 2_000,
+        graphBuildEvents: [
+          {
+            sequence: 1,
+            stage: "building_graph",
+            state: "succeeded",
+            detail: ""
+          }
+        ]
+      })
+    });
+    const payload = JSON.parse(
+      (await run("/api/progress", handleProgress, deps)).body
+    ) as Record<string, unknown>;
+    expect(payload.active).toBe(false);
+    expect(payload.view).toBe("graph");
+    expect(payload.elapsedMs).toBe(3_000);
+  });
+
+  it("expires an abandoned app.bicep wait on the server clock", async () => {
+    const calls: Calls = { log: [] };
+    const scriptedState = graphProgressState("graph", {
+      graphProgressActive: true,
+      graphProgressAwaitingModel: true,
+      graphProgressDeadlineAtMs: 60_000,
+      graphProgressStartedAtMs: 1_000,
+      graphBuildEvents: [
+        {
+          sequence: 1,
+          stage: "creating_model",
+          state: "running",
+          detail: "Copilot is creating the model."
+        }
+      ]
+    });
+    const { deps, state } = fakes(calls, {
+      nowMs: 60_000,
+      state: scriptedState
+    });
+
+    const payload = JSON.parse(
+      (await run("/api/progress", handleProgress, deps)).body
+    ) as Record<string, unknown>;
+
+    expect(payload.active).toBe(false);
+    expect(state?.graphProgressRecords?.graph?.graphProgressAwaitingModel).toBe(
+      false
+    );
+    expect(
+      state?.graphProgressRecords?.graph?.graphProgressDeadlineAtMs
+    ).toBeUndefined();
+    expect(
+      state?.graphProgressRecords?.graph?.graphBuildEvents.at(-1)
+    ).toMatchObject({
+      stage: "creating_model",
+      state: "failed",
+      detail: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+    });
+  });
+
+  // A clock that jumped backwards must not produce a negative age, which would
+  // render as a nonsense elapsed time.
+  it("clamps elapsed time when the clock moves backwards", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      nowMs: 500,
+      state: graphProgressState("graph", {
+        graphProgressActive: true,
+        graphProgressStartedAtMs: 4_000,
+        graphBuildEvents: [
+          { sequence: 1, stage: "building_graph", state: "running", detail: "" }
+        ]
+      })
+    });
+    const payload = JSON.parse(
+      (await run("/api/progress", handleProgress, deps)).body
+    ) as Record<string, unknown>;
+    expect(payload.elapsedMs).toBe(0);
+  });
+
+  it("identifies the owning stream so a reader can reject a stale snapshot", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: graphProgressState("graph", {
+        graphProgressGeneration: 4,
+        graphBuildEvents: [
+          {
+            sequence: 1,
+            stage: "checking_model",
+            state: "running",
+            detail: "Checking for an application model."
+          }
+        ]
+      })
+    });
+    const recording = await run("/api/progress", handleProgress, deps);
+    expect(JSON.parse(recording.body).generation).toBe(4);
   });
 
   it("answers an empty list for a state that has never logged", async () => {
@@ -599,6 +896,58 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(payloadOf(recording).mode).toBe("live");
   });
 
+  it("matches the session application case-insensitively", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "in_progress",
+        deployAppName: DEPLOY_APP
+      }
+    });
+    const recording = await run(
+      `/api/deployed-graph?application=${DEPLOY_APP.toUpperCase()}`,
+      handleDeployedGraph,
+      deps
+    );
+    expect(payloadOf(recording).mode).toBe("live");
+  });
+
+  it.each([
+    {
+      selectionPart: "repository",
+      url: `/api/deployed-graph?repo=${CONTEXT_REPO.toUpperCase()}`,
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "in_progress" as const,
+        deployRunId: 7
+      }
+    },
+    {
+      selectionPart: "branch",
+      url: "/api/deployed-graph",
+      state: {
+        contextRepo: CONTEXT_REPO,
+        contextBranch: WORKSPACE_BRANCH,
+        deployingBranch: WORKSPACE_BRANCH.toUpperCase(),
+        deployStatus: "in_progress" as const,
+        deployRunId: 7
+      }
+    }
+  ])(
+    "matches the session $selectionPart case-sensitively",
+    async ({ url, state }) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls, { state });
+      const recording = await run(url, handleDeployedGraph, deps);
+
+      expect(payloadOf(recording).mode).toBe("greyed");
+      expect(calls.log.some((call) => call.includes('"runId":null'))).toBe(
+        true
+      );
+    }
+  );
+
   it("treats an empty side of the environment comparison as a match", async () => {
     // Session env empty, request env set.
     const first: Calls = { log: [] };
@@ -636,11 +985,168 @@ describe("graphs-planning read routes (SU-09)", () => {
     ).toBe("live");
   });
 
-  it("seeds monitor statuses before the artifact and keeps the first", async () => {
+  it("lets a newer same-run artifact overwrite stale monitor status", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       state: {
         contextRepo: CONTEXT_REPO,
+        deployStatus: "in_progress",
+        deployRunId: 32529608815,
+        deployingResources: [
+          {
+            id: "res-deploying",
+            name: "deploying-node",
+            type: "Radius.Compute",
+            deployStatus: "in_progress"
+          }
+        ]
+      },
+      modeledResources: [
+        {
+          id: "res-deploying",
+          name: "deploying-node",
+          type: "Radius.Compute"
+        }
+      ],
+      reader: {
+        progress: progressPayload(
+          [
+            {
+              id: "res-deploying",
+              name: "deploying-node",
+              type: "Radius.Compute",
+              status: "success"
+            }
+          ],
+          { runId: 32529608815, sequence: 5, state: "in_progress" }
+        )
+      }
+    });
+    const recording = await run(
+      "/api/deployed-graph",
+      handleDeployedGraph,
+      deps
+    );
+    const payload = payloadOf(recording);
+    // The monotonic artifact snapshot is newer than the in-memory monitor copy.
+    expect(payload.resources[0].deployStatus).toBe("success");
+    expect(payload.mode).toBe("live");
+    expect(payload.application).toBe(ARTIFACT_APP);
+    expect(payload.updatedAt).toBe(UPDATED_AT);
+  });
+
+  it("uses monitor status only for resources missing from the artifact", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "in_progress",
+        deployRunId: 7,
+        deployingResources: [
+          {
+            id: "container",
+            name: "container",
+            deployStatus: "in_progress"
+          },
+          { id: "mysql", name: "mysql", deployStatus: "success" }
+        ]
+      },
+      modeledResources: [
+        { id: "container", name: "container" },
+        { id: "mysql", name: "mysql" }
+      ],
+      reader: {
+        progress: progressPayload(
+          [
+            {
+              id: "container",
+              name: "container",
+              type: "Radius.Compute/containers",
+              status: "success"
+            }
+          ],
+          { runId: 7, sequence: 6 }
+        )
+      }
+    });
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+    expect(payload.resources.map((resource) => resource.deployStatus)).toEqual([
+      "success",
+      "success"
+    ]);
+  });
+
+  it.each([
+    ["run discovery is pending", undefined, 6],
+    ["the artifact belongs to another run", 7, 6]
+  ])(
+    "ignores previous deployment status and metadata while %s",
+    async (_case, activeRunId, artifactRunId) => {
+      const calls: Calls = { log: [] };
+      const staleOutputs = [
+        { id: "old-server", type: "Microsoft.DBforMySQL/flexibleServers" }
+      ];
+      const { deps } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus: "in_progress",
+          deployRunId: activeRunId,
+          deployingResources: [
+            {
+              id: "mysql",
+              name: "mysql",
+              deployStatus: "in_progress"
+            }
+          ],
+          deployedGraph: [
+            { id: "mysql", name: "mysql", outputResources: staleOutputs }
+          ]
+        },
+        modeledResources: [{ id: "mysql", name: "mysql" }],
+        reader: {
+          graph: {
+            graph: {
+              resources: [
+                { id: "mysql", name: "mysql", outputResources: staleOutputs }
+              ]
+            },
+            status: "ok",
+            artifact: {
+              id: 6,
+              name: "radius-deploy-status-prod-old",
+              created_at: "2026-08-12T00:00:00.000Z"
+            }
+          },
+          progress: progressPayload(
+            [
+              {
+                id: "mysql",
+                name: "mysql",
+                type: "Radius.Data/mySqlDatabases",
+                status: "success"
+              }
+            ],
+            { runId: artifactRunId, sequence: 6 }
+          )
+        }
+      });
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+      expect(payload.resources[0].deployStatus).toBe("in_progress");
+      expect(payload.resources[0].outputResources).toEqual([]);
+      expect(payload.updatedAt).toBeNull();
+    }
+  );
+
+  it("settles every modeled node from the fresh terminal monitor outcome", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "complete",
         deployingResources: [
           {
             id: "res-deploying",
@@ -650,21 +1156,217 @@ describe("graphs-planning read routes (SU-09)", () => {
           }
         ]
       },
-      reader: { progress: ARTIFACT_PROGRESS }
+      modeledResources: [DEPLOYING_RESOURCES[0], PLANNED_RESOURCES[0]],
+      reader: {
+        progress: progressPayload(
+          [
+            {
+              id: "res-deploying",
+              name: "deploying-node",
+              type: "Radius.Compute",
+              status: "failed"
+            }
+          ],
+          { state: "failed" }
+        )
+      }
     });
-    const recording = await run(
-      "/api/deployed-graph",
-      handleDeployedGraph,
-      deps
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
     );
-    const payload = payloadOf(recording);
-    // The artifact says failed; the seeded monitor status wins.
-    expect(payload.resources[0].deployStatus).toBe("success");
-    // The message map is not gated by the seeding, so it still applies.
-    expect(payload.resources[0].deployMessage).toBe("artifact says failed");
-    expect(payload.mode).toBe("terminal");
-    expect(payload.application).toBe(ARTIFACT_APP);
-    expect(payload.updatedAt).toBe(UPDATED_AT);
+
+    expect(payload.resources.map((resource) => resource.deployStatus)).toEqual([
+      "success",
+      "success"
+    ]);
+    expect(calls.log).toContain("settleDeployStatuses(success)");
+  });
+
+  it("lets a demonstrably newer artifact run supersede terminal monitor state", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "complete",
+        deployAppName: DEPLOY_APP,
+        deployStartedAt: Date.parse("2026-08-12T00:00:00.000Z"),
+        deployFinishedAt: Date.parse("2026-08-13T00:00:00.000Z"),
+        deployRunId: 7,
+        deployingResources: [
+          {
+            ...DEPLOYING_RESOURCES[0],
+            deployStatus: "success"
+          }
+        ]
+      },
+      modeledResources: DEPLOYING_RESOURCES,
+      reader: {
+        graph: {
+          graph: null,
+          status: "ok",
+          artifact: {
+            id: 8,
+            name: "radius-deploy-status-prod-new",
+            created_at: "2026-08-14T00:00:00.000Z"
+          }
+        },
+        progress: progressPayload(
+          [
+            {
+              id: "res-deploying",
+              name: "deploying-node",
+              type: "Radius.Compute",
+              status: "failed"
+            }
+          ],
+          { runId: 8, state: "failed" }
+        )
+      }
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.resources[0].deployStatus).toBe("failed");
+    expect(calls.log).toContain("settleDeployStatuses(failure)");
+    expect(calls.log).not.toContain("settleDeployStatuses(success)");
+  });
+
+  it.each([
+    ["older", "2026-08-11T00:00:00.000Z"],
+    ["without creation time", undefined]
+  ])(
+    "ignores a mismatched terminal artifact that is %s",
+    async (_case, createdAt) => {
+      const calls: Calls = { log: [] };
+      const currentOutputs = [
+        {
+          id: "current-server",
+          type: "Microsoft.DBforMySQL/flexibleServers"
+        }
+      ];
+      const staleOutputs = [
+        { id: "stale-server", type: "Microsoft.DBforMySQL/flexibleServers" }
+      ];
+      const { deps } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus: "complete",
+          deployAppName: DEPLOY_APP,
+          deployStartedAt: Date.parse("2026-08-12T00:00:00.000Z"),
+          deployFinishedAt: Date.parse("2026-08-13T00:00:00.000Z"),
+          deployRunId: 7,
+          deployingResources: [
+            {
+              id: "mysql",
+              name: "mysql",
+              deployStatus: "success"
+            }
+          ],
+          deployedGraph: [
+            {
+              id: "mysql",
+              name: "mysql",
+              outputResources: currentOutputs
+            }
+          ]
+        },
+        modeledResources: [{ id: "mysql", name: "mysql" }],
+        reader: {
+          graph: {
+            graph: {
+              resources: [
+                {
+                  id: "mysql",
+                  name: "mysql",
+                  outputResources: staleOutputs
+                }
+              ]
+            },
+            status: "ok",
+            artifact: {
+              id: 6,
+              name: "radius-deploy-status-prod-old",
+              created_at: createdAt
+            }
+          },
+          progress: progressPayload(
+            [
+              {
+                id: "mysql",
+                name: "mysql",
+                type: "Radius.Data/mySqlDatabases",
+                status: "failed"
+              }
+            ],
+            { runId: 6, state: "failed" }
+          )
+        }
+      });
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.resources[0].deployStatus).toBe("success");
+      expect(payload.resources[0].outputResources).toEqual(currentOutputs);
+      expect(payload.application).toBe(DEPLOY_APP);
+      expect(payload.updatedAt).toBeNull();
+      expect(calls.log).toContain("settleDeployStatuses(success)");
+      expect(calls.log).not.toContain("settleDeployStatuses(failure)");
+    }
+  );
+
+  it("does not settle a pre-dispatch session failure", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "failed",
+        deployErrorKind: "branch-not-pushed"
+      },
+      modeledResources: GRAPH_RESOURCES
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.mode).toBe("greyed");
+    expect(payload.resources[0].deployStatus).toBe("pending");
+    expect(
+      calls.log.some((call) => call.startsWith("settleDeployStatuses"))
+    ).toBe(false);
+  });
+
+  it("settles unfinished nodes after a confirmed in-session run failure", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "failed",
+        deployRunId: 7,
+        deployingResources: [
+          {
+            ...DEPLOYING_RESOURCES[0],
+            deployStatus: "success"
+          }
+        ]
+      },
+      modeledResources: [DEPLOYING_RESOURCES[0], PLANNED_RESOURCES[0]]
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.resources.map((resource) => resource.deployStatus)).toEqual([
+      "success",
+      "failed"
+    ]);
+    expect(calls.log).toContain("settleDeployStatuses(failure)");
   });
 
   it("skips pending and statusless monitor resources when seeding", async () => {
@@ -681,7 +1383,8 @@ describe("graphs-planning read routes (SU-09)", () => {
           },
           { id: "res-planned", name: "planned-node", type: "Radius.Compute" }
         ]
-      }
+      },
+      modeledResources: [DEPLOYING_RESOURCES[0], PLANNED_RESOURCES[0]]
     });
     const recording = await run(
       "/api/deployed-graph",
@@ -725,34 +1428,81 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(payload.resources).toEqual([]);
   });
 
-  it("prefers a published graph array over every modeled fallback", async () => {
+  it("keeps modeled topology when the published graph is sparse", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       state: {
         contextRepo: CONTEXT_REPO,
-        deployingResources: DEPLOYING_RESOURCES,
-        plannedResources: PLANNED_RESOURCES,
+        graphTargetRepo: CONTEXT_REPO,
+        graphBranch: "main",
         graphResources: GRAPH_RESOURCES
       },
       reader: { graph: { graph: PUBLISHED_GRAPH, status: "ok" } }
     });
+
     const recording = await run(
       "/api/deployed-graph",
       handleDeployedGraph,
       deps
     );
     expect(payloadOf(recording).resources.map((r) => r.name)).toEqual([
-      "published-node"
+      "graph-node"
     ]);
+    expect(calls.log).not.toContain(`loadModeledGraph(${CONTEXT_REPO}|main)`);
   });
 
-  it("reads the resources array off a published graph object", async () => {
+  it("enriches an exact modeled parent with final concrete outputs", async () => {
     const calls: Calls = { log: [] };
+    const modeled = {
+      id: "mysql",
+      name: "mysql",
+      type: "Radius.Data/mySqlDatabases",
+      connections: [{ id: "api", direction: "Inbound" }]
+    };
+    const outputs = [
+      { id: "lock", name: "lock", type: "Microsoft.Authorization/locks" },
+      {
+        id: "server",
+        name: "server",
+        type: "Microsoft.DBforMySQL/flexibleServers"
+      }
+    ];
     const { deps } = fakes(calls, {
       state: {
         contextRepo: CONTEXT_REPO,
-        plannedResources: PLANNED_RESOURCES
+        graphTargetRepo: CONTEXT_REPO,
+        graphBranch: "main",
+        graphResources: [modeled]
       },
+      reader: {
+        graph: {
+          graph: {
+            resources: [
+              {
+                id: "mysql",
+                name: "mysql",
+                type: "Radius.Data/mySqlDatabases",
+                outputResources: outputs
+              }
+            ]
+          },
+          status: "ok"
+        }
+      }
+    });
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+    expect(payload.resources).toHaveLength(1);
+    expect(payload.resources[0].connections).toEqual(modeled.connections);
+    expect(payload.resources[0].outputResources).toEqual(outputs);
+  });
+
+  it("builds modeled topology instead of reading published graph resources", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: { contextRepo: CONTEXT_REPO },
+      modeledResources: GRAPH_RESOURCES,
       reader: {
         graph: { graph: { resources: PUBLISHED_GRAPH }, status: "ok" }
       }
@@ -763,52 +1513,56 @@ describe("graphs-planning read routes (SU-09)", () => {
       deps
     );
     expect(payloadOf(recording).resources.map((r) => r.name)).toEqual([
-      "published-node"
+      "graph-node"
+    ]);
+    expect(calls.log).toContain(`loadModeledGraph(${CONTEXT_REPO}|main)`);
+  });
+
+  it("surfaces a cold modeled-graph workflow failure", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: { contextRepo: CONTEXT_REPO },
+      modeledError: "Application model compilation failed.",
+      modeledRetry: true,
+      modeledStatus: 400
+    });
+
+    const recording = await run(
+      "/api/deployed-graph",
+      handleDeployedGraph,
+      deps
+    );
+    expect(recording.status).toBe(400);
+    expect(recording.body).toBe(
+      '{"error":"Application model compilation failed.","retry":true}'
+    );
+  });
+
+  it("does not use deploying or planned resources as topology", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployingResources: DEPLOYING_RESOURCES,
+        plannedResources: PLANNED_RESOURCES
+      },
+      modeledResources: GRAPH_RESOURCES
+    });
+    const recording = await run(
+      "/api/deployed-graph",
+      handleDeployedGraph,
+      deps
+    );
+    expect(payloadOf(recording).resources.map((r) => r.name)).toEqual([
+      "graph-node"
     ]);
   });
 
-  it("falls back through deploying, planned, and graph resources", async () => {
-    const chain: [CanvasState, string][] = [
-      [
-        {
-          contextRepo: CONTEXT_REPO,
-          deployingResources: DEPLOYING_RESOURCES,
-          plannedResources: PLANNED_RESOURCES,
-          graphResources: GRAPH_RESOURCES
-        },
-        "deploying-node"
-      ],
-      [
-        {
-          contextRepo: CONTEXT_REPO,
-          plannedResources: PLANNED_RESOURCES,
-          graphResources: GRAPH_RESOURCES
-        },
-        "planned-node"
-      ],
-      [
-        { contextRepo: CONTEXT_REPO, graphResources: GRAPH_RESOURCES },
-        "graph-node"
-      ]
-    ];
-    for (const [state, expected] of chain) {
-      const calls: Calls = { log: [] };
-      const { deps } = fakes(calls, { state });
-      const recording = await run(
-        "/api/deployed-graph",
-        handleDeployedGraph,
-        deps
-      );
-      expect(payloadOf(recording).resources.map((r) => r.name)).toEqual([
-        expected
-      ]);
-    }
-  });
-
-  it("falls back to the cached deployed graph when the read has none", async () => {
+  it("uses a cached deployed graph only as terminal metadata", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
-      state: { contextRepo: CONTEXT_REPO, deployedGraph: DEPLOYED_GRAPH }
+      state: { contextRepo: CONTEXT_REPO, deployedGraph: DEPLOYED_GRAPH },
+      modeledResources: GRAPH_RESOURCES
     });
     const recording = await run(
       "/api/deployed-graph",
@@ -816,9 +1570,8 @@ describe("graphs-planning read routes (SU-09)", () => {
       deps
     );
     const payload = payloadOf(recording);
-    // A cached graph alone is enough to make the deployment terminal.
     expect(payload.mode).toBe("terminal");
-    expect(payload.resources.map((r) => r.name)).toEqual(["deployed-node"]);
+    expect(payload.resources.map((r) => r.name)).toEqual(["graph-node"]);
   });
 
   it("treats a stale read as a successful one", async () => {
@@ -911,7 +1664,7 @@ describe("graphs-planning read routes (SU-09)", () => {
     );
   });
 
-  it("appends to an existing progress log rather than replacing it", async () => {
+  it("replaces a stale deployed diagnostic instead of growing the log", async () => {
     const calls: Calls = { log: [] };
     const { deps, state } = fakes(calls, {
       state: { contextRepo: CONTEXT_REPO, progressMessages: ["earlier"] },
@@ -919,9 +1672,19 @@ describe("graphs-planning read routes (SU-09)", () => {
     });
     await run("/api/deployed-graph", handleDeployedGraph, deps);
     expect(state?.progressMessages).toEqual([
-      "earlier",
       "Deployed graph status read failed: formatted:progress exploded"
     ]);
+  });
+
+  it("clears a previous deployed diagnostic after a successful read", async () => {
+    const calls: Calls = { log: [] };
+    const { deps, state } = fakes(calls, {
+      state: { contextRepo: CONTEXT_REPO, progressMessages: ["earlier"] }
+    });
+
+    await run("/api/deployed-graph", handleDeployedGraph, deps);
+
+    expect(state?.progressMessages).toEqual([]);
   });
 
   it("still answers when there is no entry to record the failure on", async () => {

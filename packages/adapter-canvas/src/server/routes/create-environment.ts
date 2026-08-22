@@ -18,7 +18,12 @@ import {
   applyProviderConfiguration,
   publishWorkflowFiles
 } from "./create-environment-workflow-publisher.js";
-import { proveGitHubEnvironmentCreated } from "../services/github-environment-provenance.js";
+import {
+  ensureGitHubEnvironment,
+  GitHubEnvironmentEnsureError,
+  readEnsuredGitHubEnvironment,
+  type GitHubEnvironmentReadResult
+} from "../services/github-environment.js";
 import type { WorkflowTempFilePort } from "./create-environment-workflow-committer.js";
 import type {
   CreateEnvironmentCommandResult,
@@ -99,6 +104,10 @@ export interface CreateEnvironmentDependencies
   preflightGhcrPackageWriteAccess(
     executor?: SelectedGhExecutor
   ): Promise<GhcrPreflightResult>;
+  readGitHubJson(
+    apiPath: string,
+    executor?: SelectedGhExecutor
+  ): Promise<GitHubEnvironmentReadResult>;
   bootstrapGHCRStatePackage(input: {
     targetRepository: string;
     registry: string;
@@ -125,12 +134,13 @@ export interface CreateEnvironmentDependencies
   tempFile: WorkflowTempFilePort;
 
   // --- GitHub environment ---
-  resolveGitHubEnvironmentCreateState(
-    result: Partial<CreateEnvironmentCommandResult> | null | undefined
-  ): "created_candidate" | "reused" | null;
+  setCanonicalEnvironment(
+    operation: CreateEnvironmentOperation,
+    environment: string
+  ): void;
   recordGitHubEnvironment(
     operation: CreateEnvironmentOperation,
-    patch: { state: string; repo: string; name: string; origin: string }
+    patch: { state: string; repo: string; name: string; origin?: string }
   ): void;
   // Promotes the environment this request wrote from "Radius may own this" to
   // "Radius created this", and only after the identity is durably saved. It
@@ -273,7 +283,8 @@ export async function handleCreateEnvironment(
       respond(admission.refusal.status, admission.refusal.body);
       return;
     }
-    const { targetRepo, envName, provider } = admission;
+    const { targetRepo, provider } = admission;
+    let { envName } = admission;
     op = admission.operation;
     const operation = admission.operation;
     const selectedExecutor = dependencies.getSelectedGitHubExecutor(
@@ -285,6 +296,13 @@ export async function handleCreateEnvironment(
       );
     }
     await selectedExecutor.verifyIdentity();
+    deleteGitHubEnvironmentRunner = async (args) => {
+      const result = await selectedExecutor.run(args);
+      if (result.code !== 0 && result.code !== "0") {
+        const detail = (result.stderr || result.stdout || "").trim();
+        throw new Error(detail || "GitHub API request failed.");
+      }
+    };
 
     steps = [];
     const rawPush = steps.push.bind(steps);
@@ -298,6 +316,19 @@ export async function handleCreateEnvironment(
       }
       return rawPush(...items);
     };
+
+    if (
+      !(await dependencies.guardStopBoundary({
+        operation,
+        boundary: "before-github-environment",
+        persist: () => dependencies.persistOperations(),
+        report: (diagnostic) =>
+          dependencies.reportOperationDiagnostic(diagnostic),
+        respond
+      }))
+    ) {
+      return;
+    }
 
     // Preflight repo access + admin BEFORE any GitHub mutation. Reachable
     // directly when credentials already exist and azure-auto-setup is skipped,
@@ -317,11 +348,58 @@ export async function handleCreateEnvironment(
         runAz:
           provider === "azure" ?
             (args: string[]) => dependencies.runAzCommand(args)
-          : null
+          : null,
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner
       });
       respond(failure.status, failure.body);
       return;
     }
+
+    const ghcrPreflight =
+      await dependencies.preflightGhcrPackageWriteAccess(selectedExecutor);
+    if (!ghcrPreflight.ok) {
+      const failure = await dependencies.finalizeSetupFailure(operation, {
+        status: 403,
+        error: ghcrPreflight.error,
+        code: ghcrPreflight.code,
+        steps,
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner
+      });
+      respond(failure.status, failure.body);
+      return;
+    }
+    const packageCredentials = ghcrPreflight.credentials;
+
+    let ensuredEnvironment = readEnsuredGitHubEnvironment(
+      operation,
+      targetRepo,
+      envName
+    );
+    try {
+      ensuredEnvironment ??= await ensureGitHubEnvironment({
+        repo: targetRepo,
+        requestedName: envName,
+        readGitHubJson: (apiPath) =>
+          dependencies.readGitHubJson(apiPath, selectedExecutor),
+        runGh: (args) => selectedExecutor.run(args),
+        now: dependencies.now
+      });
+    } catch (error) {
+      if (
+        error instanceof GitHubEnvironmentEnsureError &&
+        error.createdCandidate
+      ) {
+        dependencies.recordGitHubEnvironment(operation, {
+          state: "created_candidate",
+          repo: error.createdCandidate.repo,
+          name: error.createdCandidate.name
+        });
+      }
+      throw error;
+    }
+    const requestedEnvName = envName;
+    envName = ensuredEnvironment.name;
+    dependencies.setCanonicalEnvironment(operation, envName);
 
     const runner = createWorkflowScopeGhRunner(
       dependencies,
@@ -331,16 +409,7 @@ export async function handleCreateEnvironment(
       },
       selectedExecutor
     );
-    const { runGh, runGhOrThrow, setEnvironmentVariable, runGhWorkflow } =
-      runner;
-
-    deleteGitHubEnvironmentRunner = async (args) => {
-      const result = await runGh(args);
-      if (result.code !== 0) {
-        const detail = (result.stderr || result.stdout || "").trim();
-        throw new Error(detail || "GitHub API request failed.");
-      }
-    };
+    const { runGh, setEnvironmentVariable, runGhWorkflow } = runner;
 
     const fail = async (
       status: number,
@@ -390,6 +459,41 @@ export async function handleCreateEnvironment(
       return stopBoundary(boundary);
     };
 
+    dependencies.recordGitHubEnvironment(operation, {
+      state: ensuredEnvironment.state,
+      repo: targetRepo,
+      name: envName,
+      origin:
+        ensuredEnvironment.state === "reused" ? "pre_existing" : "unknown"
+    });
+    if (
+      ensuredEnvironment.creationProof?.proven &&
+      dependencies.promoteCreatedGitHubEnvironment(operation, {
+        repo: targetRepo,
+        name: envName
+      })
+    ) {
+      steps.push(
+        `✅ GitHub environment "${envName}" created by this setup — Radius owns it and can remove it.`
+      );
+    } else if (
+      ensuredEnvironment.state === "created_candidate" &&
+      ensuredEnvironment.creationProof &&
+      !ensuredEnvironment.creationProof.proven
+    ) {
+      steps.push(
+        `ℹ️ Radius left GitHub environment "${envName}" outside its cleanup scope. ${ensuredEnvironment.creationProof.detail}`
+      );
+    }
+    if (requestedEnvName === envName) {
+      steps.push(`✅ GitHub environment "${envName}" resolved.`);
+    } else {
+      steps.push(
+        `✅ GitHub resolved requested environment "${requestedEnvName}" as "${envName}".`
+      );
+    }
+    if (!(await checkpoint("after-github-environment"))) return;
+
     const defaultBranch =
       (await dependencies.getDefaultBranch(targetRepo, selectedExecutor)) ||
       "main";
@@ -401,15 +505,6 @@ export async function handleCreateEnvironment(
     steps.push(
       'Creating private GHCR state package "' + stateRegistry + '"...'
     );
-    // Nothing has been written to GHCR or GitHub yet on this leg.
-    if (!(await stopBoundary("before-ghcr-bootstrap"))) return;
-    const ghcrPreflight =
-      await dependencies.preflightGhcrPackageWriteAccess(selectedExecutor);
-    if (!ghcrPreflight.ok) {
-      await fail(403, ghcrPreflight.error, ghcrPreflight.code, { steps });
-      return;
-    }
-    const packageCredentials = ghcrPreflight.credentials;
     const statePackage = await dependencies.bootstrapGHCRStatePackage({
       targetRepository: targetRepo,
       registry: stateRegistry,
@@ -442,63 +537,6 @@ export async function handleCreateEnvironment(
     const prBranch = (): string | null =>
       committer.pullRequestState()?.branch || null;
 
-    // Step 1: Create the GitHub environment
-    const environmentPath =
-      "/repos/" + targetRepo + "/environments/" + encodeURIComponent(envName);
-    const environmentLookup = await runGh(["api", environmentPath]);
-    const environmentState =
-      dependencies.resolveGitHubEnvironmentCreateState(environmentLookup);
-    if (!environmentState) {
-      const detail =
-        (environmentLookup.stderr || environmentLookup.stdout || "").trim() ||
-        "The GitHub API lookup failed.";
-      throw new Error(
-        `Could not determine whether GitHub environment "${envName}" already exists before creating it. ${detail}`
-      );
-    }
-    steps.push('Creating GitHub environment "' + envName + '"...');
-    // Read before the write, so the response's own creation timestamp can be
-    // compared against the moment this request issued the PUT.
-    const environmentPutStartedAt = dependencies.now();
-    const environmentPut = await runGhOrThrow(
-      ["api", "--method", "PUT", environmentPath],
-      'Failed to create GitHub environment "' + envName + '"'
-    );
-    dependencies.recordGitHubEnvironment(operation, {
-      state: environmentState,
-      repo: targetRepo,
-      name: envName,
-      // A candidate claims nothing about who created it; only a complete proof
-      // may write "this operation".
-      origin: environmentState === "reused" ? "pre_existing" : "unknown"
-    });
-    // Settle a provable candidate before the mutation checkpoint. The checkpoint
-    // then persists the promoted ownership and honors a pending stop in one
-    // boundary, so a stop cannot strand a proven-created environment as an
-    // undeletable candidate.
-    if (environmentState === "created_candidate") {
-      const proof = proveGitHubEnvironmentCreated({
-        preflight: environmentState,
-        putResponseBody: environmentPut.stdout || "",
-        putStartedAtMs: environmentPutStartedAt
-      });
-      if (
-        proof.proven &&
-        dependencies.promoteCreatedGitHubEnvironment(operation, {
-          repo: targetRepo,
-          name: envName
-        })
-      ) {
-        steps.push(
-          `✅ GitHub environment "${envName}" created by this setup — Radius owns it and can remove it.`
-        );
-      } else if (!proof.proven) {
-        steps.push(
-          `ℹ️ Radius left GitHub environment "${envName}" outside its cleanup scope. ${proof.detail}`
-        );
-      }
-    }
-    if (!(await checkpoint("after-github-environment"))) return;
     // Tag the environment as Radius-managed so the listing can filter out
     // environments created outside this extension.
     await setEnvironmentVariable("RADIUS_MANAGED", "true");

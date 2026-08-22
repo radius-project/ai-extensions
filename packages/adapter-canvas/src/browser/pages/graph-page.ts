@@ -1,8 +1,16 @@
 import { requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
+import { clearGraphProgress, createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
-import { isRecord, readArray, readBoolean, readString } from "../json.js";
+import {
+  isRecord,
+  readArray,
+  readBoolean,
+  readNumber,
+  readString
+} from "../json.js";
+import type { GraphProgressView } from "../graph/progress.js";
 import {
   loadModeledEnvState,
   modeledPrimaryAction,
@@ -15,12 +23,21 @@ import type { GraphResource } from "../graph/model.js";
 import type { GraphController } from "../graph/surface.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";
+import {
+  GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+  GRAPH_APP_BICEP_TIMEOUT_MS
+} from "../../graph-progress-contract.js";
 
 const ENTRY_KEY = "graph-page";
 export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
 export const GRAPH_RETRY_MS = 10_000;
 export const GRAPH_STALE_RETRY_MS = 1_000;
 export const GRAPH_PROGRESS_MS = 800;
+// How long the page waits for Copilot to author .radius/app.bicep before it
+// gives up. Nothing reports back when the modeling skill finishes or refuses —
+// the page only learns by asking again — so an unbounded retry would spin
+// forever on a repository the skill cannot model at all.
+export { GRAPH_APP_BICEP_TIMEOUT_MESSAGE, GRAPH_APP_BICEP_TIMEOUT_MS };
 
 interface GraphPageState {
   repo: string;
@@ -41,18 +58,32 @@ function parseState(context: BrowserContext): GraphPageState {
   };
 }
 
+function statusElement(context: BrowserContext) {
+  return (
+    context.dom.byId("graph-status") ?? context.dom.byId("graph-refresh-status")
+  );
+}
+
 function showStatus(
   context: BrowserContext,
   message: string,
   tone: "info" | "error"
 ): void {
-  const status =
-    context.dom.byId("graph-status") ??
-    context.dom.byId("graph-refresh-status");
+  const status = statusElement(context);
   if (!status) return;
   status.style.display = "";
   status.className = `status ${tone}`;
   status.textContent = message;
+}
+
+// The status strip sits directly above the graph surface, so a failure written
+// to both renders as two identical error boxes. Clearing the strip leaves the
+// surface itself as the single place a failure is reported.
+function hideStatus(context: BrowserContext): void {
+  const status = statusElement(context);
+  if (!status) return;
+  status.style.display = "none";
+  status.textContent = "";
 }
 
 export function initializeGraphPage(
@@ -69,6 +100,12 @@ export function initializeGraphPage(
     "radiusSetGraphLoading"
   );
   const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
+  // Report a failure once, on the graph surface. The surface owns the content
+  // area, so writing there also clears whatever loading state was showing.
+  const showFailure = (message: string): void => {
+    setError("graph-container", message);
+    hideStatus(context);
+  };
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
   let hasLoadedGraph = page.loaded;
@@ -78,11 +115,64 @@ export function initializeGraphPage(
   let progress: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
+  let progressView: GraphProgressView | null = null;
+  // When the current wait for Copilot to author .radius/app.bicep began, or
+  // null when the page is not waiting on one.
+  let appBicepWaitStartedAtMs: number | null = null;
   let renderedOptions: GraphOptions | null = null;
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
     progress = null;
+    progressView?.stop();
+    progressView = null;
+    // The page states a terminal outcome on the graph surface, so a frozen
+    // panel left underneath would repeat it as a second box.
+    clearGraphProgress(context);
+  };
+
+  // Start reporting progress for one build. The loading surface must already be
+  // mounted so the panel has its host element.
+  //
+  // A missing app.bicep is answered by re-issuing the request until Copilot has
+  // written the file, so those retries continue the same panel: the elapsed
+  // clock measures the whole wait and the stages already reported stay on
+  // screen, instead of the panel being rebuilt and flashing the same first line
+  // every retry.
+  const startProgress = (
+    requestGeneration: number,
+    detail: string,
+    options: { readonly continuing?: boolean } = {}
+  ): void => {
+    if (progress !== null) entry.cancel(progress);
+    progress = null;
+    const continued = options.continuing ? progressView : null;
+    let view: GraphProgressView;
+    if (continued) {
+      // The loading surface was remounted, so the retained panel has to draw
+      // itself into the new host.
+      continued.remount();
+      view = continued;
+    } else {
+      progressView?.stop();
+      view = createGraphProgress(context, entry, {
+        initial: {
+          sequence: 0,
+          stage: "checking_model",
+          state: "running",
+          detail
+        }
+      });
+      progressView = view;
+    }
+    progress = entry.every(GRAPH_PROGRESS_MS, () =>
+      pollProgress(requestGeneration, view)
+    );
+    // Poll once immediately rather than waiting a full interval. A build that is
+    // already in flight — one this page did not start, or one it started before
+    // the user navigated away — is adopted straight away instead of showing an
+    // empty panel reading 0:00 until the first tick.
+    pollProgress(requestGeneration, view);
   };
 
   const stopRequest = (): void => {
@@ -90,6 +180,7 @@ export function initializeGraphPage(
     requestAbort?.abort();
     requestAbort = null;
     requestActive = false;
+    appBicepWaitStartedAtMs = null;
     if (retry !== null) entry.cancel(retry);
     retry = null;
     stopProgress();
@@ -149,12 +240,26 @@ export function initializeGraphPage(
     if (status) status.style.display = "none";
   };
 
-  const pollProgress = (requestGeneration: number): void => {
+  const pollProgress = (
+    requestGeneration: number,
+    view: GraphProgressView
+  ): void => {
     void context.net
-      .fetch("/api/progress")
+      .fetch("/api/progress?view=graph")
       .then((response) => response.json())
       .then((payload) => {
         if (!entry.active || requestGeneration !== generation) return;
+        const events = readArray(payload, "events");
+        if (events.length > 0) {
+          view.sync(
+            events,
+            readNumber(payload, "generation") ?? 0,
+            readNumber(payload, "elapsedMs")
+          );
+          return;
+        }
+        // Workflows that report no typed stages still append diagnostic prose,
+        // so that path stays readable instead of showing an empty panel.
         const messages = readArray(payload, "messages").filter(
           (message): message is string => typeof message === "string"
         );
@@ -167,7 +272,7 @@ export function initializeGraphPage(
       });
   };
 
-  const load = (): void => {
+  const load = (options: { readonly continuing?: boolean } = {}): void => {
     if (requestActive || !entry.active) return;
     const branch = branchSelect?.value.trim() || page.branch;
     if (!page.repo || !branch) {
@@ -193,9 +298,10 @@ export function initializeGraphPage(
       "Checking the selected branch for .radius/app.bicep…",
       "info"
     );
-    stopProgress();
-    progress = entry.every(GRAPH_PROGRESS_MS, () =>
-      pollProgress(requestGeneration)
+    startProgress(
+      requestGeneration,
+      "Checking the selected branch for .radius/app.bicep…",
+      { continuing: options.continuing }
     );
     void context.net
       .fetch("/api/load-graph", {
@@ -207,8 +313,8 @@ export function initializeGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== generation) return;
-        stopProgress();
         if (isRecord(payload) && Array.isArray(payload.resources)) {
+          stopProgress();
           showStatus(context, "Application graph ready.", "info");
           showLoadedGraph();
           renderOrUpdate(parseGraphResources(payload.resources), {
@@ -220,11 +326,22 @@ export function initializeGraphPage(
           return;
         }
         if (readBoolean(payload, "reload")) {
+          stopProgress();
           showStatus(context, "Application graph ready.", "info");
           context.nav.reload();
           return;
         }
+        // The work continues off-page while Copilot authors the model, so the
+        // panel keeps running rather than being torn down and rebuilt.
         if (readBoolean(payload, "needsAppBicep")) {
+          const now = context.clock.now();
+          if (appBicepWaitStartedAtMs === null) appBicepWaitStartedAtMs = now;
+          if (now - appBicepWaitStartedAtMs >= GRAPH_APP_BICEP_TIMEOUT_MS) {
+            appBicepWaitStartedAtMs = null;
+            stopProgress();
+            showFailure(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
+            return;
+          }
           showStatus(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
@@ -232,10 +349,11 @@ export function initializeGraphPage(
           );
           retry = entry.after(GRAPH_RETRY_MS, () => {
             retry = null;
-            load();
+            load({ continuing: true });
           });
           return;
         }
+        appBicepWaitStartedAtMs = null;
         if (readBoolean(payload, "stale")) {
           showStatus(
             context,
@@ -244,29 +362,21 @@ export function initializeGraphPage(
           );
           retry = entry.after(GRAPH_STALE_RETRY_MS, () => {
             retry = null;
-            load();
+            load({ continuing: true });
           });
           return;
         }
         const error = readString(payload, "error");
-        if (error) {
-          setError("graph-container", error);
-          showStatus(context, `Error: ${error}`, "error");
-        }
+        stopProgress();
+        if (error) showFailure(error);
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
+        appBicepWaitStartedAtMs = null;
+        const message = "Failed to generate the application graph.";
         stopProgress();
         context.logger.error("Radius graph request failed.", error);
-        setError(
-          "graph-container",
-          "Failed to generate the application graph."
-        );
-        showStatus(
-          context,
-          "Failed to generate the application graph.",
-          "error"
-        );
+        showFailure(message);
       })
       .then(() => {
         if (requestGeneration === generation) {

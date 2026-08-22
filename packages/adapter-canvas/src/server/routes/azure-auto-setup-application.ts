@@ -27,6 +27,9 @@ import type {
   RadiusAppProvenanceInput
 } from "./azure-auto-setup-types.js";
 
+export const ENTRA_APP_RETENTION_NOTICE =
+  "Radius retains this app registration if you later delete the environment; environment deletion removes only that environment's federated identity credential.";
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -80,6 +83,7 @@ export async function resolveAzureAutoSetupApplication({
   const { operations } = dependencies;
 
   let appName = `radius-deploy-${oidc.fullName.replace("/", "-")}`;
+  let applicationState: AzureAutoSetupApplicationResult["state"] = "reused";
   if (!explicitAppId) {
     if (appNameProvided) {
       const nameCheck = validateAppRegistrationName(requestedAppName);
@@ -483,7 +487,7 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         }
       } else {
-        steps.push(`Creating App Registration: ${appName}...`);
+        steps.push(`Creating Entra app registration: ${appName}...`);
         const createResult = await runAz(
           buildAppCreateArgs({
             appName,
@@ -513,7 +517,8 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         }
         clientId = createResult.stdout.trim();
-        steps.push(`✅ App Registration created: ${clientId}`);
+        applicationState = "created";
+        steps.push(`✅ Entra app registration created: ${clientId}`);
         operations.recordAzureApp(operation, {
           state: "created",
           origin: "this_operation",
@@ -637,5 +642,5 @@ export async function resolveAzureAutoSetupApplication({
     }
   }
 
-  return { clientId, appName };
+  return { clientId, appName, state: applicationState };
 }

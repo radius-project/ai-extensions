@@ -195,15 +195,18 @@ const productionHandlers = {
       graph: () => Promise.resolve({ graph: null, status: "missing" }),
       progress: () => Promise.resolve(null)
     }),
+    loadModeledGraph: () => Promise.resolve({ status: 200 }),
     buildDeployStatusMap: () => new Map(),
     buildDeployMessageMap: () => new Map(),
     deployStatusKeys: () => [],
+    mergeDeployedGraphMetadata: (modeled) => modeled,
     projectDeployedGraph: () => [],
     canvasGraphResources: () => [],
     applyDeployMessages: () => {},
-    record: () => ({}),
+    settleDeployStatuses: () => {},
     errorMessage: (error) => String(error),
-    repoMatchesWorkspace: () => false
+    repoMatchesWorkspace: () => false,
+    now: () => 0
   }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
@@ -218,6 +221,7 @@ const productionHandlers = {
         branch: "main",
         bicepPath: ""
       }),
+    listBranchPaths: () => Promise.resolve([]),
     workspaceGraphJsonPath: () => "",
     radArtifactsDirForSelection: () =>
       Promise.resolve({ dir: "", remote: false }),
@@ -246,6 +250,7 @@ const productionHandlers = {
         removeDirectory: () => {}
       }),
       triggerAppBicepHandoff: () => {},
+      listBranchPaths: () => Promise.resolve([]),
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,
       isCurrentSourceRefToken: () => false,
@@ -259,7 +264,8 @@ const productionHandlers = {
       computeGraphDiff: () => [],
       record: () => ({}),
       optionalString: () => "",
-      errorMessage: (error) => String(error)
+      errorMessage: (error) => String(error),
+      now: () => 0
     })
   }),
   ...createEnvironmentsRoutes({
@@ -333,13 +339,15 @@ const productionHandlers = {
     preflightRepoAdmin: () => Promise.resolve(""),
     preflightGhcrPackageWriteAccess: () =>
       Promise.resolve({ ok: true, credentials: null }),
+    readGitHubJson: () =>
+      Promise.resolve({ ok: true, status: 200, json: {}, stderr: "" }),
     bootstrapGHCRStatePackage: () => Promise.resolve({ visibility: undefined }),
     stateRegistryForEnvironment: () => "",
     getDefaultBranch: () => Promise.resolve("main"),
     getBranchHeadSha: () => Promise.resolve(null),
     createBranchRef: () => Promise.resolve({ ok: false, stderr: "" }),
     tempFile: { write: () => "", remove: () => {} },
-    resolveGitHubEnvironmentCreateState: () => null,
+    setCanonicalEnvironment: () => {},
     recordGitHubEnvironment: () => {},
     promoteCreatedGitHubEnvironment: () => false,
     envListCacheDelete: () => {},

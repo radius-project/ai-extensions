@@ -18,6 +18,7 @@ import {
   deployStatusKeys,
   fetchBicepFromRepo,
   fetchRecipePack,
+  mergeDeployedGraphMetadata,
   projectDeployedGraph,
   resolveRecipeOutputs,
   DEFAULT_STATE_ARCHIVE,
@@ -30,12 +31,15 @@ import {
   cloudCredential,
   listCredentialProfiles,
   saveCredentialProfile,
-  deleteCredentialProfile
+  deleteCredentialProfile,
+  recordGraphBuildEvent
 } from "./shared.js";
 import type {
   CanvasGraphResource,
   CanvasState,
   DeployErrorKind,
+  GraphBuildEvent,
+  GraphProgressView,
   GraphView
 } from "./shared.js";
 import {
@@ -119,6 +123,7 @@ import {
   hasWarnings,
   addLegacyStep,
   setContext,
+  setCanonicalEnvironment,
   setCloudContext,
   getSetupArtifactLedger,
   recordAzureApp,
@@ -255,6 +260,7 @@ import { createDeployDispatchService } from "./server/services/deploy-dispatch.j
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
+import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -921,28 +927,6 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   errorMessage
 });
 
-// Composition root for the read-only half of the `graphs-planning` family. Ten
-// narrow function seams: the instance-state reader, the cached deploy-status
-// reader factory, the two artifact map builders, the status-key and projection
-// helpers from `@radius-project/core`, the canvas resource normalizer, the
-// message applier, and the record/error/workspace-repo helpers that stay defined
-// here. The reader factory is injected already-cached so the route module owns
-// no cache of its own.
-const graphsPlanningRoutes = createGraphsPlanningRoutes({
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  createDeployStatusReader: (options) => cachedDeployStatusReader(options),
-  buildDeployStatusMap,
-  buildDeployMessageMap,
-  deployStatusKeys,
-  projectDeployedGraph: (modeled, statusByKey) =>
-    projectDeployedGraph(modeled as any[], statusByKey),
-  canvasGraphResources,
-  applyDeployMessages,
-  record,
-  errorMessage,
-  repoMatchesWorkspace
-});
-
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   defaultBranchForState,
@@ -954,6 +938,8 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
     triggerAppBicepHandoff(entry, repo, branch, "graph"),
   fetchBicepSelection: (entry, repo, branch) =>
     fetchBicepSelection(entry, repo, branch),
+  listBranchPaths: (entry, repo, branch) =>
+    listBranchPaths(entry, repo, branch),
   workspaceGraphJsonPath: (state, bicepRepoPath) =>
     workspaceGraphJsonPath(state, bicepRepoPath),
   radArtifactsDirForSelection: (options) =>
@@ -993,6 +979,8 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     }
   }),
   triggerAppBicepHandoff,
+  listBranchPaths: (entry, repo, branch) =>
+    listBranchPaths(entry, repo, branch),
   prepareSourceRefResources: (entry, view, sourceRefInput) =>
     prepareSourceRefResources(entry, view, sourceRefInput),
   setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
@@ -1010,7 +998,45 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     computeGraphDiff(baseResources, headResources),
   record,
   optionalString,
-  errorMessage
+  errorMessage,
+  now: () => Date.now()
+});
+
+// Composition root for the read-only half of the `graphs-planning` family. The
+// Deployed route reads status through the cached artifact reader, but obtains its
+// fixed topology through the same modeled-graph workflow and cache as the Graph
+// route. It never parses Bicep or invokes rad through a second path.
+const graphsPlanningRoutes = createGraphsPlanningRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  createDeployStatusReader: (options) => cachedDeployStatusReader(options),
+  loadModeledGraph: async (instanceId, repo, branch) => {
+    const outcome = await graphPlanningWorkflows.loadGraph({
+      instanceId,
+      body: JSON.stringify({ repo, branch, refresh: true })
+    });
+    const workflowError = optionalString(outcome.payload.error);
+    return {
+      status: outcome.status,
+      retry: outcome.payload.needsAppBicep === true,
+      error:
+        workflowError ||
+        (outcome.status >= 400 ?
+          `Modeled graph load failed with status ${outcome.status}.`
+        : undefined)
+    };
+  },
+  buildDeployStatusMap,
+  buildDeployMessageMap,
+  deployStatusKeys,
+  mergeDeployedGraphMetadata,
+  projectDeployedGraph: (modeled, statusByKey) =>
+    projectDeployedGraph(modeled as any[], statusByKey),
+  canvasGraphResources,
+  applyDeployMessages,
+  settleDeployStatuses,
+  errorMessage,
+  repoMatchesWorkspace,
+  now: () => Date.now()
 });
 
 // The route layer sees exactly one seam: the workflow service above. Parsing
@@ -1139,6 +1165,8 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
       getGitHubIdentity,
       executor
     ),
+  readGitHubJson: (apiPath, executor) =>
+    runGitHubJsonRequest(apiPath, executor),
   bootstrapGHCRStatePackage: (input) =>
     bootstrapGHCRStatePackage({
       targetRepository: input.targetRepository,
@@ -1177,7 +1205,9 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
       } catch {}
     }
   },
-  resolveGitHubEnvironmentCreateState,
+  setCanonicalEnvironment: (operation, environment) => {
+    setCanonicalEnvironment(operation, environment);
+  },
   recordGitHubEnvironment: (operation, patch) => {
     recordGitHubEnvironment(operation, patch);
   },
@@ -1392,11 +1422,13 @@ export function isCurrentSourceRefToken(
 export function addGraphProgress(
   state: CanvasState,
   generation: number,
-  message: string
+  view: GraphProgressView,
+  event: Omit<GraphBuildEvent, "sequence">
 ): boolean {
   if (!state || state.graphBuildGeneration !== generation) return false;
-  if (!state.progressMessages) state.progressMessages = [];
-  state.progressMessages.push(message);
+  const record = state.graphProgressRecords?.[view];
+  if (!record) return false;
+  recordGraphBuildEvent(record, event);
   return true;
 }
 
@@ -1493,6 +1525,17 @@ const envListCache = createEnvironmentListingCache();
 // `invalidateDeployListCache` seam bound below.
 const DEPLOY_LIST_TTL_MS = 15000;
 const deployListCache = new Map<string, CachedPayload>();
+
+// Both listing caches are module-scoped, so they outlive any single canvas
+// server instance. Callers that must not observe a listing captured under
+// different external state clear them wholesale through this seam.
+export function resetListingCaches(
+  environments: { clear(): void } = envListCache,
+  deployments: { clear(): void } = deployListCache
+): void {
+  environments.clear();
+  deployments.clear();
+}
 
 // A deploy request resolves branch and GitHub state asynchronously before
 // beginDeployAttempt marks the canvas state in progress. Reserve that window so
@@ -1908,9 +1951,8 @@ function triggerAppBicepHandoff(
 // per repair loop: once the agent owns the loop it redeploys and re-reads status
 // itself, so re-handing off every failed attempt would double-drive it.
 // `branch-not-pushed` is excluded: the user fixes that with a push, not by
-// editing the model. `oidc-subject-missing` is excluded for the same reason: the
-// remedy is re-running Create Environment or adding a federated credential in
-// Azure, neither of which the agent can reach by editing app.bicep.
+// editing the model. Azure OIDC preflight failures are excluded for the same
+// reason: their remedies live in cloud identity configuration, not app.bicep.
 //
 // Delivery is tracked explicitly (pending -> delivered | failed) because the
 // browser stops polling once a deploy is terminal: a rejected send has no later
@@ -1952,6 +1994,12 @@ export const DEPLOY_RUN_UNCONFIRMED_KIND: DeployErrorKind = "run-unconfirmed";
 // never opens a repair loop.
 export const DEPLOY_OIDC_SUBJECT_MISSING_KIND: DeployErrorKind =
   "oidc-subject-missing";
+
+// A federated credential exists, but Entra's case-sensitive subject comparison
+// rejects it. This stays distinct from "missing" so the browser does not send
+// the user through environment creation, which would preserve the bad casing.
+export const DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND: DeployErrorKind =
+  "oidc-subject-case-mismatch";
 
 // Ceiling for the preflight's `az` call. The check is advisory — it can only
 // block on a definitive answer — so a slow or hung `az` must not hold up a
@@ -2070,6 +2118,10 @@ export function beginDeployAttempt(
   state.deployErrorBranch = null;
   state.deployRunUrl = null;
   state.deployRunId = null;
+  // Concrete outputs belong to one deployment attempt. Keeping the previous
+  // graph would relabel a later failed run with stale resource and portal data.
+  state.deployedGraph = null;
+  state.deployedGraphRepo = undefined;
   // Only a redeploy inside an existing repair loop is already owned by the
   // agent. Every other deploy — including the agent's first one, which opens no
   // loop — must stay eligible to hand its failure off; marking that one as
@@ -2130,6 +2182,7 @@ export function triggerDeployRepairHandoff(
       // Refused before dispatch because no federated credential can match the
       // token GitHub would mint. Repairing the model cannot change that.
       state.deployErrorKind === DEPLOY_OIDC_SUBJECT_MISSING_KIND ||
+      state.deployErrorKind === DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND ||
       // An attempt whose run may still be in flight can never be repaired: the
       // resolver refuses its redeploy. Opening a loop only to refuse its first
       // call would spend a cycle and tell the agent two different things.
@@ -2404,6 +2457,7 @@ const deployDispatchService = createDeployDispatchService({
   deployWorkflowFiles: [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
   branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
   oidcSubjectMissingKind: DEPLOY_OIDC_SUBJECT_MISSING_KIND,
+  oidcSubjectCaseMismatchKind: DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
   getBranchHeadSha,
   getDefaultBranch,
   runGh: runGhForDeploy,
@@ -2519,15 +2573,6 @@ function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
       else resolve((stdout || "").trim());
     });
   });
-}
-
-export function resolveGitHubEnvironmentCreateState(
-  result: Partial<CommandResult> | null | undefined
-): "created_candidate" | "reused" | null {
-  if (!result) return null;
-  if (result.code === 0 || result.code === "0") return "reused";
-  const detail = `${result.stderr || ""}\n${result.stdout || ""}`;
-  return /HTTP 404|Not Found|404\b/i.test(detail) ? "created_candidate" : null;
 }
 
 export interface CleanupGitHubContext {
@@ -4003,6 +4048,19 @@ async function fetchFileForSelection(
   return await fetchFileFromRepo(repo, repoPath, access.branch);
 }
 
+// Every path on a branch, resolved through the same workspace-or-remote access
+// rule as the Bicep selection so the answer describes the tree the graph would
+// actually be built from. Resolves empty when the tree cannot be read, which
+// callers must treat as "unknown" rather than "empty repository".
+async function listBranchPaths(
+  entry: CanvasServerEntry,
+  repo: string,
+  branch: string
+): Promise<string[]> {
+  const access = accessForSelection(entry, repo, branch);
+  return await access.github.treePaths(repo, access.branch);
+}
+
 // Reject browser-labeled cross-site mutations while allowing non-browser clients.
 export function isCrossSiteMutation(
   method: string | undefined,
@@ -4237,36 +4295,96 @@ function createInstanceRequestCoordinator(
         async (executor) => {
           selectedGitHubExecutorsByOperation.set(operationId, executor);
           executorRegistered = true;
-          let setupResult: any = null;
-          if (op.provider === "azure" && request.needsAzureCredentials) {
-            setupResult = await postInternal("/api/azure-auto-setup", {
-              ...request.azure,
-              repo: op.repo,
-              environment: op.environment,
-              operationId
-            });
-            if (setupResult?.inputRequired || op.state === "input_required") {
-              return { shouldMonitor: false };
-            }
-          }
-          const current = operations.get(operationId);
-          if (
-            !current ||
-            current.state === "input_required" ||
-            current.endedAt
-          ) {
-            return { shouldMonitor: false };
-          }
-          await postInternal("/api/create-environment", {
-            ...request.environment,
-            repo: op.repo,
-            environment: op.environment,
-            provider: op.provider,
-            operationId,
-            clientId:
-              setupResult?.clientId || request.environment?.clientId || ""
+          return runEnvironmentOperationWorkflow(op, executor, {
+            preflightRepoAdmin: (repo, selectedExecutor) =>
+              preflightRepoAdmin(repo, selectedExecutor),
+            guardStopBoundary: (operation, boundary) =>
+              guardStopBoundary({
+                operation,
+                boundary,
+                persist: () => operations.persist(),
+                report: (diagnostic) => operations.report?.(diagnostic),
+                respond: () => undefined
+              }),
+            preflightGhcrPackageWriteAccess: (selectedExecutor) =>
+              preflightGhcrPackageWriteAccess(
+                getGhPackageCredentials,
+                getGitHubIdentity,
+                selectedExecutor
+              ),
+            readGitHubJson: (apiPath, selectedExecutor) =>
+              runGitHubJsonRequest(apiPath, selectedExecutor),
+            setCanonicalEnvironment: (operation, environment) => {
+              setCanonicalEnvironment(operation, environment);
+            },
+            recordGitHubEnvironment: (operation, patch) => {
+              recordGitHubEnvironment(operation, patch);
+            },
+            promoteCreatedGitHubEnvironment: (operation, identity) =>
+              promoteCreatedGitHubEnvironment(operation, identity),
+            addLegacyStep: (operation, text) => {
+              addLegacyStep(operation, text);
+            },
+            persistEnvironmentResolution: async (operation) => {
+              const saved = await persistMutationCheckpoint({
+                operation,
+                persist: () => operations.persist(),
+                report: (diagnostic) => operations.report?.(diagnostic),
+                fail: async (status, error, code) => {
+                  await finalizeSetupFailure(operation, {
+                    status,
+                    error,
+                    code,
+                    stage: operation.currentStage,
+                    classification: "unknown",
+                    runDeleteEnvironment: async (args) => {
+                      const result = await executor.run(args);
+                      if (result.code !== 0 && result.code !== "0") {
+                        throw new Error(
+                          (result.stderr || result.stdout || "").trim() ||
+                            "GitHub API request failed."
+                        );
+                      }
+                    }
+                  });
+                }
+              });
+              if (!saved) return false;
+              return guardStopBoundary({
+                operation,
+                boundary: "after-github-environment",
+                persist: () => operations.persist(),
+                report: (diagnostic) => operations.report?.(diagnostic),
+                respond: () => undefined
+              });
+            },
+            finalizeEnvironmentResolutionFailure: async (
+              operation,
+              input,
+              selectedExecutor
+            ) => {
+              await finalizeSetupFailure(operation, {
+                ...input,
+                stage: operation.currentStage,
+                classification:
+                  input.code === "repo-admin-required" ?
+                    "needs-someone-else"
+                  : "unknown",
+                runDeleteEnvironment: async (args) => {
+                  const result = await selectedExecutor.run(args);
+                  if (result.code !== 0 && result.code !== "0") {
+                    throw new Error(
+                      (result.stderr || result.stdout || "").trim() ||
+                        "GitHub API request failed."
+                    );
+                  }
+                }
+              });
+            },
+            getOperation: (id) => operations.get(id),
+            postInternal,
+            now: Date.now
           });
-          return { shouldMonitor: true };
         },
         30000
       );

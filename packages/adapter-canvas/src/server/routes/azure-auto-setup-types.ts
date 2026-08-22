@@ -208,6 +208,7 @@ export interface AzureAutoSetupApplicationInput {
 export interface AzureAutoSetupApplicationResult {
   clientId: string;
   appName: string;
+  state: "created" | "reused";
 }
 
 export interface AzureAutoSetupCredentialInput {

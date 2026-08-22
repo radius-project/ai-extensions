@@ -2,6 +2,14 @@
 // shared shell (./shell.ts) so every page inherits the same Radius design
 // tokens, host theme mapping, and component styles.
 
+export const CRITICAL_SHELL_STYLE_CSS = `  html {
+    color-scheme: var(--color-scheme, inherit);
+  }
+  html, body {
+    background: var(--background-color-default, Canvas);
+  }
+`;
+
 export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma variables) ─────────────────────── */
   :root {
     /* The Copilot host owns theme selection and injects these semantic tokens.
@@ -73,12 +81,15 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     --rad-mono: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; overflow: hidden; }
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--rad-bg);
+  }
   body {
     font-family: var(--rad-font);
     font-size: 14px;
     line-height: 20px;
-    background: var(--rad-bg);
     color: var(--rad-text);
     display: flex;
     flex-direction: column;
@@ -117,11 +128,19 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     background: transparent;
   }
   .rad-topnav__label { white-space: nowrap; }
-  /* Ambient operation chip. Sits at the far end of the nav bar, deliberately
-     quiet: it is a signal, not a summons. Nothing here moves the page or takes
-     focus. */
-  .rad-opchip {
+  /* Ambient progress chips. They sit at the far end of the nav bar,
+     deliberately quiet: they are a signal, not a summons. Nothing here moves
+     the page or takes focus. The row holds the alignment so a second chip
+     appearing beside the first does not push it away. */
+  .rad-topnav__chips {
     margin-left: auto;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .rad-opchip {
     align-self: center;
     display: inline-flex;
     align-items: center;
@@ -162,6 +181,18 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     padding: 20px;
     min-width: 0;
   }
+  /* A pane swap keeps the outgoing pane on screen while the next one is
+     fetched, but its page-scoped handlers are already gone. The region is made
+     inert for that window, so it also has to look unavailable rather than
+     silently swallowing clicks. The delay keeps a fast swap from flickering. */
+  .main-content[aria-busy="true"] {
+    opacity: 0.55;
+    cursor: progress;
+    transition: opacity 120ms linear 200ms;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .main-content[aria-busy="true"] { transition: none; }
+  }
 
   /* ─── Headings ────────────────────────────────────────────────────────── */
   .rad-heading { margin-bottom: 20px; }
@@ -193,6 +224,28 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   .status.info, .rad-status--info { background: var(--rad-info-bg); border: 1px solid var(--rad-info); color: var(--rad-text); }
   .status.success, .rad-status--success { background: var(--rad-success-bg); border: 1px solid var(--rad-success); color: var(--rad-text); }
   .status.error, .rad-status--error { background: var(--rad-danger-bg); border: 1px solid var(--rad-danger); color: var(--rad-text); }
+
+  /* ─── Graph build progress ────────────────────────────────────────────── */
+  /* Shared by every graph page's progress panel. Lives here rather than in the
+     graph loading fragment because the diff page renders progress without
+     mounting a graph surface. */
+  .rad-graph-progress { margin: 0; padding: 14px 16px; border: 1px solid var(--rad-stroke); border-radius: 10px; background: var(--rad-surface); box-shadow: 0 1px 2px var(--rad-shadow); text-align: left; }
+  .rad-graph-progress__head { display: flex; align-items: flex-start; gap: 12px; }
+  .rad-graph-progress__spinner { flex: 0 0 auto; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%; background: conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation: spin 1s linear infinite; }
+  .rad-graph-progress--failed .rad-graph-progress__spinner { animation: none; background: var(--rad-danger); }
+  /* State is never carried by motion or color alone. */
+  @media (prefers-reduced-motion: reduce) { .rad-graph-progress__spinner, .env-progress__spinner { animation: none; } }
+  .rad-graph-progress__headtext { flex: 1 1 auto; min-width: 0; }
+  .rad-graph-progress__title { font-size: 14px; font-weight: 600; color: var(--rad-text); line-height: 1.4; }
+  .rad-graph-progress__activity { font-size: 12px; color: var(--rad-text-tertiary); margin-top: 2px; line-height: 1.4; }
+  .rad-graph-progress__elapsed { flex: 0 0 auto; font-size: 12px; color: var(--rad-text-tertiary); font-variant-numeric: tabular-nums; }
+  .rad-graph-progress__stages { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .rad-graph-progress__stage { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--rad-text-tertiary); }
+  .rad-graph-progress__stage--running { color: var(--rad-text); font-weight: 600; }
+  .rad-graph-progress__stage--succeeded { color: var(--rad-text); }
+  .rad-graph-progress__stage--failed { color: var(--rad-danger); }
+  .rad-graph-progress__glyph { flex: 0 0 auto; width: 16px; text-align: center; font-size: 11px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ─── Legacy tabs (kept for pages not yet migrated) ───────────────────── */
   .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--rad-stroke); margin-bottom: 16px; }
@@ -309,12 +362,6 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   .rad-table__provider { color: var(--rad-text-tertiary); }
   .rad-table__creds { color: var(--rad-text-secondary); }
   .rad-table__actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; white-space: nowrap; }
-  .rad-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
-  .rad-dot--success { background: var(--rad-success); }
-  .rad-dot--failed { background: var(--rad-danger); }
-  .rad-dot--pending { background: var(--rad-text-tertiary); }
-  .rad-dot--deleting { background: var(--rad-warning); }
-  .rad-status-label { vertical-align: middle; }
 
   /* ─── Graph + node cards ──────────────────────────────────────────────── */
   #graph-container { width: 100%; height: 450px; border-radius: var(--rad-radius-lg); position: relative; background: var(--rad-bg-subtle); }

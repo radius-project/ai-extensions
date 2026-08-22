@@ -37,6 +37,7 @@ import {
   detectWorkspaceContext,
   fetchWorkspaceBicep,
   fetchWorkspaceFile,
+  hasRadiusApplicationModel,
   fetchWorkspaceTree,
   isWorkspacePath,
   isWorkspaceSelection,
@@ -93,6 +94,7 @@ import { withGhcrDockerConfig } from "./ghcr.js";
 import {
   resolveExistingRadiusArtifact,
   resolveRadiusArtifactTarget,
+  resolveStagingDirPrefix,
   validateGhcrTargetForRepo
 } from "./publish-targets.js";
 import { createSessionHolder } from "./runtime/session.js";
@@ -115,6 +117,7 @@ const dependencies: RadiusExtensionDependencies = {
   getOrCreateServer,
   getLastWebviewActivityAt,
   workspace: {
+    hasRadiusApplicationModel,
     detectWorkspaceContext,
     defaultBranchForState,
     isWorkspaceSelection,
@@ -158,6 +161,7 @@ const dependencies: RadiusExtensionDependencies = {
   publishTargets: {
     resolveExistingRadiusArtifact,
     resolveRadiusArtifactTarget,
+    resolveStagingDirPrefix,
     validateGhcrTargetForRepo
   },
   hostCallbacks: {
