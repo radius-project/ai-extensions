@@ -158,6 +158,34 @@ describe("verification retry selected account", () => {
     expect(deps.journal.persisted).toBe(2);
   });
 
+  it("unregisters the selected executor after monitoring terminalizes lost repository access", async () => {
+    const op = operation();
+    const deps = dependencies({
+      monitor: async (operationId) => {
+        deps.journal.monitored.push(operationId);
+        op.state = "failed_partial";
+        op.endedAt = "finished";
+        op.failure = {
+          code: "verification-retry-github-account-unavailable"
+        };
+      },
+      currentState: () => String(op.state)
+    });
+
+    await runVerificationRetry(op, "cmd-1", deps);
+
+    expect(deps.journal.dispatches).toHaveLength(1);
+    expect(deps.journal.monitored).toEqual(["op_retry"]);
+    expect(deps.journal.commands).toEqual([
+      { state: "running" },
+      { state: "finished", outcome: "failed_partial" }
+    ]);
+    expect(deps.journal.unregistered).toEqual(["op_retry"]);
+    expect(op.failure).toMatchObject({
+      code: "verification-retry-github-account-unavailable"
+    });
+  });
+
   it("fails closed when a legacy record has no selected login", async () => {
     const op = operation({ context: undefined });
     const createExecutor = vi.fn();
