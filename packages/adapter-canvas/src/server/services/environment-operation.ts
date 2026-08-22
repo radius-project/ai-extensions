@@ -208,6 +208,16 @@ export async function runEnvironmentOperationWorkflow(
       return { shouldMonitor: false };
     }
     if (
+      error instanceof GitHubEnvironmentEnsureError &&
+      error.createdCandidate
+    ) {
+      dependencies.recordGitHubEnvironment(operation, {
+        state: "created_candidate",
+        repo: error.createdCandidate.repo,
+        name: error.createdCandidate.name
+      });
+    }
+    if (
       !(await dependencies.guardStopBoundary(
         operation,
         "after-github-environment-attempt"

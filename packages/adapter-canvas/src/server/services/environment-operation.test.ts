@@ -309,6 +309,42 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(test.posts).toEqual([]);
   });
 
+  it("records an uncertain create before honoring Stop after the PUT", async () => {
+    const op = operation();
+    let attemptedPut = false;
+    const test = dependencies(op, {
+      guardStopBoundary: async (_target, boundary) => {
+        test.events.push(`stop:${boundary}`);
+        return !(
+          attemptedPut && boundary === "after-github-environment-attempt"
+        );
+      }
+    });
+    const executor = successfulSelectedGhExecutor({
+      run: async (args) => {
+        if (args.includes("PUT")) {
+          attemptedPut = true;
+          return command({ stdout: "{}" });
+        }
+        return command({ code: 1, stderr: "HTTP 404" });
+      }
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: false });
+
+    expect(op.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "created_candidate",
+      origin: "unknown",
+      repo: "octo/app",
+      name: "production"
+    });
+    expect(test.events).toContain("stop:after-github-environment-attempt");
+    expect(test.failures).toEqual([]);
+    expect(test.posts).toEqual([]);
+  });
+
   it("stops after persisting an input-required Azure response", async () => {
     const op = operation();
     const test = dependencies(op, {
