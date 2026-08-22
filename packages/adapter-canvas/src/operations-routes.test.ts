@@ -12,6 +12,7 @@ import {
 import {
   addLegacyStep,
   buildStages,
+  canRetryCleanup,
   createOperation,
   enterStage,
   finish,
@@ -790,13 +791,14 @@ describe("operation controls through the composed server", () => {
       ]
     });
     finish(cleanup, "failed_partial", { failure: { code: "setup-failed" } });
+    const cleanupEligibility = canRetryCleanup(cleanup);
     const retried = await postJson(
       `/api/operations/${cleanup.operationId}/retry/cleanup`,
       {}
     );
     expect(retried.status).toBe(202);
     expect(retried.body.commandId).toBe(
-      `${cleanup.operationId}:retry_cleanup:1:cleanup`
+      `${cleanup.operationId}:retry_cleanup:1:${cleanupEligibility.target}`
     );
 
     await vi.waitFor(() =>

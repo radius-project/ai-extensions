@@ -2675,7 +2675,12 @@ export function canRetryCleanup(op: any): any {
   const targets = unresolvedCleanupTargets(op);
   if (targets.length === 0)
     return { ok: false, code: "cleanup-retry-nothing-unresolved" };
-  return { ok: true, code: "cleanup-retry-allowed", targets };
+  return {
+    ok: true,
+    code: "cleanup-retry-allowed",
+    targets,
+    target: rollbackArtifactIdentity(targets)
+  };
 }
 
 function isExecutableCleanupTarget(op: any, target: RollbackTarget): boolean {

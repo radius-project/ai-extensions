@@ -20,6 +20,7 @@ import {
 import { routeKey } from "../route-table.js";
 import {
   beginRetryAttempt,
+  canRetryCleanup,
   finish,
   finishSucceeded,
   onOperationTerminal,
@@ -556,11 +557,22 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       ]
     });
     finish(op, "failed_partial", { failure: { code: "setup-failed" } });
+    const eligibility = canRetryCleanup(op);
     const out = await drive(handleRetryOperation, op, "retry/cleanup");
 
     expect(out.recording.status).toBe(202);
     const payload = out.payload();
-    expect(payload.commandId).toBe(`${op.operationId}:retry_cleanup:1:cleanup`);
+    expect(eligibility.ok).toBe(true);
+    expect(payload.commandId).toBe(
+      `${op.operationId}:retry_cleanup:1:${eligibility.target}`
+    );
+    expect(payload.commandId).toMatch(
+      new RegExp(`^${op.operationId}:retry_cleanup:1:cleanup#[0-9a-f]{16}$`)
+    );
+    expect(op.control.commands.at(-1)).toMatchObject({
+      commandId: payload.commandId,
+      target: eligibility.target
+    });
     expect(out.journal.scheduled).toEqual([
       {
         kind: "cleanup_retry",
