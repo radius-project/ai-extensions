@@ -408,8 +408,10 @@ export function prepareProviderMutation(
       : null,
     evidence: null
   };
-  recovery.state = "reconciling";
-  recovery.guidance = null;
+  if (recovery.state !== "rollback_pending") {
+    recovery.state = "reconciling";
+    recovery.guidance = null;
+  }
   recovery.mutations.push(mutation);
   op.providerRecovery = recovery;
   op.lastActivityAt = timestamp;
@@ -424,6 +426,7 @@ export function settleProviderMutation(
 ): boolean {
   if (!PROVIDER_MUTATION_STATUSES.includes(status)) return false;
   const recovery = readProviderRecovery(op?.providerRecovery);
+  const rollbackPending = recovery.state === "rollback_pending";
   const mutation = recovery.mutations.find(
     (entry) => entry.mutationId === mutationId
   );
@@ -432,7 +435,10 @@ export function settleProviderMutation(
   mutation.updatedAt = nowIso();
   mutation.evidence =
     typeof evidence === "string" && evidence.trim() ? evidence.trim() : null;
-  if (status === "manual_required") {
+  if (rollbackPending) {
+    recovery.state = "rollback_pending";
+    recovery.guidance = null;
+  } else if (status === "manual_required") {
     recovery.state = "manual_required";
     recovery.guidance = mutation.evidence;
   } else if (

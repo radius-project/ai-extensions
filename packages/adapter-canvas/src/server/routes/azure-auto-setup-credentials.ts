@@ -2,6 +2,10 @@ import {
   findLegacyMutableCredentialName,
   selectMissingFederatedCredentials
 } from "../../azure-oidc.js";
+import {
+  providerMutationRecord,
+  unresolvedProviderMutations
+} from "../../operations.js";
 import type {
   AzureAutoSetupCommandResult,
   AzureAutoSetupCredentialInput
@@ -153,10 +157,27 @@ async function createFederatedCredentials({
         `--federated-credential-id ${mutableCredentialName}`
     );
   }
-  const credentials = selectMissingFederatedCredentials(
+  const ordinarilyMissing = selectMissingFederatedCredentials(
     oidc.federatedCredentials,
     existingSubjects
   );
+  const credentials = oidc.federatedCredentials.filter((credential) => {
+    const pending = providerMutationRecord(
+      workflow.operation,
+      "azure_federated_credential.create",
+      `${clientId}:${credential.name}`
+    );
+    return (
+      pending?.status === "prepared" ||
+      pending?.status === "outcome_unknown" ||
+      pending?.status === "confirmed" ||
+      ordinarilyMissing.some(
+        (missing) =>
+          missing.name === credential.name &&
+          missing.subject === credential.subject
+      )
+    );
+  });
   const skippedCount = oidc.federatedCredentials.length - credentials.length;
   if (skippedCount > 0) {
     steps.push(
@@ -335,6 +356,15 @@ async function createFederatedCredentials({
       );
       if (!(await checkpoint())) return false;
     }
+  }
+  if (unresolvedProviderMutations(workflow.operation).length > 0) {
+    await fail(
+      409,
+      "Provider reconciliation is still pending. Radius will not complete setup or start another provider mutation.",
+      "provider-reconciliation-pending",
+      { steps, clientId, appName }
+    );
+    return false;
   }
   return true;
 }

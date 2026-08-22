@@ -252,6 +252,30 @@ describe("provider mutation recovery", () => {
     expect(mutate).toHaveBeenCalledOnce();
   });
 
+  it("keeps rollback pending sticky and starts no later provider write", async () => {
+    const operation = createOperation({ operationId: "op_test" });
+    operation.providerRecovery.state = "rollback_pending";
+    const mutate = vi.fn(async () => command());
+
+    await expect(
+      executeRecoverableMutation({
+        operation,
+        kind: "azure_app_owner.add",
+        target: "app:user",
+        persist: async () => {},
+        mutate,
+        accept: () => null,
+        reconcile: async () => ({ state: "not_applied" })
+      })
+    ).rejects.toMatchObject({
+      code: "provider-mutation-rollback-pending"
+    });
+
+    expect(operation.providerRecovery.state).toBe("rollback_pending");
+    expect(operation.providerRecovery.mutations).toEqual([]);
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
   it("classifies only terminated commands as outcome unknown", () => {
     expect(providerMutationOutcomeUnknown(command({ code: 1 }))).toBe(false);
     expect(
