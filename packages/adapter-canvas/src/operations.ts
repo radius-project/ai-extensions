@@ -2678,6 +2678,20 @@ export function canRetryCleanup(op: any): any {
   return { ok: true, code: "cleanup-retry-allowed", targets };
 }
 
+/**
+ * Whether a terminal operation still has deletion authority it can exercise.
+ *
+ * Admission follows the same first-rollback and retry-rollback predicates as
+ * the controls shown to the customer. That keeps reused and unprovable
+ * resources out of the repository lock while retaining records whose
+ * proven-owned resources can still be reconciled after a restart or manual
+ * deletion.
+ */
+export function hasUnfinishedCleanupAuthority(op: any): boolean {
+  if (!op?.setupArtifacts || !isTerminalState(op.state)) return false;
+  return canStartRollback(op).ok || canRetryCleanup(op).ok;
+}
+
 // ─── Action projection ───────────────────────────────────────────────────────
 // The server decides what a customer may do; the page renders that list. Copying
 // eligibility rules into browser code is how the two surfaces drift apart, and a
@@ -4069,6 +4083,7 @@ export function createRegistry({
     const terminal = [];
     for (const [id, op] of byId) {
       if (!isTerminalState(op.state)) continue;
+      if (hasUnfinishedCleanupAuthority(op)) continue;
       const age = now - new Date(op.endedAt || op.startedAt).getTime();
       if (age > RETAIN_TERMINAL_MS) {
         byId.delete(id);
@@ -4154,20 +4169,61 @@ export function createRegistry({
      * skipped, so the lock is released by a real terminal result.
      */
     running(repo) {
+      const repositoryIdentity = normalizeIdentityPart(repo);
       for (const op of byId.values()) {
         reconcileOperationLifecycle(op, clock());
-        if (op.repo === repo && !isTerminalState(op.state)) return op;
+        if (
+          normalizeIdentityPart(op.repo) === repositoryIdentity &&
+          !isTerminalState(op.state)
+        ) {
+          return op;
+        }
       }
       return null;
+    },
+    /**
+     * The record that owns admission for this repository.
+     *
+     * Live execution wins. Otherwise the newest terminal operation that can
+     * still remove proven-owned artifacts keeps admission until rollback (or a
+     * retry that confirms manual deletion) resolves every removable target.
+     */
+    admissionOwner(repo) {
+      const repositoryIdentity = normalizeIdentityPart(repo);
+      const active = this.running(repo);
+      if (active) {
+        return { operation: active, reason: "operation-in-progress" };
+      }
+      let blocker = null;
+      for (const op of byId.values()) {
+        if (
+          normalizeIdentityPart(op.repo) !== repositoryIdentity ||
+          !isTerminalState(op.state) ||
+          !hasUnfinishedCleanupAuthority(op)
+        ) {
+          continue;
+        }
+        if (
+          !blocker ||
+          new Date(op.endedAt || op.startedAt) >
+            new Date(blocker.endedAt || blocker.startedAt)
+        ) {
+          blocker = op;
+        }
+      }
+      return blocker ?
+          { operation: blocker, reason: "previous-cleanup-required" }
+        : null;
     },
     /**
      * The record a returning user should be shown for a repo: whatever is
      * running, else the most recent terminal record they have not yet seen.
      */
     latest(repo) {
+      const repositoryIdentity = normalizeIdentityPart(repo);
       let best = null;
       for (const op of byId.values()) {
-        if (op.repo !== repo) continue;
+        if (normalizeIdentityPart(op.repo) !== repositoryIdentity) continue;
         reconcileOperationLifecycle(op, clock());
         if (!isTerminalState(op.state)) return op;
         if (
@@ -4213,8 +4269,14 @@ export function createRegistry({
      * registry's job is only to make the collision impossible to miss.
      */
     start(op) {
-      const existing = this.running(op.repo);
-      if (existing) return { ok: false, conflict: existing };
+      const owner = this.admissionOwner(op.repo);
+      if (owner) {
+        return {
+          ok: false,
+          conflict: owner.operation,
+          reason: owner.reason
+        };
+      }
       prune();
       byId.set(op.operationId, op);
       return { ok: true, operation: op };
@@ -4224,9 +4286,14 @@ export function createRegistry({
      * that already owns the record. Another live attempt wins the conflict.
      */
     acquireForRetry(op) {
-      const existing = this.running(op.repo);
-      if (existing && existing.operationId !== op.operationId)
-        return { ok: false, conflict: existing };
+      const owner = this.admissionOwner(op.repo);
+      if (owner && owner.operation.operationId !== op.operationId) {
+        return {
+          ok: false,
+          conflict: owner.operation,
+          reason: owner.reason
+        };
+      }
       byId.set(op.operationId, op);
       return { ok: true, operation: op };
     },

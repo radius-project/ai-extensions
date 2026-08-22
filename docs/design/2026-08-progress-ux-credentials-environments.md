@@ -538,6 +538,8 @@ The collision is reachable because the agent's `create_environment` tool can cal
 
 The prototype in draft PR #244 gives each setup an operation ID and permits one running setup per repository. The first setup request returns the ID, and the second request must present it along with the same repository, environment, provider, and expected stage. An unrelated caller receives `409 Conflict` instead of adopting or overwriting the running operation. Records remain in memory, so an extension restart still loses them.
 
+The implemented durable registry keeps that admission rule within one hydrated Copilot App Session. A live operation owns execution admission, while a terminal operation retains cleanup admission only when its ledger still gives that same operation a safe first rollback or retry-rollback target. A different Create Environment request then receives `409 previous-cleanup-required` with the blocking operation ID, and the browser reopens that record instead of registering another operation. Reused resources and ambiguous candidates never retain admission because the earlier operation cannot delete them. Blocking terminal records are exempt from age and count pruning until cleanup records every removable target as deleted or not found; normal retention applies again after that durable resolution. This does not coordinate separate Copilot App Sessions or introduce a cross-session repository lock.
+
 #### Record the target and acting identity before permission checks
 
 Today, the repository-admin check can fail before the server records the requested repository, environment, cloud target, and acting GitHub account. The response then contains little more than a 403 message. The prototype in draft PR #244 records those safe fields first, so the operation can explain which account lacked permission for which repository and environment.
@@ -579,6 +581,8 @@ A stopped record therefore projects both paths, forward first, and neither is a 
 When only one path is safe, the panel says why the other is not: Radius created nothing it can prove it owns, it cannot prove the committed workflow files are unchanged, credential verification already succeeded, or ownership of a remaining resource cannot be proven. When neither is safe, the manual action stands alone and the repository lock is released.
 
 The first rollback selects **every** present proven-owned artifact and deletes in reverse dependency order — committed workflow files, GitHub environment, Azure role assignments, federated credentials, Service Principal, App Registration — recording each result before the next deletion starts. **Retry rollback** selects only the unresolved warning targets from the latest attempt and preserves the earlier results in the summary. Reused resources, `created_candidate` resources, and anything identified only by name are never deletion targets. A confirmed rollback is one cooperative server-owned command: cleanup has no pause control, so the panel offers no **Stop setup** while it runs.
+
+Retry rollback is also the reconciliation action after a customer deletes a target manually. A confirmed absence records `not_found`, removes that target from the operation's cleanup authority, and allows the next Create Environment request once no removable target remains; there is no separate recheck command.
 
 ##### Reverting committed workflow files
 

@@ -86,6 +86,7 @@ import {
   workflowRollbackCommitState,
   workflowRollbackTargets,
   canExitSetup,
+  hasUnfinishedCleanupAuthority,
   hasSurvivingCreatedArtifacts,
   isSetupExited,
   setupExitState,
@@ -1093,12 +1094,90 @@ describe("registry", () => {
     expect(clash.conflict.operationId).toBe(first.operationId);
   });
 
+  it("treats repository casing as the same admission identity", () => {
+    const reg = createRegistry();
+    const first = newOp({ repo: "Contoso/Store" });
+    expect(reg.start(first).ok).toBe(true);
+
+    expect(reg.running("contoso/store")).toBe(first);
+    expect(reg.start(newOp({ repo: "CONTOSO/STORE" }))).toMatchObject({
+      ok: false,
+      conflict: { operationId: first.operationId },
+      reason: "operation-in-progress"
+    });
+  });
+
   it("allows a new operation once the previous one is terminal", () => {
     const reg = createRegistry();
     const first = newOp();
     reg.start(first);
     finishSucceeded(first);
     expect(reg.start(newOp()).ok).toBe(true);
+  });
+
+  it("blocks a different operation while a terminal setup can still roll back its proven-owned artifact", () => {
+    const reg = createRegistry();
+    const first = ledgerAzureApp(newOp(), "created", {
+      origin: "this_operation"
+    });
+    reg.start(first);
+    finish(first, "failed_partial", { failure: { code: "setup-failed" } });
+
+    expect(reg.running(first.repo)).toBeNull();
+    expect(reg.admissionOwner(first.repo)).toEqual({
+      operation: first,
+      reason: "previous-cleanup-required"
+    });
+    expect(reg.start(newOp())).toMatchObject({
+      ok: false,
+      conflict: { operationId: first.operationId },
+      reason: "previous-cleanup-required"
+    });
+  });
+
+  it("cannot bypass retained cleanup admission with repository casing", () => {
+    const reg = createRegistry();
+    const first = ledgerAzureApp(newOp({ repo: "Contoso/Store" }), "created", {
+      origin: "this_operation"
+    });
+    reg.start(first);
+    finish(first, "failed_partial", { failure: { code: "setup-failed" } });
+
+    expect(reg.admissionOwner("contoso/store")).toEqual({
+      operation: first,
+      reason: "previous-cleanup-required"
+    });
+    expect(reg.start(newOp({ repo: "CONTOSO/STORE" }))).toMatchObject({
+      ok: false,
+      conflict: { operationId: first.operationId },
+      reason: "previous-cleanup-required"
+    });
+    expect(reg.latest("CONTOSO/STORE")).toBe(first);
+  });
+
+  it("lets the blocking operation reacquire its own repository while refusing a different retry", () => {
+    const reg = createRegistry();
+    const first = ledgerAzureApp(newOp(), "created", {
+      origin: "this_operation"
+    });
+    reg.put(first);
+    finish(first, "failed_partial", { failure: { code: "setup-failed" } });
+
+    const other = newOp();
+    expect(reg.acquireForRetry(other)).toMatchObject({
+      ok: false,
+      conflict: { operationId: first.operationId },
+      reason: "previous-cleanup-required"
+    });
+
+    beginRetryAttempt(first, "cleanup");
+    expect(reg.acquireForRetry(first)).toMatchObject({ ok: true });
+
+    expect(reg.acquireForRetry(other)).toMatchObject({
+      ok: false,
+      conflict: { operationId: first.operationId },
+      reason: "operation-in-progress"
+    });
   });
 
   it("does not treat a different repository as a conflict", () => {
@@ -1290,6 +1369,165 @@ describe("registry", () => {
     ]);
     await expect(reg.persist()).rejects.toThrow("disk full");
     expect(saves).toBe(1);
+  });
+});
+
+describe("terminal cleanup admission", () => {
+  function failedWithCreatedApp() {
+    const op = ledgerAzureApp(newOp(), "created", {
+      origin: "this_operation",
+      displayName: "radius-deploy"
+    });
+    finish(op, "failed_partial", { failure: { code: "setup-failed" } });
+    return op;
+  }
+
+  it("blocks for first rollback eligibility, including an interrupted cleanup and requested Exit", () => {
+    const firstRollback = failedWithCreatedApp();
+    expect(hasUnfinishedCleanupAuthority(firstRollback)).toBe(true);
+
+    const interrupted = failedWithCreatedApp();
+    recordCleanupState(interrupted, { state: "running", attempts: 1 });
+    expect(hasUnfinishedCleanupAuthority(interrupted)).toBe(true);
+
+    const interruptedExit = failedWithCreatedApp();
+    interruptedExit.control.commands.push({
+      kind: EXIT_COMMAND_KIND,
+      commandId: "exit-1",
+      attempt: 1,
+      target: "cleanup",
+      state: "running",
+      acceptedAt: interruptedExit.endedAt,
+      completedAt: null,
+      outcome: null
+    });
+    recordCleanupState(interruptedExit, { state: "running", attempts: 1 });
+    expect(setupExitState(interruptedExit)).toBe("requested");
+    expect(hasUnfinishedCleanupAuthority(interruptedExit)).toBe(true);
+  });
+
+  it("blocks a succeeded-with-warnings cleanup while its proven-owned warning target is retryable", () => {
+    const op = failedWithCreatedApp();
+    recordCleanupState(op, {
+      state: "succeeded_with_warnings",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius-deploy (app-1)",
+          identity: "app-1",
+          outcome: "warning",
+          detail: "Azure still reports the app."
+        }
+      ]
+    });
+
+    expect(canRetryCleanup(op)).toMatchObject({ ok: true });
+    expect(hasUnfinishedCleanupAuthority(op)).toBe(true);
+  });
+
+  it("does not block for live setup, reused resources, or ambiguous candidates", () => {
+    expect(
+      hasUnfinishedCleanupAuthority(
+        ledgerAzureApp(newOp(), "created", { origin: "this_operation" })
+      )
+    ).toBe(false);
+
+    const reused = ledgerAzureApp(newOp(), "reused", {
+      origin: "pre_existing"
+    });
+    finish(reused, "failed_partial", { failure: { code: "setup-failed" } });
+    expect(hasUnfinishedCleanupAuthority(reused)).toBe(false);
+
+    const ambiguous = ledgerEnvironment(newOp(), "created_candidate", {
+      origin: "unknown"
+    });
+    finish(ambiguous, "failed_partial", {
+      failure: { code: "setup-failed" }
+    });
+    expect(hasUnfinishedCleanupAuthority(ambiguous)).toBe(false);
+  });
+
+  it.each(["deleted", "not_found"])(
+    "releases admission after cleanup confirms the last target as %s",
+    (outcome) => {
+      const op = failedWithCreatedApp();
+      recordCleanupDeletion(op, {
+        artifactType: "azure_app",
+        identity: "app-1"
+      });
+      recordCleanupState(op, {
+        state: "succeeded",
+        attempts: 1,
+        results: [
+          {
+            attempt: 1,
+            artifactType: "azure_app",
+            target: "radius-deploy (app-1)",
+            identity: "app-1",
+            outcome,
+            detail: null
+          }
+        ]
+      });
+
+      expect(hasUnfinishedCleanupAuthority(op)).toBe(false);
+      const reg = createRegistry();
+      reg.put(op);
+      expect(reg.start(newOp())).toMatchObject({ ok: true });
+    }
+  );
+
+  it("retains an aged blocker, then resumes age pruning after cleanup is resolved", () => {
+    const now = Date.parse("2026-08-22T12:00:00.000Z");
+    const reg = createRegistry({ clock: () => now });
+    const blocker = failedWithCreatedApp();
+    blocker.startedAt = "2026-08-22T09:00:00.000Z";
+    blocker.endedAt = "2026-08-22T09:01:00.000Z";
+    reg.put(blocker);
+
+    expect(reg.snapshot().operations).toHaveLength(1);
+    expect(reg.start(newOp())).toMatchObject({
+      ok: false,
+      reason: "previous-cleanup-required"
+    });
+
+    recordCleanupDeletion(blocker, {
+      artifactType: "azure_app",
+      identity: "app-1"
+    });
+    expect(reg.start(newOp({ repo: "other/repo" }))).toMatchObject({
+      ok: true
+    });
+    expect(reg.get(blocker.operationId)).toBeNull();
+  });
+
+  it("exempts blockers from the terminal cap, then applies the cap after resolution", () => {
+    const reg = createRegistry();
+    const blocker = failedWithCreatedApp();
+    blocker.startedAt = "2026-08-22T10:00:00.000Z";
+    blocker.endedAt = "2026-08-22T10:00:01.000Z";
+    reg.put(blocker);
+    for (let index = 0; index < 20; index += 1) {
+      const op = newOp({
+        operationId: `op_terminal_${index}`,
+        repo: `contoso/repo-${index}`,
+        startedAt: `2026-08-22T10:${String(index + 1).padStart(2, "0")}:00.000Z`
+      });
+      finishSucceeded(op);
+      reg.put(op);
+    }
+
+    expect(reg.snapshot().operations).toHaveLength(21);
+    expect(reg.get(blocker.operationId)).toBe(blocker);
+
+    recordCleanupDeletion(blocker, {
+      artifactType: "azure_app",
+      identity: "app-1"
+    });
+    expect(reg.snapshot().operations).toHaveLength(20);
+    expect(reg.get(blocker.operationId)).toBeNull();
   });
 });
 
