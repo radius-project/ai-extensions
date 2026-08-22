@@ -1958,6 +1958,7 @@ const VERIFICATION_RETRY_CLASSIFICATIONS: Record<string, string> = {
   "verify-run-rbac-failed": "azure-rbac-propagation",
   "verify-run-failed": "verification-run-failed",
   "verification-tracking-expired": "verification-tracking-expired",
+  "verification-retry-github-account-unavailable": "github-account-unavailable",
   // The dispatch call itself failed, so no run was ever created: nothing was
   // verified, nothing was written, and asking GitHub again is the whole fix.
   "verify-dispatch-failed": "verification-dispatch-failed"
@@ -1997,6 +1998,8 @@ export function hasVerificationProvenance(op: any): boolean {
   return Boolean(
     op.repo &&
     op.environment &&
+    typeof op.context?.githubLogin === "string" &&
+    op.context.githubLogin.trim() &&
     typeof verification?.workflow === "string" &&
     verification.workflow &&
     typeof verification?.ref === "string" &&
@@ -2695,7 +2698,9 @@ const VERIFICATION_RETRY_DESCRIPTIONS: Record<string, string> = {
   "verification-tracking-expired":
     "Radius stopped following the previous verification run. It starts the same workflow again on the same branch.",
   "verification-dispatch-failed":
-    "GitHub refused the request that starts the verification workflow, so nothing ran. Radius asks GitHub to start the same workflow again."
+    "GitHub refused the request that starts the verification workflow, so nothing ran. Radius asks GitHub to start the same workflow again.",
+  "github-account-unavailable":
+    "Radius could not use the GitHub account selected for this setup. Re-check that account, then retry verification."
 };
 
 const SETUP_STEP_LABELS: Record<string, string> = {
@@ -3813,6 +3818,8 @@ export function hasCompleteVerificationIdentity(op: any): boolean {
   const verification = op?.verification;
   return Boolean(
     op?.currentStage === STAGE_VERIFY &&
+    typeof op?.context?.githubLogin === "string" &&
+    op.context.githubLogin.trim() &&
     Number.isFinite(Number(verification?.dispatchedAt)) &&
     Number(verification.dispatchedAt) > 0 &&
     typeof verification?.workflow === "string" &&

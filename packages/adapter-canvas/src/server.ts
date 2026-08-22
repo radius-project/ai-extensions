@@ -219,7 +219,7 @@ import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
-import { isSetupPullRequestMerged } from "./server/services/setup-pull-request.js";
+import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
 import {
   CLEANUP_COMMANDS,
   cleanupRemovedGitHubEnvironment
@@ -261,6 +261,10 @@ import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
+import {
+  monitorVerificationWithSelectedAccount,
+  runVerificationRetry as runSelectedVerificationRetry
+} from "./server/services/verification-retry.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -655,10 +659,16 @@ const operationsControlRoutes = createOperationsControlRoutes({
   get: (operationId) => operations.get(operationId),
   acquireForRetry: (op) => operations.acquireForRetry(op),
   persistOperations: () => operations.persist(),
-  isPullRequestMerged: (op, pullRequestUrl) =>
-    isSetupPullRequestMerged(String(op.repo || ""), pullRequestUrl, (apiPath) =>
-      ghApiJson(apiPath)
-    ),
+  checkPullRequestMerge: (op, pullRequestUrl) =>
+    checkSetupPullRequestMergeForOperation(op, pullRequestUrl, {
+      createExecutor: (login) =>
+        githubAccountCoordinator.createReadOnlyExecutor(login),
+      fetchJson: async (executor, apiPath) => {
+        const result = await selectedGhApiJson(executor, apiPath);
+        return { ok: result.ok, json: result.json, error: result.stderr };
+      },
+      errorMessage
+    }),
   schedule: ({ kind, instanceId, operation, commandId }) => {
     const coordinator = resolveInstanceRunner(
       instanceId,
@@ -4256,18 +4266,43 @@ function createInstanceRequestCoordinator(
     );
   }
 
-  async function monitorVerificationAsSelectedAccount(
-    operationId: string,
-    login: string
-  ): Promise<void> {
-    const executor =
-      await githubAccountCoordinator.createReadOnlyExecutor(login);
-    selectedGitHubExecutorsByOperation.set(operationId, executor);
-    try {
-      await monitorVerification(operationId);
-    } finally {
-      selectedGitHubExecutorsByOperation.delete(operationId);
-    }
+  async function monitorVerificationAsSelectedAccount(op: any): Promise<void> {
+    await monitorVerificationWithSelectedAccount(op, {
+      createExecutor: (login) =>
+        githubAccountCoordinator.createReadOnlyExecutor(login),
+      registerExecutor: (operationId, executor) => {
+        selectedGitHubExecutorsByOperation.set(operationId, executor);
+      },
+      unregisterExecutor: (operationId) => {
+        selectedGitHubExecutorsByOperation.delete(operationId);
+      },
+      monitor: monitorVerification,
+      accountUnavailable: async (operation, login, detail) => {
+        const account = login ? `@${login}` : "the saved GitHub account";
+        addLegacyStep(
+          operation,
+          `❌ Could not use ${account} to resume credential verification.`
+        );
+        finish(operation, "failed_partial", {
+          failure: {
+            code:
+              login ?
+                "verification-retry-github-account-unavailable"
+              : "verification-retry-github-account-missing",
+            stage: STAGE_VERIFY,
+            stepSeq: null,
+            message:
+              login ?
+                `Radius could not use @${login} to resume credential verification. Re-check that account and retry verification.`
+              : "Radius cannot resume credential verification because this operation has no saved GitHub account. Start a new environment setup.",
+            classification: "user-fixable",
+            evidence: detail
+          }
+        });
+        await saveOperation(operation);
+      },
+      errorMessage
+    });
   }
 
   async function runEnvironmentOperation(operationId: string): Promise<void> {
@@ -4433,61 +4468,31 @@ function createInstanceRequestCoordinator(
       return;
     }
     const op = operations.get(operationId);
-    if (!op || op.endedAt) return;
-    const saved = op.verification || {};
-    const dispatchedAt = Date.now();
-    const dispatch = await runCliCommand(
-      "gh",
-      buildVerifyWorkflowDispatchArgs({
-        workflowFile: String(saved.workflow || VERIFY_WORKFLOW_FILE),
-        targetRepo: op.repo,
-        envName: String(saved.environment || op.environment),
-        ref: String(saved.ref || "")
-      }),
-      30000
-    );
-    if (dispatch.code !== 0) {
-      const detail =
-        (dispatch.stderr || dispatch.stdout || "").trim() ||
-        "The GitHub CLI request failed.";
-      addLegacyStep(op, "❌ Could not dispatch the verify workflow again.");
-      setCommandState(op, commandId, "finished", "dispatch-failed");
-      finish(op, "failed_partial", {
-        failure: {
-          code: "verify-dispatch-failed",
-          stage: STAGE_VERIFY,
-          stepSeq: null,
-          message:
-            "Radius could not dispatch the credential verification workflow again.",
-          classification: "user-fixable",
-          evidence: detail
-        }
-      });
-      await saveOperation(op);
-      return;
-    }
-    // Keep the saved workflow, ref, and environment; only the run identity is
-    // new. Clearing runId forces the status route to resolve the run this
-    // dispatch produced rather than reuse the previous attempt's run.
-    op.verification = {
-      dispatchedAt,
-      workflow: String(saved.workflow || VERIFY_WORKFLOW_FILE),
-      ref: String(saved.ref || ""),
-      environment: String(saved.environment || op.environment),
-      runId: null,
-      runUrl: null
-    };
-    addLegacyStep(op, "✅ Verify workflow dispatched again.", STAGE_VERIFY);
-    setCommandState(op, commandId, "running");
-    await saveOperation(op);
-    await monitorVerification(operationId);
-    setCommandState(
-      op,
-      commandId,
-      "finished",
-      operations.get(operationId)?.state || null
-    );
-    await saveOperation(op);
+    if (!op) return;
+    await runSelectedVerificationRetry(op, commandId, {
+      createExecutor: (login) =>
+        githubAccountCoordinator.createReadOnlyExecutor(login),
+      registerExecutor: (id, executor) => {
+        selectedGitHubExecutorsByOperation.set(id, executor);
+      },
+      unregisterExecutor: (id) => {
+        selectedGitHubExecutorsByOperation.delete(id);
+      },
+      buildDispatchArgs: buildVerifyWorkflowDispatchArgs,
+      now: Date.now,
+      verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
+      stageVerify: STAGE_VERIFY,
+      addStep: (operation, text, stage) =>
+        addLegacyStep(operation, text, stage),
+      setCommandState,
+      finish,
+      persist: async (operation) => {
+        await saveOperation(operation);
+      },
+      monitor: monitorVerification,
+      currentState: (id) => operations.get(id)?.state || null,
+      errorMessage
+    });
   }
 
   /**
@@ -4680,18 +4685,7 @@ function createInstanceRequestCoordinator(
       activeVerificationMonitors.add(op.operationId);
       scheduleServerOwnedTask(op.operationId, async () => {
         try {
-          const selectedLogin =
-            typeof op.context?.githubLogin === "string" ?
-              op.context.githubLogin
-            : "";
-          if (selectedLogin) {
-            await monitorVerificationAsSelectedAccount(
-              op.operationId,
-              selectedLogin
-            );
-          } else {
-            await monitorVerification(op.operationId);
-          }
+          await monitorVerificationAsSelectedAccount(op);
         } finally {
           activeVerificationMonitors.delete(op.operationId);
         }

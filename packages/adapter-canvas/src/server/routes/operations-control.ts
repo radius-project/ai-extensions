@@ -120,10 +120,14 @@ export interface OperationsControlDependencies {
   // beside a fresh setup for the same repository.
   acquireForRetry(operation: OperationRecord): RepositoryLockResult;
   persistOperations(): Promise<void>;
-  isPullRequestMerged(
+  checkPullRequestMerge(
     operation: OperationRecord,
     pullRequestUrl: string | null
-  ): Promise<boolean>;
+  ): Promise<
+    | { state: "merged" }
+    | { state: "open" }
+    | { state: "unavailable"; login: string; detail: string }
+  >;
   // Returns whether a runner actually accepted the work. Scheduling is
   // per-instance closure state, so the instance that received the request is
   // passed through and the composition root resolves the right runner; a miss
@@ -422,11 +426,23 @@ async function requireMergedSetupPullRequest({
 }: CommandRequest): Promise<boolean> {
   if (!eligibility.requiresMergedPullRequest) return true;
   const pullRequestUrl = eligibility.pullRequestUrl ?? null;
-  const merged = await dependencies.isPullRequestMerged(
+  const merge = await dependencies.checkPullRequestMerge(
     operation,
     pullRequestUrl
   );
-  if (!merged) {
+  if (merge.state === "unavailable") {
+    const account = merge.login ? `@${merge.login}` : "the selected account";
+    sendJson(context, 409, {
+      error: `Radius could not verify the setup pull request with ${account}. Re-check that GitHub account and try again.`,
+      code: "verification-retry-github-account-unavailable",
+      operationId,
+      pullRequestUrl,
+      detail: merge.detail,
+      operation: clientView(operation)
+    });
+    return false;
+  }
+  if (merge.state === "open") {
     sendJson(context, 409, {
       error:
         "The setup pull request has not merged yet, so the verification workflow is not installed on the target branch.",

@@ -151,7 +151,7 @@ interface Journal {
 
 // The route module calls the pure model directly, so the only doubles a test
 // needs are the genuine I/O seams: the registry lookup, the durable write, the
-// merge proof, and the per-instance runner. `get` and `isPullRequestMerged`
+// merge proof, and the per-instance runner. `get` and `checkPullRequestMerge`
 // throw until a scenario models them, so a route that reaches an seam it must
 // not touch fails instead of quietly succeeding.
 function dependencies(
@@ -171,8 +171,8 @@ function dependencies(
       journal.persistCalls += 1;
       return Promise.resolve();
     },
-    isPullRequestMerged: () => {
-      throw new Error("isPullRequestMerged not stubbed");
+    checkPullRequestMerge: () => {
+      throw new Error("checkPullRequestMerge not stubbed");
     },
     schedule: ({ kind, instanceId, commandId }) => {
       journal.scheduled.push({ kind, instanceId, commandId });
@@ -405,9 +405,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     const op = mergeHandoff();
     const asked: Array<string | null> = [];
     const out = await drive(handleRetryOperation, op, "retry/verification", {
-      isPullRequestMerged: (_operation, pullRequestUrl) => {
+      checkPullRequestMerge: (_operation, pullRequestUrl) => {
         asked.push(pullRequestUrl);
-        return Promise.resolve(false);
+        return Promise.resolve({ state: "open" });
       }
     });
 
@@ -424,7 +424,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
   it("repeats verification once the setup pull request has merged", async () => {
     const op = mergeHandoff();
     const out = await drive(handleRetryOperation, op, "retry/verification", {
-      isPullRequestMerged: () => Promise.resolve(true)
+      checkPullRequestMerge: () => Promise.resolve({ state: "merged" })
     });
 
     expect(out.recording.status).toBe(202);
@@ -477,10 +477,10 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
   it("refuses when the record changed while the pull request was checked", async () => {
     const op = mergeHandoff();
     const out = await drive(handleRetryOperation, op, "retry/verification", {
-      isPullRequestMerged: () => {
+      checkPullRequestMerge: () => {
         // A concurrent retry reopened the record while GitHub was answering.
         beginRetryAttempt(op, "verification");
-        return Promise.resolve(true);
+        return Promise.resolve({ state: "merged" });
       }
     });
 
@@ -495,9 +495,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     // claim.
     const op = mergeHandoff({ pullRequestUrl: null });
     const out = await drive(handleRetryOperation, op, "retry/verification", {
-      isPullRequestMerged: (_operation, pullRequestUrl) => {
+      checkPullRequestMerge: (_operation, pullRequestUrl) => {
         expect(pullRequestUrl).toBeNull();
-        return Promise.resolve(false);
+        return Promise.resolve({ state: "open" });
       }
     });
 
@@ -506,6 +506,31 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       code: "verification-retry-pull-request-open",
       pullRequestUrl: null
     });
+  });
+
+  it("fails closed when the selected account cannot verify the setup pull request", async () => {
+    const op = mergeHandoff();
+    op.context = { githubLogin: "alice" };
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
+      checkPullRequestMerge: () =>
+        Promise.resolve({
+          state: "unavailable",
+          login: "alice",
+          detail: "selected credential unavailable"
+        })
+    });
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "verification-retry-github-account-unavailable",
+      error:
+        "Radius could not verify the setup pull request with @alice. Re-check that GitHub account and try again.",
+      detail: "selected credential unavailable",
+      pullRequestUrl: "https://github.com/contoso/store/pull/7"
+    });
+    expect(op.state).toBe("action_required");
+    expect(out.journal.persistCalls).toBe(0);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("names no repository rather than the word undefined in a lock conflict", async () => {
