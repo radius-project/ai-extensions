@@ -2713,6 +2713,7 @@ describe("startup reconciliation", () => {
 
   it("keeps dispatched verification pending", () => {
     const op = newOp();
+    op.context = { githubLogin: "alice" };
     enterStage(op, STAGE_VERIFY);
     op.verification = {
       dispatchedAt: Date.now(),
@@ -2725,6 +2726,25 @@ describe("startup reconciliation", () => {
     reconcileRestoredOperation(op);
     expect(op.state).toBe("running");
     expect(op.recoveryState).toBe("verification_pending");
+  });
+
+  it("fails a restored verification closed when no selected account was saved", () => {
+    const op = newOp();
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: null,
+      runUrl: null
+    };
+
+    reconcileRestoredOperation(op);
+
+    expect(op.state).toBe("failed_partial");
+    expect(op.recoveryState).toBe("interrupted");
+    expect(op.failure.code).toBe("operation-interrupted");
   });
 
   it("latches interrupted work without scheduling automatic cleanup", () => {
@@ -2940,6 +2960,7 @@ describe("keepalive predicate", () => {
 
   it("uses a bounded dispatch-based lifetime for live verification", () => {
     const op = newOp();
+    op.context = { githubLogin: "alice" };
     enterStage(op, STAGE_VERIFY);
     op.verification = {
       dispatchedAt: Date.now() - 20 * 60 * 1000,
@@ -3477,6 +3498,7 @@ describe("the options the announcement passes to session.log", () => {
 
 function verifiableOp() {
   const op = newOp();
+  op.context = { githubLogin: "alice" };
   recordAzureApp(op, {
     state: "created",
     appId: "app-1",
@@ -3801,6 +3823,14 @@ describe("retry eligibility", () => {
       "verification-tracking-expired"
     );
 
+    const unavailableAccount = verifiableOp();
+    finish(unavailableAccount, "failed_partial", {
+      failure: { code: "verification-retry-github-account-unavailable" }
+    });
+    expect(classifyVerificationRetry(unavailableAccount)).toBe(
+      "github-account-unavailable"
+    );
+
     const unknown = verifiableOp();
     finish(unknown, "failed_partial", { failure: { code: "who-knows" } });
     expect(classifyVerificationRetry(unknown)).toBeNull();
@@ -3825,6 +3855,14 @@ describe("retry eligibility", () => {
     noIdentity.verification.workflow = "";
     requireMerge(noIdentity);
     expect(canRetryVerification(noIdentity)).toMatchObject({
+      ok: false,
+      code: "verification-provenance-incomplete"
+    });
+
+    const noGitHubIdentity = verifiableOp();
+    noGitHubIdentity.context = {};
+    requireMerge(noGitHubIdentity);
+    expect(canRetryVerification(noGitHubIdentity)).toMatchObject({
       ok: false,
       code: "verification-provenance-incomplete"
     });

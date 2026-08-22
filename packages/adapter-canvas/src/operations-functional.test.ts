@@ -97,7 +97,7 @@ async function resumeRecoveredOperation(operation, actions) {
 }
 
 function operation(overrides = {}) {
-  return createOperation({
+  const op = createOperation({
     provider: "azure",
     repo: "contoso/store",
     environment: "dev",
@@ -112,6 +112,8 @@ function operation(overrides = {}) {
     },
     ...overrides
   });
+  op.context = { githubLogin: "alice" };
+  return op;
 }
 
 afterEach(async () => {
@@ -183,6 +185,7 @@ describe("operation restart functional coverage", () => {
   it("restores an operation waiting for interactive input", async () => {
     const { first, restart } = await persistedRegistries();
     const op = operation();
+    expect(op.context.githubLogin).toBe("alice");
     first.start(op);
     requireInput(op, {
       code: "app-selection-required",
@@ -615,13 +618,16 @@ describe("operation restart functional coverage", () => {
 });
 
 describe("cooperative control functional coverage", () => {
-  const operation = () =>
-    createOperation({
+  const operation = () => {
+    const op = createOperation({
       provider: "azure",
       repo: "contoso/store",
       environment: "dev",
       journey: { origin: "environments" }
     });
+    op.context = { githubLogin: "alice" };
+    return op;
+  };
 
   it("honors a stop recorded before the extension restarted", async () => {
     const { first, restart } = await persistedRegistries();
@@ -663,6 +669,7 @@ describe("cooperative control functional coverage", () => {
       }
     };
     recordAzureApp(op, { state: "created", appId: "app-1" });
+    expect(op.context.githubLogin).toBe("alice");
     finish(op, "failed_partial", {
       failure: { code: "operation-stalled", message: "lost contact" }
     });
@@ -761,6 +768,7 @@ describe("cooperative control functional coverage", () => {
 
     const restored = await restart();
     const recovered = restored.get(op.operationId);
+    expect(recovered.context.githubLogin).toBe("alice");
     expect(recovered.state).toBe("running");
     expect(recovered.control.attempts.verification).toBe(1);
     expect(recovered.control.outcomes).toEqual([
