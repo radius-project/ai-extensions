@@ -253,9 +253,12 @@ describe("environmentPage — stop, continue and rollback styling", () => {
     const markup = html();
     // The base rule carries no animation, so a panel that reached any terminal
     // state — including a completed rollback — settles instead of spinning on.
+    const activeRule = markup.indexOf(
+      ".env-progress--active .env-progress__spinner {"
+    );
     const base = markup.slice(
-      markup.indexOf(".env-progress__spinner {"),
-      markup.indexOf(".env-progress--active .env-progress__spinner {")
+      markup.lastIndexOf(".env-progress__spinner {", activeRule),
+      activeRule
     );
     expect(base).not.toContain("animation:spin");
     expect(markup).toContain(

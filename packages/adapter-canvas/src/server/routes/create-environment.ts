@@ -463,8 +463,7 @@ export async function handleCreateEnvironment(
       state: ensuredEnvironment.state,
       repo: targetRepo,
       name: envName,
-      origin:
-        ensuredEnvironment.state === "reused" ? "pre_existing" : "unknown"
+      origin: ensuredEnvironment.state === "reused" ? "pre_existing" : "unknown"
     });
     if (
       ensuredEnvironment.creationProof?.proven &&
