@@ -4362,10 +4362,7 @@ export function createRegistry({
         };
       }
       const cleanupRequired = this.cleanupRequired(op.repo);
-      if (
-        cleanupRequired &&
-        cleanupRequired.operationId !== op.operationId
-      ) {
+      if (cleanupRequired && cleanupRequired.operationId !== op.operationId) {
         return {
           ok: false,
           conflict: cleanupRequired,
