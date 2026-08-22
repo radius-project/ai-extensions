@@ -1,6 +1,5 @@
 // @ts-nocheck
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFileOperationStore } from "./operation-store.js";
@@ -17,6 +16,8 @@ import {
   recordAzureApp,
   recordCommitState,
   recordCommittedWorkflowFile,
+  recordCleanupDeletion,
+  recordCleanupState,
   recordGitHubEnvironment,
   recordServicePrincipal,
   requestStop,
@@ -34,7 +35,7 @@ const directories: string[] = [];
 
 async function persistedRegistries(now = Date.now()) {
   const directory = await fs.mkdtemp(
-    path.join(os.tmpdir(), "radius-operation-functional-")
+    path.join(process.cwd(), ".radius-operation-functional-")
   );
   directories.push(directory);
   const filePath = path.join(directory, "operations.json");
@@ -53,7 +54,7 @@ async function persistedRegistries(now = Date.now()) {
 
 async function failureInjectedRegistries(failOnSave: number) {
   const directory = await fs.mkdtemp(
-    path.join(os.tmpdir(), "radius-operation-failure-injection-")
+    path.join(process.cwd(), ".radius-operation-failure-injection-")
   );
   directories.push(directory);
   const filePath = path.join(directory, "operations.json");
@@ -115,6 +116,63 @@ afterEach(async () => {
 });
 
 describe("operation restart functional coverage", () => {
+  it("retains cleanup admission across restart and releases it after absence is reconciled", async () => {
+    const now = Date.parse("2026-08-22T14:00:00.000Z");
+    const { first, restart } = await persistedRegistries(now);
+    const op = operation({
+      operationId: "op_cleanup_blocker",
+      startedAt: "2026-08-22T10:00:00.000Z"
+    });
+    first.start(op);
+    recordAzureApp(op, {
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1",
+      displayName: "radius-contoso-store"
+    });
+    finish(op, "failed_partial", {
+      failure: { code: "setup-failed", message: "Setup failed." }
+    });
+    op.endedAt = "2026-08-22T10:01:00.000Z";
+    await first.persist();
+
+    const restored = await restart();
+    expect(
+      restored.start(operation({ operationId: "op_blocked" }))
+    ).toMatchObject({
+      ok: false,
+      conflict: { operationId: op.operationId },
+      reason: "previous-cleanup-required"
+    });
+
+    const recovered = restored.get(op.operationId);
+    recordCleanupDeletion(recovered, {
+      artifactType: "azure_app",
+      identity: "app-1"
+    });
+    recordCleanupState(recovered, {
+      state: "succeeded",
+      attempts: 1,
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius-contoso-store (app-1)",
+          identity: "app-1",
+          outcome: "not_found",
+          detail: null
+        }
+      ]
+    });
+    await restored.persist();
+
+    const afterCleanup = await restart();
+    expect(afterCleanup.get(op.operationId)).toBeNull();
+    expect(
+      afterCleanup.start(operation({ operationId: "op_admitted" }))
+    ).toMatchObject({ ok: true });
+  });
+
   it("restores an operation waiting for interactive input", async () => {
     const { first, restart } = await persistedRegistries();
     const op = operation();
@@ -317,7 +375,7 @@ describe("operation restart functional coverage", () => {
   it("fails closed on a corrupt store without inventing cleanup work", async () => {
     const report = vi.fn();
     const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), "radius-operation-corrupt-")
+      path.join(process.cwd(), ".radius-operation-corrupt-")
     );
     directories.push(directory);
     const filePath = path.join(directory, "operations.json");

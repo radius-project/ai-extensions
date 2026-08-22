@@ -402,6 +402,10 @@ Radius persists the operation after each meaningful result:
 
 If the extension stops mid-rollback, the restored ledger keeps cleanup in the interrupted `running` state. The terminal record offers Rollback again, recomputes the target set from the surviving artifacts, and repeats no deletion or restoration the ledger proved complete.
 
+The restored record also retains repository admission while it can still remove a surviving proven-owned artifact. A new Create Environment request for the same repository receives `409 previous-cleanup-required` and links back to the older operation. This prevents a new setup from reusing a resource that the older rollback could later delete. The older operation may reacquire the lock to finish its own cleanup. Once every removable target is deleted, restored, or confirmed absent, the customer may submit the new Create Environment request again.
+
+Admission-blocking records are not pruned by age or by the terminal-record cap. The protection is scoped to one hydrated Copilot App Session and is not a distributed repository lock across sessions.
+
 ## Rollback completion
 
 Rollback completes when every selected target is `deleted`, `restored`, or `not_found`.

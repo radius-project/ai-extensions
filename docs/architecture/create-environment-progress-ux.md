@@ -221,6 +221,16 @@ The page sends one complete request to `POST /api/operations`. The server:
 
 The browser immediately switches from the form to the progress panel and follows the saved operation.
 
+### An earlier rollback is incomplete
+
+A terminal operation may still own resources it can remove. This happens when Rollback, Retry rollback, or Exit was interrupted, or when cleanup finished with retryable warnings. Starting another setup for the repository would let the new setup reuse those resources while the older operation still had authority to delete them.
+
+The durable registry therefore distinguishes active execution from repository admission. A non-terminal operation blocks admission as before. A terminal operation also blocks admission while its ledger still supports a safe first Rollback or Retry rollback against surviving proven-owned artifacts. Reused resources and ambiguous candidates do not block because the earlier operation cannot delete them.
+
+`POST /api/operations` returns `409 previous-cleanup-required` with the earlier operation ID and does not create or persist the new operation. The browser reloads and focuses the earlier operation so the customer can finish **Roll back environment setup**, choose **Retry rollback**, or follow its manual guidance. After manual deletion, **Retry rollback** confirms absence as `not_found`; there is no separate recheck action. The customer submits Create Environment again after the earlier cleanup resolves.
+
+Admission-blocking terminal records are exempt from age and count pruning. Normal retention resumes after no removable target remains. This guard applies within one hydrated Copilot App Session. It does not coordinate independent sessions.
+
 ## Stop setup
 
 **Stop setup** is cooperative cancellation, not process termination.

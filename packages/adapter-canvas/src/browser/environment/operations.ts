@@ -1676,6 +1676,7 @@ export function initializeEnvironmentOperations(
         const op = parseOperationResponse(payload);
         if (!op) return false;
         renderProgress(op);
+        focusPanel();
         const detailsEl = dom.byId(PROGRESS_IDS.details);
         if (
           detailsEl &&

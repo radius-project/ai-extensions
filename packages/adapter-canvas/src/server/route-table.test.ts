@@ -57,6 +57,7 @@ const productionHandlers = {
         commit() {},
         release() {}
       }),
+      admissionOwner: () => null,
       startOperation: () => ({
         ok: true,
         operation: { operationId: "", currentStage: null }

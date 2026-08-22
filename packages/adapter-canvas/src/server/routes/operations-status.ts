@@ -52,7 +52,16 @@ export type OperationRecord = {
 
 export type StartOperationResult =
   | { ok: true; operation: OperationRecord }
-  | { ok: false; conflict: { operationId: string; [key: string]: unknown } };
+  | {
+      ok: false;
+      conflict: { operationId: string; [key: string]: unknown };
+      reason?: "operation-in-progress" | "previous-cleanup-required";
+    };
+
+export interface OperationAdmissionOwner {
+  operation: { operationId: string };
+  reason: "operation-in-progress" | "previous-cleanup-required";
+}
 
 // Seams the POST handler drives to register and start an environment operation.
 // Every one is a single function the legacy arm already called; grouping them
@@ -73,6 +82,7 @@ export interface CreateOperationDependencies {
     environment: string;
     handle: string;
   }): SelectionHandleClaim;
+  admissionOwner(repo: string): OperationAdmissionOwner | null;
   // Registry writes. `start` refuses a second operation for a repo already in
   // flight; `persist` durably records the registration before any work runs.
   startOperation(op: OperationRecord): StartOperationResult;
@@ -348,6 +358,20 @@ export async function handleCreateOperation(
     });
     return;
   }
+  const admissionOwner = dependencies.admissionOwner(repo);
+  if (admissionOwner) {
+    const previousCleanup =
+      admissionOwner.reason === "previous-cleanup-required";
+    jsonError(context, 409, {
+      error:
+        previousCleanup ?
+          `An earlier setup must finish rollback first. Then create a new environment for ${repo}.`
+        : `Setup is already running for ${repo}.`,
+      code: admissionOwner.reason,
+      operationId: admissionOwner.operation.operationId
+    });
+    return;
+  }
   const selection = dependencies.claimSelectionHandle({
     instanceId: context.instanceId,
     repo,
@@ -460,9 +484,16 @@ export async function handleCreateOperation(
     }
     const started = dependencies.startOperation(op);
     if (!started.ok) {
+      const previousCleanup = started.reason === "previous-cleanup-required";
       jsonError(context, 409, {
-        error: `Setup is already running for ${repo}.`,
-        code: "operation-in-progress",
+        error:
+          previousCleanup ?
+            `An earlier setup must finish rollback first. Then create a new environment for ${repo}.`
+          : `Setup is already running for ${repo}.`,
+        code:
+          previousCleanup ?
+            "previous-cleanup-required"
+          : "operation-in-progress",
         operationId: started.conflict.operationId
       });
       return;

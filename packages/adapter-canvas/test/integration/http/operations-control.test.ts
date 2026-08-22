@@ -106,6 +106,7 @@ function start(): Harness {
         // routes and the by-id read — so the account-selection claim is a stub
         // that refuses rather than a working handle store.
         claimSelectionHandle: () => ({ ok: false, error: "missing" }),
+        admissionOwner: () => null,
         startOperation: () => ({
           ok: true,
           operation: { operationId: "", currentStage: null }
