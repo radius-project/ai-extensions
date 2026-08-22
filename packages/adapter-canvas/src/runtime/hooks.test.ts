@@ -777,6 +777,12 @@ describe("evaluateAppBicepHook", () => {
       expect(out?.permissionDecision).toBe("deny");
       expect(out?.permissionDecisionReason).toContain("must be regenerated");
       expect(out?.permissionDecisionReason).toContain("feat");
+      // The deny reason has to name the specific evidence, not just say a
+      // refresh is needed: what we know differs per status and the agent
+      // should be told which one it is.
+      expect(out?.permissionDecisionReason).toContain(
+        `because it is ${status}`
+      );
       expect(out?.additionalContext).toContain(`because it is ${status}`);
       expect(out?.additionalContext).toContain("Refresh it now");
     }
