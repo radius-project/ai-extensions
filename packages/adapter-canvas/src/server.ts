@@ -204,6 +204,7 @@ import {
   explainOidcEnterpriseClaim,
   explainNoSubscriptions,
   explainRepoAccessForEnvSetup,
+  isGitHubRateLimitError,
   isSelectedGhAuthorizationError
 } from "./deploy.js";
 import {
@@ -4995,7 +4996,12 @@ function createInstanceRequestCoordinator(
   }
 
   async function monitorVerification(operationId: string): Promise<void> {
-    const deadline = Date.now() + 45 * 60 * 1000;
+    const initialOperation = operations.get(operationId);
+    const dispatchedAt = Number(initialOperation?.verification?.dispatchedAt);
+    const deadline =
+      Number.isFinite(dispatchedAt) && dispatchedAt > 0 ?
+        dispatchedAt + 45 * 60 * 1000
+      : Date.now() + 45 * 60 * 1000;
     let delayMs = 5000;
     while (Date.now() < deadline) {
       const op = operations.get(operationId);
@@ -5091,6 +5097,24 @@ function createInstanceRequestCoordinator(
         });
         await saveOperation(operation);
       },
+      trackingExpired: async (operation, detail) => {
+        finish(operation, "failed_partial", {
+          failure: {
+            code: "verification-tracking-expired",
+            stage: STAGE_VERIFY,
+            stepSeq: null,
+            message:
+              "Radius could not resume credential verification before the GitHub rate limit retry window expired.",
+            classification: "user-fixable",
+            evidence: detail
+          }
+        });
+        await saveOperation(operation);
+      },
+      isRateLimitError: (error) => isGitHubRateLimitError(error),
+      now: Date.now,
+      sleep: (milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds)),
       errorMessage
     });
   }

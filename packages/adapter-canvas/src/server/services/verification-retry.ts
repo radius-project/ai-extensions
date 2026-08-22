@@ -7,6 +7,7 @@ export interface VerificationRetryOperation {
   endedAt?: unknown;
   context?: { githubLogin?: unknown };
   verification?: {
+    dispatchedAt?: unknown;
     workflow?: unknown;
     ref?: unknown;
     environment?: unknown;
@@ -109,8 +110,18 @@ export interface SelectedVerificationMonitorDependencies {
     login: string,
     detail: string
   ): Promise<void>;
+  trackingExpired(
+    operation: VerificationRetryOperation,
+    detail: string
+  ): Promise<void>;
+  isRateLimitError(error: unknown): boolean;
+  now(): number;
+  sleep(milliseconds: number): Promise<void>;
   errorMessage(error: unknown): string;
 }
+
+const SELECTED_EXECUTOR_ACQUISITION_WINDOW_MS = 45 * 60 * 1000;
+const SELECTED_EXECUTOR_MAX_RETRY_DELAY_MS = 15_000;
 
 export async function monitorVerificationWithSelectedAccount(
   operation: VerificationRetryOperation,
@@ -126,16 +137,44 @@ export async function monitorVerificationWithSelectedAccount(
     return;
   }
 
-  let executor: SelectedGhExecutor;
-  try {
-    executor = await dependencies.createExecutor(login);
-  } catch (error) {
-    await dependencies.accountUnavailable(
-      operation,
-      login,
-      dependencies.errorMessage(error)
-    );
-    return;
+  const dispatchedAt = Number(operation.verification?.dispatchedAt);
+  const deadline =
+    Number.isFinite(dispatchedAt) && dispatchedAt > 0 ?
+      dispatchedAt + SELECTED_EXECUTOR_ACQUISITION_WINDOW_MS
+    : dependencies.now() + SELECTED_EXECUTOR_ACQUISITION_WINDOW_MS;
+  let delayMs = 1000;
+  let executor: SelectedGhExecutor | null = null;
+  let rateLimitDetail =
+    "GitHub rate limiting prevented Radius from reacquiring the selected account.";
+  while (!executor) {
+    if (dependencies.now() >= deadline) {
+      await dependencies.trackingExpired(operation, rateLimitDetail);
+      return;
+    }
+    try {
+      executor = await dependencies.createExecutor(login);
+      if (dependencies.now() >= deadline) {
+        await dependencies.trackingExpired(operation, rateLimitDetail);
+        return;
+      }
+    } catch (error) {
+      const detail = dependencies.errorMessage(error);
+      if (!dependencies.isRateLimitError(error)) {
+        await dependencies.accountUnavailable(operation, login, detail);
+        return;
+      }
+      rateLimitDetail = detail;
+      const remainingMs = deadline - dependencies.now();
+      if (remainingMs <= 0) {
+        await dependencies.trackingExpired(operation, detail);
+        return;
+      }
+      await dependencies.sleep(Math.min(delayMs, remainingMs));
+      delayMs = Math.min(
+        Math.ceil(delayMs * 1.5),
+        SELECTED_EXECUTOR_MAX_RETRY_DELAY_MS
+      );
+    }
   }
 
   dependencies.registerExecutor(operation.operationId, executor);
