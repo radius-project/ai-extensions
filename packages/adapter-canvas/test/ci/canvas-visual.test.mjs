@@ -78,6 +78,13 @@ describe("canonical Canvas visual runner", () => {
         stderr: "Cannot connect to the Docker daemon"
       })
     ).toContain("Cannot connect to the Docker daemon");
-    expect(dockerPrerequisiteError({ status: 0 })).toBeNull();
+    expect(
+      dockerPrerequisiteError({
+        status: 0,
+        stdout: "",
+        stderr: "Docker Desktop Linux engine failed"
+      })
+    ).toContain("Docker Desktop Linux engine failed");
+    expect(dockerPrerequisiteError({ status: 0, stdout: "29.7.2" })).toBeNull();
   });
 });

@@ -62,7 +62,7 @@ export function dockerPrerequisiteError(result) {
   if (result.error) {
     return `Docker could not be started: ${result.error.message}`;
   }
-  if (result.status !== 0) {
+  if (result.status !== 0 || !result.stdout?.trim()) {
     const detail = result.stderr?.trim();
     return `The Docker CLI is installed, but the Docker daemon is unavailable. Start Docker Desktop or Docker Engine, then retry.${detail ? `\n${detail}` : ""}`;
   }
