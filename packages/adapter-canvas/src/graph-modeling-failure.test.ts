@@ -52,8 +52,60 @@ describe("graph modeling failure classification", () => {
 
   it.each([
     [
+      "unknown resource type",
+      'resource type "Applications.Db/redis" not recognized'
+    ],
+    [
+      "unsupported API version",
+      "API version '2020-01-01' for type 'Applications.Core/containers' is not supported."
+    ],
+    ["unknown property", 'property "port" is not allowed by this schema'],
+    ["invalid reference", 'referenced resource "redis" does not exist'],
+    [
+      "wrong credential shape",
+      "credentials must be an object keyed by registry host"
+    ],
+    [
+      "Bicep compilation error without a code",
+      "Bicep compilation failed while processing app.bicep"
+    ]
+  ])("classifies a rad-level %s without a BCP code", (_name, diagnostic) => {
+    const error = new RadProcessError("rad exited with code 1", diagnostic, "");
+
+    const result = asGraphModelingFailure(error);
+
+    expect(result).toBeInstanceOf(GraphModelingFailure);
+    expect((result as Error).message).toBe(GRAPH_MODELING_FAILURE_MESSAGE);
+    expect(graphModelingDiagnostic(error)).toBe(diagnostic);
+  });
+
+  it("preserves a BCP204 extension-resolution failure", () => {
+    const processError = new RadProcessError(
+      "rad exited with code 1",
+      'Error BCP204: Extension "radius" is not recognized.',
+      ""
+    );
+    const error = new Error(
+      "rad app graph failed\nCompiled with radius extension: br:example/radius:1.0",
+      { cause: processError }
+    );
+
+    expect(asGraphModelingFailure(error)).toBe(error);
+    expect(graphModelingDiagnostic(error)).toBeNull();
+  });
+
+  it.each([
+    [
       "managed CLI failure",
       new RadProcessError("download failed", "", "connection refused")
+    ],
+    [
+      "extension restore failure without a BCP code",
+      new RadProcessError(
+        "rad exited with code 1",
+        "Failed to restore Radius extension from registry",
+        ""
+      )
     ],
     ["malformed graph JSON", new SyntaxError("Unexpected end of JSON input")],
     ["non-Error rejection", "offline"]

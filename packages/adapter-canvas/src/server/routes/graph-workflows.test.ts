@@ -700,6 +700,61 @@ describe("graph planning workflows", () => {
       expect(harness.loggedErrors).toEqual([]);
     });
 
+    it("preserves BCP204 extension failures without starting model repair", async () => {
+      const processError = new RadProcessError(
+        "rad exited with code 1",
+        'Error BCP204: Extension "radius" is not recognized.',
+        ""
+      );
+      const error = new Error(
+        "rad app graph failed\nCompiled with radius extension: br:example/radius:1.0",
+        { cause: processError }
+      );
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: false } },
+        compileThrows: { main: error }
+      });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toEqual({ error: error.message });
+      expect(repair).not.toHaveBeenCalled();
+      expect(harness.loggedErrors).toEqual([]);
+    });
+
+    it("repairs a rad-level model failure without a BCP code", async () => {
+      const diagnostic = 'resource type "Applications.Db/redis" not recognized';
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: false } },
+        compileThrows: {
+          main: validationFailure(diagnostic)
+        }
+      });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toMatchObject({
+        error: GRAPH_MODELING_FAILURE_MESSAGE,
+        modelingFailed: true
+      });
+      expect(repair).toHaveBeenCalledWith(harness.entry, {
+        view: "graph",
+        repo: "octo/app",
+        branches: ["main"],
+        diagnostic
+      });
+    });
+
     it("does not reuse a cached graph when the definition hash moved", async () => {
       const harness = start({
         selections: { main: selectionOf() },
