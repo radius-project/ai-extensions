@@ -224,21 +224,7 @@ describe("ensureGitHubEnvironment", () => {
       ],
       [{ ...resolved, setupArtifacts: {} }, "octo/app", "Production"],
       [resolved, "octo/other", "Production"],
-      [resolved, "octo/app", "production"],
-      [
-        {
-          ...resolved,
-          setupArtifacts: {
-            githubEnvironment: {
-              state: "created",
-              repo: "octo/app",
-              name: "Production"
-            }
-          }
-        },
-        "octo/app",
-        "Production"
-      ]
+      [resolved, "octo/app", "production"]
     ])(
       "does not trust a stale or incomplete persisted resolution",
       (operation, repo, environment) => {

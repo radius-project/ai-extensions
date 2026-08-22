@@ -101,7 +101,9 @@ export function readEnsuredGitHubEnvironment(
     environment !== canonical ||
     artifact?.repo !== repo ||
     artifact.name !== canonical ||
-    (artifact.state !== "created_candidate" && artifact.state !== "reused")
+    (artifact.state !== "created" &&
+      artifact.state !== "created_candidate" &&
+      artifact.state !== "reused")
   ) {
     return null;
   }
