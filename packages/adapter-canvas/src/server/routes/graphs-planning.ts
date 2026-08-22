@@ -700,26 +700,16 @@ export async function handleLoadGraphStream(
         bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
         log: sendProgress
       });
-    let graphValues: unknown[];
-    try {
-      graphValues = await dependencies.buildGraphViaRad(
-        content,
-        selection.bicepPath || ".radius/app.bicep",
-        {
-          log: sendProgress,
-          saveGraphJsonTo: graphJsonPath,
-          radArtifactsDir,
-          cleanupRadArtifactsDir: radArtifactsRemote
-        }
-      );
-    } catch (error) {
-      const failure = asGraphModelingFailure(error);
-      if (!(failure instanceof GraphModelingFailure)) throw error;
-      dependencies.logError(
-        `[radius graph] modeling failed for ${repo}@${branch}: ${failure.diagnostic}`
-      );
-      throw failure;
-    }
+    const graphValues = await dependencies.buildGraphViaRad(
+      content,
+      selection.bicepPath || ".radius/app.bicep",
+      {
+        log: sendProgress,
+        saveGraphJsonTo: graphJsonPath,
+        radArtifactsDir,
+        cleanupRadArtifactsDir: radArtifactsRemote
+      }
+    );
     const resources = dependencies.canvasGraphResources(graphValues);
     sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 

@@ -33,6 +33,10 @@ export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
 export const GRAPH_RETRY_MS = 10_000;
 export const GRAPH_STALE_RETRY_MS = 1_000;
 export const GRAPH_PROGRESS_MS = 800;
+// Why the primary button is inert after a modeling failure. The graph surface
+// carries the diagnostic; this only explains the disabled control.
+export const GRAPH_PLAN_BLOCKED_TITLE =
+  "Plan Deployment is unavailable until the application model compiles.";
 // How long the page waits for Copilot to author .radius/app.bicep before it
 // gives up. Nothing reports back when the modeling skill finishes or refuses —
 // the page only learns by asking again — so an unbounded retry would spin
@@ -120,7 +124,28 @@ export function initializeGraphPage(
   // null when the page is not waiting on one.
   let appBicepWaitStartedAtMs: number | null = null;
   let renderedOptions: GraphOptions | null = null;
-  let modelCompilable = page.loaded;
+  // Whether the selected branch's model has compiled. It starts pending even
+  // for a server-rendered graph, because that page immediately re-requests the
+  // graph and the refresh decides the real state.
+  let modelState: "pending" | "ready" | "failed" = "pending";
+
+  // Keep the primary button in step with the compile state. The server renders
+  // the button without a mode and loadModeledEnvState assigns "plan" later, so
+  // the two inputs settle in either order; re-applying both here is what stops
+  // a late environment listing from leaving a compiled model unplannable. The
+  // create-env and unavailable modes own their own enablement.
+  const syncPrimaryButton = (): void => {
+    if (!button) return;
+    const mode = button.dataset.mode;
+    if (mode === "create-env" || mode === "unavailable") return;
+    const branch = branchSelect ? branchSelect.value : page.branch;
+    button.disabled = modelState !== "ready" || !branch;
+    if (modelState === "failed") {
+      button.setAttribute("title", GRAPH_PLAN_BLOCKED_TITLE);
+    } else {
+      button.removeAttribute("title");
+    }
+  };
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
@@ -315,11 +340,8 @@ export function initializeGraphPage(
       .then((payload) => {
         if (requestGeneration !== generation) return;
         if (isRecord(payload) && Array.isArray(payload.resources)) {
-          modelCompilable = true;
-          if (button?.dataset.mode === "plan") {
-            button.disabled = !branch;
-            button.removeAttribute("title");
-          }
+          modelState = "ready";
+          syncPrimaryButton();
           stopProgress();
           showStatus(context, "Application graph ready.", "info");
           showLoadedGraph();
@@ -376,14 +398,8 @@ export function initializeGraphPage(
         stopProgress();
         if (error) {
           if (readBoolean(payload, "modelingFailed")) {
-            modelCompilable = false;
-            if (button) {
-              button.disabled = true;
-              button.setAttribute(
-                "title",
-                "Plan Deployment is unavailable until the application model compiles."
-              );
-            }
+            modelState = "failed";
+            syncPrimaryButton();
           }
           showFailure(error);
         }
@@ -407,10 +423,8 @@ export function initializeGraphPage(
   if (branchSelect) {
     entry.on(branchSelect, "change", () => {
       stopRequest();
-      modelCompilable = false;
-      if (button?.dataset.mode === "plan") {
-        button.disabled = true;
-      }
+      modelState = "pending";
+      syncPrimaryButton();
       if (branchSelect.value) {
         load();
       }
@@ -421,8 +435,8 @@ export function initializeGraphPage(
   }
 
   if (page.loaded) {
-    modelCompilable = false;
-    if (button && button.dataset.mode !== "create-env") button.disabled = true;
+    modelState = "pending";
+    syncPrimaryButton();
     const graphOptions: GraphOptions = {
       repoUrl: githubRepositoryUrl(page.repo),
       branch: page.branch,
@@ -446,11 +460,8 @@ export function initializeGraphPage(
       .then((payload) => {
         if (refreshGeneration !== generation) return;
         if (isRecord(payload) && Array.isArray(payload.resources)) {
-          modelCompilable = true;
-          if (button?.dataset.mode === "plan") {
-            button.disabled = !branchSelect?.value;
-            button.removeAttribute("title");
-          }
+          modelState = "ready";
+          syncPrimaryButton();
           renderOrUpdate(parseGraphResources(payload.resources), {
             ...graphOptions,
             localSource: sourceProvenance(payload)
@@ -465,8 +476,8 @@ export function initializeGraphPage(
           const error = readString(payload, "error");
           if (error) {
             if (readBoolean(payload, "modelingFailed")) {
-              modelCompilable = false;
-              if (button) button.disabled = true;
+              modelState = "failed";
+              syncPrimaryButton();
               showFailure(error);
             } else {
               showStatus(
@@ -501,8 +512,7 @@ export function initializeGraphPage(
   )
     .then(() => {
       if (!entry.active || hasLoadedGraph || !branchSelect?.value) return;
-      if (button?.dataset.mode === "plan" && modelCompilable)
-        button.disabled = false;
+      syncPrimaryButton();
       load();
     })
     .catch((error: unknown) => {
@@ -510,9 +520,7 @@ export function initializeGraphPage(
       showStatus(context, "Unable to load branches.", "error");
     });
   void loadModeledEnvState(context, page.repo, () => entry.active).then(() => {
-    if (entry.active && !modelCompilable && button?.dataset.mode === "deploy") {
-      button.disabled = true;
-    }
+    if (entry.active) syncPrimaryButton();
   });
 
   entry.onTeardown(() => {

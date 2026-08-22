@@ -475,7 +475,7 @@ describe("graphs-planning load-graph-stream route", () => {
   });
 
   it("keeps compile diagnostics out of the terminal done frame", async () => {
-    const { deps } = fakes({
+    const { deps, calls } = fakes({
       buildThrows: new Error("rad app graph failed", {
         cause: new RadProcessError("rad exited", "BCP035: invalid model", "")
       })
@@ -492,6 +492,13 @@ describe("graphs-planning load-graph-stream route", () => {
         repairExhausted: false
       }
     });
+    // One failure, one server log: a second line would misreport how many
+    // compiles actually ran.
+    expect(
+      calls.filter((call) =>
+        call.startsWith("logError([radius graph] modeling")
+      )
+    ).toHaveLength(1);
   });
 
   it("preserves a graph toolchain failure without Bicep diagnostics", async () => {
