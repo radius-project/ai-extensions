@@ -612,11 +612,8 @@ describe("the protected-branch pull-request fallback", () => {
 
     await expect(
       committer.commitWorkflowFileSmart("p", CONTENT, "m")
-    ).resolves.toMatchObject({
-      ok: false,
-      stderr: expect.stringContaining(
-        "Radius reconciled and removed recovered setup branch"
-      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-recovered-rollback"
     });
     expect(
       h.calls.filter(
@@ -653,9 +650,8 @@ describe("the protected-branch pull-request fallback", () => {
         CONTENT,
         "m"
       )
-    ).resolves.toMatchObject({
-      ok: false,
-      stderr: expect.stringContaining("could not remove the setup branch")
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required"
     });
     // One delete attempt, never repeated, and no rollback claimed off the back
     // of a removal that did not happen.
@@ -708,7 +704,7 @@ describe("the protected-branch pull-request fallback", () => {
         CONTENT,
         "m"
       )
-    ).resolves.toMatchObject({ ok: false });
+    ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
     expect(
       operation.providerRecovery.mutations.find(
         (entry: { kind: string }) => entry.kind === "github_branch.delete"
@@ -934,11 +930,13 @@ describe("what survives a crash during a recovered branch delete", () => {
       }
     };
 
-    await createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
-      "p",
-      CONTENT,
-      "m"
-    );
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({ code: "provider-mutation-manual-required" });
 
     expect(saved).toContain("manual_required");
     expect(saved).not.toContain("not_applied");
@@ -948,11 +946,13 @@ describe("what survives a crash during a recovered branch delete", () => {
     const { h, operation } = refusedDeleteHarness();
     h.ports.mutationRecovery = { operation, persist: async () => {} };
 
-    await createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
-      "p",
-      CONTENT,
-      "m"
-    );
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({ code: "provider-mutation-manual-required" });
     const reloaded = fromPersistedOperation(toPersistedOperation(operation));
 
     expect(providerRecoveryManualGuidance(reloaded)).toContain(
@@ -1169,11 +1169,13 @@ describe("recovering a setup branch after the default branch moved", () => {
     });
     h.ports.mutationRecovery = { operation, persist: async () => {} };
 
-    await createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
-      "p",
-      CONTENT,
-      "m"
-    );
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({ code: "provider-mutation-manual-required" });
 
     // The branch is exactly as Radius left it, so the refusal is about the
     // delete GitHub rejected — not a claim the branch holds somebody's work.
@@ -1242,11 +1244,13 @@ describe("the in-process recovered branch delete", () => {
     );
     h.ports.mutationRecovery = { operation, persist: async () => {} };
 
-    await createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
-      "p",
-      CONTENT,
-      "m"
-    );
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
 
     expect(deleteMutation(operation)).toMatchObject({
       status: "outcome_unknown"
@@ -1264,11 +1268,13 @@ describe("the in-process recovered branch delete", () => {
     );
     h.ports.mutationRecovery = { operation, persist: async () => {} };
 
-    await createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
-      "p",
-      CONTENT,
-      "m"
-    );
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({ code: "provider-mutation-recovered-rollback" });
 
     expect(deleteMutation(operation)).toMatchObject({ status: "confirmed" });
   });
@@ -1289,11 +1295,13 @@ describe("the in-process recovered branch delete", () => {
     );
     h.ports.mutationRecovery = { operation, persist: async () => {} };
 
-    await createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
-      "p",
-      CONTENT,
-      "m"
-    );
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({ code: "provider-mutation-manual-required" });
 
     expect(deleteMutation(operation)).toMatchObject({
       status: "manual_required"
@@ -1313,11 +1321,13 @@ describe("the in-process recovered branch delete", () => {
     );
     h.ports.mutationRecovery = { operation, persist: async () => {} };
 
-    await createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
-      "p",
-      CONTENT,
-      "m"
-    );
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
 
     expect(
       h.calls.filter(

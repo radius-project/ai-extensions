@@ -9,7 +9,8 @@ import {
   deterministicProviderUuid,
   executeRecoverableMutation,
   ProviderMutationRecoveryError,
-  providerMutationOutcomeUnknown
+  providerMutationOutcomeUnknown,
+  providerMutationWillWrite
 } from "./provider-mutation-recovery.js";
 
 function command(
@@ -1168,5 +1169,53 @@ describe("the second attempt, across every settled status", () => {
     });
 
     expect({ mutated, reconciled }).toEqual({ mutated: 0, reconciled: 0 });
+  });
+});
+
+// A Stop belongs before a forward write and never before a reconciling read, so
+// the same predicate the journal uses to decide whether to write is the one
+// callers gate their Stop boundary on.
+describe("providerMutationWillWrite", () => {
+  function journaled(status: string) {
+    const operation = createOperation({ operationId: "op_test" });
+    const mutation = prepareProviderMutation(operation, {
+      kind: "github_environment.put",
+      target: "octo/app:dev"
+    });
+    if (status !== "prepared") {
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        status as "confirmed",
+        null
+      );
+    }
+    return operation;
+  }
+
+  it("writes when the journal has never seen this mutation", () => {
+    expect(
+      providerMutationWillWrite(
+        createOperation({ operationId: "op_test" }),
+        "github_environment.put",
+        "octo/app:dev"
+      )
+    ).toBe(true);
+  });
+
+  it.each([
+    ["not_applied", true],
+    ["prepared", false],
+    ["outcome_unknown", false],
+    ["confirmed", false],
+    ["manual_required", false]
+  ])("reports %s as willWrite=%s", (status, expected) => {
+    expect(
+      providerMutationWillWrite(
+        journaled(status),
+        "github_environment.put",
+        "octo/app:dev"
+      )
+    ).toBe(expected);
   });
 });

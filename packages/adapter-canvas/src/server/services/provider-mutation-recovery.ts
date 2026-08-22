@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   prepareProviderMutation,
   providerMutationId,
+  providerMutationRecord,
   requestStop,
   settleProviderMutation,
   unresolvedProviderMutations,
@@ -339,6 +340,25 @@ async function reconcileMutation<T>(
     : { state: "not_applied" };
 }
 
+/**
+ * Whether the next `executeRecoverableMutation` for this entry would issue a
+ * forward provider write rather than reread state it already journaled.
+ *
+ * A Stop boundary belongs before a write and never before a reconciliation: the
+ * read is what settles the provenance of a request nobody saw answered, and
+ * skipping it would strand that entry unresolved on an operation the Stop is
+ * about to make terminal. Callers gate on this so the same journal decides both
+ * whether to write and whether a Stop may intervene.
+ */
+export function providerMutationWillWrite(
+  operation: object & { operationId: string },
+  kind: string,
+  target: string
+): boolean {
+  const journaled = providerMutationRecord(operation, kind, target);
+  return !journaled || journaled.status === "not_applied";
+}
+
 export async function executeRecoverableMutation<T>(input: {
   operation: object & { operationId: string };
   kind: string;
@@ -386,6 +406,13 @@ export async function executeRecoverableMutation<T>(input: {
   ).providerRecovery?.mutations?.find(
     (entry) => entry.mutationId === mutationId
   );
+  // Read before `prepareProviderMutation` journals this attempt, so the answer
+  // describes the world the caller's Stop gate was asked about.
+  const shouldMutate = providerMutationWillWrite(
+    input.operation,
+    input.kind,
+    input.target
+  );
   // Rollback may reread an already-journaled setup mutation to settle its exact
   // outcome, but it may never start or replay a forward provider write. A
   // deletion issued by the cleanup itself is not forward work — it is the
@@ -412,8 +439,6 @@ export async function executeRecoverableMutation<T>(input: {
     intent: input.intent
   });
 
-  const shouldMutate =
-    !existingBefore || existingBefore.status === "not_applied";
   if (shouldMutate) {
     if (existingBefore?.status === "not_applied") {
       mutation.status = "prepared";

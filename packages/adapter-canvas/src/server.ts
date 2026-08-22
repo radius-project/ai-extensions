@@ -231,6 +231,7 @@ import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
+import { honorStopBoundary } from "./server/services/operation-stop-boundary.js";
 import {
   CLEANUP_COMMANDS,
   cleanupRemovedGitHubEnvironment
@@ -275,7 +276,10 @@ import { createDeployRequestService } from "./server/services/deploy-request.js"
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
-import { executeRecoverableMutation } from "./server/services/provider-mutation-recovery.js";
+import {
+  executeRecoverableMutation,
+  providerMutationWillWrite
+} from "./server/services/provider-mutation-recovery.js";
 import {
   pendingBranchDelete,
   reconcileRecoveredBranchDelete
@@ -434,12 +438,13 @@ export async function guardStopBoundary({
   report?: (diagnostic: { code: string; message: string }) => void;
   respond: (status: number, body: Record<string, unknown>) => void;
 }): Promise<boolean> {
-  if (!shouldStop(operation)) return true;
-  // The terminal announcement waits for the durable write, so a cancellation
-  // that failed to save is never reported as a finished setup.
-  stopAtBoundary(operation, boundary, { announce: false });
-  const saved = await persistBestEffort({ operation, persist, report });
-  if (saved) announceOperationTerminal(operation);
+  const proceed = await honorStopBoundary({
+    operation,
+    boundary,
+    persist,
+    report
+  });
+  if (proceed) return true;
   respond(200, {
     cancelled: true,
     code: "operation-stopped",
@@ -919,6 +924,7 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
     ensureServicePrincipal,
     finalizeSetupFailure,
     persistMutationCheckpoint,
+    honorStopBoundary,
     sleep: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
@@ -1363,8 +1369,8 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   recordCommittedWorkflowFile: (operation, entry) => {
     recordCommittedWorkflowFile(operation, entry);
   },
-  deleteLegacyDeployWorkflow: (repo, executor) =>
-    deleteLegacyDeployWorkflow(repo, executor),
+  deleteLegacyDeployWorkflow: (repo, executor, beforeDelete) =>
+    deleteLegacyDeployWorkflow(repo, executor, beforeDelete),
   createPullRequestApi: (repo, head, base, title, body, executor) =>
     executor ?
       selectedCreatePullRequest(executor, repo, head, base, title, body)
@@ -3058,7 +3064,8 @@ export async function ensureServicePrincipal(
   mutationRecovery?: {
     operation: object & { operationId: string };
     persist(): Promise<void>;
-  }
+  },
+  beforeCreate: () => Promise<boolean> = async () => true
 ): Promise<
   | {
       ok: true;
@@ -3066,7 +3073,8 @@ export async function ensureServicePrincipal(
       origin: "unknown" | "pre_existing" | "this_operation";
       objectId: string | null;
     }
-  | { ok: false; stderr: string }
+  | { ok: false; stopped: true }
+  | { ok: false; stopped?: false; stderr: string }
 > {
   const showArgs = [
     "ad",
@@ -3197,6 +3205,18 @@ export async function ensureServicePrincipal(
       ...(result.timedOut === true ? { timedOut: true } : {})
     };
   };
+  const mutationKind = "azure_service_principal.create";
+  if (
+    (!mutationRecovery ||
+      providerMutationWillWrite(
+        mutationRecovery.operation,
+        mutationKind,
+        clientId
+      )) &&
+    !(await beforeCreate())
+  ) {
+    return { ok: false, stopped: true };
+  }
   if (!mutationRecovery) {
     const create = await runCreate();
     if (create.code === 0 || create.code === "0") {
@@ -3229,7 +3249,7 @@ export async function ensureServicePrincipal(
 
   const recovered = await executeRecoverableMutation<string>({
     operation: mutationRecovery.operation,
-    kind: "azure_service_principal.create",
+    kind: mutationKind,
     target: clientId,
     providerIdempotencyKey: clientId,
     persist: mutationRecovery.persist,
@@ -3272,6 +3292,9 @@ export async function ensureServicePrincipal(
       );
     }
   });
+  if (recovered.state === "cancelled") {
+    return { ok: false, stopped: true };
+  }
   if (recovered.state === "not_applied") {
     const rejected = recovered.result;
     return {
@@ -4531,8 +4554,9 @@ async function resolveEnvDeployment(
  */
 async function deleteLegacyDeployWorkflow(
   targetRepo: string,
-  executor?: SelectedGhExecutor
-): Promise<boolean> {
+  executor?: SelectedGhExecutor,
+  beforeDelete?: () => Promise<boolean>
+): Promise<boolean | "cancelled"> {
   const path = ".github/workflows/" + LEGACY_DEPLOY_WORKFLOW_FILE;
   if (executor) {
     const lookup = await executor.run(
@@ -4541,6 +4565,7 @@ async function deleteLegacyDeployWorkflow(
     );
     const sha = lookup.code === 0 ? lookup.stdout.trim() : "";
     if (!sha) return false;
+    if (beforeDelete && !(await beforeDelete())) return "cancelled";
     // Answering `true` for a DELETE that failed would report a removal that did
     // not happen, and the legacy workflow would keep double-triggering
     // alongside the new dispatcher with nothing saying so.
@@ -5122,6 +5147,13 @@ function createInstanceRequestCoordinator(
           return runEnvironmentOperationWorkflow(op, executor, {
             preflightRepoAdmin: (repo, selectedExecutor) =>
               preflightRepoAdmin(repo, selectedExecutor),
+            guardStopBoundary: (operation, boundary) =>
+              guardStopBoundary({
+                operation,
+                boundary,
+                persist: () => operations.persist(),
+                report: (diagnostic) => operations.report?.(diagnostic)
+              }),
             preflightGhcrPackageWriteAccess: (selectedExecutor) =>
               preflightGhcrPackageWriteAccess(
                 getGhPackageCredentials,
@@ -5253,6 +5285,14 @@ function createInstanceRequestCoordinator(
       unregisterExecutor: (id) => {
         selectedGitHubExecutorsByOperation.delete(id);
       },
+      stopBoundary: ({ operation: target, boundary, beforePersist }) =>
+        honorStopBoundary({
+          operation: target,
+          boundary,
+          persist: () => operations.persist(),
+          report: (diagnostic) => operations.report?.(diagnostic),
+          beforePersist
+        }),
       buildDispatchArgs: buildVerifyWorkflowDispatchArgs,
       selectedCommandAuthorizationError,
       isAuthorizationError: isSelectedGhAuthorizationError,

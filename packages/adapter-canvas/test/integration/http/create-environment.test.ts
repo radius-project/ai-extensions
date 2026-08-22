@@ -1944,6 +1944,70 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(harness.journal).toContain("persistBestEffort");
   });
 
+  it("persists pull-request provenance before honoring Stop", async () => {
+    const harness = start(protectedScript);
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:after-workflow-pull-request") {
+        harness.operation.stopRequested = true;
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      code: "operation-stopped",
+      boundary: "after-workflow-pull-request"
+    });
+    expect(harness.commitStates).toEqual([
+      {
+        mode: "pull_request",
+        branch: "radius/setup-dev-workflows-op-http",
+        baseBranch: "main",
+        pullRequestUrl: "https://github.com/octo/app/pull/7"
+      }
+    ]);
+    expect(harness.journal).toContain("createPullRequestApi");
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+  });
+
+  // Reconciliation still owns the operation and it is not terminal, so it must
+  // outrank a Stop recorded while the pull request was in flight. Ending the
+  // operation here would leave the journal entry open with nothing to settle it.
+  it("answers a reconciling pull request rather than honoring a pending Stop", async () => {
+    const harness = start({
+      ...protectedScript,
+      gh: [
+        ...(protectedScript.gh ?? []),
+        {
+          // The reconciling read cannot answer either, so the outcome stays
+          // unknown and the operation stays reconciling.
+          match: /^api \/repos\/octo\/app\/pulls\?/,
+          result: { code: 1, stderr: "HTTP 500" }
+        }
+      ],
+      pullRequest: { ok: false, stderr: "ECONNRESET" }
+    });
+    harness.setJournalHook((entry) => {
+      if (entry === "createPullRequestApi")
+        harness.operation.stopRequested = true;
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBe(202);
+    expect(body).toMatchObject({
+      code: "provider-mutation-outcome-unknown",
+      reconciling: true,
+      operationId: "op-http"
+    });
+    expect(String(body.message)).toContain("github_pull_request.create");
+    expect(harness.journal).toContain("createPullRequestApi");
+    expect((harness.operation as { endedAt?: unknown }).endedAt).toBeFalsy();
+    expect(harness.failures).toEqual([]);
+  });
+
   it("skips deleting the legacy deploy workflow while commits go through a pull request", async () => {
     const harness = start(protectedScript);
 
@@ -1993,6 +2057,10 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
         )
       )
     ).toBe(true);
+    expect(harness.commitStates.at(-1)).toMatchObject({
+      mode: "pull_request",
+      pullRequestUrl: null
+    });
   });
 
   it("waits for the merge when the dispatcher still chains off verification", async () => {
@@ -2073,14 +2141,14 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     ]);
   });
 
-  it("takes five cancellation gates on the fully successful path", async () => {
+  it("persists every completed mutation group on the successful path", async () => {
     const harness = start();
 
     await post({ repo: "octo/app" });
 
     expect(
       harness.journal.filter((entry) => entry === "checkpoint")
-    ).toHaveLength(5);
+    ).toHaveLength(10);
   });
 
   it("passes every safe boundary in order when no stop is recorded", async () => {
@@ -2091,13 +2159,28 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     expect(
       harness.journal.filter((entry) => entry.startsWith("stopBoundary:"))
     ).toEqual([
+      "stopBoundary:before-github-environment",
       "stopBoundary:before-ghcr-bootstrap",
+      "stopBoundary:before-github-environment-create",
       "stopBoundary:after-github-environment",
+      "stopBoundary:before-ghcr-state-package",
+      "stopBoundary:after-ghcr-state-package",
+      "stopBoundary:before-radius-managed-variable",
+      "stopBoundary:after-radius-managed-variable",
+      "stopBoundary:before-state-package-configuration",
+      "stopBoundary:after-state-package-configuration",
+      "stopBoundary:before-provider-configuration",
+      "stopBoundary:after-provider-configuration",
       "stopBoundary:before-workflow-commit",
+      "stopBoundary:before-workflow-provider-mutation",
+      "stopBoundary:after-workflow-commit",
+      "stopBoundary:before-workflow-provider-mutation",
       "stopBoundary:after-workflow-commit",
       "stopBoundary:after-workflow-commit",
+      "stopBoundary:before-workflow-provider-mutation",
       "stopBoundary:after-workflow-commit",
       "stopBoundary:before-verification-dispatch",
+      "stopBoundary:before-verification-dispatch-attempt:1",
       "stopBoundary:after-verification-dispatch"
     ]);
   });
@@ -2168,6 +2251,270 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     }
   );
 
+  // The remaining ordinary boundaries. Each one is reached on the successful
+  // script, so recording the stop as the run arrives proves nothing after it
+  // starts and that no automatic cleanup was attempted.
+  it.each([
+    "before-github-environment-create",
+    "before-ghcr-state-package",
+    "before-radius-managed-variable",
+    "after-radius-managed-variable",
+    "before-state-package-configuration",
+    "before-provider-configuration",
+    "after-provider-configuration"
+  ])("honors a stop recorded at the %s boundary", async (boundary) => {
+    const harness = start();
+    harness.setJournalHook((entry) => {
+      if (entry === `stopBoundary:${boundary}`)
+        harness.operation.stopRequested = true;
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary
+    });
+    expect(body.success).toBeUndefined();
+    expect(harness.failures).toEqual([]);
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+  });
+
+  // The credential-profile variable is written only when a profile name is sent,
+  // so its own boundaries need a request that carries one.
+  it.each([
+    "before-credential-profile-variable",
+    "after-credential-profile-variable"
+  ])("honors a stop recorded at the %s boundary", async (boundary) => {
+    const harness = start();
+    harness.setJournalHook((entry) => {
+      if (entry === `stopBoundary:${boundary}`)
+        harness.operation.stopRequested = true;
+    });
+
+    const response = await post({ repo: "octo/app", profileName: "default" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary
+    });
+    expect(harness.failures).toEqual([]);
+  });
+
+  // A stop honored inside the workflow publisher ends the publish rather than
+  // reporting a refusal for work the customer already asked to stop.
+  it("honors a stop recorded at the after-workflow-commit boundary", async () => {
+    const harness = start();
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:after-workflow-commit")
+        harness.operation.stopRequested = true;
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary: "after-workflow-commit"
+    });
+    expect(harness.committedFiles.length).toBeGreaterThan(0);
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+    expect(harness.failures).toEqual([]);
+  });
+
+  // The variable write that was already running finishes; the stop is honored
+  // before the next one, and no automatic rollback is attempted.
+  it.each([
+    {
+      variable: "RADIUS_MANAGED",
+      boundary: "after-radius-managed-variable-attempt"
+    },
+    {
+      variable: "RADIUS_STATE_BACKEND",
+      boundary: "after-state-package-configuration-attempt"
+    },
+    {
+      variable: "RADIUS_CREDENTIAL_PROFILE",
+      boundary: "after-credential-profile-variable-attempt"
+    },
+    {
+      variable: "AZURE_CLIENT_ID",
+      boundary: "after-provider-configuration-attempt"
+    }
+  ])(
+    "honors a stop after the failed $variable write",
+    async ({ variable, boundary }) => {
+      const harness = start({
+        gh: [
+          {
+            match: new RegExp(`^variable set ${variable} `),
+            result: { code: 1, stderr: "HTTP 403: Forbidden" }
+          }
+        ]
+      });
+      harness.setJournalHook((entry) => {
+        if (entry === `stopBoundary:${boundary}`)
+          harness.operation.stopRequested = true;
+      });
+
+      const response = await post({ repo: "octo/app", profileName: "default" });
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(body).toMatchObject({
+        cancelled: true,
+        code: "operation-stopped",
+        boundary
+      });
+      expect(harness.failures).toEqual([]);
+    }
+  );
+
+  // A refusal Radius would normally report still runs the automatic cleanup, so
+  // the stop is honored before that cleanup rather than after it.
+  it("honors a stop recorded before the failure cleanup of a later refusal", async () => {
+    const harness = start({
+      runListResults: [{ code: 1, stderr: "HTTP 500" }]
+    });
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:before-setup-failure-cleanup")
+        harness.operation.stopRequested = true;
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary: "before-setup-failure-cleanup"
+    });
+    expect(harness.failures).toEqual([]);
+  });
+
+  // The pull-request journal cannot say which of two matching pull requests the
+  // interrupted attempt opened, so it refuses. The stop is honored before the
+  // refusal's cleanup.
+  it("honors a stop after an unresolvable pull-request attempt", async () => {
+    const harness = start({
+      headSha: "sha-base",
+      createBranch: { ok: true, stderr: "" },
+      gh: [
+        {
+          match:
+            /^api --method PUT \/repos\/octo\/app\/contents\/\S+ --input @default$/,
+          result: { code: 1, stderr: "protected branch" }
+        },
+        {
+          match: /^api \/repos\/octo\/app\/pulls\?/,
+          result: {
+            code: 0,
+            stdout: JSON.stringify([
+              {
+                html_url: "https://github.com/octo/app/pull/7",
+                number: 7,
+                head: { ref: "radius/setup-dev-workflows-op-http" },
+                base: { ref: "main" }
+              },
+              {
+                html_url: "https://github.com/octo/app/pull/8",
+                number: 8,
+                head: { ref: "radius/setup-dev-workflows-op-http" },
+                base: { ref: "main" }
+              }
+            ])
+          }
+        }
+      ],
+      pullRequest: { ok: false, stderr: "ECONNRESET" }
+    });
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:after-workflow-pull-request-attempt")
+        harness.operation.stopRequested = true;
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary: "after-workflow-pull-request-attempt"
+    });
+    expect(harness.failures).toEqual([]);
+  });
+
+  // A refused preflight would normally roll back. The stop is honored first, so
+  // nothing is deleted on a run the customer already asked to end.
+  it.each([
+    {
+      name: "repository admin",
+      script: { repoAdminRefusal: "Admin access is required." } as Script
+    },
+    {
+      name: "GHCR package write",
+      script: {
+        ghcrPreflight: {
+          ok: false,
+          status: 403,
+          error: "GHCR package write access is missing.",
+          code: "ghcr-package-write-required"
+        }
+      } as Script
+    }
+  ])(
+    "lets a stop win over the automatic cleanup for a refused $name preflight",
+    async ({ script }) => {
+      const harness = start(script);
+      harness.setJournalHook((entry) => {
+        if (entry === "stopBoundary:before-setup-failure-cleanup")
+          harness.operation.stopRequested = true;
+      });
+
+      const response = await post({ repo: "octo/app" });
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(body).toMatchObject({
+        cancelled: true,
+        code: "operation-stopped",
+        boundary: "before-setup-failure-cleanup"
+      });
+      expect(harness.failures).toEqual([]);
+    }
+  );
+
+  // The PUT was answered with a rejection GitHub composed, so its provenance is
+  // settled. The stop is honored before the automatic cleanup that would follow.
+  it("honors a stop recorded while a refused environment create was in flight", async () => {
+    const harness = start({
+      gh: [
+        {
+          match: /^api --method PUT \/repos\/octo\/app\/environments\/dev$/,
+          result: { code: 1, stderr: "HTTP 422: Validation Failed" }
+        }
+      ]
+    });
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:after-github-environment-attempt")
+        harness.operation.stopRequested = true;
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary: "after-github-environment-attempt"
+    });
+    expect(harness.failures).toEqual([]);
+  });
+
   it("stops after the environment exists rather than abandoning it mid-write", async () => {
     const harness = start();
     // The stop lands while the GitHub environment is being created, so the
@@ -2196,5 +2543,158 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       state: "created",
       origin: "this_operation"
     });
+  });
+
+  it("lets GHCR bootstrap finish and stops before GitHub environment configuration", async () => {
+    const harness = start();
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:after-ghcr-state-package") {
+        harness.operation.stopRequested = true;
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      code: "operation-stopped",
+      boundary: "after-ghcr-state-package"
+    });
+    expect(harness.journal).toContain("bootstrapGHCRStatePackage");
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("variable set "))
+    ).toBe(false);
+  });
+
+  it("honors Stop after a failed GHCR attempt before automatic rollback", async () => {
+    const harness = start({ statePackageError: "registry unavailable" });
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:after-ghcr-state-package-attempt") {
+        harness.operation.stopRequested = true;
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      code: "operation-stopped",
+      boundary: "after-ghcr-state-package-attempt"
+    });
+    expect(harness.failures).toEqual([]);
+  });
+
+  it("finishes the coherent state-package variables before stopping provider configuration", async () => {
+    const harness = start();
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:after-state-package-configuration") {
+        harness.operation.stopRequested = true;
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      code: "operation-stopped",
+      boundary: "after-state-package-configuration"
+    });
+    expect(
+      harness.ghCalls.some((call) =>
+        call.startsWith("variable set RADIUS_STATE_ARCHIVE ")
+      )
+    ).toBe(true);
+    expect(
+      harness.ghCalls.some((call) =>
+        call.startsWith("variable set AZURE_CLIENT_ID ")
+      )
+    ).toBe(false);
+  });
+
+  it("stops before opening a workflow pull request after preserving committed files", async () => {
+    const harness = start({
+      gh: [
+        {
+          match:
+            /^api --method PUT \/repos\/octo\/app\/contents\/\S+ --input @default$/,
+          result: { code: 1, stderr: "protected branch" }
+        }
+      ],
+      headSha: "sha-base",
+      createBranch: { ok: true, stderr: "" },
+      pullRequest: {
+        ok: true,
+        url: "https://github.com/octo/app/pull/7",
+        number: 7
+      }
+    });
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:before-workflow-pull-request") {
+        harness.operation.stopRequested = true;
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      code: "operation-stopped",
+      boundary: "before-workflow-pull-request"
+    });
+    expect(harness.committedFiles.length).toBeGreaterThan(0);
+    expect(harness.journal).not.toContain("createPullRequestApi");
+  });
+
+  // The dispatch is issued once, so the boundary that matters is the one between
+  // the indexing wait plus the baseline read and the write itself.
+  it("checks Stop after the verification baseline read and before the dispatch", async () => {
+    const harness = start();
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:before-verification-dispatch-attempt:1") {
+        harness.operation.stopRequested = true;
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      code: "operation-stopped",
+      boundary: "before-verification-dispatch-attempt:1"
+    });
+    expect(harness.failures).toEqual([]);
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+    ).toHaveLength(0);
+  });
+
+  it("honors Stop immediately after a failed verification dispatch attempt", async () => {
+    const harness = start({
+      gh: [
+        {
+          match: /^workflow run /,
+          // A rejection GitHub composed, so the dispatch journal settles the
+          // attempt before the boundary rather than reconciling it.
+          result: { code: 1, stderr: "HTTP 422: Validation Failed" }
+        }
+      ]
+    });
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:after-verification-dispatch-attempt:1") {
+        harness.operation.stopRequested = true;
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body).toMatchObject({
+      code: "operation-stopped",
+      boundary: "after-verification-dispatch-attempt:1"
+    });
+    expect(harness.failures).toEqual([]);
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+    ).toHaveLength(1);
   });
 });

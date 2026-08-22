@@ -3,7 +3,10 @@ import {
   type GitHubEnvironmentCreationProof
 } from "./github-environment-provenance.js";
 import { providerMutationRecord } from "../../operations.js";
-import { executeRecoverableMutation } from "./provider-mutation-recovery.js";
+import {
+  executeRecoverableMutation,
+  providerMutationWillWrite
+} from "./provider-mutation-recovery.js";
 
 export interface GitHubEnvironmentCommandResult {
   code: string | number;
@@ -62,6 +65,13 @@ export class GitHubEnvironmentEnsureError extends Error {
     this.name = "GitHubEnvironmentEnsureError";
     this.code = code;
     this.createdCandidate = createdCandidate;
+  }
+}
+
+export class GitHubEnvironmentEnsureCancelled extends Error {
+  constructor() {
+    super("GitHub environment creation stopped before the write began.");
+    this.name = "GitHubEnvironmentEnsureCancelled";
   }
 }
 
@@ -191,6 +201,12 @@ export async function ensureGitHubEnvironment(input: {
     operation: object & { operationId: string };
     persist(): Promise<void>;
   };
+  /**
+   * Consulted immediately before the PUT that creates the environment, and only
+   * when that PUT is a forward write rather than a reread of an already
+   * journaled attempt. Returning false leaves GitHub untouched.
+   */
+  beforeCreate?(): Promise<boolean>;
   now?: () => number;
 }): Promise<EnsuredGitHubEnvironment> {
   const path =
@@ -302,6 +318,23 @@ export async function ensureGitHubEnvironment(input: {
       Date.parse(reconcilableMutation.preparedAt)
     : (input.now?.() ?? Date.now());
   const mutationArgs = ["api", "--method", "PUT", path];
+  // Only a forward PUT is stoppable. A journaled attempt that reaches here to be
+  // reconciled is a read, and stopping before it would strand the provenance of
+  // a write nobody saw answered.
+  const willWriteEnvironment =
+    !input.mutationRecovery ||
+    providerMutationWillWrite(
+      input.mutationRecovery.operation,
+      mutationKind,
+      mutationTarget
+    );
+  if (
+    willWriteEnvironment &&
+    input.beforeCreate &&
+    !(await input.beforeCreate())
+  ) {
+    throw new GitHubEnvironmentEnsureCancelled();
+  }
   let created: GitHubEnvironmentCommandResult;
   if (input.mutationRecovery) {
     const recovered =
