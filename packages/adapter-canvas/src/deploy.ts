@@ -58,9 +58,9 @@ interface WorkflowRunDetail extends WorkflowRun {
 
 export class SelectedGhAuthorizationError extends Error {
   readonly login: string;
-  readonly status: 401 | 403;
+  readonly status: 401 | 403 | 404;
 
-  constructor(login: string, status: 401 | 403, detail: string) {
+  constructor(login: string, status: 401 | 403 | 404, detail: string) {
     super(
       `GitHub rejected @${login} while reading workflow state (HTTP ${status})${
         detail ? `: ${detail}` : "."
@@ -124,12 +124,38 @@ function selectedAuthorizationStatus(
   return match[1] === "401" ? 401 : 403;
 }
 
+function selectedFailureStatus(
+  stdout: string,
+  stderr: string
+): 401 | 403 | 404 | 429 | null {
+  const match = /\bHTTP\s+(401|403|404|429)\b/i.exec(`${stderr}\n${stdout}`);
+  if (!match) return null;
+  const status = Number(match[1]);
+  if (status === 401 || status === 403 || status === 404 || status === 429) {
+    return status;
+  }
+  return null;
+}
+
+function isRateLimitFailure(stdout: string, stderr: string): boolean {
+  const detail = `${stderr}\n${stdout}`;
+  return (
+    /\bHTTP\s+429\b/i.test(detail) ||
+    /\bRetry-After\s*:/i.test(detail) ||
+    /\bX-RateLimit-Remaining\s*:\s*0\b/i.test(detail) ||
+    /\bsecondary rate limit\b/i.test(detail) ||
+    /\b(?:API|primary) rate limit (?:exceeded|reached)\b/i.test(detail) ||
+    /\brate limit\b[\s\S]*\b(?:reset|resets|retry|try again)\b/i.test(detail)
+  );
+}
+
 function selectedAuthorizationError(
   executor: SelectedGhExecutor,
   stdout: string,
   stderr: string
 ): SelectedGhAuthorizationError | null {
   const status = selectedAuthorizationStatus(stdout, stderr);
+  if (status === 403 && isRateLimitFailure(stdout, stderr)) return null;
   return status === null ? null : (
       new SelectedGhAuthorizationError(
         executor.login,
@@ -146,9 +172,93 @@ function rejectedSelectedAuthorizationError(
   if (isSelectedGhAuthorizationError(error)) return error;
   const detail = executor.errorMessage(error);
   const status = selectedAuthorizationStatus("", detail);
+  if (status === 403 && isRateLimitFailure("", detail)) return null;
   return status === null ? null : (
       new SelectedGhAuthorizationError(executor.login, status, detail)
     );
+}
+
+async function selectedRepositoryAccessError(
+  executor: SelectedGhExecutor,
+  repo: string
+): Promise<SelectedGhAuthorizationError | null> {
+  try {
+    const result = await executor.run(
+      ["api", `repos/${repo}`, "--jq", ".full_name"],
+      { timeout: 15000 }
+    );
+    if (Number(result.code) === 0) return null;
+    if (isRateLimitFailure(result.stdout, result.stderr)) return null;
+    const status = selectedFailureStatus(result.stdout, result.stderr);
+    if (status === 401 || status === 403 || status === 404) {
+      return new SelectedGhAuthorizationError(
+        executor.login,
+        status,
+        (result.stderr || result.stdout).trim()
+      );
+    }
+    return null;
+  } catch (error) {
+    if (isSelectedGhAuthorizationError(error)) return error;
+    const detail = executor.errorMessage(error);
+    if (isRateLimitFailure("", detail)) return null;
+    const status = selectedFailureStatus("", detail);
+    return status === 401 || status === 403 || status === 404 ?
+        new SelectedGhAuthorizationError(executor.login, status, detail)
+      : null;
+  }
+}
+
+async function selectedWorkflowJson(
+  executor: SelectedGhExecutor,
+  repo: string,
+  args: string[],
+  fallback: unknown,
+  timeout = 15000
+): Promise<unknown> {
+  try {
+    const result = await executor.run(args, { timeout });
+    if (Number(result.code) !== 0) {
+      const status = selectedFailureStatus(result.stdout, result.stderr);
+      if (status === 404) {
+        const repositoryError = await selectedRepositoryAccessError(
+          executor,
+          repo
+        );
+        if (repositoryError) throw repositoryError;
+        return fallback;
+      }
+      const authorizationError = selectedAuthorizationError(
+        executor,
+        result.stdout,
+        result.stderr
+      );
+      if (authorizationError) throw authorizationError;
+      return fallback;
+    }
+    try {
+      return JSON.parse(result.stdout.trim());
+    } catch {
+      return fallback;
+    }
+  } catch (error) {
+    if (isSelectedGhAuthorizationError(error)) throw error;
+    const detail = executor.errorMessage(error);
+    if (selectedFailureStatus("", detail) === 404) {
+      const repositoryError = await selectedRepositoryAccessError(
+        executor,
+        repo
+      );
+      if (repositoryError) throw repositoryError;
+      return fallback;
+    }
+    const authorizationError = rejectedSelectedAuthorizationError(
+      executor,
+      error
+    );
+    if (authorizationError) throw authorizationError;
+    throw error;
+  }
 }
 
 export function ghJson(
@@ -255,22 +365,21 @@ export async function findWorkflowRun(
   afterRunId?: number | string | null
 ): Promise<number | string | null> {
   if (knownId) return knownId;
-  const runs = await ghJson(
-    [
-      "run",
-      "list",
-      "--workflow=" + workflowFile,
-      "--limit",
-      "5",
-      "--json",
-      "databaseId,status,createdAt",
-      "--repo",
-      repo
-    ],
-    [],
-    15000,
-    executor
-  );
+  const args = [
+    "run",
+    "list",
+    "--workflow=" + workflowFile,
+    "--limit",
+    "5",
+    "--json",
+    "databaseId,status,createdAt",
+    "--repo",
+    repo
+  ];
+  const runs =
+    executor ?
+      await selectedWorkflowJson(executor, repo, args, [])
+    : await ghJson(args, []);
   if (!Array.isArray(runs)) return null;
   // Prefer a monotonic run-id baseline when the caller captured one just before
   // dispatch: accept the smallest run id that exceeds it, which is the first run
@@ -310,20 +419,19 @@ export async function getRunDetail(
   runId: number | string,
   executor?: SelectedGhExecutor
 ): Promise<WorkflowRunDetail | null> {
-  let data = await ghJson(
-    [
-      "run",
-      "view",
-      String(runId),
-      "--json",
-      "status,conclusion,jobs",
-      "--repo",
-      repo
-    ],
-    null,
-    15000,
-    executor
-  );
+  const detailArgs = [
+    "run",
+    "view",
+    String(runId),
+    "--json",
+    "status,conclusion,jobs",
+    "--repo",
+    repo
+  ];
+  let data =
+    executor ?
+      await selectedWorkflowJson(executor, repo, detailArgs, null)
+    : await ghJson(detailArgs, null);
   // The jobs sub-resource (/actions/runs/<id>/jobs) is intermittently flaky
   // (HTTP 503) and, when included, fails the whole `gh run view` call — which
   // would otherwise report the run's status/conclusion just fine. The jobs
@@ -332,20 +440,19 @@ export async function getRunDetail(
   // fails. This keeps completion detection (e.g. verify-status → success)
   // working even while the jobs endpoint is unavailable.
   if (!isRecord(data)) {
-    data = await ghJson(
-      [
-        "run",
-        "view",
-        String(runId),
-        "--json",
-        "status,conclusion",
-        "--repo",
-        repo
-      ],
-      null,
-      15000,
-      executor
-    );
+    const statusArgs = [
+      "run",
+      "view",
+      String(runId),
+      "--json",
+      "status,conclusion",
+      "--repo",
+      repo
+    ];
+    data =
+      executor ?
+        await selectedWorkflowJson(executor, repo, statusArgs, null)
+      : await ghJson(statusArgs, null);
     if (!isRecord(data)) return null;
     return {
       status: stringField(data.status),

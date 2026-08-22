@@ -68,6 +68,104 @@ describe("selected-account workflow reads", () => {
   });
 
   it.each([
+    ["retry-after", "gh: Forbidden (HTTP 403)\nRetry-After: 60"],
+    [
+      "exhausted primary limit",
+      "gh: API rate limit exceeded (HTTP 403)\nX-RateLimit-Remaining: 0"
+    ],
+    [
+      "secondary limit",
+      "gh: You have exceeded a secondary rate limit (HTTP 403)"
+    ],
+    [
+      "reset guidance",
+      "gh: rate limit reached (HTTP 403); retry when the limit resets"
+    ],
+    ["too many requests", "gh: Too Many Requests (HTTP 429)"]
+  ])("keeps selected-account %s responses pollable", async (_label, stderr) => {
+    let calls = 0;
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async () => {
+        calls += 1;
+        return { code: 1, stdout: "", stderr };
+      }
+    });
+
+    await expect(
+      findWorkflowRun("contoso/store", "verify.yml", Date.now(), null, executor)
+    ).resolves.toBeNull();
+    expect(calls).toBe(1);
+  });
+
+  it("terminalizes a masked private-repository 404 after the selected account loses repository access", async () => {
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async (args) => {
+        calls.push(args);
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "gh: Not Found (HTTP 404)"
+        };
+      }
+    });
+
+    await expect(
+      findWorkflowRun("contoso/store", "verify.yml", Date.now(), null, executor)
+    ).rejects.toMatchObject({
+      name: "SelectedGhAuthorizationError",
+      login: "alice",
+      status: 404
+    });
+    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
+    expect(calls[1]).toEqual([
+      "api",
+      "repos/contoso/store",
+      "--jq",
+      ".full_name"
+    ]);
+  });
+
+  it("keeps a not-yet-visible run detail pending when the selected account still reads the repository", async () => {
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async (args) => {
+        calls.push(args);
+        return args[0] === "api" ?
+            { code: 0, stdout: "contoso/store", stderr: "" }
+          : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+      }
+    });
+
+    await expect(
+      getRunDetail("contoso/store", "41", executor)
+    ).resolves.toBeNull();
+    expect(calls.map((args) => args[0])).toEqual(["run", "api", "run", "api"]);
+  });
+
+  it("keeps a masked run 404 pending when its repository probe is rate-limited", async () => {
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async (args) =>
+        args[0] === "api" ?
+          {
+            code: 1,
+            stdout: "",
+            stderr:
+              "gh: You have exceeded a secondary rate limit (HTTP 403)\nRetry-After: 60"
+          }
+        : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" }
+    });
+
+    await expect(
+      findWorkflowRun("contoso/store", "verify.yml", Date.now(), null, executor)
+    ).resolves.toBeNull();
+  });
+
+  it.each([
     ["run discovery", 401, "list"],
     ["run detail", 403, "detail"]
   ])(

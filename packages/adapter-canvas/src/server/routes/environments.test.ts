@@ -1079,6 +1079,22 @@ describe("environments — verify-status", () => {
             "gh: Forbidden (HTTP 403)"
           )
         )
+    },
+    {
+      phase: "masked private-repository run discovery",
+      status: 404 as const,
+      runId: null,
+      findWorkflowRun: () =>
+        Promise.reject(
+          new SelectedGhAuthorizationError(
+            "alice",
+            404,
+            "gh: Not Found (HTTP 404)"
+          )
+        ),
+      getRunDetail: () => {
+        throw new Error("run detail must not be read");
+      }
     }
   ])(
     "terminalizes selected-account $phase authorization failure immediately",
