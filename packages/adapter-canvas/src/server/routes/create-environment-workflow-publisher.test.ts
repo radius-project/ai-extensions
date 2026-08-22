@@ -372,7 +372,7 @@ describe("publishWorkflowFiles", () => {
       ".github/workflows/run-rad-commands.yml",
       ".github/workflows/radius-delete.yml"
     ]);
-    expect(recorder.gateCount()).toBe(3);
+    expect(recorder.gateCount()).toBe(4);
     // Each file is recorded with the provenance of its own write, so a later
     // rollback verifies the blob that belongs to that path rather than a shared
     // guess.
@@ -468,9 +468,26 @@ describe("publishWorkflowFiles", () => {
       ghError: "protected branch"
     });
     expect(recorder.commitCalls).toEqual([VERIFY_WORKFLOW_PATH]);
-    expect(recorder.gateCount()).toBe(0);
+    expect(recorder.gateCount()).toBe(1);
     expect(recorder.steps).toContain(
       "❌ Failed to commit verify-credentials workflow."
+    );
+  });
+
+  it("lets Stop win after a failed workflow write attempt", async () => {
+    const recorder = publisherRecorder({
+      gateFalseOnCall: 1,
+      commits: {
+        [VERIFY_WORKFLOW_PATH]: {
+          ok: false,
+          stderr: "protected branch",
+          viaPr: false
+        }
+      }
+    });
+
+    expect(await publishWorkflowFiles(recorder.ports, recorder.target)).toEqual(
+      { outcome: "cancelled" }
     );
   });
 
@@ -499,7 +516,8 @@ describe("publishWorkflowFiles", () => {
   it.each<[gateCall: number, expectedCommits: number]>([
     [1, 1],
     [2, 2],
-    [3, 3]
+    [3, 2],
+    [4, 3]
   ])(
     "reports cancellation and touches nothing further when gate %i refuses",
     async (gateFalseOnCall, expectedCommits) => {
@@ -552,9 +570,10 @@ describe("publishWorkflowFiles", () => {
     expect(recorder.steps).toContain(
       "⚠️ Could not commit delete workflow radius-delete.yml: HTTP 404"
     );
-    // A refused delete commit is not recorded and does not consume a gate.
+    // A refused delete commit is not recorded, but its completed write attempt
+    // still consumes a gate before any later mutation can begin.
     expect(recorder.committed).toHaveLength(2);
-    expect(recorder.gateCount()).toBe(2);
+    expect(recorder.gateCount()).toBe(4);
   });
 
   it("substitutes a generic detail when the delete refusal carried no stderr", async () => {

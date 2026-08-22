@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ensureGitHubEnvironment,
+  GitHubEnvironmentEnsureCancelled,
   GitHubEnvironmentEnsureError,
   readEnsuredGitHubEnvironment,
   type GitHubEnvironmentCommandResult,
@@ -90,6 +91,27 @@ describe("ensureGitHubEnvironment", () => {
         "/repos/octo/app/environments/Production%20West"
       ]
     ]);
+  });
+
+  it("checks Stop after repository reads and before environment creation", async () => {
+    let mutations = 0;
+
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) =>
+          apiPath === "/repos/octo/app" ?
+            readResult({ json: { full_name: "octo/app" } })
+          : readResult({ ok: false, status: 404 }),
+        beforeCreate: async () => false,
+        runGh: async () => {
+          mutations += 1;
+          return result();
+        }
+      })
+    ).rejects.toBeInstanceOf(GitHubEnvironmentEnsureCancelled);
+    expect(mutations).toBe(0);
   });
 
   it("fails closed on lookup errors that are not an explicit HTTP 404", async () => {
@@ -243,7 +265,7 @@ describe("ensureGitHubEnvironment", () => {
       ],
       [{ ...resolved, setupArtifacts: {} }, "octo/app", "Production"],
       [resolved, "octo/other", "Production"],
-      [resolved, "octo/app", "production"],
+      [resolved, "octo/app", "production"]
     ])(
       "does not trust a stale or incomplete persisted resolution",
       (operation, repo, environment) => {

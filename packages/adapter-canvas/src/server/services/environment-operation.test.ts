@@ -145,6 +145,29 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(ghCalls).toBe(0);
   });
 
+  it("lets Stop win over cleanup after a failed preflight", async () => {
+    const op = operation();
+    let boundaries = 0;
+    const test = dependencies(op, {
+      guardStopBoundary: async (_target, boundary) => {
+        test.events.push(`stop:${boundary}`);
+        boundaries += 1;
+        return boundaries === 1;
+      },
+      preflightRepoAdmin: async () => "admin required"
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(
+        op,
+        successfulSelectedGhExecutor(),
+        test.dependencies
+      )
+    ).toEqual({ shouldMonitor: false });
+    expect(test.events).toContain("stop:before-setup-failure-cleanup");
+    expect(test.failures).toEqual([]);
+  });
+
   it("persists GitHub's canonical name before Azure and propagates it downstream", async () => {
     const op = operation();
     const test = dependencies(op);

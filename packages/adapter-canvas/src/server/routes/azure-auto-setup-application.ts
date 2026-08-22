@@ -79,7 +79,15 @@ export async function resolveAzureAutoSetupApplication({
   requestedClientId,
   serviceManagementReference
 }: AzureAutoSetupApplicationInput): Promise<AzureAutoSetupApplicationResult | null> {
-  const { operation, steps, runAz, runGitHubJson, fail, checkpoint } = workflow;
+  const {
+    operation,
+    steps,
+    runAz,
+    runGitHubJson,
+    fail,
+    stopBoundary,
+    checkpoint
+  } = workflow;
   const { operations } = dependencies;
 
   let appName = `radius-deploy-${oidc.fullName.replace("/", "-")}`;
@@ -488,6 +496,8 @@ export async function resolveAzureAutoSetupApplication({
         }
       } else {
         steps.push(`Creating Entra app registration: ${appName}...`);
+        if (!(await stopBoundary("before-app-registration-create")))
+          return null;
         const createResult = await runAz(
           buildAppCreateArgs({
             appName,
@@ -495,6 +505,8 @@ export async function resolveAzureAutoSetupApplication({
           }).filter((arg): arg is string => typeof arg === "string")
         );
         if (createResult.code !== 0) {
+          if (!(await stopBoundary("after-app-registration-create-attempt")))
+            return null;
           if (
             !serviceManagementReference &&
             isServiceManagementReferenceError(createResult.stderr)
@@ -526,7 +538,7 @@ export async function resolveAzureAutoSetupApplication({
           displayName: appName,
           serviceManagementReference: serviceManagementReference || null
         });
-        if (!(await checkpoint())) return null;
+        if (!(await checkpoint("after-app-registration-create"))) return null;
 
         const signedIn = await getSignedInUserId();
         if (!signedIn.ok) {
@@ -541,12 +553,16 @@ export async function resolveAzureAutoSetupApplication({
         steps.push(
           "Assigning the signed-in user as an owner of the new App Registration..."
         );
+        if (!(await stopBoundary("before-app-registration-owner-add")))
+          return null;
         const ownerAdd = await runAz(
           buildAppOwnerAddArgs({
             appId: clientId,
             ownerObjectId: signedIn.id
           })
         );
+        if (!(await checkpoint("after-app-registration-owner-add")))
+          return null;
         if (
           ownerAdd.code !== 0 &&
           !isAppOwnerAlreadyAssignedError(ownerAdd.stderr)
@@ -594,9 +610,13 @@ export async function resolveAzureAutoSetupApplication({
         steps.push(
           "Applying Radius provenance tags to the new App Registration..."
         );
+        if (!(await stopBoundary("before-app-registration-tag-update")))
+          return null;
         const tagPatch = await runAz(
           buildAppTagPatchArgs({ appId: clientId, tags: provenanceTags })
         );
+        if (!(await checkpoint("after-app-registration-tag-update")))
+          return null;
         if (tagPatch.code !== 0) {
           await rollbackCreatedAppAndFail(
             "Failed to apply Radius provenance tags to the new App Registration: " +

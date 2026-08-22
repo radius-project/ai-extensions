@@ -230,6 +230,9 @@ export function createWorkflowFileCommitter(
     if (isProtectedBranchFailure(direct.stderr)) {
       let fallback: PullRequestBranchState;
       try {
+        // Branch creation and its first workflow commit are one atomic fallback.
+        // Stopping between them would leave an untracked setup branch that no
+        // operation record can resume or remove.
         fallback = await beginPrFallback();
         prState = fallback;
       } catch (e) {

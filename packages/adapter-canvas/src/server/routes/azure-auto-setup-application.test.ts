@@ -57,7 +57,8 @@ function harness(
     persist?: () => Promise<void>;
     finish?: AzureAutoSetupApplicationInput["dependencies"]["operations"]["finish"];
     report?: AzureAutoSetupApplicationInput["dependencies"]["operations"]["report"];
-    checkpoint?: () => Promise<boolean>;
+    stopBoundary?: AzureAutoSetupWorkflow["stopBoundary"];
+    checkpoint?: AzureAutoSetupWorkflow["checkpoint"];
     overrides?: Partial<
       Omit<AzureAutoSetupApplicationInput, "dependencies" | "workflow">
     >;
@@ -104,6 +105,7 @@ function harness(
     fail: async (status, error, code, extra = {}) => {
       failures.push({ status, error, code, extra });
     },
+    stopBoundary: options.stopBoundary ?? (async () => true),
     checkpoint:
       options.checkpoint ??
       (async () => {
@@ -271,6 +273,28 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       expect(test.failures[0]).toMatchObject({ code });
     }
   );
+
+  it("honors Stop after a failed owner write before automatic rollback", async () => {
+    const test = harness({
+      checkpoint: async (boundary) =>
+        boundary !== "after-app-registration-owner-add",
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) return command({ stdout: "[]" });
+        if (line.startsWith("ad app create "))
+          return command({ stdout: APP_ID });
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
+        if (line.startsWith("ad app owner add ")) {
+          return command({ code: 1, stderr: "owner denied" });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(test.failures).toEqual([]);
+  });
 
   it("falls through from a stale AZURE_CLIENT_ID to application name lookup", async () => {
     const test = harness({
@@ -881,7 +905,12 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       appName: "radius-deploy-octo-app",
       state: "created"
     });
-    expect(test.calls).toEqual(["record:created", "checkpoint"]);
+    expect(test.calls).toEqual([
+      "record:created",
+      "checkpoint",
+      "checkpoint",
+      "checkpoint"
+    ]);
     expect(test.recorded[0]).toMatchObject({
       state: "created",
       origin: "this_operation",
@@ -954,6 +983,46 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       false
     );
   });
+
+  it.each([
+    ["before-app-registration-create", "ad app create "],
+    ["before-app-registration-owner-add", "ad app owner add "],
+    ["before-app-registration-tag-update", "rest --method PATCH "]
+  ])(
+    "starts no %s mutation after Stop is observed",
+    async (boundary, forbiddenCommand) => {
+      const azCalls: string[] = [];
+      const requiredTags = buildRadiusAppProvenanceTags({
+        repo: "octo/app",
+        environment: "dev",
+        operationId: "op-app"
+      });
+      const test = harness({
+        stopBoundary: async (current) => current !== boundary,
+        runAz: async (args) => {
+          const line = args.join(" ");
+          azCalls.push(line);
+          if (line.startsWith("ad app list ")) return command({ stdout: "[]" });
+          if (line.startsWith("ad app create "))
+            return command({ stdout: APP_ID });
+          if (line.startsWith("ad signed-in-user show "))
+            return command({ stdout: USER_ID });
+          if (line.startsWith("ad app owner add ")) return command();
+          if (line.startsWith("ad app owner list "))
+            return command({ stdout: USER_ID });
+          if (line.startsWith("rest --method PATCH ")) return command();
+          if (line.startsWith("ad app show ") && line.includes("--query tags"))
+            return command({ stdout: JSON.stringify(requiredTags) });
+          throw new Error(`unscripted az call: ${line}`);
+        }
+      });
+
+      expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+      expect(azCalls.some((line) => line.startsWith(forbiddenCommand))).toBe(
+        false
+      );
+    }
+  );
 
   it.each([
     ["signed-in-user", "app-owner-lookup-failed"],

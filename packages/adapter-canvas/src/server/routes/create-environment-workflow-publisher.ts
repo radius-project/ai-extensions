@@ -302,6 +302,7 @@ export async function publishWorkflowFiles(
 
   if (!verifyCommit.ok) {
     ports.pushStep("❌ Failed to commit verify-credentials workflow.");
+    if (!(await ports.gate())) return { outcome: "cancelled" };
     return {
       outcome: "refused",
       ...describeWorkflowCommitFailure(
@@ -341,6 +342,7 @@ export async function publishWorkflowFiles(
 
     if (!deployCommit.ok) {
       ports.pushStep("❌ Failed to commit deploy workflow " + fileName + ".");
+      if (!(await ports.gate())) return { outcome: "cancelled" };
       return {
         outcome: "refused",
         ...describeWorkflowCommitFailure(
@@ -361,8 +363,15 @@ export async function publishWorkflowFiles(
   // Best-effort: remove the legacy monolithic deploy workflow so it does not
   // double-trigger alongside the new dispatcher. Skipped in PR-fallback mode
   // since we can't push to the default branch.
-  if (!ports.usingPullRequestBranch())
-    await ports.deleteLegacyDeployWorkflow(targetRepo);
+  if (!ports.usingPullRequestBranch()) {
+    try {
+      await ports.deleteLegacyDeployWorkflow(targetRepo);
+    } catch (error) {
+      if (!(await ports.gate())) return { outcome: "cancelled" };
+      throw error;
+    }
+    if (!(await ports.gate())) return { outcome: "cancelled" };
+  }
   ports.pushStep("✅ Deploy workflows committed.");
 
   // Step 4b: Commit the application-delete workflows (dispatcher + Azure
@@ -392,6 +401,7 @@ export async function publishWorkflowFiles(
             ": " +
             ((delCommit.stderr || "").trim() || "GitHub API request failed.")
         );
+        if (!(await ports.gate())) return { outcome: "cancelled" };
       }
       if (delCommit.ok) {
         ports.recordCommittedWorkflowFile(

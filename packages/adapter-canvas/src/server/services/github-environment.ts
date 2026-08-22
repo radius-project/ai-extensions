@@ -56,6 +56,13 @@ export class GitHubEnvironmentEnsureError extends Error {
   }
 }
 
+export class GitHubEnvironmentEnsureCancelled extends Error {
+  constructor() {
+    super("GitHub environment creation stopped before the write began.");
+    this.name = "GitHubEnvironmentEnsureCancelled";
+  }
+}
+
 function succeeded(result: GitHubEnvironmentCommandResult): boolean {
   return result.code === 0 || result.code === "0";
 }
@@ -104,9 +111,9 @@ export function readEnsuredGitHubEnvironment(
     environment !== canonical ||
     artifact?.repo !== repo ||
     artifact.name !== canonical ||
-    artifact.state !== "created" &&
-    artifact.state !== "created_candidate" &&
-    artifact.state !== "reused"
+    (artifact.state !== "created" &&
+      artifact.state !== "created_candidate" &&
+      artifact.state !== "reused")
   ) {
     return null;
   }
@@ -118,6 +125,7 @@ export async function ensureGitHubEnvironment(input: {
   requestedName: string;
   readGitHubJson(apiPath: string): Promise<GitHubEnvironmentReadResult>;
   runGh(args: string[]): Promise<GitHubEnvironmentCommandResult>;
+  beforeCreate?(): Promise<boolean>;
   now?: () => number;
 }): Promise<EnsuredGitHubEnvironment> {
   const path =
@@ -154,6 +162,9 @@ export async function ensureGitHubEnvironment(input: {
   }
 
   const putStartedAtMs = (input.now || Date.now)();
+  if (input.beforeCreate && !(await input.beforeCreate())) {
+    throw new GitHubEnvironmentEnsureCancelled();
+  }
   const created = await input.runGh(["api", "--method", "PUT", path]);
   if (!succeeded(created)) {
     const detail = responseDetail(created) || "The GitHub API request failed.";

@@ -220,6 +220,8 @@ import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { isSetupPullRequestMerged } from "./server/services/setup-pull-request.js";
+import { honorStopBoundary } from "./server/services/operation-stop-boundary.js";
+import { runVerificationRetry as runVerificationRetryOperation } from "./server/services/verification-retry.js";
 import {
   CLEANUP_COMMANDS,
   cleanupRemovedGitHubEnvironment
@@ -346,12 +348,13 @@ export async function guardStopBoundary({
   report?: (diagnostic: { code: string; message: string }) => void;
   respond: (status: number, body: Record<string, unknown>) => void;
 }): Promise<boolean> {
-  if (!shouldStop(operation)) return true;
-  // The terminal announcement waits for the durable write, so a cancellation
-  // that failed to save is never reported as a finished setup.
-  stopAtBoundary(operation, boundary, { announce: false });
-  const saved = await persistBestEffort({ operation, persist, report });
-  if (saved) announceOperationTerminal(operation);
+  const proceed = await honorStopBoundary({
+    operation,
+    boundary,
+    persist,
+    report
+  });
+  if (proceed) return true;
   respond(200, {
     cancelled: true,
     code: "operation-stopped",
@@ -849,6 +852,7 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
     ensureServicePrincipal,
     finalizeSetupFailure,
     persistMutationCheckpoint,
+    honorStopBoundary,
     sleep: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
@@ -2761,7 +2765,8 @@ function cleanupTargetLabel(
  */
 export async function ensureServicePrincipal(
   clientId: string,
-  runAz: (args: string[]) => Promise<Partial<CommandResult>>
+  runAz: (args: string[]) => Promise<Partial<CommandResult>>,
+  beforeCreate: () => Promise<boolean> = async () => true
 ): Promise<
   | {
       ok: true;
@@ -2769,7 +2774,8 @@ export async function ensureServicePrincipal(
       origin: "unknown" | "pre_existing" | "this_operation";
       objectId: string | null;
     }
-  | { ok: false; stderr: string }
+  | { ok: false; stopped: true }
+  | { ok: false; stopped?: false; stderr: string }
 > {
   const showArgs = [
     "ad",
@@ -2807,6 +2813,7 @@ export async function ensureServicePrincipal(
     };
   }
 
+  if (!(await beforeCreate())) return { ok: false, stopped: true };
   const create = await runAz(["ad", "sp", "create", "--id", clientId]);
   if (create.code === 0 || create.code === "0") {
     return {
@@ -4435,60 +4442,46 @@ function createInstanceRequestCoordinator(
     }
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
-    const saved = op.verification || {};
-    const dispatchedAt = Date.now();
-    const dispatch = await runCliCommand(
-      "gh",
-      buildVerifyWorkflowDispatchArgs({
-        workflowFile: String(saved.workflow || VERIFY_WORKFLOW_FILE),
-        targetRepo: op.repo,
-        envName: String(saved.environment || op.environment),
-        ref: String(saved.ref || "")
-      }),
-      30000
-    );
-    if (dispatch.code !== 0) {
-      const detail =
-        (dispatch.stderr || dispatch.stdout || "").trim() ||
-        "The GitHub CLI request failed.";
-      addLegacyStep(op, "❌ Could not dispatch the verify workflow again.");
-      setCommandState(op, commandId, "finished", "dispatch-failed");
-      finish(op, "failed_partial", {
-        failure: {
-          code: "verify-dispatch-failed",
-          stage: STAGE_VERIFY,
-          stepSeq: null,
-          message:
-            "Radius could not dispatch the credential verification workflow again.",
-          classification: "user-fixable",
-          evidence: detail
-        }
-      });
-      await saveOperation(op);
-      return;
-    }
-    // Keep the saved workflow, ref, and environment; only the run identity is
-    // new. Clearing runId forces the status route to resolve the run this
-    // dispatch produced rather than reuse the previous attempt's run.
-    op.verification = {
-      dispatchedAt,
-      workflow: String(saved.workflow || VERIFY_WORKFLOW_FILE),
-      ref: String(saved.ref || ""),
-      environment: String(saved.environment || op.environment),
-      runId: null,
-      runUrl: null
-    };
-    addLegacyStep(op, "✅ Verify workflow dispatched again.", STAGE_VERIFY);
-    setCommandState(op, commandId, "running");
-    await saveOperation(op);
-    await monitorVerification(operationId);
-    setCommandState(
-      op,
-      commandId,
-      "finished",
-      operations.get(operationId)?.state || null
-    );
-    await saveOperation(op);
+    await runVerificationRetryOperation(op, commandId, {
+      workflowFile: VERIFY_WORKFLOW_FILE,
+      now: () => Date.now(),
+      dispatch: (input) =>
+        runCliCommand(
+          "gh",
+          buildVerifyWorkflowDispatchArgs({
+            workflowFile: input.workflowFile,
+            targetRepo: input.targetRepo,
+            envName: input.envName,
+            ref: input.ref
+          }),
+          30000
+        ),
+      addStep: (operation, message) =>
+        addLegacyStep(operation, message, STAGE_VERIFY),
+      setCommandState: (operation, id, state, outcome) => {
+        setCommandState(operation, id, state, outcome);
+      },
+      finishFailed: (operation, failure) => {
+        finish(operation, "failed_partial", {
+          failure: {
+            ...failure,
+            stage: STAGE_VERIFY,
+            stepSeq: null
+          }
+        });
+      },
+      save: (operation) => saveOperation(operation),
+      stopBoundary: ({ operation, boundary, beforePersist }) =>
+        honorStopBoundary({
+          operation,
+          boundary,
+          persist: () => operations.persist(),
+          report: (diagnostic) => operations.report?.(diagnostic),
+          beforePersist
+        }),
+      monitor: (id) => monitorVerification(id),
+      currentState: (id) => operations.get(id)?.state || null
+    });
   }
 
   /**

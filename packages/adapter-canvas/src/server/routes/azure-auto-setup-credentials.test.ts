@@ -45,7 +45,8 @@ function result(
 function harness(options: {
   runAz: (args: string[]) => Promise<AzureAutoSetupCommandResult>;
   ensureServicePrincipal?: AzureAutoSetupCredentialInput["dependencies"]["ensureServicePrincipal"];
-  checkpoint?: () => Promise<boolean>;
+  stopBoundary?: AzureAutoSetupWorkflow["stopBoundary"];
+  checkpoint?: AzureAutoSetupWorkflow["checkpoint"];
   sleep?: (milliseconds: number) => Promise<void>;
   tempWrite?: (path: string, contents: string) => void;
   tempRemove?: (path: string) => void;
@@ -111,6 +112,12 @@ function harness(options: {
     fail: async (status, error, code, extra = {}) => {
       failures.push({ status, error, code, extra });
     },
+    stopBoundary:
+      options.stopBoundary ??
+      (async (boundary) => {
+        calls.push(`stop:${boundary}`);
+        return true;
+      }),
     checkpoint:
       options.checkpoint ??
       (async () => {
@@ -144,11 +151,29 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
         stderr: "Graph denied"
       })
     });
+
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
     expect(test.failures[0]).toMatchObject({
       code: "sp-failed",
       extra: { azError: "Graph denied" }
     });
+  });
+
+  it("stops after the Service Principal lookup and before its create", async () => {
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        boundary !== "before-service-principal-create",
+      ensureServicePrincipal: async (_clientId, _runAz, beforeCreate) => {
+        if (!(await beforeCreate())) return { ok: false, stopped: true };
+        throw new Error("Service Principal create must not start");
+      },
+      runAz: async (args) => {
+        throw new Error(`unexpected az call: ${args.join(" ")}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures).toEqual([]);
   });
 
   it("stops immediately when the Service Principal checkpoint cancels", async () => {
@@ -308,11 +333,51 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
         throw new Error(`unexpected az call: ${line}`);
       }
     });
+
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
     expect(test.failures[0]).toMatchObject({
       code: "federated-credential-failed"
     });
     expect(test.calls).toContain("remove:C:\\temp\\fic.json");
+  });
+
+  it("honors Stop after a failed federated credential write before rollback", async () => {
+    const test = harness({
+      checkpoint: async (boundary) =>
+        !boundary.startsWith("after-federated-credential-create-attempt:"),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: "[]" });
+        }
+        if (line.includes("federated-credential create")) {
+          return result({ code: 1, stderr: "permission denied" });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures).toEqual([]);
+  });
+
+  it("stops after credential discovery and before federated credential create", async () => {
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        !boundary.startsWith("before-federated-credential-create:"),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: "[]" });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(
+      test.calls.some((call) => call.includes("federated-credential create"))
+    ).toBe(false);
   });
 
   it("verifies an already-existing credential subject before continuing", async () => {
@@ -429,6 +494,54 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     expect(
       test.calls.filter((call) => call.startsWith("az:role "))
     ).toHaveLength(1);
+  });
+
+  it("honors Stop after a failed role write before automatic rollback", async () => {
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        !boundary.startsWith("after-role-assignment-attempt:Contributor:"),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({
+            stdout: JSON.stringify([{ name: "dev", subject: SUBJECT }])
+          });
+        }
+        if (line.startsWith("role assignment create ")) {
+          return result({ code: 1, stderr: "AuthorizationFailed" });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures).toEqual([]);
+  });
+
+  it("honors Stop during role replication backoff before another attempt", async () => {
+    let assignments = 0;
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        !boundary.startsWith("before-role-assignment-backoff:Contributor:"),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({
+            stdout: JSON.stringify([{ name: "dev", subject: SUBJECT }])
+          });
+        }
+        if (line.startsWith("role assignment create ")) {
+          assignments += 1;
+          return result({ code: 1, stderr: "PrincipalNotFound" });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(assignments).toBe(1);
+    expect(test.calls.some((call) => call.startsWith("sleep:"))).toBe(false);
+    expect(test.failures).toEqual([]);
   });
 
   it("treats a malformed advisory credential list as empty and creates the credential", async () => {

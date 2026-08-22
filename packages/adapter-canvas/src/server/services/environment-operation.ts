@@ -1,6 +1,7 @@
 import type { SelectedGhExecutor } from "../../gh.js";
 import {
   ensureGitHubEnvironment,
+  GitHubEnvironmentEnsureCancelled,
   GitHubEnvironmentEnsureError,
   type EnsuredGitHubEnvironment
 } from "./github-environment.js";
@@ -155,6 +156,14 @@ export async function runEnvironmentOperationWorkflow(
     executor
   );
   if (accessMessage) {
+    if (
+      !(await dependencies.guardStopBoundary(
+        operation,
+        "before-setup-failure-cleanup"
+      ))
+    ) {
+      return { shouldMonitor: false };
+    }
     return failResolution(operation, executor, dependencies, {
       status: 403,
       message: accessMessage,
@@ -164,6 +173,14 @@ export async function runEnvironmentOperationWorkflow(
   const packageAccess =
     await dependencies.preflightGhcrPackageWriteAccess(executor);
   if (!packageAccess.ok) {
+    if (
+      !(await dependencies.guardStopBoundary(
+        operation,
+        "before-setup-failure-cleanup"
+      ))
+    ) {
+      return { shouldMonitor: false };
+    }
     return failResolution(operation, executor, dependencies, {
       status: packageAccess.status,
       message: packageAccess.error,
@@ -179,9 +196,25 @@ export async function runEnvironmentOperationWorkflow(
       readGitHubJson: (apiPath) =>
         dependencies.readGitHubJson(apiPath, executor),
       runGh: (args) => executor.run(args),
+      beforeCreate: () =>
+        dependencies.guardStopBoundary(
+          operation,
+          "before-github-environment-create"
+        ),
       now: dependencies.now
     });
   } catch (error) {
+    if (error instanceof GitHubEnvironmentEnsureCancelled) {
+      return { shouldMonitor: false };
+    }
+    if (
+      !(await dependencies.guardStopBoundary(
+        operation,
+        "after-github-environment-attempt"
+      ))
+    ) {
+      return { shouldMonitor: false };
+    }
     return failResolution(operation, executor, dependencies, error);
   }
 
