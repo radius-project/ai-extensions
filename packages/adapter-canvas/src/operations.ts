@@ -483,9 +483,13 @@ export function providerMutationRecord(
 
 export function providerRecoveryManualGuidance(op: any): string | null {
   const recovery = readProviderRecovery(op?.providerRecovery);
-  if (recovery.state !== "manual_required") return null;
+  const manualMutation = recovery.mutations.find(
+    (entry) => entry.status === "manual_required"
+  );
+  if (recovery.state !== "manual_required" && !manualMutation) return null;
   return (
     recovery.guidance ||
+    manualMutation?.evidence ||
     "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
   );
 }
@@ -4385,11 +4389,13 @@ export function fromPersistedOperation(value: any): any {
 export function reconcileRestoredOperation(op: any): any {
   if (!op) return op;
   if (unresolvedProviderMutations(op).length > 0) {
+    const rollbackPending = op.providerRecovery?.state === "rollback_pending";
     op.state = RUNNING_STATE;
     op.endedAt = null;
     op.executionActive = false;
     op.recoveryState = "provider_reconciliation_pending";
-    op.providerRecovery.state = "reconciling";
+    op.providerRecovery.state =
+      rollbackPending ? "rollback_pending" : "reconciling";
     return op;
   }
   if (isTerminalState(op.state)) return op;
