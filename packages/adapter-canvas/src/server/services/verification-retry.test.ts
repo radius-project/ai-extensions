@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
+import { isGitHubRateLimitError } from "../../deploy.js";
 import {
   monitorVerificationWithSelectedAccount,
   runVerificationRetry,
@@ -28,6 +29,7 @@ function operation(
     environment: "dev",
     context: { githubLogin: "alice" },
     verification: {
+      dispatchedAt: 123,
       workflow: "radius-verify-credentials.yml",
       ref: "main",
       environment: "dev",
@@ -288,6 +290,10 @@ describe("verification retry selected account", () => {
         },
         monitor: () => Promise.resolve(),
         accountUnavailable: () => Promise.resolve(),
+        trackingExpired: () => Promise.resolve(),
+        isRateLimitError: isGitHubRateLimitError,
+        now: () => 0,
+        sleep: () => Promise.resolve(),
         errorMessage: (error) =>
           error instanceof Error ? error.message : String(error)
       };
@@ -329,6 +335,120 @@ describe("verification retry selected account", () => {
       );
       expect(monitor).not.toHaveBeenCalled();
       expect(deps.registered).toEqual([]);
+    });
+
+    it("terminalizes ordinary selected-account acquisition HTTP 403", async () => {
+      const unavailable = vi.fn(() => Promise.resolve());
+      const deps = monitorDependencies({
+        createExecutor: () =>
+          Promise.reject(
+            new Error(
+              "GitHub identity verification failed for @alice: gh: Forbidden (HTTP 403)"
+            )
+          ),
+        accountUnavailable: unavailable
+      });
+      const op = operation();
+
+      await monitorVerificationWithSelectedAccount(op, deps);
+
+      expect(unavailable).toHaveBeenCalledWith(
+        op,
+        "alice",
+        expect.stringContaining("Forbidden (HTTP 403)")
+      );
+      expect(deps.registered).toEqual([]);
+    });
+
+    it.each([
+      "GitHub identity verification failed: secondary rate limit (HTTP 403); Retry-After: 1",
+      "GitHub identity verification failed: Too Many Requests (HTTP 429)"
+    ])(
+      "retries rate-limited selected-account acquisition without terminalizing",
+      async (message) => {
+        let attempts = 0;
+        const unavailable = vi.fn(() => Promise.resolve());
+        const expired = vi.fn(() => Promise.resolve());
+        const sleeps: number[] = [];
+        const monitor = vi.fn(() => Promise.resolve());
+        const deps = monitorDependencies({
+          createExecutor: async () => {
+            attempts += 1;
+            if (attempts === 1) throw new Error(message);
+            return successfulSelectedGhExecutor({ login: "alice" });
+          },
+          accountUnavailable: unavailable,
+          trackingExpired: expired,
+          sleep: async (milliseconds) => {
+            sleeps.push(milliseconds);
+          },
+          monitor
+        });
+
+        await monitorVerificationWithSelectedAccount(operation(), deps);
+
+        expect(attempts).toBe(2);
+        expect(sleeps).toEqual([1000]);
+        expect(unavailable).not.toHaveBeenCalled();
+        expect(expired).not.toHaveBeenCalled();
+        expect(monitor).toHaveBeenCalledWith("op_retry");
+        expect(deps.unregistered).toEqual(["op_retry"]);
+      }
+    );
+
+    it("expires bounded acquisition retry without calling it account loss", async () => {
+      const unavailable = vi.fn(() => Promise.resolve());
+      const expired = vi.fn(() => Promise.resolve());
+      const sleep = vi.fn(() => Promise.resolve());
+      let clockReads = 0;
+      const deps = monitorDependencies({
+        createExecutor: () =>
+          Promise.reject(
+            new Error(
+              "GitHub identity verification failed: secondary rate limit (HTTP 403)"
+            )
+          ),
+        accountUnavailable: unavailable,
+        trackingExpired: expired,
+        now: () => {
+          clockReads += 1;
+          return clockReads === 1 ? 0 : 123 + 45 * 60 * 1000;
+        },
+        sleep
+      });
+      const op = operation();
+
+      await monitorVerificationWithSelectedAccount(op, deps);
+
+      expect(expired).toHaveBeenCalledWith(
+        op,
+        expect.stringContaining("secondary rate limit")
+      );
+      expect(unavailable).not.toHaveBeenCalled();
+      expect(sleep).not.toHaveBeenCalled();
+      expect(deps.registered).toEqual([]);
+    });
+
+    it("does not register an executor acquired after the dispatch deadline", async () => {
+      const expired = vi.fn(() => Promise.resolve());
+      let clockReads = 0;
+      const deps = monitorDependencies({
+        trackingExpired: expired,
+        now: () => {
+          clockReads += 1;
+          return clockReads === 1 ? 0 : 123 + 45 * 60 * 1000;
+        }
+      });
+      const op = operation();
+
+      await monitorVerificationWithSelectedAccount(op, deps);
+
+      expect(expired).toHaveBeenCalledWith(
+        op,
+        "GitHub rate limiting prevented Radius from reacquiring the selected account."
+      );
+      expect(deps.registered).toEqual([]);
+      expect(deps.unregistered).toEqual([]);
     });
 
     it("fails a legacy recovered operation without falling back to ambient GitHub", async () => {

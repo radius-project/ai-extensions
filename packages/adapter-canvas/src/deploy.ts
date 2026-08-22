@@ -149,6 +149,11 @@ function isRateLimitFailure(stdout: string, stderr: string): boolean {
   );
 }
 
+export function isGitHubRateLimitError(error: unknown): boolean {
+  const detail = error instanceof Error ? error.message : String(error);
+  return isRateLimitFailure("", detail);
+}
+
 function selectedAuthorizationError(
   executor: SelectedGhExecutor,
   stdout: string,
@@ -485,37 +490,56 @@ export async function getRunDetail(
   };
 }
 
-export function fetchRunLog(
+export async function fetchRunLog(
   repo: string,
   runId: number | string,
   executor?: SelectedGhExecutor
 ): Promise<string | null> {
   if (executor) {
-    return executor
-      .run(["run", "view", String(runId), "--log", "--repo", repo], {
-        timeout: 30000,
-        maxBuffer: 1024 * 1024 * 20
-      })
-      .then((result) => {
-        if (Number(result.code) !== 0) {
-          const authorizationError = selectedAuthorizationError(
+    try {
+      const result = await executor.run(
+        ["run", "view", String(runId), "--log", "--repo", repo],
+        {
+          timeout: 30000,
+          maxBuffer: 1024 * 1024 * 20
+        }
+      );
+      if (Number(result.code) !== 0) {
+        if (selectedFailureStatus(result.stdout, result.stderr) === 404) {
+          const repositoryError = await selectedRepositoryAccessError(
             executor,
-            result.stdout,
-            result.stderr
+            repo
           );
-          if (authorizationError) throw authorizationError;
+          if (repositoryError) throw repositoryError;
           return null;
         }
-        return result.stdout || null;
-      })
-      .catch((error: unknown) => {
-        const authorizationError = rejectedSelectedAuthorizationError(
+        const authorizationError = selectedAuthorizationError(
           executor,
-          error
+          result.stdout,
+          result.stderr
         );
         if (authorizationError) throw authorizationError;
-        throw error;
-      });
+        return null;
+      }
+      return result.stdout || null;
+    } catch (error) {
+      if (isSelectedGhAuthorizationError(error)) throw error;
+      const detail = executor.errorMessage(error);
+      if (selectedFailureStatus("", detail) === 404) {
+        const repositoryError = await selectedRepositoryAccessError(
+          executor,
+          repo
+        );
+        if (repositoryError) throw repositoryError;
+        return null;
+      }
+      const authorizationError = rejectedSelectedAuthorizationError(
+        executor,
+        error
+      );
+      if (authorizationError) throw authorizationError;
+      throw error;
+    }
   }
   return new Promise((resolve) => {
     cliExec(

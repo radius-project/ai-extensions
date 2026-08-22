@@ -271,6 +271,48 @@ describe("selected-account workflow reads", () => {
     ).resolves.toBeNull();
   });
 
+  it("terminalizes a selected-account log 404 when the repository probe also loses access", async () => {
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async (args) => {
+        calls.push(args);
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "gh: Not Found (HTTP 404)"
+        };
+      }
+    });
+
+    await expect(
+      fetchRunLog("contoso/store", "41", executor)
+    ).rejects.toMatchObject({
+      name: "SelectedGhAuthorizationError",
+      login: "alice",
+      status: 404
+    });
+    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
+  });
+
+  it("keeps a missing selected-account log ordinary when the repository probe succeeds", async () => {
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async (args) => {
+        calls.push(args);
+        return args[0] === "api" ?
+            { code: 0, stdout: "contoso/store", stderr: "" }
+          : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+      }
+    });
+
+    await expect(
+      fetchRunLog("contoso/store", "41", executor)
+    ).resolves.toBeNull();
+    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
+  });
+
   it.each([
     ["returns the selected-account run log", "workflow log", "workflow log"],
     ["treats an empty selected-account run log as unavailable", "", null]
