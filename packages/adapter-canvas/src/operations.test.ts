@@ -3087,7 +3087,11 @@ describe("retry eligibility", () => {
         detail: "Azure CLI returned 429."
       }
     ]);
-    expect(canRetryCleanup(op)).toMatchObject({ ok: true });
+    const eligibility = canRetryCleanup(op);
+    expect(eligibility).toMatchObject({ ok: true });
+    expect(eligibility.target).toBe(
+      rollbackArtifactIdentity(eligibility.targets)
+    );
     expect(unresolvedCleanupTargets(null)).toEqual([]);
   });
 
@@ -3954,6 +3958,9 @@ describe("rollback eligibility", () => {
       identity
     );
     expect(identity).toMatch(/^cleanup#[0-9a-f]{16}$/);
+    expect(
+      rollbackArtifactIdentity([...provenOwnedCleanupTargets(op)].reverse())
+    ).toBe(identity);
     // A different artifact set is a different command, so an accepted rollback
     // for one set can never absorb a request for another.
     const other = stoppedWithCreatedResources({ environment: "prod" });
@@ -3962,6 +3969,41 @@ describe("rollback eligibility", () => {
       identity
     );
     expect(rollbackArtifactIdentity([])).toBe("cleanup");
+  });
+
+  it("deduplicates cleanup commands only when their artifact identities match", () => {
+    const op = stoppedWithCreatedResources();
+    const targets = provenOwnedCleanupTargets(op);
+    const firstTarget = rollbackArtifactIdentity(targets);
+    const differentTarget = rollbackArtifactIdentity(targets.slice(1));
+
+    const first = acceptCommand(op, {
+      kind: "retry_cleanup",
+      attempt: 1,
+      target: firstTarget
+    });
+    const duplicate = acceptCommand(op, {
+      kind: "retry_cleanup",
+      attempt: 1,
+      target: firstTarget
+    });
+    const different = acceptCommand(op, {
+      kind: "retry_cleanup",
+      attempt: 1,
+      target: differentTarget
+    });
+
+    expect(first).toMatchObject({ ok: true, duplicate: false });
+    expect(duplicate).toMatchObject({
+      ok: false,
+      duplicate: true,
+      command: { commandId: first.command.commandId }
+    });
+    expect(different).toMatchObject({
+      ok: true,
+      duplicate: false,
+      command: { target: differentTarget }
+    });
   });
 
   it("previews exactly what rollback removes, keeps, and leaves to the customer", () => {
