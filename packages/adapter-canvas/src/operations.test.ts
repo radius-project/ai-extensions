@@ -63,6 +63,7 @@ import {
   settleProviderMutation,
   unresolvedProviderMutations,
   providerMutationRecord,
+  providerRecoveryManualGuidance,
   findActiveCommand,
   findCommand,
   getOperationControl,
@@ -203,12 +204,75 @@ describe("provider mutation recovery journal", () => {
     op.providerRecovery.state = "rollback_pending";
 
     settleProviderMutation(op, first.mutationId, "confirmed", "adopted");
-    prepareProviderMutation(op, {
+    const second = prepareProviderMutation(op, {
       kind: "azure_app_owner.add",
       target: "app:user"
     });
 
     expect(op.providerRecovery.state).toBe("rollback_pending");
+    settleProviderMutation(
+      op,
+      second.mutationId,
+      "manual_required",
+      "The owner identity could not be proven."
+    );
+    expect(op.providerRecovery.state).toBe("rollback_pending");
+    expect(providerRecoveryManualGuidance(op)).toBe(
+      "The owner identity could not be proven."
+    );
+  });
+
+  it("preserves rollback admission when an uncertain branch deletion is restored", () => {
+    const op = createOperation({
+      operationId: "op_recovery",
+      provider: "azure",
+      repo: "octo/app",
+      environment: "prod"
+    });
+    beginRetryAttempt(op, "cleanup");
+    const rollback = acceptCommand(op, {
+      kind: "rollback",
+      attempt: 1,
+      target: "cleanup#branch"
+    });
+    setCommandState(op, rollback.command.commandId, "running");
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_branch.delete",
+      target: "octo/app:refs/heads/radius/setup:abc123"
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The delete response was lost."
+    );
+    op.providerRecovery.state = "rollback_pending";
+    finish(op, "failed_partial", {
+      failure: {
+        code: "provider-mutation-outcome-unknown",
+        message: "The delete response was lost."
+      }
+    });
+
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(op))
+    );
+
+    expect(restored).toMatchObject({
+      state: "running",
+      endedAt: null,
+      recoveryState: "provider_reconciliation_pending",
+      providerRecovery: { state: "rollback_pending" }
+    });
+    expect(latestCommand(restored)).toMatchObject({
+      commandId: rollback.command.commandId,
+      kind: "rollback",
+      state: "finished",
+      outcome: "failed_partial"
+    });
+    expect(unresolvedProviderMutations(restored)).toEqual([
+      expect.objectContaining({ kind: "github_branch.delete" })
+    ]);
   });
 });
 

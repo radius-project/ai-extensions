@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { prepareProviderMutation } from "../../operations.js";
+import {
+  prepareProviderMutation,
+  settleProviderMutation
+} from "../../operations.js";
 import {
   buildRadiusAppProvenanceTags,
   type ResolveOidcSubjectResult
@@ -1023,6 +1026,86 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         }
       ).providerRecovery.state
     ).toBe("rollback_pending");
+  });
+
+  it("reconciles a pending application before reading a changed AZURE_CLIENT_ID", async () => {
+    const requiredTags = buildRadiusAppProvenanceTags({
+      operationId: "op-app"
+    });
+    let githubVariableReads = 0;
+    let unrelatedAppReads = 0;
+    let test: Harness;
+    test = harness({
+      checkpoint: async () =>
+        (
+          test.input.workflow.operation as AzureAutoSetupOperation & {
+            providerRecovery?: { state?: string };
+          }
+        ).providerRecovery?.state !== "rollback_pending",
+      runGitHubJson: async () => {
+        githubVariableReads += 1;
+        return {
+          ok: true,
+          status: 200,
+          json: { value: "55555555-5555-5555-5555-555555555555" }
+        };
+      },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({
+            stdout: JSON.stringify([
+              {
+                appId: APP_ID,
+                displayName: "radius-deploy-octo-app",
+                tags: requiredTags
+              }
+            ])
+          });
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app show ")) {
+          unrelatedAppReads += 1;
+          return command({ stdout: "unrelated-app" });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+    const operation = test.input.workflow
+      .operation as AzureAutoSetupOperation & {
+      recoveryState?: string;
+      providerRecovery: { state: string };
+    };
+    const mutation = prepareProviderMutation(operation, {
+      kind: "azure_application.create",
+      target: "octo/app:dev:radius-deploy-octo-app"
+    });
+    settleProviderMutation(
+      operation,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The response was lost."
+    );
+    operation.recoveryState = "provider_reconciliation_pending";
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toBeNull();
+    expect(githubVariableReads).toBe(0);
+    expect(unrelatedAppReads).toBe(0);
+    expect(operation.providerRecovery.state).toBe("rollback_pending");
+    expect(test.recorded).toContainEqual(
+      expect.objectContaining({
+        state: "created",
+        origin: "this_operation",
+        appId: APP_ID
+      })
+    );
   });
 
   it("adopts a restarted application by a provider id recorded before response loss", async () => {

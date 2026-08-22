@@ -112,8 +112,20 @@ export async function resolveAzureAutoSetupApplication({
     }
   }
 
-  let existingClientId = requestedClientId;
-  if (!existingClientId) {
+  const applicationMutationKind = "azure_application.create";
+  const applicationMutationTarget = `${oidc.fullName}:${environment}:${appName}`;
+  const pendingApplicationCreate = providerMutationRecord(
+    operation,
+    applicationMutationKind,
+    applicationMutationTarget
+  );
+  const recoveringApplicationCreate =
+    pendingApplicationCreate?.status === "prepared" ||
+    pendingApplicationCreate?.status === "outcome_unknown" ||
+    pendingApplicationCreate?.status === "confirmed";
+
+  let existingClientId = recoveringApplicationCreate ? "" : requestedClientId;
+  if (!recoveringApplicationCreate && !existingClientId) {
     const variable = await runGitHubJson(
       `/repos/${oidc.fullName}/environments/${encodeURIComponent(
         environment
@@ -202,7 +214,7 @@ export async function resolveAzureAutoSetupApplication({
       appName
     });
 
-  if (existingClientId) {
+  if (!recoveringApplicationCreate && existingClientId) {
     steps.push(
       `Verifying the repository's existing AZURE_CLIENT_ID: ${existingClientId}...`
     );
@@ -283,18 +295,6 @@ export async function resolveAzureAutoSetupApplication({
     }
   }
 
-  const applicationMutationKind = "azure_application.create";
-  const applicationMutationTarget = `${oidc.fullName}:${environment}:${appName}`;
-  const pendingApplicationCreate = providerMutationRecord(
-    operation,
-    applicationMutationKind,
-    applicationMutationTarget
-  );
-  const recoveringApplicationCreate =
-    pendingApplicationCreate?.status === "prepared" ||
-    pendingApplicationCreate?.status === "outcome_unknown" ||
-    pendingApplicationCreate?.status === "confirmed";
-
   if (!clientId) {
     const listServesRepos = async (appId: string) => {
       const result = await runAz([
@@ -317,7 +317,7 @@ export async function resolveAzureAutoSetupApplication({
       }
     };
 
-    if (explicitAppId) {
+    if (!recoveringApplicationCreate && explicitAppId) {
       if (!isUuid(explicitAppId)) {
         await fail(
           400,

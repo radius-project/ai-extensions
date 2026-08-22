@@ -152,6 +152,7 @@ import {
   stopAtBoundary,
   setCommandState,
   providerMutationRecord,
+  providerRecoveryManualGuidance,
   settleProviderMutation,
   unresolvedProviderMutations,
   workflowRollbackCommitState,
@@ -1363,6 +1364,17 @@ export function setEnvironmentOperationTestRunner(
   runner: ((operationId: string, commandId?: string) => Promise<void>) | null
 ): void {
   environmentOperationTestRunner = runner;
+}
+
+export function unmarkedVerificationRunGuidance(
+  candidateCount: number
+): string | null {
+  if (candidateCount <= 0) return null;
+  return (
+    "One or more verification runs appeared after Radius's saved retry baseline, " +
+    "but GitHub does not expose an operation-specific dispatch marker. Radius will " +
+    "not guess which run belongs to this operation or dispatch another run."
+  );
 }
 
 const activeEnvironmentTasks = new Map<string, Set<string>>();
@@ -4352,7 +4364,8 @@ function createInstanceRequestCoordinator(
         }
         if (
           current?.endedAt &&
-          current.providerRecovery?.state === "rollback_pending"
+          current.providerRecovery?.state === "rollback_pending" &&
+          !providerRecoveryManualGuidance(current)
         ) {
           scheduleAutomaticRecoveryRollback(operationId);
         } else if (
@@ -4787,19 +4800,11 @@ function createInstanceRequestCoordinator(
       } catch {
         throw new Error("GitHub returned an unreadable workflow run list.");
       }
-      if (candidates.length === 1) {
-        return {
-          state: "applied" as const,
-          value: String(candidates[0].databaseId),
-          evidence:
-            "Exactly one verification retry run appeared after the saved baseline."
-        };
-      }
-      if (candidates.length > 1) {
+      const guidance = unmarkedVerificationRunGuidance(candidates.length);
+      if (guidance) {
         return {
           state: "manual_required" as const,
-          guidance:
-            "Multiple verification runs appeared after Radius's saved retry baseline. Radius will not guess or dispatch another run."
+          guidance
         };
       }
       throw new Error(
@@ -4894,13 +4899,6 @@ function createInstanceRequestCoordinator(
     }
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
-    if (
-      kind === "rollback" &&
-      op.providerRecovery?.state === "rollback_pending"
-    ) {
-      op.providerRecovery.state = "complete";
-      op.recoveryState = null;
-    }
     const command = CLEANUP_COMMANDS[kind];
     const selected = command.selectTargets(op);
     const ledger = getSetupArtifactLedger(op);
@@ -5031,6 +5029,13 @@ function createInstanceRequestCoordinator(
       state: warnings.length ? "succeeded_with_warnings" : "succeeded",
       results: carriedResults()
     });
+    if (
+      kind === "rollback" &&
+      op.providerRecovery?.state === "rollback_pending"
+    ) {
+      op.providerRecovery.state = "complete";
+      op.recoveryState = null;
+    }
     setCommandState(
       op,
       commandId,
@@ -5061,10 +5066,36 @@ function createInstanceRequestCoordinator(
 
   function scheduleRecoveredProviderMutation(op: {
     operationId: string;
+    providerRecovery?: { state?: string };
     control?: {
       commands?: Array<{ commandId?: string; kind?: string; state?: string }>;
     };
   }): void {
+    if (op.providerRecovery?.state === "rollback_pending") {
+      const cleanupCommand = [...(op.control?.commands || [])].reverse().find(
+        (
+          entry
+        ): entry is {
+          commandId: string;
+          kind: CleanupCommandKind;
+          state?: string;
+        } =>
+          typeof entry.commandId === "string" &&
+          (entry.kind === "rollback" ||
+            entry.kind === "retry_cleanup" ||
+            entry.kind === "exit_setup")
+      );
+      if (cleanupCommand) {
+        scheduleServerOwnedTask(op.operationId, () =>
+          runCleanupCommand(
+            cleanupCommand.kind,
+            op.operationId,
+            cleanupCommand.commandId
+          )
+        );
+        return;
+      }
+    }
     const retryDispatch = unresolvedProviderMutations(op).some(
       (mutation) => mutation.kind === "github_workflow.dispatch_retry"
     );
@@ -5089,7 +5120,11 @@ function createInstanceRequestCoordinator(
 
   function startRecoveredTasks(): void {
     for (const op of operations.all()) {
-      if (op.endedAt && op.providerRecovery?.state === "rollback_pending") {
+      if (
+        op.endedAt &&
+        op.providerRecovery?.state === "rollback_pending" &&
+        !providerRecoveryManualGuidance(op)
+      ) {
         scheduleAutomaticRecoveryRollback(op.operationId);
         continue;
       }

@@ -44,6 +44,7 @@ import {
   triggerDeployRepairHandoff,
   setDeployFailureNotice,
   triggerDeployFailureNotice,
+  unmarkedVerificationRunGuidance,
   classifyDeployDispatchFailure,
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
   DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
@@ -94,6 +95,18 @@ describe("DEPLOY_RAD_COMMANDS_STEP", () => {
       expect(environments.get("octo/app")).toBeUndefined();
       expect(deployments.get("octo/app")).toBeUndefined();
     });
+  });
+});
+
+describe("verification dispatch recovery", () => {
+  it("never adopts one or many unmarked retry runs", () => {
+    expect(unmarkedVerificationRunGuidance(1)).toContain(
+      "does not expose an operation-specific dispatch marker"
+    );
+    expect(unmarkedVerificationRunGuidance(2)).toContain(
+      "will not guess which run belongs to this operation"
+    );
+    expect(unmarkedVerificationRunGuidance(0)).toBeNull();
   });
 });
 
