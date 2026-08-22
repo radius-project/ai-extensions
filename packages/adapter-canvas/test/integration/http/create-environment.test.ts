@@ -53,6 +53,7 @@ interface GhRule {
 
 interface Script {
   gh?: GhRule[];
+  runListResults?: Array<Partial<CreateEnvironmentCommandResult>>;
   repoAdminRefusal?: string;
   ghcrPreflight?: GhcrPreflightResult;
   defaultBranch?: string | null;
@@ -230,6 +231,7 @@ function start(script: Script = {}): Harness {
   // (or `@default`), which is the only signal `gh` itself would act on.
   let lastBodyBranch = "default";
   let defaultRunListCalls = 0;
+  const runListResults = [...(script.runListResults || [])];
   const runGhArgs = (args: string[]): CreateEnvironmentCommandResult => {
     const key = args
       .map((arg) => (arg === TEMP_BODY_PATH ? `@${lastBodyBranch}` : arg))
@@ -237,6 +239,15 @@ function start(script: Script = {}): Harness {
     ghCalls.push(key);
     if (key.startsWith("workflow run ")) {
       journal.push("dispatchVerifyWorkflow");
+    }
+    if (key.startsWith("run list ") && runListResults.length > 0) {
+      const next = runListResults.shift() || {};
+      return {
+        code: next.code ?? 0,
+        stdout: next.stdout ?? "",
+        stderr: next.stderr ?? "",
+        ...(next.timedOut ? { timedOut: true } : {})
+      };
     }
     if (
       key.startsWith("run list ") &&
@@ -264,7 +275,8 @@ function start(script: Script = {}): Harness {
         return {
           code: rule.result.code ?? 0,
           stdout: rule.result.stdout ?? "",
-          stderr: rule.result.stderr ?? ""
+          stderr: rule.result.stderr ?? "",
+          ...(rule.result.timedOut ? { timedOut: true } : {})
         };
       }
     }
@@ -819,7 +831,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       stateBackend: "oci",
       stateRegistry: "ghcr.io/octo/app/radius-state-dev",
       stateArchive: "radius-state",
-      verifyRunUrl: "https://github.com/octo/app/actions/runs/4242",
+      verifyRunUrl: "",
       actionRequired: false,
       pullRequestUrl: "",
       pullRequestBranch: null,
@@ -1406,29 +1418,99 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(harness.finished).toEqual([]);
   });
 
-  it("publishes the dispatch identity to the instance so the monitor tracks the new run", async () => {
+  it("does not guess a run identity when GitHub exposes no operation marker", async () => {
     const harness = start();
 
     await post({ repo: "octo/app" });
 
     expect(harness.state).toMatchObject({
       deployDispatchedAt: 1700000000000,
-      verifyRunId: "4242",
-      verifyRunUrl: "https://github.com/octo/app/actions/runs/4242"
+      verifyRunId: null,
+      verifyRunUrl: ""
     });
     expect(harness.journal).toContain(`enterStage:${STAGE_VERIFY}`);
   });
 
-  it("tolerates a run listing it cannot parse without losing the dispatch", async () => {
+  it("fails closed when the pre-dispatch run baseline is unreadable", async () => {
     const harness = start({
       gh: [{ match: /^run list /, result: { code: 0, stdout: "<html>" } }]
     });
 
     const response = await post({ repo: "octo/app" });
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ verifyRunUrl: "" });
-    expect(harness.state.verifyRunId).toBeNull();
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({
+      code: "verify-baseline-read-failed"
+    });
+    expect(harness.state.verifyRunId).toBeUndefined();
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+  });
+
+  it("does not dispatch when the verification baseline read fails", async () => {
+    const harness = start({
+      gh: [
+        {
+          match: /^run list /,
+          result: { code: 1, stderr: "GitHub Actions unavailable" }
+        }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({
+      code: "verify-baseline-read-failed"
+    });
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+  });
+
+  it("does not adopt concurrent environment runs after an uncertain verification dispatch", async () => {
+    const harness = start({
+      gh: [
+        {
+          match: /^workflow run /,
+          result: { code: 1, stderr: "terminated", timedOut: true }
+        }
+      ],
+      runListResults: [
+        { code: 0, stdout: "[]" },
+        {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              databaseId: 4242,
+              createdAt: "2023-11-14T22:13:20.000Z",
+              event: "workflow_dispatch",
+              headBranch: "main",
+              displayTitle: "Verify Radius credentials (dev)"
+            },
+            {
+              databaseId: 4243,
+              createdAt: "2023-11-14T22:13:21.000Z",
+              event: "workflow_dispatch",
+              headBranch: "main",
+              displayTitle: "Verify Radius credentials (prod)"
+            }
+          ])
+        }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app", environment: "dev" });
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(harness.state.verifyRunId).toBeUndefined();
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+    ).toHaveLength(1);
+    expect(
+      (
+        harness.operation as CreateEnvironmentOperation & {
+          providerRecovery?: { state?: string };
+        }
+      ).providerRecovery
+    ).toMatchObject({ state: "manual_required" });
   });
 
   it("fails 400 with the workflow-scope hint when the verify workflow cannot be committed", async () => {

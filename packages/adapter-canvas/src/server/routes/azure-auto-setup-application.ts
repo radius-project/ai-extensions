@@ -283,6 +283,18 @@ export async function resolveAzureAutoSetupApplication({
     }
   }
 
+  const applicationMutationKind = "azure_application.create";
+  const applicationMutationTarget = `${oidc.fullName}:${environment}:${appName}`;
+  const pendingApplicationCreate = providerMutationRecord(
+    operation,
+    applicationMutationKind,
+    applicationMutationTarget
+  );
+  const recoveringApplicationCreate =
+    pendingApplicationCreate?.status === "prepared" ||
+    pendingApplicationCreate?.status === "outcome_unknown" ||
+    pendingApplicationCreate?.status === "confirmed";
+
   if (!clientId) {
     const listServesRepos = async (appId: string) => {
       const result = await runAz([
@@ -425,7 +437,7 @@ export async function resolveAzureAutoSetupApplication({
         hasUnownedMatch: matches.length > ownedMatches.length,
         radiusProvenance: unownedRadiusProvenance,
         existingClientId,
-        createNew: createNewApp
+        createNew: createNewApp || recoveringApplicationCreate
       });
       if (selection.action === "error") {
         await fail(
@@ -491,14 +503,12 @@ export async function resolveAzureAutoSetupApplication({
         }
       } else {
         steps.push(`Creating Entra app registration: ${appName}...`);
-        const mutationKind = "azure_application.create";
-        const mutationTarget = `${oidc.fullName}:${environment}:${appName}`;
         const createResult = await executeRecoverableMutation<string>({
           operation: operation as AzureAutoSetupOperation & {
             providerRecovery?: unknown;
           },
-          kind: mutationKind,
-          target: mutationTarget,
+          kind: applicationMutationKind,
+          target: applicationMutationTarget,
           persist: () => operations.persist(),
           mutate: () =>
             runAz(
@@ -516,7 +526,7 @@ export async function resolveAzureAutoSetupApplication({
               "--filter",
               `displayName eq '${appName}'`,
               "--query",
-              "[].{appId:appId,displayName:displayName,createdDateTime:createdDateTime}",
+              "[].{appId:appId,displayName:displayName,tags:tags}",
               "-o",
               "json"
             ]);
@@ -528,7 +538,7 @@ export async function resolveAzureAutoSetupApplication({
             let candidates: Array<{
               appId?: unknown;
               displayName?: unknown;
-              createdDateTime?: unknown;
+              tags?: unknown;
             }>;
             try {
               const parsed: unknown = JSON.parse(lookup.stdout || "[]");
@@ -538,24 +548,39 @@ export async function resolveAzureAutoSetupApplication({
                 "The App Registration recovery lookup was unreadable."
               );
             }
-            const prepared = providerMutationRecord(
-              operation,
-              mutationKind,
-              mutationTarget
-            );
-            const preparedAt = Date.parse(prepared?.preparedAt || "");
+            const recordedAppId =
+              (
+                operation.setupArtifacts?.azureApp?.origin ===
+                  "this_operation" &&
+                typeof operation.setupArtifacts.azureApp.appId === "string"
+              ) ?
+                operation.setupArtifacts.azureApp.appId
+              : "";
+            const operationTag = buildRadiusAppProvenanceTags({
+              operationId: operation.operationId
+            }).find((tag) => tag.includes(operation.operationId));
             const exact = candidates.filter(
               (candidate) =>
                 candidate.displayName === appName &&
                 typeof candidate.appId === "string" &&
                 candidate.appId &&
-                typeof candidate.createdDateTime === "string" &&
-                Date.parse(candidate.createdDateTime) >= preparedAt - 60000
+                (candidate.appId === recordedAppId ||
+                  (operationTag &&
+                    Array.isArray(candidate.tags) &&
+                    candidate.tags.includes(operationTag)))
             );
             if (exact.length === 0) {
-              throw new Error(
-                "No operation-matched App Registration is visible yet."
-              );
+              if (candidates.length === 0) {
+                throw new Error(
+                  "No operation-provenanced App Registration is visible yet."
+                );
+              }
+              return {
+                state: "manual_required",
+                guidance:
+                  `One or more recent App Registrations named "${appName}" are visible, but none carries this operation's immutable provenance or a provider ID Radius saved before losing the response. ` +
+                  "Radius will not adopt, modify, or delete any of them."
+              };
             }
             if (exact.length > 1) {
               return {
@@ -566,23 +591,11 @@ export async function resolveAzureAutoSetupApplication({
               };
             }
             const appId = String(exact[0].appId);
-            const ownership = await isOwnedBySignedInUser(appId);
-            if (!ownership.ok) {
-              throw new Error(ownership.stderr);
-            }
-            if (!ownership.owned) {
-              return {
-                state: "manual_required",
-                guidance:
-                  `App Registration ${appId} matches the interrupted create window, but the selected Entra user does not own it. ` +
-                  "Radius left it unchanged and will not create or delete another application."
-              };
-            }
             return {
               state: "applied",
               value: appId,
               evidence:
-                "The exact display name, creation window, app id, and selected owner matched the interrupted operation."
+                "The exact App Registration provider identity or immutable Radius operation provenance matched the interrupted operation."
             };
           }
         });

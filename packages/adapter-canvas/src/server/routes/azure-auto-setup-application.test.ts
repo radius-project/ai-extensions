@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { prepareProviderMutation } from "../../operations.js";
 import {
   buildRadiusAppProvenanceTags,
   type ResolveOidcSubjectResult
@@ -845,9 +846,59 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     });
   });
 
-  it("adopts the exact owned application after a timed-out create", async () => {
+  it("refuses a recent same-name application without immutable operation provenance", async () => {
     let listCalls = 0;
     let createCalls = 0;
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          listCalls += 1;
+          return command({
+            stdout:
+              listCalls === 1 ? "[]" : (
+                JSON.stringify([
+                  {
+                    appId: APP_ID,
+                    displayName: "radius-deploy-octo-app",
+                    createdDateTime: new Date().toISOString()
+                  },
+                  {
+                    appId: "55555555-5555-5555-5555-555555555555",
+                    displayName: "radius-deploy-octo-app",
+                    createdDateTime: new Date().toISOString()
+                  }
+                ])
+              )
+          });
+        }
+        if (line.startsWith("ad app create ")) {
+          createCalls += 1;
+          return command({ code: 1, timedOut: true });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("immutable provenance")
+    });
+    expect(createCalls).toBe(1);
+    expect(test.recorded).toEqual([]);
+    expect(
+      (
+        test.input.workflow.operation as AzureAutoSetupOperation & {
+          providerRecovery: { mutations: Array<{ status: string }> };
+        }
+      ).providerRecovery.mutations[0]?.status
+    ).toBe("manual_required");
+  });
+
+  it("adopts an interrupted application only from immutable operation provenance", async () => {
+    let listCalls = 0;
     const requiredTags = buildRadiusAppProvenanceTags({
       repo: "octo/app",
       environment: "dev",
@@ -865,21 +916,20 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
                   {
                     appId: APP_ID,
                     displayName: "radius-deploy-octo-app",
-                    createdDateTime: new Date().toISOString()
+                    tags: requiredTags
                   }
                 ])
               )
           });
         }
         if (line.startsWith("ad app create ")) {
-          createCalls += 1;
           return command({ code: 1, timedOut: true });
         }
         if (line.startsWith("ad signed-in-user show ")) {
-          return command({ stdout: USER_ID });
+          return command({ stdout: "different-ambient-principal" });
         }
         if (line.startsWith("ad app owner list ")) {
-          return command({ stdout: USER_ID });
+          return command({ stdout: "different-ambient-principal" });
         }
         if (line.startsWith("ad app owner add ")) return command();
         if (line.startsWith("rest --method PATCH ")) return command();
@@ -896,14 +946,148 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       clientId: APP_ID,
       state: "created"
     });
-    expect(createCalls).toBe(1);
+    expect(test.recorded).toContainEqual(
+      expect.objectContaining({
+        state: "created",
+        appId: APP_ID,
+        origin: "this_operation"
+      })
+    );
+  });
+
+  it("reconciles a restarted application before reuse and transfers directly to rollback", async () => {
+    let listCalls = 0;
+    let ownerAdds = 0;
+    const requiredTags = buildRadiusAppProvenanceTags({
+      operationId: "op-app"
+    });
+    let test: Harness;
+    test = harness({
+      checkpoint: async () =>
+        (
+          test.input.workflow.operation as AzureAutoSetupOperation & {
+            providerRecovery?: { state?: string };
+          }
+        ).providerRecovery?.state !== "rollback_pending",
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          listCalls += 1;
+          if (listCalls === 1) return command({ stdout: "[]" });
+          if (listCalls === 2)
+            return command({ code: 1, stderr: "temporarily unavailable" });
+          return command({
+            stdout: JSON.stringify([
+              {
+                appId: APP_ID,
+                displayName: "radius-deploy-octo-app",
+                tags: requiredTags
+              }
+            ])
+          });
+        }
+        if (line.startsWith("ad app create ")) {
+          return command({ code: 1, timedOut: true });
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return command({ stdout: "changed-principal" });
+        }
+        if (line.startsWith("ad app owner list ")) {
+          return command({ stdout: "changed-principal" });
+        }
+        if (line.startsWith("ad app owner add ")) {
+          ownerAdds += 1;
+          return command();
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+    (
+      test.input.workflow.operation as AzureAutoSetupOperation & {
+        recoveryState?: string;
+      }
+    ).recoveryState = "provider_reconciliation_pending";
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toBeNull();
+    expect(ownerAdds).toBe(0);
     expect(
       (
         test.input.workflow.operation as AzureAutoSetupOperation & {
-          providerRecovery: { mutations: Array<{ status: string }> };
+          providerRecovery: { state: string };
         }
-      ).providerRecovery.mutations[0]?.status
-    ).toBe("confirmed");
+      ).providerRecovery.state
+    ).toBe("rollback_pending");
+  });
+
+  it("adopts a restarted application by a provider id recorded before response loss", async () => {
+    let createCalls = 0;
+    let test: Harness;
+    test = harness({
+      checkpoint: async () =>
+        (
+          test.input.workflow.operation as AzureAutoSetupOperation & {
+            providerRecovery?: { state?: string };
+          }
+        ).providerRecovery?.state !== "rollback_pending",
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({
+            stdout: JSON.stringify([
+              {
+                appId: APP_ID,
+                displayName: "radius-deploy-octo-app",
+                tags: []
+              }
+            ])
+          });
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app create ")) {
+          createCalls += 1;
+          return command();
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+    const operation = test.input.workflow
+      .operation as AzureAutoSetupOperation & {
+      recoveryState?: string;
+      setupArtifacts: {
+        azureApp: { origin: string; appId: string };
+      };
+    };
+    operation.setupArtifacts = {
+      azureApp: { origin: "this_operation", appId: APP_ID }
+    };
+    operation.recoveryState = "provider_reconciliation_pending";
+    prepareProviderMutation(operation, {
+      kind: "azure_application.create",
+      target: "octo/app:dev:radius-deploy-octo-app"
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toBeNull();
+    expect(createCalls).toBe(0);
+    expect(
+      (
+        operation as AzureAutoSetupOperation & {
+          providerRecovery: { state: string };
+        }
+      ).providerRecovery.state
+    ).toBe("rollback_pending");
   });
 
   it("reconciles timed-out owner and provenance mutations before continuing", async () => {

@@ -193,6 +193,23 @@ describe("provider mutation recovery journal", () => {
       guidance: "The provider identity did not match."
     });
   });
+
+  it("does not let later prepare or settle calls clear rollback pending", () => {
+    const op = createOperation({ operationId: "op_recovery" });
+    const first = prepareProviderMutation(op, {
+      kind: "azure_application.create",
+      target: "octo/app:dev"
+    });
+    op.providerRecovery.state = "rollback_pending";
+
+    settleProviderMutation(op, first.mutationId, "confirmed", "adopted");
+    prepareProviderMutation(op, {
+      kind: "azure_app_owner.add",
+      target: "app:user"
+    });
+
+    expect(op.providerRecovery.state).toBe("rollback_pending");
+  });
 });
 
 function newOp(overrides = {}) {

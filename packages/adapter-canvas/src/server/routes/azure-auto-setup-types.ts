@@ -21,6 +21,13 @@ export interface AzureAutoSetupOperation {
   currentStage: string;
   state?: string;
   inputRequired?: unknown;
+  providerRecovery?: unknown;
+  setupArtifacts?: {
+    azureApp?: {
+      origin?: string;
+      appId?: string | null;
+    };
+  };
 }
 
 export interface AzureAutoSetupFailureResponse {

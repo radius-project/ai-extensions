@@ -153,6 +153,19 @@ export async function executeRecoverableMutation<T>(input: {
   accept(result: ProviderMutationCommandResult): T;
   reconcile(): Promise<ProviderMutationReconciliation<T>>;
 }): Promise<RecoverableMutationResult<T>> {
+  // The recovered empty fallback branch is itself rollback work: it is deleted
+  // once by exact ref/SHA before the general rollback starts. Every setup write
+  // remains prohibited after reconciliation requests rollback.
+  if (
+    (input.operation as RecoveringOperation).providerRecovery?.state ===
+      "rollback_pending" &&
+    input.kind !== "github_branch.delete"
+  ) {
+    throw new ProviderMutationRecoveryError(
+      "Radius has finished reconciling the interrupted provider request and must roll back before any further provider changes.",
+      "provider-mutation-rollback-pending"
+    );
+  }
   const mutationId = providerMutationId(
     input.operation.operationId,
     input.kind,

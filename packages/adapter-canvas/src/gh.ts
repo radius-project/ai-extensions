@@ -10,6 +10,7 @@ import type {
   ExecFileOptions,
   ExecFileOptionsWithStringEncoding
 } from "node:child_process";
+import { toGhCommandResult } from "./server/services/gh-command-result.js";
 
 export interface GhAccount {
   login: string;
@@ -818,11 +819,7 @@ export async function createSelectedGhExecutor(
         args,
         execOptions,
         (error, stdout, stderr) => {
-          resolve({
-            code: error ? error.code || 1 : 0,
-            stdout,
-            stderr
-          });
+          resolve(toGhCommandResult(error, stdout, stderr));
         },
         redact
       );

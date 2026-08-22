@@ -857,9 +857,22 @@ export async function handleCreateEnvironment(
         "--repo",
         targetRepo
       ]);
+      if (baselineResult.code !== 0 && baselineResult.code !== "0") {
+        await fail(
+          502,
+          "Radius could not read the verification-run baseline, so it did not dispatch the workflow. Retry after GitHub Actions run history is readable.",
+          "verify-baseline-read-failed",
+          {
+            steps,
+            ghError: baselineResult.stderr || baselineResult.stdout || ""
+          }
+        );
+        return;
+      }
       baselineRunId = null;
       try {
         const parsed: unknown = JSON.parse(baselineResult.stdout);
+        if (!Array.isArray(parsed)) throw new Error("expected an array");
         const first = Array.isArray(parsed) ? parsed[0] : null;
         if (
           first &&
@@ -869,7 +882,15 @@ export async function handleCreateEnvironment(
         ) {
           baselineRunId = Number(first.databaseId);
         }
-      } catch {}
+      } catch {
+        await fail(
+          502,
+          "GitHub returned an unreadable verification-run baseline, so Radius did not dispatch the workflow.",
+          "verify-baseline-read-failed",
+          { steps }
+        );
+        return;
+      }
       verificationRef = verifyPlan.ref || defaultBranch;
       operation.verification = {
         dispatchedAt,
@@ -930,20 +951,12 @@ export async function handleCreateEnvironment(
         } catch {
           throw new Error("GitHub returned an unreadable workflow run list.");
         }
-        if (candidates.length === 1) {
-          return {
-            state: "applied",
-            value: String(candidates[0].databaseId),
-            evidence:
-              "Exactly one verification run appeared after the saved pre-dispatch baseline."
-          };
-        }
-        if (candidates.length > 1) {
+        if (candidates.length > 0) {
           return {
             state: "manual_required",
             guidance:
-              "Multiple verification runs appeared after Radius's saved pre-dispatch baseline. " +
-              "Radius will not guess which run belongs to this operation or dispatch another one."
+              "One or more verification runs appeared after Radius's saved pre-dispatch baseline, but GitHub does not expose an operation-specific dispatch marker that proves which run belongs to this operation. " +
+              "Radius will not adopt an unrelated run or dispatch another one."
           };
         }
         throw new Error(
