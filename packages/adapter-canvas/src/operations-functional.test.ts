@@ -13,11 +13,12 @@ import {
   acceptCommand,
   beginRetryAttempt,
   canRetrySetup,
+  canRetryCleanup,
+  recordCleanupState,
   recordAzureApp,
   recordCommitState,
   recordCommittedWorkflowFile,
   recordCleanupDeletion,
-  recordCleanupState,
   recordGitHubEnvironment,
   recordServicePrincipal,
   requestStop,
@@ -29,7 +30,11 @@ import {
   toClientView
 } from "./operations.js";
 import type { OperationStore } from "./operation-store.js";
-import { persistBestEffort, persistMutationCheckpoint } from "./server.js";
+import {
+  cleanupAzureSetupArtifacts,
+  persistBestEffort,
+  persistMutationCheckpoint
+} from "./server.js";
 
 const directories: string[] = [];
 
@@ -370,6 +375,57 @@ describe("operation restart functional coverage", () => {
       ok: false,
       conflict: { operationId: op.operationId }
     });
+  });
+
+  it("restores cleanup authority and unlocks creation after retry confirms manual deletion", async () => {
+    const { first, restart } = await persistedRegistries();
+    const op = operation();
+    first.start(op);
+    recordAzureApp(op, {
+      state: "created",
+      appId: "app-1",
+      displayName: "radius-app"
+    });
+    finish(op, "failed_partial", { failure: { code: "operation-stalled" } });
+    recordCleanupState(op, {
+      attempts: 1,
+      state: "succeeded_with_warnings",
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius-app (app-1)",
+          identity: "app-1",
+          outcome: "warning",
+          detail: "Azure returned 429."
+        }
+      ]
+    });
+    await first.persist();
+
+    const restored = await restart();
+    const recovered = restored.get(op.operationId);
+    expect(restored.start(operation())).toMatchObject({
+      ok: false,
+      reason: "previous-cleanup-required",
+      conflict: { operationId: op.operationId }
+    });
+    expect(canRetryCleanup(recovered).ok).toBe(true);
+
+    const retry = await cleanupAzureSetupArtifacts(recovered, {
+      only: new Set(["azure_app#app-1"]),
+      runAz: async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "Request_ResourceNotFound: Resource does not exist."
+      })
+    });
+
+    expect(retry.results).toMatchObject([
+      { artifactType: "azure_app", outcome: "not_found" }
+    ]);
+    expect(canRetryCleanup(recovered).ok).toBe(false);
+    expect(restored.start(operation()).ok).toBe(true);
   });
 
   it("fails closed on a corrupt store without inventing cleanup work", async () => {

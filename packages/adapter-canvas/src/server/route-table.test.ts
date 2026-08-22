@@ -50,6 +50,7 @@ const productionHandlers = {
       isUuid: () => false,
       buildStages: () => [],
       createOperation: () => ({ operationId: "", currentStage: null }),
+      startConflict: () => null,
       claimSelectionHandle: () => ({
         ok: true,
         login: "octocat",
@@ -57,7 +58,6 @@ const productionHandlers = {
         commit() {},
         release() {}
       }),
-      admissionOwner: () => null,
       startOperation: () => ({
         ok: true,
         operation: { operationId: "", currentStage: null }

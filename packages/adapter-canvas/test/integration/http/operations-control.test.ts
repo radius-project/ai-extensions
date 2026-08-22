@@ -14,6 +14,9 @@ import {
   type OperationFixture
 } from "../../support/server/operation-fixtures.js";
 import {
+  buildStages,
+  createOperation,
+  createRegistry,
   enterStage,
   finish,
   isTerminalState,
@@ -55,12 +58,16 @@ interface Harness {
   invalidatedListings: string[];
   persistCalls: string[];
   scheduled: Array<{ kind: string; instanceId: string; commandId: string }>;
+  createScheduled: Array<{ instanceId: string; operationId: string }>;
+  registry: ReturnType<typeof createRegistry>;
 }
 
 function start(): Harness {
   const records = new Map<string, OperationRecord>();
+  const registry = createRegistry();
   const persistCalls: string[] = [];
   const scheduled: Harness["scheduled"] = [];
+  const createScheduled: Harness["createScheduled"] = [];
   const invalidatedListings: string[] = [];
 
   const persistOperations = () => {
@@ -71,7 +78,7 @@ function start(): Harness {
   const routes = createTestRouteTable({
     ...createOperationsControlRoutes({
       get: (operationId) => records.get(operationId) ?? null,
-      acquireForRetry: () => ({ ok: true }),
+      acquireForRetry: (operation) => registry.acquireForRetry(operation),
       persistOperations,
       // Merge-proof eligibility is the route unit suite's to decide; no journey
       // here may reach GitHub for it, so the port refuses rather than answers.
@@ -96,24 +103,35 @@ function start(): Harness {
         toClientView
       },
       {
-        isValidRepoSlug: () => false,
-        isResourceGroupName: () => false,
-        isAksClusterName: () => false,
-        isUuid: () => false,
-        buildStages: () => [],
-        createOperation: () => ({ operationId: "", currentStage: null }),
-        // The create arm is never exercised here — this suite drives the control
-        // routes and the by-id read — so the account-selection claim is a stub
-        // that refuses rather than a working handle store.
-        claimSelectionHandle: () => ({ ok: false, error: "missing" }),
-        admissionOwner: () => null,
-        startOperation: () => ({
+        isValidRepoSlug: (value) =>
+          typeof value === "string" && /^[^/\s]+\/[^/\s]+$/.test(value),
+        isResourceGroupName: () => true,
+        isAksClusterName: () => true,
+        isUuid: () => true,
+        buildStages,
+        createOperation,
+        startConflict: (repo) => registry.startConflict(repo),
+        claimSelectionHandle: () => ({
           ok: true,
-          operation: { operationId: "", currentStage: null }
+          login: "octocat",
+          credentialSource: "keyring",
+          commit() {},
+          release() {}
         }),
+        startOperation: (operation) => {
+          const result = registry.start(operation);
+          if (result.ok) records.set(operation.operationId, operation);
+          return result;
+        },
         persistOperations,
         finish,
-        scheduleEnvironmentOperation: () => true,
+        scheduleEnvironmentOperation: (instanceId, operation) => {
+          createScheduled.push({
+            instanceId,
+            operationId: operation.operationId
+          });
+          return true;
+        },
         errorMessage: (error) => String(error)
       },
       // The resume and abandon actions round out the family. They are declared
@@ -165,11 +183,19 @@ function start(): Harness {
     prepareIdentity: () => {}
   });
 
-  return { records, persistCalls, scheduled, invalidatedListings };
+  return {
+    records,
+    persistCalls,
+    scheduled,
+    createScheduled,
+    registry,
+    invalidatedListings
+  };
 }
 
 function seed(harness: Harness, op: OperationFixture): OperationFixture {
   harness.records.set(op.operationId, op);
+  harness.registry.put(op);
   return op;
 }
 
@@ -262,6 +288,59 @@ function action(
 }
 
 describe("operation controls real-loopback HIT", () => {
+  it("returns the blocking cleanup operation and lets it reacquire the lock", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const old = seed(harness, stoppedSetup());
+
+    const createResponse = await fetch(`${entry.baseUrl}/api/operations`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...browserHeaders(entry.baseUrl)
+      },
+      body: JSON.stringify({
+        repo: "contoso/store",
+        environment: "prod",
+        provider: "azure",
+        clientId: "client-1",
+        tenantId: "tenant-1",
+        subscriptionId: "subscription-1",
+        resourceGroup: "rg-prod",
+        cluster: "aks-prod"
+      })
+    });
+
+    expect(createResponse.status).toBe(409);
+    expect(await createResponse.json()).toEqual({
+      error:
+        "An earlier setup for contoso/store must finish rollback before a new setup can start.",
+      code: "previous-cleanup-required",
+      operationId: old.operationId
+    });
+    expect(harness.records.size).toBe(1);
+    expect(harness.persistCalls).toEqual([]);
+    expect(harness.createScheduled).toEqual([]);
+
+    const prior = await poll(
+      entry.baseUrl,
+      `/api/operations/${encodeURIComponent(old.operationId)}`
+    );
+    const rollback = action(prior, "rollback");
+    expect(rollback?.label).toBe("Roll back created resources");
+    if (!rollback) throw new Error("Expected rollback action.");
+
+    const rollbackResponse = await post(entry.baseUrl, rollback.path);
+    expect(rollbackResponse.status).toBe(202);
+    expect(harness.scheduled).toEqual([
+      {
+        kind: "rollback",
+        instanceId: "panel-a",
+        commandId: expect.stringContaining(`${old.operationId}:rollback:`)
+      }
+    ]);
+  });
+
   it("accepts a stop over the socket and shows it on the status route", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");

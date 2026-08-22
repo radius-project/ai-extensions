@@ -607,7 +607,7 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     buildStages,
     createOperation,
     claimSelectionHandle: (input) => githubSelectionHandles.claim(input),
-    admissionOwner: (repo) => operations.admissionOwner(repo),
+    startConflict: (repo) => operations.startConflict(repo),
     startOperation: (op) => operations.start(op),
     persistOperations: () => operations.persist(),
     finish,

@@ -212,14 +212,21 @@ export async function admitCreateEnvironmentRequest(
   });
   const started = ports.startOperation(operation);
   if (!started.ok) {
+    const previousCleanup = started.reason === "previous-cleanup-required";
     return {
       outcome: "refused",
       operation: null,
       refusal: {
         status: 409,
         body: {
-          error: `Setup is already running for ${targetRepo}.`,
-          code: "operation-in-progress",
+          error:
+            previousCleanup ?
+              `An earlier setup for ${targetRepo} must finish rollback before a new setup can start.`
+            : `Setup is already running for ${targetRepo}.`,
+          code:
+            previousCleanup ?
+              "previous-cleanup-required"
+            : "operation-in-progress",
           operationId: started.conflict.operationId
         }
       }

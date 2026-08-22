@@ -45,9 +45,13 @@ export interface AzureAutoSetupOperationLifecyclePort {
   isStale(operation: AzureAutoSetupOperation): boolean;
   create(input: Record<string, unknown>): AzureAutoSetupOperation;
   buildStages(): unknown[];
-  start(
-    operation: AzureAutoSetupOperation
-  ): { ok: true } | { ok: false; conflict: { operationId: string } };
+  start(operation: AzureAutoSetupOperation):
+    | { ok: true }
+    | {
+        ok: false;
+        reason?: "operation-in-progress" | "previous-cleanup-required";
+        conflict: { operationId: string };
+      };
   persist(): Promise<void>;
   report(diagnostic: { code: string; message: string }): void;
   finish(
