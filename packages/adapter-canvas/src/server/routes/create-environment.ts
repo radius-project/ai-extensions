@@ -33,6 +33,10 @@ import type {
   GhcrPreflightResult,
   SetupFailureResponse
 } from "./create-environment-types.js";
+import {
+  executeRecoverableMutation,
+  ProviderMutationRecoveryError
+} from "../services/provider-mutation-recovery.js";
 
 // Seam 4 of the `POST /api/create-environment` slice: the seven-step use case.
 //
@@ -382,6 +386,10 @@ export async function handleCreateEnvironment(
         readGitHubJson: (apiPath) =>
           dependencies.readGitHubJson(apiPath, selectedExecutor),
         runGh: (args) => selectedExecutor.run(args),
+        mutationRecovery: {
+          operation,
+          persist: () => dependencies.persistOperations()
+        },
         now: dependencies.now
       });
     } catch (error) {
@@ -463,8 +471,7 @@ export async function handleCreateEnvironment(
       state: ensuredEnvironment.state,
       repo: targetRepo,
       name: envName,
-      origin:
-        ensuredEnvironment.state === "reused" ? "pre_existing" : "unknown"
+      origin: ensuredEnvironment.state === "reused" ? "pre_existing" : "unknown"
     });
     if (
       ensuredEnvironment.creationProof?.proven &&
@@ -528,6 +535,10 @@ export async function handleCreateEnvironment(
         errorMessage: (error) => dependencies.errorMessage(error),
         pushStep: (message) => {
           steps.push(message);
+        },
+        mutationRecovery: {
+          operation,
+          persist: () => dependencies.persistOperations()
         },
         now: () => dependencies.now()
       },
@@ -647,14 +658,120 @@ export async function handleCreateEnvironment(
           prState.base +
           "` are not permitted. Merge this PR to enable deploying and deleting the application from the Radius canvas."
       ].join("\n");
-      const pr = await dependencies.createPullRequestApi(
-        targetRepo,
-        prState.branch,
-        prState.base,
-        prTitle,
-        prBody,
-        selectedExecutor
-      );
+      const prMutation =
+        await executeRecoverableMutation<CreateEnvironmentPullRequestResult>({
+          operation,
+          kind: "github_pull_request.create",
+          target: `${targetRepo}:${prState.branch}:${prState.base}`,
+          providerIdempotencyKey: prState.branch,
+          persist: () => dependencies.persistOperations(),
+          mutate: async () => {
+            const result = await dependencies.createPullRequestApi(
+              targetRepo,
+              prState.branch,
+              prState.base,
+              prTitle,
+              prBody,
+              selectedExecutor
+            );
+            return {
+              code: result.ok ? 0 : 1,
+              stdout: result.ok ? JSON.stringify(result) : "",
+              stderr: result.stderr || "",
+              timedOut: result.timedOut
+            };
+          },
+          accept: (result) =>
+            JSON.parse(result.stdout) as CreateEnvironmentPullRequestResult,
+          reconcile: async () => {
+            const listed = await runGh([
+              "api",
+              `/repos/${targetRepo}/pulls?state=open&head=${encodeURIComponent(
+                prState.branch
+              )}&base=${encodeURIComponent(prState.base)}&per_page=10`
+            ]);
+            if (listed.code !== 0 && listed.code !== "0") {
+              throw new Error(
+                listed.stderr ||
+                  listed.stdout ||
+                  "GitHub pull requests could not be read."
+              );
+            }
+            let matches: Array<{ html_url: string; number: number }> = [];
+            try {
+              const parsed: unknown = JSON.parse(listed.stdout);
+              if (Array.isArray(parsed)) {
+                matches = parsed
+                  .filter(
+                    (
+                      value
+                    ): value is {
+                      html_url: string;
+                      number: number;
+                      head: { ref: string };
+                      base: { ref: string };
+                    } =>
+                      value !== null &&
+                      typeof value === "object" &&
+                      "html_url" in value &&
+                      typeof value.html_url === "string" &&
+                      "number" in value &&
+                      typeof value.number === "number" &&
+                      "head" in value &&
+                      value.head !== null &&
+                      typeof value.head === "object" &&
+                      "ref" in value.head &&
+                      value.head.ref === prState.branch &&
+                      "base" in value &&
+                      value.base !== null &&
+                      typeof value.base === "object" &&
+                      "ref" in value.base &&
+                      value.base.ref === prState.base
+                  )
+                  .map((value) => ({
+                    html_url: value.html_url,
+                    number: value.number
+                  }));
+              }
+            } catch {
+              throw new Error(
+                "GitHub returned an unreadable pull request list."
+              );
+            }
+            if (matches.length === 0) {
+              return {
+                state: "not_applied" as const,
+                evidence:
+                  "GitHub confirmed no open pull request uses the operation-specific branch."
+              };
+            }
+            if (matches.length > 1) {
+              return {
+                state: "manual_required" as const,
+                guidance:
+                  `Multiple pull requests use operation branch "${prState.branch}". ` +
+                  "Radius will not create, close, or modify any of them."
+              };
+            }
+            return {
+              state: "applied" as const,
+              value: {
+                ok: true,
+                url: matches[0].html_url,
+                number: matches[0].number
+              },
+              evidence:
+                "The pull request head and base match the operation-specific branch provenance."
+            };
+          }
+        });
+      const pr: CreateEnvironmentPullRequestResult =
+        prMutation.state === "applied" ?
+          prMutation.value
+        : {
+            ok: false,
+            stderr: "GitHub confirmed the pull request was not created."
+          };
       if (pr.ok) {
         pullRequestUrl = pr.url || "";
         steps.push("✅ Opened pull request #" + pr.number + ": " + pr.url);
@@ -674,6 +791,7 @@ export async function handleCreateEnvironment(
             '".'
         );
       }
+      if (!(await checkpoint("after-pull-request"))) return;
     }
     // Step 5: Dispatch the verify workflow.
     //
@@ -685,6 +803,8 @@ export async function handleCreateEnvironment(
     let verifyRunUrl = "";
     let verifyRunId: string | number | null = null;
     const dispatchedAt = dependencies.now();
+    let verificationRef = defaultBranch;
+    let baselineRunId: number | null = null;
     const verifyPlan = await dependencies.planCredentialVerification({
       targetRepo,
       prState: prState || null,
@@ -722,55 +842,173 @@ export async function handleCreateEnvironment(
         );
       steps.push("Dispatching verify-credentials workflow...");
       if (!(await stopBoundary("before-verification-dispatch"))) return;
-      // Wait briefly for GitHub to index the workflow, then dispatch with a few
-      // retries to ride out indexing/propagation races.
+      // Wait briefly for GitHub to index the workflow. The dispatch itself is
+      // issued once: if Radius loses the response, it discovers and adopts the
+      // accepted run instead of dispatching a duplicate.
       await dependencies.sleep(3000);
-      const dispatchDelays = [0, 2000, 5000];
-      let dispatchResult: CreateEnvironmentCommandResult = {
-        code: 1,
-        stdout: "",
-        stderr: ""
+      const baselineResult = await runGh([
+        "run",
+        "list",
+        "--workflow=" + dependencies.verifyWorkflowFile,
+        "--limit",
+        "1",
+        "--json",
+        "databaseId",
+        "--repo",
+        targetRepo
+      ]);
+      baselineRunId = null;
+      try {
+        const parsed: unknown = JSON.parse(baselineResult.stdout);
+        const first = Array.isArray(parsed) ? parsed[0] : null;
+        if (
+          first &&
+          typeof first === "object" &&
+          "databaseId" in first &&
+          Number.isFinite(Number(first.databaseId))
+        ) {
+          baselineRunId = Number(first.databaseId);
+        }
+      } catch {}
+      verificationRef = verifyPlan.ref || defaultBranch;
+      operation.verification = {
+        dispatchedAt,
+        workflow: dependencies.verifyWorkflowFile,
+        ref: verificationRef,
+        environment: envName,
+        baselineRunId,
+        runId: null,
+        runUrl: null
       };
-      for (const delay of dispatchDelays) {
-        if (delay > 0) await dependencies.sleep(delay);
-        dispatchResult = await runGhWorkflow(
-          dependencies.buildVerifyWorkflowDispatchArgs({
-            workflowFile: dependencies.verifyWorkflowFile,
-            targetRepo,
-            envName,
-            ref: verifyPlan.ref
-          })
-        );
-        if (dispatchResult.code === 0) break;
-      }
-
-      if (dispatchResult.code === 0) {
-        steps.push("✅ Credentials verification dispatched.");
-        await dependencies.sleep(5000);
+      const discoverAcceptedRun = async (): Promise<
+        | { state: "applied"; value: string; evidence: string }
+        | { state: "manual_required"; guidance: string }
+      > => {
         const runsResult = await runGh([
           "run",
           "list",
-          "--workflow=radius-verify-credentials.yml",
+          "--workflow=" + dependencies.verifyWorkflowFile,
           "--limit",
-          "1",
+          "10",
           "--json",
-          "databaseId,status,url",
+          "databaseId,createdAt",
           "--repo",
           targetRepo
         ]);
+        if (runsResult.code !== 0 && runsResult.code !== "0") {
+          throw new Error(
+            runsResult.stderr ||
+              runsResult.stdout ||
+              "GitHub workflow runs could not be read."
+          );
+        }
+        let candidates: Array<{ databaseId: number; createdAt: string }> = [];
         try {
           const parsed: unknown = JSON.parse(runsResult.stdout);
-          const runs = Array.isArray(parsed) ? parsed : [];
-          if (runs.length > 0) {
-            verifyRunId = runs[0].databaseId;
-            verifyRunUrl =
-              "https://github.com/" +
-              targetRepo +
-              "/actions/runs/" +
-              verifyRunId;
-            steps.push("Verify run: " + verifyRunUrl);
+          if (Array.isArray(parsed)) {
+            candidates = parsed
+              .filter(
+                (value): value is { databaseId: number; createdAt: string } =>
+                  value !== null &&
+                  typeof value === "object" &&
+                  "databaseId" in value &&
+                  Number.isFinite(Number(value.databaseId)) &&
+                  "createdAt" in value &&
+                  typeof value.createdAt === "string"
+              )
+              .map((value) => ({
+                databaseId: Number(value.databaseId),
+                createdAt: value.createdAt
+              }))
+              .filter(
+                (value) =>
+                  (baselineRunId === null ||
+                    value.databaseId > baselineRunId) &&
+                  Date.parse(value.createdAt) >= dispatchedAt - 60000
+              );
           }
-        } catch {}
+        } catch {
+          throw new Error("GitHub returned an unreadable workflow run list.");
+        }
+        if (candidates.length === 1) {
+          return {
+            state: "applied",
+            value: String(candidates[0].databaseId),
+            evidence:
+              "Exactly one verification run appeared after the saved pre-dispatch baseline."
+          };
+        }
+        if (candidates.length > 1) {
+          return {
+            state: "manual_required",
+            guidance:
+              "Multiple verification runs appeared after Radius's saved pre-dispatch baseline. " +
+              "Radius will not guess which run belongs to this operation or dispatch another one."
+          };
+        }
+        throw new Error(
+          "No verification run is visible after the saved pre-dispatch baseline yet."
+        );
+      };
+      const dispatch = await executeRecoverableMutation({
+        operation,
+        kind: "github_workflow.dispatch",
+        target: `${targetRepo}:${dependencies.verifyWorkflowFile}:${verificationRef}:${envName}`,
+        persist: () => dependencies.persistOperations(),
+        mutate: () =>
+          runGhWorkflow(
+            dependencies.buildVerifyWorkflowDispatchArgs({
+              workflowFile: dependencies.verifyWorkflowFile,
+              targetRepo,
+              envName,
+              ref: verifyPlan.ref
+            })
+          ),
+        accept: () => "",
+        reconcile: async () => {
+          for (const delay of [0, 2000, 5000]) {
+            if (delay > 0) await dependencies.sleep(delay);
+            try {
+              return await discoverAcceptedRun();
+            } catch {
+              if (delay === 5000)
+                throw new Error(
+                  "GitHub has not exposed an accepted verification run yet."
+                );
+            }
+          }
+          throw new Error(
+            "GitHub has not exposed an accepted verification run."
+          );
+        }
+      });
+      const dispatchResult =
+        dispatch.state === "applied" ?
+          { code: 0, stdout: "", stderr: "" }
+        : dispatch.result || {
+            code: 1,
+            stdout: "",
+            stderr: "GitHub confirmed the dispatch was not accepted."
+          };
+
+      if (dispatchResult.code === 0) {
+        steps.push("✅ Credentials verification dispatched.");
+        if (dispatch.state === "applied" && dispatch.recovered) {
+          verifyRunId = dispatch.value;
+        } else {
+          await dependencies.sleep(5000);
+          try {
+            const discovered = await discoverAcceptedRun();
+            if (discovered.state === "applied") {
+              verifyRunId = discovered.value;
+            }
+          } catch {}
+        }
+        if (verifyRunId !== null) {
+          verifyRunUrl =
+            "https://github.com/" + targetRepo + "/actions/runs/" + verifyRunId;
+          steps.push("Verify run: " + verifyRunUrl);
+        }
       } else {
         const detail =
           (dispatchResult.stderr || dispatchResult.stdout || "").trim() ||
@@ -778,7 +1016,7 @@ export async function handleCreateEnvironment(
         steps.push("❌ Could not dispatch verify workflow: " + detail);
         await fail(
           400,
-          "Environment and state package were configured, but the verify workflow could not be dispatched after multiple attempts. " +
+          "Environment and state package were configured, but GitHub definitively rejected the verify workflow dispatch. " +
             detail,
           "verify-dispatch-failed",
           {
@@ -802,7 +1040,8 @@ export async function handleCreateEnvironment(
       operation.verification = {
         dispatchedAt,
         workflow: dependencies.verifyWorkflowFile,
-        ref: verifyPlan.ref || defaultBranch,
+        ref: verificationRef,
+        baselineRunId,
         environment: envName,
         runId: verifyRunId == null ? null : String(verifyRunId),
         runUrl: verifyRunUrl || null
@@ -931,10 +1170,26 @@ export async function handleCreateEnvironment(
       steps
     });
   } catch (e) {
+    if (
+      e instanceof ProviderMutationRecoveryError &&
+      e.code === "provider-mutation-outcome-unknown" &&
+      op
+    ) {
+      respond(202, {
+        operationId: op.operationId,
+        code: e.code,
+        reconciling: true,
+        message: e.message
+      });
+      return;
+    }
     const failure = await dependencies.finalizeSetupFailure(op, {
       status: 400,
       error: dependencies.errorMessage(e),
-      code: "create-environment-unhandled",
+      code:
+        e instanceof ProviderMutationRecoveryError ?
+          e.code
+        : "create-environment-unhandled",
       classification: "unknown",
       evidence: e instanceof Error ? e.stack || null : null,
       steps,

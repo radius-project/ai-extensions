@@ -229,6 +229,7 @@ function start(script: Script = {}): Harness {
   // committer just wrote and rewrites the temp-file argument to `@<branch>`
   // (or `@default`), which is the only signal `gh` itself would act on.
   let lastBodyBranch = "default";
+  let defaultRunListCalls = 0;
   const runGhArgs = (args: string[]): CreateEnvironmentCommandResult => {
     const key = args
       .map((arg) => (arg === TEMP_BODY_PATH ? `@${lastBodyBranch}` : arg))
@@ -236,6 +237,27 @@ function start(script: Script = {}): Harness {
     ghCalls.push(key);
     if (key.startsWith("workflow run ")) {
       journal.push("dispatchVerifyWorkflow");
+    }
+    if (
+      key.startsWith("run list ") &&
+      !(script.gh || []).some((rule) => rule.match.test(key))
+    ) {
+      defaultRunListCalls += 1;
+      return {
+        code: 0,
+        stdout:
+          defaultRunListCalls === 1 ? "[]" : (
+            JSON.stringify([
+              {
+                databaseId: 4242,
+                createdAt: "2023-11-14T22:13:20.000Z",
+                status: "queued",
+                url: "ignored"
+              }
+            ])
+          ),
+        stderr: ""
+      };
     }
     for (const rule of rules) {
       if (rule.match.test(key)) {
@@ -1011,7 +1033,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   });
 
   it("fails closed when promoted ownership cannot be checkpointed", async () => {
-    const harness = start({ persistRejectsAfter: 2 });
+    const harness = start({ persistRejectsAfter: 3 });
 
     await post({ repo: "octo/app" });
 
@@ -1391,7 +1413,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
 
     expect(harness.state).toMatchObject({
       deployDispatchedAt: 1700000000000,
-      verifyRunId: 4242,
+      verifyRunId: "4242",
       verifyRunUrl: "https://github.com/octo/app/actions/runs/4242"
     });
     expect(harness.journal).toContain(`enterStage:${STAGE_VERIFY}`);
@@ -1472,7 +1494,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     // Three attempts: the immediate one plus the two backoff retries.
     expect(
       harness.ghCalls.filter((call) => call.startsWith("workflow run "))
-    ).toHaveLength(3);
+    ).toHaveLength(1);
   });
 });
 
@@ -1507,7 +1529,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       success: true,
       actionRequired: true,
       pullRequestUrl: "https://github.com/octo/app/pull/7",
-      pullRequestBranch: "radius/setup-dev-workflows-1700000000000",
+      pullRequestBranch: "radius/setup-dev-workflows-op-http",
       pullRequestBaseBranch: "main",
       verifyRunUrl: ""
     });
@@ -1517,7 +1539,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(harness.commitStates).toEqual([
       {
         mode: "pull_request",
-        branch: "radius/setup-dev-workflows-1700000000000",
+        branch: "radius/setup-dev-workflows-op-http",
         baseBranch: "main",
         pullRequestUrl: "https://github.com/octo/app/pull/7"
       }
@@ -1530,7 +1552,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
           terminal: {
             reason: "pr-merge-required",
             pullRequestUrl: "https://github.com/octo/app/pull/7",
-            branch: "radius/setup-dev-workflows-1700000000000",
+            branch: "radius/setup-dev-workflows-op-http",
             baseBranch: "main",
             userMessage:
               "Merge the pull request to finish setup; credential verification and deploys run once it lands."
@@ -1611,12 +1633,12 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(await response.json()).toMatchObject({
       actionRequired: true,
       pullRequestUrl: "",
-      pullRequestBranch: "radius/setup-dev-workflows-1700000000000"
+      pullRequestBranch: "radius/setup-dev-workflows-op-http"
     });
     expect(harness.commitStates).toEqual([
       {
         mode: "pull_request",
-        branch: "radius/setup-dev-workflows-1700000000000",
+        branch: "radius/setup-dev-workflows-op-http",
         baseBranch: "main",
         pullRequestUrl: null
       }
@@ -1637,7 +1659,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     // `persistMutationCheckpoint` helper's ("no further" cloud resources),
     // which is distinct from the admission-time refusal that reports no cloud
     // resources at all.
-    const harness = start({ persistRejectsAfter: 1 });
+    const harness = start({ persistRejectsAfter: 3 });
 
     const response = await post({ repo: "octo/app" });
 

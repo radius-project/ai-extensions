@@ -59,6 +59,10 @@ import {
   canStartRollback,
   classifyVerificationRetry,
   createOperationControl,
+  prepareProviderMutation,
+  settleProviderMutation,
+  unresolvedProviderMutations,
+  providerMutationRecord,
   findActiveCommand,
   findCommand,
   getOperationControl,
@@ -97,6 +101,99 @@ import {
   STAGE_CONFIGURE_ENVIRONMENT,
   STAGE_VERIFY
 } from "./operations.js";
+
+describe("provider mutation recovery journal", () => {
+  it("survives persistence and reopens a terminal operation for reconciliation", () => {
+    const op = createOperation({
+      operationId: "op_recovery",
+      provider: "azure",
+      repo: "octo/app",
+      environment: "prod"
+    });
+    op.resumeRequest = { environment: { environment: "prod" } };
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_workflow.put",
+      target: "octo/app:main:.github/workflows/verify.yml"
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The request timed out."
+    );
+    finish(op, "failed_partial", {
+      failure: {
+        code: "provider-mutation-outcome-unknown",
+        message: "The request timed out."
+      }
+    });
+
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(op))
+    );
+
+    expect(restored).toMatchObject({
+      state: "running",
+      endedAt: null,
+      recoveryState: "provider_reconciliation_pending",
+      providerRecovery: { state: "reconciling" }
+    });
+    expect(unresolvedProviderMutations(restored)).toHaveLength(1);
+  });
+
+  it("blocks setup retry while a provider outcome is unknown", () => {
+    const op = createOperation({
+      operationId: "op_recovery",
+      provider: "azure",
+      repo: "octo/app",
+      environment: "prod"
+    });
+    op.resumeRequest = { environment: { environment: "prod" } };
+    prepareProviderMutation(op, {
+      kind: "azure_application.create",
+      target: "tenant:radius-prod"
+    });
+    finish(op, "failed_partial", {
+      failure: { code: "operation-interrupted", message: "interrupted" }
+    });
+
+    expect(canRetrySetup(op)).toMatchObject({
+      ok: false,
+      code: "setup-retry-provider-outcome-unknown"
+    });
+  });
+
+  it("retains exact manual guidance and never treats command IDs as provider keys", () => {
+    const op = createOperation({ operationId: "op_recovery" });
+    const mutation = prepareProviderMutation(op, {
+      kind: "azure_role_assignment.create",
+      target: "principal:scope:role",
+      providerIdempotencyKey: "role-assignment-guid"
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "manual_required",
+      "The provider identity did not match."
+    );
+
+    expect(
+      providerMutationRecord(
+        op,
+        "azure_role_assignment.create",
+        "principal:scope:role"
+      )
+    ).toMatchObject({
+      status: "manual_required",
+      providerIdempotencyKey: "role-assignment-guid",
+      evidence: "The provider identity did not match."
+    });
+    expect(toClientView(op).providerRecovery).toMatchObject({
+      state: "manual_required",
+      guidance: "The provider identity did not match."
+    });
+  });
+});
 
 function newOp(overrides = {}) {
   return createOperation({
@@ -516,6 +613,38 @@ describe("record shape", () => {
         results: []
       }
     });
+  });
+
+  it("upgrades a legacy role assignment entry with its deterministic provider id", () => {
+    const op = fromPersistedOperation({
+      ...toPersistedOperation(newOp()),
+      setupArtifacts: {
+        roleAssignments: [
+          {
+            role: "Contributor",
+            scope: "/subscriptions/sub/resourceGroups/rg",
+            principalObjectId: "sp-1"
+          }
+        ]
+      }
+    });
+
+    expect(op.setupArtifacts.roleAssignments[0].assignmentId).toBe(null);
+    recordCreatedRoleAssignment(op, {
+      assignmentId: "assignment-1",
+      role: "Contributor",
+      scope: "/subscriptions/sub/resourceGroups/rg",
+      principalObjectId: "sp-1"
+    });
+
+    expect(op.setupArtifacts.roleAssignments).toEqual([
+      {
+        assignmentId: "assignment-1",
+        role: "Contributor",
+        scope: "/subscriptions/sub/resourceGroups/rg",
+        principalObjectId: "sp-1"
+      }
+    ]);
   });
 
   it("marks the first committed workflow as the rollback boundary", () => {
@@ -3092,6 +3221,26 @@ describe("retry eligibility", () => {
     ]);
     expect(canRetryCleanup(op)).toMatchObject({ ok: true });
     expect(unresolvedCleanupTargets(null)).toEqual([]);
+  });
+
+  it("never repeats a cleanup mutation whose provider outcome is unknown", () => {
+    const op = newOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    warnedCleanup(op, [
+      {
+        artifactType: "azure_app",
+        target: "radius (app-1)",
+        outcome: "warning",
+        detail:
+          "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. The exact provider identity is still present."
+      }
+    ]);
+    finish(op, "failed_partial", { failure: { code: "x" } });
+
+    expect(canRetryCleanup(op)).toMatchObject({
+      ok: false,
+      code: "cleanup-retry-outcome-unknown"
+    });
   });
 
   it("never offers cleanup retry when the committed workflows cannot be proven unchanged", () => {

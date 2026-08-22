@@ -169,6 +169,7 @@ export interface CreateEnvironmentPullRequestResult {
   url?: string;
   number?: number;
   stderr?: string;
+  timedOut?: boolean;
 }
 
 export interface CredentialVerificationPlanResult {

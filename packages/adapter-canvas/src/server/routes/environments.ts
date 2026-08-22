@@ -595,14 +595,33 @@ export async function handleVerifyStatus(
     if (!runId) {
       const workflow =
         verifyOp?.verification?.workflow || dependencies.verifyWorkflowFile;
+      const baselineRunId = verifyOp?.verification?.baselineRunId || null;
       runId =
         selectedExecutor ?
+          baselineRunId ?
+            await dependencies.findWorkflowRun(
+              repo,
+              workflow,
+              dispatchedAt,
+              null,
+              selectedExecutor,
+              baselineRunId
+            )
+          : await dependencies.findWorkflowRun(
+              repo,
+              workflow,
+              dispatchedAt,
+              null,
+              selectedExecutor
+            )
+        : baselineRunId ?
           await dependencies.findWorkflowRun(
             repo,
             workflow,
             dispatchedAt,
             null,
-            selectedExecutor
+            undefined,
+            baselineRunId
           )
         : await dependencies.findWorkflowRun(
             repo,
@@ -611,11 +630,15 @@ export async function handleVerifyStatus(
             null
           );
       if (runId && verifyOp) {
+        dependencies.settleVerificationDispatchRecovery(verifyOp, runId);
         verifyOp.verification = {
           dispatchedAt: verifyOp.verification.dispatchedAt,
           workflow: verifyOp.verification.workflow,
           ref: verifyOp.verification.ref,
           environment: verifyOp.verification.environment,
+          ...(verifyOp.verification.baselineRunId ?
+            { baselineRunId: verifyOp.verification.baselineRunId }
+          : {}),
           runId: String(runId),
           runUrl: "https://github.com/" + repo + "/actions/runs/" + runId
         };

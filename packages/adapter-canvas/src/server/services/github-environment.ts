@@ -2,11 +2,14 @@ import {
   proveGitHubEnvironmentCreated,
   type GitHubEnvironmentCreationProof
 } from "./github-environment-provenance.js";
+import { providerMutationRecord } from "../../operations.js";
+import { executeRecoverableMutation } from "./provider-mutation-recovery.js";
 
 export interface GitHubEnvironmentCommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
 }
 
 export interface GitHubEnvironmentReadResult {
@@ -104,9 +107,9 @@ export function readEnsuredGitHubEnvironment(
     environment !== canonical ||
     artifact?.repo !== repo ||
     artifact.name !== canonical ||
-    artifact.state !== "created" &&
-    artifact.state !== "created_candidate" &&
-    artifact.state !== "reused"
+    (artifact.state !== "created" &&
+      artifact.state !== "created_candidate" &&
+      artifact.state !== "reused")
   ) {
     return null;
   }
@@ -118,12 +121,26 @@ export async function ensureGitHubEnvironment(input: {
   requestedName: string;
   readGitHubJson(apiPath: string): Promise<GitHubEnvironmentReadResult>;
   runGh(args: string[]): Promise<GitHubEnvironmentCommandResult>;
+  mutationRecovery?: {
+    operation: object & { operationId: string };
+    persist(): Promise<void>;
+  };
   now?: () => number;
 }): Promise<EnsuredGitHubEnvironment> {
   const path =
     `/repos/${input.repo}/environments/` +
     encodeURIComponent(input.requestedName);
   const lookup = await input.readGitHubJson(path);
+  const mutationKind = "github_environment.put";
+  const mutationTarget = `${input.repo}:${input.requestedName}`;
+  const pendingMutation =
+    input.mutationRecovery ?
+      providerMutationRecord(
+        input.mutationRecovery.operation,
+        mutationKind,
+        mutationTarget
+      )
+    : null;
   if (lookup.ok) {
     const name = parseEnvironmentName(lookup.json);
     if (!name) {
@@ -132,9 +149,26 @@ export async function ensureGitHubEnvironment(input: {
         "github-environment-name-missing"
       );
     }
-    return { name, state: "reused" };
+    if (!pendingMutation) return { name, state: "reused" };
+    if (pendingMutation.status === "confirmed") {
+      return {
+        name,
+        state: "created_candidate",
+        creationProof: { proven: true, detail: null }
+      };
+    }
+    if (pendingMutation.status === "not_applied") {
+      return { name, state: "reused" };
+    }
+    if (pendingMutation.status === "manual_required") {
+      throw new GitHubEnvironmentEnsureError(
+        pendingMutation.evidence ||
+          `Radius cannot prove who created GitHub environment "${input.repo}:${name}".`,
+        "provider-mutation-manual-required"
+      );
+    }
   }
-  if (lookup.status !== 404) {
+  if (!lookup.ok && lookup.status !== 404) {
     const detail = lookup.stderr?.trim() || "The GitHub API lookup failed.";
     throw new GitHubEnvironmentEnsureError(
       `Could not resolve GitHub environment "${input.requestedName}". ${detail}`,
@@ -142,7 +176,10 @@ export async function ensureGitHubEnvironment(input: {
     );
   }
 
-  const repository = await input.readGitHubJson(`/repos/${input.repo}`);
+  const repository =
+    lookup.ok ?
+      { ok: true }
+    : await input.readGitHubJson(`/repos/${input.repo}`);
   if (!repository.ok) {
     const detail =
       repository.stderr?.trim() ||
@@ -153,8 +190,83 @@ export async function ensureGitHubEnvironment(input: {
     );
   }
 
-  const putStartedAtMs = (input.now || Date.now)();
-  const created = await input.runGh(["api", "--method", "PUT", path]);
+  const putStartedAtMs =
+    pendingMutation ?
+      Date.parse(pendingMutation.preparedAt)
+    : (input.now || Date.now)();
+  const mutationArgs = ["api", "--method", "PUT", path];
+  let created: GitHubEnvironmentCommandResult;
+  if (input.mutationRecovery) {
+    const recovered =
+      await executeRecoverableMutation<GitHubEnvironmentCommandResult>({
+        operation: input.mutationRecovery.operation,
+        kind: mutationKind,
+        target: mutationTarget,
+        persist: input.mutationRecovery.persist,
+        mutate: () => input.runGh(mutationArgs),
+        accept: (result) => result,
+        reconcile: async () => {
+          const reread = await input.readGitHubJson(path);
+          if (!reread.ok) {
+            if (reread.status === 404) {
+              return {
+                state: "not_applied" as const,
+                evidence: "GitHub confirmed the environment is absent."
+              };
+            }
+            throw new Error(
+              reread.stderr || "GitHub environment state could not be read."
+            );
+          }
+          const canonical = parseEnvironmentName(reread.json);
+          if (!canonical) {
+            return {
+              state: "manual_required" as const,
+              guidance:
+                `GitHub reports an environment at "${mutationTarget}", but not its canonical identity. ` +
+                "Radius left it in place and will not retry or delete it."
+            };
+          }
+          const proof = proveGitHubEnvironmentCreated({
+            preflight: "created_candidate",
+            putResponseBody: JSON.stringify(reread.json),
+            putStartedAtMs
+          });
+          if (!proof.proven) {
+            return {
+              state: "manual_required" as const,
+              guidance:
+                `GitHub environment "${input.repo}:${canonical}" exists after the interrupted request, ` +
+                "but GitHub did not provide enough creation provenance to prove this operation owns it. " +
+                "Radius left it unchanged and will not retry or delete it."
+            };
+          }
+          return {
+            state: "applied" as const,
+            value: {
+              code: 0,
+              stdout: JSON.stringify(reread.json),
+              stderr: ""
+            },
+            evidence:
+              "The exact environment identity and creation timestamp matched the interrupted operation."
+          };
+        }
+      });
+    if (recovered.state === "not_applied") {
+      const detail =
+        recovered.result ?
+          responseDetail(recovered.result)
+        : "GitHub confirmed that the environment was not created.";
+      throw new GitHubEnvironmentEnsureError(
+        `Failed to create GitHub environment "${input.requestedName}". ${detail}`,
+        "github-environment-create-failed"
+      );
+    }
+    created = recovered.value;
+  } else {
+    created = await input.runGh(mutationArgs);
+  }
   if (!succeeded(created)) {
     const detail = responseDetail(created) || "The GitHub API request failed.";
     throw new GitHubEnvironmentEnsureError(

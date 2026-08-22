@@ -104,6 +104,9 @@ function dependencies(
         events.push("persist");
         return true;
       },
+      persistProviderMutation: async () => {
+        events.push("persist-provider-mutation");
+      },
       finalizeEnvironmentResolutionFailure: async (_target, input) => {
         failures.push(input);
       },
