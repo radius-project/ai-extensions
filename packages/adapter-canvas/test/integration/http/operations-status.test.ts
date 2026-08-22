@@ -44,9 +44,10 @@ interface Harness {
   persistCalls: string[];
   scheduled: Array<{ instanceId: string; operationId: string }>;
   scheduleAccepted: { value: boolean };
-  admissionOwner: {
+  startConflict: {
     value: {
-      operation: { operationId: string };
+      ok: false;
+      conflict: { operationId: string };
       reason: "operation-in-progress" | "previous-cleanup-required";
     } | null;
   };
@@ -95,7 +96,7 @@ function start(strictBrowserMutations = false): Harness {
   const persistCalls: string[] = [];
   const scheduled: Array<{ instanceId: string; operationId: string }> = [];
   const scheduleAccepted = { value: true };
-  const admissionOwner: Harness["admissionOwner"] = { value: null };
+  const startConflict: Harness["startConflict"] = { value: null };
   const persistOperations = (): Promise<void> => {
     persistCalls.push("persist");
     return persistError.value ?
@@ -140,13 +141,19 @@ function start(strictBrowserMutations = false): Harness {
           commit() {},
           release() {}
         }),
-        admissionOwner: () => admissionOwner.value,
         isValidRepoSlug,
         isResourceGroupName,
         isAksClusterName,
         isUuid,
         buildStages,
         createOperation,
+        startConflict: (repo) => {
+          if (startConflict.value) return startConflict.value;
+          const existing = running.get(repo);
+          return existing ?
+              { ok: false, reason: "operation-in-progress", conflict: existing }
+            : null;
+        },
         startOperation: (op) => {
           const existing = running.get(op.repo as string);
           if (existing) return { ok: false, conflict: existing };
@@ -206,7 +213,7 @@ function start(strictBrowserMutations = false): Harness {
     persistCalls,
     scheduled,
     scheduleAccepted,
-    admissionOwner,
+    startConflict,
     setLatest(record) {
       latest = record;
     }
@@ -347,8 +354,9 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
 
   it("returns the prior cleanup operation without registering or scheduling a new setup", async () => {
     const harness = start();
-    harness.admissionOwner.value = {
-      operation: { operationId: "op-cleanup" },
+    harness.startConflict.value = {
+      ok: false,
+      conflict: { operationId: "op-cleanup" },
       reason: "previous-cleanup-required"
     };
     const recordCount = harness.records.size;
@@ -362,7 +370,7 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({
       error:
-        "An earlier setup must finish rollback first. Then create a new environment for octo/app.",
+        "An earlier setup for octo/app must finish rollback before a new setup can start.",
       code: "previous-cleanup-required",
       operationId: "op-cleanup"
     });

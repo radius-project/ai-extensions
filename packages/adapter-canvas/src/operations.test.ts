@@ -19,6 +19,7 @@ import {
   finish,
   finishSucceeded,
   hasWarnings,
+  hasUnfinishedCleanupAuthority,
   isTerminalState,
   requestStop,
   requireInput,
@@ -86,7 +87,6 @@ import {
   workflowRollbackCommitState,
   workflowRollbackTargets,
   canExitSetup,
-  hasUnfinishedCleanupAuthority,
   hasSurvivingCreatedArtifacts,
   isSetupExited,
   setupExitState,
@@ -1110,7 +1110,7 @@ describe("registry", () => {
     });
   });
 
-  it("allows a new operation once the previous one is terminal", () => {
+  it("allows a new operation once a successful previous operation is terminal", () => {
     const reg = createRegistry();
     const first = newOp();
     reg.start(first);
@@ -1181,6 +1181,285 @@ describe("registry", () => {
       conflict: { operationId: first.operationId },
       reason: "operation-in-progress"
     });
+  });
+
+  it("blocks a new operation while a terminal record can still roll back proven-owned resources", () => {
+    const reg = createRegistry();
+    const first = stoppedWithCreatedResources();
+    reg.put(first);
+
+    expect(hasUnfinishedCleanupAuthority(null)).toBe(false);
+    expect(hasUnfinishedCleanupAuthority(newOp())).toBe(false);
+    expect(hasUnfinishedCleanupAuthority(first)).toBe(true);
+    expect(reg.start(newOp())).toMatchObject({
+      ok: false,
+      reason: "previous-cleanup-required",
+      conflict: { operationId: first.operationId }
+    });
+    expect(reg.size()).toBe(1);
+  });
+
+  it("blocks on retryable rollback warnings but not reused or manual-only resources", () => {
+    const reg = createRegistry();
+    const retryable = stoppedWithCreatedResources();
+    recordCleanupState(retryable, {
+      attempts: 1,
+      state: "succeeded_with_warnings",
+      results: [
+        {
+          attempt: 1,
+          artifactType: "azure_app",
+          target: "radius-deploy (app-1)",
+          identity: "app-1",
+          outcome: "warning",
+          detail: "Azure returned 429."
+        }
+      ]
+    });
+    reg.put(retryable);
+
+    expect(hasUnfinishedCleanupAuthority(retryable)).toBe(true);
+    expect(reg.start(newOp()).reason).toBe("previous-cleanup-required");
+
+    reg.delete(retryable.operationId);
+    const manualOnly = newOp();
+    recordAzureApp(manualOnly, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-1"
+    });
+    recordServicePrincipal(manualOnly, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    recordGitHubEnvironment(manualOnly, {
+      state: "created_candidate",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    finish(manualOnly, "failed_partial", {
+      failure: { code: "github-environment-failed" }
+    });
+    reg.put(manualOnly);
+    expect(hasUnfinishedCleanupAuthority(manualOnly)).toBe(false);
+    expect(reg.start(newOp()).ok).toBe(true);
+  });
+
+  it.each([
+    [
+      "App Registration id",
+      (op) =>
+        recordAzureApp(op, {
+          state: "created",
+          origin: "this_operation",
+          displayName: "radius-deploy"
+        })
+    ],
+    [
+      "Service Principal id",
+      (op) =>
+        recordServicePrincipal(op, {
+          state: "created",
+          origin: "this_operation"
+        })
+    ],
+    [
+      "federated credential parent App Registration id",
+      (op) =>
+        recordCreatedFederatedCredential(op, {
+          name: "radius-main",
+          subject: "repo:contoso/store:ref:refs/heads/main"
+        })
+    ],
+    [
+      "federated credential name",
+      (op) => {
+        recordAzureApp(op, {
+          state: "reused",
+          origin: "pre_existing",
+          appId: "app-1"
+        });
+        recordCreatedFederatedCredential(op, {
+          name: "",
+          subject: "repo:contoso/store:ref:refs/heads/main"
+        });
+      }
+    ],
+    [
+      "role assignment principal object id",
+      (op) =>
+        recordCreatedRoleAssignment(op, {
+          role: "Contributor",
+          scope: "/subscriptions/s1",
+          principalObjectId: ""
+        })
+    ],
+    [
+      "role assignment role",
+      (op) =>
+        recordCreatedRoleAssignment(op, {
+          role: "",
+          scope: "/subscriptions/s1",
+          principalObjectId: "sp-1"
+        })
+    ],
+    [
+      "role assignment scope",
+      (op) =>
+        recordCreatedRoleAssignment(op, {
+          role: "Contributor",
+          scope: "",
+          principalObjectId: "sp-1"
+        })
+    ],
+    [
+      "GitHub environment repository",
+      (op) =>
+        recordGitHubEnvironment(op, {
+          state: "created",
+          repo: "",
+          name: "dev"
+        })
+    ]
+  ])(
+    "does not block when a created artifact lacks its %s",
+    (_label, record) => {
+      const reg = createRegistry();
+      const manualOnly = newOp();
+      record(manualOnly);
+      finish(manualOnly, "failed_partial", {
+        failure: { code: "operation-stalled" }
+      });
+      reg.put(manualOnly);
+
+      expect(hasUnfinishedCleanupAuthority(manualOnly)).toBe(false);
+      expect(reg.start(newOp()).ok).toBe(true);
+    }
+  );
+
+  it.each([
+    [
+      "federated credential",
+      (op) => {
+        recordAzureApp(op, {
+          state: "reused",
+          origin: "pre_existing",
+          appId: "app-1"
+        });
+        recordCreatedFederatedCredential(op, {
+          name: "radius-main",
+          subject: "repo:contoso/store:ref:refs/heads/main"
+        });
+      }
+    ],
+    [
+      "role assignment",
+      (op) =>
+        recordCreatedRoleAssignment(op, {
+          role: "Contributor",
+          scope: "/subscriptions/s1",
+          principalObjectId: "sp-1"
+        })
+    ]
+  ])("blocks while a terminal record can remove its %s", (_label, record) => {
+    const reg = createRegistry();
+    const blocker = newOp();
+    record(blocker);
+    finish(blocker, "failed_partial", {
+      failure: { code: "operation-stalled" }
+    });
+    reg.put(blocker);
+
+    expect(hasUnfinishedCleanupAuthority(blocker)).toBe(true);
+    expect(reg.start(newOp())).toMatchObject({
+      ok: false,
+      reason: "previous-cleanup-required",
+      conflict: { operationId: blocker.operationId }
+    });
+  });
+
+  it("lets the blocking operation reacquire its repository lock for cleanup", () => {
+    const reg = createRegistry();
+    const first = stoppedWithCreatedResources();
+    reg.put(first);
+
+    beginRetryAttempt(first, "cleanup");
+
+    expect(reg.acquireForRetry(first)).toMatchObject({
+      ok: true,
+      operation: first
+    });
+    expect(reg.running(first.repo)).toBe(first);
+  });
+
+  it("refuses another terminal operation while cleanup authority belongs to the blocker", () => {
+    const reg = createRegistry();
+    const blocker = stoppedWithCreatedResources();
+    const olderRetry = addSafeResumeRequest(newOp());
+    finish(olderRetry, "failed_partial", {
+      failure: { code: "operation-stalled" }
+    });
+    reg.put(blocker);
+    reg.put(olderRetry);
+
+    beginRetryAttempt(olderRetry, "setup");
+
+    expect(reg.acquireForRetry(olderRetry)).toMatchObject({
+      ok: false,
+      conflict: { operationId: blocker.operationId }
+    });
+  });
+
+  it("retains cleanup authority beyond terminal age until its removable targets are resolved", () => {
+    const now = Date.parse("2026-08-22T12:00:00.000Z");
+    const reg = createRegistry({ clock: () => now });
+    const first = stoppedWithCreatedResources();
+    first.endedAt = new Date(now - 2 * 60 * 60 * 1000).toISOString();
+    reg.put(first);
+
+    expect(
+      reg.snapshot().operations.map((operation) => operation.operationId)
+    ).toContain(first.operationId);
+
+    for (const target of provenOwnedCleanupTargets(first)) {
+      recordCleanupDeletion(first, target);
+    }
+
+    expect(
+      reg.snapshot().operations.map((operation) => operation.operationId)
+    ).not.toContain(first.operationId);
+  });
+
+  it("excludes cleanup authority from the terminal-count cap until cleanup is resolved", () => {
+    const now = Date.parse("2026-08-22T12:00:00.000Z");
+    const reg = createRegistry({ clock: () => now });
+    const first = stoppedWithCreatedResources();
+    first.endedAt = new Date(now - 1000).toISOString();
+    reg.put(first);
+    for (let index = 0; index < 21; index += 1) {
+      const completed = newOp({ repo: `contoso/completed-${index}` });
+      finishSucceeded(completed);
+      completed.endedAt = new Date(now + index).toISOString();
+      reg.put(completed);
+    }
+
+    const blockedSnapshot = reg.snapshot();
+    expect(blockedSnapshot.operations).toHaveLength(21);
+    expect(
+      blockedSnapshot.operations.map((operation) => operation.operationId)
+    ).toContain(first.operationId);
+
+    for (const target of provenOwnedCleanupTargets(first)) {
+      recordCleanupDeletion(first, target);
+    }
+
+    const resolvedSnapshot = reg.snapshot();
+    expect(resolvedSnapshot.operations).toHaveLength(20);
+    expect(
+      resolvedSnapshot.operations.map((operation) => operation.operationId)
+    ).not.toContain(first.operationId);
   });
 
   it("does not treat a different repository as a conflict", () => {

@@ -425,6 +425,37 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
     });
   });
 
+  it("distinguishes an earlier operation that must finish rollback", async () => {
+    const operation: AzureAutoSetupOperation = {
+      operationId: "op-new",
+      repo: "octo/app",
+      environment: "dev",
+      provider: "azure",
+      currentStage: "authorize_identity"
+    };
+    const response = await invoke(
+      JSON.stringify(VALID_SETUP),
+      createAzureAutoSetupTestDependencies({
+        operations: {
+          create: () => operation,
+          start: () => ({
+            ok: false,
+            reason: "previous-cleanup-required",
+            conflict: { operationId: "op-cleanup" }
+          })
+        }
+      })
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error:
+        "An earlier setup for octo/app must finish rollback before a new setup can start.",
+      code: "previous-cleanup-required",
+      operationId: "op-cleanup"
+    });
+  });
+
   it("fails closed when the initial operation record cannot be persisted", async () => {
     const journal: string[] = [];
     const operation: AzureAutoSetupOperation = {

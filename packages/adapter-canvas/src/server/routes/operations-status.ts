@@ -54,14 +54,14 @@ export type StartOperationResult =
   | { ok: true; operation: OperationRecord }
   | {
       ok: false;
-      conflict: { operationId: string; [key: string]: unknown };
       reason?: "operation-in-progress" | "previous-cleanup-required";
+      conflict: { operationId: string; [key: string]: unknown };
     };
 
-export interface OperationAdmissionOwner {
-  operation: { operationId: string };
-  reason: "operation-in-progress" | "previous-cleanup-required";
-}
+export type OperationStartConflict = Extract<
+  StartOperationResult,
+  { ok: false }
+>;
 
 // Seams the POST handler drives to register and start an environment operation.
 // Every one is a single function the legacy arm already called; grouping them
@@ -82,7 +82,7 @@ export interface CreateOperationDependencies {
     environment: string;
     handle: string;
   }): SelectionHandleClaim;
-  admissionOwner(repo: string): OperationAdmissionOwner | null;
+  startConflict(repo: string): OperationStartConflict | null;
   // Registry writes. `start` refuses a second operation for a repo already in
   // flight; `persist` durably records the registration before any work runs.
   startOperation(op: OperationRecord): StartOperationResult;
@@ -285,6 +285,23 @@ function jsonError(
   context.response.end(JSON.stringify(payload));
 }
 
+function sendStartConflict(
+  context: CanvasRequestContext,
+  repo: string,
+  started: OperationStartConflict
+): void {
+  const previousCleanup = started.reason === "previous-cleanup-required";
+  jsonError(context, 409, {
+    error:
+      previousCleanup ?
+        `An earlier setup for ${repo} must finish rollback before a new setup can start.`
+      : `Setup is already running for ${repo}.`,
+    code:
+      previousCleanup ? "previous-cleanup-required" : "operation-in-progress",
+    operationId: started.conflict.operationId
+  });
+}
+
 // Register a new environment-setup operation and hand back a status URL the
 // panel polls. The request returns 202 the moment the record is durably
 // registered; the actual setup runs as a server-owned background task so the
@@ -358,18 +375,9 @@ export async function handleCreateOperation(
     });
     return;
   }
-  const admissionOwner = dependencies.admissionOwner(repo);
-  if (admissionOwner) {
-    const previousCleanup =
-      admissionOwner.reason === "previous-cleanup-required";
-    jsonError(context, 409, {
-      error:
-        previousCleanup ?
-          `An earlier setup must finish rollback first. Then create a new environment for ${repo}.`
-        : `Setup is already running for ${repo}.`,
-      code: admissionOwner.reason,
-      operationId: admissionOwner.operation.operationId
-    });
+  const startConflict = dependencies.startConflict(repo);
+  if (startConflict) {
+    sendStartConflict(context, repo, startConflict);
     return;
   }
   const selection = dependencies.claimSelectionHandle({
@@ -484,18 +492,7 @@ export async function handleCreateOperation(
     }
     const started = dependencies.startOperation(op);
     if (!started.ok) {
-      const previousCleanup = started.reason === "previous-cleanup-required";
-      jsonError(context, 409, {
-        error:
-          previousCleanup ?
-            `An earlier setup must finish rollback first. Then create a new environment for ${repo}.`
-          : `Setup is already running for ${repo}.`,
-        code:
-          previousCleanup ?
-            "previous-cleanup-required"
-          : "operation-in-progress",
-        operationId: started.conflict.operationId
-      });
+      sendStartConflict(context, repo, started);
       return;
     }
     try {

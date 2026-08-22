@@ -2678,18 +2678,76 @@ export function canRetryCleanup(op: any): any {
   return { ok: true, code: "cleanup-retry-allowed", targets };
 }
 
+function isExecutableCleanupTarget(op: any, target: RollbackTarget): boolean {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger || target.identity === null) return false;
+  if (target.artifactType === "workflow_file") return true;
+  if (target.artifactType === "github_environment") {
+    return Boolean(
+      String(ledger.githubEnvironment.repo || "").trim() &&
+      String(ledger.githubEnvironment.name || "").trim()
+    );
+  }
+  if (target.artifactType === "service_principal") {
+    return Boolean(
+      String(
+        ledger.servicePrincipal.appId || ledger.servicePrincipal.objectId || ""
+      ).trim()
+    );
+  }
+  if (target.artifactType === "azure_app") {
+    return Boolean(String(ledger.azureApp.appId || "").trim());
+  }
+  if (target.artifactType === "federated_credential") {
+    const appId = String(
+      ledger.azureApp.appId || ledger.servicePrincipal.appId || ""
+    ).trim();
+    return Boolean(
+      appId &&
+      ledger.federatedCredentials.some(
+        (artifact: any) =>
+          String(artifact.name || "").trim() &&
+          cleanupArtifactIdentity("federated_credential", artifact) ===
+            target.identity
+      )
+    );
+  }
+  if (target.artifactType === "role_assignment") {
+    return ledger.roleAssignments.some(
+      (artifact: any) =>
+        String(artifact.principalObjectId || "").trim() &&
+        String(artifact.role || "").trim() &&
+        String(artifact.scope || "").trim() &&
+        cleanupArtifactIdentity("role_assignment", artifact) === target.identity
+    );
+  }
+  return false;
+}
+
 /**
- * Whether a terminal operation still has deletion authority it can exercise.
+ * Whether a terminal operation still owns cleanup work Radius can perform.
  *
- * Admission follows the same first-rollback and retry-rollback predicates as
- * the controls shown to the customer. That keeps reused and unprovable
- * resources out of the repository lock while retaining records whose
- * proven-owned resources can still be reconciled after a restart or manual
- * deletion.
+ * Reused resources, ambiguous candidates, and manual-only guidance do not count:
+ * this is deliberately the union of the two executable rollback paths.
  */
 export function hasUnfinishedCleanupAuthority(op: any): boolean {
-  if (!op?.setupArtifacts || !isTerminalState(op.state)) return false;
-  return canStartRollback(op).ok || canRetryCleanup(op).ok;
+  if (!op || !isTerminalState(op.state)) return false;
+  const rollback = canStartRollback(op);
+  if (
+    rollback.ok &&
+    rollback.targets.some((target: RollbackTarget) =>
+      isExecutableCleanupTarget(op, target)
+    )
+  ) {
+    return true;
+  }
+  const retry = canRetryCleanup(op);
+  return (
+    retry.ok &&
+    retry.targets.some((target: RollbackTarget) =>
+      isExecutableCleanupTarget(op, target)
+    )
+  );
 }
 
 // ─── Action projection ───────────────────────────────────────────────────────
@@ -3805,9 +3863,8 @@ export function announcementOptions(op: any): any {
 // Keyed by repo, because "one setup at a time per repository" is the invariant
 // that actually matters — two concurrent runs would race on the same App
 // Registration, federated credentials and environment secrets. Records are held
-// after they finish so a user who returns later still finds the outcome; this
-// is memory-only and therefore does not survive an extension restart, which the
-// error-handling table treats as an expected degradation rather than a bug.
+// after they finish so a user who returns later still finds the outcome, and the
+// injected store restores them when this Copilot App session restarts.
 
 const RETAIN_TERMINAL_MS = 60 * 60 * 1000;
 const MAX_RETAINED = 20;
@@ -4083,6 +4140,9 @@ export function createRegistry({
     const terminal = [];
     for (const [id, op] of byId) {
       if (!isTerminalState(op.state)) continue;
+      // Cleanup authority is a repository lock, not display history. Retaining
+      // it is what lets a restart recover the old operation and prevents age or
+      // count pruning from silently authorizing a second setup.
       if (hasUnfinishedCleanupAuthority(op)) continue;
       const age = now - new Date(op.endedAt || op.startedAt).getTime();
       if (age > RETAIN_TERMINAL_MS) {
@@ -4182,23 +4242,15 @@ export function createRegistry({
       return null;
     },
     /**
-     * The record that owns admission for this repository.
-     *
-     * Live execution wins. Otherwise the newest terminal operation that can
-     * still remove proven-owned artifacts keeps admission until rollback (or a
-     * retry that confirms manual deletion) resolves every removable target.
+     * The terminal operation that must finish rollback before a new setup may
+     * start for this repository.
      */
-    admissionOwner(repo) {
+    cleanupRequired(repo) {
       const repositoryIdentity = normalizeIdentityPart(repo);
-      const active = this.running(repo);
-      if (active) {
-        return { operation: active, reason: "operation-in-progress" };
-      }
       let blocker = null;
       for (const op of byId.values()) {
         if (
           normalizeIdentityPart(op.repo) !== repositoryIdentity ||
-          !isTerminalState(op.state) ||
           !hasUnfinishedCleanupAuthority(op)
         ) {
           continue;
@@ -4211,8 +4263,29 @@ export function createRegistry({
           blocker = op;
         }
       }
-      return blocker ?
-          { operation: blocker, reason: "previous-cleanup-required" }
+      return blocker;
+    },
+    startConflict(repo) {
+      const running = this.running(repo);
+      if (running)
+        return {
+          ok: false,
+          reason: "operation-in-progress",
+          conflict: running
+        };
+      const cleanupRequired = this.cleanupRequired(repo);
+      if (cleanupRequired)
+        return {
+          ok: false,
+          reason: "previous-cleanup-required",
+          conflict: cleanupRequired
+        };
+      return null;
+    },
+    admissionOwner(repo) {
+      const conflict = this.startConflict(repo);
+      return conflict ?
+          { operation: conflict.conflict, reason: conflict.reason }
         : null;
     },
     /**
@@ -4269,14 +4342,8 @@ export function createRegistry({
      * registry's job is only to make the collision impossible to miss.
      */
     start(op) {
-      const owner = this.admissionOwner(op.repo);
-      if (owner) {
-        return {
-          ok: false,
-          conflict: owner.operation,
-          reason: owner.reason
-        };
-      }
+      const conflict = this.startConflict(op.repo);
+      if (conflict) return conflict;
       prune();
       byId.set(op.operationId, op);
       return { ok: true, operation: op };
@@ -4286,12 +4353,23 @@ export function createRegistry({
      * that already owns the record. Another live attempt wins the conflict.
      */
     acquireForRetry(op) {
-      const owner = this.admissionOwner(op.repo);
-      if (owner && owner.operation.operationId !== op.operationId) {
+      const running = this.running(op.repo);
+      if (running && running.operationId !== op.operationId) {
         return {
           ok: false,
-          conflict: owner.operation,
-          reason: owner.reason
+          conflict: running,
+          reason: "operation-in-progress"
+        };
+      }
+      const cleanupRequired = this.cleanupRequired(op.repo);
+      if (
+        cleanupRequired &&
+        cleanupRequired.operationId !== op.operationId
+      ) {
+        return {
+          ok: false,
+          conflict: cleanupRequired,
+          reason: "previous-cleanup-required"
         };
       }
       byId.set(op.operationId, op);

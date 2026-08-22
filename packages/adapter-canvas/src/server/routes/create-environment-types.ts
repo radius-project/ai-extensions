@@ -118,6 +118,7 @@ export interface CreateEnvironmentOperation {
 
 export interface OperationStartConflict {
   ok: false;
+  reason?: "operation-in-progress" | "previous-cleanup-required";
   conflict: { operationId: string };
 }
 

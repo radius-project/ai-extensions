@@ -256,6 +256,33 @@ describe("the create-environment refusal ladder", () => {
     expect(recorder.persistCalls).toBe(0);
   });
 
+  it("rung 5 — distinguishes cleanup authority from a running operation", async () => {
+    const recorder = ports({
+      start: {
+        ok: false,
+        reason: "previous-cleanup-required",
+        conflict: { operationId: "op-cleanup" }
+      }
+    });
+
+    await expect(
+      admitCreateEnvironmentRequest({ repo: "octo/app" }, recorder.ports)
+    ).resolves.toEqual({
+      outcome: "refused",
+      operation: null,
+      refusal: {
+        status: 409,
+        body: {
+          error:
+            "An earlier setup for octo/app must finish rollback before a new setup can start.",
+          code: "previous-cleanup-required",
+          operationId: "op-cleanup"
+        }
+      }
+    });
+    expect(recorder.persistCalls).toBe(0);
+  });
+
   it("rung 6 — refuses 500, finalizes the record and reports a diagnostic when the recovery record cannot be saved", async () => {
     const recorder = ports({
       start: { ok: true },
