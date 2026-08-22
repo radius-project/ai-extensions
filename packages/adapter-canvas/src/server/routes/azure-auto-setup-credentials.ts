@@ -6,8 +6,13 @@ import type {
   AzureAutoSetupCommandResult,
   AzureAutoSetupCredentialInput
 } from "./azure-auto-setup-types.js";
+import {
+  deterministicProviderUuid,
+  executeRecoverableMutation
+} from "../services/provider-mutation-recovery.js";
 
 interface RoleAssignmentInput {
+  assignmentId?: string;
   objectId: string;
   role: string;
   scope: string;
@@ -27,6 +32,7 @@ export function isReplicationLagError(stderr?: string): boolean {
 }
 
 export function buildRoleAssignmentArgs({
+  assignmentId,
   objectId,
   role,
   scope,
@@ -36,6 +42,7 @@ export function buildRoleAssignmentArgs({
     "role",
     "assignment",
     "create",
+    ...(assignmentId ? ["--name", assignmentId] : []),
     "--assignee-object-id",
     objectId,
     "--assignee-principal-type",
@@ -179,22 +186,102 @@ async function createFederatedCredentials({
       name: credential.name,
       issuer: "https://token.actions.githubusercontent.com",
       subject: credential.subject,
-      audiences: ["api://AzureADTokenExchange"]
+      audiences: ["api://AzureADTokenExchange"],
+      description: `Created by Radius operation ${workflow.operation.operationId}`
     });
     const path = dependencies.tempFile.createPath();
     let result: AzureAutoSetupCommandResult;
     try {
       dependencies.tempFile.write(path, contents);
-      result = await runAz([
-        "ad",
-        "app",
-        "federated-credential",
-        "create",
-        "--id",
-        clientId,
-        "--parameters",
-        "@" + path
-      ]);
+      const mutation =
+        await executeRecoverableMutation<AzureAutoSetupCommandResult>({
+          operation: workflow.operation,
+          kind: "azure_federated_credential.create",
+          target: `${clientId}:${credential.name}`,
+          persist: dependencies.operations.persist,
+          mutate: () =>
+            runAz([
+              "ad",
+              "app",
+              "federated-credential",
+              "create",
+              "--id",
+              clientId,
+              "--parameters",
+              "@" + path
+            ]),
+          accept: (value) => value,
+          reconcile: async () => {
+            const shown = await runAz([
+              "ad",
+              "app",
+              "federated-credential",
+              "show",
+              "--id",
+              clientId,
+              "--federated-credential-id",
+              credential.name,
+              "--query",
+              "{subject:subject,description:description}",
+              "-o",
+              "json"
+            ]);
+            if (shown.code !== 0 && shown.code !== "0") {
+              if (
+                /not found|does not exist/i.test(shown.stderr || shown.stdout)
+              ) {
+                return {
+                  state: "not_applied" as const,
+                  evidence:
+                    "Microsoft Entra confirmed the federated credential is absent."
+                };
+              }
+              throw new Error(
+                shown.stderr ||
+                  shown.stdout ||
+                  "The federated credential could not be read."
+              );
+            }
+            let actual: { subject?: unknown; description?: unknown };
+            try {
+              actual = JSON.parse(shown.stdout) as {
+                subject?: unknown;
+                description?: unknown;
+              };
+            } catch {
+              throw new Error(
+                "Microsoft Entra returned unreadable federated credential state."
+              );
+            }
+            if (
+              actual.subject !== credential.subject ||
+              actual.description !==
+                `Created by Radius operation ${workflow.operation.operationId}`
+            ) {
+              return {
+                state: "manual_required" as const,
+                guidance:
+                  `Federated credential "${credential.name}" exists, but its subject or Radius operation provenance does not match. ` +
+                  "Radius will not overwrite or delete it."
+              };
+            }
+            return {
+              state: "applied" as const,
+              value: { code: 0, stdout: shown.stdout, stderr: "" },
+              evidence:
+                "The credential name, subject, and Radius operation provenance matched."
+            };
+          }
+        });
+      result =
+        mutation.state === "applied" ?
+          mutation.value
+        : mutation.result || {
+            code: 1,
+            stdout: "",
+            stderr:
+              "Microsoft Entra confirmed the federated credential was not created."
+          };
     } finally {
       dependencies.tempFile.remove(path);
     }
@@ -280,6 +367,8 @@ async function resolveServicePrincipalObjectId(
 
 async function assignRole(
   input: RoleAssignmentInput,
+  operation: AzureAutoSetupCredentialInput["workflow"]["operation"],
+  persist: () => Promise<void>,
   runAz: AzureAutoSetupCredentialInput["workflow"]["runAz"],
   sleep: AzureAutoSetupCredentialInput["dependencies"]["sleep"]
 ): Promise<{ ok: boolean; created: boolean; stderr: string }> {
@@ -289,7 +378,108 @@ async function assignRole(
     stderr: ""
   };
   for (let attempt = 0; attempt < 6; attempt++) {
-    last = await runAz(buildRoleAssignmentArgs(input));
+    const mutation =
+      await executeRecoverableMutation<AzureAutoSetupCommandResult>({
+        operation,
+        kind: "azure_role_assignment.create",
+        target:
+          input.assignmentId ||
+          `${input.objectId}:${input.role}:${input.scope}`,
+        providerIdempotencyKey: input.assignmentId || null,
+        persist,
+        mutate: () => runAz(buildRoleAssignmentArgs(input)),
+        accept: (value) => value,
+        reconcile: async () => {
+          if (!input.assignmentId) {
+            return {
+              state: "manual_required" as const,
+              guidance:
+                "Radius cannot reconcile this role assignment without its deterministic provider ID."
+            };
+          }
+          const listed = await runAz([
+            "role",
+            "assignment",
+            "list",
+            "--scope",
+            input.scope,
+            "--query",
+            `[?name=='${input.assignmentId}'].{id:id,principalId:principalId,roleDefinitionName:roleDefinitionName,scope:scope}`,
+            "-o",
+            "json"
+          ]);
+          if (listed.code !== 0 && listed.code !== "0") {
+            if (
+              /not found|does not exist/i.test(listed.stderr || listed.stdout)
+            ) {
+              return {
+                state: "not_applied" as const,
+                evidence:
+                  "Azure confirmed the deterministic assignment ID is absent."
+              };
+            }
+            throw new Error(
+              listed.stderr ||
+                listed.stdout ||
+                "The Azure role assignment could not be read."
+            );
+          }
+          let matches: Array<{
+            id?: unknown;
+            principalId?: unknown;
+            roleDefinitionName?: unknown;
+            scope?: unknown;
+          }>;
+          try {
+            matches = JSON.parse(listed.stdout) as typeof matches;
+          } catch {
+            throw new Error("Azure returned unreadable role assignment state.");
+          }
+          if (!Array.isArray(matches)) {
+            throw new Error("Azure returned unreadable role assignment state.");
+          }
+          if (matches.length === 0) {
+            return {
+              state: "not_applied" as const,
+              evidence:
+                "Azure confirmed the deterministic assignment ID is absent."
+            };
+          }
+          const actual = matches.length === 1 ? matches[0] : undefined;
+          if (
+            !actual ||
+            typeof actual.id !== "string" ||
+            !actual.id
+              .toLowerCase()
+              .endsWith(`/${input.assignmentId.toLowerCase()}`) ||
+            actual.principalId !== input.objectId ||
+            actual.roleDefinitionName !== input.role ||
+            typeof actual.scope !== "string" ||
+            actual.scope.toLowerCase() !== input.scope.toLowerCase()
+          ) {
+            return {
+              state: "manual_required" as const,
+              guidance:
+                `Azure role assignment "${input.assignmentId}" exists, but its principal, role, or scope does not match this operation. ` +
+                "Radius will not modify or delete it."
+            };
+          }
+          return {
+            state: "applied" as const,
+            value: { code: 0, stdout: listed.stdout, stderr: "" },
+            evidence:
+              "The deterministic assignment ID, principal, role, and scope matched."
+          };
+        }
+      });
+    last =
+      mutation.state === "applied" ?
+        mutation.value
+      : mutation.result || {
+          code: 1,
+          stdout: "",
+          stderr: "Azure confirmed the role assignment was not created."
+        };
     if (last.code === 0 || last.stderr.includes("already exists")) {
       return {
         ok: true,
@@ -387,14 +577,20 @@ export async function configureAzureAutoSetupCredentials({
   if (!(await checkpoint())) return false;
 
   const contributorScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
+  const contributorAssignmentId = deterministicProviderUuid(
+    `${operation.operationId}\0${servicePrincipalObjectId}\0Contributor\0${contributorScope}`
+  );
   steps.push(`Assigning Contributor role on ${resourceGroup}...`);
   const contributor = await assignRole(
     {
       objectId: servicePrincipalObjectId,
+      assignmentId: contributorAssignmentId,
       role: "Contributor",
       scope: contributorScope,
       subscriptionId
     },
+    operation,
+    dependencies.operations.persist,
     runAz,
     dependencies.sleep
   );
@@ -410,6 +606,7 @@ export async function configureAzureAutoSetupCredentials({
   steps.push("✅ Contributor role assigned");
   if (contributor.created) {
     dependencies.operations.recordCreatedRoleAssignment(operation, {
+      assignmentId: contributorAssignmentId,
       role: "Contributor",
       scope: contributorScope,
       principalObjectId: servicePrincipalObjectId
@@ -422,16 +619,22 @@ export async function configureAzureAutoSetupCredentials({
     resourceGroup
   );
   const clusterScope = `/subscriptions/${subscriptionId}/resourceGroups/${aksResourceGroup}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
+  const clusterAssignmentId = deterministicProviderUuid(
+    `${operation.operationId}\0${servicePrincipalObjectId}\0Azure Kubernetes Service RBAC Cluster Admin\0${clusterScope}`
+  );
   steps.push(
     `Assigning Azure Kubernetes Service RBAC Cluster Admin on ${clusterName}...`
   );
   const clusterRole = await assignRole(
     {
       objectId: servicePrincipalObjectId,
+      assignmentId: clusterAssignmentId,
       role: "Azure Kubernetes Service RBAC Cluster Admin",
       scope: clusterScope,
       subscriptionId
     },
+    operation,
+    dependencies.operations.persist,
     runAz,
     dependencies.sleep
   );
@@ -439,6 +642,7 @@ export async function configureAzureAutoSetupCredentials({
     steps.push("✅ AKS RBAC Cluster Admin role assigned");
     if (clusterRole.created) {
       dependencies.operations.recordCreatedRoleAssignment(operation, {
+        assignmentId: clusterAssignmentId,
         role: "Azure Kubernetes Service RBAC Cluster Admin",
         scope: clusterScope,
         principalObjectId: servicePrincipalObjectId

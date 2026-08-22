@@ -38,7 +38,8 @@ function result(
   return {
     code: partial.code ?? 0,
     stdout: partial.stdout ?? "",
-    stderr: partial.stderr ?? ""
+    stderr: partial.stderr ?? "",
+    ...(partial.timedOut === undefined ? {} : { timedOut: partial.timedOut })
   };
 }
 
@@ -270,8 +271,17 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     });
     await expect(
       configureAzureAutoSetupCredentials(test.input)
-    ).rejects.toThrow("spawn failed");
+    ).rejects.toThrow(
+      "Radius could not confirm the outcome of azure_federated_credential.create"
+    );
     expect(removed).toEqual(["C:\\temp\\fic.json"]);
+    expect(
+      (
+        test.workflow.operation as AzureAutoSetupOperation & {
+          providerRecovery: { mutations: Array<{ status: string }> };
+        }
+      ).providerRecovery.mutations[0]?.status
+    ).toBe("outcome_unknown");
   });
 
   it("removes the secure temp file when writing the credential file throws", async () => {
@@ -357,6 +367,87 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     expect(test.failures[0]).toMatchObject({
       code: "federated-credential-subject-mismatch"
     });
+  });
+
+  it("adopts a timed-out federated credential only when operation provenance matches", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: "[]" });
+        }
+        if (line.includes("federated-credential create")) {
+          return result({ code: 1, timedOut: true });
+        }
+        if (line.includes("federated-credential show")) {
+          return result({
+            stdout: JSON.stringify({
+              subject: SUBJECT,
+              description: "Created by Radius operation op-credentials"
+            })
+          });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    expect(test.calls).toContain("fic:dev");
+    expect(
+      (
+        test.workflow.operation as AzureAutoSetupOperation & {
+          providerRecovery: { mutations: Array<{ status: string }> };
+        }
+      ).providerRecovery.mutations[0]
+    ).toMatchObject({ status: "confirmed" });
+  });
+
+  it("adopts a timed-out deterministic role assignment after exact reconciliation", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({
+            stdout: JSON.stringify([{ name: "dev", subject: SUBJECT }])
+          });
+        }
+        if (
+          line.startsWith("role assignment create ") &&
+          line.includes("--role Contributor ")
+        ) {
+          return result({ code: 1, timedOut: true });
+        }
+        if (line.startsWith("role assignment list ")) {
+          const assignmentId = /name=='([^']+)'/.exec(
+            args[args.indexOf("--query") + 1]
+          )?.[1];
+          const scope = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-radius`;
+          return result({
+            stdout: JSON.stringify([
+              {
+                id: `${scope}/providers/Microsoft.Authorization/roleAssignments/${assignmentId}`,
+                principalId: OBJECT_ID,
+                roleDefinitionName: "Contributor",
+                scope
+              }
+            ])
+          });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    expect(test.calls).toContain("role:Contributor");
+    expect(
+      test.calls.find(
+        (call) =>
+          call.startsWith("az:role assignment create ") &&
+          call.includes("--role Contributor ")
+      )
+    ).toContain("--name");
   });
 
   it("retries replication lag, records created roles, and preserves the non-fatal AKS warning", async () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createOperation, prepareProviderMutation } from "../../operations.js";
 import {
   createWorkflowFileCommitter,
   isProtectedBranchFailure,
@@ -18,7 +19,7 @@ interface Script {
   runGhWorkflow?: Partial<CreateEnvironmentCommandResult>[];
   defaultBranch?: string | null;
   headSha?: string | null;
-  createBranch?: { ok: boolean; stderr: string };
+  createBranch?: { ok: boolean; stderr: string; timedOut?: boolean };
 }
 
 interface Harness {
@@ -73,7 +74,8 @@ function harness(script: Script = {}): Harness {
     return Promise.resolve({
       code: next.code ?? 0,
       stdout: next.stdout ?? "",
-      stderr: next.stderr ?? ""
+      stderr: next.stderr ?? "",
+      ...(next.timedOut ? { timedOut: true } : {})
     });
   };
 
@@ -155,6 +157,79 @@ describe("isProtectedBranchFailure", () => {
 });
 
 describe("committing a workflow file", () => {
+  it("adopts an exact workflow write after a timed-out response", async () => {
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
+        }
+      ],
+      runGhWorkflow: [{ code: 1, timedOut: true }]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    h.ports.mutationRecovery = {
+      operation,
+      persist: async () => {}
+    };
+    const committer = createWorkflowFileCommitter(h.ports, target);
+
+    await expect(
+      committer.commitWorkflowFileSmart(
+        ".github/workflows/a.yml",
+        CONTENT,
+        "Add a"
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      viaPr: false,
+      blobSha: "blob-recovered",
+      contentSha256: CONTENT_DIGEST,
+      previousBlobKnown: true
+    });
+    expect(
+      h.calls.filter((call) => call.kind === "runGhWorkflow")
+    ).toHaveLength(1);
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "confirmed"
+    });
+  });
+
+  it("fails closed when the workflow path changed after a timed-out response", async () => {
+    const otherContent = Buffer.from("different").toString("base64");
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        {
+          code: 0,
+          stdout: JSON.stringify({
+            sha: "blob-other",
+            content: otherContent
+          })
+        }
+      ],
+      runGhWorkflow: [{ code: 1, timedOut: true }]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    h.ports.mutationRecovery = {
+      operation,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        ".github/workflows/a.yml",
+        CONTENT,
+        "Add a"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("will not overwrite or remove it")
+    });
+    expect(operation.providerRecovery.state).toBe("manual_required");
+  });
+
   it("commits straight to the default branch and reports no pull request", async () => {
     const h = harness({
       runGh: [{ code: 1, stderr: "HTTP 404: Not Found" }],
@@ -343,6 +418,82 @@ describe("reading a contents-API write back", () => {
 });
 
 describe("the protected-branch pull-request fallback", () => {
+  it("adopts a timed-out operation-specific branch without creating a duplicate", async () => {
+    const h = harness({
+      runGh: [
+        { code: 1 },
+        {
+          code: 0,
+          stdout: JSON.stringify({ object: { sha: "sha-1" } })
+        },
+        { code: 1, stderr: "HTTP 404: Not Found" }
+      ],
+      runGhWorkflow: [{ code: 1, stderr: "protected branch" }, { code: 0 }],
+      defaultBranch: "main",
+      headSha: "sha-1",
+      createBranch: { ok: false, stderr: "terminated", timedOut: true }
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    h.ports.mutationRecovery = {
+      operation,
+      persist: async () => {}
+    };
+    const committer = createWorkflowFileCommitter(h.ports, target);
+
+    await expect(
+      committer.commitWorkflowFileSmart("p", CONTENT, "m")
+    ).resolves.toMatchObject({ ok: true, viaPr: true });
+    expect(operation.providerRecovery.mutations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "github_branch.create",
+          status: "confirmed"
+        })
+      ])
+    );
+  });
+
+  it("removes a recovered empty setup branch before automatic rollback", async () => {
+    const h = harness({
+      runGh: [
+        { code: 1 },
+        {
+          code: 0,
+          stdout: JSON.stringify({ object: { sha: "sha-1" } })
+        }
+      ],
+      runGhWorkflow: [{ code: 1, stderr: "protected branch" }, { code: 0 }],
+      defaultBranch: "main",
+      headSha: "sha-1"
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    operation.recoveryState = "provider_reconciliation_pending";
+    prepareProviderMutation(operation, {
+      kind: "github_branch.create",
+      target: "octo/app\0radius/setup-dev-workflows-workflow\0sha-1",
+      providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
+    });
+    h.ports.mutationRecovery = {
+      operation,
+      persist: async () => {}
+    };
+    const committer = createWorkflowFileCommitter(h.ports, target);
+
+    await expect(
+      committer.commitWorkflowFileSmart("p", CONTENT, "m")
+    ).resolves.toMatchObject({
+      ok: false,
+      stderr: expect.stringContaining(
+        "Radius reconciled and removed recovered setup branch"
+      )
+    });
+    expect(
+      h.calls.filter(
+        (call) => call.kind === "runGhWorkflow" && call.args.includes("DELETE")
+      )
+    ).toHaveLength(1);
+  });
+
   it("creates a branch off the default branch head and re-commits there", async () => {
     const h = harness({
       runGh: [{ code: 1 }, { code: 1, stderr: "HTTP 404: Not Found" }],

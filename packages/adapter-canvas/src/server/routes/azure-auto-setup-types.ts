@@ -10,6 +10,7 @@ export interface AzureAutoSetupCommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
 }
 
 export interface AzureAutoSetupOperation {
@@ -102,6 +103,7 @@ export interface AzureAutoSetupOperationArtifactPort {
   recordCreatedRoleAssignment(
     operation: AzureAutoSetupOperation,
     entry: {
+      assignmentId?: string;
       role: string;
       scope: string;
       principalObjectId: string;
@@ -222,10 +224,12 @@ export interface AzureAutoSetupCredentialInput {
     "ensureServicePrincipal" | "sleep" | "tempFile"
   > & {
     operations: Pick<
-      AzureAutoSetupOperationArtifactPort,
+      AzureAutoSetupOperationArtifactPort &
+        AzureAutoSetupOperationLifecyclePort,
       | "recordServicePrincipal"
       | "recordCreatedFederatedCredential"
       | "recordCreatedRoleAssignment"
+      | "persist"
     >;
   };
   oidc: ResolveOidcSubjectResult;

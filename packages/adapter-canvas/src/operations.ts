@@ -36,13 +36,16 @@ import {
 // (commit, blob and content digests) so a rollback after the workflow commit
 // point can prove the files it would revert are still exactly what Radius wrote.
 // Version 4 distinguishes a path proven absent before setup from an older record
-// that never observed the previous path state. Versions 1 through 3 still load:
+// that never observed the previous path state. Version 5 adds the provider
+// mutation recovery journal. Versions 1 through 4 still load:
 // `readOperationControl` and
 // `readSetupArtifactLedger` fill the new fields with safe defaults rather than
 // discarding the operation, and a default of "no provenance" fails a
 // post-commit rollback closed instead of guessing.
-export const OPERATION_SCHEMA_VERSION = 4;
-export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4]);
+export const OPERATION_SCHEMA_VERSION = 5;
+export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([
+  1, 2, 3, 4, 5
+]);
 
 // `deleted` is written only after a cleanup attempt proved the resource is gone
 // (removed by Radius, or already absent). It keeps a rolled-back artifact out of
@@ -108,6 +111,7 @@ export type FederatedCredentialArtifact = {
 };
 
 export type RoleAssignmentArtifact = {
+  assignmentId: string | null;
   role: string;
   scope: string;
   principalObjectId: string | null;
@@ -258,6 +262,227 @@ export type OperationControlRecord = {
   commands: OperationCommandRecord[];
   outcomes: OperationOutcomeRecord[];
 };
+
+export type ProviderMutationStatus =
+  | "prepared"
+  | "confirmed"
+  | "not_applied"
+  | "outcome_unknown"
+  | "manual_required";
+
+export type ProviderMutationRecord = {
+  mutationId: string;
+  kind: string;
+  target: string;
+  status: ProviderMutationStatus;
+  preparedAt: string;
+  updatedAt: string;
+  providerIdempotencyKey: string | null;
+  evidence: string | null;
+};
+
+export type ProviderRecoveryRecord = {
+  state:
+    | "idle"
+    | "reconciling"
+    | "rollback_pending"
+    | "manual_required"
+    | "complete";
+  guidance: string | null;
+  mutations: ProviderMutationRecord[];
+};
+
+const PROVIDER_MUTATION_STATUSES = Object.freeze([
+  "prepared",
+  "confirmed",
+  "not_applied",
+  "outcome_unknown",
+  "manual_required"
+]);
+
+export function createProviderRecovery(): ProviderRecoveryRecord {
+  return { state: "idle", guidance: null, mutations: [] };
+}
+
+function readProviderRecovery(value: any): ProviderRecoveryRecord {
+  const source = value && typeof value === "object" ? value : {};
+  const mutations =
+    Array.isArray(source.mutations) ?
+      source.mutations
+        .filter(
+          (entry: any) =>
+            entry &&
+            typeof entry.mutationId === "string" &&
+            entry.mutationId &&
+            typeof entry.kind === "string" &&
+            entry.kind &&
+            typeof entry.target === "string" &&
+            entry.target &&
+            PROVIDER_MUTATION_STATUSES.includes(entry.status)
+        )
+        .map((entry: any) => ({
+          mutationId: entry.mutationId,
+          kind: entry.kind,
+          target: entry.target,
+          status: entry.status,
+          preparedAt: isoOrNull(entry.preparedAt) || nowIso(),
+          updatedAt: isoOrNull(entry.updatedAt) || nowIso(),
+          providerIdempotencyKey:
+            (
+              typeof entry.providerIdempotencyKey === "string" &&
+              entry.providerIdempotencyKey
+            ) ?
+              entry.providerIdempotencyKey
+            : null,
+          evidence:
+            typeof entry.evidence === "string" && entry.evidence ?
+              entry.evidence
+            : null
+        }))
+    : [];
+  const state =
+    (
+      [
+        "idle",
+        "reconciling",
+        "rollback_pending",
+        "manual_required",
+        "complete"
+      ].includes(source.state)
+    ) ?
+      source.state
+    : "idle";
+  return {
+    state,
+    guidance:
+      typeof source.guidance === "string" && source.guidance ?
+        source.guidance
+      : null,
+    mutations
+  };
+}
+
+export function providerMutationId(
+  operationId: string,
+  kind: string,
+  target: string
+): string {
+  return `pm_${createHash("sha256")
+    .update(`${operationId}\0${kind}\0${target}`)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+export function prepareProviderMutation(
+  op: any,
+  {
+    kind,
+    target,
+    providerIdempotencyKey = null
+  }: {
+    kind: string;
+    target: string;
+    providerIdempotencyKey?: string | null;
+  }
+): ProviderMutationRecord {
+  const recovery = readProviderRecovery(op?.providerRecovery);
+  const mutationId = providerMutationId(op.operationId, kind, target);
+  const existing = recovery.mutations.find(
+    (entry) => entry.mutationId === mutationId
+  );
+  if (existing) {
+    op.providerRecovery = recovery;
+    return existing;
+  }
+  const timestamp = nowIso();
+  const mutation: ProviderMutationRecord = {
+    mutationId,
+    kind,
+    target,
+    status: "prepared",
+    preparedAt: timestamp,
+    updatedAt: timestamp,
+    providerIdempotencyKey:
+      typeof providerIdempotencyKey === "string" && providerIdempotencyKey ?
+        providerIdempotencyKey
+      : null,
+    evidence: null
+  };
+  recovery.state = "reconciling";
+  recovery.guidance = null;
+  recovery.mutations.push(mutation);
+  op.providerRecovery = recovery;
+  op.lastActivityAt = timestamp;
+  return mutation;
+}
+
+export function settleProviderMutation(
+  op: any,
+  mutationId: string,
+  status: ProviderMutationStatus,
+  evidence: string | null = null
+): boolean {
+  if (!PROVIDER_MUTATION_STATUSES.includes(status)) return false;
+  const recovery = readProviderRecovery(op?.providerRecovery);
+  const mutation = recovery.mutations.find(
+    (entry) => entry.mutationId === mutationId
+  );
+  if (!mutation) return false;
+  mutation.status = status;
+  mutation.updatedAt = nowIso();
+  mutation.evidence =
+    typeof evidence === "string" && evidence.trim() ? evidence.trim() : null;
+  if (status === "manual_required") {
+    recovery.state = "manual_required";
+    recovery.guidance = mutation.evidence;
+  } else if (
+    recovery.mutations.some(
+      (entry) =>
+        entry.status === "prepared" || entry.status === "outcome_unknown"
+    )
+  ) {
+    recovery.state = "reconciling";
+  } else if (
+    recovery.mutations.some((entry) => entry.status === "manual_required")
+  ) {
+    recovery.state = "manual_required";
+  } else {
+    recovery.state = "complete";
+    recovery.guidance = null;
+  }
+  op.providerRecovery = recovery;
+  op.lastActivityAt = mutation.updatedAt;
+  return true;
+}
+
+export function unresolvedProviderMutations(op: any): ProviderMutationRecord[] {
+  return readProviderRecovery(op?.providerRecovery).mutations.filter(
+    (entry) => entry.status === "prepared" || entry.status === "outcome_unknown"
+  );
+}
+
+export function providerMutationRecord(
+  op: any,
+  kind: string,
+  target: string
+): ProviderMutationRecord | null {
+  if (!op?.operationId) return null;
+  const mutationId = providerMutationId(op.operationId, kind, target);
+  return (
+    readProviderRecovery(op.providerRecovery).mutations.find(
+      (entry) => entry.mutationId === mutationId
+    ) || null
+  );
+}
+
+export function providerRecoveryManualGuidance(op: any): string | null {
+  const recovery = readProviderRecovery(op?.providerRecovery);
+  if (recovery.state !== "manual_required") return null;
+  return (
+    recovery.guidance ||
+    "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
+  );
+}
 
 const MAX_RETAINED_COMMANDS = 20;
 const MAX_RETAINED_OUTCOMES = 20;
@@ -551,6 +776,15 @@ export function readWorkflowCommitArtifact(value: any): WorkflowCommitArtifact {
   };
 }
 
+function readRoleAssignmentArtifact(value: any): RoleAssignmentArtifact {
+  return {
+    assignmentId: optionalShaString(value && value.assignmentId),
+    role: String((value && value.role) || ""),
+    scope: String((value && value.scope) || ""),
+    principalObjectId: optionalShaString(value && value.principalObjectId)
+  };
+}
+
 /**
  * Restore a saved artifact ledger onto the current shape.
  *
@@ -585,7 +819,11 @@ export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
         source.federatedCredentials
       : [],
     roleAssignments:
-      Array.isArray(source.roleAssignments) ? source.roleAssignments : [],
+      Array.isArray(source.roleAssignments) ?
+        source.roleAssignments.map((entry: any) =>
+          readRoleAssignmentArtifact(entry)
+        )
+      : [],
     githubEnvironment: {
       ...ledger.githubEnvironment,
       ...(source.githubEnvironment || {}),
@@ -670,7 +908,8 @@ export function createOperation({
     terminal: null,
     failure: null,
     stopRequested: false,
-    control: createOperationControl()
+    control: createOperationControl(),
+    providerRecovery: createProviderRecovery()
   };
 }
 
@@ -1061,6 +1300,10 @@ export function recordCreatedRoleAssignment(op: any, entry: any): any {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger || !entry) return op;
   const next = {
+    assignmentId:
+      entry.assignmentId == null || entry.assignmentId === "" ?
+        null
+      : String(entry.assignmentId),
     role: String(entry.role || ""),
     scope: String(entry.scope || ""),
     principalObjectId:
@@ -1069,14 +1312,20 @@ export function recordCreatedRoleAssignment(op: any, entry: any): any {
       : String(entry.principalObjectId)
   };
   if (!next.role || !next.scope) return op;
-  if (
-    !ledger.roleAssignments.some(
-      (item) =>
-        item.role === next.role &&
-        item.scope === next.scope &&
-        item.principalObjectId === next.principalObjectId
-    )
-  ) {
+  const existing = ledger.roleAssignments.find(
+    (item) =>
+      item.role === next.role &&
+      item.scope === next.scope &&
+      item.principalObjectId === next.principalObjectId &&
+      (item.assignmentId === next.assignmentId ||
+        item.assignmentId == null ||
+        next.assignmentId == null)
+  );
+  if (existing) {
+    if (existing.assignmentId == null && next.assignmentId != null) {
+      existing.assignmentId = next.assignmentId;
+    }
+  } else {
     ledger.roleAssignments.push(next);
   }
   return op;
@@ -1422,9 +1671,12 @@ export function cleanupArtifactIdentity(
         artifact.subject
       )}`;
     case "role_assignment":
-      return `${normalizeIdentityPart(artifact.role)}@${normalizeIdentityPart(
-        artifact.scope
-      )}`;
+      return (
+        normalizeIdentityPart(artifact.assignmentId) ||
+        `${normalizeIdentityPart(artifact.role)}@${normalizeIdentityPart(
+          artifact.scope
+        )}`
+      );
     case "github_environment":
       return `${normalizeIdentityPart(artifact.repo)}:${normalizeIdentityPart(
         artifact.name
@@ -2064,6 +2316,15 @@ export function ambiguousSetupOwnership(ledger: any): string | null {
   return null;
 }
 
+export function ambiguousProviderMutation(op: any): string | null {
+  const manual = providerRecoveryManualGuidance(op);
+  if (manual) return manual;
+  const unresolved = unresolvedProviderMutations(op);
+  if (unresolved.length === 0) return null;
+  const mutation = unresolved[0];
+  return `Radius has not confirmed the outcome of ${mutation.kind} for ${mutation.target}.`;
+}
+
 export const SETUP_RESUME_STEPS = Object.freeze([
   "azure_app",
   "service_principal",
@@ -2238,6 +2499,13 @@ function setupForwardEligibility(
   const request = op.resumeRequest || op.request;
   if (!request || !request.environment)
     return { ok: false, code: `${prefix}-request-missing` };
+  const providerAmbiguous = ambiguousProviderMutation(op);
+  if (providerAmbiguous)
+    return {
+      ok: false,
+      code: `${prefix}-provider-outcome-unknown`,
+      detail: providerAmbiguous
+    };
   const ledger = getSetupArtifactLedger(op);
   const ambiguous = ambiguousSetupOwnership(ledger);
   if (ambiguous)
@@ -2688,6 +2956,20 @@ export function canRetryCleanup(op: any): any {
   }
   if (ledger.cleanup.state !== "succeeded_with_warnings")
     return { ok: false, code: "cleanup-retry-not-retryable" };
+  const unknownDelete = ledger.cleanup.results.find(
+    (entry) =>
+      entry.outcome === "warning" &&
+      entry.detail?.includes(
+        "Outcome unknown after provider timeout; Radius will not repeat this delete blindly."
+      )
+  );
+  if (unknownDelete) {
+    return {
+      ok: false,
+      code: "cleanup-retry-outcome-unknown",
+      detail: unknownDelete.detail
+    };
+  }
   const targets = unresolvedCleanupTargets(op);
   if (targets.length === 0)
     return { ok: false, code: "cleanup-retry-nothing-unresolved" };
@@ -4008,7 +4290,8 @@ const PERSISTED_OPERATION_KEYS = new Set([
   "resumeRequest",
   "resumeFrom",
   "verification",
-  "control"
+  "control",
+  "providerRecovery"
 ]);
 
 function persistedFailure(failure: any): any {
@@ -4034,6 +4317,7 @@ export function toPersistedOperation(op: any): any {
   }
   record.failure = persistedFailure(op.failure);
   record.control = readOperationControl(op.control);
+  record.providerRecovery = readProviderRecovery(op.providerRecovery);
   // Written through the same normalizer the restore path uses, so a saved
   // ledger always carries the current provenance shape.
   record.setupArtifacts = readSetupArtifactLedger(op.setupArtifacts);
@@ -4079,6 +4363,7 @@ export function fromPersistedOperation(value: any): any {
     throw new Error("Invalid persisted operation stages or steps.");
   }
   record.control = readOperationControl(value.control);
+  record.providerRecovery = readProviderRecovery(value.providerRecovery);
   // Versions 1 and 2 have no workflow provenance, and version 3 does not say
   // whether a null previous blob means "absent" or "unknown". Normalizing here
   // gives every reader the current shape; the missing proof refuses rollback.
@@ -4092,7 +4377,16 @@ export function fromPersistedOperation(value: any): any {
 }
 
 export function reconcileRestoredOperation(op: any): any {
-  if (!op || isTerminalState(op.state)) return op;
+  if (!op) return op;
+  if (unresolvedProviderMutations(op).length > 0) {
+    op.state = RUNNING_STATE;
+    op.endedAt = null;
+    op.executionActive = false;
+    op.recoveryState = "provider_reconciliation_pending";
+    op.providerRecovery.state = "reconciling";
+    return op;
+  }
+  if (isTerminalState(op.state)) return op;
   // A stop the customer already paid for outlives the process that was going to
   // honor it. Nothing is mid-flight after a restart, so the boundary is here.
   if (shouldStop(op)) {
@@ -4109,6 +4403,22 @@ export function reconcileRestoredOperation(op: any): any {
   }
   if (hasCompleteVerificationIdentity(op)) {
     op.recoveryState = "verification_pending";
+    return op;
+  }
+  const manualGuidance = providerRecoveryManualGuidance(op);
+  if (manualGuidance) {
+    const now = nowIso();
+    op.state = "failed_partial";
+    op.endedAt = now;
+    op.lastActivityAt = now;
+    op.failure = {
+      code: "provider-reconciliation-manual-required",
+      stage: op.currentStage,
+      stepSeq: null,
+      message: manualGuidance,
+      classification: "user-fixable"
+    };
+    op.recoveryState = "manual_required";
     return op;
   }
   const activeCommand = latestCommand(op);
@@ -4477,6 +4787,7 @@ export function toClientView(op: any): any {
   const cleanup = projectCleanupSummary(op);
   const control = op.control || createOperationControl();
   const command = latestCommand(op);
+  const providerRecovery = readProviderRecovery(op.providerRecovery);
   return {
     operationId: op.operationId,
     schemaVersion: op.schemaVersion,
@@ -4502,6 +4813,18 @@ export function toClientView(op: any): any {
     terminalState: isTerminalState(op.state) ? op.state : null,
     hasWarnings: hasWarnings(op),
     cleanup,
+    providerRecovery: {
+      state: providerRecovery.state,
+      guidance: providerRecovery.guidance,
+      mutations: providerRecovery.mutations.map((mutation) => ({
+        mutationId: mutation.mutationId,
+        kind: mutation.kind,
+        target: mutation.target,
+        status: mutation.status,
+        preparedAt: mutation.preparedAt,
+        updatedAt: mutation.updatedAt
+      }))
+    },
     stop: {
       requested: Boolean(control.stop.requestedAt),
       requestedAt: control.stop.requestedAt,

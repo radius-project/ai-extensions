@@ -122,6 +122,7 @@ function deps(
       "hasCompleteVerificationIdentity"
     ) as never,
     findWorkflowRun: unset("findWorkflowRun") as never,
+    settleVerificationDispatchRecovery: () => {},
     getRunDetail: unset("getRunDetail") as never,
     fetchRunLog: unset("fetchRunLog") as never,
     extractErrorLines: unset("extractErrorLines") as never,

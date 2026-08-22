@@ -502,11 +502,43 @@ describe("resolveCleanupGitHubContext", () => {
       ["api", "/repos/octo/app"],
       expect.objectContaining({ timeout: 20000 })
     );
-    expect(executor.runOrThrow).toHaveBeenCalledWith(
+    expect(executor.run).toHaveBeenCalledWith(
       ["api", "--method", "DELETE", "/repos/octo/app/environments/dev"],
-      "Could not delete the GitHub environment",
       { timeout: 20000 }
     );
+  });
+
+  it("confirms absence after a timed-out environment delete", async () => {
+    const executor = selectedExecutor({
+      run: vi
+        .fn()
+        .mockResolvedValueOnce({
+          code: 1,
+          stdout: "",
+          stderr: "terminated",
+          timedOut: true
+        })
+        .mockResolvedValueOnce({
+          code: 1,
+          stdout: "",
+          stderr: "HTTP 404: Not Found"
+        })
+    });
+    const context = await resolveCleanupGitHubContext({
+      targets: [{ artifactType: "github_environment" }],
+      selectedLogin: "octocat",
+      createExecutor: async () => executor
+    });
+
+    await expect(
+      context.deleteEnvironment([
+        "api",
+        "--method",
+        "DELETE",
+        "/repos/octo/app/environments/dev"
+      ])
+    ).resolves.toBeUndefined();
+    expect(executor.run).toHaveBeenCalledTimes(2);
   });
 
   it("fails closed when a cleanup record has no selected GitHub account", async () => {
@@ -793,6 +825,7 @@ describe("cleanupAzureSetupArtifacts", () => {
       subject: "repo:octo/app:pull_request"
     });
     recordCreatedRoleAssignment(op, {
+      assignmentId: "assignment-1",
       role: "Contributor",
       scope: "/subscriptions/sub/resourceGroups/rg",
       principalObjectId: "sp-1"
@@ -830,12 +863,8 @@ describe("cleanupAzureSetupArtifacts", () => {
         "role",
         "assignment",
         "delete",
-        "--assignee-object-id",
-        "sp-1",
-        "--role",
-        "Contributor",
-        "--scope",
-        "/subscriptions/sub/resourceGroups/rg",
+        "--ids",
+        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Authorization/roleAssignments/assignment-1",
         "--output",
         "none"
       ],
@@ -1138,6 +1167,34 @@ describe("cleanupAzureSetupArtifacts", () => {
     expect(result.state).toBe("not_needed");
     expect([...result.attemptedKeys]).toEqual([]);
     expect(op.setupArtifacts.azureApp.state).toBe("created");
+  });
+
+  it("reconciles a timed-out Azure delete by its stable provider id", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    const calls: string[][] = [];
+
+    const cleanup = await cleanupAzureSetupArtifacts(op, {
+      runAz: async (args) => {
+        calls.push(args);
+        return args.includes("delete") ?
+            { code: 1, stdout: "", stderr: "terminated", timedOut: true }
+          : {
+              code: 1,
+              stdout: "",
+              stderr: "Request_ResourceNotFound: app was not found"
+            };
+      }
+    });
+
+    expect(cleanup.state).toBe("succeeded");
+    expect(cleanup.results).toMatchObject([
+      { artifactType: "azure_app", outcome: "not_found" }
+    ]);
+    expect(calls).toEqual([
+      ["ad", "app", "delete", "--id", "app-1"],
+      ["ad", "app", "show", "--id", "app-1", "-o", "none"]
+    ]);
   });
 
   it("records warnings and continues when a delete fails", async () => {

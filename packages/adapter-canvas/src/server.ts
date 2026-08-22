@@ -151,6 +151,9 @@ import {
   shouldStop,
   stopAtBoundary,
   setCommandState,
+  providerMutationRecord,
+  settleProviderMutation,
+  unresolvedProviderMutations,
   workflowRollbackCommitState,
   workflowRollbackTargets,
   INPUT_REQUIRED_STATE,
@@ -264,6 +267,7 @@ import { createDeployRequestService } from "./server/services/deploy-request.js"
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
+import { executeRecoverableMutation } from "./server/services/provider-mutation-recovery.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
@@ -391,11 +395,7 @@ function runCliCommand(
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(cmd, args, { timeout }, (err, stdout, stderr) => {
-      resolve({
-        code: err ? err.code || 1 : 0,
-        stdout: stdout || "",
-        stderr: stderr || ""
-      });
+      resolve(toGhCommandResult(err, stdout, stderr));
     });
     endChildInput(child);
   });
@@ -1121,8 +1121,34 @@ const environmentsRoutes = createEnvironmentsRoutes({
   getSelectedGitHubExecutor: (operationId) =>
     selectedGitHubExecutorsByOperation.get(operationId),
   hasCompleteVerificationIdentity,
-  findWorkflowRun: (repo, workflowFile, sinceMs, knownId, executor) =>
-    findWorkflowRun(repo, workflowFile, sinceMs, knownId, executor),
+  findWorkflowRun: (
+    repo,
+    workflowFile,
+    sinceMs,
+    knownId,
+    executor,
+    afterRunId
+  ) =>
+    findWorkflowRun(repo, workflowFile, sinceMs, knownId, executor, afterRunId),
+  settleVerificationDispatchRecovery: (operation, runId) => {
+    const op = operation as any;
+    const verification = op?.verification;
+    if (!verification) return;
+    const target = `${op.repo}:${verification.workflow}:${verification.ref}:${verification.environment}`;
+    const mutation = providerMutationRecord(
+      op,
+      "github_workflow.dispatch",
+      target
+    );
+    if (mutation) {
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "confirmed",
+        `Adopted verification run ${runId} after the saved pre-dispatch baseline.`
+      );
+    }
+  },
   getRunDetail: (repo, runId, executor) => getRunDetail(repo, runId, executor),
   fetchRunLog: (repo, runId, executor) => fetchRunLog(repo, runId, executor),
   extractErrorLines: (logText, max) => extractErrorLines(logText, max),
@@ -1341,7 +1367,7 @@ const canvasServer = createCanvasServer(
       const coordinator = instanceRequestCoordinators.get(instanceId);
       if (coordinator) {
         entry.state.browserMutationNonce = coordinator.browserMutationNonce;
-        coordinator.startRecoveredVerificationTasks();
+        coordinator.startRecoveredTasks();
       }
     },
     onStopped: (instanceId) => {
@@ -2678,10 +2704,32 @@ export async function resolveCleanupGitHubContext({
     deleteEnvironment:
       executor ?
         async (args) => {
-          await executor.runOrThrow(
-            args,
-            "Could not delete the GitHub environment",
-            { timeout: 20000 }
+          const deleted = await executor.run(args, { timeout: 20000 });
+          if (deleted.code === 0 || deleted.code === "0") return;
+          const detail = (deleted.stderr || deleted.stdout || "").trim();
+          if (!deleted.timedOut) {
+            throw new Error(
+              detail || "Could not delete the GitHub environment."
+            );
+          }
+          const path = args.at(-1) || "";
+          const reread = await executor.run(["api", path], { timeout: 12000 });
+          if (
+            reread.code !== 0 &&
+            reread.code !== "0" &&
+            /(?:HTTP\s+404|\bNot Found\b)/i.test(
+              `${reread.stderr}\n${reread.stdout}`
+            )
+          ) {
+            return;
+          }
+          if (reread.code === 0 || reread.code === "0") {
+            throw new Error(
+              "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. The GitHub environment identity is still present, and deleting it by name again could remove a replacement resource."
+            );
+          }
+          throw new Error(
+            "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. GitHub environment state could not be read safely."
           );
         }
       : async () => {
@@ -2712,14 +2760,31 @@ export async function deleteNewlyCreatedGitHubEnvironment(
 }
 
 function buildRoleAssignmentDeleteArgs({
+  assignmentId,
   objectId,
   role,
   scope
 }: {
+  assignmentId?: string;
   objectId: string;
   role: string;
   scope: string;
 }): string[] {
+  if (assignmentId) {
+    const assignmentResourceId = `${scope.replace(
+      /\/+$/,
+      ""
+    )}/providers/Microsoft.Authorization/roleAssignments/${assignmentId}`;
+    return [
+      "role",
+      "assignment",
+      "delete",
+      "--ids",
+      assignmentResourceId,
+      "--output",
+      "none"
+    ];
+  }
   return [
     "role",
     "assignment",
@@ -2764,6 +2829,14 @@ function isAzureCleanupNotFound(
 ): boolean {
   const detail = `${result?.stderr || ""}\n${result?.stdout || ""}`;
   if (artifactType === "role_assignment") {
+    if (result?.code === 0 || result?.code === "0") {
+      try {
+        const matches = JSON.parse(String(result.stdout || ""));
+        if (Array.isArray(matches) && matches.length === 0) return true;
+      } catch {
+        // Fall through to the provider's diagnostic text.
+      }
+    }
     return /No matched assignments were found to delete|No matching role assignments were found|The role assignment does not exist/i.test(
       detail
     );
@@ -2934,6 +3007,7 @@ export async function cleanupAzureSetupArtifacts(
     artifactType: SetupCleanupArtifactType;
     artifact: Record<string, unknown>;
     args?: string[];
+    readArgs?: string[];
     missingDetail?: string;
   }> = [];
 
@@ -2945,10 +3019,26 @@ export async function cleanupAzureSetupArtifacts(
       ...(objectId ?
         {
           args: buildRoleAssignmentDeleteArgs({
+            assignmentId: String(roleAssignment.assignmentId || ""),
             objectId,
             role: String(roleAssignment.role || ""),
             scope: String(roleAssignment.scope || "")
-          })
+          }),
+          ...(roleAssignment.assignmentId ?
+            {
+              readArgs: [
+                "role",
+                "assignment",
+                "list",
+                "--scope",
+                String(roleAssignment.scope || ""),
+                "--query",
+                `[?name=='${String(roleAssignment.assignmentId)}'].id`,
+                "-o",
+                "json"
+              ]
+            }
+          : {})
         }
       : {
           missingDetail:
@@ -2969,7 +3059,19 @@ export async function cleanupAzureSetupArtifacts(
           args: buildFederatedCredentialDeleteArgs({
             appId: cleanupAppId,
             name: String(credential.name || "")
-          })
+          }),
+          readArgs: [
+            "ad",
+            "app",
+            "federated-credential",
+            "show",
+            "--id",
+            cleanupAppId,
+            "--federated-credential-id",
+            String(credential.name || ""),
+            "-o",
+            "none"
+          ]
         }
       : {
           missingDetail:
@@ -2986,7 +3088,10 @@ export async function cleanupAzureSetupArtifacts(
       artifactType: "service_principal",
       artifact: ledger.servicePrincipal as Record<string, unknown>,
       ...(spId ?
-        { args: buildServicePrincipalDeleteArgs({ id: spId }) }
+        {
+          args: buildServicePrincipalDeleteArgs({ id: spId }),
+          readArgs: ["ad", "sp", "show", "--id", spId, "-o", "none"]
+        }
       : {
           missingDetail:
             "Missing the Service Principal id needed to delete the created identity."
@@ -3000,7 +3105,10 @@ export async function cleanupAzureSetupArtifacts(
       artifactType: "azure_app",
       artifact: ledger.azureApp as Record<string, unknown>,
       ...(appId ?
-        { args: buildAppDeleteArgs({ appId }) }
+        {
+          args: buildAppDeleteArgs({ appId }),
+          readArgs: ["ad", "app", "show", "--id", appId, "-o", "none"]
+        }
       : {
           missingDetail:
             "Missing the App Registration id needed to delete the created application."
@@ -3127,6 +3235,50 @@ export async function cleanupAzureSetupArtifacts(
         deletion.artifact,
         "deleted",
         null
+      );
+      continue;
+    }
+
+    if (result.timedOut) {
+      const outcomeUnknown =
+        "Outcome unknown after provider timeout; Radius will not repeat this delete blindly.";
+      if (!deletion.readArgs) {
+        warnings.push(`${outcomeUnknown} ${label} has no stable provider ID.`);
+        await pushResult(
+          deletion.artifactType,
+          deletion.artifact,
+          "warning",
+          `${outcomeUnknown} The artifact has no stable provider ID for reconciliation.`
+        );
+        continue;
+      }
+      const reread = await runAz(deletion.readArgs);
+      if (isAzureCleanupNotFound(deletion.artifactType, reread)) {
+        steps?.push(
+          `✅ ${label} was confirmed absent after the timed-out delete`
+        );
+        await pushResult(
+          deletion.artifactType,
+          deletion.artifact,
+          "not_found",
+          null
+        );
+        continue;
+      }
+      const reconciliationDetail =
+        reread.code === 0 || reread.code === "0" ?
+          `${outcomeUnknown} The exact provider identity is still present.`
+        : `${outcomeUnknown} Provider state could not be read: ${
+            String(reread.stderr || reread.stdout || "").trim() ||
+            "unknown Azure CLI error"
+          }`;
+      warnings.push(`Failed to delete ${label}: ${reconciliationDetail}`);
+      steps?.push(`⚠ Failed to delete ${label}: ${reconciliationDetail}`);
+      await pushResult(
+        deletion.artifactType,
+        deletion.artifact,
+        "warning",
+        reconciliationDetail
       );
       continue;
     }
@@ -4023,6 +4175,11 @@ function createInstanceRequestCoordinator(
   resolveBaseUrl: () => string
 ) {
   const serverOwnedTasks = new Map<string, Promise<void>>();
+  const automaticRecoveryRollbacks = new Set<string>();
+  const providerReconciliationTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
   const serverOwnedToken = randomUUID();
   const browserMutationNonce = randomUUID();
 
@@ -4040,6 +4197,7 @@ function createInstanceRequestCoordinator(
     operationId: string,
     task: () => Promise<void>
   ): void {
+    let reconciliationNeeded = false;
     let instanceTasks = activeEnvironmentTasks.get(instanceId);
     if (!instanceTasks) {
       instanceTasks = new Set();
@@ -4061,6 +4219,25 @@ function createInstanceRequestCoordinator(
       .catch(async (error) => {
         const current = operations.get(operationId);
         if (shuttingDownInstances.has(instanceId)) return;
+        if (current && unresolvedProviderMutations(current).length > 0) {
+          current.recoveryState = "provider_reconciliation_pending";
+          setExecutionActive(current, false);
+          if (
+            !current.steps.some(
+              (step: { label?: string }) =>
+                step.label ===
+                "⏳ A provider step's outcome could not be confirmed. Radius is reconciling it without repeating the mutation."
+            )
+          ) {
+            addLegacyStep(
+              current,
+              "⏳ A provider step's outcome could not be confirmed. Radius is reconciling it without repeating the mutation."
+            );
+          }
+          reconciliationNeeded = true;
+          await operations.persist().catch(() => {});
+          return;
+        }
         if (current && !current.endedAt) {
           finish(current, "failed", {
             failure: {
@@ -4094,8 +4271,61 @@ function createInstanceRequestCoordinator(
             }
           }
         }
+        if (
+          current?.endedAt &&
+          current.providerRecovery?.state === "rollback_pending"
+        ) {
+          scheduleAutomaticRecoveryRollback(operationId);
+        } else if (
+          reconciliationNeeded &&
+          current &&
+          !current.endedAt &&
+          unresolvedProviderMutations(current).length > 0
+        ) {
+          scheduleProviderReconciliation(operationId);
+        }
       });
     serverOwnedTasks.set(operationId, running);
+  }
+
+  function scheduleProviderReconciliation(operationId: string): void {
+    if (providerReconciliationTimers.has(operationId)) return;
+    const timer = setTimeout(() => {
+      providerReconciliationTimers.delete(operationId);
+      if (shuttingDownInstances.has(instanceId)) return;
+      const operation = operations.get(operationId);
+      if (
+        !operation ||
+        operation.endedAt ||
+        unresolvedProviderMutations(operation).length === 0
+      ) {
+        return;
+      }
+      scheduleRecoveredProviderMutation(operation);
+    }, 5000);
+    timer.unref?.();
+    providerReconciliationTimers.set(operationId, timer);
+  }
+
+  function scheduleAutomaticRecoveryRollback(operationId: string): void {
+    if (automaticRecoveryRollbacks.has(operationId)) return;
+    automaticRecoveryRollbacks.add(operationId);
+    queueMicrotask(() => {
+      void postInternal(
+        `/api/operations/${encodeURIComponent(operationId)}/rollback`,
+        {}
+      )
+        .catch((error) => {
+          operations.report?.({
+            scope: "provider-recovery-auto-rollback",
+            operationId,
+            message: errorMessage(error)
+          });
+        })
+        .finally(() => {
+          automaticRecoveryRollbacks.delete(operationId);
+        });
+    });
   }
 
   async function postInternal(pathname: string, data: unknown): Promise<any> {
@@ -4263,6 +4493,7 @@ function createInstanceRequestCoordinator(
                   });
                 }
               }),
+            persistProviderMutation: () => operations.persist(),
             finalizeEnvironmentResolutionFailure: async (
               operation,
               input,
@@ -4340,20 +4571,168 @@ function createInstanceRequestCoordinator(
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
     const saved = op.verification || {};
-    const dispatchedAt = Date.now();
-    const dispatch = await runCliCommand(
-      "gh",
-      buildVerifyWorkflowDispatchArgs({
-        workflowFile: String(saved.workflow || VERIFY_WORKFLOW_FILE),
-        targetRepo: op.repo,
-        envName: String(saved.environment || op.environment),
-        ref: String(saved.ref || "")
-      }),
-      30000
+    const workflow = String(saved.workflow || VERIFY_WORKFLOW_FILE);
+    const ref = String(saved.ref || "");
+    const environment = String(saved.environment || op.environment);
+    const mutationTarget = `${op.repo}:${workflow}:${ref}:${environment}:${commandId}`;
+    const existingMutation = providerMutationRecord(
+      op,
+      "github_workflow.dispatch_retry",
+      mutationTarget
     );
-    if (dispatch.code !== 0) {
+    const dispatchedAt =
+      existingMutation && Number.isFinite(Number(saved.dispatchedAt)) ?
+        Number(saved.dispatchedAt)
+      : Date.now();
+    let baselineRunId =
+      existingMutation && Number.isFinite(Number(saved.baselineRunId)) ?
+        Number(saved.baselineRunId)
+      : null;
+    if (!existingMutation) {
+      const baseline = await runCliCommand("gh", [
+        "run",
+        "list",
+        "--workflow=" + workflow,
+        "--limit",
+        "10",
+        "--json",
+        "databaseId",
+        "--repo",
+        op.repo
+      ]);
+      if (baseline.code !== 0 && baseline.code !== "0") {
+        const detail =
+          (baseline.stderr || baseline.stdout || "").trim() ||
+          "The GitHub CLI request failed.";
+        setCommandState(op, commandId, "finished", "baseline-failed");
+        finish(op, "failed_partial", {
+          failure: {
+            code: "verify-dispatch-baseline-failed",
+            stage: STAGE_VERIFY,
+            stepSeq: null,
+            message:
+              "Radius could not establish a workflow-run baseline, so it did not dispatch verification.",
+            classification: "user-fixable",
+            evidence: detail
+          }
+        });
+        await saveOperation(op);
+        return;
+      }
+      try {
+        const runs = JSON.parse(baseline.stdout) as Array<{
+          databaseId?: unknown;
+        }>;
+        baselineRunId =
+          Array.isArray(runs) ?
+            runs.reduce<number | null>((latest, run) => {
+              const id = Number(run?.databaseId);
+              return Number.isFinite(id) && (latest === null || id > latest) ?
+                  id
+                : latest;
+            }, null)
+          : null;
+      } catch {
+        baselineRunId = null;
+      }
+    }
+    op.verification = {
+      dispatchedAt,
+      workflow,
+      ref,
+      environment,
+      baselineRunId,
+      runId: null,
+      runUrl: null
+    };
+    const discoverAcceptedRun = async () => {
+      const listed = await runCliCommand("gh", [
+        "run",
+        "list",
+        "--workflow=" + workflow,
+        "--limit",
+        "10",
+        "--json",
+        "databaseId,createdAt",
+        "--repo",
+        op.repo
+      ]);
+      if (listed.code !== 0 && listed.code !== "0") {
+        throw new Error(
+          listed.stderr ||
+            listed.stdout ||
+            "GitHub workflow runs could not be read."
+        );
+      }
+      let candidates: Array<{ databaseId: number; createdAt: string }> = [];
+      try {
+        const parsed: unknown = JSON.parse(listed.stdout);
+        if (Array.isArray(parsed)) {
+          candidates = parsed
+            .filter(
+              (value): value is { databaseId: number; createdAt: string } =>
+                value !== null &&
+                typeof value === "object" &&
+                "databaseId" in value &&
+                Number.isFinite(Number(value.databaseId)) &&
+                "createdAt" in value &&
+                typeof value.createdAt === "string"
+            )
+            .map((value) => ({
+              databaseId: Number(value.databaseId),
+              createdAt: value.createdAt
+            }))
+            .filter(
+              (value) =>
+                (baselineRunId === null || value.databaseId > baselineRunId) &&
+                Date.parse(value.createdAt) >= dispatchedAt - 60000
+            );
+        }
+      } catch {
+        throw new Error("GitHub returned an unreadable workflow run list.");
+      }
+      if (candidates.length === 1) {
+        return {
+          state: "applied" as const,
+          value: String(candidates[0].databaseId),
+          evidence:
+            "Exactly one verification retry run appeared after the saved baseline."
+        };
+      }
+      if (candidates.length > 1) {
+        return {
+          state: "manual_required" as const,
+          guidance:
+            "Multiple verification runs appeared after Radius's saved retry baseline. Radius will not guess or dispatch another run."
+        };
+      }
+      throw new Error(
+        "GitHub has not exposed the accepted verification retry run yet."
+      );
+    };
+    const dispatch = await executeRecoverableMutation({
+      operation: op,
+      kind: "github_workflow.dispatch_retry",
+      target: mutationTarget,
+      persist: () => operations.persist(),
+      mutate: () =>
+        runCliCommand(
+          "gh",
+          buildVerifyWorkflowDispatchArgs({
+            workflowFile: workflow,
+            targetRepo: op.repo,
+            envName: environment,
+            ref
+          }),
+          30000
+        ),
+      accept: () => "",
+      reconcile: discoverAcceptedRun
+    });
+    if (dispatch.state === "not_applied") {
+      const rejected = dispatch.result;
       const detail =
-        (dispatch.stderr || dispatch.stdout || "").trim() ||
+        (rejected?.stderr || rejected?.stdout || "").trim() ||
         "The GitHub CLI request failed.";
       addLegacyStep(op, "❌ Could not dispatch the verify workflow again.");
       setCommandState(op, commandId, "finished", "dispatch-failed");
@@ -4371,16 +4750,20 @@ function createInstanceRequestCoordinator(
       await saveOperation(op);
       return;
     }
-    // Keep the saved workflow, ref, and environment; only the run identity is
-    // new. Clearing runId forces the status route to resolve the run this
-    // dispatch produced rather than reuse the previous attempt's run.
     op.verification = {
       dispatchedAt,
-      workflow: String(saved.workflow || VERIFY_WORKFLOW_FILE),
-      ref: String(saved.ref || ""),
-      environment: String(saved.environment || op.environment),
-      runId: null,
-      runUrl: null
+      workflow,
+      ref,
+      environment,
+      baselineRunId,
+      runId:
+        dispatch.state === "applied" && dispatch.recovered ?
+          String(dispatch.value)
+        : null,
+      runUrl:
+        dispatch.state === "applied" && dispatch.recovered ?
+          `https://github.com/${op.repo}/actions/runs/${dispatch.value}`
+        : null
     };
     addLegacyStep(op, "✅ Verify workflow dispatched again.", STAGE_VERIFY);
     setCommandState(op, commandId, "running");
@@ -4415,6 +4798,13 @@ function createInstanceRequestCoordinator(
     }
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
+    if (
+      kind === "rollback" &&
+      op.providerRecovery?.state === "rollback_pending"
+    ) {
+      op.providerRecovery.state = "complete";
+      op.recoveryState = null;
+    }
     const command = CLEANUP_COMMANDS[kind];
     const selected = command.selectTargets(op);
     const ledger = getSetupArtifactLedger(op);
@@ -4573,8 +4963,47 @@ function createInstanceRequestCoordinator(
     await persist();
   }
 
-  function startRecoveredVerificationTasks(): void {
+  function scheduleRecoveredProviderMutation(op: {
+    operationId: string;
+    control?: {
+      commands?: Array<{ commandId?: string; kind?: string; state?: string }>;
+    };
+  }): void {
+    const retryDispatch = unresolvedProviderMutations(op).some(
+      (mutation) => mutation.kind === "github_workflow.dispatch_retry"
+    );
+    if (retryDispatch) {
+      const command = [...(op.control?.commands || [])]
+        .reverse()
+        .find(
+          (entry) =>
+            entry.kind === "retry_verification" &&
+            typeof entry.commandId === "string"
+        );
+      if (command?.commandId) {
+        const commandId = command.commandId;
+        scheduleServerOwnedTask(op.operationId, () =>
+          runVerificationRetry(op.operationId, commandId)
+        );
+        return;
+      }
+    }
+    scheduleEnvironmentOperation(op);
+  }
+
+  function startRecoveredTasks(): void {
     for (const op of operations.all()) {
+      if (op.endedAt && op.providerRecovery?.state === "rollback_pending") {
+        scheduleAutomaticRecoveryRollback(op.operationId);
+        continue;
+      }
+      if (
+        op.recoveryState === "provider_reconciliation_pending" &&
+        !op.endedAt
+      ) {
+        scheduleRecoveredProviderMutation(op);
+        continue;
+      }
       if (
         op.recoveryState !== "verification_pending" ||
         op.currentStage !== STAGE_VERIFY ||
@@ -4688,7 +5117,7 @@ function createInstanceRequestCoordinator(
   return {
     browserMutationNonce,
     handleUnmatchedRequest,
-    startRecoveredVerificationTasks,
+    startRecoveredTasks,
     isServerOwned,
     validateBrowserMutation,
     scheduleEnvironmentOperation,

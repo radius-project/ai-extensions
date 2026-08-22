@@ -68,6 +68,7 @@ export interface EnvironmentOperationWorkflowDependencies {
   persistEnvironmentResolution(
     operation: EnvironmentOperationRecord
   ): Promise<boolean>;
+  persistProviderMutation(): Promise<void>;
   finalizeEnvironmentResolutionFailure(
     operation: EnvironmentOperationRecord,
     input: { status: number; error: string; code: string },
@@ -170,7 +171,11 @@ export async function runEnvironmentOperationWorkflow(
       readGitHubJson: (apiPath) =>
         dependencies.readGitHubJson(apiPath, executor),
       runGh: (args) => executor.run(args),
-      now: dependencies.now
+      now: dependencies.now,
+      mutationRecovery: {
+        operation,
+        persist: dependencies.persistProviderMutation
+      }
     });
   } catch (error) {
     return failResolution(operation, executor, dependencies, error);

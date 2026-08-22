@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createOperation } from "../../operations.js";
 import {
   ensureGitHubEnvironment,
   GitHubEnvironmentEnsureError,
@@ -90,6 +91,74 @@ describe("ensureGitHubEnvironment", () => {
         "/repos/octo/app/environments/Production%20West"
       ]
     ]);
+  });
+
+  it("adopts an exact environment after a timed-out PUT instead of retrying", async () => {
+    const operation = createOperation({ operationId: "op_environment" });
+    let environmentReads = 0;
+    let putCalls = 0;
+    const ensured = await ensureGitHubEnvironment({
+      repo: "octo/app",
+      requestedName: "production",
+      readGitHubJson: async (apiPath) => {
+        if (apiPath === "/repos/octo/app") {
+          return readResult({ json: { full_name: "octo/app" } });
+        }
+        environmentReads += 1;
+        return environmentReads === 1 ?
+            readResult({ ok: false, status: 404 })
+          : readResult({
+              json: {
+                name: "production",
+                created_at: "2026-08-22T00:00:00.000Z"
+              }
+            });
+      },
+      runGh: async () => {
+        putCalls += 1;
+        return result({ code: 1, timedOut: true });
+      },
+      mutationRecovery: { operation, persist: async () => {} },
+      now: () => Date.parse("2026-08-22T00:00:00.000Z")
+    });
+
+    expect(ensured).toEqual({
+      name: "production",
+      state: "created_candidate",
+      creationProof: { proven: true, detail: null }
+    });
+    expect(putCalls).toBe(1);
+    expect(operation.providerRecovery).toMatchObject({
+      state: "complete",
+      mutations: [{ status: "confirmed" }]
+    });
+  });
+
+  it("fails closed when a timed-out PUT leaves an environment without ownership proof", async () => {
+    const operation = createOperation({ operationId: "op_environment" });
+    let environmentReads = 0;
+
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) => {
+          if (apiPath === "/repos/octo/app") {
+            return readResult({ json: { full_name: "octo/app" } });
+          }
+          environmentReads += 1;
+          return environmentReads === 1 ?
+              readResult({ ok: false, status: 404 })
+            : readResult({ json: { name: "production" } });
+        },
+        runGh: async () => result({ code: 1, timedOut: true }),
+        mutationRecovery: { operation, persist: async () => {} }
+      })
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("will not retry or delete it")
+    });
+    expect(operation.providerRecovery.state).toBe("manual_required");
   });
 
   it("fails closed on lookup errors that are not an explicit HTTP 404", async () => {
