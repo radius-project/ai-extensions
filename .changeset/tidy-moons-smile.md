@@ -1,6 +1,5 @@
 ---
-"@radius-project/core": patch
-"@radius-project/adapter-canvas": patch
+"radius": patch
 ---
 
 Stop reporting a manual edit to `.radius/app.bicep` that needs no regeneration.

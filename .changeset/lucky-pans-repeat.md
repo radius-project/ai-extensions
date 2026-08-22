@@ -1,6 +1,5 @@
 ---
-"@radius-project/core": patch
-"@radius-project/adapter-canvas": patch
+"radius": patch
 ---
 
 Regenerate an app model that has no origin record instead of asking the user.

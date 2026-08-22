@@ -473,7 +473,7 @@ export function appModelRefreshPrompt(status: AppModelStatus): string {
 // Timeline stand-in for appModelRefreshPrompt.
 export function appModelRefreshDisplayPrompt(status: AppModelStatus): string {
   const where = status.repo ? ` for ${status.repo}` : "";
-  return `Refreshing the application model${where} (branch \`${status.branch}\`), which no longer matches the current source.`;
+  return `Regenerating the application model${where} (branch \`${status.branch}\`) before showing the graph.`;
 }
 
 export function appModelRefreshMessage(status: AppModelStatus): HandoffMessage {
@@ -510,7 +510,7 @@ export function appModelUnverifiedDisplayPrompt(
   status: AppModelStatus
 ): string {
   const where = status.repo ? ` for ${status.repo}` : "";
-  return `Checking whether the application model${where} (branch \`${status.branch}\`) still matches the current source.`;
+  return `Asking whether to regenerate the manually edited application model${where} (branch \`${status.branch}\`).`;
 }
 
 export function appModelUnverifiedMessage(

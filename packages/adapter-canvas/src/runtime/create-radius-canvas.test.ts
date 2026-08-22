@@ -894,7 +894,9 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
       .calls[0][0] as { prompt: string; displayPrompt: string };
     expect(message.prompt).toContain("needs to be regenerated");
     expect(message.prompt).toContain("radius_generate_app");
-    expect(message.displayPrompt).toContain("Refreshing the application model");
+    expect(message.displayPrompt).toContain(
+      "Regenerating the application model"
+    );
   });
 
   it("only notes drift on a branch the skill is not allowed to rewrite", async () => {

@@ -115,7 +115,7 @@ The rule is the same in each case: a failed read never causes us to overwrite an
 
 Writing is the exception. When the script cannot work out the source commit, it prints the reason and exits without writing anything, because a record naming a commit it never confirmed would be false. The app model itself is left alone.
 
-The skill is told to fix the cause and run the script again rather than write the record by hand. If that never happens, the app model simply has no record, so the next graph open treats it as unverified and asks before overwriting it.
+The skill is told to fix the cause and run the script again rather than write the record by hand. If that never happens, the app model simply has no record, so the next graph open regenerates it.
 
 A graph is only ever held back once. If the app model is not regenerated, because the skill failed or the user said no, the next open renders whatever is there rather than holding the graph back again. Nobody is locked out of their own graph by a fix that did not happen. The same applies if any of this breaks outright: a failure while checking the app model is ignored and the view opens.
 

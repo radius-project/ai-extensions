@@ -945,7 +945,7 @@ describe("appModelRefreshPrompt", () => {
       "radius_generate_app"
     );
     expect(appModelRefreshDisplayPrompt(modelStatus("", "feat"))).toContain(
-      "Refreshing the application model (branch `feat`)"
+      "Regenerating the application model (branch `feat`)"
     );
   });
 });
@@ -1051,7 +1051,7 @@ describe("appModelUnverifiedPrompt", () => {
 
   it("omits the repo phrase from the timeline when the repo is unknown", () => {
     expect(appModelUnverifiedDisplayPrompt(modelStatus("", "feat"))).toContain(
-      "Checking whether the application model (branch `feat`)"
+      "manually edited application model (branch `feat`)"
     );
   });
 });
