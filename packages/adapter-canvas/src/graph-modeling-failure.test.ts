@@ -19,9 +19,23 @@ describe("graph modeling failure classification", () => {
     const result = asGraphModelingFailure(error);
 
     expect(result).toBeInstanceOf(GraphModelingFailure);
-    expect((result as Error).message).toBe(GRAPH_MODELING_FAILURE_MESSAGE);
+    expect((result as Error).message).toBe(
+      `${GRAPH_MODELING_FAILURE_MESSAGE} app.bicep line 4: Missing required property.`
+    );
     expect((result as Error).cause).toBe(error);
     expect(graphModelingDiagnostic(error)).toContain("BCP035");
+  });
+
+  it("falls back to the concise message when a BCP diagnostic has no source location", () => {
+    const error = new RadProcessError(
+      "rad exited with code 1",
+      "Error BCP062: Invalid reference.",
+      ""
+    );
+
+    expect((asGraphModelingFailure(error) as Error).message).toBe(
+      GRAPH_MODELING_FAILURE_MESSAGE
+    );
   });
 
   it("logs the diagnostic stream instead of unrelated stderr", () => {

@@ -120,6 +120,7 @@ export function initializeGraphPage(
   // null when the page is not waiting on one.
   let appBicepWaitStartedAtMs: number | null = null;
   let renderedOptions: GraphOptions | null = null;
+  let modelCompilable = page.loaded;
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
@@ -314,6 +315,11 @@ export function initializeGraphPage(
       .then((payload) => {
         if (requestGeneration !== generation) return;
         if (isRecord(payload) && Array.isArray(payload.resources)) {
+          modelCompilable = true;
+          if (button?.dataset.mode === "plan") {
+            button.disabled = !branch;
+            button.removeAttribute("title");
+          }
           stopProgress();
           showStatus(context, "Application graph ready.", "info");
           showLoadedGraph();
@@ -368,7 +374,19 @@ export function initializeGraphPage(
         }
         const error = readString(payload, "error");
         stopProgress();
-        if (error) showFailure(error);
+        if (error) {
+          if (readBoolean(payload, "modelingFailed")) {
+            modelCompilable = false;
+            if (button) {
+              button.disabled = true;
+              button.setAttribute(
+                "title",
+                "Plan Deployment is unavailable until the application model compiles."
+              );
+            }
+          }
+          showFailure(error);
+        }
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
@@ -389,8 +407,9 @@ export function initializeGraphPage(
   if (branchSelect) {
     entry.on(branchSelect, "change", () => {
       stopRequest();
-      if (button && button.dataset.mode !== "create-env") {
-        button.disabled = !branchSelect.value;
+      modelCompilable = false;
+      if (button?.dataset.mode === "plan") {
+        button.disabled = true;
       }
       if (branchSelect.value) {
         load();
@@ -402,6 +421,8 @@ export function initializeGraphPage(
   }
 
   if (page.loaded) {
+    modelCompilable = false;
+    if (button && button.dataset.mode !== "create-env") button.disabled = true;
     const graphOptions: GraphOptions = {
       repoUrl: githubRepositoryUrl(page.repo),
       branch: page.branch,
@@ -425,6 +446,11 @@ export function initializeGraphPage(
       .then((payload) => {
         if (refreshGeneration !== generation) return;
         if (isRecord(payload) && Array.isArray(payload.resources)) {
+          modelCompilable = true;
+          if (button?.dataset.mode === "plan") {
+            button.disabled = !branchSelect?.value;
+            button.removeAttribute("title");
+          }
           renderOrUpdate(parseGraphResources(payload.resources), {
             ...graphOptions,
             localSource: sourceProvenance(payload)
@@ -438,11 +464,17 @@ export function initializeGraphPage(
         } else {
           const error = readString(payload, "error");
           if (error) {
-            showStatus(
-              context,
-              `Unable to refresh the application graph: ${error}`,
-              "error"
-            );
+            if (readBoolean(payload, "modelingFailed")) {
+              modelCompilable = false;
+              if (button) button.disabled = true;
+              showFailure(error);
+            } else {
+              showStatus(
+                context,
+                `Unable to refresh the application graph: ${error}`,
+                "error"
+              );
+            }
           }
         }
       })
@@ -469,7 +501,7 @@ export function initializeGraphPage(
   )
     .then(() => {
       if (!entry.active || hasLoadedGraph || !branchSelect?.value) return;
-      if (button && button.dataset.mode !== "create-env")
+      if (button?.dataset.mode === "plan" && modelCompilable)
         button.disabled = false;
       load();
     })
@@ -477,7 +509,11 @@ export function initializeGraphPage(
       context.logger.error("Radius could not load graph branches.", error);
       showStatus(context, "Unable to load branches.", "error");
     });
-  loadModeledEnvState(context, page.repo, () => entry.active);
+  void loadModeledEnvState(context, page.repo, () => entry.active).then(() => {
+    if (entry.active && !modelCompilable && button?.dataset.mode === "deploy") {
+      button.disabled = true;
+    }
+  });
 
   entry.onTeardown(() => {
     stopRequest();

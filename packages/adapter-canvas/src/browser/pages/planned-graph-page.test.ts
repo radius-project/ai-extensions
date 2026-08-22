@@ -151,6 +151,34 @@ describe("initializePlannedGraphPage", () => {
     expect(teardown).toBe(NOOP_TEARDOWN);
   });
 
+  it("renders model compilation failures only on the graph and disables deployment", async () => {
+    const { browser, button, status, branch } = fixture();
+    const setError = vi.fn();
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({
+        error: "Your application model couldn't be compiled.",
+        modelingFailed: true
+      })
+    );
+
+    initializePlannedGraphPage(browser.context, {
+      radiusRenderGraph: vi.fn(),
+      radiusSetGraphLoading: vi.fn(),
+      radiusSetGraphError: setError
+    });
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "Your application model couldn't be compiled."
+    );
+    expect(status.style.display).toBe("none");
+    expect(button.disabled).toBe(true);
+    expect(branch.listenerCount("change")).toBe(1);
+  });
+
   it("renders persisted resources and binds idempotently", async () => {
     const { browser, app, branch, environment } = fixture({
       resources: [{ id: "app/web" }]

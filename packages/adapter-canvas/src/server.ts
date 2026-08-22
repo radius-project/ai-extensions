@@ -209,6 +209,12 @@ import {
 import { createGraphsPlanningWritesRoutes } from "./server/routes/graphs-planning-writes.js";
 import { createGraphPlanningWorkflows } from "./server/routes/graph-workflows.js";
 import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
+import {
+  beginGraphRepairAttempt,
+  clearGraphRepairAttempt,
+  graphRepairHandoffMessage,
+  type GraphRepairRequest
+} from "./graph-model-repair.js";
 import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
 import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
 import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
@@ -810,8 +816,14 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
     prepareSourceRefResources(entry, "graph", context),
   commitSourceRef: (entry, resources, context, expectedToken) =>
     setSourceRefResources(entry, "graph", resources, context, expectedToken),
+  isCurrentSourceRef: (entry, expectedToken) =>
+    isCurrentSourceRefToken(entry.state, "graph", expectedToken),
   triggerAppBicepHandoff: (entry, repo, branch) =>
     triggerAppBicepHandoff(entry, repo, branch, "graph"),
+  triggerGraphRepairHandoff: (entry, request) =>
+    triggerGraphRepairHandoff(entry, request),
+  clearGraphRepairAttempt: (entry) =>
+    clearGraphRepairAttempt(entry.state, "graph"),
   fetchBicepSelection: (entry, repo, branch) =>
     fetchBicepSelection(entry, repo, branch),
   listBranchPaths: (entry, repo, branch) =>
@@ -856,6 +868,12 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     }
   }),
   triggerAppBicepHandoff,
+  triggerGraphRepairHandoff: (entry, request) =>
+    triggerGraphRepairHandoff(entry, request),
+  clearGraphRepairAttempt: (entry, view) => {
+    clearGraphRepairAttempt(entry.state, view);
+    if (view === "diff") delete entry.state.diffModelingFailed;
+  },
   listBranchPaths: (entry, repo, branch) =>
     listBranchPaths(entry, repo, branch),
   prepareSourceRefResources: (entry, view, sourceRefInput) =>
@@ -879,6 +897,27 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   logError: (message) => console.error(message),
   now: () => Date.now()
 });
+
+function triggerGraphRepairHandoff(
+  entry: CanvasServerEntry,
+  request: GraphRepairRequest
+) {
+  if (request.view === "diff") entry.state.diffModelingFailed = true;
+  const attempt = beginGraphRepairAttempt(entry.state, request);
+  if (attempt.repairing) {
+    void invokeSessionPrompt(
+      sessionPromptHandler,
+      graphRepairHandoffMessage(request, attempt)
+    ).then((result) => {
+      if (result.status >= 400) {
+        console.error(
+          `[radius graph] failed to hand repair attempt ${attempt.attempt} to the agent: ${result.error}`
+        );
+      }
+    });
+  }
+  return attempt;
+}
 
 // Composition root for the read-only half of the `graphs-planning` family. The
 // Deployed route reads status through the cached artifact reader, but obtains its

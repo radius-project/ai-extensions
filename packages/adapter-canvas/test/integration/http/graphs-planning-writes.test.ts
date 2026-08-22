@@ -112,6 +112,13 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         readInstanceEntry: () => (entryMissing ? undefined : { state }),
         pipeline,
         triggerAppBicepHandoff: () => {},
+        triggerGraphRepairHandoff: () => ({
+          attempt: 1,
+          maxAttempts: 3,
+          repairing: true,
+          repairExhausted: false
+        }),
+        clearGraphRepairAttempt: () => {},
         listBranchPaths: () => Promise.resolve(active.branchPaths ?? []),
         prepareSourceRefResources,
         setSourceRefResources,
@@ -287,7 +294,12 @@ describe("graphs-planning writes real-loopback HIT", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({
-      error: GRAPH_MODELING_FAILURE_MESSAGE
+      error: GRAPH_MODELING_FAILURE_MESSAGE,
+      modelingFailed: true,
+      attempt: 1,
+      maxAttempts: 3,
+      repairing: true,
+      repairExhausted: false
     });
     expect(harness.state.graphLoaded).toBeUndefined();
     expect(loggedErrors).toEqual([

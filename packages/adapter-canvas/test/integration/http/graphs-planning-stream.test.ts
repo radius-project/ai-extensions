@@ -76,9 +76,18 @@ function start(): Harness {
         entry.state.graphResources = resources;
         return true;
       },
+      isCurrentSourceRef: (entry, expectedToken) =>
+        entry.state.sourceRefContexts?.graph?.token === expectedToken,
       triggerAppBicepHandoff: (_entry, repo, branch) => {
         handoffs.push({ repo, branch });
       },
+      triggerGraphRepairHandoff: () => ({
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
+      }),
+      clearGraphRepairAttempt: () => {},
       fetchBicepSelection: (_entry, _repo, _branch) => {
         if (script.fetchThrows) return Promise.reject(script.fetchThrows);
         return Promise.resolve(
@@ -373,7 +382,14 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
     const { frames } = await readFrames(response);
     expect(frames.at(-1)).toEqual({
       event: "done",
-      data: { error: GRAPH_MODELING_FAILURE_MESSAGE }
+      data: {
+        error: GRAPH_MODELING_FAILURE_MESSAGE,
+        modelingFailed: true,
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
+      }
     });
     // A failed compile leaves no provenance behind.
     expect(harness.state.graphTargetRepo).toBeUndefined();

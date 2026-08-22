@@ -2,9 +2,12 @@ import { RadProcessError } from "@radius-project/adapter-shared";
 import { GRAPH_MODELING_FAILURE_MESSAGE } from "./graph-progress-contract.js";
 
 export class GraphModelingFailure extends Error {
-  constructor(cause: unknown) {
-    super(GRAPH_MODELING_FAILURE_MESSAGE, { cause });
+  readonly diagnostic: string;
+
+  constructor(cause: unknown, diagnostic: string) {
+    super(graphModelingFailureMessage(diagnostic), { cause });
     this.name = "GraphModelingFailure";
+    this.diagnostic = diagnostic;
   }
 }
 
@@ -30,8 +33,21 @@ export function graphModelingDiagnostic(error: unknown): string | null {
 }
 
 export function asGraphModelingFailure(error: unknown): unknown {
-  if (graphModelingDiagnostic(error) !== null) {
-    return new GraphModelingFailure(error);
-  }
+  const diagnostic = graphModelingDiagnostic(error);
+  if (diagnostic !== null) return new GraphModelingFailure(error, diagnostic);
   return error;
+}
+
+export function graphModelingFailureMessage(diagnostic: string): string {
+  const line = diagnostic
+    .split(/\r?\n/u)
+    .find((candidate) => /\bBCP\d{3}\b/u.test(candidate));
+  if (!line) return GRAPH_MODELING_FAILURE_MESSAGE;
+  const match =
+    /(?:^|[\\/])(?<file>[^\\/()[\]\r\n]+\.bicep)\((?<line>\d+)(?:,\d+)?\)\s*:\s*(?:Error|Warning)\s+BCP\d{3}:\s*(?<detail>.*?)(?:\s+\[https?:\/\/.*)?$/iu.exec(
+      line
+    );
+  if (!match?.groups) return GRAPH_MODELING_FAILURE_MESSAGE;
+  const detail = match.groups.detail.trim();
+  return `${GRAPH_MODELING_FAILURE_MESSAGE} ${match.groups.file} line ${match.groups.line}: ${detail}`;
 }

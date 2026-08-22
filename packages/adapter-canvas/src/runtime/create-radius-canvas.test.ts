@@ -444,7 +444,7 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
   });
 
   it("records a graph-diff failure for the current comparison", async () => {
-    const { canvas, deps } = setup({
+    const { canvas, deps, sessionHolder } = setup({
       bicepByRepoBranch: {
         "remote:acme/widgets@main": "resource db {}",
         "remote:acme/widgets@feat": "resource db {}"
@@ -475,6 +475,53 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     expect(deps.logError).toHaveBeenCalledWith(
       "[radius graph] modeling failed for acme/widgets@main...feat: BCP035: invalid model"
     );
+    expect(deps.servers.get("radius-panel")!.state.diffModelingFailed).toBe(
+      true
+    );
+    const sent = vi.mocked(sessionHolder.get().send).mock.calls[0]?.[0] as {
+      prompt: string;
+      displayPrompt: string;
+    };
+    expect(sent.prompt).toContain("BCP035: invalid model");
+    expect(sent.prompt).toContain("attempt 1 of 3");
+    expect(sent.displayPrompt).not.toContain("BCP035");
+  });
+
+  it("preserves the compile failure when the Agent handoff cannot be delivered", async () => {
+    const { canvas, deps, sessionHolder } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "resource db {}",
+        "remote:acme/widgets@feat": "resource db {}"
+      }
+    });
+    vi.mocked(sessionHolder.get().send).mockRejectedValue(
+      new Error("session unavailable")
+    );
+    vi.mocked(deps.rad.buildGraphViaRad).mockRejectedValue(
+      new Error("rad app graph failed", {
+        cause: new RadProcessError(
+          "rad exited with code 1",
+          "BCP035: invalid model",
+          ""
+        )
+      })
+    );
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "feat"
+      })
+    );
+
+    expect(deps.servers.get("radius-panel")!.state.diffError).toBe(
+      GRAPH_MODELING_FAILURE_MESSAGE
+    );
+    expect(deps.logError).toHaveBeenCalledWith(
+      expect.stringContaining("session unavailable")
+    );
   });
 
   it("preserves a graph-diff toolchain failure without Bicep diagnostics", async () => {
@@ -491,6 +538,8 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         "connection refused"
       )
     );
+    const entry = await deps.getOrCreateServer("radius-panel", "graph-diff");
+    entry.state.diffModelingFailed = true;
 
     await canvas.open(
       ctx("radius-panel", {
@@ -505,14 +554,29 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
       "managed Bicep download failed"
     );
     expect(deps.logError).not.toHaveBeenCalled();
+    expect(entry.state.diffModelingFailed).toBeUndefined();
   });
 
   it("only records a diff error for the CURRENT diff request (stale responses are ignored)", async () => {
-    const { canvas, deps } = setup();
+    const { canvas, deps, sessionHolder } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "resource db {}",
+        "remote:acme/widgets@feat": "resource db {}",
+        "remote:acme/widgets@other": "resource db {}"
+      }
+    });
     // First compare fails...
     (
       deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>
-    ).mockRejectedValueOnce(new Error("boom"));
+    ).mockRejectedValueOnce(
+      new Error("rad app graph failed", {
+        cause: new RadProcessError(
+          "rad exited with code 1",
+          "BCP035: stale invalid model",
+          ""
+        )
+      })
+    );
     const firstOpen = canvas.open(
       ctx("radius-panel", {
         page: "graph-diff",
@@ -537,6 +601,7 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     await firstOpen;
     // The stale failure must not have clobbered the current (successful) state.
     expect(deps.servers.get("radius-panel")!.state.diffError).toBeUndefined();
+    expect(sessionHolder.get().send).not.toHaveBeenCalled();
   });
 
   it("does not let a late graph result mutate the same instance after deferred close and reopen", async () => {

@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-Report a graph modeling failure in the Radius canvas as one short message instead of rendering `rad`'s raw `app.bicep` validation output as graph content, and send the compiler detail to the server log.
+Report graph modeling failures as concise graph-surface messages, hand full compiler diagnostics to the Agent for bounded automatic repair, and keep deployment actions disabled until the application model compiles.

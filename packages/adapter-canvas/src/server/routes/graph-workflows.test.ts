@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RadProcessError } from "@radius-project/adapter-shared";
 import {
   computeGraphDiff,
@@ -220,6 +220,13 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     triggerAppBicepHandoff: (handoffEntry, repo, branches, page) => {
       handoffs.push({ repo, branches, page, hasEntry: !!handoffEntry });
     },
+    triggerGraphRepairHandoff: () => ({
+      attempt: 1,
+      maxAttempts: 3,
+      repairing: true,
+      repairExhausted: false
+    }),
+    clearGraphRepairAttempt: () => {},
     listBranchPaths: (_entry, _repo, branch) =>
       Promise.resolve(harnessScript.branchPaths?.[branch] ?? []),
     prepareSourceRefResources,
@@ -615,12 +622,21 @@ describe("graph planning workflows", () => {
         staged: { main: { dir: "/tmp/staged", remote: false } },
         compileThrows: { main: validationFailure(radOutput) }
       });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
 
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
 
       expect(outcome.status).toBe(400);
       expect(outcome.payload).toEqual({
-        error: GRAPH_MODELING_FAILURE_MESSAGE
+        error: `${GRAPH_MODELING_FAILURE_MESSAGE} app.bicep line 31: The specified "object" declaration is missing the following required properties: "application".`,
+        modelingFailed: true,
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
       });
       expect(messages(harness.state)).not.toContain(radOutput);
       expect(
@@ -631,6 +647,36 @@ describe("graph planning workflows", () => {
       expect(harness.loggedErrors).toEqual([
         `[radius graph] modeling failed for octo/app@main: ${radOutput}`
       ]);
+      expect(repair).toHaveBeenCalledWith(harness.entry, {
+        view: "graph",
+        repo: "octo/app",
+        branches: ["main"],
+        diagnostic: radOutput
+      });
+    });
+
+    it("does not repair a modeled failure after its source selection changes", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: false } },
+        compileThrows: {
+          main: validationFailure("BCP035: stale invalid model")
+        },
+        afterStage: () => {
+          prepareSourceRefResources(harness.entry, "graph", {
+            repo: "octo/other",
+            branch: "main"
+          });
+        }
+      });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(repair).not.toHaveBeenCalled();
     });
 
     it("preserves a graph toolchain failure that has no Bicep diagnostic", async () => {
@@ -1024,6 +1070,33 @@ describe("graph planning workflows", () => {
       expect(outcome.kind).toBe("json");
       expect(harness.state.plannedRepo).toBeUndefined();
     });
+
+    it("does not repair a planned failure after its source selection changes", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ branch: "main" }) },
+        staged: { main: { dir: "/tmp/stage", remote: true } },
+        compileThrows: {
+          main: validationFailure("BCP035: stale invalid plan")
+        },
+        afterStage: () => {
+          prepareSourceRefResources(harness.entry, "planned", {
+            repo: "octo/other",
+            branch: "main"
+          });
+        }
+      });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
+
+      await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","branch":"main","provider":"azure"}'
+      );
+
+      expect(repair).not.toHaveBeenCalled();
+    });
   });
 
   describe("POST /api/diff-branches", () => {
@@ -1308,7 +1381,12 @@ describe("graph planning workflows", () => {
       expect(outcome.status).toBe(400);
       expect(outcome.kind).toBe("json");
       expect(outcome.payload).toEqual({
-        error: GRAPH_MODELING_FAILURE_MESSAGE
+        error: GRAPH_MODELING_FAILURE_MESSAGE,
+        modelingFailed: true,
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
       });
       // The compare page reads `diffError` straight into its markup, so the
       // recorded failure is the same short sentence, not rad's output.
@@ -1328,7 +1406,9 @@ describe("graph planning workflows", () => {
           main: { dir: "", remote: false },
           "feature/x": { dir: "", remote: false }
         },
-        compileThrows: { main: new Error("rad exited 1") },
+        compileThrows: {
+          main: validationFailure("BCP035: stale invalid model")
+        },
         afterStage: () => {
           // Only fires once both sides have staged; harmless to run twice.
           prepareSourceRefResources(harness.entry, "diff", {
@@ -1338,6 +1418,10 @@ describe("graph planning workflows", () => {
           });
         }
       });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
 
       const outcome = await harness.run("diffBranches", diffBody);
 
@@ -1345,6 +1429,7 @@ describe("graph planning workflows", () => {
       // The failure belongs to a selection no longer on screen, so it must not
       // paint an error over the newer one.
       expect(harness.state.diffError).toBeUndefined();
+      expect(repair).not.toHaveBeenCalled();
     });
   });
 
@@ -1434,7 +1519,12 @@ describe("graph planning workflows", () => {
 
       expect(outcome.status).toBe(400);
       expect(outcome.payload).toEqual({
-        error: GRAPH_MODELING_FAILURE_MESSAGE
+        error: GRAPH_MODELING_FAILURE_MESSAGE,
+        modelingFailed: true,
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
       });
       // rad's Bicep diagnostics are the exact text issue #475 kept out of the
       // graph surface: they survive only in the server log.

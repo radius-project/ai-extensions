@@ -28,9 +28,13 @@ import type { CanvasServerEntry } from "../server.js";
 import type { CanvasGraphResource, CanvasState } from "../shared.js";
 import {
   asGraphModelingFailure,
-  graphModelingDiagnostic,
   GraphModelingFailure
 } from "../graph-modeling-failure.js";
+import {
+  beginGraphRepairAttempt,
+  clearGraphRepairAttempt,
+  graphRepairHandoffMessage
+} from "../graph-model-repair.js";
 
 const MAX_DEFERRED_ENVIRONMENT_CLOSE_MS = 46 * 60 * 1000;
 
@@ -377,6 +381,7 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
         entry.state.diffHead = headBranch;
         entry.state.diffTargetRepo = repo;
         delete entry.state.diffError;
+        delete entry.state.diffModelingFailed;
         try {
           const [baseContent, headContent] = await Promise.all([
             fetchBicepForBranch(repo, baseBranch, entry.state),
@@ -442,11 +447,37 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
           } catch (error) {
             const failure = asGraphModelingFailure(error);
             if (!(failure instanceof GraphModelingFailure)) throw error;
-            const diagnostic =
-              graphModelingDiagnostic(error) ?? errorMessage(error);
             deps.logError(
-              `[radius graph] modeling failed for ${repo}@${baseBranch}...${headBranch}: ${diagnostic}`
+              `[radius graph] modeling failed for ${repo}@${baseBranch}...${headBranch}: ${failure.diagnostic}`
             );
+            const request = {
+              view: "diff" as const,
+              repo: repo || "",
+              branches: [baseBranch, headBranch],
+              diagnostic: failure.diagnostic
+            };
+            if (
+              !isCurrentSourceRefToken(
+                entry.state,
+                "diff",
+                sourceRefContext.token
+              )
+            ) {
+              throw failure;
+            }
+            const attempt = beginGraphRepairAttempt(entry.state, request);
+            entry.state.diffModelingFailed = true;
+            if (attempt.repairing) {
+              try {
+                await deps.session
+                  .get()
+                  .send(graphRepairHandoffMessage(request, attempt));
+              } catch (handoffError) {
+                deps.logError(
+                  `[radius graph] failed to hand repair attempt ${attempt.attempt} to the agent: ${errorMessage(handoffError)}`
+                );
+              }
+            }
             throw failure;
           }
           const diffResources = deps.core.computeGraphDiff(
@@ -461,6 +492,8 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
             sourceRefContext.token
           );
           if (committed) {
+            clearGraphRepairAttempt(entry.state, "diff");
+            delete entry.state.diffModelingFailed;
             const hasChanges = diffResources.some(
               (r) => r.diffStatus !== "unchanged"
             );

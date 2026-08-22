@@ -198,7 +198,15 @@ const productionHandlers = {
     defaultBranchForState: () => "main",
     prepareSourceRef: () => ({ token: "" }),
     commitSourceRef: () => true,
+    isCurrentSourceRef: () => true,
     triggerAppBicepHandoff: () => {},
+    triggerGraphRepairHandoff: () => ({
+      attempt: 1,
+      maxAttempts: 3,
+      repairing: true,
+      repairExhausted: false
+    }),
+    clearGraphRepairAttempt: () => {},
     fetchBicepSelection: () =>
       Promise.resolve({
         content: null,
@@ -236,6 +244,13 @@ const productionHandlers = {
         removeDirectory: () => {}
       }),
       triggerAppBicepHandoff: () => {},
+      triggerGraphRepairHandoff: () => ({
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
+      }),
+      clearGraphRepairAttempt: () => {},
       listBranchPaths: () => Promise.resolve([]),
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,

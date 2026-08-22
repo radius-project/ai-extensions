@@ -190,6 +190,23 @@ describe("initializeGraphPage", () => {
     expect(branch.listenerCount()).toBe(0);
   });
 
+  it("disables Plan Deployment while a loaded graph is being refreshed", async () => {
+    const { browser, button } = fixture({ loaded: true });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    browser.net.handle(
+      "/api/load-graph",
+      () => createDeferred<HttpResponse>().promise
+    );
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("plan");
+    expect(button.disabled).toBe(true);
+  });
+
   it("polls progress immediately and then once per interval, ignoring a late response", async () => {
     const { browser } = fixture({ loaded: false });
     browser.net.supportsAbort = false;
@@ -262,6 +279,51 @@ describe("initializeGraphPage", () => {
     expect(setError).toHaveBeenCalledTimes(1);
     expect(status?.textContent).toBe("");
     expect(status?.style.display).toBe("none");
+  });
+
+  it("disables planning when the selected model does not compile", async () => {
+    const setError = vi.fn();
+    const { browser, button, branch } = fixture({ loaded: false });
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        error: "Your application model couldn't be compiled.",
+        modelingFailed: true
+      })
+    );
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
+    await flushPromises();
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "until the application model"
+    );
+    expect(branch.listenerCount("change")).toBe(1);
+  });
+
+  it("keeps Plan Deployment disabled while a changed branch is compiling", async () => {
+    const { browser, branch, button } = fixture({ loaded: true });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/web" }] })
+    );
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(button.dataset.mode).toBe("plan");
+
+    browser.net.handle(
+      "/api/load-graph",
+      () => createDeferred<HttpResponse>().promise
+    );
+    branch.value = "another";
+    branch.dispatch("change");
+
+    expect(button.disabled).toBe(true);
   });
 
   it("silently skips the status update when no status element exists", async () => {

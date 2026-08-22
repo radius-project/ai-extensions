@@ -4,7 +4,6 @@ import {
 } from "@radius-project/core";
 import {
   asGraphModelingFailure,
-  graphModelingDiagnostic,
   GraphModelingFailure
 } from "../../graph-modeling-failure.js";
 import type { DeployStatus } from "@radius-project/core";
@@ -13,6 +12,10 @@ import type {
   WorkflowArtifact
 } from "../../deploy-artifacts.js";
 import { recordGraphBuildEvent } from "../../shared.js";
+import type {
+  GraphRepairAttempt,
+  GraphRepairRequest
+} from "../../graph-model-repair.js";
 import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { GraphProgressRecord, GraphProgressView } from "../../shared.js";
@@ -566,11 +569,17 @@ export interface GraphsPlanningStreamDependencies {
     context: { repo: string; branch: string },
     expectedToken: string
   ): boolean;
+  isCurrentSourceRef(entry: CanvasServerEntry, expectedToken: string): boolean;
   triggerAppBicepHandoff(
     entry: CanvasServerEntry,
     repo: string,
     branch: string
   ): void;
+  triggerGraphRepairHandoff(
+    entry: CanvasServerEntry,
+    request: GraphRepairRequest
+  ): GraphRepairAttempt;
+  clearGraphRepairAttempt(entry: CanvasServerEntry): void;
   fetchBicepSelection(
     entry: CanvasServerEntry,
     repo: string,
@@ -706,10 +715,8 @@ export async function handleLoadGraphStream(
     } catch (error) {
       const failure = asGraphModelingFailure(error);
       if (!(failure instanceof GraphModelingFailure)) throw error;
-      const diagnostic =
-        graphModelingDiagnostic(error) ?? dependencies.errorMessage(error);
       dependencies.logError(
-        `[radius graph] modeling failed for ${repo}@${branch}: ${diagnostic}`
+        `[radius graph] modeling failed for ${repo}@${branch}: ${failure.diagnostic}`
       );
       throw failure;
     }
@@ -733,9 +740,32 @@ export async function handleLoadGraphStream(
     // supplied the app.bicep content (file is on disk).
     entry.state.graphFromWorkspace = selection.fromWorkspace;
     entry.state.activeGraphView = "graph";
+    dependencies.clearGraphRepairAttempt(entry);
 
     sendDone({ reload: true });
   } catch (e) {
+    const failure = asGraphModelingFailure(e);
+    if (failure instanceof GraphModelingFailure) {
+      dependencies.logError(
+        `[radius graph] modeling failed for ${repo}@${branch}: ${failure.diagnostic}`
+      );
+      if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
+        sendDone({ stale: true });
+        return;
+      }
+      const attempt = dependencies.triggerGraphRepairHandoff(entry, {
+        view: "graph",
+        repo,
+        branches: [branch],
+        diagnostic: failure.diagnostic
+      });
+      sendDone({
+        error: failure.message,
+        modelingFailed: true,
+        ...attempt
+      });
+      return;
+    }
     sendDone({ error: dependencies.errorMessage(e) });
   }
 }
