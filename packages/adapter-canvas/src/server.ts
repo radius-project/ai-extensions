@@ -283,6 +283,7 @@ import {
   recoverVerificationRun,
   verificationActionsUrl
 } from "./server/services/recovered-verification-run.js";
+import { planRecoveredCleanup } from "./server/services/recovered-cleanup-command.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
@@ -5342,40 +5343,37 @@ function createInstanceRequestCoordinator(
     });
     if (outcome.state === "removed") {
       addLegacyStep(op, `✅ ${outcome.evidence}`);
-      const cleanupCommand = savedCleanupCommand(op);
-      if (cleanupCommand) {
+      // `operations.persist` rather than the best-effort save: a command a
+      // runner executes but no reload can find is the one shape that lets the
+      // same deletion be scheduled again after the next restart.
+      const plan = await planRecoveredCleanup({
+        operation: op,
+        persist: () => operations.persist()
+      });
+      if (plan.state === "resume" || plan.state === "start") {
+        if (plan.state === "start") {
+          addLegacyStep(
+            op,
+            "⏳ Rolling back the resources this interrupted attempt created."
+          );
+        }
         await saveOperation(op);
-        await runCleanupCommand(
-          cleanupCommand.kind,
-          operationId,
-          cleanupCommand.commandId
-        );
+        await runCleanupCommand(plan.kind, operationId, plan.commandId);
         return;
       }
-      // No cleanup command was ever accepted, so the record has to become
-      // terminal for one to run. The branch this recovery was blocking on is
-      // provably gone, which is the condition the rest of the reconciled
-      // rollback was waiting for — so this hands off to the same automatic
-      // recovery rollback every other settled reconciliation uses rather than
-      // asking the customer to start a removal Radius already decided on. A
-      // record that still owes an answer elsewhere is not that condition, and
-      // claiming a rollback had begun would describe work nothing will do.
-      const canHandOff =
-        unresolvedProviderMutations(op).length === 0 &&
-        !providerRecoveryManualGuidance(op);
-      if (canHandOff && op.providerRecovery) {
-        op.providerRecovery.state = "rollback_pending";
-        op.providerRecovery.guidance = null;
-      }
+      // Nothing is left to remove, or a provider answer is still outstanding.
+      // The record has to become terminal either way so the panel stops showing
+      // work nothing will do, and so the refusal the gates already compute is
+      // the one the customer reads.
       finish(op, "failed_partial", {
         failure: {
           code: "setup-branch-removed-pending-rollback",
           stage: op.currentStage,
           stepSeq: null,
           message:
-            canHandOff ?
-              "Radius removed the setup branch an interrupted attempt had created. It is now rolling back the resources it can prove it owns."
-            : "Radius removed the setup branch an interrupted attempt had created. The resources it can prove it owns are still in place and can be rolled back.",
+            plan.state === "blocked" ?
+              `Radius removed the setup branch an interrupted attempt had created, but it cannot remove anything else yet. ${plan.detail}`
+            : "Radius removed the setup branch an interrupted attempt had created. Nothing else from this attempt is left to remove.",
           classification: "user-fixable",
           evidence: null
         }
@@ -5426,25 +5424,46 @@ function createInstanceRequestCoordinator(
     await saveOperation(op);
   }
 
-  function savedCleanupCommand(op: {
-    control?: {
-      commands?: Array<{ commandId?: string; kind?: string; state?: string }>;
-    };
-  }): { commandId: string; kind: CleanupCommandKind } | null {
-    const found = [...(op.control?.commands || [])].reverse().find(
-      (
-        entry
-      ): entry is {
-        commandId: string;
-        kind: CleanupCommandKind;
-        state?: string;
-      } =>
-        typeof entry.commandId === "string" &&
-        (entry.kind === "rollback" ||
-          entry.kind === "retry_cleanup" ||
-          entry.kind === "exit_setup")
-    );
-    return found ? { commandId: found.commandId, kind: found.kind } : null;
+  /**
+   * Run the deletion a reconciled operation decided on, opening one if needed.
+   *
+   * Reconciliation reaching `rollback_pending` is a decision, not a command:
+   * without a durable command behind it the record would sit running with no
+   * pass to execute and no entry the panel could name. Resolving it here keeps
+   * that decision and the command that carries it out in one place, whether the
+   * pass was already in flight when the process went away or has to be opened.
+   */
+  async function runRecoveredCleanup(operationId: string): Promise<void> {
+    const op = operations.get(operationId);
+    if (!op || op.endedAt) return;
+    const plan = await planRecoveredCleanup({
+      operation: op,
+      persist: () => operations.persist()
+    });
+    if (plan.state === "resume" || plan.state === "start") {
+      await runCleanupCommand(plan.kind, operationId, plan.commandId);
+      return;
+    }
+    // Nothing executable is left. Terminalizing is what stops the record from
+    // holding the repository open for a pass that will never be scheduled; the
+    // destructive gates then decide what, if anything, the customer is offered.
+    finish(op, "failed_partial", {
+      failure: {
+        code:
+          plan.state === "blocked" ?
+            "provider-reconciliation-manual-required"
+          : "setup-rollback-nothing-owned",
+        stage: op.currentStage,
+        stepSeq: null,
+        message:
+          plan.state === "blocked" ?
+            plan.detail
+          : "Radius reconciled the interrupted setup and found nothing it can prove it created, so it removed nothing.",
+        classification: "user-fixable",
+        evidence: null
+      }
+    });
+    await saveOperation(op);
   }
 
   function scheduleRecoveredProviderMutation(op: {
@@ -5469,17 +5488,10 @@ function createInstanceRequestCoordinator(
         scheduleEnvironmentOperation(op);
         return;
       }
-      const cleanupCommand = savedCleanupCommand(op);
-      if (cleanupCommand) {
-        scheduleServerOwnedTask(op.operationId, () =>
-          runCleanupCommand(
-            cleanupCommand.kind,
-            op.operationId,
-            cleanupCommand.commandId
-          )
-        );
-        return;
-      }
+      scheduleServerOwnedTask(op.operationId, () =>
+        runRecoveredCleanup(op.operationId)
+      );
+      return;
     }
     const retryDispatch = unresolvedProviderMutations(op).some(
       (mutation) => mutation.kind === "github_workflow.dispatch_retry"
