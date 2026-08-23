@@ -22,6 +22,7 @@ export interface EnvironmentOperationRecord {
       state: string;
       repo: string | null;
       name: string | null;
+      providerId: string | null;
     };
   };
 }
@@ -60,7 +61,13 @@ export interface EnvironmentOperationWorkflowDependencies {
   ): void;
   recordGitHubEnvironment(
     operation: EnvironmentOperationRecord,
-    patch: { state: string; repo: string; name: string; origin?: string }
+    patch: {
+      state: string;
+      repo: string;
+      name: string;
+      providerId?: string | null;
+      origin?: string;
+    }
   ): void;
   promoteCreatedGitHubEnvironment(
     operation: EnvironmentOperationRecord,
@@ -196,6 +203,10 @@ export async function runEnvironmentOperationWorkflow(
     state: ensured.state,
     repo: operation.repo,
     name: ensured.name,
+    // GitHub's own id for the environment, so a rollback can tell what this
+    // request wrote from a replacement the customer created under the same
+    // name. Without it the cleanup gate has nothing to match and refuses.
+    providerId: ensured.providerId,
     origin: ensured.state === "reused" ? "pre_existing" : "unknown"
   });
   if (
