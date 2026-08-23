@@ -21,6 +21,7 @@ import {
   srcLineFromRef,
   srcPathFromRef
 } from "./model.js";
+import { azurePortalUrl } from "./details.js";
 // Imported from the `graph` subpath rather than the package root: the root
 // barrel also re-exports the workflow modules, and `workflows/delete.ts` reads
 // `process.env` at module scope. Bundling that into a browser entry ships a
@@ -384,7 +385,7 @@ export function buildGraph(
         resource.portalUrl ||
         resolved?.portalUrl ||
         (resolved?.id?.startsWith("/subscriptions/") ?
-          `https://portal.azure.com/#@/resource${encodeURI(resolved.id)}/overview`
+          azurePortalUrl(resolved.id)
         : ""),
       cloudResources: JSON.stringify(cloudOutputsOf(resource))
     });

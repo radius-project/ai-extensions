@@ -94,7 +94,7 @@ export interface GraphSurface {
   ): GraphController | null;
   setLoading(containerId: string): void;
   setError(containerId: string, message: string): void;
-  openExternal(url: string): boolean;
+  openExternal(url: string): void;
   openLocalSource(relPath: string, line: number, fallbackUrl: string): void;
   destroyAll(): void;
 }
@@ -114,18 +114,16 @@ export function createGraphSurface(
 
   // Open an external URL the way clicking a native target="_blank" anchor
   // would, which the host opens in the system browser.
-  function openExternal(url: string): boolean {
+  function openExternal(url: string): void {
     const safeUrl = safeExternalUrl(url);
-    if (!safeUrl) return false;
-    return context.external.open(safeUrl);
+    if (safeUrl) context.external.open(safeUrl);
   }
 
   // Open a repo-relative worktree file in the Copilot editor canvas. The
   // webview has no SDK session handle, so it asks the local canvas server,
   // which opens the file in the editor. localSource is a coarse page-level flag
   // (repo and branch match the workspace), so a file that is not actually on
-  // this checkout answers non-2xx and the click falls back to the remote URL —
-  // the link is never a dead end.
+  // this checkout answers non-2xx and the page attempts the remote fallback.
   function openLocalSource(
     relPath: string,
     line: number,
@@ -342,8 +340,13 @@ export function createGraphSurface(
         }
         const rebuilt = buildGraph(settings, next);
         layoutGraph(vendor.dagre, rebuilt.nodes, rebuilt.edges);
-        if (record.legend && settings.deployMode) {
-          record.legend.innerHTML = buildStatusLegendHtml(rebuilt.resources);
+        if (record.legend) {
+          record.legend.innerHTML =
+            settings.deployMode ?
+              buildStatusLegendHtml(rebuilt.resources)
+            : buildCategoryLegendHtml(
+                collectLegendCategories(rebuilt.resources)
+              );
         }
         if (!mounted.update(rebuilt.nodes, rebuilt.edges)) {
           return render(containerId, next, options);

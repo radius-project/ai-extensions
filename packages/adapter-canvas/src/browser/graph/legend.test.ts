@@ -19,7 +19,11 @@ describe("status legend", () => {
       "Deployed",
       "Failed"
     ]);
-    const html = buildStatusLegendHtml();
+    const html = buildStatusLegendHtml([
+      { name: "pending", deployStatus: "pending" },
+      { name: "deployed", deployStatus: "success" },
+      { name: "failed", deployStatus: "failed" }
+    ]);
     expect(html.split('class="legend-item"').length - 1).toBe(3);
     expect(html).toContain("Pending / deploying");
     expect(html.split("data:image/svg+xml,").length - 1).toBe(3);

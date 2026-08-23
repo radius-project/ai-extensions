@@ -232,7 +232,29 @@ describe("parseDeployProgressArtifact", () => {
     it("preserves a producer graph beneath Rad build progress output", () => {
       expect(
         parseDeployGraphArtifact(
-          `Compiling .radius/app.bicep\nBuilding {model}...\n${JSON.stringify(graph)}\n`
+          `Compiling .radius/app.bicep\nBuilding {model}...\n${JSON.stringify(graph)}\nDone in 4.2s\n`
+        )
+      ).toEqual(graph);
+    });
+
+    it("ignores structured log records before and after the graph document", () => {
+      const graphWithBraces = {
+        ...graph,
+        resources: [
+          { ...graph.resources[0], message: "created {successfully}" }
+        ]
+      };
+      expect(
+        parseDeployGraphArtifact(
+          `${JSON.stringify({ level: "info" })}\n${JSON.stringify(graphWithBraces)}\n${JSON.stringify({ level: "done" })}\n`
+        )
+      ).toEqual(graphWithBraces);
+    });
+
+    it("ignores non-resource array log records before the graph document", () => {
+      expect(
+        parseDeployGraphArtifact(
+          `${JSON.stringify(["starting build"])}\n${JSON.stringify(graph)}\n`
         )
       ).toEqual(graph);
     });
@@ -249,6 +271,10 @@ describe("parseDeployProgressArtifact", () => {
       expect(parseDeployGraphArtifact("")).toBeNull();
       expect(parseDeployGraphArtifact("progress\n42")).toBeNull();
       expect(parseDeployGraphArtifact("progress\n{broken")).toBeNull();
+      expect(
+        parseDeployGraphArtifact('{"level":"info"}\n{"message":"done"}')
+      ).toBeNull();
+      expect(parseDeployGraphArtifact('["starting build"]')).toBeNull();
     });
   });
 
@@ -954,7 +980,8 @@ describe("createDeployStatusReader", () => {
                 outputResources: [{ id: "/subscriptions/sub/mysql", portalUrl }]
               }
             ]
-          })
+          }) +
+          '\n{"level":"info","message":"complete"}\n'
       })
     });
 

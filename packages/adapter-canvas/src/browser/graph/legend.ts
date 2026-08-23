@@ -32,19 +32,12 @@ export const STATUS_LEGEND_ITEMS: ReadonlyArray<{
 ];
 
 export function buildStatusLegendHtml(
-  resources?: readonly GraphResource[]
+  resources: readonly GraphResource[]
 ): string {
-  const visibleKinds =
-    resources ?
-      new Set(
-        resources.map((resource) =>
-          radiusDeployBadgeKind(resource.deployStatus)
-        )
-      )
-    : null;
-  return STATUS_LEGEND_ITEMS.filter(
-    (item) => visibleKinds === null || visibleKinds.has(item.kind)
-  )
+  const visibleKinds = new Set(
+    resources.map((resource) => radiusDeployBadgeKind(resource.deployStatus))
+  );
+  return STATUS_LEGEND_ITEMS.filter((item) => visibleKinds.has(item.kind))
     .map(
       (item) =>
         '<div class="legend-item"><img src="' +

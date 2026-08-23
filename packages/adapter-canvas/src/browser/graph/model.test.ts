@@ -152,7 +152,8 @@ describe("radiusDeployBadgeSvg", () => {
     );
     expect(fallback).toContain('stroke="#0969da"');
     expect(fallback).toContain("animation:spin 1s linear infinite");
-    expect(fallback).toContain("prefers-reduced-motion:no-preference");
+    expect(fallback).toContain("prefers-reduced-motion:reduce");
+    expect(fallback).toContain(".spinner{animation:none}");
     expect(radiusDeployBadgeSvg("anything-else")).toBe(radiusDeployBadgeSvg());
   });
 

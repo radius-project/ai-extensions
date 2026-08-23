@@ -334,22 +334,69 @@ export function parseDeployProgressArtifact(
  */
 export function parseDeployGraphArtifact(text?: string | null): unknown | null {
   if (!text) return null;
-  for (let index = 0; index < text.length; index++) {
-    const first = text[index];
+  let arrayGraph: unknown[] | null = null;
+  for (let start = 0; start < text.length; start++) {
+    const first = text[start];
     if (first !== "{" && first !== "[") continue;
+    const expectedClosers: string[] = [];
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+    for (let index = start; index < text.length; index++) {
+      const character = text[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (character === "\\") {
+          escaped = true;
+        } else if (character === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+      } else if (character === "{") {
+        expectedClosers.push("}");
+      } else if (character === "[") {
+        expectedClosers.push("]");
+      } else if (character === "}" || character === "]") {
+        if (expectedClosers.pop() !== character) break;
+        if (expectedClosers.length === 0) {
+          end = index + 1;
+          break;
+        }
+      }
+    }
+    if (end < 0) continue;
     try {
-      const parsed: unknown = JSON.parse(text.slice(index).trim());
-      if (
-        parsed !== null &&
-        (Array.isArray(parsed) || typeof parsed === "object")
-      ) {
+      const parsed: unknown = JSON.parse(text.slice(start, end));
+      if (isRecord(parsed) && isGraphResourceArray(parsed.resources)) {
         return parsed;
       }
+      if (isGraphResourceArray(parsed) && arrayGraph === null) {
+        arrayGraph = parsed;
+      }
     } catch {
-      // A brace in the preamble is not the JSON document; keep scanning.
+      // A balanced fragment in the preamble is not necessarily valid JSON.
     }
   }
-  return null;
+  return arrayGraph;
+}
+
+function isGraphResourceArray(value: unknown): value is unknown[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (resource) =>
+        isRecord(resource) &&
+        ("id" in resource ||
+          "name" in resource ||
+          "type" in resource ||
+          "connections" in resource ||
+          "outputResources" in resource)
+    )
+  );
 }
 
 function normalizeDeployStatusField(value: unknown): DeployStatus | undefined {

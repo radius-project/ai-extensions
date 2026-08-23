@@ -435,6 +435,7 @@ export async function handleDeployedGraph(
     : [];
 
   const plannedMetadataMatchesSelection =
+    terminalConclusion !== "failure" &&
     !!state.deployProvider &&
     state.plannedProvider === state.deployProvider &&
     state.plannedRepo === repo &&

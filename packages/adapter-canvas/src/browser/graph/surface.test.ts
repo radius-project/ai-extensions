@@ -386,6 +386,27 @@ describe("controller", () => {
     );
   });
 
+  it("updates a category legend without remounting the graph", () => {
+    const harness = setup();
+    const controller = harness.surface.render(
+      "graph-container",
+      [{ id: "app/web", name: "web", type: "Radius.Compute/containers" }],
+      { showLegend: true }
+    );
+    const app = childComponent(harness.vendor!.reactDom.roots[0].rendered[0]);
+    app.type(app.props);
+    harness.vendor!.react.runEffects();
+    const legend = harness.parent.inserted[0][0] as FakeElement;
+    expect(legend.innerHTML).toContain("Compute");
+
+    controller?.update([
+      { id: "app/cache", name: "cache", type: "Radius.Cache/redisCaches" }
+    ]);
+
+    expect(legend.innerHTML).toContain("Cache");
+    expect(legend.innerHTML).not.toContain("Compute");
+  });
+
   it("remounts when React has not bound the updater yet", () => {
     const harness = setup();
     const controller = harness.surface.render("graph-container", RESOURCES);

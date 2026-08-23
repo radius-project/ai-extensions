@@ -125,7 +125,7 @@ export function radiusDeployBadgeSvg(kind?: string): string {
     // to the shared asset so every consumer (node and legend) has the same
     // indefinite lifecycle; terminal states replace this asset entirely.
     svg =
-      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><style>@keyframes spin{to{transform:rotate(360deg)}}@media (prefers-reduced-motion:no-preference){.spinner{animation:spin 1s linear infinite;transform-origin:8px 8px}}</style><circle cx="8" cy="8" r="5.5" stroke="#8c959f" stroke-width="2" opacity=".35"/><g class="spinner"><path d="M8 2.5a5.5 5.5 0 015.5 5.5" stroke="#0969da" stroke-width="2" stroke-linecap="round"/></g></svg>';
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><style>@keyframes spin{to{transform:rotate(360deg)}}.spinner{animation:spin 1s linear infinite;transform-origin:8px 8px}@media (prefers-reduced-motion:reduce){.spinner{animation:none}}</style><circle cx="8" cy="8" r="5.5" stroke="#8c959f" stroke-width="2" opacity=".35"/><g class="spinner"><path d="M8 2.5a5.5 5.5 0 015.5 5.5" stroke="#0969da" stroke-width="2" stroke-linecap="round"/></g></svg>';
   }
   svg = svg.replace("<svg ", '<svg width="40" height="40" ');
   const uri = "data:image/svg+xml," + encodeURIComponent(svg);
