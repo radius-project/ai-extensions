@@ -1241,7 +1241,7 @@ describe("repair budget", () => {
     assert.match(result.stderr, /repair budget is now spent/u);
   });
 
-  it("refuses a fourth compile without running Bicep at all", () => {
+  it("refuses a compile past the budget without running Bicep at all", () => {
     const directory = temporaryDirectory();
     stagedRun(directory, {
       attempts: REPAIR_ATTEMPT_BUDGET,

@@ -380,6 +380,30 @@ describe("parseRepairState", () => {
     expect(parseRepairState({ attempts }).attempts).toBe(0);
   });
 
+  // A fingerprint describes what the previous attempt failed with, so an
+  // unusable count leaves it describing nothing. Keeping it would report the
+  // run's first compile as a repeat and tell the agent to change a fix it has
+  // not made yet.
+  it.each([
+    ["a negative count", -1],
+    ["zero", 0],
+    ["a fractional count", 1.5],
+    ["a numeric string", "2"],
+    ["NaN", Number.NaN],
+    ["a missing count", undefined]
+  ])("drops the fingerprint alongside %s", (_name, attempts) => {
+    expect(parseRepairState({ attempts, fingerprint: "abc" })).toEqual({
+      attempts: 0,
+      fingerprint: null
+    });
+  });
+
+  it("does not call the first compile a repeat after a malformed record", () => {
+    const state = parseRepairState({ attempts: "many", fingerprint: "abc" });
+
+    expect(isRepeatedFailure(state, "abc")).toBe(false);
+  });
+
   it.each([
     ["an empty fingerprint", ""],
     ["a blank fingerprint", "   "],

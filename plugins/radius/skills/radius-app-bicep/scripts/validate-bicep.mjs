@@ -51,15 +51,19 @@ function parseRepairState(value) {
   }
   const attempts = value.attempts;
   const fingerprint = value.fingerprint;
+  // The two fields are read as one fact, not two. A fingerprint only means
+  // "what the previous attempt failed with", so without a usable count there is
+  // no previous attempt for it to describe, and keeping it would report the
+  // first compile of the run as a repeat.
+  if (
+    typeof attempts !== "number" ||
+    !Number.isInteger(attempts) ||
+    attempts <= 0
+  ) {
+    return { attempts: 0, fingerprint: null };
+  }
   return {
-    attempts:
-      (
-        typeof attempts === "number" &&
-        Number.isInteger(attempts) &&
-        attempts > 0
-      ) ?
-        attempts
-      : 0,
+    attempts,
     fingerprint:
       typeof fingerprint === "string" && fingerprint.trim() ?
         fingerprint.trim()

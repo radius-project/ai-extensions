@@ -402,15 +402,20 @@ export function parseRepairState(value: unknown): RepairState {
   const record = value as Record<string, unknown>;
   const attempts = record.attempts;
   const fingerprint = record.fingerprint;
+  // The two fields are read as one fact, not two. A fingerprint only means
+  // "what the previous attempt failed with", so without a usable count there is
+  // no previous attempt for it to describe, and keeping it would report the
+  // first compile of the run as a repeat — telling the agent its last fix was
+  // wrong when it has not made one yet.
+  if (
+    typeof attempts !== "number" ||
+    !Number.isInteger(attempts) ||
+    attempts <= 0
+  ) {
+    return { attempts: 0, fingerprint: null };
+  }
   return {
-    attempts:
-      (
-        typeof attempts === "number" &&
-        Number.isInteger(attempts) &&
-        attempts > 0
-      ) ?
-        attempts
-      : 0,
+    attempts,
     fingerprint:
       typeof fingerprint === "string" && fingerprint.trim() ?
         fingerprint.trim()
