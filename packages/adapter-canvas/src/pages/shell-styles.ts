@@ -401,7 +401,7 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   }
   .rad-node__dots:hover { background: var(--rad-bg-subtle); color: var(--rad-text); }
   .rad-node__portal {
-    display: block; color: inherit; text-decoration: none;
+    display: block; color: inherit; text-decoration: none; cursor: pointer;
   }
   .rad-node__portal:focus-visible { outline: 2px solid var(--rad-link); outline-offset: 2px; }
 
