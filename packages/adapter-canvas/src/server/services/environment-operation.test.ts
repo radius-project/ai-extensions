@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createOperation,
   promoteCreatedGitHubEnvironment,
+  provenOwnedCleanupTargets,
   recordGitHubEnvironment,
   setCanonicalEnvironment
 } from "../../operations.js";
@@ -464,5 +465,112 @@ describe("runEnvironmentOperationWorkflow", () => {
         }
       }
     ]);
+  });
+});
+
+// A GitHub environment is addressed by a name the customer can delete and
+// recreate. The id GitHub reports for it is the only thing that tells the one
+// this workflow wrote from a replacement, and the rollback's identity gate
+// refuses to delete without it — so the workflow has to put it in the ledger,
+// not just the canonical name.
+describe("the id a later rollback has to match", () => {
+  function creates(body: Record<string, unknown>) {
+    return successfulSelectedGhExecutor({
+      run: async (args) => {
+        // The preflight read finds nothing, so the workflow creates it.
+        if (!args.includes("--method")) {
+          return command({ code: 1, stderr: "HTTP 404: Not Found" });
+        }
+        return command({ stdout: JSON.stringify(body) });
+      }
+    });
+  }
+
+  it("records the id GitHub reported for the environment it created", async () => {
+    const op = operation();
+    const test = dependencies(op);
+
+    expect(
+      await runEnvironmentOperationWorkflow(
+        op,
+        creates({ id: 1234567, name: "production" }),
+        test.dependencies
+      )
+    ).toEqual({ shouldMonitor: true });
+
+    expect(op.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "created_candidate",
+      repo: "octo/app",
+      name: "production",
+      providerId: "1234567"
+    });
+  });
+
+  it("hands that id to the identity the rollback deletes on", async () => {
+    const op = operation();
+    const test = dependencies(op, {
+      promoteCreatedGitHubEnvironment: (target, identity) =>
+        promoteCreatedGitHubEnvironment(target, identity)
+    });
+
+    await runEnvironmentOperationWorkflow(
+      op,
+      creates({
+        id: 1234567,
+        node_id: "MDExOkVudmlyb25tZW50MTIzNDU2Nw==",
+        name: "production",
+        created_at: "2026-08-22T00:00:00.000Z"
+      }),
+      test.dependencies
+    );
+
+    // The id leads the cleanup identity, so a rollback that later reads the
+    // name back can require the same id before deleting anything.
+    expect(
+      provenOwnedCleanupTargets(op)
+        .filter((entry) => entry.artifactType === "github_environment")
+        .map((entry) => entry.identity)
+    ).toEqual(["1234567|octo/app:production"]);
+  });
+
+  it("falls back to the node id when GitHub reports no numeric id", async () => {
+    const op = operation();
+    const test = dependencies(op);
+
+    await runEnvironmentOperationWorkflow(
+      op,
+      creates({ node_id: "MDExOkVudmlyb25tZW50OTk5", name: "production" }),
+      test.dependencies
+    );
+
+    expect(op.setupArtifacts.githubEnvironment.providerId).toBe(
+      "MDExOkVudmlyb25tZW50OTk5"
+    );
+  });
+
+  it("records no id when GitHub reports none, so the rollback refuses to guess", async () => {
+    const op = operation();
+    const test = dependencies(op, {
+      promoteCreatedGitHubEnvironment: (target, identity) =>
+        promoteCreatedGitHubEnvironment(target, identity)
+    });
+
+    await runEnvironmentOperationWorkflow(
+      op,
+      creates({
+        name: "production",
+        created_at: "2026-08-22T00:00:00.000Z"
+      }),
+      test.dependencies
+    );
+
+    // Null, never the name standing in for an id: the cleanup gate reads this
+    // as "no way to tell a replacement apart" and leaves the resource alone.
+    expect(op.setupArtifacts.githubEnvironment.providerId).toBeNull();
+    expect(
+      provenOwnedCleanupTargets(op)
+        .filter((entry) => entry.artifactType === "github_environment")
+        .map((entry) => entry.identity)
+    ).toEqual(["octo/app:production"]);
   });
 });
