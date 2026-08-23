@@ -432,3 +432,107 @@ describe("planning the deletion a recovered operation runs", () => {
     expect(operation.control.attempts.cleanup).toBe(2);
   });
 });
+
+describe("a cleanup delete that never got an answer", () => {
+  function withUnsettledDeletion(status: "outcome_unknown" | "prepared") {
+    const operation = recovered();
+    const accepted = acceptCommand(operation, {
+      kind: "retry_cleanup",
+      attempt: 1,
+      target: "cleanup#abc"
+    });
+    setCommandState(operation, accepted.command.commandId, "running");
+    const mutation = prepareProviderMutation(operation, {
+      kind: "azure_app.cleanup_delete",
+      target: "app-1"
+    });
+    if (status === "outcome_unknown") {
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "outcome_unknown",
+        "The delete response was lost."
+      );
+    }
+    return { operation, commandId: accepted.command.commandId };
+  }
+
+  it.each([["outcome_unknown"], ["prepared"]] as const)(
+    "refuses to resume the pass that issued it while it is %s",
+    async (status) => {
+      const { operation } = withUnsettledDeletion(status);
+
+      const plan = await planRecoveredCleanup({
+        operation,
+        persist: async () => {
+          throw new Error("a blocked plan must persist nothing");
+        }
+      });
+
+      // Resuming would walk the same selection again and reissue a delete whose
+      // outcome nobody established — the one replay this journal exists to stop.
+      expect(plan).toMatchObject({
+        state: "blocked",
+        detail: expect.stringContaining(
+          "azure_app deletion it issued for app-1"
+        )
+      });
+    }
+  );
+
+  it("resumes the pass once the deletion is settled", async () => {
+    const { operation, commandId } = withUnsettledDeletion("outcome_unknown");
+    settleProviderMutation(
+      operation,
+      operation.providerRecovery.mutations[0].mutationId,
+      "confirmed",
+      "The exact identity is absent."
+    );
+
+    await expect(
+      planRecoveredCleanup({ operation, persist: async () => {} })
+    ).resolves.toEqual({
+      state: "resume",
+      commandId,
+      kind: "cleanup_retry"
+    });
+  });
+
+  it("does not open a fresh rollback around an unsettled deletion either", async () => {
+    const operation = recovered();
+    const mutation = prepareProviderMutation(operation, {
+      kind: "github_environment.cleanup_delete",
+      target: "octo/app:prod"
+    });
+    settleProviderMutation(
+      operation,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The delete response was lost."
+    );
+
+    const plan = await planRecoveredCleanup({
+      operation,
+      persist: async () => {
+        throw new Error("a blocked plan must persist nothing");
+      }
+    });
+
+    expect(plan.state).toBe("blocked");
+    expect(operation.control.commands).toEqual([]);
+  });
+
+  it("ignores a settled deletion and a forward mutation of another kind", async () => {
+    const { operation, commandId } = withUnsettledDeletion("outcome_unknown");
+    settleProviderMutation(
+      operation,
+      operation.providerRecovery.mutations[0].mutationId,
+      "not_applied",
+      "GitHub refused the delete."
+    );
+
+    await expect(
+      planRecoveredCleanup({ operation, persist: async () => {} })
+    ).resolves.toMatchObject({ state: "resume", commandId });
+  });
+});

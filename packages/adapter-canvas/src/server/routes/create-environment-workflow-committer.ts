@@ -16,6 +16,11 @@ import {
   ProviderMutationRecoveryError
 } from "../services/provider-mutation-recovery.js";
 import { parseBranchDeleteTarget } from "../services/recovered-branch-delete.js";
+import {
+  branchRefListingArgs,
+  branchRefReadArgs,
+  proveBranchAbsent
+} from "../services/branch-absence.js";
 
 // Seam 3 of the `POST /api/create-environment` slice: committing workflow files.
 //
@@ -300,21 +305,44 @@ export function createWorkflowFileCommitter(
             "Remove that exact branch yourself, then start setup again.",
           accept: () => true,
           reconcile: async () => {
-            const current = await readBranchHead(branch);
-            if (current.state === "absent") {
+            // A 404 from the ref endpoint is not the branch being gone: GitHub
+            // answers the same way for a ref this token is not allowed to see.
+            // The proof is the ref listing the account can actually enumerate,
+            // read to its end and confirmed once more against the ref itself —
+            // the same proof restart recovery uses, so the two paths cannot
+            // reach different conclusions about the same branch.
+            const proof = await proveBranchAbsent({
+              repo: target.targetRepo,
+              branch,
+              ports: {
+                listBranchRefs: (page) =>
+                  ports.runGh(
+                    branchRefListingArgs(target.targetRepo, branch, page)
+                  ),
+                readBranchRef: () =>
+                  ports.runGh(branchRefReadArgs(target.targetRepo, branch))
+              }
+            });
+            if (proof.state === "absent") {
               return {
                 state: "applied" as const,
                 value: true,
-                evidence:
-                  "GitHub confirmed the recovered setup branch is absent."
+                evidence: `GitHub confirmed the recovered setup branch is absent. ${proof.evidence}`
               };
             }
+            if (proof.state === "unknown") {
+              // Unreadable, not refused. Leaving the entry unresolved is what
+              // keeps the next pass from repeating a delete whose outcome
+              // nobody can establish.
+              throw new Error(proof.detail);
+            }
+            const current = await readBranchHead(branch);
             return {
               state: "manual_required" as const,
               guidance:
-                current.sha === baseSha ?
-                  `Recovered branch "${branch}" still exists after Radius's single rollback request. Radius will not repeat the delete blindly. Delete that exact branch manually before retrying setup.`
-                : `Recovered branch "${branch}" now points to a different commit. Radius will not delete it because it may contain replacement work.`
+                current.state === "present" && current.sha !== baseSha ?
+                  `Recovered branch "${branch}" now points to a different commit. Radius will not delete it because it may contain replacement work.`
+                : `Recovered branch "${branch}" still exists after Radius's single rollback request. Radius will not repeat the delete blindly. Delete that exact branch manually before retrying setup.`
             };
           }
         });

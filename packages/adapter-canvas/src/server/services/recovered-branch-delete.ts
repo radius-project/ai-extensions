@@ -4,12 +4,12 @@ import {
   type ProviderMutationRecord
 } from "../../operations.js";
 import {
-  parseRefListingPage,
-  proveAbsentFromListing
-} from "./resource-absence.js";
+  isNotFoundResponse,
+  proveBranchAbsent,
+  REF_PAGE_SIZE
+} from "./branch-absence.js";
 
-/** The page size the ref listing is requested with, and read back against. */
-export const REF_PAGE_SIZE = 100;
+export { REF_PAGE_SIZE };
 
 // Recovering the one destructive request setup issues on its own behalf.
 //
@@ -122,11 +122,7 @@ export async function reconcileRecoveredBranchDelete(input: {
   }
   const ok = read.code === 0 || read.code === "0";
   if (!ok) {
-    if (
-      /(?:HTTP\s+404|\bNot Found\b)/i.test(
-        `${read.stderr || ""}\n${read.stdout || ""}`
-      )
-    ) {
+    if (isNotFoundResponse(read)) {
       // GitHub returns the same 404 for a ref that is gone and for a ref this
       // token is not allowed to see, and it decides that per resource: an
       // account can read a repository's metadata and still be refused its refs.
@@ -134,13 +130,14 @@ export async function reconcileRecoveredBranchDelete(input: {
       // ref listing the account can actually complete — and the branch has to
       // be missing from all of it. A branch that is merely invisible is a
       // branch still holding the customer's work.
-      const proof = await proveAbsentFromListing({
-        target: `refs/heads/${target.branch}`,
-        resource: "branch",
-        scope: target.repo,
-        readPage: (page) =>
-          input.listBranchRefs(target.repo, target.branch, page),
-        parsePage: (stdout) => parseRefListingPage(stdout, REF_PAGE_SIZE)
+      const proof = await proveBranchAbsent({
+        repo: target.repo,
+        branch: target.branch,
+        ports: {
+          listBranchRefs: (page) =>
+            input.listBranchRefs(target.repo, target.branch, page),
+          readBranchRef: () => input.readBranchRef(target.repo, target.branch)
+        }
       });
       if (proof.state === "unknown") {
         return {

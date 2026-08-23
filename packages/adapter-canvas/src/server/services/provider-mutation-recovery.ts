@@ -46,6 +46,10 @@ function requireRecoveryRollback(
   if (
     operation.recoveryState !== "provider_reconciliation_pending" ||
     mutation.kind.startsWith("github_workflow.dispatch") ||
+    // A deletion the rollback itself issued settles inside a pass that is
+    // already the rollback. Demanding another one, and stopping the executor to
+    // get it, would halt that pass between two deletions.
+    mutation.kind.endsWith(".cleanup_delete") ||
     unresolvedProviderMutations(operation).length > 0
   ) {
     return;
@@ -128,7 +132,7 @@ const CONCLUSIVE_REJECTION = new RegExp(
   [
     // GitHub REST/CLI: an explicit 4xx other than 408 Request Timeout.
     String.raw`\bHTTP\s*(?:400|401|403|404|405|409|410|415|422|429|451)\b`,
-    String.raw`\b(?:Bad Request|Unauthorized|Forbidden|Not Found|Method Not Allowed|Conflict|Gone|Unsupported Media Type|Unprocessable Entity|Validation Failed|API rate limit exceeded)\b`,
+    String.raw`\b(?:Bad Request|Unauthorized|Forbidden|Not Found|Method Not Allowed|Conflict|Gone|Unsupported Media Type|Unprocessable Entity|Validation Failed|API rate limit exceeded|Too Many Requests|TooManyRequests)\b`,
     String.raw`Resource not accessible by`,
     String.raw`Bad credentials`,
     String.raw`Must have admin rights`,
@@ -314,11 +318,15 @@ export async function executeRecoverableMutation<T>(input: {
     (entry) => entry.mutationId === mutationId
   );
   // Rollback may reread an already-journaled setup mutation to settle its exact
-  // outcome, but it may never start or replay a forward provider write.
+  // outcome, but it may never start or replay a forward provider write. A
+  // deletion issued by the cleanup itself is not forward work — it is the
+  // rollback — so it is exempt along with the setup-branch delete that unblocks
+  // it.
   if (
     (input.operation as RecoveringOperation).providerRecovery?.state ===
       "rollback_pending" &&
     input.kind !== "github_branch.delete" &&
+    !input.kind.endsWith(".cleanup_delete") &&
     (!existingBefore ||
       existingBefore.status === "not_applied" ||
       existingBefore.status === "manual_required")

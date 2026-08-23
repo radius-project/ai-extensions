@@ -7,12 +7,14 @@ import {
   provenOwnedCleanupTargets,
   rollbackArtifactIdentity,
   setCommandState,
+  unresolvedProviderMutations,
   workflowProvenanceGap
 } from "../../operations.js";
 import {
   cleanupRunnerKind,
   type CleanupCommandKind
 } from "./cleanup-commands.js";
+import { isCleanupDeletionKind } from "./cleanup-deletion-journal.js";
 
 // Deciding which deletion pass a recovered operation should run, if any.
 //
@@ -83,6 +85,21 @@ export async function planRecoveredCleanup(input: {
   operation: object & { operationId: string };
   persist(): Promise<void>;
 }): Promise<RecoveredCleanupPlan> {
+  // An unresolved cleanup delete is a deletion Radius issued and never got an
+  // answer for. Resuming the pass that issued it would walk the same selection
+  // again and reissue it, which is the one replay a destructive journal exists
+  // to prevent, so the entry is reconciled before any command is resumed.
+  const unsettledDeletion = unresolvedProviderMutations(input.operation).find(
+    (mutation) => isCleanupDeletionKind(mutation.kind)
+  );
+  if (unsettledDeletion) {
+    return {
+      state: "blocked",
+      detail:
+        `Radius has not confirmed the outcome of the ${unsettledDeletion.kind.replace(".cleanup_delete", "")} deletion it issued for ${unsettledDeletion.target}. ` +
+        "It will not repeat that delete or continue the rollback until that resource's exact identity can be read."
+    };
+  }
   const active = activeCleanupCommand(input.operation);
   if (active) {
     return { state: "resume", commandId: active.commandId, kind: active.kind };

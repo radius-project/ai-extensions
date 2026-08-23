@@ -276,13 +276,29 @@ import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import { executeRecoverableMutation } from "./server/services/provider-mutation-recovery.js";
 import {
   pendingBranchDelete,
-  reconcileRecoveredBranchDelete,
-  REF_PAGE_SIZE
+  reconcileRecoveredBranchDelete
 } from "./server/services/recovered-branch-delete.js";
 import {
-  parseEnvironmentListingPage,
-  proveAbsentFromListing
-} from "./server/services/resource-absence.js";
+  branchRefListingArgs,
+  branchRefReadArgs,
+  isNotFoundResponse
+} from "./server/services/branch-absence.js";
+import {
+  CleanupJournalPersistenceError,
+  executeJournaledCleanupDeletion,
+  isCleanupDeletionKind,
+  type CleanupDeletionCommandResult,
+  type CleanupDeletionOutcome,
+  type ExactIdentityRead
+} from "./server/services/cleanup-deletion-journal.js";
+import type { ResourceAbsenceProof } from "./server/services/resource-absence.js";
+import {
+  ENVIRONMENT_PAGE_SIZE,
+  environmentListingArgs,
+  environmentNameFromApiPath,
+  environmentsApiPath,
+  proveEnvironmentAbsent
+} from "./server/services/environment-absence.js";
 import {
   readRecoveredVerificationIdentity,
   recoverVerificationRun,
@@ -2764,6 +2780,8 @@ export function resolveGitHubEnvironmentCreateState(
 export interface CleanupGitHubContext {
   rollbackCommand: WorkflowRollbackCommand;
   deleteEnvironment(args: string[]): Promise<void>;
+  /** Reads an exact resource back through the same selected account. */
+  readEnvironment(args: string[]): Promise<CommandResult>;
 }
 
 export async function resolveCleanupGitHubContext({
@@ -2808,6 +2826,10 @@ export async function resolveCleanupGitHubContext({
           stdout: "",
           stderr: failure
         }),
+    readEnvironment:
+      executor ?
+        (args) => executor.run(args, { timeout: 12000 })
+      : async () => ({ code: 1, stdout: "", stderr: failure }),
     deleteEnvironment:
       executor ?
         async (args) => {
@@ -2837,30 +2859,9 @@ export async function resolveCleanupGitHubContext({
             // environments API. So the corroborating read is the environments
             // listing itself, read to its end by the same executor, and absence
             // only means absence when the whole listing came back without it.
-            const target = environmentNameFromApiPath(path);
-            const listingPath = environmentsApiPath(path);
-            const proof =
-              target && listingPath ?
-                await proveAbsentFromListing({
-                  target,
-                  resource: "environment",
-                  scope: listingPath.replace(/^\/repos\//, ""),
-                  readPage: (page) =>
-                    executor.run(
-                      [
-                        "api",
-                        `${listingPath}?per_page=${ENVIRONMENT_PAGE_SIZE}&page=${page}`
-                      ],
-                      { timeout: 12000 }
-                    ),
-                  parsePage: (stdout) =>
-                    parseEnvironmentListingPage(stdout, ENVIRONMENT_PAGE_SIZE)
-                })
-              : {
-                  state: "unknown" as const,
-                  detail:
-                    "Radius could not derive the environments listing for the path it deleted through."
-                };
+            const proof = await proveEnvironmentAbsentAt(path, (args) =>
+              executor.run(args, { timeout: 12000 })
+            );
             if (proof.state === "absent") return;
             throw new Error(
               "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. " +
@@ -2876,34 +2877,42 @@ export async function resolveCleanupGitHubContext({
         }
   };
 }
+export {
+  ENVIRONMENT_PAGE_SIZE,
+  environmentsApiPath,
+  environmentNameFromApiPath
+};
 
-/** The page size the environments listing is requested with, and read back against. */
-export const ENVIRONMENT_PAGE_SIZE = 100;
-
-/** The `/repos/{owner}/{repo}/environments` listing an environment path belongs to. */
-export function environmentsApiPath(environmentApiPath: string): string | null {
-  const match = ENVIRONMENT_API_PATH.exec(environmentApiPath);
-  return match ? `/repos/${match[1]}/${match[2]}/environments` : null;
-}
-
-/** The environment an API path names, decoded back to its canonical name. */
-export function environmentNameFromApiPath(
-  environmentApiPath: string
-): string | null {
-  const match = ENVIRONMENT_API_PATH.exec(environmentApiPath);
-  if (!match) return null;
-  try {
-    const name = decodeURIComponent(match[3]);
-    return name || null;
-  } catch {
-    // A path Radius cannot decode is one it cannot compare against a listing,
-    // so it proves nothing rather than comparing the escaped form.
-    return null;
+/**
+ * Prove the environment an API path names absent, through the same account.
+ *
+ * Shared by the timed-out delete and the journal's reconcile so the two cannot
+ * disagree: neither may read a bare 404 from the environment endpoint as
+ * absence, because GitHub returns that for a hidden environment too.
+ */
+async function proveEnvironmentAbsentAt(
+  environmentApiPath: string,
+  run: (args: string[]) => Promise<CommandResult>
+): Promise<ResourceAbsenceProof> {
+  const name = environmentNameFromApiPath(environmentApiPath);
+  const listingPath = environmentsApiPath(environmentApiPath);
+  if (!name || !listingPath) {
+    return {
+      state: "unknown",
+      detail:
+        "Radius could not derive the environments listing for the path it deleted through."
+    };
   }
+  return proveEnvironmentAbsent({
+    repo: listingPath.replace(/^\/repos\//, "").replace(/\/environments$/, ""),
+    name,
+    ports: {
+      listEnvironments: (page) =>
+        run(environmentListingArgs(listingPath, page)),
+      readEnvironment: () => run(["api", environmentApiPath])
+    }
+  });
 }
-
-const ENVIRONMENT_API_PATH =
-  /^\/repos\/([^/]+)\/([^/]+)\/environments\/([^/?#]+)$/;
 
 export async function deleteNewlyCreatedGitHubEnvironment(
   artifact:
@@ -3225,13 +3234,40 @@ export async function ensureServicePrincipal(
       };
 }
 
+/**
+ * Hand every deletion this pass could not settle to the customer.
+ *
+ * Reconciliation only ever runs against a live record, so an unresolved cleanup
+ * delete on a record that is about to become terminal would stay unresolved for
+ * the life of the extension — blocking the destructive commands, blocking a
+ * forward retry, and holding the repository lock with nothing able to release
+ * it. Naming the resource converts that into a refusal the panel can show and
+ * the customer can act on, and releases the lock so a fresh setup is possible.
+ */
+export function quarantineUnsettledCleanupDeletions(op: any): number {
+  const unsettled = unresolvedProviderMutations(op).filter((mutation) =>
+    isCleanupDeletionKind(mutation.kind)
+  );
+  for (const mutation of unsettled) {
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "manual_required",
+      `Radius issued one delete for ${mutation.kind.replace(".cleanup_delete", "")} ${mutation.target} and could not establish whether it took effect. ` +
+        "It will not repeat that delete. Check that resource and remove it yourself if it is unwanted, then start a new setup."
+    );
+  }
+  return unsettled.length;
+}
+
 export async function cleanupAzureSetupArtifacts(
   op: any,
   {
     runAz,
     steps,
     only,
-    onResultRecorded
+    onResultRecorded,
+    persistJournal
   }: {
     runAz: (args: string[]) => Promise<Partial<CommandResult>>;
     steps?: string[];
@@ -3242,6 +3278,10 @@ export async function cleanupAzureSetupArtifacts(
     // Called after each result is written into the ledger, so a caller that
     // owns durable storage can save one deletion before the next one starts.
     onResultRecorded?: () => Promise<void> | void;
+    // Writes the mutation journal to disk. Supplied wherever durable storage
+    // exists, because a delete that is not written down before it is issued is
+    // one a later attempt cannot tell from a delete that never happened.
+    persistJournal?: () => Promise<void>;
   }
 ): Promise<{
   attempt: number;
@@ -3457,116 +3497,99 @@ export async function cleanupAzureSetupArtifacts(
 
   for (const deletion of selected) {
     const label = cleanupTargetLabel(deletion.artifactType, deletion.artifact);
-    if (deletion.missingDetail) {
-      warnings.push(deletion.missingDetail);
-      steps?.push(`⚠ ${deletion.missingDetail}`);
+    const identity = cleanupArtifactIdentity(
+      deletion.artifactType,
+      deletion.artifact
+    );
+    // Every delete below is addressed by an exact immutable provider identity
+    // and read back by the same one. An artifact that cannot supply both is one
+    // Radius could only delete by name, and a name after a rebuild belongs to
+    // the customer's replacement rather than to this attempt's leftover.
+    const unidentifiable =
+      deletion.missingDetail ||
+      (!deletion.readArgs ?
+        `${label} has no stable provider identity Radius can verify before and after a delete, so it will not remove it. Review it and delete it yourself if it is unwanted.`
+      : !identity ?
+        `${label} was recorded without the provider identity a safe delete needs.`
+      : null);
+    if (unidentifiable) {
+      warnings.push(unidentifiable);
+      steps?.push(`⚠ ${unidentifiable}`);
       await pushResult(
         deletion.artifactType,
         deletion.artifact,
         "skipped",
-        deletion.missingDetail
+        unidentifiable
       );
       continue;
     }
 
-    let result: Partial<CommandResult>;
+    const readArgs = deletion.readArgs as string[];
+    const readExactIdentity = async (): Promise<ExactIdentityRead> => {
+      let reread: Partial<CommandResult>;
+      try {
+        reread = await runAz(readArgs);
+      } catch {
+        return "unreadable";
+      }
+      if (isAzureCleanupNotFound(deletion.artifactType, reread))
+        return "absent";
+      return reread.code === 0 || reread.code === "0" ?
+          "present"
+        : "unreadable";
+    };
+
+    let settled: CleanupDeletionOutcome;
     try {
-      result = await runAz(deletion.args || []);
+      settled = await executeJournaledCleanupDeletion({
+        operation: op,
+        artifactType: deletion.artifactType,
+        identity,
+        label,
+        persist: persistJournal ?? (async () => {}),
+        runDelete: async () => {
+          const result = await runAz(deletion.args || []);
+          return {
+            code: result.code ?? 1,
+            stdout: String(result.stdout || ""),
+            stderr: String(result.stderr || ""),
+            ...(result.timedOut === true ? { timedOut: true } : {})
+          };
+        },
+        isAlreadyAbsent: (result: CleanupDeletionCommandResult) =>
+          isAzureCleanupNotFound(deletion.artifactType, result),
+        readExactIdentity
+      });
     } catch (error) {
-      const detail =
-        error instanceof Error ?
-          error.message
-        : String(error || "Unknown error");
-      const warning = `Failed to delete ${label}: ${detail}`;
-      warnings.push(warning);
-      steps?.push(`⚠ ${warning}`);
+      if (!(error instanceof CleanupJournalPersistenceError)) throw error;
+      // The journal did not reach disk. Radius stops here rather than deleting
+      // anything else it could not account for afterwards.
+      const detail = `Radius stopped this rollback because it could not save the record of what it was deleting: ${error.message}`;
+      warnings.push(detail);
+      steps?.push(`⚠ ${detail}`);
       await pushResult(
         deletion.artifactType,
         deletion.artifact,
         "warning",
         detail
       );
-      continue;
+      break;
     }
 
-    if (result.code === 0 || result.code === "0") {
+    if (settled.outcome === "deleted") {
       steps?.push(`✅ Deleted ${label}`);
-      await pushResult(
-        deletion.artifactType,
-        deletion.artifact,
-        "deleted",
-        null
-      );
-      continue;
-    }
-
-    if (result.timedOut) {
-      const outcomeUnknown =
-        "Outcome unknown after provider timeout; Radius will not repeat this delete blindly.";
-      if (!deletion.readArgs) {
-        warnings.push(`${outcomeUnknown} ${label} has no stable provider ID.`);
-        await pushResult(
-          deletion.artifactType,
-          deletion.artifact,
-          "warning",
-          `${outcomeUnknown} The artifact has no stable provider ID for reconciliation.`
-        );
-        continue;
-      }
-      const reread = await runAz(deletion.readArgs);
-      if (isAzureCleanupNotFound(deletion.artifactType, reread)) {
-        steps?.push(
-          `✅ ${label} was confirmed absent after the timed-out delete`
-        );
-        await pushResult(
-          deletion.artifactType,
-          deletion.artifact,
-          "not_found",
-          null
-        );
-        continue;
-      }
-      const reconciliationDetail =
-        reread.code === 0 || reread.code === "0" ?
-          `${outcomeUnknown} The exact provider identity is still present.`
-        : `${outcomeUnknown} Provider state could not be read: ${
-            String(reread.stderr || reread.stdout || "").trim() ||
-            "unknown Azure CLI error"
-          }`;
-      warnings.push(`Failed to delete ${label}: ${reconciliationDetail}`);
-      steps?.push(`⚠ Failed to delete ${label}: ${reconciliationDetail}`);
-      await pushResult(
-        deletion.artifactType,
-        deletion.artifact,
-        "warning",
-        reconciliationDetail
-      );
-      continue;
-    }
-
-    if (isAzureCleanupNotFound(deletion.artifactType, result)) {
+    } else if (settled.outcome === "not_found") {
       steps?.push(`✅ ${label} was already absent`);
-      await pushResult(
-        deletion.artifactType,
-        deletion.artifact,
-        "not_found",
-        null
-      );
-      continue;
+    } else {
+      const warning = `Failed to delete ${label}: ${settled.detail}`;
+      warnings.push(warning);
+      steps?.push(`⚠ ${warning}`);
     }
-
-    const detail =
-      String(result.stderr || "").trim() ||
-      String(result.stdout || "").trim() ||
-      "Unknown Azure CLI error.";
-    const warning = `Failed to delete ${label}: ${detail}`;
-    warnings.push(warning);
-    steps?.push(`⚠ ${warning}`);
     await pushResult(
       deletion.artifactType,
       deletion.artifact,
-      "warning",
-      detail
+      settled.outcome,
+      settled.detail
     );
   }
 
@@ -3671,11 +3694,17 @@ export async function cleanupGitHubEnvironmentArtifact(
   {
     attempt,
     runDeleteEnvironment,
+    readEnvironment,
+    persistJournal,
     invalidateEnvironmentListing,
     steps
   }: {
     attempt: number;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
+    // Reads the exact environment back after an interrupted delete, and writes
+    // the mutation journal. Supplied wherever durable storage exists.
+    readEnvironment?: ((args: string[]) => Promise<CommandResult>) | null;
+    persistJournal?: () => Promise<void>;
     // Called with the repository whose environment was proven removed, so the
     // listing the picker reads stops answering from a cache that still holds
     // it. The server owns this: the browser cannot invalidate a server cache,
@@ -3738,30 +3767,85 @@ export async function cleanupGitHubEnvironmentArtifact(
     return { results, warnings, attempted: true };
   }
 
+  if (!envRepo || !envName) {
+    const detail =
+      "Missing the GitHub environment name or repository needed to target the newly created environment precisely.";
+    warnings.push(detail);
+    steps?.push(`⚠️ ${detail}`);
+    recordOutcome("warning", detail);
+    return { results, warnings, attempted: true };
+  }
+
+  const environmentPath = `/repos/${envRepo}/environments/${encodeURIComponent(envName)}`;
+  const deleteArgs = ["api", "--method", "DELETE", environmentPath];
+  let settled: CleanupDeletionOutcome;
   try {
-    const deleted = await deleteNewlyCreatedGitHubEnvironment(
-      artifact,
-      runDeleteEnvironment
+    settled = await executeJournaledCleanupDeletion({
+      operation: op,
+      artifactType: "github_environment",
+      identity: identity || `${envRepo}:${envName}`,
+      label: `GitHub environment "${target}"`,
+      persist: persistJournal ?? (async () => {}),
+      runDelete: async () => {
+        try {
+          await runDeleteEnvironment(deleteArgs);
+          return { code: 0, stdout: "", stderr: "" };
+        } catch (cleanupError) {
+          const detail = errorMessage(cleanupError);
+          // The delete helper throws its own "outcome unknown" sentence when a
+          // timeout left the answer in doubt. That is not a rejection, so it is
+          // carried through as one rather than settled as "nothing happened".
+          return {
+            code: 1,
+            stdout: "",
+            stderr: detail,
+            ...(/Outcome unknown after provider timeout/i.test(detail) ?
+              { timedOut: true }
+            : {})
+          };
+        }
+      },
+      isAlreadyAbsent: (result) => isNotFoundResponse(result),
+      // The same proof the delete port uses. A bare 404 from the environment
+      // endpoint is what GitHub answers for an environment this token cannot
+      // see, so settling a deletion on it would move ledger ownership for a
+      // resource that is still there.
+      readExactIdentity: async () => {
+        if (!readEnvironment) return "unreadable";
+        try {
+          const proof = await proveEnvironmentAbsentAt(
+            environmentPath,
+            readEnvironment
+          );
+          if (proof.state === "absent") return "absent";
+          return proof.state === "present" ? "present" : "unreadable";
+        } catch {
+          return "unreadable";
+        }
+      }
+    });
+  } catch (error) {
+    if (!(error instanceof CleanupJournalPersistenceError)) throw error;
+    const detail = `Radius stopped before removing GitHub environment "${target}" because it could not save the record of what it was deleting: ${error.message}`;
+    warnings.push(detail);
+    steps?.push(`⚠️ ${detail}`);
+    recordOutcome("warning", detail);
+    return { results, warnings, attempted: true };
+  }
+
+  if (settled.outcome === "deleted" || settled.outcome === "not_found") {
+    steps?.push(
+      settled.outcome === "deleted" ?
+        `✅ Deleted GitHub environment "${envName}"`
+      : `✅ GitHub environment "${envName}" was already absent`
     );
-    if (deleted) {
-      steps?.push(`✅ Deleted GitHub environment "${envName}"`);
-      recordOutcome("deleted", null);
-      // `deleted` is only true for an artifact carrying both a repository and
-      // a name, so the repo the listing is cached under is known here.
-      invalidateEnvironmentListing?.(envRepo);
-    } else {
-      const detail =
-        "Missing the GitHub environment name or repository needed to target the newly created environment precisely.";
-      warnings.push(detail);
-      steps?.push(`⚠️ ${detail}`);
-      recordOutcome("warning", detail);
-    }
-  } catch (cleanupError) {
-    const detail = errorMessage(cleanupError);
-    const warning = `Failed to delete GitHub environment "${envName}": ${detail}`;
+    recordOutcome(settled.outcome, null);
+    invalidateEnvironmentListing?.(envRepo);
+  } else {
+    const warning = `Failed to delete GitHub environment "${envName}": ${settled.detail}`;
     warnings.push(warning);
     steps?.push(`⚠️ ${warning}`);
-    recordOutcome("warning", detail);
+    recordOutcome(settled.outcome, settled.detail);
   }
   return { results, warnings, attempted: true };
 }
@@ -3778,7 +3862,8 @@ export async function finalizeSetupFailure(
     extra = {},
     steps,
     runAz,
-    runDeleteEnvironment
+    runDeleteEnvironment,
+    readEnvironment
   }: {
     status: number;
     error: string;
@@ -3790,6 +3875,7 @@ export async function finalizeSetupFailure(
     steps?: string[];
     runAz?: ((args: string[]) => Promise<Partial<CommandResult>>) | null;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
+    readEnvironment?: ((args: string[]) => Promise<CommandResult>) | null;
   }
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const safeExtra = sanitizeFailureExtra(extra || {});
@@ -3853,7 +3939,8 @@ export async function finalizeSetupFailure(
       if (runAz) {
         const azureCleanup = await cleanupAzureSetupArtifacts(op, {
           runAz,
-          steps
+          steps,
+          persistJournal: () => operations.persist()
         });
         warnings.push(...azureCleanup.warnings);
         results = [...results, ...azureCleanup.results];
@@ -3865,6 +3952,8 @@ export async function finalizeSetupFailure(
       const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
         attempt,
         runDeleteEnvironment,
+        readEnvironment,
+        persistJournal: () => operations.persist(),
         invalidateEnvironmentListing: (repo) => {
           envListCache.invalidate(repo);
         },
@@ -3881,6 +3970,9 @@ export async function finalizeSetupFailure(
         cleanupState = "succeeded";
       }
 
+      // Same reason as the rollback runner: this record is about to be terminal,
+      // so an unresolved deletion would have nobody left to settle it.
+      quarantineUnsettledCleanupDeletions(op);
       if (results.length > 0) {
         const priorResults =
           Array.isArray(ledger.cleanup.results) ?
@@ -5218,6 +5310,8 @@ function createInstanceRequestCoordinator(
       const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
         attempt,
         runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
+        readEnvironment: cleanupGitHub.readEnvironment,
+        persistJournal: () => operations.persist(),
         invalidateEnvironmentListing: (repo) => {
           envListCache.invalidate(repo);
         },
@@ -5246,12 +5340,20 @@ function createInstanceRequestCoordinator(
           )
           .map((entry: { key: string }) => entry.key)
       ),
-      onResultRecorded: persist
+      onResultRecorded: persist,
+      persistJournal: () => operations.persist()
     });
     warnings.push(...azureCleanup.warnings);
     results = [...results, ...azureCleanup.results];
 
     for (const step of steps) addLegacyStep(op, step);
+    // A deletion this pass issued and could not settle has nobody left to
+    // settle it: the record is about to end, and every scheduler that would
+    // reread it is gated on a live operation. Leaving it merely unresolved
+    // would hold the repository behind an entry no command can clear, so it is
+    // handed to the customer by name instead. The delete is still never
+    // repeated — `manual_required` refuses that as firmly as `outcome_unknown`.
+    quarantineUnsettledCleanupDeletions(op);
     const recoveryAfterCleanup = cleanupProviderRecoveryDisposition(op);
     if (!recoveryAfterCleanup.mayCompleteCleanup) {
       recordCleanupState(op, {
@@ -5376,20 +5478,13 @@ function createInstanceRequestCoordinator(
       operation: op,
       mutation,
       readBranchRef: (repo, branch) =>
-        executor.run([
-          "api",
-          `/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`
-        ]),
+        executor.run(branchRefReadArgs(repo, branch)),
       // The same permission the 404 came from. Matching-refs answers with every
       // ref sharing the prefix, so the account either can see this repository's
       // refs — in which case the branch's absence from the listing is real — or
       // cannot, in which case nothing is concluded.
       listBranchRefs: (repo, branch, page) =>
-        executor.run([
-          "api",
-          `/repos/${repo}/git/matching-refs/heads/${encodeURIComponent(branch)}` +
-            `?per_page=${REF_PAGE_SIZE}&page=${page}`
-        ])
+        executor.run(branchRefListingArgs(repo, branch, page))
     });
     if (outcome.state === "removed") {
       addLegacyStep(op, `✅ ${outcome.evidence}`);
@@ -5497,6 +5592,9 @@ function createInstanceRequestCoordinator(
     // Nothing executable is left. Terminalizing is what stops the record from
     // holding the repository open for a pass that will never be scheduled; the
     // destructive gates then decide what, if anything, the customer is offered.
+    // A deletion still awaiting an answer is named before that happens, because
+    // once the record is terminal nothing will reread it.
+    quarantineUnsettledCleanupDeletions(op);
     finish(op, "failed_partial", {
       failure: {
         code:
