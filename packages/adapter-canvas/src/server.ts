@@ -156,7 +156,9 @@ import {
   shouldStop,
   stopAtBoundary,
   setCommandState,
+  providerMutationId,
   providerMutationRecord,
+  provenOwnedCleanupTargets,
   providerRecoveryManualGuidance,
   settleProviderMutation,
   unresolvedProviderMutations,
@@ -285,6 +287,7 @@ import {
 } from "./server/services/branch-absence.js";
 import {
   CleanupJournalPersistenceError,
+  cleanupDeletionKind,
   executeJournaledCleanupDeletion,
   isCleanupDeletionKind,
   type CleanupDeletionCommandResult,
@@ -304,7 +307,10 @@ import {
   recoverVerificationRun,
   verificationActionsUrl
 } from "./server/services/recovered-verification-run.js";
-import { planRecoveredCleanup } from "./server/services/recovered-cleanup-command.js";
+import {
+  planRecoveredCleanup,
+  planRecoveredSchedule
+} from "./server/services/recovered-cleanup-command.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
@@ -3805,7 +3811,12 @@ export async function cleanupGitHubEnvironmentArtifact(
           };
         }
       },
-      isAlreadyAbsent: (result) => isNotFoundResponse(result),
+      // GitHub answers 404 to the DELETE itself both for an environment that
+      // is already gone and for one this token is not allowed to see. Neither
+      // reading is safe to record, so the answer is deferred to the
+      // reconciliation below, which proves absence through the listing.
+      isAlreadyAbsent: (result) =>
+        isNotFoundResponse(result) ? "unproven" : false,
       // The same proof the delete port uses. A bare 404 from the environment
       // endpoint is what GitHub answers for an environment this token cannot
       // see, so settling a deletion on it would move ledger ownership for a
@@ -5578,9 +5589,80 @@ function createInstanceRequestCoordinator(
    * that decision and the command that carries it out in one place, whether the
    * pass was already in flight when the process went away or has to be opened.
    */
+
+  /**
+   * Read back the exact identity of every deletion this operation left open.
+   *
+   * Restricted to artifacts whose journal entry is still unresolved, because a
+   * cleanup executor asked about an artifact with no entry would delete it.
+   * For the ones it is asked about, `executeRecoverableMutation` takes the
+   * reconcile branch — the delete is never issued a second time — so this
+   * settles them from provider state alone.
+   */
+  async function reconcileUnsettledCleanupDeletions(op: any): Promise<void> {
+    const unsettled = new Set(
+      unresolvedProviderMutations(op)
+        .filter((mutation) => isCleanupDeletionKind(mutation.kind))
+        .map((mutation) => mutation.mutationId)
+    );
+    if (unsettled.size === 0) return;
+    const targets = provenOwnedCleanupTargets(op).filter((target: any) =>
+      unsettled.has(
+        providerMutationId(
+          op.operationId,
+          cleanupDeletionKind(String(target.artifactType)),
+          String(target.identity ?? "")
+        )
+      )
+    );
+    if (targets.length === 0) return;
+    const steps: string[] = [];
+    const selectedLogin = optionalString(op.context?.githubLogin);
+    if (
+      targets.some(
+        (target: any) => target.artifactType === "github_environment"
+      )
+    ) {
+      const cleanupGitHub = await resolveCleanupGitHubContext({
+        targets,
+        selectedLogin
+      });
+      await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: Number(getSetupArtifactLedger(op)?.cleanup?.attempts || 1),
+        runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
+        readEnvironment: cleanupGitHub.readEnvironment,
+        persistJournal: () => operations.persist(),
+        invalidateEnvironmentListing: (repo) => {
+          envListCache.invalidate(repo);
+        },
+        steps
+      });
+    }
+    const azureKeys = new Set<string>(
+      targets
+        .filter((target: any) => target.artifactType !== "github_environment")
+        .map((target: any) => String(target.key))
+    );
+    if (azureKeys.size > 0 && op.provider === "azure") {
+      await cleanupAzureSetupArtifacts(op, {
+        runAz: (args: string[]) => runCliCommand("az", args),
+        steps,
+        only: azureKeys,
+        persistJournal: () => operations.persist()
+      });
+    }
+    for (const step of steps) addLegacyStep(op, step);
+    await saveOperation(op);
+  }
+
   async function runRecoveredCleanup(operationId: string): Promise<void> {
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
+    // Settle the deletions this operation already issued before deciding
+    // anything else. The executors reconcile a journaled entry by reading its
+    // exact identity and never reissue it, so this is the reconciliation the
+    // resume gate is waiting on rather than another pass over the ledger.
+    await reconcileUnsettledCleanupDeletions(op);
     const plan = await planRecoveredCleanup({
       operation: op,
       persist: () => operations.persist()
@@ -5621,44 +5703,25 @@ function createInstanceRequestCoordinator(
       commands?: Array<{ commandId?: string; kind?: string; state?: string }>;
     };
   }): void {
-    // Destructive first, and before any forward work: a setup branch whose
-    // deletion never got an answer is neither safe to build on nor safe to
-    // ignore, so nothing else is scheduled until it is settled.
-    if (pendingBranchDelete(op)) {
+    const next = planRecoveredSchedule(op);
+    if (next.kind === "branch_delete") {
       scheduleServerOwnedTask(op.operationId, () =>
         runRecoveredBranchDelete(op.operationId)
       );
       return;
     }
-    if (op.providerRecovery?.state === "rollback_pending") {
-      const unresolved = unresolvedProviderMutations(op);
-      if (unresolved.length > 0) {
-        scheduleEnvironmentOperation(op);
-        return;
-      }
+    if (next.kind === "cleanup") {
       scheduleServerOwnedTask(op.operationId, () =>
         runRecoveredCleanup(op.operationId)
       );
       return;
     }
-    const retryDispatch = unresolvedProviderMutations(op).some(
-      (mutation) => mutation.kind === "github_workflow.dispatch_retry"
-    );
-    if (retryDispatch) {
-      const command = [...(op.control?.commands || [])]
-        .reverse()
-        .find(
-          (entry) =>
-            entry.kind === "retry_verification" &&
-            typeof entry.commandId === "string"
-        );
-      if (command?.commandId) {
-        const commandId = command.commandId;
-        scheduleServerOwnedTask(op.operationId, () =>
-          runVerificationRetry(op.operationId, commandId)
-        );
-        return;
-      }
+    if (next.kind === "verification_retry") {
+      const commandId = next.commandId;
+      scheduleServerOwnedTask(op.operationId, () =>
+        runVerificationRetry(op.operationId, commandId)
+      );
+      return;
     }
     scheduleEnvironmentOperation(op);
   }

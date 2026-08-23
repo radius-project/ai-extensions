@@ -2345,6 +2345,135 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
     expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
   });
 
+  describe("a DELETE the environments API answers 404", () => {
+    function listing(names: string[]) {
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          total_count: names.length,
+          environments: names.map((name) => ({ name }))
+        }),
+        stderr: ""
+      };
+    }
+    const NOT_FOUND = { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+
+    function claimedEnvironment() {
+      const op = newAzureOp();
+      recordGitHubEnvironment(op, {
+        state: "created",
+        repo: "octo/app",
+        name: "dev"
+      });
+      return op;
+    }
+
+    it("does not report a removal when the listing is refused", async () => {
+      const op = claimedEnvironment();
+      const invalidated: string[] = [];
+      let deletes = 0;
+
+      const result = await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: 1,
+        runDeleteEnvironment: async () => {
+          deletes += 1;
+          throw new Error("HTTP 404: Not Found");
+        },
+        // Repository metadata may be readable; the Actions environments API is
+        // not. GitHub answers 404 per resource, so the DELETE's own 404 proves
+        // nothing about whether the environment is gone.
+        readEnvironment: async () => ({
+          code: 1,
+          stdout: "",
+          stderr: "HTTP 403: Resource not accessible"
+        }),
+        invalidateEnvironmentListing: (repo) => invalidated.push(repo)
+      });
+
+      expect(deletes).toBe(1);
+      expect(result.results[0].outcome).toBe("warning");
+      // Ownership never moves and the picker's cache is never released.
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+      expect(invalidated).toEqual([]);
+      expect(
+        unresolvedProviderMutations(op).map((entry) => entry.kind)
+      ).toEqual(["github_environment.cleanup_delete"]);
+    });
+
+    it("refuses when the listing still holds the environment", async () => {
+      const op = claimedEnvironment();
+      const invalidated: string[] = [];
+
+      const result = await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: 1,
+        runDeleteEnvironment: async () => {
+          throw new Error("HTTP 404: Not Found");
+        },
+        // The name answers for something the account can list, so the 404 was
+        // masked access rather than a removal.
+        readEnvironment: async (args) =>
+          args[1].includes("/environments?") ?
+            listing(["dev", "prod"])
+          : { code: 0, stdout: JSON.stringify({ name: "dev" }), stderr: "" },
+        invalidateEnvironmentListing: (repo) => invalidated.push(repo)
+      });
+
+      expect(result.results[0].outcome).toBe("skipped");
+      expect(result.results[0].detail).toContain("still present");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+      expect(invalidated).toEqual([]);
+    });
+
+    it("settles not_found only from an exhaustive listing and a confirming reread", async () => {
+      const op = claimedEnvironment();
+      const invalidated: string[] = [];
+      const reads: string[] = [];
+
+      const result = await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: 1,
+        runDeleteEnvironment: async () => {
+          throw new Error("HTTP 404: Not Found");
+        },
+        readEnvironment: async (args) => {
+          reads.push(args[1]);
+          return args[1].includes("/environments?") ?
+              listing(["prod", "staging"])
+            : NOT_FOUND;
+        },
+        invalidateEnvironmentListing: (repo) => invalidated.push(repo)
+      });
+
+      expect(reads).toEqual([
+        "/repos/octo/app/environments?per_page=100&page=1",
+        "/repos/octo/app/environments/dev"
+      ]);
+      expect(result.results[0].outcome).toBe("not_found");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+      expect(invalidated).toEqual(["octo/app"]);
+      expect(unresolvedProviderMutations(op)).toEqual([]);
+    });
+
+    it("issues the delete exactly once whatever the proof decides", async () => {
+      const op = claimedEnvironment();
+      let deletes = 0;
+      const ports = {
+        runDeleteEnvironment: async () => {
+          deletes += 1;
+          throw new Error("HTTP 404: Not Found");
+        },
+        readEnvironment: async (args: string[]) =>
+          args[1].includes("/environments?") ?
+            listing(["dev"])
+          : { code: 0, stdout: JSON.stringify({ name: "dev" }), stderr: "" }
+      };
+
+      await cleanupGitHubEnvironmentArtifact(op, { attempt: 1, ...ports });
+      await cleanupGitHubEnvironmentArtifact(op, { attempt: 2, ...ports });
+
+      expect(deletes).toBe(1);
+    });
+  });
+
   it("stops before deleting the environment when the journal cannot be saved", async () => {
     const op = newAzureOp();
     recordGitHubEnvironment(op, {

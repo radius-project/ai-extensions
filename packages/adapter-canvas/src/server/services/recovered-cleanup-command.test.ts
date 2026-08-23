@@ -20,7 +20,8 @@ import type { OperationCommandKind } from "../../operations.js";
 import { CLEANUP_COMMANDS } from "./cleanup-commands.js";
 import {
   activeCleanupCommand,
-  planRecoveredCleanup
+  planRecoveredCleanup,
+  planRecoveredSchedule
 } from "./recovered-cleanup-command.js";
 
 function recovered(operationId = "op_cleanup") {
@@ -534,5 +535,189 @@ describe("a cleanup delete that never got an answer", () => {
     await expect(
       planRecoveredCleanup({ operation, persist: async () => {} })
     ).resolves.toMatchObject({ state: "resume", commandId });
+  });
+});
+
+describe("what a restored operation is handed to next", () => {
+  const GENERIC_STATES = [
+    "idle",
+    "reconciling",
+    "rollback_pending",
+    "manual_required",
+    "complete"
+  ] as const;
+
+  function restored(state: (typeof GENERIC_STATES)[number]) {
+    const operation = recovered();
+    operation.providerRecovery.state = state;
+    return operation;
+  }
+
+  function unsettledDelete(
+    operation: ReturnType<typeof recovered>,
+    kind = "azure_app.cleanup_delete"
+  ) {
+    const mutation = prepareProviderMutation(operation, {
+      kind,
+      target: "app-1"
+    });
+    settleProviderMutation(
+      operation,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The delete response was lost."
+    );
+    return operation;
+  }
+
+  it.each(GENERIC_STATES)(
+    "routes an unsettled cleanup delete to cleanup from the %s state",
+    (state) => {
+      const operation = unsettledDelete(restored(state));
+
+      // Whatever the setup's own mutations left behind, a deletion Radius
+      // issued belongs to the rollback. Forward setup would rebuild resources
+      // the customer asked it to remove.
+      expect(planRecoveredSchedule(operation)).toEqual({ kind: "cleanup" });
+    }
+  );
+
+  it.each(GENERIC_STATES)(
+    "routes an in-flight cleanup command to cleanup from the %s state",
+    (state) => {
+      const operation = restored(state);
+      const accepted = acceptCommand(operation, {
+        kind: "retry_cleanup",
+        attempt: 1,
+        target: "cleanup#abc"
+      });
+      setCommandState(operation, accepted.command.commandId, "running");
+
+      expect(planRecoveredSchedule(operation)).toEqual({ kind: "cleanup" });
+    }
+  );
+
+  it.each([
+    ["a rollback", "rollback"],
+    ["a cleanup retry", "retry_cleanup"],
+    ["an exit", "exit_setup"]
+  ] as const)("routes an in-flight %s to cleanup", (_label, kind) => {
+    const operation = restored("reconciling");
+    const accepted = acceptCommand(operation, {
+      kind,
+      attempt: 1,
+      target: "cleanup#abc"
+    });
+    setCommandState(operation, accepted.command.commandId, "accepted");
+
+    expect(planRecoveredSchedule(operation)).toEqual({ kind: "cleanup" });
+  });
+
+  it("routes every cleanup deletion kind to cleanup", () => {
+    for (const artifactType of [
+      "azure_app",
+      "service_principal",
+      "federated_credential",
+      "role_assignment",
+      "github_environment"
+    ]) {
+      const operation = unsettledDelete(
+        restored("reconciling"),
+        `${artifactType}.cleanup_delete`
+      );
+      expect(planRecoveredSchedule(operation)).toEqual({ kind: "cleanup" });
+    }
+  });
+
+  it("settles the setup branch before anything else, cleanup included", () => {
+    const operation = unsettledDelete(restored("rollback_pending"));
+    const branch = prepareProviderMutation(operation, {
+      kind: "github_branch.delete",
+      target: "octo/app\u0000radius/setup-prod\u0000base"
+    });
+    settleProviderMutation(
+      operation,
+      branch.mutationId,
+      "outcome_unknown",
+      "The delete response was lost."
+    );
+
+    expect(planRecoveredSchedule(operation)).toEqual({ kind: "branch_delete" });
+  });
+
+  it("sends a finished cleanup command with nothing outstanding forward", () => {
+    const operation = restored("reconciling");
+    const accepted = acceptCommand(operation, {
+      kind: "retry_cleanup",
+      attempt: 1,
+      target: "cleanup#abc"
+    });
+    setCommandState(operation, accepted.command.commandId, "finished", "done");
+
+    expect(planRecoveredSchedule(operation)).toEqual({ kind: "forward_setup" });
+  });
+
+  it("resumes a verification retry when only its dispatch is outstanding", () => {
+    const operation = restored("reconciling");
+    const accepted = acceptCommand(operation, {
+      kind: "retry_verification",
+      attempt: 1,
+      target: "verification"
+    });
+    setCommandState(operation, accepted.command.commandId, "running");
+    prepareProviderMutation(operation, {
+      kind: "github_workflow.dispatch_retry",
+      target: "octo/app:verify.yml:main:prod:cmd"
+    });
+
+    expect(planRecoveredSchedule(operation)).toEqual({
+      kind: "verification_retry",
+      commandId: accepted.command.commandId
+    });
+  });
+
+  it("goes forward when a dispatch retry has no command left to resume", () => {
+    const operation = restored("reconciling");
+    prepareProviderMutation(operation, {
+      kind: "github_workflow.dispatch_retry",
+      target: "octo/app:verify.yml:main:prod:cmd"
+    });
+
+    // Nothing recorded the retry that dispatch belongs to, so there is no
+    // command identity to resume it under.
+    expect(planRecoveredSchedule(operation)).toEqual({ kind: "forward_setup" });
+  });
+
+  it("takes no command list at all as nothing to resume", () => {
+    const operation = restored("reconciling");
+    prepareProviderMutation(operation, {
+      kind: "github_workflow.dispatch_retry",
+      target: "octo/app:verify.yml:main:prod:cmd"
+    });
+    delete (operation as { control?: unknown }).control;
+
+    expect(planRecoveredSchedule(operation)).toEqual({ kind: "forward_setup" });
+  });
+
+  it("goes forward only when nothing destructive is outstanding", () => {
+    const operation = restored("reconciling");
+    prepareProviderMutation(operation, {
+      kind: "azure_application.create",
+      target: "octo/app:prod:radius-deploy"
+    });
+
+    expect(planRecoveredSchedule(operation)).toEqual({ kind: "forward_setup" });
+  });
+
+  it("never reports forward setup while any deletion is outstanding", () => {
+    // The livelock this ordering exists to prevent: a cleanup record handed to
+    // the forward setup neither settles its deletions nor releases the lock,
+    // and comes back to the same decision after every restart.
+    for (const state of GENERIC_STATES) {
+      const operation = unsettledDelete(restored(state));
+      for (let restart = 0; restart < 3; restart++) {
+        expect(planRecoveredSchedule(operation).kind).not.toBe("forward_setup");
+      }
+    }
   });
 });
