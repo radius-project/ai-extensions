@@ -33,7 +33,8 @@ import {
   invokeSessionPrompt,
   localDeploymentBlocksMutation,
   preflightGhcrPackageWriteAccess,
-  repositoryApiPath,
+  environmentsApiPath,
+  environmentNameFromApiPath,
   resetListingCaches,
   resetDeploymentViewState,
   resolveCleanupGitHubContext,
@@ -815,22 +816,37 @@ describe("ensureServicePrincipal", () => {
   });
 });
 
-describe("repositoryApiPath", () => {
-  it("derives the repository an environment path belongs to", () => {
-    expect(repositoryApiPath("/repos/octo/app/environments/dev")).toBe(
-      "/repos/octo/app"
+describe("deriving the environments listing a delete path belongs to", () => {
+  it("names the listing and the environment the path targets", () => {
+    expect(environmentsApiPath("/repos/octo/app/environments/dev")).toBe(
+      "/repos/octo/app/environments"
     );
+    expect(environmentNameFromApiPath("/repos/octo/app/environments/dev")).toBe(
+      "dev"
+    );
+  });
+
+  it("decodes the environment back to the name a listing reports", () => {
     expect(
-      repositoryApiPath("/repos/octo/app/environments/needs%20encoding")
-    ).toBe("/repos/octo/app");
+      environmentNameFromApiPath("/repos/octo/app/environments/needs%20space")
+    ).toBe("needs space");
+  });
+
+  it("refuses a name it cannot decode rather than comparing the escaped form", () => {
+    expect(
+      environmentNameFromApiPath("/repos/octo/app/environments/%E0%A4%A")
+    ).toBeNull();
   });
 
   it.each([
     ["a repository path with no environment", "/repos/octo/app"],
+    ["the listing path itself", "/repos/octo/app/environments"],
+    ["a nested path below the environment", "/repos/octo/app/environments/a/b"],
     ["an unrelated path", "/user/repos"],
     ["an empty path", ""]
   ])("returns null for %s", (_label, path) => {
-    expect(repositoryApiPath(path)).toBeNull();
+    expect(environmentsApiPath(path)).toBeNull();
+    expect(environmentNameFromApiPath(path)).toBeNull();
   });
 });
 
@@ -889,121 +905,193 @@ describe("resolveCleanupGitHubContext", () => {
     );
   });
 
-  it("confirms absence after a timed-out environment delete once the repository still reads", async () => {
-    const executor = selectedExecutor({
-      run: vi
-        .fn()
-        .mockResolvedValueOnce({
-          code: 1,
-          stdout: "",
-          stderr: "terminated",
-          timedOut: true
-        })
-        .mockResolvedValueOnce({
-          code: 1,
-          stdout: "",
-          stderr: "HTTP 404: Not Found"
-        })
-        .mockResolvedValueOnce({
-          code: 0,
-          stdout: JSON.stringify({ full_name: "octo/app" }),
-          stderr: ""
-        })
-    });
-    const context = await resolveCleanupGitHubContext({
-      targets: [{ artifactType: "github_environment" }],
-      selectedLogin: "octocat",
-      createExecutor: async () => executor
+  describe("a timed-out environment delete answered with 404", () => {
+    const DELETE_ARGS = [
+      "api",
+      "--method",
+      "DELETE",
+      "/repos/octo/app/environments/dev"
+    ];
+    const TIMED_OUT = {
+      code: 1,
+      stdout: "",
+      stderr: "terminated",
+      timedOut: true
+    };
+    const NOT_FOUND = { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+    const listing = (names: string[], totalCount = names.length) => ({
+      code: 0,
+      stdout: JSON.stringify({
+        total_count: totalCount,
+        environments: names.map((name) => ({ name }))
+      }),
+      stderr: ""
     });
 
-    await expect(
-      context.deleteEnvironment([
-        "api",
-        "--method",
-        "DELETE",
-        "/repos/octo/app/environments/dev"
-      ])
-    ).resolves.toBeUndefined();
-    expect(executor.run).toHaveBeenCalledTimes(3);
-    expect(executor.run).toHaveBeenLastCalledWith(
-      ["api", "/repos/octo/app"],
-      expect.anything()
-    );
-  });
+    function timedOutDelete(...responses: unknown[]) {
+      const run = vi.fn();
+      run.mockResolvedValueOnce(TIMED_OUT).mockResolvedValueOnce(NOT_FOUND);
+      for (const response of responses) run.mockResolvedValueOnce(response);
+      return selectedExecutor({ run });
+    }
 
-  it.each([
-    [
-      "the repository read also 404s",
-      { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
-    ],
-    [
-      "the repository read is refused",
-      { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" }
-    ]
-  ])(
-    "refuses to call a timed-out environment delete complete when %s",
-    async (_label, repositoryRead) => {
-      const executor = selectedExecutor({
-        run: vi
-          .fn()
-          .mockResolvedValueOnce({
-            code: 1,
-            stdout: "",
-            stderr: "terminated",
-            timedOut: true
-          })
-          .mockResolvedValueOnce({
-            code: 1,
-            stdout: "",
-            stderr: "HTTP 404: Not Found"
-          })
-          .mockResolvedValueOnce(repositoryRead)
-      });
-      const context = await resolveCleanupGitHubContext({
+    async function context(executor: ReturnType<typeof selectedExecutor>) {
+      return resolveCleanupGitHubContext({
         targets: [{ artifactType: "github_environment" }],
         selectedLogin: "octocat",
         createExecutor: async () => executor
       });
+    }
 
-      // GitHub answers 404 both for an environment that is gone and for a
-      // repository this token can no longer see. Only the first is a delete.
+    it("proves absence from the environments listing the same account can read", async () => {
+      const executor = timedOutDelete(listing(["prod", "staging"]));
+
       await expect(
-        context.deleteEnvironment([
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).resolves.toBeUndefined();
+      expect(executor.run).toHaveBeenCalledTimes(3);
+      expect(executor.run).toHaveBeenLastCalledWith(
+        ["api", "/repos/octo/app/environments?per_page=100&page=1"],
+        expect.objectContaining({ timeout: 12000 })
+      );
+    });
+
+    it.each([
+      [
+        "the Actions environments API is refused",
+        { code: 1, stdout: "", stderr: "HTTP 403: Resource not accessible" }
+      ],
+      [
+        "the listing itself answers 404",
+        { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
+      ]
+    ])("refuses absence when %s", async (_label, response) => {
+      // Repository metadata being readable proves nothing about the Actions
+      // environments permission: GitHub answers 404 per resource, so only a
+      // listing the account can actually complete separates gone from hidden.
+      const executor = timedOutDelete(response);
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("masked access rather than a completed delete");
+    });
+
+    it("refuses absence when the listing still holds the environment", async () => {
+      const executor = timedOutDelete(listing(["dev", "prod"]));
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("is still present");
+    });
+
+    it("reads every page before calling the environment gone", async () => {
+      const first = Array.from({ length: 100 }, (_u, index) => `env-${index}`);
+      const second = Array.from({ length: 50 }, (_u, index) => `late-${index}`);
+      const executor = timedOutDelete(
+        listing(first, 150),
+        listing(second, 150)
+      );
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).resolves.toBeUndefined();
+      expect(executor.run).toHaveBeenCalledTimes(4);
+      expect(executor.run).toHaveBeenLastCalledWith(
+        ["api", "/repos/octo/app/environments?per_page=100&page=2"],
+        expect.anything()
+      );
+    });
+
+    it("finds the environment on a later page rather than reporting it gone", async () => {
+      const first = Array.from({ length: 100 }, (_u, index) => `env-${index}`);
+      const executor = timedOutDelete(
+        listing(first, 101),
+        listing(["dev"], 101)
+      );
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("is still present");
+    });
+
+    it("refuses absence when the listing stops short of the count GitHub reports", async () => {
+      // A short page that does not reach total_count was truncated somewhere,
+      // so its silence about the environment is not evidence.
+      const executor = timedOutDelete(listing(["prod"], 12));
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("ended after 1 of 12 entries");
+    });
+
+    it.each([
+      ["an unreadable body", { code: 0, stdout: "<html>", stderr: "" }],
+      [
+        "an array instead of an envelope",
+        { code: 0, stdout: "[]", stderr: "" }
+      ],
+      [
+        "an envelope with no environments",
+        { code: 0, stdout: JSON.stringify({ total_count: 0 }), stderr: "" }
+      ],
+      [
+        "an entry with no name",
+        {
+          code: 0,
+          stdout: JSON.stringify({ total_count: 1, environments: [{}] }),
+          stderr: ""
+        }
+      ]
+    ])("refuses absence for %s", async (_label, response) => {
+      const executor = timedOutDelete(response);
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("could not read");
+    });
+
+    it("accepts an envelope that reports no total at all", async () => {
+      const executor = timedOutDelete({
+        code: 0,
+        stdout: JSON.stringify({ environments: [{ name: "prod" }] }),
+        stderr: ""
+      });
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).resolves.toBeUndefined();
+    });
+
+    it("keeps a timed-out delete unknown when the path names no environment", async () => {
+      const executor = timedOutDelete();
+
+      await expect(
+        (await context(executor)).deleteEnvironment([
           "api",
           "--method",
           "DELETE",
-          "/repos/octo/app/environments/dev"
+          "/user/repos"
         ])
-      ).rejects.toThrow("masked access rather than a completed delete");
-    }
-  );
+      ).rejects.toThrow("could not derive the environments listing");
+      expect(executor.run).toHaveBeenCalledTimes(2);
+    });
 
-  it("keeps a timed-out delete unknown when the path names no repository", async () => {
-    const executor = selectedExecutor({
-      run: vi
+    it("still refuses when the environment is readable after the timeout", async () => {
+      const run = vi
         .fn()
+        .mockResolvedValueOnce(TIMED_OUT)
         .mockResolvedValueOnce({
-          code: 1,
-          stdout: "",
-          stderr: "terminated",
-          timedOut: true
-        })
-        .mockResolvedValueOnce({
-          code: 1,
-          stdout: "",
-          stderr: "HTTP 404: Not Found"
-        })
-    });
-    const context = await resolveCleanupGitHubContext({
-      targets: [{ artifactType: "github_environment" }],
-      selectedLogin: "octocat",
-      createExecutor: async () => executor
-    });
+          code: 0,
+          stdout: JSON.stringify({ name: "dev" }),
+          stderr: ""
+        });
+      const executor = selectedExecutor({ run });
 
-    await expect(
-      context.deleteEnvironment(["api", "--method", "DELETE", "/user/repos"])
-    ).rejects.toThrow("masked access rather than a completed delete");
-    expect(executor.run).toHaveBeenCalledTimes(2);
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("identity is still present");
+      expect(run).toHaveBeenCalledTimes(2);
+    });
   });
 
   it("fails closed when a cleanup record has no selected GitHub account", async () => {
