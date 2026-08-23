@@ -37,6 +37,10 @@ import {
   executeRecoverableMutation,
   ProviderMutationRecoveryError
 } from "../services/provider-mutation-recovery.js";
+import {
+  findExactVerificationRun,
+  hasPostDispatchVerificationRuns
+} from "../../verification-run-identity.js";
 
 // Seam 4 of the `POST /api/create-environment` slice: the seven-step use case.
 //
@@ -222,6 +226,7 @@ export interface CreateEnvironmentDependencies
     targetRepo: string;
     envName: string;
     ref?: string;
+    operationMarker?: string;
   }): string[];
   verifyWorkflowFile: string;
   stageVerify: string;
@@ -805,6 +810,7 @@ export async function handleCreateEnvironment(
     const dispatchedAt = dependencies.now();
     let verificationRef = defaultBranch;
     let baselineRunId: number | null = null;
+    let verificationManualReason = "";
     const verifyPlan = await dependencies.planCredentialVerification({
       targetRepo,
       prState: prState || null,
@@ -892,11 +898,20 @@ export async function handleCreateEnvironment(
         return;
       }
       verificationRef = verifyPlan.ref || defaultBranch;
+      const supportsOperationMarker =
+        verifyPlan.supportsOperationMarker !== false;
+      const operationMarker =
+        supportsOperationMarker ? operation.operationId : "";
+      const verificationActionsUrl =
+        `https://github.com/${targetRepo}/actions/workflows/` +
+        encodeURIComponent(dependencies.verifyWorkflowFile);
       operation.verification = {
         dispatchedAt,
         workflow: dependencies.verifyWorkflowFile,
         ref: verificationRef,
         environment: envName,
+        event: "workflow_dispatch",
+        operationMarker: operationMarker || null,
         baselineRunId,
         runId: null,
         runUrl: null
@@ -912,7 +927,7 @@ export async function handleCreateEnvironment(
           "--limit",
           "10",
           "--json",
-          "databaseId,createdAt",
+          "databaseId,createdAt,displayTitle,event,headBranch",
           "--repo",
           targetRepo
         ]);
@@ -923,44 +938,51 @@ export async function handleCreateEnvironment(
               "GitHub workflow runs could not be read."
           );
         }
-        let candidates: Array<{ databaseId: number; createdAt: string }> = [];
+        let parsed: unknown;
         try {
-          const parsed: unknown = JSON.parse(runsResult.stdout);
-          if (Array.isArray(parsed)) {
-            candidates = parsed
-              .filter(
-                (value): value is { databaseId: number; createdAt: string } =>
-                  value !== null &&
-                  typeof value === "object" &&
-                  "databaseId" in value &&
-                  Number.isFinite(Number(value.databaseId)) &&
-                  "createdAt" in value &&
-                  typeof value.createdAt === "string"
-              )
-              .map((value) => ({
-                databaseId: Number(value.databaseId),
-                createdAt: value.createdAt
-              }))
-              .filter(
-                (value) =>
-                  (baselineRunId === null ||
-                    value.databaseId > baselineRunId) &&
-                  Date.parse(value.createdAt) >= dispatchedAt - 60000
-              );
-          }
+          parsed = JSON.parse(runsResult.stdout);
         } catch {
           throw new Error("GitHub returned an unreadable workflow run list.");
         }
-        if (candidates.length > 0) {
+        if (!operationMarker) {
+          return {
+            state: "manual_required",
+            guidance: `The installed verification workflow does not expose Radius's operation marker. Check the accepted run in ${verificationActionsUrl}; Radius will not guess which run belongs to this operation or dispatch another one.`
+          };
+        }
+        const exact = findExactVerificationRun(parsed, {
+          baselineRunId,
+          dispatchedAt,
+          ref: verificationRef,
+          environment: envName,
+          operationMarker
+        });
+        if (exact.state === "applied") {
+          return {
+            state: "applied",
+            value: exact.runId,
+            evidence:
+              "The workflow, ref, environment, event, and operation-specific run title matched exactly."
+          };
+        }
+        if (exact.state === "ambiguous") {
+          return {
+            state: "manual_required",
+            guidance: `Multiple verification runs carry this operation's exact marker. Check ${verificationActionsUrl}; Radius will not choose one or dispatch another run.`
+          };
+        }
+        if (
+          hasPostDispatchVerificationRuns(parsed, baselineRunId, dispatchedAt)
+        ) {
           return {
             state: "manual_required",
             guidance:
-              "One or more verification runs appeared after Radius's saved pre-dispatch baseline, but GitHub does not expose an operation-specific dispatch marker that proves which run belongs to this operation. " +
-              "Radius will not adopt an unrelated run or dispatch another one."
+              `GitHub exposed one or more new verification runs, but none matches this operation's exact workflow/ref/environment/event marker. ` +
+              `Check ${verificationActionsUrl}; Radius will not adopt or redispatch a run.`
           };
         }
         throw new Error(
-          "No verification run is visible after the saved pre-dispatch baseline yet."
+          "No verification run with this operation's exact marker is visible yet."
         );
       };
       const dispatch = await executeRecoverableMutation({
@@ -974,7 +996,8 @@ export async function handleCreateEnvironment(
               workflowFile: dependencies.verifyWorkflowFile,
               targetRepo,
               envName,
-              ref: verifyPlan.ref
+              ref: verifyPlan.ref,
+              operationMarker
             })
           ),
         accept: () => "",
@@ -1008,14 +1031,27 @@ export async function handleCreateEnvironment(
         steps.push("✅ Credentials verification dispatched.");
         if (dispatch.state === "applied" && dispatch.recovered) {
           verifyRunId = dispatch.value;
+        } else if (!operationMarker) {
+          verificationManualReason =
+            `GitHub accepted verification, but the installed legacy workflow cannot expose an operation-specific run marker. ` +
+            `Review the run in ${verificationActionsUrl}. Radius will not adopt or redispatch it.`;
+          verifyRunUrl = verificationActionsUrl;
         } else {
           await dependencies.sleep(5000);
           try {
             const discovered = await discoverAcceptedRun();
             if (discovered.state === "applied") {
               verifyRunId = discovered.value;
+            } else {
+              verificationManualReason = discovered.guidance;
+              verifyRunUrl = verificationActionsUrl;
             }
-          } catch {}
+          } catch {
+            verificationManualReason =
+              `GitHub accepted verification, but Radius could not confirm the exact marked run. ` +
+              `Review ${verificationActionsUrl}; Radius will not adopt another run or dispatch again.`;
+            verifyRunUrl = verificationActionsUrl;
+          }
         }
         if (verifyRunId !== null) {
           verifyRunUrl =
@@ -1034,6 +1070,11 @@ export async function handleCreateEnvironment(
           "verify-dispatch-failed",
           {
             environment: envName,
+            event: "workflow_dispatch",
+            operationMarker:
+              verifyPlan.supportsOperationMarker !== false ?
+                operation.operationId
+              : null,
             provider,
             repo: targetRepo,
             stateBackend: dependencies.ociStateBackend,
@@ -1050,10 +1091,28 @@ export async function handleCreateEnvironment(
     // Record dispatch markers so the deploy monitor can track the correct
     // (newly-triggered) runs rather than any stale runs.
     {
+      const priorVerification =
+        (
+          operation.verification !== null &&
+          typeof operation.verification === "object"
+        ) ?
+          operation.verification
+        : {};
+      const priorOperationMarker =
+        (
+          "operationMarker" in priorVerification &&
+          typeof priorVerification.operationMarker === "string"
+        ) ?
+          priorVerification.operationMarker
+        : "";
       operation.verification = {
+        ...priorVerification,
         dispatchedAt,
         workflow: dependencies.verifyWorkflowFile,
         ref: verificationRef,
+        event: "workflow_dispatch",
+        operationMarker:
+          priorOperationMarker || (prState ? operation.operationId : null),
         baselineRunId,
         environment: envName,
         runId: verifyRunId == null ? null : String(verifyRunId),
@@ -1083,7 +1142,8 @@ export async function handleCreateEnvironment(
       }
     }
 
-    const actionRequired = !verifyPlan.shouldDispatch;
+    const actionRequired =
+      !verifyPlan.shouldDispatch || verificationManualReason !== "";
     dependencies.recordCleanupState(operation, { state: "not_needed" });
     if (actionRequired) {
       // The third terminal state, and the one the product kept getting wrong.
@@ -1098,12 +1158,16 @@ export async function handleCreateEnvironment(
       );
       dependencies.finish(operation, "action_required", {
         terminal: {
-          reason: "pr-merge-required",
+          reason:
+            verificationManualReason ?
+              "verification-run-manual"
+            : "pr-merge-required",
           pullRequestUrl: pullRequestUrl || null,
           branch: prState?.branch || null,
           baseBranch: prState?.base || verifyPlan.defaultBranch || null,
           userMessage:
-            pullRequestUrl ?
+            verificationManualReason ||
+            (pullRequestUrl ?
               "Merge the pull request to finish setup; credential verification and deploys run once it lands."
             : `Open and merge a pull request from "${
                 prState?.branch || "the setup branch"
@@ -1111,7 +1175,7 @@ export async function handleCreateEnvironment(
                 prState?.base ||
                 verifyPlan.defaultBranch ||
                 "the default branch"
-              }" to finish setup.`
+              }" to finish setup.`)
         }
       });
       await dependencies.persistBestEffort({

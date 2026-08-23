@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { providerMutationRecord } from "../../operations.js";
 import { needsWorkflowScope } from "./create-environment-gh-runner.js";
 import type {
   CreateEnvironmentCommandResult,
@@ -320,8 +321,40 @@ export function createWorkflowFileCommitter(
       /(?:HTTP\s+404|\bNot Found\b)/i.test(
         `${shaRes.stderr || ""}\n${shaRes.stdout || ""}`
       );
+    const mutationKind = "github_workflow.put";
+    const mutationTarget = `${target.targetRepo}:${branch || "<default>"}:${path}`;
+    const mutationRecovery = ports.mutationRecovery;
+    const recoveryOperation = mutationRecovery?.operation;
+    const existingMutation =
+      recoveryOperation ?
+        providerMutationRecord(recoveryOperation, mutationKind, mutationTarget)
+      : null;
+    const existingIntent = existingMutation?.intent;
+    const operationMarker =
+      typeof existingIntent?.operationMarker === "string" ?
+        existingIntent.operationMarker
+      : recoveryOperation ?
+        `radius-operation:${recoveryOperation.operationId}:workflow:${workflowContentDigest(contentB64).slice(0, 16)}`
+      : "";
+    const intendedPreviousBlobSha =
+      (
+        existingIntent &&
+        "previousBlobSha" in existingIntent &&
+        (typeof existingIntent.previousBlobSha === "string" ||
+          existingIntent.previousBlobSha === null)
+      ) ?
+        existingIntent.previousBlobSha
+      : sha || null;
+    const intendedPreviousBlobKnown =
+      typeof existingIntent?.previousBlobKnown === "boolean" ?
+        existingIntent.previousBlobKnown
+      : previousBlobKnown;
+    const commitMessage =
+      operationMarker ?
+        `${message}\n\nRadius-Operation: ${operationMarker}`
+      : message;
     const bodyObj = {
-      message,
+      message: commitMessage,
       content: contentB64,
       ...(branch ? { branch } : {}),
       ...(sha ? { sha } : {})
@@ -337,13 +370,21 @@ export function createWorkflowFileCommitter(
     ];
     let r: CreateEnvironmentCommandResult;
     try {
-      if (ports.mutationRecovery) {
+      if (mutationRecovery) {
         const mutation =
           await executeRecoverableMutation<CreateEnvironmentCommandResult>({
-            operation: ports.mutationRecovery.operation,
-            kind: "github_workflow.put",
-            target: `${target.targetRepo}:${branch || "<default>"}:${path}`,
-            persist: ports.mutationRecovery.persist,
+            operation: mutationRecovery.operation,
+            kind: mutationKind,
+            target: mutationTarget,
+            intent: {
+              branch: branch || "<default>",
+              path,
+              previousBlobSha: intendedPreviousBlobSha,
+              previousBlobKnown: intendedPreviousBlobKnown,
+              contentSha256: workflowContentDigest(contentB64),
+              operationMarker
+            },
+            persist: mutationRecovery.persist,
             mutate: () => ports.runGhWorkflow(args),
             accept: (result) => result,
             reconcile: async () => {
@@ -386,6 +427,11 @@ export function createWorkflowFileCommitter(
               const currentDigest =
                 currentContent ? workflowContentDigest(currentContent) : "";
               const expectedDigest = workflowContentDigest(contentB64);
+              const durableIntent = providerMutationRecord(
+                mutationRecovery.operation,
+                mutationKind,
+                mutationTarget
+              )?.intent;
               if (
                 typeof body.sha !== "string" ||
                 !body.sha ||
@@ -398,13 +444,81 @@ export function createWorkflowFileCommitter(
                     "Radius will not overwrite or remove it."
                 };
               }
+              if (
+                typeof durableIntent?.operationMarker !== "string" ||
+                durableIntent.operationMarker !== operationMarker ||
+                durableIntent.contentSha256 !== expectedDigest ||
+                durableIntent.path !== path ||
+                durableIntent.branch !== (branch || "<default>") ||
+                typeof durableIntent.previousBlobKnown !== "boolean"
+              ) {
+                return {
+                  state: "manual_required" as const,
+                  guidance:
+                    `Radius does not have complete pre-write rollback provenance for "${path}" on "${branch || "the default branch"}". ` +
+                    "It will not accept, overwrite, or remove that workflow."
+                };
+              }
+              const commitsPath =
+                `/repos/${target.targetRepo}/commits?path=${encodeURIComponent(path)}` +
+                `${branch ? `&sha=${encodeURIComponent(branch)}` : ""}&per_page=10`;
+              const commits = await ports.runGh(["api", commitsPath]);
+              if (commits.code !== 0 && commits.code !== "0") {
+                throw new Error(
+                  commits.stderr ||
+                    commits.stdout ||
+                    "GitHub workflow commit history could not be read."
+                );
+              }
+              let matchingCommits: Array<{ sha: string }> = [];
+              try {
+                const parsed: unknown = JSON.parse(commits.stdout);
+                if (Array.isArray(parsed)) {
+                  matchingCommits = parsed.filter(
+                    (
+                      candidate
+                    ): candidate is {
+                      sha: string;
+                      commit: { message: string };
+                    } =>
+                      candidate !== null &&
+                      typeof candidate === "object" &&
+                      "sha" in candidate &&
+                      typeof candidate.sha === "string" &&
+                      candidate.sha.length === 40 &&
+                      "commit" in candidate &&
+                      candidate.commit !== null &&
+                      typeof candidate.commit === "object" &&
+                      "message" in candidate.commit &&
+                      typeof candidate.commit.message === "string" &&
+                      candidate.commit.message.includes(
+                        `Radius-Operation: ${operationMarker}`
+                      )
+                  );
+                }
+              } catch {
+                return {
+                  state: "manual_required" as const,
+                  guidance:
+                    `GitHub returned unreadable commit history for "${path}" on "${branch || "the default branch"}". ` +
+                    "Radius will not accept, overwrite, or remove that workflow."
+                };
+              }
+              if (matchingCommits.length !== 1) {
+                return {
+                  state: "manual_required" as const,
+                  guidance:
+                    `Radius could not prove one exact commit for "${path}" on "${branch || "the default branch"}" using this operation's immutable marker. ` +
+                    "It will not accept, overwrite, or remove that workflow."
+                };
+              }
               return {
                 state: "applied" as const,
                 value: {
                   code: 0,
                   stdout: JSON.stringify({
                     content: { sha: body.sha },
-                    commit: { sha: null }
+                    commit: { sha: matchingCommits[0].sha }
                   }),
                   stderr: ""
                 },
@@ -429,8 +543,8 @@ export function createWorkflowFileCommitter(
     }
     return {
       ...r,
-      previousBlobSha: sha || null,
-      previousBlobKnown,
+      previousBlobSha: intendedPreviousBlobSha,
+      previousBlobKnown: intendedPreviousBlobKnown,
       ...readWorkflowCommitProvenance(r.stdout)
     };
   };

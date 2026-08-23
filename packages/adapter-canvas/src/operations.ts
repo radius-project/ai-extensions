@@ -278,6 +278,7 @@ export type ProviderMutationRecord = {
   preparedAt: string;
   updatedAt: string;
   providerIdempotencyKey: string | null;
+  intent?: Record<string, string | number | boolean | null>;
   evidence: string | null;
 };
 
@@ -334,6 +335,20 @@ function readProviderRecovery(value: any): ProviderRecoveryRecord {
             ) ?
               entry.providerIdempotencyKey
             : null,
+          ...(entry.intent && typeof entry.intent === "object" ?
+            {
+              intent: Object.fromEntries(
+                Object.entries(entry.intent).filter(
+                  ([key, field]) =>
+                    key &&
+                    (typeof field === "string" ||
+                      typeof field === "number" ||
+                      typeof field === "boolean" ||
+                      field === null)
+                )
+              )
+            }
+          : {}),
           evidence:
             typeof entry.evidence === "string" && entry.evidence ?
               entry.evidence
@@ -378,11 +393,13 @@ export function prepareProviderMutation(
   {
     kind,
     target,
-    providerIdempotencyKey = null
+    providerIdempotencyKey = null,
+    intent = null
   }: {
     kind: string;
     target: string;
     providerIdempotencyKey?: string | null;
+    intent?: Record<string, string | number | boolean | null> | null;
   }
 ): ProviderMutationRecord {
   const recovery = readProviderRecovery(op?.providerRecovery);
@@ -406,6 +423,7 @@ export function prepareProviderMutation(
       typeof providerIdempotencyKey === "string" && providerIdempotencyKey ?
         providerIdempotencyKey
       : null,
+    ...(intent ? { intent: structuredClone(intent) } : {}),
     evidence: null
   };
   if (recovery.state !== "rollback_pending") {

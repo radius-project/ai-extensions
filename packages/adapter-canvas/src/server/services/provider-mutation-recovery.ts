@@ -148,24 +148,12 @@ export async function executeRecoverableMutation<T>(input: {
   kind: string;
   target: string;
   providerIdempotencyKey?: string | null;
+  intent?: Record<string, string | number | boolean | null> | null;
   persist(): Promise<void>;
   mutate(): Promise<ProviderMutationCommandResult>;
   accept(result: ProviderMutationCommandResult): T;
   reconcile(): Promise<ProviderMutationReconciliation<T>>;
 }): Promise<RecoverableMutationResult<T>> {
-  // The recovered empty fallback branch is itself rollback work: it is deleted
-  // once by exact ref/SHA before the general rollback starts. Every setup write
-  // remains prohibited after reconciliation requests rollback.
-  if (
-    (input.operation as RecoveringOperation).providerRecovery?.state ===
-      "rollback_pending" &&
-    input.kind !== "github_branch.delete"
-  ) {
-    throw new ProviderMutationRecoveryError(
-      "Radius has finished reconciling the interrupted provider request and must roll back before any further provider changes.",
-      "provider-mutation-rollback-pending"
-    );
-  }
   const mutationId = providerMutationId(
     input.operation.operationId,
     input.kind,
@@ -178,10 +166,26 @@ export async function executeRecoverableMutation<T>(input: {
   ).providerRecovery?.mutations?.find(
     (entry) => entry.mutationId === mutationId
   );
+  // Rollback may reread an already-journaled setup mutation to settle its exact
+  // outcome, but it may never start or replay a forward provider write.
+  if (
+    (input.operation as RecoveringOperation).providerRecovery?.state ===
+      "rollback_pending" &&
+    input.kind !== "github_branch.delete" &&
+    (!existingBefore ||
+      existingBefore.status === "not_applied" ||
+      existingBefore.status === "manual_required")
+  ) {
+    throw new ProviderMutationRecoveryError(
+      "Radius has finished reconciling the interrupted provider request and must roll back before any further provider changes.",
+      "provider-mutation-rollback-pending"
+    );
+  }
   const mutation = prepareProviderMutation(input.operation, {
     kind: input.kind,
     target: input.target,
-    providerIdempotencyKey: input.providerIdempotencyKey
+    providerIdempotencyKey: input.providerIdempotencyKey,
+    intent: input.intent
   });
 
   const shouldMutate =

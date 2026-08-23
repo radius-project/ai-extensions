@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createOperation } from "../../operations.js";
+import {
+  createOperation,
+  prepareProviderMutation,
+  settleProviderMutation
+} from "../../operations.js";
 import {
   ensureGitHubEnvironment,
   GitHubEnvironmentEnsureError,
@@ -131,6 +135,64 @@ describe("ensureGitHubEnvironment", () => {
     expect(operation.providerRecovery).toMatchObject({
       state: "complete",
       mutations: [{ status: "confirmed" }]
+    });
+  });
+
+  it("re-proves a restored confirmed PUT from durable absence and timestamp evidence", async () => {
+    const operation = createOperation({ operationId: "op_environment" });
+    const mutation = prepareProviderMutation(operation, {
+      kind: "github_environment.put",
+      target: "octo/app:production"
+    });
+    mutation.preparedAt = "2026-08-22T00:00:00.000Z";
+    settleProviderMutation(operation, mutation.mutationId, "confirmed");
+
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async () =>
+          readResult({
+            json: {
+              name: "production",
+              created_at: "2026-08-22T00:00:00.000Z"
+            }
+          }),
+        runGh: async () => {
+          throw new Error("confirmed PUT must not replay");
+        },
+        mutationRecovery: { operation, persist: async () => {} }
+      })
+    ).resolves.toEqual({
+      name: "production",
+      state: "created_candidate",
+      creationProof: { proven: true, detail: null }
+    });
+  });
+
+  it("keeps a restored confirmed PUT outside cleanup when creation proof is unavailable", async () => {
+    const operation = createOperation({ operationId: "op_environment" });
+    const mutation = prepareProviderMutation(operation, {
+      kind: "github_environment.put",
+      target: "octo/app:production"
+    });
+    mutation.preparedAt = "2026-08-22T00:00:00.000Z";
+    settleProviderMutation(operation, mutation.mutationId, "confirmed");
+
+    const ensured = await ensureGitHubEnvironment({
+      repo: "octo/app",
+      requestedName: "production",
+      readGitHubJson: async () => readResult({ json: { name: "production" } }),
+      runGh: async () => {
+        throw new Error("confirmed PUT must not replay");
+      },
+      mutationRecovery: { operation, persist: async () => {} }
+    });
+
+    expect(ensured).toMatchObject({
+      name: "production",
+      state: "created_candidate",
+      creationProof: { proven: false }
     });
   });
 

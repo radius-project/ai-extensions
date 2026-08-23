@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createOperation, prepareProviderMutation } from "../../operations.js";
+import {
+  createOperation,
+  fromPersistedOperation,
+  prepareProviderMutation,
+  toPersistedOperation
+} from "../../operations.js";
 import {
   createWorkflowFileCommitter,
   isProtectedBranchFailure,
@@ -164,6 +169,18 @@ describe("committing a workflow file", () => {
         {
           code: 0,
           stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
+        },
+        {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              sha: "a".repeat(40),
+              commit: {
+                message:
+                  "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:fff71b97a5a94949"
+              }
+            }
+          ])
         }
       ],
       runGhWorkflow: [{ code: 1, timedOut: true }]
@@ -184,6 +201,7 @@ describe("committing a workflow file", () => {
     ).resolves.toMatchObject({
       ok: true,
       viaPr: false,
+      commitSha: "a".repeat(40),
       blobSha: "blob-recovered",
       contentSha256: CONTENT_DIGEST,
       previousBlobKnown: true
@@ -192,7 +210,118 @@ describe("committing a workflow file", () => {
       h.calls.filter((call) => call.kind === "runGhWorkflow")
     ).toHaveLength(1);
     expect(operation.providerRecovery.mutations[0]).toMatchObject({
-      status: "confirmed"
+      status: "confirmed",
+      intent: {
+        branch: "<default>",
+        path: ".github/workflows/a.yml",
+        previousBlobSha: null,
+        previousBlobKnown: true,
+        contentSha256: CONTENT_DIGEST
+      }
+    });
+  });
+
+  it("restores the pre-write blob and exact commit after a lost response and restart", async () => {
+    const first = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
+        },
+        { code: 1, stderr: "commit history temporarily unavailable" }
+      ],
+      runGhWorkflow: [{ code: 1, timedOut: true }]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    first.ports.mutationRecovery = {
+      operation,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(first.ports, target).commitWorkflowFileSmart(
+        ".github/workflows/a.yml",
+        CONTENT,
+        "Add a"
+      )
+    ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+
+    const restored = fromPersistedOperation(toPersistedOperation(operation));
+    const second = harness({
+      runGh: [
+        { code: 0, stdout: "blob-recovered" },
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
+        },
+        {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              sha: "b".repeat(40),
+              commit: {
+                message:
+                  "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:fff71b97a5a94949"
+              }
+            }
+          ])
+        }
+      ]
+    });
+    second.ports.mutationRecovery = {
+      operation: restored,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(second.ports, target).commitWorkflowFileSmart(
+        ".github/workflows/a.yml",
+        CONTENT,
+        "Add a"
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      commitSha: "b".repeat(40),
+      blobSha: "blob-recovered",
+      previousBlobSha: null,
+      previousBlobKnown: true
+    });
+    expect(
+      second.calls.filter((call) => call.kind === "runGhWorkflow")
+    ).toEqual([]);
+  });
+
+  it("fails closed when exact created commit provenance cannot be recovered", async () => {
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
+        },
+        { code: 0, stdout: "[]" }
+      ],
+      runGhWorkflow: [{ code: 1, timedOut: true }]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    h.ports.mutationRecovery = {
+      operation,
+      persist: async () => {}
+    };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        ".github/workflows/a.yml",
+        CONTENT,
+        "Add a"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("one exact commit")
+    });
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "manual_required"
     });
   });
 

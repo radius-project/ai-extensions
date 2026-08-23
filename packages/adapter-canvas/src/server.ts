@@ -111,6 +111,10 @@ import {
   planCredentialVerification
 } from "./verification-plan.js";
 import {
+  findExactVerificationRun,
+  hasPostDispatchVerificationRuns
+} from "./verification-run-identity.js";
+import {
   operations,
   isTerminalState,
   isStale,
@@ -136,6 +140,7 @@ import {
   recordCommittedWorkflowFile,
   recordCleanupState,
   recordCleanupDeletion,
+  reconcileRestoredOperation,
   cleanupArtifactIdentity,
   cleanupTargetKey,
   formatGitHubEnvironmentLabel,
@@ -1375,6 +1380,67 @@ export function unmarkedVerificationRunGuidance(
     "but GitHub does not expose an operation-specific dispatch marker. Radius will " +
     "not guess which run belongs to this operation or dispatch another run."
   );
+}
+
+export async function resolveAcknowledgedVerificationRun(input: {
+  operationMarker: string;
+  pause(milliseconds: number): Promise<void>;
+  discover(): Promise<
+    | { state: "applied"; value: string }
+    | { state: "manual_required"; guidance: string }
+  >;
+  actionsUrl: string;
+}): Promise<
+  | { state: "applied"; runId: string }
+  | { state: "manual_required"; guidance: string }
+> {
+  if (!input.operationMarker) {
+    return {
+      state: "manual_required",
+      guidance:
+        `The installed verification workflow does not expose Radius's operation marker. Check ${input.actionsUrl}; ` +
+        "Radius will not guess which run belongs to this retry or dispatch another run."
+    };
+  }
+  await input.pause(5000);
+  try {
+    const discovered = await input.discover();
+    return discovered.state === "applied" ?
+        { state: "applied", runId: discovered.value }
+      : discovered;
+  } catch {
+    return {
+      state: "manual_required",
+      guidance:
+        `GitHub accepted verification, but Radius could not confirm the exact marked run. Review ${input.actionsUrl}. ` +
+        "Radius will not adopt or redispatch a run."
+    };
+  }
+}
+
+export function reopenProviderReconciliation(operation: any): boolean {
+  if (!operation || unresolvedProviderMutations(operation).length === 0) {
+    return false;
+  }
+
+  reconcileRestoredOperation(operation);
+  setExecutionActive(operation, false);
+  return true;
+}
+
+export function cleanupProviderRecoveryDisposition(operation: any): {
+  blockers: ReturnType<typeof unresolvedProviderMutations>;
+  mayStartDestructiveCleanup: boolean;
+  mayCompleteCleanup: boolean;
+} {
+  const blockers = unresolvedProviderMutations(operation);
+  return {
+    blockers,
+    mayStartDestructiveCleanup: blockers.every(
+      (mutation) => mutation.kind === "github_branch.delete"
+    ),
+    mayCompleteCleanup: blockers.length === 0
+  };
 }
 
 const activeEnvironmentTasks = new Map<string, Set<string>>();
@@ -4310,9 +4376,7 @@ function createInstanceRequestCoordinator(
       .catch(async (error) => {
         const current = operations.get(operationId);
         if (shuttingDownInstances.has(instanceId)) return;
-        if (current && unresolvedProviderMutations(current).length > 0) {
-          current.recoveryState = "provider_reconciliation_pending";
-          setExecutionActive(current, false);
+        if (reopenProviderReconciliation(current)) {
           if (
             !current.steps.some(
               (step: { label?: string }) =>
@@ -4683,6 +4747,11 @@ function createInstanceRequestCoordinator(
     const workflow = String(saved.workflow || VERIFY_WORKFLOW_FILE);
     const ref = String(saved.ref || "");
     const environment = String(saved.environment || op.environment);
+    const operationMarker =
+      typeof saved.operationMarker === "string" ? saved.operationMarker : "";
+    const verificationActionsUrl =
+      `https://github.com/${op.repo}/actions/workflows/` +
+      encodeURIComponent(workflow);
     const mutationTarget = `${op.repo}:${workflow}:${ref}:${environment}:${commandId}`;
     const existingMutation = providerMutationRecord(
       op,
@@ -4762,7 +4831,7 @@ function createInstanceRequestCoordinator(
         "--limit",
         "10",
         "--json",
-        "databaseId,createdAt",
+        "databaseId,createdAt,displayTitle,event,headBranch",
         "--repo",
         op.repo
       ]);
@@ -4773,38 +4842,51 @@ function createInstanceRequestCoordinator(
             "GitHub workflow runs could not be read."
         );
       }
-      let candidates: Array<{ databaseId: number; createdAt: string }> = [];
+      let parsed: unknown;
       try {
-        const parsed: unknown = JSON.parse(listed.stdout);
-        if (Array.isArray(parsed)) {
-          candidates = parsed
-            .filter(
-              (value): value is { databaseId: number; createdAt: string } =>
-                value !== null &&
-                typeof value === "object" &&
-                "databaseId" in value &&
-                Number.isFinite(Number(value.databaseId)) &&
-                "createdAt" in value &&
-                typeof value.createdAt === "string"
-            )
-            .map((value) => ({
-              databaseId: Number(value.databaseId),
-              createdAt: value.createdAt
-            }))
-            .filter(
-              (value) =>
-                (baselineRunId === null || value.databaseId > baselineRunId) &&
-                Date.parse(value.createdAt) >= dispatchedAt - 60000
-            );
-        }
+        parsed = JSON.parse(listed.stdout);
       } catch {
         throw new Error("GitHub returned an unreadable workflow run list.");
       }
-      const guidance = unmarkedVerificationRunGuidance(candidates.length);
-      if (guidance) {
+      if (!operationMarker) {
         return {
           state: "manual_required" as const,
-          guidance
+          guidance:
+            `The installed verification workflow does not expose Radius's operation marker. Check ${verificationActionsUrl}; ` +
+            "Radius will not guess which run belongs to this retry or dispatch another run."
+        };
+      }
+      const exact = findExactVerificationRun(parsed, {
+        baselineRunId,
+        dispatchedAt,
+        ref,
+        environment,
+        operationMarker
+      });
+      if (exact.state === "applied") {
+        return {
+          state: "applied" as const,
+          value: exact.runId,
+          evidence:
+            "The workflow, ref, environment, event, and operation-specific run title matched exactly."
+        };
+      }
+      if (exact.state === "ambiguous") {
+        return {
+          state: "manual_required" as const,
+          guidance:
+            `Multiple verification retry runs carry this operation's exact marker. Check ${verificationActionsUrl}; ` +
+            "Radius will not choose one or dispatch another run."
+        };
+      }
+      if (
+        hasPostDispatchVerificationRuns(parsed, baselineRunId, dispatchedAt)
+      ) {
+        return {
+          state: "manual_required" as const,
+          guidance:
+            `GitHub exposed one or more new verification retry runs, but none matches this operation's exact workflow/ref/environment/event marker. ` +
+            `Check ${verificationActionsUrl}; Radius will not adopt or redispatch a run.`
         };
       }
       throw new Error(
@@ -4823,7 +4905,8 @@ function createInstanceRequestCoordinator(
             workflowFile: workflow,
             targetRepo: op.repo,
             envName: environment,
-            ref
+            ref,
+            operationMarker
           }),
           30000
         ),
@@ -4851,22 +4934,52 @@ function createInstanceRequestCoordinator(
       await saveOperation(op);
       return;
     }
+    let acceptedRunId =
+      dispatch.state === "applied" && dispatch.recovered ?
+        String(dispatch.value)
+      : null;
+    let verificationManualGuidance = "";
+    if (!acceptedRunId) {
+      const adoption = await resolveAcknowledgedVerificationRun({
+        operationMarker,
+        pause: (milliseconds) =>
+          new Promise((resolve) => setTimeout(resolve, milliseconds)),
+        discover: discoverAcceptedRun,
+        actionsUrl: verificationActionsUrl
+      });
+      if (adoption.state === "applied") {
+        acceptedRunId = adoption.runId;
+      } else {
+        verificationManualGuidance = adoption.guidance;
+      }
+    }
     op.verification = {
       dispatchedAt,
       workflow,
       ref,
       environment,
+      event: "workflow_dispatch",
+      operationMarker: operationMarker || null,
       baselineRunId,
-      runId:
-        dispatch.state === "applied" && dispatch.recovered ?
-          String(dispatch.value)
-        : null,
+      runId: acceptedRunId,
       runUrl:
-        dispatch.state === "applied" && dispatch.recovered ?
-          `https://github.com/${op.repo}/actions/runs/${dispatch.value}`
+        acceptedRunId ?
+          `https://github.com/${op.repo}/actions/runs/${acceptedRunId}`
         : null
     };
     addLegacyStep(op, "✅ Verify workflow dispatched again.", STAGE_VERIFY);
+    if (!op.verification.runId) {
+      op.verification.runUrl = verificationActionsUrl;
+      setCommandState(op, commandId, "finished", "action_required");
+      finish(op, "action_required", {
+        terminal: {
+          reason: "verification-run-manual",
+          userMessage: verificationManualGuidance
+        }
+      });
+      await saveOperation(op);
+      return;
+    }
     setCommandState(op, commandId, "running");
     await saveOperation(op);
     await monitorVerification(operationId);
@@ -4899,6 +5012,12 @@ function createInstanceRequestCoordinator(
     }
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
+    const recoveryBeforeCleanup = cleanupProviderRecoveryDisposition(op);
+    if (!recoveryBeforeCleanup.mayStartDestructiveCleanup) {
+      throw new Error(
+        "Provider mutations must be reconciled before cleanup can continue."
+      );
+    }
     const command = CLEANUP_COMMANDS[kind];
     const selected = command.selectTargets(op);
     const ledger = getSetupArtifactLedger(op);
@@ -5014,6 +5133,35 @@ function createInstanceRequestCoordinator(
     results = [...results, ...azureCleanup.results];
 
     for (const step of steps) addLegacyStep(op, step);
+    const recoveryAfterCleanup = cleanupProviderRecoveryDisposition(op);
+    if (!recoveryAfterCleanup.mayCompleteCleanup) {
+      recordCleanupState(op, {
+        attempts: azureCleanup.attempt,
+        state: "pending",
+        results: carriedResults()
+      });
+      setCommandState(
+        op,
+        commandId,
+        "finished",
+        "provider-reconciliation-pending"
+      );
+      finish(op, "failed_partial", {
+        failure: {
+          code: "provider-reconciliation-pending",
+          stage: op.currentStage,
+          stepSeq: null,
+          message:
+            "Cleanup could not finish because one or more provider mutation outcomes are still unresolved.",
+          classification: "user-fixable",
+          evidence: recoveryAfterCleanup.blockers
+            .map((mutation) => `${mutation.kind} for ${mutation.target}`)
+            .join("; ")
+        }
+      });
+      await persist();
+      return;
+    }
     // The browser reloads the environment table the moment this record turns
     // terminal, and that reload is answered from the repo-scoped listing cache.
     // Invalidating here — before `finish`, not only where the deletion happened
@@ -5072,6 +5220,13 @@ function createInstanceRequestCoordinator(
     };
   }): void {
     if (op.providerRecovery?.state === "rollback_pending") {
+      const unresolved = unresolvedProviderMutations(op);
+      if (
+        unresolved.some((mutation) => mutation.kind !== "github_branch.delete")
+      ) {
+        scheduleEnvironmentOperation(op);
+        return;
+      }
       const cleanupCommand = [...(op.control?.commands || [])].reverse().find(
         (
           entry

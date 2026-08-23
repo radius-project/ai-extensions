@@ -262,6 +262,9 @@ function start(script: Script = {}): Harness {
               {
                 databaseId: 4242,
                 createdAt: "2023-11-14T22:13:20.000Z",
+                displayTitle: "Radius verify dev [op-http]",
+                event: "workflow_dispatch",
+                headBranch: "main",
                 status: "queued",
                 url: "ignored"
               }
@@ -831,7 +834,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       stateBackend: "oci",
       stateRegistry: "ghcr.io/octo/app/radius-state-dev",
       stateArchive: "radius-state",
-      verifyRunUrl: "",
+      verifyRunUrl: "https://github.com/octo/app/actions/runs/4242",
       actionRequired: false,
       pullRequestUrl: "",
       pullRequestBranch: null,
@@ -1418,15 +1421,15 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(harness.finished).toEqual([]);
   });
 
-  it("does not guess a run identity when GitHub exposes no operation marker", async () => {
+  it("adopts the exact operation-marked run after acknowledged dispatch", async () => {
     const harness = start();
 
     await post({ repo: "octo/app" });
 
     expect(harness.state).toMatchObject({
       deployDispatchedAt: 1700000000000,
-      verifyRunId: null,
-      verifyRunUrl: ""
+      verifyRunId: "4242",
+      verifyRunUrl: "https://github.com/octo/app/actions/runs/4242"
     });
     expect(harness.journal).toContain(`enterStage:${STAGE_VERIFY}`);
   });
@@ -1656,9 +1659,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     ).toBe(true);
   });
 
-  it("dispatches anyway when the verify workflow already exists on the default branch", async () => {
-    // The PR is then merely informational, so the response must not report it
-    // as blocking work.
+  it("makes an acknowledged legacy workflow dispatch action-required", async () => {
     const harness = start({
       ...protectedScript,
       files: {
@@ -1670,9 +1671,24 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     const response = await post({ repo: "octo/app" });
 
     expect(await response.json()).toMatchObject({
-      actionRequired: false,
+      actionRequired: true,
       pullRequestUrl: "",
-      pullRequestBranch: null
+      pullRequestBranch: "radius/setup-dev-workflows-op-http"
+    });
+    expect(harness.finished).toContainEqual(
+      expect.objectContaining({
+        state: "action_required",
+        options: expect.objectContaining({
+          terminal: expect.objectContaining({
+            reason: "verification-run-manual",
+            userMessage: expect.stringContaining("/actions/workflows/")
+          })
+        })
+      })
+    );
+    expect(harness.operation.verification).toMatchObject({
+      event: "workflow_dispatch",
+      operationMarker: "op-http"
     });
     expect(
       harness.ghCalls.some((call) =>
