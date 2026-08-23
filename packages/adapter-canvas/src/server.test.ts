@@ -1771,6 +1771,31 @@ describe("triggerDeployRepairHandoff", () => {
     expect(entry.state.deployNoticeAttempts).toBe(0);
   });
 
+  it("clears concrete metadata from the previous deployment attempt", () => {
+    const entry = failedEntry();
+    entry.state.deployedGraph = [
+      {
+        id: "mysql",
+        outputResources: [
+          { id: "old-server", type: "Microsoft.DBforMySQL/flexibleServers" }
+        ]
+      }
+    ];
+    entry.state.deployedGraphRepo = "octo/app";
+
+    beginDeployAttempt(entry.state, {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep",
+      repairLoop: false
+    });
+
+    expect(entry.state.deployedGraph).toBeNull();
+    expect(entry.state.deployedGraphRepo).toBeUndefined();
+  });
+
   describe("resolveDeployRepairLoop", () => {
     it("treats a deploy with no attempt as an ordinary deploy", () => {
       expect(

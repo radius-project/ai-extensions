@@ -25,6 +25,7 @@ export type GraphPageId = (typeof GRAPH_PAGES)[number];
 const NAVIGATION_ENTRY_KEY = "graph-navigation";
 
 export interface NavigationEvent {
+  readonly detail?: number;
   preventDefault(): void;
 }
 
@@ -83,6 +84,10 @@ export function createGraphNavigation(
     event: NavigationEvent | null,
     pageId: GraphPageId
   ): void {
+    // Clicks synthesized by keyboard activation have detail 0. Pointer clicks
+    // must not regain focus after the navigation replaces their original link.
+    const transferFocus =
+      event === null || event.detail === undefined || event.detail === 0;
     event?.preventDefault();
     const url = graphPageUrl(context.nav.search, pageId);
     const content = context.dom.byId(GRAPH_CONTENT_ID);
@@ -122,10 +127,12 @@ export function createGraphNavigation(
           if (nav) nav.innerHTML = newNavValue.innerHTML;
         }
         context.nav.pushState(url);
-        const active = context.dom.document.querySelector(
-          `#${GRAPH_NAV_ID} [${GRAPH_PAGE_ATTRIBUTE}="${pageId}"]`
-        );
-        context.focus.focus(isDomElement(active) ? active : null);
+        if (transferFocus) {
+          const active = context.dom.document.querySelector(
+            `#${GRAPH_NAV_ID} [${GRAPH_PAGE_ATTRIBUTE}="${pageId}"]`
+          );
+          context.focus.focus(isDomElement(active) ? active : null);
+        }
         request = null;
       })
       .catch((error: unknown) => {

@@ -163,17 +163,22 @@ describe("application modeling journey", () => {
       ["sessions", "Azure Cache for Redis Enterprise"]
     ]);
 
-    // The deployed view keeps the modeled topology and paints it with status.
+    // The deployed view keeps modeled topology and nested resolved metadata,
+    // then paints each parent with status.
     const deployed = projectDeployedGraph(planned, {
       [API_ID]: "success",
       "orders|radius.data/postgresqldatabases": "in_progress"
     });
     expect(
-      deployed.map((r: any) => [r.name, r.deployStatus, r.outputResources])
+      deployed.map((r: any) => [
+        r.name,
+        r.deployStatus,
+        r.outputResources.map((output: any) => output.type)
+      ])
     ).toEqual([
-      ["api", "success", []],
-      ["orders", "in_progress", []],
-      ["sessions", "pending", []]
+      ["api", "success", ["Microsoft.ContainerService/managedClusters"]],
+      ["orders", "in_progress", ["Microsoft.DBforPostgreSQL/flexibleServers"]],
+      ["sessions", "pending", ["Microsoft.Cache/redisEnterprise"]]
     ]);
   });
 
