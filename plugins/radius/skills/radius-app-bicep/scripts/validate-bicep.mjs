@@ -23,7 +23,7 @@ import os from "node:os";
 import path from "node:path";
 
 const STAGING_RUN_RECORD = "run.json";
-const REPAIR_ATTEMPT_BUDGET = 3;
+const REPAIR_ATTEMPT_BUDGET = 5;
 
 function repairBudgetSpentMessage(attempts) {
   return (

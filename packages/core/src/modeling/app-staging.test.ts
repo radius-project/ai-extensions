@@ -432,8 +432,8 @@ describe("evaluateRepairAttempt", () => {
     ).toBe(false);
   });
 
-  it("matches the deploy repair budget", () => {
-    expect(REPAIR_ATTEMPT_BUDGET).toBe(3);
+  it("is the budget the deploy-failure repair loop uses", () => {
+    expect(REPAIR_ATTEMPT_BUDGET).toBe(5);
   });
 });
 
@@ -525,7 +525,7 @@ describe("fingerprintCompilerOutput", () => {
 
 describe("repair messages", () => {
   it("states how many compiles were spent", () => {
-    expect(repairBudgetSpentMessage(3)).toContain("compiled 3 times");
+    expect(repairBudgetSpentMessage(5)).toContain("compiled 5 times");
   });
 
   it("tells the agent to make a materially different fix", () => {

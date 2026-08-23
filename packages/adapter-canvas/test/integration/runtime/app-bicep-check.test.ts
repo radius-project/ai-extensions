@@ -1259,7 +1259,10 @@ describe("repair budget", () => {
     const result = runChecker(directory, env);
 
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /repair budget of 3 is spent/u);
+    assert.match(
+      result.stderr,
+      new RegExp(`repair budget of ${REPAIR_ATTEMPT_BUDGET} is spent`, "u")
+    );
     assert.match(result.stderr, /no application definition was written/u);
     assert.equal(fs.existsSync(path.join(directory, "spawned")), false);
     assert.deepEqual(readRepair(directory), {
@@ -1298,17 +1301,21 @@ describe("repair budget", () => {
     assert.equal((readRepair(directory) as { attempts: number }).attempts, 2);
   });
 
-  it("stops a stuck run after exactly three compiles", () => {
+  it("stops a stuck run once the budget is spent", () => {
     const directory = temporaryDirectory();
     stagedRun(directory);
 
-    const statuses = [1, 2, 3, 4].map(
+    const statuses = Array.from(
+      { length: REPAIR_ATTEMPT_BUDGET },
       () => runChecker(directory, fakeBicep(directory, failure, 1)).status
     );
-    assert.deepEqual(statuses, [1, 1, 1, 1]);
+    assert.deepEqual(statuses, Array(REPAIR_ATTEMPT_BUDGET).fill(1));
 
     const refused = runChecker(directory, fakeBicep(directory, failure, 1));
-    assert.match(refused.stderr, /repair budget of 3 is spent/u);
+    assert.match(
+      refused.stderr,
+      new RegExp(`repair budget of ${REPAIR_ATTEMPT_BUDGET} is spent`, "u")
+    );
     assert.equal(
       (readRepair(directory) as { attempts: number }).attempts,
       REPAIR_ATTEMPT_BUDGET
@@ -1413,6 +1420,18 @@ describe("repair budget", () => {
 // The checker re-implements core's repair rules. These cases assert both reach
 // the same verdict, which is the contract that keeps them from drifting.
 describe("agreement with the core repair rules", () => {
+  // The authoring budget and the deploy-failure repair budget answer the same
+  // question — how many times we retry a repair on app.bicep — so they are
+  // pinned to each other here rather than each carrying its own literal.
+  // DEPLOY_HANDOFF_MAX_ATTEMPTS is deliberately not this number: it counts
+  // deliveries of the handoff message, not repairs.
+  it("uses the same budget as the deploy-failure repair loop", async () => {
+    const { DEPLOY_REPAIR_ATTEMPT_CAP } =
+      await import("../../../src/runtime/hooks.js");
+
+    assert.equal(REPAIR_ATTEMPT_BUDGET, DEPLOY_REPAIR_ATTEMPT_CAP);
+  });
+
   const attemptCases = [0, 1, 2, 3, 4];
 
   it.each(attemptCases)(

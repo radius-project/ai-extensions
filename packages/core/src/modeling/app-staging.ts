@@ -359,11 +359,12 @@ function parseStagedOriginHash(text: unknown): string | null {
 // exactly one modeling run: a counter that outlived the run would refuse a
 // legitimate fresh run because of a stuck one last week.
 
-// Compiles allowed per modeling run: the first plus two repairs, or three
-// repairs of a model generated before the first compile. Matched to
-// DEPLOY_HANDOFF_MAX_ATTEMPTS so the product has one answer to "how many times
-// do we retry a repair".
-export const REPAIR_ATTEMPT_BUDGET = 3;
+// Compiles allowed per modeling run. Matched to DEPLOY_REPAIR_ATTEMPT_CAP, the
+// budget the deploy-failure repair loop uses, so the product has one answer to
+// "how many times do we retry a repair on app.bicep". Not to be confused with
+// DEPLOY_HANDOFF_MAX_ATTEMPTS, which counts deliveries of the handoff message
+// rather than repairs.
+export const REPAIR_ATTEMPT_BUDGET = 5;
 
 // What the checker has recorded about this run's compiles.
 export interface RepairState {
