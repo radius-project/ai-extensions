@@ -497,6 +497,13 @@ export async function workspaceSourceChangedSince(
 // clean rather than absent. Returns undefined when git cannot answer, which
 // callers must treat as "not shown to be recoverable" rather than as safe.
 //
+// `--ignored` is load-bearing. Without it an untracked model that a gitignore
+// rule matches prints nothing at all, which is indistinguishable from tracked
+// and clean, so the file git has never seen would read as safe to overwrite.
+// That is the exact case this guard exists to catch. With the flag it prints
+// `!!` instead. A model that is force-added and committed is no longer ignored,
+// so this does not manufacture a prompt for one that is genuinely recoverable.
+//
 // Both supported model paths are asked about at once, since the caller does not
 // track which layout the model came from. A stray untracked file at the other
 // path makes this report false, which errs toward asking rather than replacing.
@@ -507,6 +514,7 @@ export async function workspaceModelRecoverable(
   const result = await runGitResult(workspacePath, [
     "status",
     "--porcelain",
+    "--ignored",
     "--",
     ...WORKSPACE_BICEP_PATHS
   ]);

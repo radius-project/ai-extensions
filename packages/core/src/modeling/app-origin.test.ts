@@ -188,25 +188,36 @@ describe("evaluateAppModelFreshness", () => {
 
   // Without a record we cannot tell whether anyone edited the model, so the
   // question that decides the overwrite is whether git can give it back.
-  it.each([
-    ["uncommitted or untracked", false],
-    ["unknown to git", undefined]
-  ])(
-    "requires confirmation for a model with no origin that is %s",
-    (_label, modelRecoverable) => {
-      const result = evaluateAppModelFreshness({
-        ...current,
-        model: MODEL,
-        originText: null,
-        modelRecoverable
-      });
+  it("requires confirmation for a model with no origin git cannot restore", () => {
+    const result = evaluateAppModelFreshness({
+      ...current,
+      model: MODEL,
+      originText: null,
+      modelRecoverable: false
+    });
 
-      expect(result.status).toBe("unrecorded");
-      expect(result.stale).toBe(true);
-      expect(result.requiresConfirmation).toBe(true);
-      expect(result.reason).toContain("exists nowhere else");
-    }
-  );
+    expect(result.status).toBe("unrecorded");
+    expect(result.stale).toBe(true);
+    expect(result.requiresConfirmation).toBe(true);
+    expect(result.reason).toContain("exists nowhere else");
+  });
+
+  // Both cases ask, but they are not the same fact. Reporting the file as
+  // untracked when git was simply unreachable claims something we never
+  // established.
+  it("does not claim a model is untracked when git could not answer", () => {
+    const result = evaluateAppModelFreshness({
+      ...current,
+      model: MODEL,
+      originText: null,
+      modelRecoverable: undefined
+    });
+
+    expect(result.status).toBe("unrecorded");
+    expect(result.requiresConfirmation).toBe(true);
+    expect(result.reason).toContain("Git could not say");
+    expect(result.reason).not.toContain("is untracked");
+  });
 
   it("regenerates without confirmation a model with an unparseable origin", () => {
     const result = evaluateAppModelFreshness({

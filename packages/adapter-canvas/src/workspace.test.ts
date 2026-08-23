@@ -693,6 +693,40 @@ describe("workspaceModelRecoverable", () => {
     }
   });
 
+  // Without --ignored an ignored model prints nothing, which is what a tracked,
+  // clean file prints, so the file git has never seen would read as safe to
+  // replace. That is the silent overwrite this whole check exists to prevent.
+  it("is false for a model hidden by gitignore", async () => {
+    const dir = await repo();
+    try {
+      await write(dir, "resource db {}\n");
+      await fs.writeFile(path.join(dir, ".gitignore"), ".radius/\n");
+      execFileSync("git", ["add", ".gitignore"], { cwd: dir });
+      execFileSync("git", ["commit", "--quiet", "-m", "ignore"], { cwd: dir });
+
+      expect(await workspaceModelRecoverable(dir)).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The mirror of the case above: once the model is committed it is no longer
+  // ignored, so --ignored must not manufacture a prompt for a recoverable file.
+  it("is true for a committed model inside an ignored directory", async () => {
+    const dir = await repo();
+    try {
+      await write(dir, "resource db {}\n");
+      await fs.writeFile(path.join(dir, ".gitignore"), ".radius/\n");
+      execFileSync("git", ["add", ".gitignore"], { cwd: dir });
+      execFileSync("git", ["add", "-f", ".radius/app.bicep"], { cwd: dir });
+      execFileSync("git", ["commit", "--quiet", "-m", "model"], { cwd: dir });
+
+      expect(await workspaceModelRecoverable(dir)).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("is false for a model git has never seen", async () => {
     const dir = await repo();
     try {

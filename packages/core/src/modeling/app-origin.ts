@@ -222,11 +222,18 @@ export function evaluateAppModelFreshness(
     // An untracked or already-modified file exists nowhere else, so replacing
     // it is final and is theirs to approve.
     const recoverable = input.modelRecoverable === true;
+    const unrecorded = `The model has no usable ${APP_ORIGIN_REPO_PATH} origin record, so the source revision it was generated from and whether it still compiles cannot be established.`;
+    // Three distinct answers, and they must not be collapsed. Saying the file
+    // is untracked when git simply could not be reached asserts a fact we never
+    // established, which is the same mistake as calling an unverifiable model
+    // out of date. Both still require confirmation; only the wording differs.
+    const detail =
+      input.modelRecoverable === false ?
+        " It also has uncommitted changes or is untracked, so regenerating it would discard content that exists nowhere else."
+      : " Git could not say whether it is committed, so there is no way to show that regenerating it would leave a copy behind.";
     return freshness(
       "unrecorded",
-      recoverable ?
-        `The model has no usable ${APP_ORIGIN_REPO_PATH} origin record, so the source revision it was generated from and whether it still compiles cannot be established.`
-      : `The model has no usable ${APP_ORIGIN_REPO_PATH} origin record, so the source revision it was generated from and whether it still compiles cannot be established. It also has uncommitted changes or is untracked, so regenerating it would discard content that exists nowhere else.`,
+      recoverable ? unrecorded : `${unrecorded}${detail}`,
       null,
       !recoverable
     );

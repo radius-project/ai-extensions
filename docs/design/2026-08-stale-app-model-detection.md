@@ -97,7 +97,7 @@ Regeneration writes the working tree and never commits. So an app model that is 
 | Modified, or untracked   | The view opens and the agent asks first.               |
 | Git cannot say           | Treated as not recoverable, so the agent asks.         |
 
-`workspaceModelRecoverable` in `packages/adapter-canvas/src/workspace.ts` runs a single `git status --porcelain` for this, and only when there is no record to judge the app model by. Once one is written it never runs again for that app model, so it costs a subprocess once rather than on every graph open.
+`workspaceModelRecoverable` in `packages/adapter-canvas/src/workspace.ts` runs a single `git status --porcelain --ignored` for this, and only when there is no record to judge the app model by. `--ignored` matters: without it an app model that a gitignore rule matches prints nothing, exactly like a committed and unmodified one, so the file git has never seen would read as safe to replace. Once one is written it never runs again for that app model, so it costs a subprocess once rather than on every graph open.
 
 Two places in the code handle this. `evaluateAppBicepHook` holds the graph back when regenerating is safe. `maybeHandoffAppBicep` covers everything else, including openings the first one never sees, such as a reload after source links are attached, or the user simply clicking the panel open. Without it, those openings would quietly show a stale app model, which is the original problem in a different place.
 
