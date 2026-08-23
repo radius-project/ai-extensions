@@ -279,6 +279,7 @@ import {
   branchRefReadArgs,
   isNotFoundResponse
 } from "./server/services/branch-absence.js";
+import { parseEnvironmentProviderId } from "./server/services/github-environment.js";
 import {
   CleanupJournalPersistenceError,
   cleanupDeletionKind,
@@ -3263,6 +3264,10 @@ export async function cleanupAzureSetupArtifacts(
     artifact: Record<string, unknown>;
     args?: string[];
     readArgs?: string[];
+    // Reads the resource's own immutable id, for kinds addressed by a name the
+    // customer may reuse. Present together with the id the ledger recorded.
+    identityArgs?: string[];
+    recordedProviderId?: string | null;
     missingDetail?: string;
   }> = [];
 
@@ -3326,7 +3331,24 @@ export async function cleanupAzureSetupArtifacts(
             String(credential.name || ""),
             "-o",
             "none"
-          ]
+          ],
+          // A credential name is the customer's to reuse inside their own
+          // application, so the id decides whether this is still Radius's.
+          identityArgs: [
+            "ad",
+            "app",
+            "federated-credential",
+            "show",
+            "--id",
+            cleanupAppId,
+            "--federated-credential-id",
+            String(credential.name || ""),
+            "--query",
+            "id",
+            "-o",
+            "tsv"
+          ],
+          recordedProviderId: optionalString(credential.providerId)
         }
       : {
           missingDetail:
@@ -3493,6 +3515,33 @@ export async function cleanupAzureSetupArtifacts(
         : "unreadable";
     };
 
+    async function confirmRecordedIdentity(): Promise<string | null> {
+      const recorded = deletion.recordedProviderId;
+      if (!recorded) {
+        return `${label} was recorded without the provider id that tells it from a resource recreated under the same name, so Radius will not delete it. Review it and remove it yourself if it is unwanted.`;
+      }
+      let current: Partial<CommandResult>;
+      try {
+        current = await runAz(deletion.identityArgs as string[]);
+      } catch (error) {
+        return `Radius could not read ${label} to confirm its identity: ${errorMessage(error)}. It removed nothing.`;
+      }
+      if (current.code !== 0 && current.code !== "0") {
+        // A resource that is already gone is nothing to mistake for a
+        // replacement, so the delete still runs and the provider settles it.
+        return isAzureCleanupNotFound(deletion.artifactType, current) ? null : (
+            `Radius could not read ${label} to confirm its identity, so it removed nothing.`
+          );
+      }
+      const live = String(current.stdout || "").trim();
+      if (!live) {
+        return `The provider did not report an id for ${label}, so Radius cannot confirm it is the resource it created. It removed nothing.`;
+      }
+      return live === recorded ? null : (
+          `${label} now has a different provider id than the one Radius created, so the name belongs to a replacement. Radius removed nothing.`
+        );
+    }
+
     let settled: CleanupDeletionOutcome;
     try {
       settled = await executeJournaledCleanupDeletion({
@@ -3500,6 +3549,7 @@ export async function cleanupAzureSetupArtifacts(
         artifactType: deletion.artifactType,
         identity,
         label,
+        ...(deletion.identityArgs ? { confirmRecordedIdentity } : {}),
         persist: persistJournal ?? (async () => {}),
         runDelete: async () => {
           const result = await runAz(deletion.args || []);
@@ -3763,6 +3813,40 @@ export async function cleanupGitHubEnvironmentArtifact(
       // is already gone and for one this token is not allowed to see. Neither
       // reading is safe to record, so the answer is deferred to the
       // reconciliation below, which proves absence through the listing.
+      // Names are reused. Before the one delete goes out, the environment
+      // answering to this name has to still be the one the ledger recorded.
+      confirmRecordedIdentity: async () => {
+        const recorded = optionalString(artifact.providerId);
+        if (!recorded) {
+          return `GitHub environment "${target}" was recorded without GitHub's own id for it, so Radius cannot tell it from an environment recreated under the same name. Review it and delete it yourself if it is unwanted.`;
+        }
+        if (!readEnvironment) {
+          return `Radius has no way to read GitHub environment "${target}" back, so it cannot confirm the environment under that name is still the one it created.`;
+        }
+        let current: CommandResult;
+        try {
+          current = await readEnvironment(["api", environmentPath]);
+        } catch (error) {
+          return `Radius could not read GitHub environment "${target}" to confirm its identity: ${errorMessage(error)}. It removed nothing.`;
+        }
+        if (current.code !== 0 && current.code !== "0") {
+          return isNotFoundResponse(current) ? null : (
+              `Radius could not read GitHub environment "${target}" to confirm its identity, so it removed nothing.`
+            );
+        }
+        let live: string | null;
+        try {
+          live = parseEnvironmentProviderId(JSON.parse(current.stdout));
+        } catch {
+          live = null;
+        }
+        if (!live) {
+          return `GitHub did not report an id for environment "${target}", so Radius cannot confirm it is the environment it created. It removed nothing.`;
+        }
+        return live === recorded ? null : (
+            `GitHub environment "${target}" now has a different id than the one Radius created, so the name belongs to a replacement. Radius removed nothing.`
+          );
+      },
       isAlreadyAbsent: (result) =>
         isNotFoundResponse(result) ? "unproven" : false,
       // The same proof the delete port uses. A bare 404 from the environment

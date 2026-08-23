@@ -79,8 +79,22 @@ export async function executeJournaledCleanupDeletion(input: {
   isAlreadyAbsent(result: CleanupDeletionCommandResult): boolean | "unproven";
   /** Read back the exact immutable identity this delete targeted. */
   readExactIdentity(): Promise<ExactIdentityRead>;
+  /**
+   * Confirm, before the first delete goes out, that the resource answering to
+   * this name is still the one the ledger recorded.
+   *
+   * Supplied for resources whose name the customer may reuse: an environment or
+   * a federated credential deleted and recreated under the same name is a
+   * different resource, and a delete addressed by name would remove theirs.
+   * Returning a refusal string stops the delete and hands it over.
+   */
+  confirmRecordedIdentity?(): Promise<string | null>;
 }): Promise<CleanupDeletionOutcome> {
   let alreadyAbsent = false;
+  if (input.confirmRecordedIdentity) {
+    const mismatch = await input.confirmRecordedIdentity();
+    if (mismatch) return { outcome: "skipped", detail: mismatch };
+  }
   try {
     const removal = await executeRecoverableMutation<"deleted" | "not_found">({
       operation: input.operation,

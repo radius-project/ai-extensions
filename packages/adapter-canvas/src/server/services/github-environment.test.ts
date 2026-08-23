@@ -50,7 +50,11 @@ describe("ensureGitHubEnvironment", () => {
       }
     });
 
-    expect(ensured).toEqual({ name: "Production", state: "reused" });
+    expect(ensured).toEqual({
+      name: "Production",
+      state: "reused",
+      providerId: null
+    });
     expect(calls).toEqual(["/repos/octo/app/environments/production"]);
   });
 
@@ -81,6 +85,7 @@ describe("ensureGitHubEnvironment", () => {
     expect(ensured).toEqual({
       name: "Production West",
       state: "created_candidate",
+      providerId: null,
       creationProof: { proven: true, detail: null }
     });
     expect(reads).toEqual([
@@ -129,6 +134,7 @@ describe("ensureGitHubEnvironment", () => {
     expect(ensured).toEqual({
       name: "production",
       state: "created_candidate",
+      providerId: null,
       creationProof: { proven: true, detail: null }
     });
     expect(putCalls).toBe(1);
@@ -166,6 +172,7 @@ describe("ensureGitHubEnvironment", () => {
     ).resolves.toEqual({
       name: "production",
       state: "created_candidate",
+      providerId: null,
       creationProof: { proven: true, detail: null }
     });
   });
@@ -192,6 +199,7 @@ describe("ensureGitHubEnvironment", () => {
     expect(ensured).toMatchObject({
       name: "production",
       state: "created_candidate",
+      providerId: null,
       creationProof: { proven: false }
     });
   });
@@ -309,7 +317,8 @@ describe("ensureGitHubEnvironment", () => {
         readEnsuredGitHubEnvironment(resolved, "octo/app", "Production")
       ).toEqual({
         name: "Production",
-        state: "created_candidate"
+        state: "created_candidate",
+        providerId: null
       });
     });
 
@@ -329,7 +338,7 @@ describe("ensureGitHubEnvironment", () => {
           "octo/app",
           "Production"
         )
-      ).toEqual({ name: "Production", state: "created" });
+      ).toEqual({ name: "Production", state: "created", providerId: null });
     });
 
     it.each([
@@ -472,13 +481,18 @@ describe("ensureGitHubEnvironment", () => {
     expect(first).toEqual({
       name: "Production",
       state: "created_candidate",
+      providerId: null,
       creationProof: {
         proven: false,
         detail:
           "GitHub did not report when the environment was created, so Radius cannot prove this request created it."
       }
     });
-    expect(second).toEqual({ name: "Production", state: "reused" });
+    expect(second).toEqual({
+      name: "Production",
+      state: "reused",
+      providerId: null
+    });
     expect(putCalls).toBe(1);
   });
 
