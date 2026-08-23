@@ -177,4 +177,5 @@ export interface CredentialVerificationPlanResult {
   defaultBranch: string;
   pullRequestUrl: string;
   skipReason: string;
+  supportsOperationMarker?: boolean;
 }

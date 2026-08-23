@@ -10,6 +10,7 @@ import {
   azureCliAssistDisplayPrompt,
   azureCliAssistMessage,
   cleanupAzureSetupArtifacts,
+  cleanupProviderRecoveryDisposition,
   cleanupGitHubEnvironmentArtifact,
   rollbackCommittedWorkflowFiles,
   guardStopBoundary,
@@ -36,6 +37,8 @@ import {
   resetDeploymentViewState,
   resolveCleanupGitHubContext,
   releaseDeploymentMutation,
+  reopenProviderReconciliation,
+  resolveAcknowledgedVerificationRun,
   reserveDeploymentMutation,
   resolveDeploymentEnvironment,
   resolveDeployStatus,
@@ -54,6 +57,7 @@ import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import {
   createOperation,
   finish,
+  prepareProviderMutation,
   recordAzureApp,
   recordCleanupState,
   recordCommittedWorkflowFile,
@@ -107,6 +111,117 @@ describe("verification dispatch recovery", () => {
       "will not guess which run belongs to this operation"
     );
     expect(unmarkedVerificationRunGuidance(0)).toBeNull();
+  });
+
+  it("adopts an exact marked run after an acknowledged retry dispatch", async () => {
+    const pauses: number[] = [];
+
+    await expect(
+      resolveAcknowledgedVerificationRun({
+        operationMarker: "op_retry",
+        pause: async (milliseconds) => {
+          pauses.push(milliseconds);
+        },
+        discover: async () => ({ state: "applied", value: "4242" }),
+        actionsUrl:
+          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
+      })
+    ).resolves.toEqual({ state: "applied", runId: "4242" });
+    expect(pauses).toEqual([5000]);
+  });
+
+  it("fails closed when an acknowledged retry cannot expose an exact run", async () => {
+    await expect(
+      resolveAcknowledgedVerificationRun({
+        operationMarker: "op_retry",
+        pause: async () => {},
+        discover: async () => {
+          throw new Error("run list unavailable");
+        },
+        actionsUrl:
+          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
+      })
+    ).resolves.toMatchObject({
+      state: "manual_required",
+      guidance: expect.stringContaining(
+        "could not confirm the exact marked run"
+      )
+    });
+  });
+
+  it("does not inspect or adopt runs for an acknowledged legacy retry", async () => {
+    let inspected = false;
+    await expect(
+      resolveAcknowledgedVerificationRun({
+        operationMarker: "",
+        pause: async () => {
+          throw new Error("legacy retries must not wait for adoption");
+        },
+        discover: async () => {
+          inspected = true;
+          return { state: "applied", value: "unrelated" };
+        },
+        actionsUrl:
+          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
+      })
+    ).resolves.toMatchObject({
+      state: "manual_required",
+      guidance: expect.stringContaining("does not expose")
+    });
+    expect(inspected).toBe(false);
+  });
+
+  describe("in-process provider reconciliation", () => {
+    it("atomically reopens a terminalized unknown outcome for the scheduler", () => {
+      const operation = createOperation({ operationId: "op_recovery" });
+      prepareProviderMutation(operation, {
+        kind: "azure_federated_credential.create",
+        target: "app:dev"
+      });
+
+      finish(operation, "failed_partial", {
+        failure: { code: "provider-mutation-outcome-unknown" }
+      });
+
+      expect(reopenProviderReconciliation(operation)).toBe(true);
+      expect(operation).toMatchObject({
+        state: "running",
+        endedAt: null,
+        executionActive: false,
+        recoveryState: "provider_reconciliation_pending"
+      });
+    });
+  });
+
+  describe("cleanup provider recovery gate", () => {
+    it.each([
+      [
+        "azure_federated_credential.create",
+        "app:dev",
+        false,
+        "blocks destructive cleanup before reconciliation"
+      ],
+      [
+        "github_branch.delete",
+        "octo/app:refs/heads/radius/setup:abc",
+        true,
+        "allows only the exact delete recovery to resume"
+      ]
+    ])(
+      "prevents successful cleanup for unresolved %s and %s",
+      (kind, target, mayStartDestructiveCleanup) => {
+        const operation = createOperation({ operationId: "op_cleanup" });
+        prepareProviderMutation(operation, { kind, target });
+
+        expect(cleanupProviderRecoveryDisposition(operation)).toEqual({
+          blockers: [
+            expect.objectContaining({ kind, target, status: "prepared" })
+          ],
+          mayStartDestructiveCleanup,
+          mayCompleteCleanup: false
+        });
+      }
+    );
   });
 });
 

@@ -28,6 +28,16 @@ interface FederatedCredential {
   subject: string;
 }
 
+function isRollbackPending(operation: { providerRecovery?: unknown }): boolean {
+  const recovery = operation.providerRecovery;
+  return (
+    recovery !== null &&
+    typeof recovery === "object" &&
+    "state" in recovery &&
+    recovery.state === "rollback_pending"
+  );
+}
+
 export function isReplicationLagError(stderr?: string): boolean {
   if (!stderr) return false;
   return /does not exist in the directory|PrincipalNotFound|Cannot find (?:principal|user or service principal)|No matching principal|not found in the directory/i.test(
@@ -357,7 +367,10 @@ async function createFederatedCredentials({
       if (!(await checkpoint())) return false;
     }
   }
-  if (unresolvedProviderMutations(workflow.operation).length > 0) {
+  const unresolvedCredentials = unresolvedProviderMutations(
+    workflow.operation
+  ).filter((mutation) => mutation.kind === "azure_federated_credential.create");
+  if (unresolvedCredentials.length > 0) {
     await fail(
       409,
       "Provider reconciliation is still pending. Radius will not complete setup or start another provider mutation.",
@@ -643,6 +656,15 @@ export async function configureAzureAutoSetupCredentials({
     });
     if (!(await checkpoint())) return false;
   }
+  if (isRollbackPending(operation)) {
+    await fail(
+      409,
+      "Radius reconciled the interrupted Contributor assignment and must roll back before any further provider changes.",
+      "provider-rollback-pending",
+      { steps, clientId, appName }
+    );
+    return false;
+  }
 
   const aksResourceGroup = pickAksResourceGroup(
     clusterResourceGroup,
@@ -687,6 +709,15 @@ export async function configureAzureAutoSetupCredentials({
         "Details: " +
         clusterRole.stderr
     );
+  }
+  if (isRollbackPending(operation)) {
+    await fail(
+      409,
+      "Radius reconciled the interrupted AKS role assignment and must roll back before setup can complete.",
+      "provider-rollback-pending",
+      { steps, clientId, appName }
+    );
+    return false;
   }
   return true;
 }

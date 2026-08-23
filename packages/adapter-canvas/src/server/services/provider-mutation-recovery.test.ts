@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createOperation } from "../../operations.js";
+import {
+  createOperation,
+  prepareProviderMutation,
+  settleProviderMutation
+} from "../../operations.js";
 import {
   deterministicProviderUuid,
   executeRecoverableMutation,
@@ -274,6 +278,35 @@ describe("provider mutation recovery", () => {
     expect(operation.providerRecovery.state).toBe("rollback_pending");
     expect(operation.providerRecovery.mutations).toEqual([]);
     expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it("allows rollback to reconcile an existing setup mutation without replaying it", async () => {
+    const operation = createOperation({ operationId: "op_test" });
+    const prepared = prepareProviderMutation(operation, {
+      kind: "azure_federated_credential.create",
+      target: "app:dev"
+    });
+    settleProviderMutation(operation, prepared.mutationId, "outcome_unknown");
+    operation.providerRecovery.state = "rollback_pending";
+    const mutate = vi.fn(async () => command());
+
+    await expect(
+      executeRecoverableMutation({
+        operation,
+        kind: "azure_federated_credential.create",
+        target: "app:dev",
+        persist: async () => {},
+        mutate,
+        accept: () => null,
+        reconcile: async () => ({
+          state: "applied" as const,
+          value: null,
+          evidence: "Exact operation provenance matched."
+        })
+      })
+    ).resolves.toEqual({ state: "applied", value: null, recovered: true });
+    expect(mutate).not.toHaveBeenCalled();
+    expect(operation.providerRecovery.state).toBe("rollback_pending");
   });
 
   it("classifies only terminated commands as outcome unknown", () => {

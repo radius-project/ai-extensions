@@ -518,6 +518,78 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     ).toContain("--name");
   });
 
+  it("lets the role stage reconcile its own unresolved mutation after restart", async () => {
+    let contributorCreates = 0;
+    let contributorReads = 0;
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({
+            stdout: JSON.stringify([{ name: "dev", subject: SUBJECT }])
+          });
+        }
+        if (
+          line.startsWith("role assignment create ") &&
+          line.includes("--role Contributor ")
+        ) {
+          contributorCreates += 1;
+          return result({ code: 1, timedOut: true });
+        }
+        if (line.startsWith("role assignment list ")) {
+          contributorReads += 1;
+          if (contributorReads === 1) {
+            return result({ code: 1, stderr: "temporarily unavailable" });
+          }
+          const assignmentId = /name=='([^']+)'/.exec(
+            args[args.indexOf("--query") + 1]
+          )?.[1];
+          const scope = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-radius`;
+          return result({
+            stdout: JSON.stringify([
+              {
+                id: `${scope}/providers/Microsoft.Authorization/roleAssignments/${assignmentId}`,
+                principalId: OBJECT_ID,
+                roleDefinitionName: "Contributor",
+                scope
+              }
+            ])
+          });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    await expect(
+      configureAzureAutoSetupCredentials(test.input)
+    ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+    (
+      test.workflow.operation as AzureAutoSetupOperation & {
+        recoveryState?: string;
+      }
+    ).recoveryState = "provider_reconciliation_pending";
+
+    await expect(configureAzureAutoSetupCredentials(test.input)).resolves.toBe(
+      false
+    );
+    expect(contributorCreates).toBe(1);
+    expect(contributorReads).toBe(2);
+    expect(test.failures).toContainEqual(
+      expect.objectContaining({
+        status: 409,
+        code: "provider-rollback-pending"
+      })
+    );
+    expect(
+      (
+        test.workflow.operation as AzureAutoSetupOperation & {
+          providerRecovery: { state: string };
+        }
+      ).providerRecovery.state
+    ).toBe("rollback_pending");
+  });
+
   it("retries replication lag, records created roles, and preserves the non-fatal AKS warning", async () => {
     let objectLookup = 0;
     let contributor = 0;

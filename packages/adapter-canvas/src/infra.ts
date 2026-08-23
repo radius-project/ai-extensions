@@ -21,6 +21,7 @@ import {
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
 } from "@radius-project/core";
+import { VERIFY_OPERATION_INPUT } from "./verification-run-identity.js";
 import type { DeployWorkflowOptions } from "@radius-project/core";
 import { parse as parseYaml } from "yaml";
 import {
@@ -152,10 +153,43 @@ export async function generateVerifyWorkflow(
     throw new Error(`No verify template for provider "${provider}".`);
   const upstream = await fetchRadiusTemplate(fileName);
   const workflow = configureVerifyGhcrProbe(
-    coreGenerateVerifyWorkflow(env, platform, upstream)
+    configureVerifyOperationMarker(
+      coreGenerateVerifyWorkflow(env, platform, upstream)
+    )
   );
   assertValidWorkflowYaml(workflow, `verify workflow "${fileName}"`);
   return workflow;
+}
+
+export function configureVerifyOperationMarker(workflow: string): string {
+  const lines = workflow.split("\n");
+  const onIndex = lines.findIndex((line) => /^on:\s*$/.test(line));
+  const dispatchIndex = lines.findIndex((line) =>
+    /^\s+workflow_dispatch:\s*$/.test(line)
+  );
+  const inputsIndex =
+    dispatchIndex < 0 ? -1 : (
+      lines.findIndex(
+        (line, index) => index > dispatchIndex && /^\s+inputs:\s*$/.test(line)
+      )
+    );
+  if (onIndex < 0 || inputsIndex < 0) return workflow;
+  const inputsIndent = lines[inputsIndex].match(/^\s*/)?.[0] ?? "";
+  const fieldIndent = `${inputsIndent}  `;
+  lines.splice(
+    inputsIndex + 1,
+    0,
+    `${fieldIndent}${VERIFY_OPERATION_INPUT}:`,
+    `${fieldIndent}  description: Radius operation identity`,
+    `${fieldIndent}  required: false`,
+    `${fieldIndent}  type: string`
+  );
+  lines.splice(
+    onIndex,
+    0,
+    `run-name: Radius verify \${{ inputs.environment }} [\${{ inputs.${VERIFY_OPERATION_INPUT} }}]`
+  );
+  return lines.join("\n");
 }
 
 /**

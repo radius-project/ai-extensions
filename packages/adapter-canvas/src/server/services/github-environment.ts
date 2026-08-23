@@ -156,10 +156,15 @@ export async function ensureGitHubEnvironment(input: {
     }
     if (!pendingMutation) return { name, state: "reused" };
     if (pendingMutation.status === "confirmed") {
+      const creationProof = proveGitHubEnvironmentCreated({
+        preflight: "created_candidate",
+        putResponseBody: JSON.stringify(lookup.json),
+        putStartedAtMs: Date.parse(pendingMutation.preparedAt)
+      });
       return {
         name,
         state: "created_candidate",
-        creationProof: { proven: true, detail: null }
+        creationProof
       };
     }
     if (pendingMutation.status === "not_applied") {

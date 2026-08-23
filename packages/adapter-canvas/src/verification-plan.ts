@@ -1,3 +1,5 @@
+import { hasVerificationOperationMarker } from "./verification-run-identity.js";
+
 export interface PullRequestState {
   branch: string;
   base?: string;
@@ -10,6 +12,7 @@ export interface CredentialVerificationPlan {
   dispatcherChains?: boolean;
   pullRequestUrl: string;
   skipReason: string;
+  supportsOperationMarker: boolean;
 }
 
 type FetchFile = (
@@ -49,7 +52,8 @@ export async function planCredentialVerification({
       ref: "",
       defaultBranch: "",
       pullRequestUrl: "",
-      skipReason: ""
+      skipReason: "",
+      supportsOperationMarker: true
     };
   }
 
@@ -76,7 +80,8 @@ export async function planCredentialVerification({
     defaultBranch,
     dispatcherChains,
     pullRequestUrl: shouldDispatch ? "" : pullRequestUrl,
-    skipReason
+    skipReason,
+    supportsOperationMarker: hasVerificationOperationMarker(verifyWorkflow)
   };
 }
 
@@ -84,12 +89,14 @@ export function buildVerifyWorkflowDispatchArgs({
   workflowFile,
   targetRepo,
   envName,
-  ref = ""
+  ref = "",
+  operationMarker = ""
 }: {
   workflowFile: string;
   targetRepo: string;
   envName: string;
   ref?: string;
+  operationMarker?: string;
 }): string[] {
   return [
     "workflow",
@@ -97,6 +104,7 @@ export function buildVerifyWorkflowDispatchArgs({
     workflowFile,
     "-f",
     "environment=" + envName,
+    ...(operationMarker ? ["-f", "radius_operation=" + operationMarker] : []),
     "--repo",
     targetRepo,
     ...(ref ? ["--ref", ref] : [])

@@ -46,6 +46,7 @@ describe("credential verification planning", () => {
     });
     expect(plan.shouldDispatch).toBe(true);
     expect(plan.ref).toBe("");
+    expect(plan.supportsOperationMarker).toBe(true);
   });
 
   it("defers when the default branch still chains verification to deployment", async () => {
@@ -94,6 +95,7 @@ describe("credential verification planning", () => {
         path.includes("verify") ? "workflow" : dispatcher("prod", false)
     });
     expect(safe.shouldDispatch).toBe(true);
+    expect(safe.supportsOperationMarker).toBe(false);
   });
 });
 
@@ -111,5 +113,16 @@ describe("dispatch arguments", () => {
         ref: "radius/setup-dev"
       }).slice(-2)
     ).toEqual(["--ref", "radius/setup-dev"]);
+  });
+
+  it("passes the operation marker as a workflow input", () => {
+    expect(
+      buildVerifyWorkflowDispatchArgs({
+        workflowFile: "radius-verify-credentials.yml",
+        targetRepo: "octo/app",
+        envName: "dev",
+        operationMarker: "op_verify"
+      })
+    ).toContain("radius_operation=op_verify");
   });
 });
