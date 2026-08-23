@@ -129,6 +129,17 @@ export interface RunRadAppGraphOptions {
   saveGraphJsonTo?: string;
 }
 
+/** Options for {@link resolveRadiusExtensionRef}. */
+export interface ResolveRadiusExtensionRefOptions {
+  log?: Logger;
+  /** The binary that will run the compile; located on disk when omitted. */
+  radPath?: string;
+  /** Injected locator so tests need not depend on the machine's install. */
+  locateRadBinary?: () => string | null;
+  /** Injected version reader so tests need not spawn a real binary. */
+  readVersion?: (radPath: string) => Promise<string | null>;
+}
+
 /** Options for {@link buildGraphViaRad}. */
 export interface BuildGraphViaRadOptions {
   log?: Logger;
@@ -212,25 +223,20 @@ export const MANAGED_RAD_BIN = path.join(
 export const MANAGED_RAD_PATH = path.join(MANAGED_RAD_BIN, `rad${EXE}`);
 export const MANAGED_BICEP_PATH = path.join(MANAGED_RAD_BIN, `bicep${EXE}`);
 
-// Bicep config that registers the Radius extension. `rad app graph` compiles
-// Bicep offline, but bicep still needs this file beside the .bicep to resolve
-// `extension radius` + `Radius.*` types — it tells bicep where to pull the
-// extension from (downloaded once from the ACR registry, like the bicep/rad
-// binaries). Without it, compilation fails with `BCP204: Extension "radius" is
-// not recognized`. This is the single source of truth reused by adapters that
-// commit the same file into a repo's `.radius/` directory.
-export const RADIUS_BICEP_CONFIG: {
-  experimentalFeaturesEnabled: { extensibility: boolean };
-  extensions: { radius: string };
-} = {
-  experimentalFeaturesEnabled: { extensibility: true },
-  extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
-};
-export const RADIUS_BICEP_CONFIG_JSON = JSON.stringify(
-  RADIUS_BICEP_CONFIG,
-  null,
-  2
-);
+// The ACR repository that publishes the Radius Bicep extension: the `Radius.*`
+// type index bicep resolves `extension radius` against. `rad app graph` compiles
+// Bicep offline, but bicep still needs a bicepconfig.json beside the .bicep
+// naming this extension, or compilation fails with `BCP204: Extension "radius"
+// is not recognized`. A tag is always appended — see
+// {@link radiusExtensionRefForVersion}; this registry is never referenced
+// untagged.
+export const RADIUS_EXTENSION_REGISTRY = "br:biceptypes.azurecr.io/radius";
+
+// The Bicep settings a Radius compile needs regardless of which extension tag is
+// selected. `extensibility` gates the `extension` keyword itself.
+export const RADIUS_BICEP_EXPERIMENTAL_FEATURES: Readonly<{
+  extensibility: boolean;
+}> = Object.freeze({ extensibility: true });
 export const MODELED_APP_GRAPH_FLAGS: readonly string[] = Object.freeze([
   "--include-icons"
 ]);
@@ -539,6 +545,81 @@ export function compareVersions(
     if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
   }
   return 0;
+}
+
+/**
+ * radiusExtensionRefForVersion - map a rad CLI version to the Radius Bicep
+ * extension reference that matches it, e.g. "v0.60.0-rc1" ->
+ * "br:biceptypes.azurecr.io/radius:0.60".
+ *
+ * The registry publishes one `major.minor` release-channel tag per Radius
+ * release, so the extension is pinned to the release channel of the very binary
+ * that will run the compile. Prerelease and build suffixes are ignored, matching
+ * {@link compareVersions}: released binaries have been observed self-reporting a
+ * prerelease string (a `v0.60.0-rc1` install serving the 0.60 line), and
+ * `reconcileWithLatest` treats such a binary as equal to its release rather than
+ * upgrading it, so the channel — not the suffix — is what identifies the types.
+ *
+ * Known limitation: the `major.minor` channel tag is published at GA, so a
+ * genuinely pre-GA binary used during a release-candidate window derives a tag
+ * that does not exist yet and the compile fails to restore the extension. That
+ * is a development/`RADIUS_RAD_BINARY` scenario, the failure names the exact
+ * reference it tried (see `buildGraphViaRad`), and pinning `extensions.radius`
+ * in `.radius/bicepconfig.json` overrides it.
+ *
+ * The mutable `latest` and `edge` tags are deliberately never produced. Both
+ * float independently of the installed binary — `latest` has been observed
+ * lagging the current release, and `edge` is years stale — so either can
+ * silently compile a model against a schema the installed toolchain does not
+ * have, dropping valid properties or accepting invalid ones.
+ *
+ * Returns null when the version has no parseable major.minor.patch core.
+ */
+export function radiusExtensionRefForVersion(
+  version: string | null | undefined
+): string | null {
+  const parsed = parseVersion(version);
+  if (!parsed) return null;
+  return `${RADIUS_EXTENSION_REGISTRY}:${parsed[0]}.${parsed[1]}`;
+}
+
+/**
+ * resolveRadiusExtensionRef - the Radius Bicep extension reference to compile
+ * with when the repository does not pin one itself, derived from the version of
+ * the `rad` binary that will run the compile.
+ *
+ * Reading the version is a local spawn, so this stays correct offline and in
+ * air-gapped use: no releases API call is involved. Returns null when no binary
+ * can be located or its version is unreadable, which callers treat as "fail
+ * closed" rather than substituting a floating tag.
+ *
+ * `readVersion` is injected so tests can drive the mapping deterministically
+ * without spawning a real binary, and `locateRadBinary` so they do not depend on
+ * whether the machine happens to have one installed.
+ */
+export async function resolveRadiusExtensionRef({
+  log = noop,
+  radPath = "",
+  locateRadBinary = () => resolveExistingRadBinary(),
+  readVersion = (binary: string) => radBinaryVersion(binary)
+}: ResolveRadiusExtensionRefOptions = {}): Promise<string | null> {
+  const binary = radPath || locateRadBinary();
+  if (!binary) {
+    log(
+      "Could not locate a rad binary to derive the Radius Bicep extension version from."
+    );
+    return null;
+  }
+  const version = await readVersion(binary);
+  const ref = radiusExtensionRefForVersion(version);
+  if (!ref) {
+    const reported = version ? ` (it reported "${version}")` : "";
+    log(
+      `Could not determine the Radius release of ${binary}${reported}; the Radius Bicep extension cannot be derived from it.`
+    );
+    return null;
+  }
+  return ref;
 }
 
 function githubAuthHeaders(): Record<string, string> {
@@ -1408,6 +1489,58 @@ function copyLocalExtensionArtifact(
 }
 
 /**
+ * The outcome of looking for the repository's applicable bicepconfig.json.
+ * "absent" and "unreadable" are kept distinct so a fail-closed error can name
+ * the real cause: telling a user with a malformed config that no config was
+ * found would send them to create a pin they already have.
+ */
+type RepositoryBicepConfig =
+  | { kind: "parsed"; config: Record<string, unknown> }
+  | { kind: "absent" }
+  | { kind: "unreadable"; detail: string };
+
+/**
+ * readRepositoryBicepConfig - locate and parse the applicable repository
+ * bicepconfig.json. Reading is separated from assembly so a fail-closed throw
+ * during assembly is never swallowed by this function's parse-error handling.
+ */
+function readRepositoryBicepConfig(
+  radArtifactsDir: string,
+  log: Logger
+): RepositoryBicepConfig {
+  if (!radArtifactsDir) return { kind: "absent" };
+  const wsConfigPath = path.join(radArtifactsDir, "bicepconfig.json");
+  try {
+    if (!fs.existsSync(wsConfigPath)) return { kind: "absent" };
+    const parsed: unknown = JSON.parse(fs.readFileSync(wsConfigPath, "utf8"));
+    if (isPlainObject(parsed)) return { kind: "parsed", config: parsed };
+    return { kind: "unreadable", detail: "its root is not a JSON object" };
+  } catch (err) {
+    const detail = errorMessage(err);
+    log(
+      `Warning: could not read repository bicepconfig.json; deriving the Radius extension from the installed rad release instead: ${detail}`
+    );
+    return { kind: "unreadable", detail };
+  }
+}
+
+/**
+ * requireRadiusExtensionRef - fail closed when no `extensions.radius` reference
+ * can be established. Compiling against a guessed floating tag would validate
+ * the model against a different contract than it targets, so an actionable
+ * error is raised instead. The reason is embedded in the message because
+ * callers routinely run with the default no-op logger (issue #173).
+ */
+function requireRadiusExtensionRef(ref: string, reason: string): string {
+  if (ref) return ref;
+  throw new Error(
+    `Cannot determine which Radius Bicep extension to compile with: ${reason}, ` +
+      "and the release of the managed rad binary could not be read. Pin it by setting " +
+      `"extensions.radius" in .radius/bicepconfig.json (for example "${RADIUS_EXTENSION_REGISTRY}:0.60").`
+  );
+}
+
+/**
  * writeBicepCompileConfig - populate a temp compile dir with the effective
  * bicepconfig.json (and any local extension artifacts) a modeled app needs.
  *
@@ -1419,14 +1552,17 @@ function copyLocalExtensionArtifact(
  * Bicep setting (analyzers, formatting, moduleAliases, cloud, ...) are all
  * preserved. Every extension alias pointing at a local file (not a `br:`/`oci:`
  * ref) is copied into `dir` preserving its relative path so bicep resolves it.
- * `extensibility` is force-enabled and a `radius` alias is backfilled from the
- * base only when the repo config omits it, so `extension radius` always
- * resolves; nothing else in the repo config is rewritten.
+ * `extensibility` is force-enabled and a `radius` alias is backfilled from
+ * `radiusExtensionRef` only when the repo config omits it, so `extension radius`
+ * always resolves; nothing else in the repo config is rewritten.
  *
- * The base RADIUS_BICEP_CONFIG is used only as a fallback when no applicable
- * repository bicepconfig.json exists or it is unreadable — that base still
- * compiles apps that only use `extension radius`. A missing/unreadable workspace
- * config is logged and skipped.
+ * `radiusExtensionRef` is the reference derived from the rad binary that will
+ * run the compile (see {@link resolveRadiusExtensionRef}). It is used only when
+ * the repository does not pin one — when no applicable bicepconfig.json exists,
+ * it is unreadable, or it omits `extensions.radius`. When it is empty in one of
+ * those cases this throws rather than falling back to a floating tag, so a
+ * compile never silently runs against a schema that does not match the
+ * toolchain.
  *
  * Returns the effective config object written to disk, so callers can report the
  * selected `extensions.radius` reference (e.g. in a compilation failure) even
@@ -1435,66 +1571,57 @@ function copyLocalExtensionArtifact(
 export function writeBicepCompileConfig(
   dir: string,
   radArtifactsDir: string,
-  log: Logger = noop
+  log: Logger = noop,
+  radiusExtensionRef = ""
 ): BicepCompileConfig {
-  let config: BicepCompileConfig | null = null;
-  if (radArtifactsDir) {
-    try {
-      const wsConfigPath = path.join(radArtifactsDir, "bicepconfig.json");
-      if (fs.existsSync(wsConfigPath)) {
-        const parsed: unknown = JSON.parse(
-          fs.readFileSync(wsConfigPath, "utf8")
+  const repository = readRepositoryBicepConfig(radArtifactsDir, log);
+  const fallbackRef = radiusExtensionRef.trim();
+  let config: BicepCompileConfig;
+
+  if (repository.kind === "parsed") {
+    const parsed = repository.config;
+    // Use the repository config verbatim, then ensure only what a Radius
+    // compile requires (extensibility on, a resolvable `radius` alias).
+    const experimentalFeaturesEnabled: Record<string, unknown> & {
+      extensibility: boolean;
+    } = {
+      ...(isPlainObject(parsed.experimentalFeaturesEnabled) ?
+        parsed.experimentalFeaturesEnabled
+      : {}),
+      extensibility: true
+    };
+
+    const extensionsSource =
+      isPlainObject(parsed.extensions) ? parsed.extensions : {};
+    const radiusRef =
+      typeof extensionsSource.radius === "string" ?
+        extensionsSource.radius
+      : requireRadiusExtensionRef(
+          fallbackRef,
+          "the repository bicepconfig.json does not pin extensions.radius"
         );
-        if (isPlainObject(parsed)) {
-          // Use the repository config verbatim, then ensure only what a Radius
-          // compile requires (extensibility on, a resolvable `radius` alias).
-          const experimentalFeaturesEnabled: Record<string, unknown> & {
-            extensibility: boolean;
-          } = {
-            ...(isPlainObject(parsed.experimentalFeaturesEnabled) ?
-              parsed.experimentalFeaturesEnabled
-            : {}),
-            extensibility: true
-          };
-
-          const extensionsSource =
-            isPlainObject(parsed.extensions) ? parsed.extensions : {};
-          const radiusRef =
-            typeof extensionsSource.radius === "string" ?
-              extensionsSource.radius
-            : RADIUS_BICEP_CONFIG.extensions.radius;
-          const extensions: Record<string, unknown> & { radius: string } = {
-            ...extensionsSource,
-            radius: radiusRef
-          };
-          for (const ref of Object.values(extensions)) {
-            if (typeof ref !== "string") continue;
-            if (!isOciExtensionRef(ref))
-              copyLocalExtensionArtifact(radArtifactsDir, dir, ref, log);
-          }
-
-          config = {
-            ...parsed,
-            experimentalFeaturesEnabled,
-            extensions
-          };
-        }
-      }
-    } catch (err) {
-      log(
-        `Warning: could not read repository bicepconfig.json; using the base Radius config: ${errorMessage(err)}`
-      );
-      config = null;
+    const extensions: Record<string, unknown> & { radius: string } = {
+      ...extensionsSource,
+      radius: radiusRef
+    };
+    for (const ref of Object.values(extensions)) {
+      if (typeof ref !== "string") continue;
+      if (!isOciExtensionRef(ref))
+        copyLocalExtensionArtifact(radArtifactsDir, dir, ref, log);
     }
-  }
-  if (!config) {
+
+    config = { ...parsed, experimentalFeaturesEnabled, extensions };
+  } else {
+    const reason =
+      repository.kind === "unreadable" ?
+        `the repository bicepconfig.json could not be read (${repository.detail})`
+      : "no applicable repository bicepconfig.json was found";
     config = {
-      experimentalFeaturesEnabled: {
-        ...RADIUS_BICEP_CONFIG.experimentalFeaturesEnabled
-      },
-      extensions: { ...RADIUS_BICEP_CONFIG.extensions }
+      experimentalFeaturesEnabled: { ...RADIUS_BICEP_EXPERIMENTAL_FEATURES },
+      extensions: { radius: requireRadiusExtensionRef(fallbackRef, reason) }
     };
   }
+
   log(`Compiling with radius extension: ${config.extensions.radius}`);
   fs.writeFileSync(
     path.join(dir, "bicepconfig.json"),
@@ -1529,10 +1656,21 @@ export async function buildGraphViaRad(
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-bicep-"));
   const bicepFile = path.join(dir, "app.bicep");
   try {
+    // Resolve the binary up front so the compile config can be pinned to the
+    // release that will actually run the compile. runRadAppGraph resolves again
+    // below and reuses this same cached/on-disk binary.
+    const radPath = await resolveRadForGraph({ log });
+    const radiusExtensionRef =
+      (await resolveRadiusExtensionRef({ log, radPath })) ?? "";
     // Order matters: write bicepconfig.json (and copy any local extension
     // artifacts) before app.bicep so the extensions are in place when rad
     // compiles the Bicep. bicep looks for bicepconfig.json next to the .bicep.
-    const config = writeBicepCompileConfig(dir, radArtifactsDir, log);
+    const config = writeBicepCompileConfig(
+      dir,
+      radArtifactsDir,
+      log,
+      radiusExtensionRef
+    );
     fs.writeFileSync(bicepFile, content);
     try {
       const appGraph = await runRadAppGraph(bicepFile, {
