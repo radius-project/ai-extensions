@@ -34,9 +34,7 @@ export interface RecoveredBranchDeleteTarget {
 export type RecoveredBranchDeleteOutcome =
   | { state: "removed"; branch: string; evidence: string }
   | { state: "manual_required"; branch: string | null; guidance: string }
-  | { state: "unreadable"; branch: string | null; guidance: string };
-
-/**
+  | { state: "unreadable"; branch: string | null; guidance: string }; /**
  * The repository, branch, and base commit a delete entry names.
  *
  * The target is NUL-separated at the write site precisely so it can be split
@@ -84,6 +82,7 @@ export async function reconcileRecoveredBranchDelete(input: {
   operation: object;
   mutation: ProviderMutationRecord;
   readBranchRef(repo: string, branch: string): Promise<BranchRefReadResult>;
+  readRepository(repo: string): Promise<BranchRefReadResult>;
 }): Promise<RecoveredBranchDeleteOutcome> {
   const target = parseBranchDeleteTarget(input.mutation.target);
   if (!target) {
@@ -117,7 +116,32 @@ export async function reconcileRecoveredBranchDelete(input: {
         `${read.stderr || ""}\n${read.stdout || ""}`
       )
     ) {
-      const evidence = `GitHub confirmed the recovered setup branch "${target.branch}" is absent.`;
+      // GitHub returns the same 404 for a ref that is gone and for a repository
+      // the selected account can no longer see. Only the second read separates
+      // them, and only the same account's read counts: a branch that is merely
+      // invisible is a branch still holding the customer's work.
+      let repository: BranchRefReadResult;
+      try {
+        repository = await input.readRepository(target.repo);
+      } catch (error) {
+        return {
+          state: "unreadable",
+          branch: target.branch,
+          guidance:
+            `GitHub reported branch "${target.branch}" in ${target.repo} as absent, but Radius could not confirm the selected account can still read that repository: ` +
+            `${error instanceof Error ? error.message : String(error)}. That answer may be masked access rather than a completed delete, so Radius changed nothing further.`
+        };
+      }
+      if (repository.code !== 0 && repository.code !== "0") {
+        return {
+          state: "unreadable",
+          branch: target.branch,
+          guidance:
+            `GitHub reported branch "${target.branch}" in ${target.repo} as absent, but the selected account could not read that repository, ` +
+            "so the answer may be masked access rather than a completed delete. Radius changed nothing further."
+        };
+      }
+      const evidence = `GitHub confirmed the recovered setup branch "${target.branch}" is absent, and the selected account can still read ${target.repo}.`;
       settleProviderMutation(
         input.operation,
         input.mutation.mutationId,

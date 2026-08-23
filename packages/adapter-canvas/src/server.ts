@@ -278,6 +278,11 @@ import {
   pendingBranchDelete,
   reconcileRecoveredBranchDelete
 } from "./server/services/recovered-branch-delete.js";
+import {
+  readRecoveredVerificationIdentity,
+  recoverVerificationRun,
+  verificationActionsUrl
+} from "./server/services/recovered-verification-run.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
@@ -311,7 +316,6 @@ export async function persistMutationCheckpoint({
 }): Promise<boolean> {
   try {
     await persist();
-    return true;
   } catch (error) {
     report?.({
       code: "operation-store-write-failed",
@@ -326,6 +330,21 @@ export async function persistMutationCheckpoint({
     );
     return false;
   }
+  // Every provider write in the setup passes through here on its way to the
+  // next one, which makes this the one place that can guarantee reconciliation's
+  // verdict is honored. Once recovery has decided the interrupted attempt must
+  // be undone, continuing forward would add resources to the set about to be
+  // deleted — and each one added after the decision is one the rollback's
+  // selection never learned about.
+  if (operation?.providerRecovery?.state === "rollback_pending") {
+    await fail(
+      409,
+      "Radius reconciled the interrupted provider request and must roll back before making any further provider changes.",
+      "provider-rollback-pending"
+    );
+    return false;
+  }
+  return true;
 }
 
 export async function persistBestEffort({
@@ -2796,18 +2815,34 @@ export async function resolveCleanupGitHubContext({
           }
           const path = args.at(-1) || "";
           const reread = await executor.run(["api", path], { timeout: 12000 });
+          if (reread.code === 0 || reread.code === "0") {
+            throw new Error(
+              "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. The GitHub environment identity is still present, and deleting it by name again could remove a replacement resource."
+            );
+          }
           if (
-            reread.code !== 0 &&
-            reread.code !== "0" &&
             /(?:HTTP\s+404|\bNot Found\b)/i.test(
               `${reread.stderr}\n${reread.stdout}`
             )
           ) {
-            return;
-          }
-          if (reread.code === 0 || reread.code === "0") {
+            // GitHub answers 404 both for an environment that is gone and for a
+            // repository this token can no longer see, and the second answer
+            // arrives with the environment still in place. The same executor
+            // that just read the environment reads the repository, so a 404
+            // only means "absent" when the account provably still has the
+            // visibility that would have shown it.
+            const repoPath = repositoryApiPath(path);
+            const repository =
+              repoPath ?
+                await executor.run(["api", repoPath], { timeout: 12000 })
+              : null;
+            if (
+              repository &&
+              (repository.code === 0 || repository.code === "0")
+            )
+              return;
             throw new Error(
-              "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. The GitHub environment identity is still present, and deleting it by name again could remove a replacement resource."
+              "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. GitHub reported the environment as absent, but the selected account could not read the repository, so that answer may be masked access rather than a completed delete."
             );
           }
           throw new Error(
@@ -2818,6 +2853,14 @@ export async function resolveCleanupGitHubContext({
           throw new Error(failure);
         }
   };
+}
+
+/** The `/repos/{owner}/{repo}` path an environment API path belongs to. */
+export function repositoryApiPath(environmentApiPath: string): string | null {
+  const match = /^\/repos\/([^/]+)\/([^/]+)\/environments\//.exec(
+    environmentApiPath
+  );
+  return match ? `/repos/${match[1]}/${match[2]}` : null;
 }
 
 export async function deleteNewlyCreatedGitHubEnvironment(
@@ -2957,18 +3000,28 @@ function cleanupTargetLabel(
  *                       it existed independently of this attempt.
  *   created           — the lookup found nothing and `az ad sp create`
  *                       succeeded, so this attempt made it and may remove it.
- *   created_candidate — the lookup found nothing, the create reported failure,
- *                       and a second lookup found a principal anyway. Radius
- *                       very likely created it, but "very likely" is not a
- *                       licence to delete, and calling it `reused` would claim
- *                       something provably false: it was absent moments ago.
+ *   created_candidate — the lookup found nothing, the create's outcome could
+ *                       not be established, and a later lookup found a
+ *                       principal anyway. Radius very likely created it, but
+ *                       "very likely" is not a licence to delete, and calling
+ *                       it `reused` would claim something provably false: it
+ *                       was absent moments ago.
  *
  * Collapsing the third case into `reused` is what put a Service Principal this
  * setup created under "Radius will keep — reused" and out of every rollback.
+ *
+ * The create itself is journaled when a recovery port is supplied. Without one,
+ * a restart between the request and its answer left no record that a create had
+ * been issued at all, so the next attempt reran it — the one replay the
+ * journal exists to prevent.
  */
 export async function ensureServicePrincipal(
   clientId: string,
-  runAz: (args: string[]) => Promise<Partial<CommandResult>>
+  runAz: (args: string[]) => Promise<Partial<CommandResult>>,
+  mutationRecovery?: {
+    operation: object & { operationId: string };
+    persist(): Promise<void>;
+  }
 ): Promise<
   | {
       ok: true;
@@ -2989,61 +3042,145 @@ export async function ensureServicePrincipal(
     "-o",
     "tsv"
   ];
-  const before = await runAz(showArgs);
-  const existingObjectId = String(before.stdout || "").trim();
-  if ((before.code === 0 || before.code === "0") && existingObjectId) {
+  const readObjectId = async (): Promise<{
+    ok: boolean;
+    objectId: string;
+    stderr: string;
+  }> => {
+    const result = await runAz(showArgs);
+    return {
+      ok: result.code === 0 || result.code === "0",
+      objectId: String(result.stdout || "").trim(),
+      stderr: String(result.stderr || "").trim()
+    };
+  };
+  const before = await readObjectId();
+  if (before.ok && before.objectId) {
     return {
       ok: true,
       state: "reused",
       origin: "pre_existing",
-      objectId: existingObjectId
+      objectId: before.objectId
     };
   }
-  if (before.code === 0 || before.code === "0") {
+  if (before.ok) {
     return {
       ok: false,
       stderr: "The Service Principal lookup returned an empty object id."
     };
   }
-  if (before.code !== 0 && !isAzResourceNotFound(before.stderr)) {
+  if (!isAzResourceNotFound(before.stderr)) {
     return {
       ok: false,
       stderr:
-        String(before.stderr || "").trim() ||
+        before.stderr ||
         "Failed to look up the Service Principal before creation."
     };
   }
 
-  const create = await runAz(["ad", "sp", "create", "--id", clientId]);
-  if (create.code === 0 || create.code === "0") {
+  const createArgs = ["ad", "sp", "create", "--id", clientId];
+  const runCreate = async (): Promise<CommandResult> => {
+    const result = await runAz(createArgs);
     return {
-      ok: true,
-      state: "created",
-      origin: "this_operation",
-      objectId: null
+      code: result.code ?? 1,
+      stdout: String(result.stdout || ""),
+      stderr: String(result.stderr || ""),
+      ...(result.timedOut === true ? { timedOut: true } : {})
     };
-  }
-
-  const after = await runAz(showArgs);
-  const racedObjectId = String(after.stdout || "").trim();
-  if ((after.code === 0 || after.code === "0") && racedObjectId) {
-    // Absent before this attempt, present after its own create attempt: this
-    // reconciles a failed create against reality, and it is not a reuse.
-    return {
-      ok: true,
-      state: "created_candidate",
-      origin: "unknown",
-      objectId: racedObjectId
-    };
-  }
-
-  return {
-    ok: false,
-    stderr:
-      String(create.stderr || "").trim() ||
-      String(after.stderr || "").trim() ||
-      "Could not create or find the Service Principal."
   };
+  if (!mutationRecovery) {
+    const create = await runCreate();
+    if (create.code === 0 || create.code === "0") {
+      return {
+        ok: true,
+        state: "created",
+        origin: "this_operation",
+        objectId: null
+      };
+    }
+    const after = await readObjectId();
+    if (after.ok && after.objectId) {
+      // Absent before this attempt, present after its own create attempt: this
+      // reconciles a failed create against reality, and it is not a reuse.
+      return {
+        ok: true,
+        state: "created_candidate",
+        origin: "unknown",
+        objectId: after.objectId
+      };
+    }
+    return {
+      ok: false,
+      stderr:
+        create.stderr ||
+        after.stderr ||
+        "Could not create or find the Service Principal."
+    };
+  }
+
+  const recovered = await executeRecoverableMutation<string>({
+    operation: mutationRecovery.operation,
+    kind: "azure_service_principal.create",
+    target: clientId,
+    providerIdempotencyKey: clientId,
+    persist: mutationRecovery.persist,
+    mutate: runCreate,
+    accept: () => "",
+    reconcile: async () => {
+      const after = await readObjectId();
+      if (after.ok && after.objectId) {
+        // `--id` is the App Registration's own client id, so a principal found
+        // this way is the exact principal for the exact application this
+        // operation created. What the read cannot settle is provenance: the
+        // principal was absent before Radius asked for it, and Radius asked
+        // once, but a concurrent creator would look identical. So the object id
+        // is adopted and ownership is not.
+        return {
+          state: "applied",
+          value: after.objectId,
+          evidence:
+            "The Service Principal for this operation's exact application client id exists after the interrupted create."
+        };
+      }
+      if (after.ok) {
+        throw new Error(
+          "The Service Principal lookup returned an empty object id."
+        );
+      }
+      if (isAzResourceNotFound(after.stderr)) {
+        return {
+          state: "not_applied",
+          evidence:
+            "Microsoft Entra confirmed no Service Principal exists for this application."
+        };
+      }
+      throw new Error(
+        after.stderr || "The Service Principal state could not be read."
+      );
+    }
+  });
+  if (recovered.state === "not_applied") {
+    const rejected = recovered.result;
+    return {
+      ok: false,
+      stderr:
+        (rejected?.stderr || rejected?.stdout || "").trim() ||
+        "Could not create or find the Service Principal."
+    };
+  }
+  return recovered.recovered ?
+      {
+        ok: true,
+        state: "created_candidate",
+        origin: "unknown",
+        objectId: recovered.value
+      }
+    : {
+        ok: true,
+        state: "created",
+        origin: "this_operation",
+        objectId: null
+      };
 }
 
 export async function cleanupAzureSetupArtifacts(
@@ -5166,14 +5303,42 @@ function createInstanceRequestCoordinator(
     if (!op) return;
     const mutation = pendingBranchDelete(op);
     if (!mutation) return;
+    // The branch belongs to the account that created it. An ambient `gh` here
+    // would read the repository as whoever the CLI happens to be logged in as,
+    // and a 404 from the wrong identity is exactly the answer this recovery
+    // must never mistake for "the branch is gone".
+    const selectedLogin =
+      typeof op.context?.githubLogin === "string" ?
+        op.context.githubLogin.trim()
+      : "";
+    let executor: SelectedGhExecutor;
+    try {
+      if (!selectedLogin) {
+        throw new Error(
+          "The operation record does not name the GitHub account that created the setup branch."
+        );
+      }
+      executor =
+        await githubAccountCoordinator.createReadOnlyExecutor(selectedLogin);
+      await executor.verifyIdentity();
+    } catch (error) {
+      await failRecoveredBranchDelete(
+        op,
+        "setup-branch-delete-unresolved",
+        "Radius could not use the GitHub account that created the recovered setup branch, so it still cannot say whether its deletion took effect: " +
+          `${errorMessage(error)}. It changed nothing further.`
+      );
+      return;
+    }
     const outcome = await reconcileRecoveredBranchDelete({
       operation: op,
       mutation,
       readBranchRef: (repo, branch) =>
-        runCliCommand("gh", [
+        executor.run([
           "api",
           `/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`
-        ])
+        ]),
+      readRepository: (repo) => executor.run(["api", `/repos/${repo}`])
     });
     if (outcome.state === "removed") {
       addLegacyStep(op, `✅ ${outcome.evidence}`);
@@ -5188,15 +5353,29 @@ function createInstanceRequestCoordinator(
         return;
       }
       // No cleanup command was ever accepted, so the record has to become
-      // terminal for one to be offered. Ending it here is what keeps a
-      // reconciled delete from holding the operation open indefinitely.
+      // terminal for one to run. The branch this recovery was blocking on is
+      // provably gone, which is the condition the rest of the reconciled
+      // rollback was waiting for — so this hands off to the same automatic
+      // recovery rollback every other settled reconciliation uses rather than
+      // asking the customer to start a removal Radius already decided on. A
+      // record that still owes an answer elsewhere is not that condition, and
+      // claiming a rollback had begun would describe work nothing will do.
+      const canHandOff =
+        unresolvedProviderMutations(op).length === 0 &&
+        !providerRecoveryManualGuidance(op);
+      if (canHandOff && op.providerRecovery) {
+        op.providerRecovery.state = "rollback_pending";
+        op.providerRecovery.guidance = null;
+      }
       finish(op, "failed_partial", {
         failure: {
           code: "setup-branch-removed-pending-rollback",
           stage: op.currentStage,
           stepSeq: null,
           message:
-            "Radius removed the setup branch an interrupted attempt had created. The resources it can prove it owns are still in place and can be rolled back.",
+            canHandOff ?
+              "Radius removed the setup branch an interrupted attempt had created. It is now rolling back the resources it can prove it owns."
+            : "Radius removed the setup branch an interrupted attempt had created. The resources it can prove it owns are still in place and can be rolled back.",
           classification: "user-fixable",
           evidence: null
         }
@@ -5205,19 +5384,41 @@ function createInstanceRequestCoordinator(
       return;
     }
     addLegacyStep(op, `⚠️ ${outcome.guidance}`);
+    await failRecoveredBranchDelete(
+      op,
+      outcome.state === "unreadable" ?
+        "setup-branch-delete-unresolved"
+      : "setup-branch-delete-manual-required",
+      outcome.guidance,
+      { announced: true }
+    );
+  }
+
+  /**
+   * End a recovered branch delete that could not be settled.
+   *
+   * The blocker is written to the provider recovery record as well as the
+   * failure, because the recovery state is what the destructive gates read: a
+   * failure message alone would still leave Rollback and Exit on offer for a
+   * record whose setup branch may still be in the repository.
+   */
+  async function failRecoveredBranchDelete(
+    op: any,
+    code: string,
+    guidance: string,
+    { announced = false }: { announced?: boolean } = {}
+  ): Promise<void> {
+    if (!announced) addLegacyStep(op, `⚠️ ${guidance}`);
     if (op.providerRecovery) {
       op.providerRecovery.state = "manual_required";
-      op.providerRecovery.guidance = outcome.guidance;
+      op.providerRecovery.guidance = guidance;
     }
     finish(op, "failed_partial", {
       failure: {
-        code:
-          outcome.state === "unreadable" ?
-            "setup-branch-delete-unresolved"
-          : "setup-branch-delete-manual-required",
+        code,
         stage: op.currentStage,
         stepSeq: null,
-        message: outcome.guidance,
+        message: guidance,
         classification: "user-fixable",
         evidence: null
       }
@@ -5333,6 +5534,9 @@ function createInstanceRequestCoordinator(
             typeof op.context?.githubLogin === "string" ?
               op.context.githubLogin
             : "";
+          if (!(await resolveRecoveredVerificationRun(op, selectedLogin))) {
+            return;
+          }
           if (selectedLogin) {
             await monitorVerificationAsSelectedAccount(
               op.operationId,
@@ -5346,6 +5550,86 @@ function createInstanceRequestCoordinator(
         }
       });
     }
+  }
+
+  /**
+   * Give a restarted verification the run identity its dispatch never recorded.
+   *
+   * The dispatch is journaled before the request goes out and confirmed after
+   * GitHub accepts it, so a restart in between leaves a record that knows a run
+   * exists and cannot say which one. Monitoring that record polls a null run id
+   * until the tracking window closes, which reads as a hung setup. So the run is
+   * discovered here first, by the operation-specific marker and nothing weaker,
+   * and a record whose workflow never carried a marker is handed to the customer
+   * immediately rather than waiting for an identity it can never obtain.
+   *
+   * Returns whether monitoring should continue.
+   */
+  async function resolveRecoveredVerificationRun(
+    op: any,
+    selectedLogin: string
+  ): Promise<boolean> {
+    const identity = readRecoveredVerificationIdentity(
+      op,
+      VERIFY_WORKFLOW_FILE
+    );
+    const actionsUrl = verificationActionsUrl(identity.repo, identity.workflow);
+    const handOff = async (guidance: string): Promise<boolean> => {
+      op.verification = {
+        ...(op.verification || {}),
+        runId: null,
+        runUrl: actionsUrl
+      };
+      finish(op, "action_required", {
+        terminal: { reason: "verification-run-manual", userMessage: guidance }
+      });
+      await saveOperation(op);
+      return false;
+    };
+    let executor: SelectedGhExecutor | null = null;
+    if (selectedLogin && op.verification?.runId == null) {
+      try {
+        executor =
+          await githubAccountCoordinator.createReadOnlyExecutor(selectedLogin);
+        await executor.verifyIdentity();
+      } catch (error) {
+        return handOff(
+          "Radius restarted while credential verification was dispatched and could not use the GitHub account that dispatched it: " +
+            `${errorMessage(error)}. Review the run in ${actionsUrl}; Radius will not adopt one or dispatch another.`
+        );
+      }
+    }
+    const listArgs = [
+      "run",
+      "list",
+      "--workflow=" + identity.workflow,
+      "--limit",
+      "10",
+      "--json",
+      "databaseId,createdAt,displayTitle,event,headBranch",
+      "--repo",
+      identity.repo
+    ];
+    const outcome = await recoverVerificationRun({
+      runId: op.verification?.runId,
+      identity,
+      listRuns: () =>
+        executor ? executor.run(listArgs) : runCliCommand("gh", listArgs)
+    });
+    if (outcome.state === "monitor") return true;
+    if (outcome.state === "hand_off") return handOff(outcome.guidance);
+    op.verification = {
+      ...(op.verification || {}),
+      runId: outcome.runId,
+      runUrl: outcome.runUrl
+    };
+    addLegacyStep(
+      op,
+      `✅ Recovered the credential verification run this setup dispatched: ${outcome.runUrl}`,
+      STAGE_VERIFY
+    );
+    await saveOperation(op);
+    return true;
   }
 
   const handleUnmatchedRequest = async (

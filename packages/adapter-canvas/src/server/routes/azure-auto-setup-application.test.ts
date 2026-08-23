@@ -297,7 +297,11 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           return command({ stdout: "[]" });
         }
         if (line.startsWith("ad app create ")) {
-          return command({ code: 1, stderr: "creation denied" });
+          return command({
+            code: 1,
+            stderr:
+              "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+          });
         }
         throw new Error(`unscripted az call: ${line}`);
       }
@@ -1323,7 +1327,11 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           return command({ stdout: "[]" });
         }
         if (line.startsWith("ad app create ")) {
-          return command({ code: 1, stderr: "directory denied" });
+          return command({
+            code: 1,
+            stderr:
+              "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+          });
         }
         throw new Error(`unscripted az call: ${line}`);
       }
@@ -1390,7 +1398,11 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           }
           if (line.startsWith("ad app owner add ")) {
             return stage === "owner-add" ?
-                command({ code: 1, stderr: "owner denied" })
+                command({
+                  code: 1,
+                  stderr:
+                    "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+                })
               : command();
           }
           if (line.startsWith("ad app owner list ")) {
@@ -1403,7 +1415,11 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           }
           if (line.startsWith("rest --method PATCH ")) {
             return stage === "tag-patch" ?
-                command({ code: 1, stderr: "tag denied" })
+                command({
+                  code: 1,
+                  stderr:
+                    "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+                })
               : command();
           }
           if (

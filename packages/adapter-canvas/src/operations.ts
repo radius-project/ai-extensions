@@ -279,6 +279,10 @@ export type ProviderMutationRecord = {
   updatedAt: string;
   providerIdempotencyKey: string | null;
   intent?: Record<string, string | number | boolean | null>;
+  // How many times reconciliation has failed to read this mutation's provider
+  // state. Bounded so an unreadable resource becomes a named hand-off instead
+  // of an endlessly rescheduled reconciliation.
+  reconcileAttempts?: number;
   evidence: string | null;
 };
 
@@ -355,6 +359,14 @@ function readProviderRecovery(value: any): ProviderRecoveryRecord {
                       field === null)
                 )
               )
+            }
+          : {}),
+          ...((
+            Number.isFinite(Number(entry.reconcileAttempts)) &&
+            Number(entry.reconcileAttempts) > 0
+          ) ?
+            {
+              reconcileAttempts: Math.floor(Number(entry.reconcileAttempts))
             }
           : {}),
           evidence:
@@ -514,6 +526,24 @@ export function providerMutationRecord(
   );
 }
 
+/**
+ * Every journal entry of one kind, whatever its status.
+ *
+ * A mutation whose target embeds provider state that can move — the commit a
+ * branch was cut from, say — cannot be looked up by recomputing that target,
+ * because the second attempt would compute a different one and journal a
+ * second entry the first could never be settled from. Reading back by kind is
+ * how a recovery finds the identity the interrupted attempt actually used.
+ */
+export function providerMutationsByKind(
+  op: any,
+  kind: string
+): ProviderMutationRecord[] {
+  return readProviderRecovery(op?.providerRecovery).mutations.filter(
+    (entry) => entry.kind === kind
+  );
+}
+
 export function providerRecoveryManualGuidance(op: any): string | null {
   const recovery = readProviderRecovery(op?.providerRecovery);
   const manualMutation = recovery.mutations.find(
@@ -547,17 +577,23 @@ export function legacyRecoveryQuarantine(op: any): string | null {
 }
 
 /**
- * Move a nonterminal pre-journal record into durable quarantine.
+ * Move a pre-journal record into durable quarantine.
  *
  * Answers whether it did, so the caller can stop reconciling: no later branch
  * can improve on "Radius does not know what this attempt started".
+ *
+ * A terminal record keeps the verdict it already reported. Rewriting a
+ * cancellation into a failure would erase what the customer was told, and the
+ * quarantine's job is not to change the story but to withdraw the destructive
+ * and forward commands that story would otherwise offer.
  */
 export function quarantineUnrecoverableLegacy(op: any): boolean {
-  if (!op || isTerminalState(op.state)) return false;
+  if (!op) return false;
   const recovery = readProviderRecovery(op.providerRecovery);
   // A record that carries journal entries described its own work, however old
   // its stamp is, and the journal branches above already handled it.
   if (recovery.mutations.length > 0) return false;
+  if (recovery.state === "unrecoverable_legacy") return false;
   const restored = Number(op.restoredSchemaVersion);
   if (
     !Number.isFinite(restored) ||
@@ -571,6 +607,8 @@ export function quarantineUnrecoverableLegacy(op: any): boolean {
     guidance: UNRECOVERABLE_LEGACY_GUIDANCE,
     mutations: []
   };
+  op.recoveryState = "manual_required";
+  if (isTerminalState(op.state)) return true;
   op.state = "failed_partial";
   op.endedAt = now;
   op.lastActivityAt = now;
@@ -582,7 +620,6 @@ export function quarantineUnrecoverableLegacy(op: any): boolean {
     message: UNRECOVERABLE_LEGACY_GUIDANCE,
     classification: "user-fixable"
   };
-  op.recoveryState = "manual_required";
   for (const stage of op.stages || []) {
     if (stage.state === "running") stage.state = "failed";
     else if (stage.state === "pending") stage.state = "skipped";
@@ -1111,7 +1148,10 @@ export function canResumeInput(
     op.executionActive ||
     // A stop saved before this answer wins the race. Continuing here would
     // resume an operation the customer already asked Radius to end.
-    shouldStop(op)
+    shouldStop(op) ||
+    // A prompt is a forward step. An attempt whose provider work Radius cannot
+    // account for must not take one, whatever the customer typed into it.
+    ambiguousProviderMutation(op) !== null
   )
     return false;
   if (
@@ -2433,6 +2473,38 @@ export function ambiguousProviderMutation(op: any): string | null {
   return `Radius has not confirmed the outcome of ${mutation.kind} for ${mutation.target}.`;
 }
 
+/**
+ * The single refusal every destructive command shares.
+ *
+ * Rollback, retry-rollback, and exit all delete. They differ only in the
+ * sentence the customer reads, so they must not differ in when they refuse: a
+ * mutation whose outcome is unproven names a resource that may exist without a
+ * ledger entry, and any of the three would then delete around it and report a
+ * cleanup it did not do. The check runs before the ledger is consulted on
+ * purpose — an empty selection is exactly the shape an unjournaled resource
+ * produces, so "nothing is owned" is not permission to proceed.
+ */
+function providerDestructiveRefusal(
+  op: any,
+  prefix: "rollback" | "exit" | "cleanup-retry"
+): { ok: false; code: string; detail: string } | null {
+  const legacy = legacyRecoveryQuarantine(op);
+  if (legacy) {
+    return {
+      ok: false,
+      code: `${prefix}-legacy-unrecoverable`,
+      detail: legacy
+    };
+  }
+  const ambiguous = ambiguousProviderMutation(op);
+  if (!ambiguous) return null;
+  return {
+    ok: false,
+    code: `${prefix}-provider-outcome-unknown`,
+    detail: ambiguous
+  };
+}
+
 export const SETUP_RESUME_STEPS = Object.freeze([
   "azure_app",
   "service_principal",
@@ -2841,13 +2913,8 @@ export function canStartRollback(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
-  const legacy = legacyRecoveryQuarantine(op);
-  if (legacy)
-    return {
-      ok: false,
-      code: "rollback-legacy-unrecoverable",
-      detail: legacy
-    };
+  const refused = providerDestructiveRefusal(op, "rollback");
+  if (refused) return refused;
   // Successful verification is the completion boundary, so a verified
   // environment is never rolled back through the setup record.
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
@@ -2975,9 +3042,8 @@ export function canExitSetup(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
-  const legacy = legacyRecoveryQuarantine(op);
-  if (legacy)
-    return { ok: false, code: "exit-legacy-unrecoverable", detail: legacy };
+  const refused = providerDestructiveRefusal(op, "exit");
+  if (refused) return refused;
   // A verified environment is finished work, not an abandoned attempt. It is
   // removed with Delete Environment, exactly as a rollback is refused for it.
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
@@ -3061,13 +3127,8 @@ export function canRetryCleanup(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
-  const legacy = legacyRecoveryQuarantine(op);
-  if (legacy)
-    return {
-      ok: false,
-      code: "cleanup-retry-legacy-unrecoverable",
-      detail: legacy
-    };
+  const refused = providerDestructiveRefusal(op, "cleanup-retry");
+  if (refused) return refused;
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return { ok: false, code: "cleanup-retry-ledger-missing" };
   if (hasReachedSetupCommitPoint(op)) {
@@ -3163,7 +3224,10 @@ export function hasUnfinishedCleanupAuthority(op: any): boolean {
   // An unproven mutation is the one claim that has no ledger entry behind it:
   // the resource it may have created is precisely the one Radius could not
   // record. Releasing the repository here would let a second setup start
-  // against it, which is the collision the journal exists to prevent.
+  // against it, which is the collision the journal exists to prevent. A
+  // mutation reconciliation could only hand to the customer is deliberately not
+  // held: its guidance ends by telling them to start a new setup, and a lock
+  // no command can clear would make that impossible.
   if (unresolvedProviderMutations(op).length > 0) return true;
   const rollback = canStartRollback(op);
   if (
@@ -3312,6 +3376,16 @@ const UNAVAILABLE_GUIDANCE_MESSAGES: Record<string, string> = {
     "Radius rolled back what this attempt created. Start a new environment setup when you are ready."
 };
 
+// Refusals whose sentence is the reconciliation's own guidance rather than a
+// fixed line. The detail names the exact resource Radius could not account for,
+// so a generic replacement would be strictly less useful.
+const DETAIL_GUIDANCE_CODES = Object.freeze([
+  "rollback-legacy-unrecoverable",
+  "rollback-provider-outcome-unknown",
+  "setup-continue-provider-outcome-unknown",
+  "setup-retry-provider-outcome-unknown"
+]);
+
 export function projectActionGuidance(op: any): any[] {
   if (!op || !isTerminalState(op.state)) return [];
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
@@ -3322,12 +3396,14 @@ export function projectActionGuidance(op: any): any[] {
   const notes: Array<{ code: string; message: string }> = [];
   const rollback = canStartRollback(op);
   const forward = canContinueSetup(op).ok || canRetrySetup(op).ok;
-  const explain = (code: string) => {
-    const message = UNAVAILABLE_GUIDANCE_MESSAGES[code];
-    if (message) notes.push({ code, message });
+  const explain = (refusal: { code: string; detail?: string }) => {
+    const message =
+      UNAVAILABLE_GUIDANCE_MESSAGES[refusal.code] ||
+      (DETAIL_GUIDANCE_CODES.includes(refusal.code) ? refusal.detail : "");
+    if (message) notes.push({ code: refusal.code, message });
   };
-  if (!rollback.ok) explain(rollback.code);
-  if (!forward) explain(canContinueSetup(op).code);
+  if (!rollback.ok) explain(rollback);
+  if (!forward) explain(canContinueSetup(op));
   return notes;
 }
 
@@ -4523,13 +4599,15 @@ export function reconcileRestoredOperation(op: any): any {
       rollbackPending ? "rollback_pending" : "reconciling";
     return op;
   }
-  if (isTerminalState(op.state)) return op;
-  // A record written before the journal existed, caught mid-flight. Its ledger
-  // says what Radius had finished, and nothing at all says what it had started:
-  // the mutation that was in the air when the process died left no trace. So a
-  // retry could create a second App Registration and a rollback could delete a
-  // resource this attempt never made. Quarantine it durably and say why.
+  // A record written before the journal existed. Its ledger says what Radius
+  // had finished, and nothing at all says what it had started: the mutation
+  // that was in the air when the process died left no trace. So a retry could
+  // create a second App Registration and a rollback could delete a resource
+  // this attempt never made. Quarantine it durably and say why — before the
+  // terminal shortcut below, because a record that already reached a terminal
+  // state still offers rollback, retry-rollback, and exit from that state.
   if (quarantineUnrecoverableLegacy(op)) return op;
+  if (isTerminalState(op.state)) return op;
   // A stop the customer already paid for outlives the process that was going to
   // honor it. Nothing is mid-flight after a restart, so the boundary is here.
   if (shouldStop(op)) {

@@ -33,6 +33,7 @@ import {
   invokeSessionPrompt,
   localDeploymentBlocksMutation,
   preflightGhcrPackageWriteAccess,
+  repositoryApiPath,
   resetListingCaches,
   resetDeploymentViewState,
   resolveCleanupGitHubContext,
@@ -581,6 +582,256 @@ describe("ensureServicePrincipal", () => {
       stderr: "Request_ResourceNotFound: Resource 'app-1' does not exist"
     });
   });
+
+  describe("journaling the create so a restart cannot repeat it", () => {
+    function recovery() {
+      const operation = createOperation({ operationId: "op_sp" });
+      return {
+        operation,
+        port: { operation, persist: async () => {} }
+      };
+    }
+
+    const absent = {
+      code: 1,
+      stdout: "",
+      stderr: "Request_ResourceNotFound: Resource 'app-1' does not exist"
+    };
+
+    it("records the create before issuing it and confirms it afterwards", async () => {
+      const { operation, port } = recovery();
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) => (args[2] === "create" ? { code: 0 } : absent),
+        port
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        state: "created",
+        origin: "this_operation"
+      });
+      expect(operation.providerRecovery.mutations).toEqual([
+        expect.objectContaining({
+          kind: "azure_service_principal.create",
+          target: "app-1",
+          providerIdempotencyKey: "app-1",
+          status: "confirmed"
+        })
+      ]);
+    });
+
+    it("adopts the exact principal for this client id rather than creating a second one", async () => {
+      const { operation, port } = recovery();
+      const creates: string[][] = [];
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) => {
+          if (args[2] === "create") {
+            creates.push(args);
+            return { code: 1, stdout: "", stderr: "", timedOut: true };
+          }
+          return creates.length === 0 ?
+              absent
+            : { code: 0, stdout: "sp-object-1\n", stderr: "" };
+        },
+        port
+      );
+
+      // Present after this attempt's own create but never provably created by
+      // it, so the object id is adopted and ownership is not.
+      expect(result).toEqual({
+        ok: true,
+        state: "created_candidate",
+        origin: "unknown",
+        objectId: "sp-object-1"
+      });
+      expect(creates).toHaveLength(1);
+      expect(operation.providerRecovery.mutations[0]).toMatchObject({
+        status: "confirmed",
+        evidence: expect.stringContaining("exact application client id")
+      });
+    });
+
+    it("never reissues the create when a restart replays the same step", async () => {
+      const { operation, port } = recovery();
+      const creates: string[][] = [];
+      const runAz = async (args: string[]) => {
+        if (args[2] === "create") {
+          creates.push(args);
+          return { code: 1, stdout: "", stderr: "", timedOut: true };
+        }
+        return creates.length === 0 ?
+            absent
+          : { code: 0, stdout: "sp-object-1\n", stderr: "" };
+      };
+
+      await ensureServicePrincipal("app-1", runAz, port);
+      const replay = await ensureServicePrincipal("app-1", runAz, port);
+
+      // The second pass finds the principal in its precheck, so it reuses it
+      // and never reaches the create at all.
+      expect(creates).toHaveLength(1);
+      expect(replay).toMatchObject({ ok: true, objectId: "sp-object-1" });
+      expect(operation.providerRecovery.mutations).toHaveLength(1);
+    });
+
+    it("reports a definite Entra refusal without journaling a phantom principal", async () => {
+      const { operation, port } = recovery();
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) =>
+          args[2] === "create" ?
+            {
+              code: 1,
+              stdout: "",
+              stderr:
+                "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+            }
+          : absent,
+        port
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        stderr: expect.stringContaining("Insufficient privileges")
+      });
+      expect(operation.providerRecovery.mutations[0].status).toBe(
+        "not_applied"
+      );
+    });
+
+    it("settles as not applied when Entra proves no principal exists", async () => {
+      const { operation, port } = recovery();
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) =>
+          args[2] === "create" ?
+            { code: 1, stdout: "", stderr: "", timedOut: true }
+          : absent,
+        port
+      );
+
+      expect(result.ok).toBe(false);
+      expect(operation.providerRecovery.mutations[0].status).toBe(
+        "not_applied"
+      );
+    });
+
+    it("refuses to create a principal once reconciliation demanded a rollback", async () => {
+      const { operation, port } = recovery();
+      operation.providerRecovery.state = "rollback_pending";
+
+      await expect(
+        ensureServicePrincipal(
+          "app-1",
+          async (args) => {
+            if (args[2] === "create") {
+              throw new Error("no create may run while a rollback is pending");
+            }
+            return absent;
+          },
+          port
+        )
+      ).rejects.toMatchObject({ code: "provider-mutation-rollback-pending" });
+    });
+
+    it("leaves an unreadable directory unresolved instead of guessing", async () => {
+      const { operation, port } = recovery();
+      let created = false;
+
+      await expect(
+        ensureServicePrincipal(
+          "app-1",
+          async (args) => {
+            if (args[2] === "create") {
+              created = true;
+              return { code: 1, stdout: "", stderr: "", timedOut: true };
+            }
+            return created ?
+                { code: 1, stdout: "", stderr: "the directory did not answer" }
+              : absent;
+          },
+          port
+        )
+      ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+
+      expect(operation.providerRecovery.mutations[0].status).toBe(
+        "outcome_unknown"
+      );
+    });
+
+    it("treats an empty reconciliation object id as unreadable rather than absent", async () => {
+      const { operation, port } = recovery();
+      let created = false;
+
+      await expect(
+        ensureServicePrincipal(
+          "app-1",
+          async (args) => {
+            if (args[2] === "create") {
+              created = true;
+              return { code: 1, stdout: "", stderr: "", timedOut: true };
+            }
+            return created ? { code: 0, stdout: "  \n", stderr: "" } : absent;
+          },
+          port
+        )
+      ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+
+      expect(operation.providerRecovery.mutations[0].evidence).toContain(
+        "empty object id"
+      );
+    });
+
+    it("stops before the create when the precheck itself failed for another reason", async () => {
+      const { operation, port } = recovery();
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) => {
+          if (args[2] === "create") {
+            throw new Error("a failed precheck must not reach the create");
+          }
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "HTTP 503: Service Unavailable"
+          };
+        },
+        port
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        stderr: "HTTP 503: Service Unavailable"
+      });
+      expect(operation.providerRecovery.mutations).toEqual([]);
+    });
+  });
+});
+
+describe("repositoryApiPath", () => {
+  it("derives the repository an environment path belongs to", () => {
+    expect(repositoryApiPath("/repos/octo/app/environments/dev")).toBe(
+      "/repos/octo/app"
+    );
+    expect(
+      repositoryApiPath("/repos/octo/app/environments/needs%20encoding")
+    ).toBe("/repos/octo/app");
+  });
+
+  it.each([
+    ["a repository path with no environment", "/repos/octo/app"],
+    ["an unrelated path", "/user/repos"],
+    ["an empty path", ""]
+  ])("returns null for %s", (_label, path) => {
+    expect(repositoryApiPath(path)).toBeNull();
+  });
 });
 
 describe("resolveCleanupGitHubContext", () => {
@@ -638,7 +889,96 @@ describe("resolveCleanupGitHubContext", () => {
     );
   });
 
-  it("confirms absence after a timed-out environment delete", async () => {
+  it("confirms absence after a timed-out environment delete once the repository still reads", async () => {
+    const executor = selectedExecutor({
+      run: vi
+        .fn()
+        .mockResolvedValueOnce({
+          code: 1,
+          stdout: "",
+          stderr: "terminated",
+          timedOut: true
+        })
+        .mockResolvedValueOnce({
+          code: 1,
+          stdout: "",
+          stderr: "HTTP 404: Not Found"
+        })
+        .mockResolvedValueOnce({
+          code: 0,
+          stdout: JSON.stringify({ full_name: "octo/app" }),
+          stderr: ""
+        })
+    });
+    const context = await resolveCleanupGitHubContext({
+      targets: [{ artifactType: "github_environment" }],
+      selectedLogin: "octocat",
+      createExecutor: async () => executor
+    });
+
+    await expect(
+      context.deleteEnvironment([
+        "api",
+        "--method",
+        "DELETE",
+        "/repos/octo/app/environments/dev"
+      ])
+    ).resolves.toBeUndefined();
+    expect(executor.run).toHaveBeenCalledTimes(3);
+    expect(executor.run).toHaveBeenLastCalledWith(
+      ["api", "/repos/octo/app"],
+      expect.anything()
+    );
+  });
+
+  it.each([
+    [
+      "the repository read also 404s",
+      { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
+    ],
+    [
+      "the repository read is refused",
+      { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" }
+    ]
+  ])(
+    "refuses to call a timed-out environment delete complete when %s",
+    async (_label, repositoryRead) => {
+      const executor = selectedExecutor({
+        run: vi
+          .fn()
+          .mockResolvedValueOnce({
+            code: 1,
+            stdout: "",
+            stderr: "terminated",
+            timedOut: true
+          })
+          .mockResolvedValueOnce({
+            code: 1,
+            stdout: "",
+            stderr: "HTTP 404: Not Found"
+          })
+          .mockResolvedValueOnce(repositoryRead)
+      });
+      const context = await resolveCleanupGitHubContext({
+        targets: [{ artifactType: "github_environment" }],
+        selectedLogin: "octocat",
+        createExecutor: async () => executor
+      });
+
+      // GitHub answers 404 both for an environment that is gone and for a
+      // repository this token can no longer see. Only the first is a delete.
+      await expect(
+        context.deleteEnvironment([
+          "api",
+          "--method",
+          "DELETE",
+          "/repos/octo/app/environments/dev"
+        ])
+      ).rejects.toThrow("masked access rather than a completed delete");
+    }
+  );
+
+  it("keeps a timed-out delete unknown when the path names no repository", async () => {
     const executor = selectedExecutor({
       run: vi
         .fn()
@@ -661,13 +1001,8 @@ describe("resolveCleanupGitHubContext", () => {
     });
 
     await expect(
-      context.deleteEnvironment([
-        "api",
-        "--method",
-        "DELETE",
-        "/repos/octo/app/environments/dev"
-      ])
-    ).resolves.toBeUndefined();
+      context.deleteEnvironment(["api", "--method", "DELETE", "/user/repos"])
+    ).rejects.toThrow("masked access rather than a completed delete");
     expect(executor.run).toHaveBeenCalledTimes(2);
   });
 

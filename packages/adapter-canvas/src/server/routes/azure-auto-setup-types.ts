@@ -160,7 +160,11 @@ export interface AzureAutoSetupDependencies {
   tempFile: AzureAutoSetupTempFilePort;
   ensureServicePrincipal(
     clientId: string,
-    runAz: (args: string[]) => Promise<Partial<AzureAutoSetupCommandResult>>
+    runAz: (args: string[]) => Promise<Partial<AzureAutoSetupCommandResult>>,
+    mutationRecovery?: {
+      operation: object & { operationId: string };
+      persist(): Promise<void>;
+    }
   ): Promise<
     | {
         ok: true;

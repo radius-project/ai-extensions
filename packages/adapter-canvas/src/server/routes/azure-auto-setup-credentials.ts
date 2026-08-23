@@ -550,10 +550,27 @@ export async function configureAzureAutoSetupCredentials({
 }: AzureAutoSetupCredentialInput): Promise<boolean> {
   const { operation, steps, runAz, fail, checkpoint } = workflow;
 
+  // Reconciliation may have decided this attempt must be undone while the
+  // request that reached here was still in flight. Every mutation below adds a
+  // resource to a set the rollback has already been selected for, so the halt
+  // comes before the first one rather than after it.
+  if (isRollbackPending(operation)) {
+    await fail(
+      409,
+      "Radius reconciled an interrupted provider request and must roll back before creating a Service Principal.",
+      "provider-rollback-pending",
+      { steps, clientId, appName }
+    );
+    return false;
+  }
   steps.push("Creating Service Principal...");
   const servicePrincipal = await dependencies.ensureServicePrincipal(
     clientId,
-    runAz
+    runAz,
+    {
+      operation,
+      persist: dependencies.operations.persist
+    }
   );
   if (!servicePrincipal.ok) {
     await fail(
@@ -581,6 +598,15 @@ export async function configureAzureAutoSetupCredentials({
   });
   if (!(await checkpoint())) return false;
 
+  if (isRollbackPending(operation)) {
+    await fail(
+      409,
+      "Radius reconciled the interrupted Service Principal request and must roll back before adding federated credentials.",
+      "provider-rollback-pending",
+      { steps, clientId, appName }
+    );
+    return false;
+  }
   if (
     !(await createFederatedCredentials({
       workflow,
@@ -591,6 +617,15 @@ export async function configureAzureAutoSetupCredentials({
       appName
     }))
   ) {
+    return false;
+  }
+  if (isRollbackPending(operation)) {
+    await fail(
+      409,
+      "Radius reconciled an interrupted federated credential request and must roll back before assigning Azure roles.",
+      "provider-rollback-pending",
+      { steps, clientId, appName }
+    );
     return false;
   }
 
