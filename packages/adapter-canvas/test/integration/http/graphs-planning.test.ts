@@ -584,6 +584,66 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     expect(payload.resources[0].deployStatus).toBe("success");
   });
 
+  it("serves matching planned provider types when deployed metadata is sparse", async () => {
+    const harness = start();
+    const plannedOutputs = [
+      {
+        id: "planned-server",
+        name: "server",
+        type: "Microsoft.DBforMySQL/flexibleServers"
+      }
+    ];
+    harness.state.contextRepo = "octo/app";
+    harness.state.plannedRepo = "octo/app";
+    harness.state.plannedBranch = "main";
+    harness.state.plannedEnvironment = "prod";
+    harness.state.plannedProvider = "azure";
+    harness.state.deployProvider = "azure";
+    harness.state.plannedResources = [
+      {
+        id: "mysql",
+        name: "mysql",
+        type: "Radius.Data/mySqlDatabases",
+        connections: [{ id: "api" }],
+        outputResources: plannedOutputs
+      }
+    ];
+    harness.modeledResources.push(
+      {
+        id: "mysql",
+        name: "mysql",
+        type: "Radius.Data/mySqlDatabases",
+        connections: [{ id: "api" }]
+      },
+      { id: "api", name: "api", type: "Radius.Compute/containers" }
+    );
+    harness.reader.graph = {
+      graph: {
+        resources: [{ id: "mysql", name: "mysql", outputResources: [] }]
+      },
+      status: "ok"
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/deployed-graph?environment=prod`
+    );
+    const payload = (await response.json()) as {
+      resources: CanvasGraphResource[];
+    };
+
+    expect(payload.resources.map((resource) => resource.name)).toEqual([
+      "mysql",
+      "api"
+    ]);
+    expect(payload.resources[0].connections).toEqual([{ id: "api" }]);
+    expect(payload.resources[0].outputResources).toEqual(plannedOutputs);
+    expect(payload.resources.map((resource) => resource.deployStatus)).toEqual([
+      "pending",
+      "pending"
+    ]);
+  });
+
   it("keeps current terminal state when a mismatched artifact predates the attempt", async () => {
     const harness = start();
     const currentOutputs = [

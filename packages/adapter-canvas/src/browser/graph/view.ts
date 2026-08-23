@@ -202,11 +202,7 @@ export function createNodeComponent(
     const badge =
       data.deployBadge ?
         h("img", {
-          className:
-            "rad-node__badge" +
-            (data.deployBadgeKind === "progress" ?
-              " rad-node__badge--progress"
-            : ""),
+          className: "rad-node__badge",
           src: data.deployBadge,
           alt:
             data.deployBadgeKind === "failed" ? "Failed"

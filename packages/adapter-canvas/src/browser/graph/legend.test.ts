@@ -24,6 +24,9 @@ describe("status legend", () => {
     expect(html).toContain("Pending / deploying");
     expect(html.split("data:image/svg+xml,").length - 1).toBe(3);
     expect(html).toContain('width="14" height="14"');
+    expect(decodeURIComponent(html)).toContain(
+      "animation:spin 1s linear infinite"
+    );
   });
 });
 

@@ -566,6 +566,37 @@ describe("planned and deploying graphs", () => {
     expect(built.dataById["a"].deployMessage).toBe("done");
   });
 
+  it("keeps the indefinite progress asset through state updates until status is terminal", () => {
+    const deploy = settings({ deployMode: true });
+    for (let update = 0; update < 10; update++) {
+      const built = buildGraph(deploy, [
+        {
+          id: "a",
+          name: "a",
+          deployStatus: update % 2 === 0 ? "pending" : "in_progress"
+        }
+      ]);
+      const svg = decodeURIComponent(
+        (built.dataById["a"]?.deployBadge ?? "").slice(
+          "data:image/svg+xml,".length
+        )
+      );
+      expect(svg).toContain("animation:spin 1s linear infinite");
+    }
+
+    for (const status of ["success", "failed"]) {
+      const built = buildGraph(deploy, [
+        { id: "a", name: "a", deployStatus: status }
+      ]);
+      const svg = decodeURIComponent(
+        (built.dataById["a"]?.deployBadge ?? "").slice(
+          "data:image/svg+xml,".length
+        )
+      );
+      expect(svg).not.toContain("@keyframes spin");
+    }
+  });
+
   it("carries no badge outside deploy mode", () => {
     const built = buildGraph(settings(), [
       { id: "a", name: "a", deployStatus: "success" }

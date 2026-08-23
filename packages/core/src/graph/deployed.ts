@@ -94,7 +94,11 @@ export function mergeDeployedGraphMetadata(
     const id = typeof resource?.id === "string" ? resource.id.trim() : "";
     const metadata = id ? deployedById.get(id) : undefined;
     const outputs =
-      Array.isArray(metadata?.outputResources) ? metadata.outputResources
+      (
+        Array.isArray(metadata?.outputResources) &&
+        metadata.outputResources.length > 0
+      ) ?
+        metadata.outputResources
       : Array.isArray(resource?.outputResources) ? resource.outputResources
       : [];
     return {

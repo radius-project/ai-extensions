@@ -309,7 +309,7 @@ describe("node card", () => {
   });
 
   it.each([
-    ["progress", "In progress", " rad-node__badge--progress"],
+    ["progress", "In progress", ""],
     ["success", "Deployed", ""],
     ["failed", "Failed", ""]
   ])(
