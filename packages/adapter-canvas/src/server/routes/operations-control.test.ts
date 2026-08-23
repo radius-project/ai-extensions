@@ -550,6 +550,10 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       `${op.operationId}:retry_verification:1:verification`
     );
     expect(payload.operation.currentStage).toBe(STAGE_VERIFY);
+    expect(op.verification).toMatchObject({
+      acquisitionPending: true,
+      retryCommandId: payload.commandId
+    });
     // The action_required verdict is kept as history.
     expect(payload.operation.outcomes).toEqual([
       expect.objectContaining({
@@ -565,6 +569,24 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
         commandId: payload.commandId
       }
     ]);
+  });
+
+  it("removes the pending acquisition marker when verification retry cannot be saved", async () => {
+    const op = mergeHandoff();
+    const previousVerification = structuredClone(op.verification);
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
+      checkPullRequestMerge: () => Promise.resolve({ state: "merged" }),
+      persistOperations: () => Promise.reject(new Error("disk gone"))
+    });
+
+    expect(out.recording.status).toBe(500);
+    expect(out.payload()).toMatchObject({
+      code: "operation-retry-persist-failed",
+      detail: "disk gone"
+    });
+    expect(op.state).toBe("action_required");
+    expect(op.verification).toEqual(previousVerification);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("repeats verification without a merge proof for an Azure RBAC failure", async () => {

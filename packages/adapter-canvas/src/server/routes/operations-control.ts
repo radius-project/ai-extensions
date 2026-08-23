@@ -18,6 +18,7 @@ import {
   enterStage,
   findActiveCommand,
   finish,
+  markVerificationRetryAcquisition,
   rollbackRetryAttempt,
   setCommandState,
   setStageState,
@@ -196,6 +197,11 @@ interface CommandSpec {
   activeKinds?: readonly OperationCommandKind[];
   // Where the record must be positioned for the work to resume.
   prepare?: (operation: OperationRecord, eligibility: RetryEligibility) => void;
+  prepareAccepted?: (
+    operation: OperationRecord,
+    eligibility: RetryEligibility,
+    commandId: string
+  ) => void;
   // Checked after eligibility, for a command that needs proof from outside the
   // saved record. Resolves false when it has already answered the request.
   precondition?: (request: CommandRequest) => Promise<boolean>;
@@ -607,6 +613,9 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     attemptKind: "verification",
     eligibility: canRetryVerification,
     prepare: enterVerifyStage,
+    prepareAccepted: (operation, _eligibility, commandId) => {
+      markVerificationRetryAcquisition(operation, commandId);
+    },
     precondition: requireMergedSetupPullRequest,
     scheduleKind: "verification_retry",
     schedulerMiss: "close-operation",
@@ -698,6 +707,7 @@ async function runAcceptedCommand(
     return;
   }
   spec.prepare?.(operation, eligibility);
+  spec.prepareAccepted?.(operation, eligibility, commandId);
   try {
     await dependencies.persistOperations();
   } catch (error) {

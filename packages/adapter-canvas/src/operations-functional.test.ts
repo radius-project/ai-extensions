@@ -10,6 +10,7 @@ import {
   finish,
   finishSucceeded,
   isStale,
+  markVerificationRetryAcquisition,
   acceptCommand,
   beginRetryAttempt,
   canRetrySetup,
@@ -785,6 +786,38 @@ describe("cooperative control functional coverage", () => {
     expect(recovered.verification.workflow).toBe(
       "radius-verify-credentials.yml"
     );
+  });
+
+  it("restores a persisted verification retry that was acquiring its selected executor", async () => {
+    const { first, restart } = await persistedRegistries();
+    const op = operation();
+    first.start(op);
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "41",
+      runUrl: "https://github.com/contoso/store/actions/runs/41"
+    };
+    const accepted = acceptCommand(op, {
+      kind: "retry_verification",
+      attempt: 1,
+      target: "verification"
+    });
+    markVerificationRetryAcquisition(op, accepted.command.commandId);
+    await first.persist();
+
+    const restored = await restart();
+    const recovered = restored.get(op.operationId);
+    expect(recovered.state).toBe("running");
+    expect(recovered.recoveryState).toBe("verification_acquisition_pending");
+    expect(recovered.verification).toMatchObject({
+      acquisitionPending: true,
+      retryCommandId: accepted.command.commandId,
+      runId: "41"
+    });
   });
 
   it("loads a version 1 record written before the control fields existed", async () => {

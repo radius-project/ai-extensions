@@ -97,6 +97,8 @@ import {
   canExitSetup,
   hasSurvivingCreatedArtifacts,
   isSetupExited,
+  hasPendingVerificationAcquisition,
+  markVerificationRetryAcquisition,
   setupExitState,
   EXIT_COMMAND_KIND,
   EXIT_COMMAND_OUTCOME,
@@ -2745,6 +2747,54 @@ describe("startup reconciliation", () => {
     expect(op.state).toBe("failed_partial");
     expect(op.recoveryState).toBe("interrupted");
     expect(op.failure.code).toBe("operation-interrupted");
+  });
+
+  it("restores a pending verification retry acquisition instead of monitoring the prior run", () => {
+    const op = newOp();
+    op.context = { githubLogin: "alice" };
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "41",
+      runUrl: "https://github.com/contoso/store/actions/runs/41"
+    };
+    markVerificationRetryAcquisition(op, "cmd-retry");
+
+    reconcileRestoredOperation(op);
+
+    expect(hasPendingVerificationAcquisition(op)).toBe(true);
+    expect(op.state).toBe("running");
+    expect(op.recoveryState).toBe("verification_acquisition_pending");
+    expect(op.verification).toMatchObject({
+      acquisitionPending: true,
+      retryCommandId: "cmd-retry",
+      runId: "41"
+    });
+  });
+
+  it("recovers a pre-dispatch checkpoint by monitoring instead of redispatching", () => {
+    const op = newOp();
+    op.context = { githubLogin: "alice" };
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: null,
+      runUrl: null,
+      dispatchPending: true,
+      retryCommandId: "cmd-retry"
+    };
+
+    reconcileRestoredOperation(op);
+
+    expect(hasPendingVerificationAcquisition(op)).toBe(false);
+    expect(op.state).toBe("running");
+    expect(op.recoveryState).toBe("verification_pending");
   });
 
   it("latches interrupted work without scheduling automatic cleanup", () => {

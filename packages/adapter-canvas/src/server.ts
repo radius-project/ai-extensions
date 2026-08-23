@@ -5287,10 +5287,17 @@ function createInstanceRequestCoordinator(
       setCommandState,
       finish,
       persist: async (operation) => {
-        await saveOperation(operation);
+        if (!(await saveOperation(operation))) {
+          throw new Error(
+            "Radius could not persist the verification retry checkpoint."
+          );
+        }
       },
       monitor: monitorVerification,
       currentState: (id) => operations.get(id)?.state || null,
+      isRateLimitError: (error) => isGitHubRateLimitError(error),
+      sleep: (milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds)),
       errorMessage
     });
   }
@@ -5831,7 +5838,8 @@ function createInstanceRequestCoordinator(
         continue;
       }
       if (
-        op.recoveryState !== "verification_pending" ||
+        (op.recoveryState !== "verification_pending" &&
+          op.recoveryState !== "verification_acquisition_pending") ||
         op.currentStage !== STAGE_VERIFY ||
         op.endedAt ||
         activeVerificationMonitors.has(op.operationId)
@@ -5840,7 +5848,14 @@ function createInstanceRequestCoordinator(
       activeVerificationMonitors.add(op.operationId);
       scheduleServerOwnedTask(op.operationId, async () => {
         try {
-          await monitorVerificationAsSelectedAccount(op);
+          if (op.recoveryState === "verification_acquisition_pending") {
+            await runVerificationRetry(
+              op.operationId,
+              String(op.verification?.retryCommandId || "")
+            );
+          } else {
+            await monitorVerificationAsSelectedAccount(op);
+          }
         } finally {
           activeVerificationMonitors.delete(op.operationId);
         }

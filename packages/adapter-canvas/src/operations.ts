@@ -1777,6 +1777,29 @@ function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
   );
 }
 
+export function markVerificationRetryAcquisition(
+  op: any,
+  commandId: string
+): any {
+  if (!op) return op;
+  op.verification = {
+    ...(op.verification || {}),
+    acquisitionPending: true,
+    retryCommandId: commandId
+  };
+  delete op.verification.acquisitionDeadline;
+  return op;
+}
+
+export function hasPendingVerificationAcquisition(op: any): boolean {
+  return Boolean(
+    op?.currentStage === STAGE_VERIFY &&
+    op?.verification?.acquisitionPending === true &&
+    typeof op.verification.retryCommandId === "string" &&
+    op.verification.retryCommandId
+  );
+}
+
 export function hasReachedSetupCommitPoint(op: any): boolean {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return false;
@@ -4368,6 +4391,8 @@ export function rollbackRetryAttempt(op: any, snapshot: any): any {
   else op.resumeFrom = snapshot.resumeFrom;
   if (snapshot.inputRequired === undefined) delete op.inputRequired;
   else op.inputRequired = structuredClone(snapshot.inputRequired);
+  if (snapshot.verification === undefined) delete op.verification;
+  else op.verification = structuredClone(snapshot.verification);
   // `finish` opens cleanup on the way out, so a rolled-back terminal transition
   // has to put the ledger's cleanup record back too or the next projection
   // reports a rollback that never happened.
@@ -4394,6 +4419,10 @@ export function snapshotRetryState(op: any): any {
     executionActive: op.executionActive,
     resumeFrom: op.resumeFrom,
     inputRequired: op.inputRequired,
+    verification:
+      op.verification === undefined ?
+        undefined
+      : structuredClone(op.verification),
     cleanup: ledger?.cleanup ? structuredClone(ledger.cleanup) : undefined,
     notifiedAt: op.journey?.notifiedAt ?? null
   };
@@ -4546,6 +4575,7 @@ export function hasCompleteVerificationIdentity(op: any): boolean {
   const verification = op?.verification;
   return Boolean(
     op?.currentStage === STAGE_VERIFY &&
+    verification?.acquisitionPending !== true &&
     typeof op?.context?.githubLogin === "string" &&
     op.context.githubLogin.trim() &&
     Number.isFinite(Number(verification?.dispatchedAt)) &&
@@ -4784,6 +4814,10 @@ export function reconcileRestoredOperation(op: any): any {
       op.recoveryState = "waiting_input";
       return op;
     }
+  }
+  if (hasPendingVerificationAcquisition(op)) {
+    op.recoveryState = "verification_acquisition_pending";
+    return op;
   }
   if (hasCompleteVerificationIdentity(op)) {
     op.recoveryState = "verification_pending";
