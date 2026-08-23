@@ -67,30 +67,94 @@ function requireRecoveryRollback(
  * itself composed — a validation error, a permission refusal, a conflict — says
  * the request was seen and rejected.
  *
- * So the test is inverted from the obvious one: a failure is treated as
- * uncertain unless the provider's own diagnostic is there to read.
+ * So the test is an allowlist rather than a denylist. A denylist has to
+ * enumerate every way a request can fail inconclusively and gets the default
+ * exactly backwards: the failure nobody anticipated becomes "nothing happened",
+ * which is the one verdict that authorizes a blind replay. Here an
+ * unrecognised diagnostic stays unknown, and only a recognised conclusive
+ * rejection is allowed to say the provider refused the write.
  */
 export function providerMutationOutcomeUnknown(
   result: ProviderMutationCommandResult
 ): boolean {
-  if (result.timedOut === true) return true;
-  if (result.code === 0 || result.code === "0") return false;
-  // A signal name or a negative/128+ status is the process dying, not an answer.
-  if (typeof result.code === "string" && /^SIG[A-Z0-9]+$/.test(result.code)) {
-    return true;
+  if (result.timedOut !== true && (result.code === 0 || result.code === "0")) {
+    return false;
   }
-  const status = Number(result.code);
-  if (Number.isFinite(status) && (status < 0 || status >= 128)) return true;
-  const diagnostic = `${result.stderr || ""}\n${result.stdout || ""}`.trim();
-  // Nothing came back to read, so nothing says the provider rejected anything.
-  if (!diagnostic) return true;
-  return TRANSPORT_FAILURE.test(diagnostic);
+  return classifyProviderMutationFailure(result) !== "not_applied";
 }
 
-// Failures of the pipe rather than of the request. Each one can be reported
-// after the provider has already accepted the write.
-const TRANSPORT_FAILURE =
-  /\b(?:ECONNRESET|ECONNABORTED|ECONNREFUSED|EPIPE|ETIMEDOUT|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EAI_AGAIN)\b|connection (?:reset|closed|aborted)|broken pipe|socket hang up|network is unreachable|unexpected EOF|premature close|stream closed|terminated by signal|killed|timed? ?out|TLS handshake|remote error|server closed the connection/i;
+export type ProviderMutationFailureVerdict = "not_applied" | "outcome_unknown";
+
+/**
+ * Read a failed provider command as either a conclusive rejection or silence.
+ *
+ * `not_applied` is the load-bearing verdict: it is the only one that lets a
+ * later attempt reissue the same write. It is reached only when the diagnostic
+ * carries a rejection the provider itself composed and carries nothing that
+ * could equally describe a request the provider accepted and then failed to
+ * acknowledge.
+ */
+export function classifyProviderMutationFailure(
+  result: ProviderMutationCommandResult
+): ProviderMutationFailureVerdict {
+  if (result.timedOut === true) return "outcome_unknown";
+  // A signal name or a negative/128+ status is the process dying, not an answer.
+  if (typeof result.code === "string" && /^SIG[A-Z0-9]+$/.test(result.code)) {
+    return "outcome_unknown";
+  }
+  const status = Number(result.code);
+  if (Number.isFinite(status) && (status < 0 || status >= 128)) {
+    return "outcome_unknown";
+  }
+  const diagnostic = `${result.stderr || ""}\n${result.stdout || ""}`.trim();
+  // Nothing came back to read, so nothing says the provider rejected anything.
+  if (!diagnostic) return "outcome_unknown";
+  if (INCONCLUSIVE_FAILURE.test(diagnostic)) return "outcome_unknown";
+  return CONCLUSIVE_REJECTION.test(diagnostic) ? "not_applied" : (
+      "outcome_unknown"
+    );
+}
+
+// Answers that are compatible with the provider having accepted the write.
+// Checked before the allowlist so a diagnostic carrying both — a 500 that also
+// mentions "Not Found", a retry summary quoting an earlier 422 — stays unknown.
+const INCONCLUSIVE_FAILURE =
+  /\b(?:ECONNRESET|ECONNABORTED|ECONNREFUSED|EPIPE|ETIMEDOUT|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EAI_AGAIN)\b|\bHTTP\s*5\d\d\b|\bstatus(?:\s*code)?[:=]?\s*5\d\d\b|connection (?:reset|closed|aborted)|broken pipe|socket hang up|network is unreachable|unexpected EOF|premature close|stream closed|terminated by signal|\bkilled\b|timed? ?out|\btimeout\b|context deadline exceeded|deadline exceeded|i\/o timeout|request canceled|operation was cancell?ed|TLS handshake|remote error|server closed the connection|internal server error|bad gateway|service unavailable|gateway time-?out|temporarily unavailable|try again later|\bEOF\b/i;
+
+// Rejections the provider composed. Every entry names a request the provider
+// saw, understood, and refused, so nothing was written and reissuing the same
+// call is safe.
+const CONCLUSIVE_REJECTION = new RegExp(
+  [
+    // GitHub REST/CLI: an explicit 4xx other than 408 Request Timeout.
+    String.raw`\bHTTP\s*(?:400|401|403|404|405|409|410|415|422|429|451)\b`,
+    String.raw`\b(?:Bad Request|Unauthorized|Forbidden|Not Found|Method Not Allowed|Conflict|Gone|Unsupported Media Type|Unprocessable Entity|Validation Failed|API rate limit exceeded)\b`,
+    String.raw`Resource not accessible by`,
+    String.raw`Bad credentials`,
+    String.raw`Must have admin rights`,
+    String.raw`already exists`,
+    String.raw`Reference (?:already exists|does not exist)`,
+    String.raw`refusing to allow`,
+    String.raw`protected branch|branch protection|required status check|approving review|review is required|through a pull request|push declined`,
+    // Azure CLI argument parsing never reaches the service at all.
+    String.raw`unrecognized arguments|the following arguments are required|argument [^:\n]+: (?:expected|invalid)|invalid choice`,
+    // Microsoft Graph and ARM error identifiers.
+    String.raw`\b(?:AuthorizationFailed|InvalidAuthenticationToken|Authorization_RequestDenied|Authentication_Unauthorized|Request_BadRequest|Request_ResourceNotFound|Directory_ObjectNotFound|BadRequest|InvalidRequest|InvalidRequestFormat|ValidationError|InvalidArgumentValue|InvalidParameterValue|MissingRequiredParameter|ResourceNotFound|ResourceGroupNotFound|SubscriptionNotFound|InvalidResourceType|MissingSubscription|RoleAssignmentExists|RoleDefinitionDoesNotExist|PrincipalNotFound|InvalidPrincipalId|LinkedAuthorizationFailed|InvalidTemplateDeployment)\b`,
+    String.raw`Insufficient privileges to complete the operation`,
+    String.raw`does not have authorization to perform action`,
+    String.raw`is not authorized to perform action`,
+    String.raw`does not exist or one of its queried reference-property objects are not present`,
+    String.raw`does not exist in the directory`,
+    String.raw`Cannot find (?:principal|user or service principal)`,
+    String.raw`No matching principal`,
+    String.raw`not found in the directory`,
+    String.raw`added object references already exist|object reference already exists`,
+    // Service Management Reference identifiers, matched as the tenant emits them.
+    String.raw`serviceManagementReference|serviceTreeNullValueProvided|serviceTreeInvalid`,
+    String.raw`Please run 'az login'|az login --|Please run 'az account set'`
+  ].join("|"),
+  "i"
+);
 
 export function deterministicProviderUuid(seed: string): string {
   const bytes = Buffer.from(
@@ -123,23 +187,69 @@ async function persistOrThrow(
   }
 }
 
+/**
+ * How many times a mutation's provider state may fail to be readable before
+ * the uncertainty is handed to the customer.
+ *
+ * Reconciliation is rescheduled on a fixed interval, so a read that can never
+ * succeed — a directory that will never list the object, a repository the token
+ * lost access to — otherwise retries for as long as the extension runs. The
+ * record stays nonterminal, the repository stays reserved, and no command is
+ * ever offered to clear it. Bounding the attempts turns that silent livelock
+ * into a named refusal that the destructive gates and the panel can both act
+ * on. The mutation is still never replayed.
+ */
+const MAX_RECONCILE_ATTEMPTS = 12;
+
 async function reconcileMutation<T>(
   operation: object,
   mutation: ProviderMutationRecord,
   reconcile: () => Promise<ProviderMutationReconciliation<T>>,
   persist: () => Promise<void>
 ): Promise<RecoverableMutationResult<T>> {
+  // `settleProviderMutation` normalizes the whole recovery record, so the entry
+  // it leaves behind is a different object from the one passed in here. The
+  // attempt counter has to be written to that live entry or it is discarded.
+  const recordAttempts = (attempts: number): void => {
+    const live = (
+      operation as {
+        providerRecovery?: { mutations?: ProviderMutationRecord[] };
+      }
+    ).providerRecovery?.mutations?.find(
+      (entry) => entry.mutationId === mutation.mutationId
+    );
+    if (live) live.reconcileAttempts = attempts;
+  };
   let outcome: ProviderMutationReconciliation<T>;
   try {
     outcome = await reconcile();
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    const attempts = (Number(mutation.reconcileAttempts) || 0) + 1;
+    if (attempts >= MAX_RECONCILE_ATTEMPTS) {
+      const guidance =
+        `Radius could not read provider state for ${mutation.kind} on ${mutation.target} after ${attempts} attempts, most recently: ${detail}. ` +
+        "It will not repeat that request or delete anything on a guess. Review that resource yourself, remove it if it is unwanted, then start a new setup.";
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "manual_required",
+        guidance
+      );
+      recordAttempts(attempts);
+      await persistOrThrow(persist, "after reconciliation was abandoned");
+      throw new ProviderMutationRecoveryError(
+        guidance,
+        "provider-mutation-manual-required"
+      );
+    }
     settleProviderMutation(
       operation,
       mutation.mutationId,
       "outcome_unknown",
       `Provider state could not be read: ${detail}`
     );
+    recordAttempts(attempts);
     await persistOrThrow(persist, "after reconciliation failed");
     throw new ProviderMutationRecoveryError(
       `Radius could not confirm the outcome of ${mutation.kind} for ${mutation.target}. It will not retry that mutation until provider state can be read safely.`,
@@ -182,6 +292,14 @@ export async function executeRecoverableMutation<T>(input: {
   mutate(): Promise<ProviderMutationCommandResult>;
   accept(result: ProviderMutationCommandResult): T;
   reconcile(): Promise<ProviderMutationReconciliation<T>>;
+  /**
+   * Turn a conclusive provider rejection into a manual blocker in the same
+   * settle. A destructive request Radius issued once and the provider refused
+   * leaves the resource in place, and `not_applied` is a resolved status: a
+   * crash between recording it and writing a separate blocker would reload a
+   * record that looks fully reconciled with the resource still there.
+   */
+  rejectionGuidance?(result: ProviderMutationCommandResult): string;
 }): Promise<RecoverableMutationResult<T>> {
   const mutationId = providerMutationId(
     input.operation.operationId,
@@ -225,6 +343,12 @@ export async function executeRecoverableMutation<T>(input: {
       mutation.preparedAt = new Date().toISOString();
       mutation.updatedAt = mutation.preparedAt;
       mutation.evidence = null;
+      // The refused attempt's intent described the world it was about to write
+      // into. That world has moved on, so a fresh attempt journals the state it
+      // actually read rather than inheriting a predecessor that is no longer
+      // the one a revert would restore.
+      if (input.intent) mutation.intent = structuredClone(input.intent);
+      else delete mutation.intent;
     }
     await persistOrThrow(input.persist, "before the provider request");
     let result: ProviderMutationCommandResult;
@@ -260,6 +384,23 @@ export async function executeRecoverableMutation<T>(input: {
       return { state: "applied", value, recovered: false };
     }
     if (!providerMutationOutcomeUnknown(result)) {
+      const manualGuidance = input.rejectionGuidance?.(result);
+      if (manualGuidance) {
+        settleProviderMutation(
+          input.operation,
+          mutation.mutationId,
+          "manual_required",
+          manualGuidance
+        );
+        await persistOrThrow(
+          input.persist,
+          "after the provider refused a destructive request"
+        );
+        throw new ProviderMutationRecoveryError(
+          manualGuidance,
+          "provider-mutation-manual-required"
+        );
+      }
       settleProviderMutation(
         input.operation,
         mutation.mutationId,

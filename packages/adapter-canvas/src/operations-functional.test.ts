@@ -895,3 +895,81 @@ describe("cooperative control functional coverage", () => {
     expect(view).not.toContain("idempotencyKey");
   });
 });
+
+describe("the checkpoint every Azure mutation passes through", () => {
+  function checkpointHarness(op) {
+    const failures = [];
+    return {
+      failures,
+      run: () =>
+        persistMutationCheckpoint({
+          operation: op,
+          persist: async () => {},
+          report: () => {},
+          fail: async (status, error, code) => {
+            failures.push({ status, error, code });
+          }
+        })
+    };
+  }
+
+  it("lets forward work continue while no rollback has been decided", async () => {
+    const op = createOperation({ operationId: "op_checkpoint" });
+    const harness = checkpointHarness(op);
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.failures).toEqual([]);
+  });
+
+  it("halts forward work as soon as reconciliation demands a rollback", async () => {
+    const op = createOperation({ operationId: "op_checkpoint" });
+    op.providerRecovery.state = "rollback_pending";
+    const harness = checkpointHarness(op);
+
+    // Every Azure write in the setup saves its provenance here before the next
+    // one starts, so this is the single place that can guarantee no Service
+    // Principal, federated credential, or role assignment is added to a set
+    // the rollback selection has already been made for.
+    await expect(harness.run()).resolves.toBe(false);
+    expect(harness.failures).toEqual([
+      {
+        status: 409,
+        code: "provider-rollback-pending",
+        error: expect.stringContaining("must roll back")
+      }
+    ]);
+  });
+
+  it.each(["reconciling", "manual_required", "complete", "idle"])(
+    "continues through a %s recovery state",
+    async (state) => {
+      const op = createOperation({ operationId: "op_checkpoint" });
+      op.providerRecovery.state = state;
+      const harness = checkpointHarness(op);
+
+      await expect(harness.run()).resolves.toBe(true);
+    }
+  );
+
+  it("reports the persistence failure ahead of the rollback decision", async () => {
+    const op = createOperation({ operationId: "op_checkpoint" });
+    op.providerRecovery.state = "rollback_pending";
+    const failures = [];
+
+    const saved = await persistMutationCheckpoint({
+      operation: op,
+      persist: async () => {
+        throw new Error("disk full");
+      },
+      report: () => {},
+      fail: async (status, error, code) => {
+        failures.push({ status, code, error });
+      }
+    });
+
+    expect(saved).toBe(false);
+    expect(failures).toEqual([
+      expect.objectContaining({ code: "operation-persistence-failed" })
+    ]);
+  });
+});

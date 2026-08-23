@@ -313,7 +313,11 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
           return result({ stdout: "[]" });
         }
         if (line.includes("federated-credential create")) {
-          return result({ code: 1, stderr: "permission denied" });
+          return result({
+            code: 1,
+            stderr:
+              "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+          });
         }
         throw new Error(`unexpected az call: ${line}`);
       }
@@ -980,5 +984,90 @@ describe("pickAksResourceGroup", () => {
     expect(pickAksResourceGroup(undefined, "rg-deploy")).toBe("rg-deploy");
     expect(pickAksResourceGroup(null, "rg-deploy")).toBe("rg-deploy");
     expect(pickAksResourceGroup(123, "rg-deploy")).toBe("rg-deploy");
+  });
+});
+
+describe("halting Azure work once a rollback has been decided", () => {
+  function pending(test: ReturnType<typeof harness>) {
+    (
+      test.workflow.operation as AzureAutoSetupOperation & {
+        providerRecovery: { state: string; guidance: null; mutations: [] };
+      }
+    ).providerRecovery = {
+      state: "rollback_pending",
+      guidance: null,
+      mutations: []
+    };
+    return test;
+  }
+
+  it("creates no Service Principal at all", async () => {
+    const test = pending(
+      harness({
+        runAz: async (args) => {
+          throw new Error(`no az call may run: ${args.join(" ")}`);
+        },
+        ensureServicePrincipal: async () => {
+          throw new Error("no Service Principal may be created");
+        }
+      })
+    );
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures[0]).toMatchObject({
+      status: 409,
+      code: "provider-rollback-pending",
+      error: expect.stringContaining("before creating a Service Principal")
+    });
+    expect(test.calls).toEqual([]);
+  });
+
+  it("adds no federated credential after the Service Principal step reconciled", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        throw new Error(`no az call may run: ${args.join(" ")}`);
+      },
+      ensureServicePrincipal: async (_clientId, _runAz) => {
+        pending(test);
+        return {
+          ok: true,
+          state: "created_candidate",
+          origin: "unknown",
+          objectId: OBJECT_ID
+        };
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures[0]).toMatchObject({
+      status: 409,
+      code: "provider-rollback-pending",
+      error: expect.stringContaining("before adding federated credentials")
+    });
+    expect(test.calls).not.toContain("fic:radius-octo-app-dev");
+  });
+
+  it("assigns no Azure role after the federated credentials reconciled", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: "[]" });
+        }
+        if (line.includes("federated-credential create")) {
+          pending(test);
+          return result();
+        }
+        throw new Error(`no further az call may run: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures[0]).toMatchObject({
+      status: 409,
+      code: "provider-rollback-pending",
+      error: expect.stringContaining("before assigning Azure roles")
+    });
+    expect(test.calls.some((call) => call.startsWith("role:"))).toBe(false);
   });
 });

@@ -1546,7 +1546,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       gh: [
         {
           match: /^api --method PUT \/repos\/octo\/app\/contents\//,
-          result: { code: 1, stderr: "HTTP 500: server error" }
+          result: { code: 1, stderr: "HTTP 404: Not Found" }
         }
       ]
     });
@@ -1558,6 +1558,42 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(payload.error).toContain(
       "Check that you have write access to the repository"
     );
+  });
+
+  it("does not report a server-side commit failure as a refusal it can retry", async () => {
+    const harness = start({
+      gh: [
+        {
+          match: /^api --method PUT \/repos\/octo\/app\/contents\//,
+          result: { code: 1, stderr: "HTTP 500: server error" }
+        }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    // A 500 can be reported after GitHub already accepted the write, so the
+    // write is reconciled against the repository rather than replayed, and the
+    // single PUT is never repeated behind the customer's back.
+    expect(
+      harness.ghCalls.filter((call) =>
+        call.startsWith("api --method PUT /repos/octo/app/contents/")
+      )
+    ).toHaveLength(1);
+    expect(response.status).not.toBe(400);
+    const recovery = (
+      harness.operation as CreateEnvironmentOperation & {
+        providerRecovery?: {
+          mutations?: Array<{ kind?: string; status?: string }>;
+        };
+      }
+    ).providerRecovery;
+    const put = recovery?.mutations?.find(
+      (entry) => entry.kind === "github_workflow.put"
+    );
+    // Never `not_applied`: that is the one status that would authorize a
+    // later attempt to reissue a write GitHub may already hold.
+    expect(put?.status).not.toBe("not_applied");
   });
 
   it("fails 400 when the verify workflow cannot be dispatched after every retry", async () => {

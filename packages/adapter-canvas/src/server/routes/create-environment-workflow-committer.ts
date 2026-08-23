@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   providerMutationId,
   providerMutationRecord,
+  providerMutationsByKind,
   settleProviderMutation
 } from "../../operations.js";
 import { needsWorkflowScope } from "./create-environment-gh-runner.js";
@@ -14,6 +15,7 @@ import {
   executeRecoverableMutation,
   ProviderMutationRecoveryError
 } from "../services/provider-mutation-recovery.js";
+import { parseBranchDeleteTarget } from "../services/recovered-branch-delete.js";
 
 // Seam 3 of the `POST /api/create-environment` slice: committing workflow files.
 //
@@ -88,6 +90,30 @@ export function workflowContentDigest(contentB64: string): string {
   return createHash("sha256")
     .update(Buffer.from(contentB64, "base64"))
     .digest("hex");
+}
+
+/**
+ * The branch and base commit an interrupted attempt already journaled.
+ *
+ * Looked up by kind rather than by recomputing the target, because the target
+ * embeds the base commit: recomputing it after the default branch moved would
+ * produce a different mutation id, leave the original entry unresolvable, and
+ * lock the repository behind a journal entry nothing could ever settle.
+ */
+export function recordedSetupBranchCreate(
+  operation: unknown,
+  repo: string
+): { branch: string; baseSha: string } | null {
+  for (const mutation of providerMutationsByKind(
+    operation,
+    "github_branch.create"
+  )) {
+    const parsed = parseBranchDeleteTarget(mutation.target);
+    if (parsed && parsed.repo === repo) {
+      return { branch: parsed.branch, baseSha: parsed.baseSha };
+    }
+  }
+  return null;
 }
 
 /**
@@ -170,14 +196,27 @@ export function createWorkflowFileCommitter(
   const beginPrFallback = async (): Promise<PullRequestBranchState> => {
     if (prState) return prState;
     const base = (await ports.getDefaultBranch(target.targetRepo)) || "main";
-    const baseSha = await ports.getBranchHeadSha(target.targetRepo, base);
-    if (!baseSha)
-      throw new Error(`could not resolve head of base branch "${base}"`);
     const suffix =
       ports.mutationRecovery?.operation.operationId
         .replace(/^op_/, "")
         .slice(0, 12) || String(ports.now());
-    const branch = `radius/setup-${target.envName}-workflows-${suffix}`;
+    // The commit this branch was cut from is part of the mutation's identity
+    // and is also what a later delete compares the branch head against. Reading
+    // it fresh on every attempt would move that identity whenever the default
+    // branch advanced, journaling a second entry the interrupted one could
+    // never be settled from — and comparing the recovered branch against a
+    // commit Radius never created it at. So a recorded attempt supplies both.
+    const recorded = recordedSetupBranchCreate(
+      ports.mutationRecovery?.operation,
+      target.targetRepo
+    );
+    const baseSha =
+      recorded?.baseSha ||
+      (await ports.getBranchHeadSha(target.targetRepo, base));
+    if (!baseSha)
+      throw new Error(`could not resolve head of base branch "${base}"`);
+    const branch =
+      recorded?.branch || `radius/setup-${target.envName}-workflows-${suffix}`;
     if (ports.mutationRecovery) {
       const creation = await executeRecoverableMutation({
         operation: ports.mutationRecovery.operation,
@@ -246,6 +285,17 @@ export function createWorkflowFileCommitter(
                 branch
               )}`
             ]),
+          // GitHub answering "no" is not the branch being gone. Reporting a
+          // removal here — and then starting the rollback that removal was meant
+          // to unblock — would tell the customer their setup branch had been
+          // cleaned up while it is still sitting in the repository. The refusal
+          // is recorded as the blocker itself, in the same settle, so a crash
+          // cannot reload a record that looks resolved with the branch present.
+          rejectionGuidance: (result) =>
+            `Radius could not remove the setup branch "${branch}" it recovered in ${target.targetRepo}: ` +
+            `${result.stderr?.trim() || result.stdout?.trim() || "GitHub refused the request."} ` +
+            "It did not repeat the delete and did not start a rollback, because a rollback that leaves this branch behind would report work it has not done. " +
+            "Remove that exact branch yourself, then start setup again.",
           accept: () => true,
           reconcile: async () => {
             const current = await readBranchHead(branch);
@@ -266,18 +316,9 @@ export function createWorkflowFileCommitter(
             };
           }
         });
-        // GitHub answering "no" is not the branch being gone. Reporting a
-        // removal here — and then starting the rollback that removal was meant
-        // to unblock — would tell the customer their setup branch had been
-        // cleaned up while it is still sitting in the repository.
         if (removal.state !== "applied") {
-          const detail =
-            removal.result?.stderr?.trim() ||
-            removal.result?.stdout?.trim() ||
-            "" ||
-            "GitHub refused the request.";
           const guidance =
-            `Radius could not remove the setup branch "${branch}" it recovered in ${target.targetRepo}: ${detail} ` +
+            `Radius could not remove the setup branch "${branch}" it recovered in ${target.targetRepo}. ` +
             "It did not repeat the delete and did not start a rollback, because a rollback that leaves this branch behind would report work it has not done. " +
             "Remove that exact branch yourself, then start setup again.";
           settleProviderMutation(
@@ -363,7 +404,20 @@ export function createWorkflowFileCommitter(
       recoveryOperation ?
         providerMutationRecord(recoveryOperation, mutationKind, mutationTarget)
       : null;
-    const existingIntent = existingMutation?.intent;
+    // A refused or hand-off write is not a write this attempt is reconciling —
+    // it is one this attempt is about to make for the first time. Its recorded
+    // intent describes a repository state that has since moved on, so only a
+    // record still awaiting an answer contributes the predecessor a revert
+    // would restore.
+    const reconcilableIntent =
+      (
+        existingMutation?.status === "prepared" ||
+        existingMutation?.status === "outcome_unknown" ||
+        existingMutation?.status === "confirmed"
+      ) ?
+        existingMutation
+      : null;
+    const existingIntent = reconcilableIntent?.intent;
     const operationMarker =
       typeof existingIntent?.operationMarker === "string" ?
         existingIntent.operationMarker
