@@ -56,7 +56,7 @@ export function environmentNameFromApiPath(
   const match = ENVIRONMENT_API_PATH.exec(environmentApiPath);
   if (!match) return null;
   try {
-    return decodeURIComponent(match[3]) || null;
+    return decodeURIComponent(match[3]);
   } catch {
     // A path Radius cannot decode is one it cannot compare against a listing,
     // so it proves nothing rather than comparing the escaped form.

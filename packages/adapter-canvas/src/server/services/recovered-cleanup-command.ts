@@ -136,3 +136,57 @@ export async function planRecoveredCleanup(input: {
   await input.persist();
   return { state: "start", commandId, kind: "rollback", attempt };
 }
+
+export type RecoveredScheduleTarget =
+  | { kind: "branch_delete" }
+  | { kind: "cleanup" }
+  | { kind: "verification_retry"; commandId: string }
+  | { kind: "forward_setup" };
+
+/**
+ * What a restored operation's next task is.
+ *
+ * The ordering is the safety property. A setup branch whose deletion never got
+ * an answer is neither safe to build on nor safe to ignore, so it comes first.
+ * Then anything that belongs to a rollback — a cleanup command still in flight,
+ * or a deletion this operation issued and never settled — because a record that
+ * was deleting when the process went away must never be handed to the forward
+ * setup, whatever `providerRecovery.state` says about the setup's own
+ * mutations. Only a record with neither goes forward.
+ */
+export function planRecoveredSchedule(operation: {
+  providerRecovery?: { state?: string };
+  control?: {
+    commands?: Array<{ commandId?: string; kind?: string; state?: string }>;
+  };
+}): RecoveredScheduleTarget {
+  const unresolved = unresolvedProviderMutations(operation);
+  if (unresolved.some((mutation) => mutation.kind === "github_branch.delete")) {
+    return { kind: "branch_delete" };
+  }
+  if (
+    operation.providerRecovery?.state === "rollback_pending" ||
+    activeCleanupCommand(operation) !== null ||
+    unresolved.some((mutation) => isCleanupDeletionKind(mutation.kind))
+  ) {
+    return { kind: "cleanup" };
+  }
+  if (
+    unresolved.some(
+      (mutation) => mutation.kind === "github_workflow.dispatch_retry"
+    )
+  ) {
+    const command = [...(operation.control?.commands || [])]
+      .reverse()
+      .find(
+        (entry) =>
+          entry.kind === "retry_verification" &&
+          typeof entry.commandId === "string" &&
+          entry.commandId
+      );
+    if (command?.commandId) {
+      return { kind: "verification_retry", commandId: command.commandId };
+    }
+  }
+  return { kind: "forward_setup" };
+}

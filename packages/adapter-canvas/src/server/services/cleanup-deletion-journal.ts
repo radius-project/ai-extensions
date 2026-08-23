@@ -68,8 +68,15 @@ export async function executeJournaledCleanupDeletion(input: {
   label: string;
   persist(): Promise<void>;
   runDelete(): Promise<CleanupDeletionCommandResult>;
-  /** Whether the provider's own answer says the resource was already gone. */
-  isAlreadyAbsent(result: CleanupDeletionCommandResult): boolean;
+  /**
+   * How to read the provider's own answer that the resource was already gone.
+   *
+   * `true` settles it as a completed removal. `"unproven"` says the provider's
+   * "not found" is not evidence on its own — GitHub returns it for a resource
+   * this token may not see — so the question is handed to reconciliation, which
+   * owns the read that can actually tell absence from invisibility.
+   */
+  isAlreadyAbsent(result: CleanupDeletionCommandResult): boolean | "unproven";
   /** Read back the exact immutable identity this delete targeted. */
   readExactIdentity(): Promise<ExactIdentityRead>;
 }): Promise<CleanupDeletionOutcome> {
@@ -84,10 +91,17 @@ export async function executeJournaledCleanupDeletion(input: {
       mutate: async () => {
         const result = await input.runDelete();
         if (result.code === 0 || result.code === "0") return result;
+        if (result.timedOut) return result;
         // "It was already gone" is a completed deletion, not a refusal, and it
         // is the answer a replayed delete would produce if the first one had
-        // landed. Normalizing it here keeps both on the same settled path.
-        if (!result.timedOut && input.isAlreadyAbsent(result)) {
+        // landed. Normalizing it here keeps both on the same settled path —
+        // but only for a provider whose "not found" is an answer rather than a
+        // permission decision. Where it is not, the delete is marked
+        // inconclusive so reconciliation proves absence before anything is
+        // recorded as removed.
+        const absent = input.isAlreadyAbsent(result);
+        if (absent === "unproven") return { ...result, timedOut: true };
+        if (absent) {
           alreadyAbsent = true;
           return { ...result, code: 0 };
         }
