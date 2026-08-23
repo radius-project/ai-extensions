@@ -258,6 +258,7 @@ export function parseDeployProgressArtifact(
   } catch {
     return null;
   }
+
   if (!isRecord(parsed)) return null;
   if (parsed.schemaVersion !== DEPLOY_PROGRESS_SCHEMA_VERSION) return null;
   if (typeof parsed.application !== "string" || !parsed.application)
@@ -323,6 +324,32 @@ export function parseDeployProgressArtifact(
     state: typeof parsed.state === "string" ? parsed.state : undefined,
     resources
   };
+}
+
+/**
+ * Rad may write build progress to stdout before emitting the graph JSON. The
+ * deploy workflow redirects that combined stream into deploy-graph.json, so
+ * locate the first complete JSON document rather than rejecting valid graph
+ * metadata because of the human-readable preamble.
+ */
+export function parseDeployGraphArtifact(text?: string | null): unknown | null {
+  if (!text) return null;
+  for (let index = 0; index < text.length; index++) {
+    const first = text[index];
+    if (first !== "{" && first !== "[") continue;
+    try {
+      const parsed: unknown = JSON.parse(text.slice(index).trim());
+      if (
+        parsed !== null &&
+        (Array.isArray(parsed) || typeof parsed === "object")
+      ) {
+        return parsed;
+      }
+    } catch {
+      // A brace in the preamble is not the JSON document; keep scanning.
+    }
+  }
+  return null;
 }
 
 function normalizeDeployStatusField(value: unknown): DeployStatus | undefined {
@@ -857,15 +884,9 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
             inspectedArtifacts.set(artifact.id, empty("malformed"));
           continue;
         }
-        let graph: unknown | null = null;
         const graphText = files[DEPLOY_STATUS_FILES.graph];
-        if (graphText) {
-          try {
-            graph = JSON.parse(graphText);
-          } catch {
-            sawMalformed = true;
-          }
-        }
+        const graph = parseDeployGraphArtifact(graphText);
+        if (graphText && graph === null) sawMalformed = true;
         result = {
           status: "ok",
           progress,

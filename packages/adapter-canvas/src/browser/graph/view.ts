@@ -19,6 +19,7 @@ import type {
   ReactLike,
   ReactRoot
 } from "./vendor.js";
+import { safeExternalUrl } from "./details.js";
 
 const TYPE_LABEL_MAX_PX = 13;
 const TYPE_LABEL_MIN_PX = 7;
@@ -62,7 +63,6 @@ export interface NodeCardDeps {
   // Opens a repo-relative worktree file in the editor canvas, with the node's
   // remote URL as the fallback.
   openLocalSource(relPath: string, line: number, fallbackUrl: string): void;
-  openExternal(url: string): boolean;
   // Opens or closes the details panel for a card.
   toggleDetails(data: GraphNodeData, card: DomElement | null): void;
   openDetails(data: GraphNodeData, card: DomElement | null): void;
@@ -211,6 +211,37 @@ export function createNodeComponent(
             : "In progress"
         })
       : null;
+    const portalUrl =
+      settings.deployMode ? safeExternalUrl(data.portalUrl) : null;
+    const head = h(
+      "div",
+      { className: "rad-node__head" },
+      icon,
+      h("span", { className: "rad-node__title" }, data.nodeName)
+    );
+    const type = h(
+      "div",
+      { className: "rad-node__type", ref: typeRef, title: data.typeLabel },
+      data.typeLabel
+    );
+    const mainContent =
+      portalUrl ?
+        h(
+          "a",
+          {
+            className: "rad-node__portal nodrag nopan nokey",
+            href: portalUrl,
+            target: "_blank",
+            rel: "noopener noreferrer",
+            "aria-label": `Open ${data.nodeName} in Azure Portal`,
+            onClick: (event: { stopPropagation(): void }) => {
+              event.stopPropagation();
+            }
+          },
+          head,
+          type
+        )
+      : h("div", { className: "rad-node__content" }, head, type);
 
     const card = h(
       "div",
@@ -224,30 +255,12 @@ export function createNodeComponent(
           borderWidth: (data.borderWidth || 2.5) + "px",
           borderColor: data.borderColor || "var(--rad-node-border)"
         },
-        onClick: (event: { currentTarget?: unknown }) => {
-          if (
-            settings.deployMode &&
-            data.portalUrl &&
-            deps.openExternal(data.portalUrl)
-          ) {
-            return;
-          }
-          deps.openDetails(data, asElement(event.currentTarget));
-        }
+        onClick: (event: { currentTarget?: unknown }) =>
+          deps.openDetails(data, asElement(event.currentTarget))
       },
       dots,
       badge,
-      h(
-        "div",
-        { className: "rad-node__head" },
-        icon,
-        h("span", { className: "rad-node__title" }, data.nodeName)
-      ),
-      h(
-        "div",
-        { className: "rad-node__type", ref: typeRef, title: data.typeLabel },
-        data.typeLabel
-      ),
+      mainContent,
       sourceRow
     );
 

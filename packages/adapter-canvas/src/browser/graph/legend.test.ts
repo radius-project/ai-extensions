@@ -28,6 +28,23 @@ describe("status legend", () => {
       "animation:spin 1s linear infinite"
     );
   });
+
+  it("shows only statuses present in the deployed graph", () => {
+    const terminal = buildStatusLegendHtml([
+      { name: "api", deployStatus: "success" },
+      { name: "db", deployStatus: "failed" }
+    ]);
+    expect(terminal).toContain("Deployed");
+    expect(terminal).toContain("Failed");
+    expect(terminal).not.toContain("Pending / deploying");
+    expect(decodeURIComponent(terminal)).not.toContain("animation:spin");
+
+    const live = buildStatusLegendHtml([
+      { name: "api", deployStatus: "in_progress" }
+    ]);
+    expect(live).toContain("Pending / deploying");
+    expect(decodeURIComponent(live)).toContain("animation:spin");
+  });
 });
 
 describe("category legend", () => {

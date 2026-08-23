@@ -6,11 +6,13 @@
 
 import { escapeBrowserHtml } from "../html.js";
 import {
+  radiusDeployBadgeKind,
   radiusDeployBadgeSvg,
   radiusGetTypeStyle,
   radiusResolveIcon
 } from "./model.js";
 import type { GraphResource, ResourceOutput } from "./model.js";
+import type { DeployBadgeKind } from "./model.js";
 
 export interface LegendCategory {
   name: string;
@@ -21,7 +23,7 @@ export interface LegendCategory {
 // every node carries a status badge, and the badge is the primary signal there
 // because fills stay neutral so labels stay readable.
 export const STATUS_LEGEND_ITEMS: ReadonlyArray<{
-  kind: string;
+  kind: DeployBadgeKind;
   label: string;
 }> = [
   { kind: "progress", label: "Pending / deploying" },
@@ -29,15 +31,29 @@ export const STATUS_LEGEND_ITEMS: ReadonlyArray<{
   { kind: "failed", label: "Failed" }
 ];
 
-export function buildStatusLegendHtml(): string {
-  return STATUS_LEGEND_ITEMS.map(
-    (item) =>
-      '<div class="legend-item"><img src="' +
-      escapeBrowserHtml(radiusDeployBadgeSvg(item.kind)) +
-      '" width="14" height="14" style="vertical-align:middle;" alt="" />' +
-      escapeBrowserHtml(item.label) +
-      "</div>"
-  ).join("");
+export function buildStatusLegendHtml(
+  resources?: readonly GraphResource[]
+): string {
+  const visibleKinds =
+    resources ?
+      new Set(
+        resources.map((resource) =>
+          radiusDeployBadgeKind(resource.deployStatus)
+        )
+      )
+    : null;
+  return STATUS_LEGEND_ITEMS.filter(
+    (item) => visibleKinds === null || visibleKinds.has(item.kind)
+  )
+    .map(
+      (item) =>
+        '<div class="legend-item"><img src="' +
+        escapeBrowserHtml(radiusDeployBadgeSvg(item.kind)) +
+        '" width="14" height="14" style="vertical-align:middle;" alt="" />' +
+        escapeBrowserHtml(item.label) +
+        "</div>"
+    )
+    .join("");
 }
 
 // Categories present in the graph, including those contributed only by output

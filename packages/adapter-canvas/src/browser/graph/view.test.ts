@@ -61,7 +61,6 @@ function node(overrides: Partial<GraphNodeData> = {}): GraphNodeData {
 
 interface Recorded {
   local: Array<[string, number, string]>;
-  external: string[];
   toggled: Array<[string, DomElement | null]>;
   opened: Array<[string, DomElement | null]>;
 }
@@ -77,17 +76,12 @@ function renderCard(
   const vendor = createGraphVendor();
   const recorded: Recorded = {
     local: [],
-    external: [],
     toggled: [],
     opened: []
   };
   const component = createNodeComponent(vendor, resolveGraphSettings(options), {
     openLocalSource: (path, line, fallback) =>
       recorded.local.push([path, line, fallback]),
-    openExternal: (url) => {
-      recorded.external.push(url);
-      return url.startsWith("https://");
-    },
     toggleDetails: (value, card) => recorded.toggled.push([value.id, card]),
     openDetails: (value, card) => recorded.opened.push([value.id, card])
   });
@@ -233,19 +227,24 @@ describe("node card", () => {
     expect(recorded.toggled).toEqual([["app/web", owner]]);
   });
 
-  it("opens a deployed node's concrete portal URL instead of its details panel", () => {
+  it("renders a deployed node's concrete portal URL as a native link", () => {
     const portalUrl = "https://portal.azure.com/resource/mysql";
     const { tree, recorded } = renderCard(node({ portalUrl }), {
       deployMode: true
     });
+    const link = findByClass(tree, "rad-node__portal nodrag nopan nokey");
 
-    callHandler(findByClass(tree, "rad-node"), "onClick");
-
-    expect(recorded.external).toEqual([portalUrl]);
+    expect(props(link)).toMatchObject({
+      href: portalUrl,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      "aria-label": "Open web in Azure Portal"
+    });
+    callHandler(link, "onClick");
     expect(recorded.opened).toEqual([]);
   });
 
-  it("falls back to details when a deployed portal URL cannot be opened", () => {
+  it("does not render an unsafe deployed portal link", () => {
     const { tree, recorded } = renderCard(
       node({ portalUrl: "javascript:alert(1)" }),
       { deployMode: true }
@@ -253,7 +252,9 @@ describe("node card", () => {
 
     callHandler(findByClass(tree, "rad-node"), "onClick");
 
-    expect(recorded.external).toEqual(["javascript:alert(1)"]);
+    expect(
+      findByClass(tree, "rad-node__portal nodrag nopan nokey")
+    ).toBeUndefined();
     expect(recorded.opened).toEqual([["app/web", null]]);
   });
 
@@ -543,7 +544,6 @@ describe("mountGraph", () => {
       settings: resolveGraphSettings(),
       deps: {
         openLocalSource: () => undefined,
-        openExternal: () => false,
         openDetails: () => undefined,
         toggleDetails: () => undefined
       },

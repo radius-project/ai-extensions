@@ -400,6 +400,10 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     min-width: 24px; min-height: 24px;
   }
   .rad-node__dots:hover { background: var(--rad-bg-subtle); color: var(--rad-text); }
+  .rad-node__portal {
+    display: block; color: inherit; text-decoration: none;
+  }
+  .rad-node__portal:focus-visible { outline: 2px solid var(--rad-link); outline-offset: 2px; }
 
   .field { margin: 8px 0; }
   .field-label { font-weight: 500; color: var(--rad-text-tertiary); font-size: 12px; }

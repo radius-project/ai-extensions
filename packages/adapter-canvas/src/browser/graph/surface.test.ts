@@ -293,10 +293,17 @@ describe("populated graph", () => {
 
   it("renders the deploy status legend while deploying", () => {
     const harness = setup();
-    harness.surface.render("graph-container", RESOURCES, {
-      showLegend: true,
-      deployMode: true
-    });
+    harness.surface.render(
+      "graph-container",
+      RESOURCES.map((resource) => ({
+        ...resource,
+        deployStatus: "in_progress"
+      })),
+      {
+        showLegend: true,
+        deployMode: true
+      }
+    );
     const legend = harness.parent.inserted[0][0] as FakeElement;
     expect(legend.innerHTML).toContain("Pending / deploying");
     expect(legend.innerHTML).not.toContain("Compute");
@@ -353,6 +360,30 @@ describe("controller", () => {
     expect(harness.vendor!.dagre?.graphs).toHaveLength(2);
     expect(harness.vendor!.reactFlow.nodeUpdates).toHaveLength(1);
     expect(harness.vendor!.reactFlow.nodeUpdates[0]).toHaveLength(1);
+  });
+
+  it("removes the progress legend when the graph becomes terminal", () => {
+    const harness = setup();
+    const controller = harness.surface.render(
+      "graph-container",
+      [{ id: "app/web", name: "web", deployStatus: "in_progress" }],
+      { showLegend: true, deployMode: true }
+    );
+    const app = childComponent(harness.vendor!.reactDom.roots[0].rendered[0]);
+    app.type(app.props);
+    harness.vendor!.react.runEffects();
+    const legend = harness.parent.inserted[0][0] as FakeElement;
+    expect(legend.innerHTML).toContain("Pending / deploying");
+
+    controller?.update([
+      { id: "app/web", name: "web", deployStatus: "success" }
+    ]);
+
+    expect(legend.innerHTML).toContain("Deployed");
+    expect(legend.innerHTML).not.toContain("Pending / deploying");
+    expect(decodeURIComponent(legend.innerHTML)).not.toContain(
+      "animation:spin"
+    );
   });
 
   it("remounts when React has not bound the updater yet", () => {

@@ -6,7 +6,7 @@
 // here runs the shipped libraries in Chromium against the real modules.
 
 import { describe, it, expect, afterEach } from "vitest";
-import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
+import { screen, waitFor, within } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import {
   buildGraph,
@@ -37,7 +37,6 @@ const RESOURCES = [
 
 interface Recorded {
   local: Array<[string, number, string]>;
-  external: string[];
   toggled: string[];
   opened: string[];
   reloads: number;
@@ -74,7 +73,6 @@ function mount(
   const { host, dispose } = createGraphHost();
   const recorded: Recorded = {
     local: [],
-    external: [],
     toggled: [],
     opened: [],
     reloads: 0
@@ -92,10 +90,6 @@ function mount(
     deps: {
       openLocalSource: (path, line, fallback) =>
         recorded.local.push([path, line, fallback]),
-      openExternal: (url) => {
-        recorded.external.push(url);
-        return true;
-      },
       toggleDetails: (data: GraphNodeData, card: DomElement | null) =>
         recorded.toggled.push(`${data.id}:${card ? "card" : "none"}`),
       openDetails: (data: GraphNodeData) => recorded.opened.push(data.id)
@@ -162,10 +156,17 @@ describe("graph view in a real browser", () => {
     ).toBeTruthy();
     expect(mysql.getAttribute("data-node-id")).toBe("mysql");
 
-    fireEvent.click(mysql);
-    expect(recorded.external).toEqual([
+    const portal = mysql.querySelector("a.rad-node__portal");
+    if (!(portal instanceof HTMLAnchorElement)) {
+      throw new Error("deployed node has no native portal link");
+    }
+    expect(portal.getAttribute("aria-label")).toBe(
+      "Open mysql in Azure Portal"
+    );
+    expect(portal.getAttribute("href")).toBe(
       "https://portal.azure.com/#@tenant/resource/server"
-    ]);
+    );
+    expect(portal.getAttribute("target")).toBe("_blank");
     expect(recorded.opened).toEqual([]);
   });
 
