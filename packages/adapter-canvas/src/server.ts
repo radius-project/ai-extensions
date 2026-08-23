@@ -268,6 +268,10 @@ import { createDeployMonitorService } from "./server/services/deploy-monitor.js"
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import { executeRecoverableMutation } from "./server/services/provider-mutation-recovery.js";
+import {
+  pendingBranchDelete,
+  reconcileRecoveredBranchDelete
+} from "./server/services/recovered-branch-delete.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
@@ -3579,7 +3583,31 @@ export async function finalizeSetupFailure(
     | undefined;
 
   if (ledger) {
-    if (commitPointReached) {
+    // A quarantined or unproven provider mutation means Radius cannot say what
+    // this attempt owns. Deleting the App Registration and the GitHub
+    // environment on that footing is the destructive half of the same guess the
+    // journal exists to refuse — and it would contradict, in the same response,
+    // the guidance the record already carries. Unproven counts as well as
+    // quarantined: an interrupted request that reached the provider is exactly
+    // the one whose resource is missing from the ledger. This is deliberately
+    // stricter than the disposition that governs a customer's explicit
+    // post-terminal rollback, because nobody asked for this one.
+    const unresolved = unresolvedProviderMutations(op);
+    const quarantine =
+      providerRecoveryManualGuidance(op) ||
+      (unresolved.length > 0 ?
+        `Radius has not confirmed the outcome of ${unresolved[0].kind} for ${unresolved[0].target}, so it cannot tell which resources this attempt owns.`
+      : null);
+    if (quarantine && !commitPointReached) {
+      recordCleanupState(op, { state: "not_needed" });
+      addLegacyStep(
+        op,
+        "⚠️ Radius removed nothing automatically because it could not prove what this attempt owns."
+      );
+      body.providerRecoveryGuidance = quarantine;
+      cleanupSummary = projectCleanupSummary(op);
+      terminalState = "failed_partial";
+    } else if (commitPointReached) {
       recordCleanupState(op, { state: "not_needed" });
       cleanupSummary = projectCleanupSummary(op);
       if (ledger.commit.workflowFiles.length > 0)
@@ -4819,10 +4847,17 @@ function createInstanceRequestCoordinator(
       workflow,
       ref,
       environment,
+      // The marker and event are the dispatch's identity, and they have to be on
+      // disk before the request goes out. A restart between this save and the
+      // dispatch would otherwise lose the only thing that can recognise the run
+      // this retry started, leaving it unclaimable forever.
+      event: "workflow_dispatch",
+      operationMarker: operationMarker || null,
       baselineRunId,
       runId: null,
       runUrl: null
     };
+    await saveOperation(op);
     const discoverAcceptedRun = async () => {
       const listed = await runCliCommand("gh", [
         "run",
@@ -4897,6 +4932,7 @@ function createInstanceRequestCoordinator(
       operation: op,
       kind: "github_workflow.dispatch_retry",
       target: mutationTarget,
+      providerIdempotencyKey: operationMarker || null,
       persist: () => operations.persist(),
       mutate: () =>
         runCliCommand(
@@ -5212,6 +5248,100 @@ function createInstanceRequestCoordinator(
     await persist();
   }
 
+  /**
+   * Settle an unresolved setup-branch deletion before anything else runs.
+   *
+   * This is the one recovery that cannot be folded into the others. Running the
+   * setup forward would rebuild against a branch whose fate is unknown, and
+   * running the rollback would report a cleanup that skipped the branch it was
+   * supposed to remove first. Both are resolved here, or the record ends saying
+   * plainly that the branch is the customer's to remove.
+   */
+  async function runRecoveredBranchDelete(operationId: string): Promise<void> {
+    const op = operations.get(operationId);
+    if (!op) return;
+    const mutation = pendingBranchDelete(op);
+    if (!mutation) return;
+    const outcome = await reconcileRecoveredBranchDelete({
+      operation: op,
+      mutation,
+      readBranchRef: (repo, branch) =>
+        runCliCommand("gh", [
+          "api",
+          `/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`
+        ])
+    });
+    if (outcome.state === "removed") {
+      addLegacyStep(op, `✅ ${outcome.evidence}`);
+      const cleanupCommand = savedCleanupCommand(op);
+      if (cleanupCommand) {
+        await saveOperation(op);
+        await runCleanupCommand(
+          cleanupCommand.kind,
+          operationId,
+          cleanupCommand.commandId
+        );
+        return;
+      }
+      // No cleanup command was ever accepted, so the record has to become
+      // terminal for one to be offered. Ending it here is what keeps a
+      // reconciled delete from holding the operation open indefinitely.
+      finish(op, "failed_partial", {
+        failure: {
+          code: "setup-branch-removed-pending-rollback",
+          stage: op.currentStage,
+          stepSeq: null,
+          message:
+            "Radius removed the setup branch an interrupted attempt had created. The resources it can prove it owns are still in place and can be rolled back.",
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      await saveOperation(op);
+      return;
+    }
+    addLegacyStep(op, `⚠️ ${outcome.guidance}`);
+    if (op.providerRecovery) {
+      op.providerRecovery.state = "manual_required";
+      op.providerRecovery.guidance = outcome.guidance;
+    }
+    finish(op, "failed_partial", {
+      failure: {
+        code:
+          outcome.state === "unreadable" ?
+            "setup-branch-delete-unresolved"
+          : "setup-branch-delete-manual-required",
+        stage: op.currentStage,
+        stepSeq: null,
+        message: outcome.guidance,
+        classification: "user-fixable",
+        evidence: null
+      }
+    });
+    await saveOperation(op);
+  }
+
+  function savedCleanupCommand(op: {
+    control?: {
+      commands?: Array<{ commandId?: string; kind?: string; state?: string }>;
+    };
+  }): { commandId: string; kind: CleanupCommandKind } | null {
+    const found = [...(op.control?.commands || [])].reverse().find(
+      (
+        entry
+      ): entry is {
+        commandId: string;
+        kind: CleanupCommandKind;
+        state?: string;
+      } =>
+        typeof entry.commandId === "string" &&
+        (entry.kind === "rollback" ||
+          entry.kind === "retry_cleanup" ||
+          entry.kind === "exit_setup")
+    );
+    return found ? { commandId: found.commandId, kind: found.kind } : null;
+  }
+
   function scheduleRecoveredProviderMutation(op: {
     operationId: string;
     providerRecovery?: { state?: string };
@@ -5219,27 +5349,22 @@ function createInstanceRequestCoordinator(
       commands?: Array<{ commandId?: string; kind?: string; state?: string }>;
     };
   }): void {
+    // Destructive first, and before any forward work: a setup branch whose
+    // deletion never got an answer is neither safe to build on nor safe to
+    // ignore, so nothing else is scheduled until it is settled.
+    if (pendingBranchDelete(op)) {
+      scheduleServerOwnedTask(op.operationId, () =>
+        runRecoveredBranchDelete(op.operationId)
+      );
+      return;
+    }
     if (op.providerRecovery?.state === "rollback_pending") {
       const unresolved = unresolvedProviderMutations(op);
-      if (
-        unresolved.some((mutation) => mutation.kind !== "github_branch.delete")
-      ) {
+      if (unresolved.length > 0) {
         scheduleEnvironmentOperation(op);
         return;
       }
-      const cleanupCommand = [...(op.control?.commands || [])].reverse().find(
-        (
-          entry
-        ): entry is {
-          commandId: string;
-          kind: CleanupCommandKind;
-          state?: string;
-        } =>
-          typeof entry.commandId === "string" &&
-          (entry.kind === "rollback" ||
-            entry.kind === "retry_cleanup" ||
-            entry.kind === "exit_setup")
-      );
+      const cleanupCommand = savedCleanupCommand(op);
       if (cleanupCommand) {
         scheduleServerOwnedTask(op.operationId, () =>
           runCleanupCommand(

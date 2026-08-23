@@ -58,6 +58,8 @@ import {
   createOperation,
   finish,
   prepareProviderMutation,
+  settleProviderMutation,
+  getSetupArtifactLedger,
   recordAzureApp,
   recordCleanupState,
   recordCommittedWorkflowFile,
@@ -1706,6 +1708,174 @@ describe("guardStopBoundary", () => {
 });
 
 describe("finalizeSetupFailure", () => {
+  // Reading the ledger back out is only meaningful for a record that has one,
+  // so a missing ledger is a broken fixture rather than a soft assertion.
+  function ledgerOf(op: Parameters<typeof getSetupArtifactLedger>[0]) {
+    const ledger = getSetupArtifactLedger(op);
+    if (!ledger) throw new Error("expected the operation to carry a ledger");
+    return ledger;
+  }
+
+  // A setup that created cloud and GitHub resources and then issued the one
+  // destructive request it makes on its own behalf: deleting the setup branch a
+  // recovered attempt had created.
+  function quarantinedSetup() {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev"
+    });
+    prepareProviderMutation(op, {
+      kind: "github_branch.delete",
+      target: "octo/app\u0000radius/setup-dev\u0000base-1"
+    });
+    return op;
+  }
+
+  it("removes nothing while a provider mutation is quarantined", async () => {
+    // The setup-branch delete GitHub refused settles as manual_required and the
+    // record then says Radius started no rollback. Running the pre-commit
+    // cleanup anyway would delete the Azure identity and the GitHub environment
+    // in the same breath as that sentence.
+    const op = quarantinedSetup();
+    const guidance =
+      'Radius could not remove the setup branch "radius/setup-dev" it recovered. Remove that exact branch yourself, then start setup again.';
+    settleProviderMutation(
+      op,
+      op.providerRecovery.mutations[0].mutationId,
+      "manual_required",
+      guidance
+    );
+
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: guidance,
+      code: "provider-mutation-manual-required",
+      extra: { steps: [] },
+      steps: [],
+      runAz: async (args) => {
+        throw new Error(`Azure must not be mutated: ${args.join(" ")}`);
+      },
+      runDeleteEnvironment: async (args) => {
+        throw new Error(`GitHub must not be mutated: ${args.join(" ")}`);
+      }
+    });
+
+    expect(failure.body.providerRecoveryGuidance).toBe(guidance);
+    expect(failure.body.cleanup).toMatchObject({
+      rollbackAttempted: false,
+      state: "not_needed"
+    });
+    // The resources are still recorded as present, so the customer can act on
+    // them and a later rollback still has something to remove.
+    expect(ledgerOf(op).githubEnvironment.state).toBe("created");
+    expect(ledgerOf(op).azureApp.state).toBe("created");
+  });
+
+  it("removes nothing while a delete outcome is merely unproven", async () => {
+    // The reconcile read failed, so the delete settles `outcome_unknown` rather
+    // than `manual_required`. The request still reached GitHub, so the resource
+    // set this attempt owns is just as unknown as in the refused case.
+    const op = quarantinedSetup();
+    settleProviderMutation(
+      op,
+      op.providerRecovery.mutations[0].mutationId,
+      "outcome_unknown",
+      "The delete response was lost."
+    );
+
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "outcome unknown",
+      code: "provider-mutation-outcome-unknown",
+      extra: { steps: [] },
+      steps: [],
+      runAz: async (args) => {
+        throw new Error(`Azure must not be mutated: ${args.join(" ")}`);
+      },
+      runDeleteEnvironment: async (args) => {
+        throw new Error(`GitHub must not be mutated: ${args.join(" ")}`);
+      }
+    });
+
+    expect(failure.body.providerRecoveryGuidance).toContain(
+      "has not confirmed the outcome of github_branch.delete"
+    );
+    expect(failure.body.cleanup).toMatchObject({ state: "not_needed" });
+    expect(ledgerOf(op).githubEnvironment.state).toBe("created");
+  });
+
+  it("removes nothing when the quarantine is carried by a sticky rollback", async () => {
+    // `settleProviderMutation` keeps `rollback_pending` and clears the
+    // recovery-level guidance, so the refusal is readable only through the
+    // mutation's own evidence. That is the shape production actually produces.
+    const op = quarantinedSetup();
+    op.providerRecovery.state = "rollback_pending";
+    settleProviderMutation(
+      op,
+      op.providerRecovery.mutations[0].mutationId,
+      "manual_required",
+      "Remove that exact branch yourself, then start setup again."
+    );
+    expect(op.providerRecovery.state).toBe("rollback_pending");
+    expect(op.providerRecovery.guidance).toBeNull();
+
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "refused",
+      code: "provider-mutation-manual-required",
+      extra: { steps: [] },
+      steps: [],
+      runAz: async (args) => {
+        throw new Error(`Azure must not be mutated: ${args.join(" ")}`);
+      },
+      runDeleteEnvironment: async (args) => {
+        throw new Error(`GitHub must not be mutated: ${args.join(" ")}`);
+      }
+    });
+
+    expect(failure.body.providerRecoveryGuidance).toBe(
+      "Remove that exact branch yourself, then start setup again."
+    );
+    expect(ledgerOf(op).githubEnvironment.state).toBe("created");
+  });
+
+  it("still rolls back once the quarantined mutation is settled", async () => {
+    // The recovered delete succeeded, which is exactly the case that must go on
+    // to remove the rest of what this attempt created.
+    const op = quarantinedSetup();
+    op.providerRecovery.state = "rollback_pending";
+    settleProviderMutation(
+      op,
+      op.providerRecovery.mutations[0].mutationId,
+      "confirmed",
+      "GitHub confirmed the recovered setup branch is absent."
+    );
+
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "rolled back",
+      code: "provider-mutation-recovered-rollback",
+      extra: { steps: [] },
+      steps: [],
+      runAz: async () => ({ code: 0, stdout: "", stderr: "" }),
+      runDeleteEnvironment: async () => {}
+    });
+
+    expect(failure.body.cleanup).toMatchObject({
+      rollbackBeforeCommit: true,
+      state: "succeeded"
+    });
+    expect(ledgerOf(op).githubEnvironment.state).toBe("deleted");
+  });
+
   it("rolls back newly created GitHub and Azure artifacts before any workflow commit", async () => {
     const op = newAzureOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });

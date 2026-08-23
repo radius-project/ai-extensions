@@ -309,11 +309,100 @@ describe("provider mutation recovery", () => {
     expect(operation.providerRecovery.state).toBe("rollback_pending");
   });
 
-  it("classifies only terminated commands as outcome unknown", () => {
-    expect(providerMutationOutcomeUnknown(command({ code: 1 }))).toBe(false);
-    expect(
-      providerMutationOutcomeUnknown(command({ code: 1, timedOut: true }))
-    ).toBe(true);
+  it.each([
+    [
+      "an explicit validation rejection",
+      { code: 1, stderr: "BadRequest: environment name is invalid" }
+    ],
+    [
+      "a permission refusal",
+      { code: 1, stderr: "HTTP 403: Resource not accessible by integration" }
+    ],
+    [
+      "a conflict the provider composed",
+      { code: 1, stderr: "RoleAssignmentExists: already exists" }
+    ],
+    [
+      "a rejection written to stdout",
+      { code: 2, stdout: "ERROR: subject mismatch" }
+    ]
+  ])("treats %s as a definite non-application", (_label, result) => {
+    expect(providerMutationOutcomeUnknown(command(result))).toBe(false);
+  });
+
+  it.each([
+    ["a timed-out command", { code: 1, timedOut: true }],
+    ["a reset connection", { code: 1, stderr: "read ECONNRESET" }],
+    ["a broken pipe", { code: 1, stderr: "write EPIPE: broken pipe" }],
+    ["a hung-up socket", { code: 1, stderr: "socket hang up" }],
+    ["a killed process", { code: "SIGKILL", stderr: "" }],
+    ["a signal-derived status", { code: 137, stderr: "" }],
+    ["a negative status", { code: -1, stderr: "" }],
+    ["no diagnostic at all", { code: 1, stderr: "", stdout: "" }],
+    ["whitespace instead of a diagnostic", { code: 1, stderr: "   \n" }]
+  ])("leaves %s unresolved rather than replaying it", (_label, result) => {
+    expect(providerMutationOutcomeUnknown(command(result))).toBe(true);
+  });
+
+  it("treats a successful command as settled", () => {
+    expect(providerMutationOutcomeUnknown(command({ code: 0 }))).toBe(false);
+    expect(providerMutationOutcomeUnknown(command({ code: "0" }))).toBe(false);
+  });
+
+  it("reconciles a transport failure instead of recording it as not applied", async () => {
+    const operation = createOperation({ operationId: "op_test" });
+    const mutate = vi.fn(async () =>
+      command({ code: 1, stderr: "write EPIPE: broken pipe" })
+    );
+    const reconcile = vi.fn(async () => ({
+      state: "applied" as const,
+      value: "adopted",
+      evidence: "The exact resource identity matched."
+    }));
+
+    const result = await executeRecoverableMutation({
+      operation,
+      kind: "azure_role_assignment.create",
+      target: "assignment",
+      persist: async () => {},
+      mutate,
+      accept: () => null,
+      reconcile
+    });
+
+    expect(result).toEqual({
+      state: "applied",
+      value: "adopted",
+      recovered: true
+    });
+    expect(mutate).toHaveBeenCalledOnce();
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "confirmed"
+    });
+  });
+
+  it("records an explicit rejection as not applied without reconciling", async () => {
+    const operation = createOperation({ operationId: "op_test" });
+    const reconcile = vi.fn(async () => ({ state: "not_applied" as const }));
+
+    const result = await executeRecoverableMutation({
+      operation,
+      kind: "azure_role_assignment.create",
+      target: "assignment",
+      persist: async () => {},
+      mutate: async () =>
+        command({ code: 1, stderr: "BadRequest: scope is invalid" }),
+      accept: () => null,
+      reconcile
+    });
+
+    expect(result.state).toBe("not_applied");
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied",
+      evidence: "BadRequest: scope is invalid"
+    });
   });
 
   it("builds stable provider UUIDs with UUID v5 bits", () => {
