@@ -104,6 +104,8 @@ function dependencies(
       journal.monitored.push(operationId);
     },
     currentState: () => "succeeded",
+    isRateLimitError: isGitHubRateLimitError,
+    sleep: () => Promise.resolve(),
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error)
   };
@@ -157,7 +159,7 @@ describe("verification retry selected account", () => {
       { state: "running" },
       { state: "finished", outcome: "succeeded" }
     ]);
-    expect(deps.journal.persisted).toBe(2);
+    expect(deps.journal.persisted).toBe(4);
   });
 
   it("unregisters the selected executor after monitoring terminalizes lost repository access", async () => {
@@ -186,6 +188,73 @@ describe("verification retry selected account", () => {
     expect(op.failure).toMatchObject({
       code: "verification-retry-github-account-unavailable"
     });
+  });
+
+  it("does not dispatch when the dispatch-pending checkpoint cannot be saved", async () => {
+    const op = operation();
+    const dispatch = vi.fn(() =>
+      Promise.resolve({ code: 0, stdout: "", stderr: "" })
+    );
+    let persists = 0;
+    const deps = dependencies({
+      createExecutor: () =>
+        Promise.resolve(
+          successfulSelectedGhExecutor({ login: "alice", run: dispatch })
+        ),
+      persist: async () => {
+        persists += 1;
+        if (persists === 2) throw new Error("disk gone");
+      }
+    });
+
+    await expect(runVerificationRetry(op, "cmd-1", deps)).rejects.toThrow(
+      "disk gone"
+    );
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(deps.journal.unregistered).toEqual(["op_retry"]);
+    expect(op.verification).toMatchObject({
+      dispatchPending: true,
+      retryCommandId: "cmd-1"
+    });
+  });
+
+  it("keeps monitoring from the durable dispatch-pending identity when clearing it fails", async () => {
+    const op = operation();
+    const snapshots: Array<Record<string, unknown>> = [];
+    let persists = 0;
+    const dispatch = vi.fn(() =>
+      Promise.resolve({ code: 0, stdout: "", stderr: "" })
+    );
+    const deps = dependencies({
+      createExecutor: () =>
+        Promise.resolve(
+          successfulSelectedGhExecutor({ login: "alice", run: dispatch })
+        ),
+      persist: async (operation) => {
+        persists += 1;
+        snapshots.push(structuredClone(operation.verification || {}));
+        if (persists === 3) throw new Error("disk gone");
+      }
+    });
+
+    await runVerificationRetry(op, "cmd-1", deps);
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(snapshots[1]).toMatchObject({
+      dispatchPending: true,
+      retryCommandId: "cmd-1",
+      dispatchedAt: 12345,
+      runId: null
+    });
+    expect(snapshots[2]).not.toHaveProperty("dispatchPending");
+    expect(snapshots[3]).toMatchObject({
+      dispatchPending: true,
+      retryCommandId: "cmd-1",
+      dispatchedAt: 12345
+    });
+    expect(deps.journal.monitored).toEqual(["op_retry"]);
+    expect(deps.journal.unregistered).toEqual(["op_retry"]);
   });
 
   it("fails closed when a legacy record has no selected login", async () => {
@@ -224,6 +293,89 @@ describe("verification retry selected account", () => {
     });
     expect(deps.journal.registered).toEqual([]);
     expect(deps.journal.dispatches).toEqual([]);
+  });
+
+  it.each([
+    "GitHub identity verification failed: secondary rate limit (HTTP 403); Retry-After: 1",
+    "GitHub identity verification failed: Too Many Requests (HTTP 429)"
+  ])(
+    "retries direct verification after rate-limited selected-account acquisition",
+    async (message) => {
+      let attempts = 0;
+      const sleeps: number[] = [];
+      const deps = dependencies({
+        createExecutor: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new Error(message);
+          return successfulSelectedGhExecutor({ login: "alice" });
+        },
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+        }
+      });
+
+      const op = operation();
+      await runVerificationRetry(op, "cmd-1", deps);
+
+      expect(attempts).toBe(2);
+      expect(sleeps).toEqual([1000]);
+      expect(deps.journal.dispatches).toHaveLength(0);
+      expect(deps.journal.registered).toEqual(["op_retry"]);
+      expect(deps.journal.monitored).toEqual(["op_retry"]);
+      expect(deps.journal.unregistered).toEqual(["op_retry"]);
+      expect(op.verification?.dispatchedAt).toBe(12345);
+    }
+  );
+
+  it("terminalizes ordinary direct selected-account acquisition HTTP 403", async () => {
+    const sleep = vi.fn(() => Promise.resolve());
+    const deps = dependencies({
+      createExecutor: () =>
+        Promise.reject(
+          new Error(
+            "GitHub identity verification failed for @alice: gh: Forbidden (HTTP 403)"
+          )
+        ),
+      sleep
+    });
+    const op = operation();
+
+    await runVerificationRetry(op, "cmd-1", deps);
+
+    expect(op.failure).toMatchObject({
+      code: "verification-retry-github-account-unavailable",
+      evidence: expect.stringContaining("Forbidden (HTTP 403)")
+    });
+    expect(sleep).not.toHaveBeenCalled();
+    expect(deps.journal.registered).toEqual([]);
+    expect(deps.journal.dispatches).toEqual([]);
+  });
+
+  it("keeps an expired direct acquisition rate limit retryable", async () => {
+    let clockReads = 0;
+    const deps = dependencies({
+      createExecutor: () =>
+        Promise.reject(
+          new Error("secondary rate limit (HTTP 403); Retry-After: 60")
+        ),
+      now: () => {
+        clockReads += 1;
+        return clockReads <= 2 ? 0 : 45 * 60 * 1000;
+      }
+    });
+    const op = operation();
+
+    await runVerificationRetry(op, "cmd-1", deps);
+
+    expect(op.failure).toMatchObject({
+      code: "verification-tracking-expired",
+      evidence: expect.stringContaining("secondary rate limit")
+    });
+    expect(deps.journal.commands).toEqual([
+      { state: "running" },
+      { state: "finished", outcome: "tracking-expired" }
+    ]);
+    expect(deps.journal.registered).toEqual([]);
   });
 
   it("preserves the legacy target defaults while using the selected executor", async () => {
@@ -529,6 +681,7 @@ describe("verification retry selected account", () => {
           "Radius could not dispatch the credential verification workflow again as @alice. Re-check that account and try again."
       });
       expect(deps.journal.commands).toEqual([
+        { state: "running" },
         { state: "finished", outcome: "dispatch-failed" }
       ]);
       expect(deps.journal.monitored).toEqual([]);
