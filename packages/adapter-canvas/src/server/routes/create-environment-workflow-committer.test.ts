@@ -1182,3 +1182,142 @@ describe("recovering a setup branch after the default branch moved", () => {
     expect(deletes[0].target).toBe(CREATE_TARGET);
   });
 });
+
+describe("the in-process recovered branch delete", () => {
+  const CREATE_TARGET =
+    "octo/app\u0000radius/setup-dev-workflows-workflow\u0000sha-1";
+  const NOT_FOUND = { code: 1, stderr: "HTTP 404: Not Found" };
+
+  function recovering() {
+    const operation = createOperation({ operationId: "op_workflow" });
+    operation.recoveryState = "provider_reconciliation_pending";
+    prepareProviderMutation(operation, {
+      kind: "github_branch.create",
+      target: CREATE_TARGET,
+      providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
+    });
+    return operation;
+  }
+
+  // The PUT precheck, the create reconcile read, then whatever the delete's own
+  // reconciliation asks for.
+  function script(...afterDelete: Array<Record<string, unknown>>) {
+    return {
+      runGh: [
+        { code: 1 },
+        { code: 0, stdout: JSON.stringify({ object: { sha: "sha-1" } }) },
+        ...afterDelete
+      ],
+      runGhWorkflow: [
+        { code: 1, stderr: "protected branch" },
+        { code: 1, stderr: "terminated", timedOut: true }
+      ],
+      defaultBranch: "main",
+      headSha: "sha-1"
+    };
+  }
+
+  function deleteMutation(operation: {
+    providerRecovery: { mutations: Array<{ kind: string; status: string }> };
+  }) {
+    return operation.providerRecovery.mutations.find(
+      (entry) => entry.kind === "github_branch.delete"
+    );
+  }
+
+  it("does not call the branch gone from the ref endpoint's 404 alone", async () => {
+    const operation = recovering();
+    // The ref 404s and the ref listing is refused: the account may simply not
+    // be allowed to see this repository's refs, so nothing is concluded.
+    const h = harness(
+      script(NOT_FOUND, {
+        code: 1,
+        stderr: "HTTP 403: Resource not accessible"
+      })
+    );
+    h.ports.mutationRecovery = { operation, persist: async () => {} };
+
+    await createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+      "p",
+      CONTENT,
+      "m"
+    );
+
+    expect(deleteMutation(operation)).toMatchObject({
+      status: "outcome_unknown"
+    });
+  });
+
+  it("settles the delete only from an exhaustive listing and a confirming reread", async () => {
+    const operation = recovering();
+    const h = harness(
+      script(
+        // The listing the account can complete, then the confirming reread.
+        { code: 0, stdout: JSON.stringify([{ ref: "refs/heads/main" }]) },
+        NOT_FOUND
+      )
+    );
+    h.ports.mutationRecovery = { operation, persist: async () => {} };
+
+    await createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+      "p",
+      CONTENT,
+      "m"
+    );
+
+    expect(deleteMutation(operation)).toMatchObject({ status: "confirmed" });
+  });
+
+  it("refuses when the listing still holds the branch", async () => {
+    const operation = recovering();
+    const h = harness(
+      script(
+        {
+          code: 0,
+          stdout: JSON.stringify([
+            { ref: "refs/heads/radius/setup-dev-workflows-workflow" }
+          ])
+        },
+        // The head read that decides which refusal the customer reads.
+        { code: 0, stdout: JSON.stringify({ object: { sha: "sha-1" } }) }
+      )
+    );
+    h.ports.mutationRecovery = { operation, persist: async () => {} };
+
+    await createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+      "p",
+      CONTENT,
+      "m"
+    );
+
+    expect(deleteMutation(operation)).toMatchObject({
+      status: "manual_required"
+    });
+    expect(providerRecoveryManualGuidance(operation)).toContain(
+      "will not repeat the delete blindly"
+    );
+  });
+
+  it("issues the delete exactly once whatever the reconciliation decides", async () => {
+    const operation = recovering();
+    const h = harness(
+      script(NOT_FOUND, {
+        code: 1,
+        stderr: "HTTP 403: Resource not accessible"
+      })
+    );
+    h.ports.mutationRecovery = { operation, persist: async () => {} };
+
+    await createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+      "p",
+      CONTENT,
+      "m"
+    );
+
+    expect(
+      h.calls.filter(
+        (call) => call.kind === "runGhWorkflow" && call.args.includes("DELETE")
+      )
+    ).toHaveLength(1);
+  });
+});

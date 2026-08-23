@@ -38,6 +38,9 @@ export type ResourceAbsenceProof =
   | { state: "present"; detail: string }
   | { state: "unknown"; detail: string };
 
+/** How the exact resource endpoint answered the final confirming read. */
+export type ExactResourceRead = "absent" | "present" | "unreadable";
+
 // A listing that has not ended by here is either enormous or looping. Either
 // way Radius stops reading and refuses to conclude anything from what it saw.
 const MAX_LISTING_PAGES = 20;
@@ -55,6 +58,15 @@ function readFailureDetail(result: ListingReadResult): string {
  * back full may have been followed by another holding the target, and a listing
  * that stopped short of the count GitHub advertised was cut off, so neither is
  * allowed to stand in for the whole set.
+ *
+ * Two more things can hide a target from an offset-paged listing that is
+ * otherwise complete. If the set changed size while Radius was walking it, an
+ * entry can slide from a page not yet read onto one already read, so a count
+ * that moves between pages ends the proof rather than the listing. And even a
+ * listing that never moved was assembled request by request, so absence is
+ * confirmed once more against the resource's own endpoint — the same read whose
+ * 404 started all of this, now backed by a listing that says the account could
+ * have seen the resource if it were there.
  */
 export async function proveAbsentFromListing(input: {
   target: string;
@@ -62,6 +74,7 @@ export async function proveAbsentFromListing(input: {
   scope: string;
   readPage(page: number): Promise<ListingReadResult>;
   parsePage(stdout: string): ListingPage | null;
+  confirmExactAbsence(): Promise<ExactResourceRead>;
   maxPages?: number;
 }): Promise<ResourceAbsenceProof> {
   const limit = input.maxPages ?? MAX_LISTING_PAGES;
@@ -72,6 +85,7 @@ export async function proveAbsentFromListing(input: {
       "That answer may be masked access rather than a completed delete."
   });
   let seen = 0;
+  let advertised: number | null = null;
   for (let page = 1; page <= limit; page++) {
     let result: ListingReadResult;
     try {
@@ -92,20 +106,53 @@ export async function proveAbsentFromListing(input: {
         detail: `${input.resource} "${input.target}" is still present in ${input.scope}.`
       };
     }
+    const pageCount =
+      (
+        typeof parsed.totalCount === "number" &&
+        Number.isFinite(parsed.totalCount)
+      ) ?
+        parsed.totalCount
+      : null;
+    if (pageCount !== null) {
+      // An offset-paged listing that grew or shrank underneath the walk can slide
+      // an entry from an unread page onto one already read. The set Radius saw is
+      // then not the set that exists, so it proves nothing about the target.
+      if (advertised !== null && advertised !== pageCount) {
+        return masked(
+          `the listing changed from ${advertised} to ${pageCount} entries while Radius was reading it`
+        );
+      }
+      advertised = pageCount;
+    }
     seen += parsed.names.length;
     if (parsed.hasMore) continue;
-    if (
-      typeof parsed.totalCount === "number" &&
-      Number.isFinite(parsed.totalCount) &&
-      seen < parsed.totalCount
-    ) {
+    if (advertised !== null && seen < advertised) {
+      return masked(`the listing ended after ${seen} of ${advertised} entries`);
+    }
+    let exact: ExactResourceRead;
+    try {
+      exact = await input.confirmExactAbsence();
+    } catch (error) {
       return masked(
-        `the listing ended after ${seen} of ${parsed.totalCount} entries`
+        `the confirming read failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+    if (exact === "present") {
+      return {
+        state: "present",
+        detail: `${input.resource} "${input.target}" is still present in ${input.scope}.`
+      };
+    }
+    if (exact === "unreadable") {
+      return masked(
+        "the confirming read of the resource itself could not be completed"
       );
     }
     return {
       state: "absent",
-      evidence: `The selected account read every ${input.resource} in ${input.scope} and "${input.target}" is not among them.`
+      evidence: `The selected account read every ${input.resource} in ${input.scope}, "${input.target}" is not among them, and its own endpoint still reports it gone.`
     };
   }
   return masked(`the listing did not end within ${limit} pages`);

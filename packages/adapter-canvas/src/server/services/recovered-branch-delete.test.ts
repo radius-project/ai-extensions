@@ -128,7 +128,12 @@ describe("settling a recovered setup-branch delete", () => {
       }
     });
 
-    expect(reads).toEqual([[REPO, BRANCH]]);
+    // The endpoint read that started the proof, then the confirming reread the
+    // listing is checked against before absence is reported.
+    expect(reads).toEqual([
+      [REPO, BRANCH],
+      [REPO, BRANCH]
+    ]);
     expect(outcome).toMatchObject({ state: "removed", branch: BRANCH });
     expect(operation.providerRecovery.mutations[0].status).toBe("confirmed");
   });

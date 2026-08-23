@@ -32,8 +32,10 @@ function prove(
   overrides: Partial<Parameters<typeof proveAbsentFromListing>[0]> = {}
 ) {
   const requested: number[] = [];
+  const confirmations: number[] = [];
   return {
     requested,
+    confirmations,
     run: () =>
       proveAbsentFromListing({
         target: "wanted",
@@ -45,6 +47,13 @@ function prove(
           return typeof entry === "function" ? entry() : entry;
         },
         parsePage: (stdout) => parseRefListingPage(stdout, PER_PAGE),
+        // The listing was assembled request by request, so absence is confirmed
+        // once more against the resource itself. Most cases only care that it
+        // agreed, so the default is the 404 that started the proof.
+        confirmExactAbsence: async () => {
+          confirmations.push(confirmations.length + 1);
+          return "absent" as const;
+        },
         ...overrides
       })
   };
@@ -151,6 +160,152 @@ describe("proving a resource absent from a listing it can read", () => {
       state: "unknown",
       detail: expect.stringContaining("ended after 1 of 9 entries")
     });
+    expect(harness.confirmations).toEqual([]);
+  });
+
+  describe("an offset-paged listing that moved while it was read", () => {
+    it.each([
+      ["grew", 4, 6],
+      ["shrank", 6, 4]
+    ])(
+      "refuses absence when the count %s between pages",
+      async (_label, first, second) => {
+        const counts = [first, second];
+        let page = 0;
+        const proof = await proveAbsentFromListing({
+          target: "wanted",
+          resource: "environment",
+          scope: "octo/app",
+          readPage: async () => ({ code: 0, stdout: "{}", stderr: "" }),
+          parsePage: (): ListingPage => {
+            const total = counts[page] ?? counts.at(-1)!;
+            page += 1;
+            return {
+              names: page === 1 ? ["a", "b", "c", "d"] : ["e"],
+              hasMore: page === 1,
+              totalCount: total
+            };
+          },
+          confirmExactAbsence: async () => "absent"
+        });
+
+        expect(proof).toMatchObject({
+          state: "unknown",
+          detail: expect.stringContaining(
+            `changed from ${first} to ${second} entries`
+          )
+        });
+      }
+    );
+
+    it("finds a target that slid onto a page already read", async () => {
+      // The classic offset race: an entry ahead of the target is removed, the
+      // target moves back onto page one, and a naive walk never sees it. The
+      // count moving is the signal that the set is not the one Radius saw.
+      let page = 0;
+      const proof = await proveAbsentFromListing({
+        target: "wanted",
+        resource: "environment",
+        scope: "octo/app",
+        readPage: async () => ({ code: 0, stdout: "{}", stderr: "" }),
+        parsePage: (): ListingPage => {
+          page += 1;
+          return page === 1 ?
+              { names: ["a", "b", "c", "d"], hasMore: true, totalCount: 5 }
+            : { names: [], hasMore: false, totalCount: 4 };
+        },
+        confirmExactAbsence: async () => "absent"
+      });
+
+      expect(proof).toMatchObject({ state: "unknown" });
+    });
+
+    it("accepts a listing whose count never moved", async () => {
+      let page = 0;
+      const proof = await proveAbsentFromListing({
+        target: "wanted",
+        resource: "environment",
+        scope: "octo/app",
+        readPage: async () => ({ code: 0, stdout: "{}", stderr: "" }),
+        parsePage: (): ListingPage => {
+          page += 1;
+          return page === 1 ?
+              { names: ["a", "b", "c", "d"], hasMore: true, totalCount: 5 }
+            : { names: ["e"], hasMore: false, totalCount: 5 };
+        },
+        confirmExactAbsence: async () => "absent"
+      });
+
+      expect(proof).toMatchObject({ state: "absent" });
+    });
+  });
+
+  describe("the confirming read of the resource itself", () => {
+    it("runs only after the listing came back complete and clean", async () => {
+      const harness = prove([refs("refs/heads/main")]);
+
+      await expect(harness.run()).resolves.toMatchObject({ state: "absent" });
+      expect(harness.confirmations).toEqual([1]);
+    });
+
+    it("does not run when the listing already found the target", async () => {
+      const harness = prove([
+        { code: 0, stdout: JSON.stringify([{ ref: "wanted" }]), stderr: "" }
+      ]);
+
+      await expect(harness.run()).resolves.toMatchObject({ state: "present" });
+      expect(harness.confirmations).toEqual([]);
+    });
+
+    it("reports the target present when the confirming read finds it", async () => {
+      const harness = prove([refs("refs/heads/main")], {
+        confirmExactAbsence: async () => "present"
+      });
+
+      await expect(harness.run()).resolves.toMatchObject({
+        state: "present",
+        detail: expect.stringContaining("is still present")
+      });
+    });
+
+    it("leaves the outcome unknown when the confirming read is forbidden", async () => {
+      const harness = prove([refs("refs/heads/main")], {
+        confirmExactAbsence: async () => "unreadable"
+      });
+
+      await expect(harness.run()).resolves.toMatchObject({
+        state: "unknown",
+        detail: expect.stringContaining(
+          "confirming read of the resource itself"
+        )
+      });
+    });
+
+    it("leaves the outcome unknown when the confirming read throws", async () => {
+      const harness = prove([refs("refs/heads/main")], {
+        confirmExactAbsence: async () => {
+          throw new Error("the token was revoked");
+        }
+      });
+
+      await expect(harness.run()).resolves.toMatchObject({
+        state: "unknown",
+        detail: expect.stringContaining("the token was revoked")
+      });
+    });
+
+    it("names a non-Error confirming-read failure rather than dropping it", async () => {
+      const harness = prove([refs("refs/heads/main")], {
+        confirmExactAbsence: async () => {
+          throw "spawn failed";
+        }
+      });
+
+      await expect(harness.run()).resolves.toMatchObject({
+        state: "unknown",
+        detail: expect.stringContaining("spawn failed")
+      });
+    });
   });
 
   it("accepts a listing whose count it reached exactly", async () => {
@@ -162,7 +317,8 @@ describe("proving a resource absent from a listing it can read", () => {
         page === 1 ?
           environments(["a", "b", "c", "d"], 6)
         : environments(["e", "f"], 6),
-      parsePage: (stdout) => parseEnvironmentListingPage(stdout, PER_PAGE)
+      parsePage: (stdout) => parseEnvironmentListingPage(stdout, PER_PAGE),
+      confirmExactAbsence: async () => "absent"
     });
 
     expect(proof).toMatchObject({ state: "absent" });
