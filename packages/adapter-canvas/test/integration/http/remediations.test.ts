@@ -171,6 +171,60 @@ describe("run-remediation real-loopback HIT", () => {
     expect(harness.sent).toHaveLength(1);
   });
 
+  it("commits the generated model before pushing when paths are named", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      {
+        id: "git-push-branch",
+        params: { branch: BRANCH, paths: ".radius,app.bicep" },
+        confirmed: true
+      },
+      browserHeaders(entry.baseUrl)
+    );
+
+    expect(response.status).toBe(200);
+    expect(harness.sent).toHaveLength(1);
+    const prompt = harness.sent[0].prompt;
+    expect(prompt).toContain(
+      `git add -- .radius app.bicep\ngit commit -m "Add Radius application model"\ngit push -u origin ${BRANCH}`
+    );
+  });
+
+  it.each([
+    ["a traversal", "../../etc/passwd"],
+    ["an absolute path", "/etc/passwd"],
+    ["a glob", "*"],
+    ["the worktree root", "."],
+    ["an unrelated source path", "src/secrets.ts"]
+  ])(
+    "never stages %s a client asks for, and pushes without it",
+    async (_label, path) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await post(
+        entry.baseUrl,
+        {
+          id: "git-push-branch",
+          params: { branch: BRANCH, paths: path },
+          confirmed: true
+        },
+        browserHeaders(entry.baseUrl)
+      );
+
+      // The registry rebuilds the command from an allowlist, so a path the
+      // client invented is dropped entirely rather than reaching a `git add`.
+      expect(response.status).toBe(200);
+      expect(harness.sent[0].prompt).not.toContain("git add");
+      expect(harness.sent[0].prompt).toContain(
+        `Run \`git push -u origin ${BRANCH}\` in this Copilot session.`
+      );
+    }
+  );
+
   it.each([
     ["an unknown id", { id: "wipe-the-disk" }],
     [

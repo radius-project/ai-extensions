@@ -148,6 +148,38 @@ function githubLogin(value: unknown): string {
   return GITHUB_LOGIN.test(candidate) ? candidate : "";
 }
 
+/**
+ * Every path the Radius generator owns, and the only paths a remediation will
+ * ever stage. Mirrors the generated-path set the workspace reader excludes when
+ * it decides whether application source drifted.
+ *
+ * This is a closed set on purpose. A `git add` pathspec is the one place a
+ * remediation touches the filesystem by name, so it is chosen from a fixed
+ * allowlist rather than validated by shape: a caller cannot widen it, and a path
+ * traversal or a glob has nothing to escape into.
+ */
+export const GENERATED_MODEL_PATHS = [
+  ".radius",
+  "app.bicep",
+  "app.origin.json"
+] as const;
+
+export type GeneratedModelPath = (typeof GENERATED_MODEL_PATHS)[number];
+
+// Normalize a caller's requested paths to allowlisted members, in the
+// allowlist's own order and without duplicates. Anything unrecognized is
+// dropped: staging fewer generated files still produces a correct push, so an
+// unknown entry degrades the commit rather than refusing it. `branch` is what
+// this remediation genuinely cannot proceed without.
+function generatedPaths(value: unknown): readonly GeneratedModelPath[] {
+  const requested =
+    Array.isArray(value) ? value
+    : typeof value === "string" ? value.split(",")
+    : [];
+  const wanted = new Set(requested.map((entry) => text(entry)));
+  return GENERATED_MODEL_PATHS.filter((candidate) => wanted.has(candidate));
+}
+
 const RETURN_AND_VERIFY =
   "return to the Radius canvas and click Verify Credentials again";
 
@@ -346,6 +378,8 @@ function buildGithubWorkflowScope(): Remediation {
   };
 }
 
+const MODEL_COMMIT_MESSAGE = "Add Radius application model";
+
 function buildGitPushBranch(
   params: Readonly<Record<string, unknown>>
 ): RemediationResult {
@@ -357,22 +391,55 @@ function buildGitPushBranch(
         "Radius could not read a branch name it can safely push, so it will not run git push for you."
     };
   }
+  // Pushing a branch publishes commits, not the working tree. When the
+  // generated model is still uncommitted, a bare push leaves the very files the
+  // deploy needs behind, and the workflow then reads a branch without them. So
+  // the caller tells us which generated paths are dirty and those are staged and
+  // committed first, in the same remediation, rather than being left as a step
+  // the user has to infer.
+  const paths = generatedPaths(params.paths);
+  const commands: readonly (readonly string[])[] =
+    paths.length > 0 ?
+      [
+        ["git", "add", "--", ...paths],
+        ["git", "commit", "-m", MODEL_COMMIT_MESSAGE],
+        ["git", "push", "-u", "origin", branch]
+      ]
+    : [["git", "push", "-u", "origin", branch]];
   return {
     ok: true,
     remediation: {
       id: "git-push-branch",
-      params: { branch },
-      title: "Push the branch to GitHub",
-      displayCommand: `git push -u origin ${branch}`,
-      argv: [["git", "push", "-u", "origin", branch]],
+      params: { branch, paths: paths.join(",") },
+      title:
+        paths.length > 0 ?
+          "Commit the Radius model and push the branch"
+        : "Push the branch to GitHub",
+      displayCommand: commands
+        .map((argv) =>
+          argv
+            // Only the commit message can contain a space, and it is a constant
+            // rather than a parameter. Quoting it keeps the copied line
+            // paste-able without composing a shell string for execution.
+            .map((token) => (token.includes(" ") ? `"${token}"` : token))
+            .join(" ")
+        )
+        .join("\n"),
+      argv: commands,
       cwd: "workspace",
       impact: "high",
       confirmTitle: `Push ${branch} to GitHub?`,
       confirmBody:
-        `This writes to the remote repository: every commit on \`${branch}\` ` +
-        "is published to origin and the branch starts tracking it. Review what " +
-        "you are about to publish before continuing.",
-      confirmLabel: "Push branch",
+        (paths.length > 0 ?
+          `This commits the generated Radius files (${paths.join(
+            ", "
+          )}) on \`${branch}\` and then writes to the remote repository: ` +
+          "every commit on the branch is published to origin and the branch " +
+          "starts tracking it. Nothing else in your working tree is staged. "
+        : `This writes to the remote repository: every commit on \`${branch}\` ` +
+          "is published to origin and the branch starts tracking it. ") +
+        "Review what you are about to publish before continuing.",
+      confirmLabel: paths.length > 0 ? "Commit and push" : "Push branch",
       followUp:
         "After the push finishes, return to the Radius canvas and deploy again."
     }
@@ -476,7 +543,9 @@ function displayPromptFor(remediation: Remediation): string {
     case "github-workflow-scope":
       return "Granting the GitHub CLI token the workflow scope the Radius canvas needs.";
     case "git-push-branch":
-      return `Pushing ${remediation.params.branch} to GitHub so the Radius canvas can deploy it.`;
+      return remediation.params.paths ?
+          `Committing the generated Radius files and pushing ${remediation.params.branch} to GitHub so the Radius canvas can deploy it.`
+        : `Pushing ${remediation.params.branch} to GitHub so the Radius canvas can deploy it.`;
   }
 }
 
@@ -499,7 +568,13 @@ function reasonFor(remediation: Remediation): string {
     case "github-workflow-scope":
       return "The GitHub CLI token is missing the workflow scope, which the Radius canvas needs to manage GitHub Actions workflow files.";
     case "git-push-branch":
-      return `The branch ${remediation.params.branch} has not been pushed to GitHub yet, so the Radius canvas has nothing to deploy.`;
+      return remediation.params.paths ?
+          `The generated Radius files (${remediation.params.paths
+            .split(",")
+            .join(", ")}) are not committed and the branch ${
+            remediation.params.branch
+          } has not been pushed to GitHub, so the Radius canvas has nothing to deploy. Pushing on its own would not publish them.`
+        : `The branch ${remediation.params.branch} has not been pushed to GitHub yet, so the Radius canvas has nothing to deploy.`;
   }
 }
 
@@ -512,13 +587,26 @@ function reasonFor(remediation: Remediation): string {
 export function remediationSessionMessage(
   remediation: Remediation
 ): RemediationSessionMessage {
+  // A single-line command reads naturally inline. A multi-command remediation
+  // does not, and inlining it would also let the steps be reordered or dropped
+  // by a reader, so it is presented as an ordered fenced block instead.
+  const runInstruction =
+    remediation.argv.length > 1 ?
+      [
+        "Run these commands, in order, in this Copilot session:",
+        "```console",
+        remediation.displayCommand,
+        "```",
+        "Stage only the paths named above; do not stage anything else in the working tree."
+      ].join("\n")
+    : `Run \`${remediation.displayCommand}\` in this Copilot session.`;
   const instructions =
     (
       remediation.id === "azure-cli-install" ||
       remediation.id === "azure-cli-login"
     ) ?
       azureLoginInstructions(remediation.displayCommand)
-    : `Run \`${remediation.displayCommand}\` in this Copilot session.`;
+    : runInstruction;
   const lines =
     remediation.id === "azure-cli-install" ?
       [reasonFor(remediation), `Please install Azure CLI, then ${instructions}`]

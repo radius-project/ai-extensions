@@ -54,6 +54,7 @@ export type {
   AppOrigin
 } from "./modeling/index.js";
 export {
+  GENERATED_MODEL_PATHS,
   REMEDIATION_IDS,
   buildRemediation,
   isRemediationId,
@@ -61,6 +62,7 @@ export {
   remediationView
 } from "./remediations.js";
 export type {
+  GeneratedModelPath,
   Remediation,
   RemediationCwd,
   RemediationId,

@@ -306,6 +306,41 @@ unaffected.
   fills; `src/pages/deploying-page.ts` serializes `mutationNonce` into the
   deploying page state, which only the environment page carried before.
 
+#### Committing generated files before a push — issue #478
+
+`git-push-branch` is the one remediation whose advice was incomplete rather than
+merely inert. A push publishes commits, not the working tree, so when the
+generated Radius model is still uncommitted the branch that reaches the remote is
+one the deploy workflow can check out but cannot read a model from.
+
+The registry therefore accepts an optional `paths` parameter. When it is present
+the remediation emits three argv arrays instead of one — `git add`, `git commit`,
+`git push` — and a newline-joined `displayCommand`, and
+`remediationSessionMessage` renders any remediation with more than one argv as a
+fenced console block with an explicit instruction to stage only the named paths.
+The branch is on `argv.length`, not on the id, so a future multi-command
+remediation inherits the rendering.
+
+When no paths are pending, the emitted command, wording, and prose are unchanged.
+Naming a commit step for a clean tree would be wrong advice, not merely noisy.
+
+Detection is server-side. `uncommittedGeneratedPaths()` in
+`src/workspace.ts` asks `git status --porcelain -uall` about one generated root at
+a time; a combined invocation would require column-parsing porcelain output, whose
+significant leading space the shared git helper trims away. `deploy-dispatch`
+receives it as an injected port and threads the result through `CanvasState` and
+the deploy-status payload to the deploying page, which passes it back as the
+`paths` parameter.
+
+`paths` is validated differently from every other parameter. The others are
+checked by shape — a GUID, a GitHub login, a branch — but a `git add` pathspec is
+the one place a remediation names the filesystem, so `paths` is checked by closed
+membership in `GENERATED_MODEL_PATHS`. A traversal, a glob, `.`, or a source path
+has nothing to escape into because it is not in the set. Unrecognized entries are
+dropped rather than refusing the remediation: the result degrades to a plain push,
+which is still correct advice. Only a bad `branch` refuses outright, because that
+is the one input the remediation cannot proceed without.
+
 #### Build and packaging
 
 No bundle, dependency, or plugin-packaging change. `plugins/radius/dist/extension.mjs`
@@ -356,6 +391,7 @@ Two testing notes worth stating plainly rather than implying:
 |-----------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | A tampered or injected client names an arbitrary command              | The route rebuilds from the id through the registry and ignores command text in the body. Only the eight enumerated remediations can be produced.                               |
 | A parameter smuggles shell metacharacters                             | Parameters are validated to structural identifier shapes before reaching an argv, and commands are argv arrays, never composed shell strings.                                   |
+| A client smuggles an arbitrary `git add` pathspec                     | `paths` is validated by closed membership in `GENERATED_MODEL_PATHS`, not by shape. Traversals, absolute paths, globs, `.`, and source paths are dropped before reaching argv.  |
 | A credential value leaks into a prompt or the UI                      | No remediation accepts a credential parameter. Prompts, display prompts, and callout text are built from the registry entry and validated identifiers only.                     |
 | A destructive command runs on consent that was never obtained         | High impact fails closed server-side on `confirmed !== true`, independent of the UI, and the UI confirmation is rendered in place so a modal-suppressing host cannot bypass it. |
 | Cross-origin or replayed mutation                                     | The route uses the default `nonce-required` mutation policy and requires `X-Radius-Mutation-Nonce`.                                                                             |

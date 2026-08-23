@@ -212,6 +212,7 @@ export function handleDeployStatus(
   const error = entry?.state?.deployError || null;
   const errorKind = entry?.state?.deployErrorKind || null;
   const errorBranch = entry?.state?.deployErrorBranch || null;
+  const errorPaths = entry?.state?.deployErrorPaths || null;
   const startedAt = entry?.state?.deployStartedAt || null;
   const finishedAt = entry?.state?.deployFinishedAt || null;
   const deployedGraph = entry?.state?.deployedGraph || null;
@@ -254,6 +255,7 @@ export function handleDeployStatus(
         error,
         errorKind,
         errorBranch,
+        errorPaths,
         startedAt,
         finishedAt,
         deployedGraph,
@@ -275,6 +277,7 @@ export function handleDeployStatus(
         error,
         errorKind,
         errorBranch,
+        errorPaths,
         startedAt,
         finishedAt,
         deployedGraph,

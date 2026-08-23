@@ -615,6 +615,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         );
       },
       classifyDeployDispatchFailure: () => "run-unconfirmed",
+      uncommittedGeneratedPaths: () => Promise.resolve([]),
       latestWorkflowRunId: () => {
         throw new Error("OIDC refusal must happen before run discovery");
       },

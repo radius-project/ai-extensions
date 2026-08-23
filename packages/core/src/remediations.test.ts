@@ -275,6 +275,125 @@ describe("git push remediation", () => {
     expect(remediation.confirmBody).toContain("remote repository");
   });
 
+  describe("uncommitted generated files", () => {
+    it("stages and commits the generated model before pushing", () => {
+      const remediation = build("git-push-branch", {
+        branch: "feature/login",
+        paths: ".radius,app.bicep"
+      });
+
+      // Order is the contract: a push that runs before the commit publishes a
+      // branch without the model the deploy reads, which is the whole bug.
+      expect(remediation.argv).toEqual([
+        ["git", "add", "--", ".radius", "app.bicep"],
+        ["git", "commit", "-m", "Add Radius application model"],
+        ["git", "push", "-u", "origin", "feature/login"]
+      ]);
+      expect(remediation.displayCommand).toBe(
+        'git add -- .radius app.bicep\ngit commit -m "Add Radius application model"\ngit push -u origin feature/login'
+      );
+      expect(remediation.params).toEqual({
+        branch: "feature/login",
+        paths: ".radius,app.bicep"
+      });
+      expect(remediation.title).toBe(
+        "Commit the Radius model and push the branch"
+      );
+      expect(remediation.confirmLabel).toBe("Commit and push");
+      expect(remediation.confirmBody).toContain(".radius, app.bicep");
+      expect(remediation.confirmBody).toContain(
+        "Nothing else in your working tree is staged"
+      );
+    });
+
+    it("accepts an array of paths", () => {
+      const remediation = build("git-push-branch", {
+        branch: "main",
+        paths: [".radius"]
+      });
+
+      expect(remediation.argv[0]).toEqual(["git", "add", "--", ".radius"]);
+    });
+
+    it("normalizes paths to the allowlist order and drops duplicates", () => {
+      const remediation = build("git-push-branch", {
+        branch: "main",
+        paths: "app.origin.json,.radius,.radius"
+      });
+
+      expect(remediation.argv[0]).toEqual([
+        "git",
+        "add",
+        "--",
+        ".radius",
+        "app.origin.json"
+      ]);
+    });
+
+    it.each([
+      ["a traversal", "../../etc/passwd"],
+      ["a glob", "*"],
+      ["the worktree root", "."],
+      ["an unrelated source path", "src/index.ts"],
+      ["a near-miss prefix", ".radiusx"],
+      ["an empty entry", ""]
+    ])("drops %s rather than staging it", (_label, path) => {
+      const remediation = build("git-push-branch", {
+        branch: "main",
+        paths: path
+      });
+
+      // A path outside the allowlist degrades to a plain push: staging fewer
+      // generated files still pushes correctly, and nothing unallowlisted may
+      // ever reach a `git add`.
+      expect(remediation.argv).toEqual([
+        ["git", "push", "-u", "origin", "main"]
+      ]);
+      expect(remediation.params.paths).toBe("");
+    });
+
+    it("keeps the allowlisted members of a partly invalid list", () => {
+      const remediation = build("git-push-branch", {
+        branch: "main",
+        paths: "src/index.ts,.radius"
+      });
+
+      expect(remediation.argv[0]).toEqual(["git", "add", "--", ".radius"]);
+    });
+
+    it.each([
+      ["a number", 7],
+      ["null", null],
+      ["an object", { radius: true }]
+    ])("treats %s as no paths", (_label, paths) => {
+      const remediation = build("git-push-branch", { branch: "main", paths });
+
+      expect(remediation.argv).toHaveLength(1);
+      expect(remediation.title).toBe("Push the branch to GitHub");
+      expect(remediation.confirmLabel).toBe("Push branch");
+    });
+
+    it("still refuses a bad branch even when paths are valid", () => {
+      expect(
+        buildRemediation("git-push-branch", {
+          branch: "--force",
+          paths: ".radius"
+        }).ok
+      ).toBe(false);
+    });
+
+    it("exposes the staged paths on the view", () => {
+      const view = remediationView("git-push-branch", {
+        branch: "main",
+        paths: ".radius"
+      });
+
+      expect(view.runnable).toBe(true);
+      expect(view.params.paths).toBe(".radius");
+      expect(view.command).toContain("git add -- .radius");
+    });
+  });
+
   it.each([
     ["a branch starting with a hyphen", "--force"],
     ["a branch with a space", "my branch"],
@@ -427,6 +546,45 @@ describe("remediationSessionMessage", () => {
       "Run it from the repository worktree for this session."
     );
     expect(message.displayPrompt).toContain("feature/login");
+  });
+
+  it("presents a multi-command remediation as an ordered block", () => {
+    const message = remediationSessionMessage(
+      build("git-push-branch", {
+        branch: "feature/login",
+        paths: ".radius"
+      })
+    );
+
+    expect(message.prompt).toContain(
+      "Run these commands, in order, in this Copilot session:"
+    );
+    expect(message.prompt).toContain(
+      'git add -- .radius\ngit commit -m "Add Radius application model"\ngit push -u origin feature/login'
+    );
+    // Without this the agent could reasonably stage the whole worktree, which
+    // would publish unrelated work the user never confirmed.
+    expect(message.prompt).toContain(
+      "Stage only the paths named above; do not stage anything else in the working tree."
+    );
+    expect(message.prompt).toContain("are not committed");
+    expect(message.displayPrompt).toBe(
+      "Committing the generated Radius files and pushing feature/login to GitHub so the Radius canvas can deploy it."
+    );
+  });
+
+  it("keeps a single-command remediation inline", () => {
+    const message = remediationSessionMessage(
+      build("git-push-branch", { branch: "feature/login" })
+    );
+
+    expect(message.prompt).toContain(
+      "Run `git push -u origin feature/login` in this Copilot session."
+    );
+    expect(message.prompt).not.toContain("```console");
+    expect(message.displayPrompt).toBe(
+      "Pushing feature/login to GitHub so the Radius canvas can deploy it."
+    );
   });
 
   it("omits the worktree line for machine-level commands", () => {

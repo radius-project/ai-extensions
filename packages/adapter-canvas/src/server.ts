@@ -99,6 +99,7 @@ import {
   isWorkspaceSelection,
   resolveSessionId,
   toSafeRepoRelPath,
+  uncommittedGeneratedPaths,
   workspaceGraphJsonPath
 } from "./workspace.js";
 import {
@@ -2005,6 +2006,7 @@ export function beginDeployAttempt(
   state.deployError = null;
   state.deployErrorKind = null;
   state.deployErrorBranch = null;
+  state.deployErrorPaths = null;
   state.deployRunUrl = null;
   state.deployRunId = null;
   // Concrete outputs belong to one deployment attempt. Keeping the previous
@@ -2385,6 +2387,10 @@ const deployDispatchService = createDeployDispatchService({
   ensureWorkflowsCurrent,
   latestWorkflowRunId,
   classifyDeployDispatchFailure,
+  uncommittedGeneratedPaths: (entry) =>
+    uncommittedGeneratedPaths(
+      (entry as CanvasServerEntry).state?.workspacePath
+    ),
   invalidateDeployListCache: (repo) => {
     deployListCache.delete(repo);
   },

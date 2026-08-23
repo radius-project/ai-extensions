@@ -1604,6 +1604,55 @@ describe("deploy flow", () => {
     expect(fakeText(page.pushActionHost)).toContain("Run with Copilot");
   });
 
+  it("offers commit-then-push when the server reports uncommitted generated files", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "branch-not-pushed",
+        errorBranch: "feature",
+        errorPaths: ".radius,app.bicep",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    // A bare push would publish the branch without the model the deploy reads,
+    // so the offer has to carry the staging and commit steps too.
+    const offered = fakeText(page.pushActionHost);
+    expect(offered).toContain("git add -- .radius app.bicep");
+    expect(offered).toContain('git commit -m "Add Radius application model"');
+    expect(offered).toContain("git push -u origin feature");
+  });
+
+  it("ignores uncommitted paths reported for a failure that is not a missing push", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "oidc-subject-missing",
+        errorBranch: "feature",
+        errorPaths: ".radius",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(fakeText(page.pushActionHost)).toBe("");
+  });
+
   it("falls back to 'your branch' when the branch-not-pushed failure omits errorBranch", async () => {
     const page = fixture();
     init(page);

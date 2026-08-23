@@ -1297,6 +1297,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
         return Promise.resolve(76);
       },
       classifyDeployDispatchFailure: () => "run-unconfirmed",
+      uncommittedGeneratedPaths: () => Promise.resolve([]),
       invalidateDeployListCache: () => record("evict-deploy-listing"),
       errorMessage: (error) => String(error),
       now: () => 1_700_000_000_000

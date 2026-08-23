@@ -111,6 +111,7 @@ interface DeployStatusPayload {
   deployRunUrl: string;
   errorKind: string;
   errorBranch: string;
+  errorPaths: string;
   repairing: boolean;
   handoff: DeployHandoff;
   active: boolean;
@@ -124,6 +125,7 @@ interface DeployFailureDetails {
   runUrl: string;
   errorKind: string;
   errorBranch: string;
+  errorPaths: string;
   repairing: boolean;
   handoff: DeployHandoff;
 }
@@ -194,6 +196,7 @@ function parseDeployStatus(payload: unknown): DeployStatusPayload {
     deployRunUrl: readString(payload, "deployRunUrl"),
     errorKind: readString(payload, "errorKind"),
     errorBranch: readString(payload, "errorBranch"),
+    errorPaths: readString(payload, "errorPaths"),
     repairing: readBoolean(payload, "repairing"),
     handoff: parseHandoff(payload),
     active: readBoolean(payload, "active"),
@@ -805,13 +808,16 @@ export function initializeDeployingPage(
   // Offers to push the unpushed branch. The command is rebuilt from the
   // registry rather than from the rendered text, and a push is high impact, so
   // the callout takes its own confirmation before anything is handed off.
-  const mountPushAction = (branch: string): void => {
+  const mountPushAction = (branch: string, paths: string): void => {
     pushAction?.dispose();
     pushAction = null;
     if (branch === "") return;
     const host = context.dom.byId("deploy-push-action");
     if (!host) return;
-    const remediation = remediationView("git-push-branch", { branch });
+    // `paths` names the generated files the server found uncommitted. Passing
+    // it through turns the offer into commit-then-push, because pushing alone
+    // would publish the branch without the model the deploy reads.
+    const remediation = remediationView("git-push-branch", { branch, paths });
     pushAction = createCommandAction(context, {
       host,
       remediation,
@@ -907,8 +913,10 @@ export function initializeDeployingPage(
     // Rebind rather than accumulate: showDeployFailed can run repeatedly
     // while Copilot's repair handoff keeps retrying.
     release(copyBindings);
+    const pushable = details.errorKind === "branch-not-pushed";
     mountPushAction(
-      details.errorKind === "branch-not-pushed" ? details.errorBranch : ""
+      pushable ? details.errorBranch : "",
+      pushable ? details.errorPaths : ""
     );
     const fixCredentialsButton = context.dom.byId("deploy-fix-credentials");
     if (fixCredentialsButton) {
@@ -975,6 +983,7 @@ export function initializeDeployingPage(
               runUrl: status.deployRunUrl,
               errorKind: status.errorKind,
               errorBranch: status.errorBranch,
+              errorPaths: status.errorPaths,
               repairing: status.repairing,
               handoff: status.handoff
             });
@@ -1142,6 +1151,7 @@ export function initializeDeployingPage(
                 runUrl: status.deployRunUrl,
                 errorKind: status.errorKind,
                 errorBranch: status.errorBranch,
+                errorPaths: status.errorPaths,
                 repairing: false,
                 handoff: status.handoff
               });
@@ -1156,6 +1166,7 @@ export function initializeDeployingPage(
               runUrl: status.deployRunUrl,
               errorKind: status.errorKind,
               errorBranch: status.errorBranch,
+              errorPaths: status.errorPaths,
               repairing: status.repairing,
               handoff: status.handoff
             });
