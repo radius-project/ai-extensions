@@ -208,11 +208,18 @@ function start(script: Script = {}): Harness {
       requestedEnvironment: script.preparedEnvironment.requestedName,
       canonicalEnvironment: script.preparedEnvironment.canonicalName
     };
-    operation.setupArtifacts.githubEnvironment = {
-      ...operation.setupArtifacts.githubEnvironment,
-      state: script.preparedEnvironment.state,
-      repo: "octo/app",
-      name: script.preparedEnvironment.canonicalName
+    operation.setupArtifacts = {
+      ...createSetupArtifactLedger(),
+      githubEnvironment: {
+        providerId: null,
+        state: script.preparedEnvironment.state,
+        origin:
+          script.preparedEnvironment.state === "reused" ?
+            "pre_existing"
+          : "unknown",
+        repo: "octo/app",
+        name: script.preparedEnvironment.canonicalName
+      }
     };
   }
 
@@ -999,7 +1006,22 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   });
 
   it("checkpoints proven ownership before honoring a stop boundary", async () => {
-    const harness = start();
+    const harness = start({
+      gh: [
+        {
+          match: /^api --method PUT \/repos\/octo\/app\/environments\/dev$/,
+          result: {
+            code: 0,
+            stdout: JSON.stringify({
+              id: 1234567,
+              node_id: "MDExOkVudmlyb25tZW50MTIzNDU2Nw==",
+              name: "dev",
+              created_at: "2023-11-14T22:13:20.000Z"
+            })
+          }
+        }
+      ]
+    });
 
     await post({ repo: "octo/app" });
 
@@ -1019,7 +1041,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       state: "created",
       origin: "this_operation",
       repo: "octo/app",
-      name: "dev"
+      name: "dev",
+      // GitHub's own id, kept so a later rollback can tell this environment
+      // from a replacement created under the same name.
+      providerId: "1234567"
     });
     expect(harness.steps).toContain(
       '✅ GitHub environment "dev" created by this setup — Radius owns it and can remove it.'
@@ -1034,6 +1059,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
           result: {
             code: 0,
             stdout: JSON.stringify({
+              id: 1234567,
               name: "dev",
               created_at: "2020-01-01T00:00:00.000Z",
               updated_at: "2026-02-01T12:00:00.000Z"
@@ -1259,7 +1285,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       state: "created_candidate",
       origin: "unknown",
       repo: "octo/app",
-      name: "dev"
+      name: "dev",
+      // The create answered without an id, so there is nothing to record and
+      // a rollback will refuse to delete by name alone.
+      providerId: null
     });
     expect(harness.ghCalls).toEqual([
       "api /repos/octo/app/environments/dev",

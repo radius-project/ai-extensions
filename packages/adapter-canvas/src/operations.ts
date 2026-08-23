@@ -108,6 +108,9 @@ export type ServicePrincipalArtifact = {
 export type FederatedCredentialArtifact = {
   name: string;
   subject: string;
+  // The credential's own object id. A name is the customer's to reuse, so the
+  // id is what a delete has to match before it removes anything.
+  providerId: string | null;
 };
 
 export type RoleAssignmentArtifact = {
@@ -122,6 +125,10 @@ export type GitHubEnvironmentArtifact = {
   origin: SetupArtifactOrigin;
   repo: string | null;
   name: string | null;
+  // GitHub's own id for the environment. Environment names are reused freely —
+  // deleting and recreating "dev" is routine — so the id is the only thing that
+  // says the environment answering to this name is still the one Radius made.
+  providerId: string | null;
 };
 
 // `state` keeps a reverted file in the ledger instead of deleting the entry:
@@ -853,7 +860,8 @@ export function createSetupArtifactLedger(): SetupArtifactLedger {
       state: "not_started",
       origin: "unknown",
       repo: null,
-      name: null
+      name: null,
+      providerId: null
     },
     commit: {
       mode: "not_started",
@@ -959,7 +967,12 @@ export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
     },
     federatedCredentials:
       Array.isArray(source.federatedCredentials) ?
-        source.federatedCredentials
+        source.federatedCredentials.map((entry: any) => ({
+          ...entry,
+          name: String(entry?.name || ""),
+          subject: String(entry?.subject || ""),
+          providerId: optionalIdentityString(entry?.providerId)
+        }))
       : [],
     roleAssignments:
       Array.isArray(source.roleAssignments) ?
@@ -972,6 +985,11 @@ export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
       ...(source.githubEnvironment || {}),
       origin: readArtifactOrigin(
         source.githubEnvironment && source.githubEnvironment.origin
+      ),
+      // Records written before the id was captured normalize to null, which is
+      // what refuses their automated deletion rather than deleting by name.
+      providerId: optionalIdentityString(
+        source.githubEnvironment && source.githubEnvironment.providerId
       )
     },
     commit: {
@@ -1427,17 +1445,23 @@ export function recordServicePrincipal(op: any, patch: any): any {
 export function recordCreatedFederatedCredential(op: any, entry: any): any {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger || !entry) return op;
-  const next = {
+  const next: FederatedCredentialArtifact = {
     name: String(entry.name || ""),
-    subject: String(entry.subject || "")
+    subject: String(entry.subject || ""),
+    providerId: optionalIdentityString(entry.providerId)
   };
   if (!next.name || !next.subject) return op;
-  if (
-    !ledger.federatedCredentials.some(
-      (item) => item.name === next.name && item.subject === next.subject
-    )
-  ) {
+  const existing = ledger.federatedCredentials.find(
+    (item) => item.name === next.name && item.subject === next.subject
+  );
+  if (!existing) {
     ledger.federatedCredentials.push(next);
+    return op;
+  }
+  // A later read that finally learned the id upgrades the record it belongs to,
+  // because a credential with no id is one Radius will refuse to delete.
+  if (!existing.providerId && next.providerId) {
+    existing.providerId = next.providerId;
   }
   return op;
 }
@@ -1520,7 +1544,11 @@ export function promoteCreatedGitHubEnvironment(
   if (!provenRepo || !provenName) return false;
   const provenIdentity = cleanupArtifactIdentity("github_environment", {
     repo: provenRepo,
-    name: provenName
+    name: provenName,
+    // The proof is the repo and name this request wrote, so it is compared
+    // against the same record's own id rather than against no id at all —
+    // otherwise capturing GitHub's id would make every promotion refuse.
+    providerId: artifact.providerId
   });
   if (
     provenIdentity !== cleanupArtifactIdentity("github_environment", artifact)
@@ -1799,6 +1827,24 @@ function normalizeIdentityPart(value: any): string {
 }
 
 /** The stable key for one cleanup-capable artifact, or "" when unidentifiable. */
+/** A provider id as the ledger stores it: a non-empty string, or nothing. */
+export function optionalIdentityString(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/**
+ * Put the provider's own id in front of a name the customer can reuse.
+ *
+ * A record written before the id was captured keeps the identity it already
+ * had, so the results and journal entries an earlier version wrote still match
+ * the artifact they were written for after an upgrade.
+ */
+function identityLedBy(providerId: any, rest: string): string {
+  const id = normalizeIdentityPart(providerId);
+  return id ? `${id}|${rest}` : rest;
+}
+
 export function cleanupArtifactIdentity(
   artifactType: any,
   artifact: any
@@ -1813,9 +1859,14 @@ export function cleanupArtifactIdentity(
         normalizeIdentityPart(artifact.objectId)
       );
     case "federated_credential":
-      return `${normalizeIdentityPart(artifact.name)}@${normalizeIdentityPart(
-        artifact.subject
-      )}`;
+      // The provider id leads, so a credential recreated under the same name
+      // and subject is a different identity to the journal and to a delete.
+      return identityLedBy(
+        artifact.providerId,
+        `${normalizeIdentityPart(artifact.name)}@${normalizeIdentityPart(
+          artifact.subject
+        )}`
+      );
     case "role_assignment":
       return (
         normalizeIdentityPart(artifact.assignmentId) ||
@@ -1824,9 +1875,15 @@ export function cleanupArtifactIdentity(
         )}`
       );
     case "github_environment":
-      return `${normalizeIdentityPart(artifact.repo)}:${normalizeIdentityPart(
-        artifact.name
-      )}`;
+      // The provider id leads for the same reason it does for a credential: an
+      // environment deleted and recreated under the same name is somebody
+      // else's resource, and the identity has to say so.
+      return identityLedBy(
+        artifact.providerId,
+        `${normalizeIdentityPart(artifact.repo)}:${normalizeIdentityPart(
+          artifact.name
+        )}`
+      );
     // Path plus branch, because the same workflow path on a setup branch and on
     // the default branch are two different files with two different provenances.
     case "workflow_file":
@@ -4649,6 +4706,23 @@ export function reconcileRestoredOperation(op: any): any {
     (activeCommand.kind === "rollback" ||
       activeCommand.kind === "retry_cleanup" ||
       activeCommand.kind === "exit_setup");
+  if (cleanupInterrupted) {
+    // A deletion pass the customer asked for and Radius had started. Ending the
+    // record here would hide that command from every scheduler — a terminal
+    // operation owns no active command — and the pass would never be picked up
+    // again, leaving the resources it was removing in place with the
+    // repository still reserved for them. It stays open so the recovery
+    // scheduler can resume the command it already has an identity for.
+    op.state = RUNNING_STATE;
+    op.endedAt = null;
+    op.executionActive = false;
+    op.recoveryState = "provider_reconciliation_pending";
+    const ledger = getSetupArtifactLedger(op);
+    // `running` is what tells a later read this pass was interrupted rather
+    // than finished, so the remaining proven-owned artifacts stay claimed.
+    if (ledger) ledger.cleanup.state = "running";
+    return op;
+  }
   const now = nowIso();
   op.state = "failed_partial";
   op.endedAt = now;
@@ -4663,11 +4737,8 @@ export function reconcileRestoredOperation(op: any): any {
   };
   const ledger = getSetupArtifactLedger(op);
   if (ledger) {
-    // A cleanup runner cannot survive the process that owned it. Keeping the
-    // state as running makes hasAttemptedCleanup treat the pass as interrupted,
-    // so the terminal record offers Rollback again against the ledger's remaining
-    // proven-owned artifacts. Results checkpointed before the restart stay put.
-    ledger.cleanup.state = cleanupInterrupted ? "running" : "not_needed";
+    // No pass was in flight, so nothing is left half-done for this record.
+    ledger.cleanup.state = "not_needed";
   }
   for (const stage of op.stages || []) {
     if (stage.state === "running") stage.state = "failed";

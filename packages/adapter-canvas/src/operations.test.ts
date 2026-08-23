@@ -145,6 +145,109 @@ describe("provider mutation recovery journal", () => {
     expect(unresolvedProviderMutations(restored)).toHaveLength(1);
   });
 
+  describe("the provider's own id for a name the customer can reuse", () => {
+    function claimed() {
+      const op = createOperation({
+        operationId: "op_ids",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      recordAzureApp(op, { state: "created", appId: "app-1" });
+      recordGitHubEnvironment(op, {
+        state: "created",
+        repo: "octo/app",
+        name: "prod",
+        providerId: "1234"
+      });
+      recordCreatedFederatedCredential(op, {
+        name: "radius-prod",
+        subject: "repo:octo/app:environment:prod",
+        providerId: "fic-1"
+      });
+      return op;
+    }
+
+    it("carries both ids through a save and reload", () => {
+      const restored = fromPersistedOperation(toPersistedOperation(claimed()));
+
+      expect(restored.setupArtifacts.githubEnvironment.providerId).toBe("1234");
+      expect(restored.setupArtifacts.federatedCredentials[0].providerId).toBe(
+        "fic-1"
+      );
+    });
+
+    it("keys the deletion on the id, not on the reusable name", () => {
+      const op = claimed();
+
+      const identities = provenOwnedCleanupTargets(op).map(
+        (entry) => entry.identity
+      );
+
+      // A rollback that matched on repo+name alone would accept a
+      // same-named replacement as its own leftover.
+      expect(identities).toContain("1234|octo/app:prod");
+      expect(identities).toContain(
+        "fic-1|radius-prod@repo:octo/app:environment:prod"
+      );
+    });
+
+    it("reads a record written before the ids were captured as having none", () => {
+      const persisted = toPersistedOperation(claimed()) as any;
+      delete persisted.setupArtifacts.githubEnvironment.providerId;
+      delete persisted.setupArtifacts.federatedCredentials[0].providerId;
+
+      const restored = fromPersistedOperation(persisted);
+
+      // Null, never a guess: the cleanup gate refuses to delete on it.
+      expect(restored.setupArtifacts.githubEnvironment.providerId).toBeNull();
+      expect(
+        restored.setupArtifacts.federatedCredentials[0].providerId
+      ).toBeNull();
+      expect(
+        provenOwnedCleanupTargets(restored).map((entry) => entry.identity)
+      ).toEqual(
+        expect.arrayContaining([
+          "octo/app:prod",
+          "radius-prod@repo:octo/app:environment:prod"
+        ])
+      );
+    });
+
+    it.each([
+      ["a number the provider returned", 1234, "1234"],
+      ["a padded string", "  fic-1  ", "fic-1"],
+      ["an empty string", "   ", null],
+      ["a missing value", undefined, null],
+      ["a value that is not an identity", { id: 1 }, null]
+    ])("normalizes %s", (_label, value, expected) => {
+      const op = claimed();
+      const persisted = toPersistedOperation(op) as any;
+      persisted.setupArtifacts.githubEnvironment.providerId = value;
+
+      expect(
+        fromPersistedOperation(persisted).setupArtifacts.githubEnvironment
+          .providerId
+      ).toBe(expected);
+    });
+
+    it("fills in an id a later reconciliation learned", () => {
+      const op = claimed();
+      op.setupArtifacts.federatedCredentials[0].providerId = null;
+
+      recordCreatedFederatedCredential(op, {
+        name: "radius-prod",
+        subject: "repo:octo/app:environment:prod",
+        providerId: "fic-1"
+      });
+
+      expect(op.setupArtifacts.federatedCredentials).toHaveLength(1);
+      expect(op.setupArtifacts.federatedCredentials[0].providerId).toBe(
+        "fic-1"
+      );
+    });
+  });
+
   describe("records written before the journal existed", () => {
     function legacy(state: string, schemaVersion: number) {
       const op = createOperation({
@@ -870,7 +973,8 @@ describe("canonical environment identity", () => {
       state: "created_candidate",
       origin: "unknown",
       repo: "contoso/store",
-      name: "Production"
+      name: "Production",
+      providerId: null
     });
   });
 
@@ -892,7 +996,8 @@ describe("canonical environment identity", () => {
       state: "reused",
       origin: "unknown",
       repo: "contoso/store",
-      name: "Staging"
+      name: "Staging",
+      providerId: null
     });
   });
 
@@ -914,7 +1019,8 @@ describe("canonical environment identity", () => {
       state: "reused",
       origin: "unknown",
       repo: "fabrikam/store",
-      name: "production"
+      name: "production",
+      providerId: null
     });
   });
 });
@@ -1090,7 +1196,8 @@ describe("record shape", () => {
         state: "not_started",
         origin: "unknown",
         repo: null,
-        name: null
+        name: null,
+        providerId: null
       },
       commit: {
         mode: "not_started",
@@ -4981,27 +5088,58 @@ describe("a closed operation never looks like work in progress", () => {
 });
 
 describe("an interrupted rollback still offers a way out", () => {
-  it("preserves an active cleanup across restart as an interrupted rollback", () => {
+  it.each([["rollback"], ["retry_cleanup"], ["exit_setup"]])(
+    "keeps an interrupted %s resumable instead of closing the record on it",
+    (kind) => {
+      const op = stoppedWithCreatedResources();
+      const rollback = canStartRollback(op);
+      beginRetryAttempt(op, "cleanup");
+      const accepted = acceptCommand(op, {
+        kind,
+        attempt: 1,
+        target: rollback.target
+      });
+      setCommandState(op, accepted.command.commandId, "running");
+      recordCleanupPass(op, "running", []);
+
+      const restored = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(op))
+      );
+
+      // Terminalizing here would hide the command from every scheduler — a
+      // terminal record owns no active command — and the pass that was
+      // removing resources would never be picked up again.
+      expect(restored.state).toBe("running");
+      expect(restored.endedAt).toBeNull();
+      expect(restored.executionActive).toBe(false);
+      expect(restored.recoveryState).toBe("provider_reconciliation_pending");
+      expect(restored.setupArtifacts.cleanup.state).toBe("running");
+      expect(findActiveCommand(restored)).toMatchObject({
+        kind,
+        commandId: accepted.command.commandId,
+        state: "running"
+      });
+    }
+  );
+
+  it("still closes a record whose cleanup command already finished", () => {
     const op = stoppedWithCreatedResources();
     const rollback = canStartRollback(op);
     beginRetryAttempt(op, "cleanup");
-    acceptCommand(op, {
+    const accepted = acceptCommand(op, {
       kind: "rollback",
       attempt: 1,
       target: rollback.target
     });
-    recordCleanupPass(op, "running", []);
+    setCommandState(op, accepted.command.commandId, "finished", "rolled-back");
 
     const restored = reconcileRestoredOperation(
       fromPersistedOperation(toPersistedOperation(op))
     );
 
+    // History, not work. Nothing is left to resume, so the record ends.
     expect(restored.state).toBe("failed_partial");
-    expect(restored.setupArtifacts.cleanup.state).toBe("running");
-    expect(canStartRollback(restored)).toMatchObject({ ok: true });
-    expect(
-      projectOperationActions(restored).map((entry) => entry.id)
-    ).toContain("rollback");
+    expect(findActiveCommand(restored)).toBeNull();
   });
 
   it("treats a cleanup left running on a closed record as unfinished, not done", () => {
@@ -5974,7 +6112,8 @@ describe("proving the GitHub environment this setup created", () => {
       state: "created",
       origin: "this_operation",
       repo: "contoso/store",
-      name: "dev"
+      name: "dev",
+      providerId: null
     });
   });
 
@@ -6064,7 +6203,8 @@ describe("proving the GitHub environment this setup created", () => {
       state: "created",
       origin: "this_operation",
       repo: "contoso/store",
-      name: "dev"
+      name: "dev",
+      providerId: null
     });
   });
 
@@ -6126,7 +6266,8 @@ describe("provenance survives an extension restart", () => {
       state: "created",
       origin: "this_operation",
       repo: "contoso/store",
-      name: "dev"
+      name: "dev",
+      providerId: null
     });
     expect(reloaded.setupArtifacts.azureApp).toMatchObject({
       state: "created",

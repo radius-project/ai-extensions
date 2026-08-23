@@ -22,12 +22,12 @@ export interface GitHubEnvironmentReadResult {
 export interface EnsuredGitHubEnvironment {
   name: string;
   state: "created" | "created_candidate" | "reused";
-  creationEvidence?: {
-    putResponseBody: string;
-    putStartedAtMs: number;
-  };
-  // Recovery establishes ownership from the mutation journal, so it reports a
-  // settled proof instead of raw evidence the caller would have to re-derive.
+  // GitHub's own id for the environment. Names are reused freely, so this is
+  // what a later delete has to match before it removes anything.
+  providerId: string | null;
+  // Proving happens here rather than at the call site because a reconciled
+  // mutation proves ownership from the re-read body against the journalled
+  // start time, which the caller cannot reconstruct.
   creationProof?: GitHubEnvironmentCreationProof;
 }
 
@@ -44,6 +44,7 @@ export interface GitHubEnvironmentResolutionRecord {
       state?: unknown;
       repo?: unknown;
       name?: unknown;
+      providerId?: unknown;
     };
   };
 }
@@ -70,6 +71,29 @@ function succeeded(result: GitHubEnvironmentCommandResult): boolean {
 
 function responseDetail(result: GitHubEnvironmentCommandResult): string {
   return (result.stderr || result.stdout || "").trim();
+}
+
+/** GitHub's immutable id for an environment payload, when it reports one. */
+export function parseEnvironmentProviderId(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) return null;
+  const body = value as { id?: unknown; node_id?: unknown };
+  if (typeof body.id === "number" && Number.isFinite(body.id)) {
+    return String(body.id);
+  }
+  if (typeof body.id === "string" && body.id.trim()) return body.id.trim();
+  return typeof body.node_id === "string" && body.node_id.trim() ?
+      body.node_id.trim()
+    : null;
+}
+
+function parseCommandEnvironmentProviderId(
+  result: GitHubEnvironmentCommandResult
+): string | null {
+  try {
+    return parseEnvironmentProviderId(JSON.parse(result.stdout));
+  } catch {
+    return null;
+  }
 }
 
 function parseEnvironmentName(value: unknown): string | null {
@@ -118,7 +142,14 @@ export function readEnsuredGitHubEnvironment(
   ) {
     return null;
   }
-  return { name: canonical, state: artifact.state };
+  return {
+    name: canonical,
+    state: artifact.state,
+    providerId:
+      typeof artifact.providerId === "string" && artifact.providerId ?
+        artifact.providerId
+      : null
+  };
 }
 
 export async function ensureGitHubEnvironment(input: {
@@ -154,7 +185,10 @@ export async function ensureGitHubEnvironment(input: {
         "github-environment-name-missing"
       );
     }
-    if (!pendingMutation) return { name, state: "reused" };
+    const listedProviderId = parseEnvironmentProviderId(lookup.json);
+    if (!pendingMutation) {
+      return { name, state: "reused", providerId: listedProviderId };
+    }
     if (pendingMutation.status === "confirmed") {
       const creationProof = proveGitHubEnvironmentCreated({
         preflight: "created_candidate",
@@ -164,11 +198,12 @@ export async function ensureGitHubEnvironment(input: {
       return {
         name,
         state: "created_candidate",
+        providerId: listedProviderId,
         creationProof
       };
     }
     if (pendingMutation.status === "not_applied") {
-      return { name, state: "reused" };
+      return { name, state: "reused", providerId: listedProviderId };
     }
     if (pendingMutation.status === "manual_required") {
       throw new GitHubEnvironmentEnsureError(
@@ -296,12 +331,17 @@ export async function ensureGitHubEnvironment(input: {
       createdCandidate
     );
   }
+  const creationProof = proveGitHubEnvironmentCreated({
+    preflight: "created_candidate",
+    putResponseBody: created.stdout,
+    putStartedAtMs
+  });
   return {
     name,
     state: "created_candidate",
-    creationEvidence: {
-      putResponseBody: created.stdout,
-      putStartedAtMs
-    }
+    // Captured from the write GitHub acknowledged, or from the read that
+    // reconciled it, so the delete has an id to match rather than a name.
+    providerId: parseCommandEnvironmentProviderId(created),
+    creationProof
   };
 }

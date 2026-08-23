@@ -105,7 +105,7 @@ export interface AzureAutoSetupOperationArtifactPort {
   ): void;
   recordCreatedFederatedCredential(
     operation: AzureAutoSetupOperation,
-    entry: { name: string; subject: string }
+    entry: { name: string; subject: string; providerId?: string | null }
   ): void;
   recordCreatedRoleAssignment(
     operation: AzureAutoSetupOperation,

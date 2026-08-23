@@ -110,6 +110,41 @@ export function pickAksResourceGroup(
   return own || resourceGroup;
 }
 
+/**
+ * The federated credential's own object id, or nothing.
+ *
+ * Nothing is a refusal rather than a gap: a credential Radius cannot identify
+ * by id is one it will not delete automatically, because the name it would
+ * otherwise delete by belongs to whoever holds it next.
+ */
+export async function readFederatedCredentialId(
+  runAz: (args: string[]) => Promise<AzureAutoSetupCommandResult>,
+  clientId: string,
+  name: string
+): Promise<string | null> {
+  try {
+    const shown = await runAz([
+      "ad",
+      "app",
+      "federated-credential",
+      "show",
+      "--id",
+      clientId,
+      "--federated-credential-id",
+      name,
+      "--query",
+      "id",
+      "-o",
+      "tsv"
+    ]);
+    if (shown.code !== 0 && shown.code !== "0") return null;
+    const id = String(shown.stdout || "").trim();
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
 async function createFederatedCredentials({
   workflow,
   dependencies,
@@ -253,7 +288,7 @@ async function createFederatedCredentials({
               "--federated-credential-id",
               credential.name,
               "--query",
-              "{subject:subject,description:description}",
+              "{id:id,subject:subject,description:description}",
               "-o",
               "json"
             ]);
@@ -273,9 +308,14 @@ async function createFederatedCredentials({
                   "The federated credential could not be read."
               );
             }
-            let actual: { subject?: unknown; description?: unknown };
+            let actual: {
+              id?: unknown;
+              subject?: unknown;
+              description?: unknown;
+            };
             try {
               actual = JSON.parse(shown.stdout) as {
+                id?: unknown;
                 subject?: unknown;
                 description?: unknown;
               };
@@ -357,11 +397,19 @@ async function createFederatedCredentials({
     }
     steps.push(`✅ Federated credential "${credential.name}" created`);
     if (created) {
+      // The credential's own object id, read back through the same identity
+      // that created it. A name is the customer's to reuse, so this is what a
+      // later delete has to match before it removes anything.
       dependencies.operations.recordCreatedFederatedCredential(
         workflow.operation,
         {
           name: credential.name,
-          subject: credential.subject
+          subject: credential.subject,
+          providerId: await readFederatedCredentialId(
+            runAz,
+            clientId,
+            credential.name
+          )
         }
       );
       if (!(await checkpoint())) return false;

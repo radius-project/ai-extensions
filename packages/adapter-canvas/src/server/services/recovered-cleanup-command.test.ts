@@ -4,7 +4,9 @@ import {
   beginRetryAttempt,
   buildCommandId,
   createOperation,
+  findActiveCommand,
   finish,
+  fromPersistedOperation,
   prepareProviderMutation,
   provenOwnedCleanupTargets,
   recordAzureApp,
@@ -14,10 +16,12 @@ import {
   requestStop,
   rollbackArtifactIdentity,
   setCommandState,
-  settleProviderMutation
+  settleProviderMutation,
+  toPersistedOperation,
+  reconcileRestoredOperation
 } from "../../operations.js";
 import type { OperationCommandKind } from "../../operations.js";
-import { CLEANUP_COMMANDS } from "./cleanup-commands.js";
+import { CLEANUP_COMMANDS, cleanupRunnerKind } from "./cleanup-commands.js";
 import {
   activeCleanupCommand,
   planRecoveredCleanup,
@@ -719,5 +723,97 @@ describe("what a restored operation is handed to next", () => {
         expect(planRecoveredSchedule(operation).kind).not.toBe("forward_setup");
       }
     }
+  });
+});
+
+describe("a cleanup command that outlived the process", () => {
+  const ACTIVE_KINDS: OperationCommandKind[] = [
+    "rollback",
+    "retry_cleanup",
+    "exit_setup"
+  ];
+
+  function interrupted(
+    kind: OperationCommandKind,
+    state: "accepted" | "running" | "finished"
+  ) {
+    const operation = recovered(`op_${kind}`);
+    requestStop(operation);
+    beginRetryAttempt(operation, "cleanup");
+    const accepted = acceptCommand(operation, {
+      kind,
+      attempt: 1
+    });
+    setCommandState(operation, accepted.command.commandId, state);
+    return { operation, commandId: accepted.command.commandId };
+  }
+
+  it.each(ACTIVE_KINDS)(
+    "hands a restarted %s back to cleanup with the same command",
+    async (kind) => {
+      for (const state of ["accepted", "running"] as const) {
+        const { operation, commandId } = interrupted(kind, state);
+
+        const restored = reconcileRestoredOperation(
+          fromPersistedOperation(toPersistedOperation(operation))
+        );
+
+        // No unresolved mutation is outstanding here — the command itself is
+        // the only evidence that work was in flight, so it has to survive the
+        // restart for the scheduler to see it.
+        // The persisted command keeps its own identity and state; the
+        // scheduler sees it under the runner key that can execute it.
+        expect(findActiveCommand(restored)).toMatchObject({
+          kind,
+          commandId,
+          state
+        });
+        expect(activeCleanupCommand(restored)).toEqual({
+          commandId,
+          kind: cleanupRunnerKind(kind)
+        });
+        expect(planRecoveredSchedule(restored)).toEqual({ kind: "cleanup" });
+        await expect(
+          planRecoveredCleanup({
+            operation: restored,
+            persist: async () => {}
+          })
+        ).resolves.toEqual({
+          state: "resume",
+          commandId,
+          kind: cleanupRunnerKind(kind)
+        });
+      }
+    }
+  );
+
+  it.each(ACTIVE_KINDS)(
+    "never routes a restarted %s into the forward setup",
+    (kind) => {
+      for (const state of ["accepted", "running"] as const) {
+        let record = interrupted(kind, state).operation;
+        for (let restart = 0; restart < 3; restart++) {
+          record = reconcileRestoredOperation(
+            fromPersistedOperation(toPersistedOperation(record))
+          );
+          expect(planRecoveredSchedule(record).kind).toBe("cleanup");
+        }
+      }
+    }
+  );
+
+  it("leaves a finished cleanup command as history rather than resuming it", () => {
+    const { operation, commandId } = interrupted("rollback", "finished");
+
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(operation))
+    );
+
+    expect(activeCleanupCommand(restored)).toBeNull();
+    expect(
+      restored.control.commands.map(
+        (entry: { commandId: string }) => entry.commandId
+      )
+    ).toContain(commandId);
   });
 });
