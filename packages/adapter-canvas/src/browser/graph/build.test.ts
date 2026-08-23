@@ -525,6 +525,59 @@ describe("planned and deploying graphs", () => {
     );
   });
 
+  it("uses the representative output's exact portal URL on the deployed parent", () => {
+    const portalUrl =
+      "https://portal.azure.com/#@tenant/resource/subscriptions/s1/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/mysql";
+    const built = buildGraph(settings({ deployMode: true }), [
+      {
+        id: "mysql",
+        name: "mysql",
+        type: "Radius.Data/mySqlDatabases",
+        outputResources: [
+          {
+            id: "/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Authorization/locks/mysql",
+            name: "lock",
+            type: "Microsoft.Authorization/locks",
+            portalUrl: "https://portal.azure.com/lock"
+          },
+          {
+            id: "/subscriptions/s1/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/mysql",
+            name: "server",
+            type: "Microsoft.DBforMySQL/flexibleServers",
+            portalUrl
+          }
+        ]
+      }
+    ]);
+
+    expect(built.dataById.mysql.portalUrl).toBe(portalUrl);
+    expect(JSON.parse(built.dataById.mysql.cloudResources)).toContainEqual(
+      expect.objectContaining({ name: "server", portalUrl })
+    );
+  });
+
+  it("builds a tenant-neutral Azure URL for an older deployed graph", () => {
+    const id =
+      "/subscriptions/s1/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/mysql";
+    const built = buildGraph(settings({ deployMode: true }), [
+      {
+        id: "mysql",
+        name: "mysql",
+        outputResources: [
+          {
+            id,
+            name: "server",
+            type: "Microsoft.DBforMySQL/flexibleServers"
+          }
+        ]
+      }
+    ]);
+
+    expect(built.dataById.mysql.portalUrl).toBe(
+      `https://portal.azure.com/#@/resource${id}/overview`
+    );
+  });
+
   it("keeps the modeled resource's own icon rather than the output's glyph", () => {
     const built = buildGraph(settings({ plannedMode: true }), [
       {

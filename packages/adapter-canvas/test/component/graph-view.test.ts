@@ -6,7 +6,7 @@
 // here runs the shipped libraries in Chromium against the real modules.
 
 import { describe, it, expect, afterEach } from "vitest";
-import { screen, waitFor, within } from "@testing-library/dom";
+import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import {
   buildGraph,
@@ -37,6 +37,7 @@ const RESOURCES = [
 
 interface Recorded {
   local: Array<[string, number, string]>;
+  external: string[];
   toggled: string[];
   opened: string[];
   reloads: number;
@@ -71,7 +72,13 @@ function mount(
   layoutGraph(vendor.dagre, built.nodes, built.edges);
 
   const { host, dispose } = createGraphHost();
-  const recorded: Recorded = { local: [], toggled: [], opened: [], reloads: 0 };
+  const recorded: Recorded = {
+    local: [],
+    external: [],
+    toggled: [],
+    opened: [],
+    reloads: 0
+  };
   const graph = mountGraph({
     vendor,
     clock: realClock(),
@@ -85,6 +92,10 @@ function mount(
     deps: {
       openLocalSource: (path, line, fallback) =>
         recorded.local.push([path, line, fallback]),
+      openExternal: (url) => {
+        recorded.external.push(url);
+        return true;
+      },
       toggleDetails: (data: GraphNodeData, card: DomElement | null) =>
         recorded.toggled.push(`${data.id}:${card ? "card" : "none"}`),
       openDetails: (data: GraphNodeData) => recorded.opened.push(data.id)
@@ -121,7 +132,7 @@ describe("graph view in a real browser", () => {
   });
 
   it("renders the deployed parent with its representative concrete root type", async () => {
-    mount({
+    const { recorded } = mount({
       deployMode: true,
       resources: [
         {
@@ -132,8 +143,9 @@ describe("graph view in a real browser", () => {
           outputResources: [
             { id: "lock", type: "Microsoft.Authorization/locks" },
             {
-              id: "server",
-              type: "Microsoft.DBforMySQL/flexibleServers"
+              id: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/server",
+              type: "Microsoft.DBforMySQL/flexibleServers",
+              portalUrl: "https://portal.azure.com/#@tenant/resource/server"
             },
             {
               id: "database",
@@ -149,6 +161,12 @@ describe("graph view in a real browser", () => {
       within(mysql).getByTitle("Microsoft.DBforMySQL/flexibleServers")
     ).toBeTruthy();
     expect(mysql.getAttribute("data-node-id")).toBe("mysql");
+
+    fireEvent.click(mysql);
+    expect(recorded.external).toEqual([
+      "https://portal.azure.com/#@tenant/resource/server"
+    ]);
+    expect(recorded.opened).toEqual([]);
   });
 
   it("places connected nodes on separate rows using the real dagre layout", async () => {

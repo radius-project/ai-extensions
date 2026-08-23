@@ -61,6 +61,7 @@ function node(overrides: Partial<GraphNodeData> = {}): GraphNodeData {
 
 interface Recorded {
   local: Array<[string, number, string]>;
+  external: string[];
   toggled: Array<[string, DomElement | null]>;
   opened: Array<[string, DomElement | null]>;
 }
@@ -74,10 +75,19 @@ function renderCard(
   vendor: ReturnType<typeof createGraphVendor>;
 } {
   const vendor = createGraphVendor();
-  const recorded: Recorded = { local: [], toggled: [], opened: [] };
+  const recorded: Recorded = {
+    local: [],
+    external: [],
+    toggled: [],
+    opened: []
+  };
   const component = createNodeComponent(vendor, resolveGraphSettings(options), {
     openLocalSource: (path, line, fallback) =>
       recorded.local.push([path, line, fallback]),
+    openExternal: (url) => {
+      recorded.external.push(url);
+      return url.startsWith("https://");
+    },
     toggleDetails: (value, card) => recorded.toggled.push([value.id, card]),
     openDetails: (value, card) => recorded.opened.push([value.id, card])
   });
@@ -221,6 +231,30 @@ describe("node card", () => {
       }
     );
     expect(recorded.toggled).toEqual([["app/web", owner]]);
+  });
+
+  it("opens a deployed node's concrete portal URL instead of its details panel", () => {
+    const portalUrl = "https://portal.azure.com/resource/mysql";
+    const { tree, recorded } = renderCard(node({ portalUrl }), {
+      deployMode: true
+    });
+
+    callHandler(findByClass(tree, "rad-node"), "onClick");
+
+    expect(recorded.external).toEqual([portalUrl]);
+    expect(recorded.opened).toEqual([]);
+  });
+
+  it("falls back to details when a deployed portal URL cannot be opened", () => {
+    const { tree, recorded } = renderCard(
+      node({ portalUrl: "javascript:alert(1)" }),
+      { deployMode: true }
+    );
+
+    callHandler(findByClass(tree, "rad-node"), "onClick");
+
+    expect(recorded.external).toEqual(["javascript:alert(1)"]);
+    expect(recorded.opened).toEqual([["app/web", null]]);
   });
 
   it("falls back to the clicked element when there is no card ancestor", () => {
@@ -509,6 +543,7 @@ describe("mountGraph", () => {
       settings: resolveGraphSettings(),
       deps: {
         openLocalSource: () => undefined,
+        openExternal: () => false,
         openDetails: () => undefined,
         toggleDetails: () => undefined
       },

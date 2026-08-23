@@ -492,9 +492,10 @@ describe("opening source", () => {
     expect(harness.browser.external.opened).toEqual(["https://github.test/x"]);
   });
 
-  it("ignores an external open with no URL", () => {
+  it("ignores empty and unsafe external URLs", () => {
     const harness = setup();
     harness.surface.openExternal("");
+    harness.surface.openExternal("javascript:alert(1)");
     expect(harness.browser.external.opened).toEqual([]);
   });
 

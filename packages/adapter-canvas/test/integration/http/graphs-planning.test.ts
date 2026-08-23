@@ -590,7 +590,9 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       {
         id: "planned-server",
         name: "server",
-        type: "Microsoft.DBforMySQL/flexibleServers"
+        type: "Microsoft.DBforMySQL/flexibleServers",
+        portalUrl:
+          "https://portal.azure.com/#@tenant/resource/subscriptions/s/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/server"
       }
     ];
     harness.state.contextRepo = "octo/app";
@@ -649,7 +651,9 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     const currentOutputs = [
       {
         id: "current-server",
-        type: "Microsoft.DBforMySQL/flexibleServers"
+        type: "Microsoft.DBforMySQL/flexibleServers",
+        portalUrl:
+          "https://portal.azure.com/#@tenant/resource/subscriptions/s/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/current-server"
       }
     ];
     harness.state.contextRepo = "octo/app";

@@ -62,6 +62,7 @@ export interface NodeCardDeps {
   // Opens a repo-relative worktree file in the editor canvas, with the node's
   // remote URL as the fallback.
   openLocalSource(relPath: string, line: number, fallbackUrl: string): void;
+  openExternal(url: string): boolean;
   // Opens or closes the details panel for a card.
   toggleDetails(data: GraphNodeData, card: DomElement | null): void;
   openDetails(data: GraphNodeData, card: DomElement | null): void;
@@ -224,6 +225,13 @@ export function createNodeComponent(
           borderColor: data.borderColor || "var(--rad-node-border)"
         },
         onClick: (event: { currentTarget?: unknown }) => {
+          if (
+            settings.deployMode &&
+            data.portalUrl &&
+            deps.openExternal(data.portalUrl)
+          ) {
+            return;
+          }
           deps.openDetails(data, asElement(event.currentTarget));
         }
       },

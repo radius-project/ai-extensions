@@ -8,7 +8,7 @@
 // same container replaces them instead of stacking.
 
 import { buildGraph, resolveGraphSettings } from "./build.js";
-import { createDetailsPanel } from "./details.js";
+import { createDetailsPanel, safeExternalUrl } from "./details.js";
 import { layoutGraph } from "./layout.js";
 import {
   buildCategoryLegendHtml,
@@ -94,7 +94,7 @@ export interface GraphSurface {
   ): GraphController | null;
   setLoading(containerId: string): void;
   setError(containerId: string, message: string): void;
-  openExternal(url: string): void;
+  openExternal(url: string): boolean;
   openLocalSource(relPath: string, line: number, fallbackUrl: string): void;
   destroyAll(): void;
 }
@@ -113,9 +113,10 @@ export function createGraphSurface(
 
   // Open an external URL the way clicking a native target="_blank" anchor
   // would, which the host opens in the system browser.
-  function openExternal(url: string): void {
-    if (!url) return;
-    context.external.open(url);
+  function openExternal(url: string): boolean {
+    const safeUrl = safeExternalUrl(url);
+    if (!safeUrl) return false;
+    return context.external.open(safeUrl);
   }
 
   // Open a repo-relative worktree file in the Copilot editor canvas. The
@@ -308,7 +309,7 @@ export function createGraphSurface(
       clock: context.clock,
       host,
       settings,
-      deps: { openLocalSource, openDetails, toggleDetails },
+      deps: { openLocalSource, openExternal, openDetails, toggleDetails },
       reload: () => context.nav.reload(),
       nodes: built.nodes,
       edges: built.edges
