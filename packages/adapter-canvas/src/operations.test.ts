@@ -55,6 +55,9 @@ import {
   canContinueSetup,
   canRetryCleanup,
   canRetrySetup,
+  legacyRecoveryQuarantine,
+  quarantineUnrecoverableLegacy,
+  ambiguousProviderMutation,
   canRetryVerification,
   canStartRollback,
   classifyVerificationRetry,
@@ -140,6 +143,179 @@ describe("provider mutation recovery journal", () => {
       providerRecovery: { state: "reconciling" }
     });
     expect(unresolvedProviderMutations(restored)).toHaveLength(1);
+  });
+
+  describe("records written before the journal existed", () => {
+    function legacy(state: string, schemaVersion: number) {
+      const op = createOperation({
+        operationId: "op_legacy",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      op.resumeRequest = { environment: { environment: "prod" } };
+      recordAzureApp(op, {
+        state: "created",
+        appId: "app-1",
+        displayName: "radius-app"
+      });
+      if (state !== "running") {
+        finish(op, state, {
+          failure: { code: "operation-stalled", message: "lost contact" }
+        });
+      }
+      const persisted = toPersistedOperation(op);
+      persisted.schemaVersion = schemaVersion;
+      return fromPersistedOperation(persisted);
+    }
+
+    it.each([1, 2, 3, 4])(
+      "quarantines a nonterminal version %i record instead of guessing",
+      (schemaVersion) => {
+        const restored = reconcileRestoredOperation(
+          legacy("running", schemaVersion)
+        );
+
+        expect(restored).toMatchObject({
+          state: "failed_partial",
+          recoveryState: "manual_required",
+          executionActive: false,
+          providerRecovery: { state: "unrecoverable_legacy" },
+          failure: { code: "operation-legacy-unrecoverable" }
+        });
+        expect(restored.endedAt).toEqual(expect.any(String));
+        expect(legacyRecoveryQuarantine(restored)).toContain(
+          "did not journal the provider requests it had in flight"
+        );
+      }
+    );
+
+    it("blocks every forward and destructive action on a quarantined record", () => {
+      const restored = reconcileRestoredOperation(legacy("running", 4));
+
+      expect(canContinueSetup(restored)).toMatchObject({ ok: false });
+      expect(canRetrySetup(restored)).toMatchObject({ ok: false });
+      // The forward gate reads the quarantine through the same ambiguity check
+      // an unproven mutation uses, so neither path can walk past it.
+      expect(ambiguousProviderMutation(restored)).toContain(
+        "will neither continue the setup nor delete anything"
+      );
+      expect(canStartRollback(restored)).toMatchObject({
+        ok: false,
+        code: "rollback-legacy-unrecoverable"
+      });
+      expect(canRetryCleanup(restored)).toMatchObject({
+        ok: false,
+        code: "cleanup-retry-legacy-unrecoverable"
+      });
+      expect(canExitSetup(restored)).toMatchObject({
+        ok: false,
+        code: "exit-legacy-unrecoverable"
+      });
+    });
+
+    it("keeps the quarantine after a further save and reload", () => {
+      const restored = reconcileRestoredOperation(legacy("running", 3));
+      const reloaded = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(restored))
+      );
+
+      expect(reloaded.providerRecovery.state).toBe("unrecoverable_legacy");
+      expect(canStartRollback(reloaded)).toMatchObject({
+        ok: false,
+        code: "rollback-legacy-unrecoverable"
+      });
+    });
+
+    it("leaves a terminal legacy record exactly as conservative as it was", () => {
+      const restored = reconcileRestoredOperation(legacy("failed_partial", 4));
+
+      expect(restored.providerRecovery.state).toBe("idle");
+      expect(restored.failure.code).toBe("operation-stalled");
+      expect(legacyRecoveryQuarantine(restored)).toBeNull();
+      expect(canStartRollback(restored).ok).toBe(true);
+    });
+
+    it("does not quarantine a current-version record", () => {
+      const restored = reconcileRestoredOperation(
+        legacy("running", OPERATION_SCHEMA_VERSION)
+      );
+
+      expect(legacyRecoveryQuarantine(restored)).toBeNull();
+      expect(restored.providerRecovery.state).toBe("idle");
+    });
+
+    it.each([
+      ["no record at all", null],
+      ["a record with no restored version", { state: "running" }],
+      [
+        "a record whose restored version is unreadable",
+        { state: "running", restoredSchemaVersion: "old" }
+      ]
+    ])("quarantines nothing for %s", (_label, candidate) => {
+      expect(quarantineUnrecoverableLegacy(candidate)).toBe(false);
+    });
+
+    it("keeps the repository reserved while a delete outcome is unproven", () => {
+      const op = createOperation({
+        operationId: "op_branch",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_branch.delete",
+        target: "octo/app\u0000radius/setup-prod\u0000base"
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "outcome_unknown",
+        "The delete response was lost."
+      );
+      finish(op, "failed_partial", {
+        failure: {
+          code: "setup-branch-delete-unresolved",
+          message: "unreadable"
+        }
+      });
+
+      // Nothing in the ledger is removable, so only the open journal entry can
+      // hold the repository — and it must.
+      expect(canStartRollback(op).ok).toBe(false);
+      expect(hasUnfinishedCleanupAuthority(op)).toBe(true);
+
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "manual_required",
+        "Remove that exact branch yourself."
+      );
+
+      expect(hasUnfinishedCleanupAuthority(op)).toBe(false);
+    });
+
+    it("does not quarantine an old record that journaled its work", () => {
+      const op = createOperation({
+        operationId: "op_legacy",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_environment.put",
+        target: "octo/app:prod"
+      });
+      settleProviderMutation(op, mutation.mutationId, "confirmed", "matched");
+      const persisted = toPersistedOperation(op);
+      persisted.schemaVersion = 4;
+
+      const restored = reconcileRestoredOperation(
+        fromPersistedOperation(persisted)
+      );
+
+      expect(legacyRecoveryQuarantine(restored)).toBeNull();
+    });
   });
 
   it("blocks setup retry while a provider outcome is unknown", () => {

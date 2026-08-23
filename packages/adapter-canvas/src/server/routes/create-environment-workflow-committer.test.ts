@@ -3,6 +3,7 @@ import {
   createOperation,
   fromPersistedOperation,
   prepareProviderMutation,
+  providerRecoveryManualGuidance,
   toPersistedOperation
 } from "../../operations.js";
 import {
@@ -616,6 +617,102 @@ describe("the protected-branch pull-request fallback", () => {
         "Radius reconciled and removed recovered setup branch"
       )
     });
+    expect(
+      h.calls.filter(
+        (call) => call.kind === "runGhWorkflow" && call.args.includes("DELETE")
+      )
+    ).toHaveLength(1);
+  });
+
+  it("reports no removal and starts no rollback when GitHub refuses the delete", async () => {
+    const h = harness({
+      runGh: [
+        { code: 1 },
+        { code: 0, stdout: JSON.stringify({ object: { sha: "sha-1" } }) }
+      ],
+      runGhWorkflow: [
+        { code: 1, stderr: "protected branch" },
+        { code: 1, stderr: "HTTP 403: Required status check is not met" }
+      ],
+      defaultBranch: "main",
+      headSha: "sha-1"
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    operation.recoveryState = "provider_reconciliation_pending";
+    prepareProviderMutation(operation, {
+      kind: "github_branch.create",
+      target: "octo/app\0radius/setup-dev-workflows-workflow\0sha-1",
+      providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
+    });
+    h.ports.mutationRecovery = { operation, persist: async () => {} };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).resolves.toMatchObject({
+      ok: false,
+      stderr: expect.stringContaining("could not remove the setup branch")
+    });
+    // One delete attempt, never repeated, and no rollback claimed off the back
+    // of a removal that did not happen.
+    expect(
+      h.calls.filter(
+        (call) => call.kind === "runGhWorkflow" && call.args.includes("DELETE")
+      )
+    ).toHaveLength(1);
+    expect(operation.providerRecovery.state).toBe("rollback_pending");
+    expect(
+      operation.providerRecovery.mutations.find(
+        (entry: { kind: string }) => entry.kind === "github_branch.delete"
+      )
+    ).toMatchObject({ status: "manual_required" });
+    // Manual guidance is what stops the automatic rollback from starting off a
+    // removal that never happened; the record still offers a customer-driven
+    // rollback for the resources Radius can prove it owns.
+    expect(providerRecoveryManualGuidance(operation)).toContain(
+      "Remove that exact branch yourself"
+    );
+  });
+
+  it("leaves the delete unresolved when its answer is lost rather than refused", async () => {
+    const h = harness({
+      runGh: [
+        { code: 1 },
+        { code: 0, stdout: JSON.stringify({ object: { sha: "sha-1" } }) },
+        // The reconcile read that follows the lost delete.
+        { code: 1, stderr: "HTTP 500: server error" }
+      ],
+      runGhWorkflow: [
+        { code: 1, stderr: "protected branch" },
+        { code: 1, stderr: "socket hang up" }
+      ],
+      defaultBranch: "main",
+      headSha: "sha-1"
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    operation.recoveryState = "provider_reconciliation_pending";
+    prepareProviderMutation(operation, {
+      kind: "github_branch.create",
+      target: "octo/app\0radius/setup-dev-workflows-workflow\0sha-1",
+      providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
+    });
+    h.ports.mutationRecovery = { operation, persist: async () => {} };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        "p",
+        CONTENT,
+        "m"
+      )
+    ).resolves.toMatchObject({ ok: false });
+    expect(
+      operation.providerRecovery.mutations.find(
+        (entry: { kind: string }) => entry.kind === "github_branch.delete"
+      )
+    ).toMatchObject({ status: "outcome_unknown" });
     expect(
       h.calls.filter(
         (call) => call.kind === "runGhWorkflow" && call.args.includes("DELETE")

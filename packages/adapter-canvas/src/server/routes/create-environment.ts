@@ -993,6 +993,9 @@ export async function handleCreateEnvironment(
         operation,
         kind: "github_workflow.dispatch",
         target: `${targetRepo}:${dependencies.verifyWorkflowFile}:${verificationRef}:${envName}`,
+        // The marker travels with the intent, so a recovery reads the identity
+        // this dispatch sent rather than re-deriving one that may have changed.
+        providerIdempotencyKey: operationMarker || null,
         persist: () => dependencies.persistOperations(),
         mutate: () =>
           runGhWorkflow(

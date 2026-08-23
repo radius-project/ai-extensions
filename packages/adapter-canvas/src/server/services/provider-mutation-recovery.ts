@@ -57,11 +57,40 @@ function requireRecoveryRollback(
   requestStop(operation);
 }
 
+/**
+ * Whether the provider's answer leaves the mutation's outcome unknown.
+ *
+ * A nonzero exit is not by itself evidence that nothing happened. A CLI that was
+ * killed, lost its socket, or died mid-write may have delivered the request
+ * before it failed, and recording that as `not_applied` is what lets the next
+ * attempt replay a mutation that already landed. Only an answer the provider
+ * itself composed — a validation error, a permission refusal, a conflict — says
+ * the request was seen and rejected.
+ *
+ * So the test is inverted from the obvious one: a failure is treated as
+ * uncertain unless the provider's own diagnostic is there to read.
+ */
 export function providerMutationOutcomeUnknown(
   result: ProviderMutationCommandResult
 ): boolean {
-  return result.timedOut === true;
+  if (result.timedOut === true) return true;
+  if (result.code === 0 || result.code === "0") return false;
+  // A signal name or a negative/128+ status is the process dying, not an answer.
+  if (typeof result.code === "string" && /^SIG[A-Z0-9]+$/.test(result.code)) {
+    return true;
+  }
+  const status = Number(result.code);
+  if (Number.isFinite(status) && (status < 0 || status >= 128)) return true;
+  const diagnostic = `${result.stderr || ""}\n${result.stdout || ""}`.trim();
+  // Nothing came back to read, so nothing says the provider rejected anything.
+  if (!diagnostic) return true;
+  return TRANSPORT_FAILURE.test(diagnostic);
 }
+
+// Failures of the pipe rather than of the request. Each one can be reported
+// after the provider has already accepted the write.
+const TRANSPORT_FAILURE =
+  /\b(?:ECONNRESET|ECONNABORTED|ECONNREFUSED|EPIPE|ETIMEDOUT|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EAI_AGAIN)\b|connection (?:reset|closed|aborted)|broken pipe|socket hang up|network is unreachable|unexpected EOF|premature close|stream closed|terminated by signal|killed|timed? ?out|TLS handshake|remote error|server closed the connection/i;
 
 export function deterministicProviderUuid(seed: string): string {
   const bytes = Buffer.from(

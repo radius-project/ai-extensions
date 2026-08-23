@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { providerMutationRecord } from "../../operations.js";
+import {
+  providerMutationId,
+  providerMutationRecord,
+  settleProviderMutation
+} from "../../operations.js";
 import { needsWorkflowScope } from "./create-environment-gh-runner.js";
 import type {
   CreateEnvironmentCommandResult,
@@ -229,7 +233,7 @@ export function createWorkflowFileCommitter(
         ports.mutationRecovery.operation.providerRecovery?.state ===
           "rollback_pending"
       ) {
-        await executeRecoverableMutation({
+        const removal = await executeRecoverableMutation({
           operation: ports.mutationRecovery.operation,
           kind: "github_branch.delete",
           target: `${target.targetRepo}\0${branch}\0${baseSha}`,
@@ -264,6 +268,36 @@ export function createWorkflowFileCommitter(
             };
           }
         });
+        // GitHub answering "no" is not the branch being gone. Reporting a
+        // removal here — and then starting the rollback that removal was meant
+        // to unblock — would tell the customer their setup branch had been
+        // cleaned up while it is still sitting in the repository.
+        if (removal.state !== "applied") {
+          const detail =
+            removal.result?.stderr?.trim() ||
+            removal.result?.stdout?.trim() ||
+            "" ||
+            "GitHub refused the request.";
+          const guidance =
+            `Radius could not remove the setup branch "${branch}" it recovered in ${target.targetRepo}: ${detail} ` +
+            "It did not repeat the delete and did not start a rollback, because a rollback that leaves this branch behind would report work it has not done. " +
+            "Remove that exact branch yourself, then start setup again.";
+          settleProviderMutation(
+            ports.mutationRecovery.operation,
+            providerMutationId(
+              ports.mutationRecovery.operation.operationId,
+              "github_branch.delete",
+              `${target.targetRepo}\0${branch}\0${baseSha}`
+            ),
+            "manual_required",
+            guidance
+          );
+          await ports.mutationRecovery.persist();
+          throw new ProviderMutationRecoveryError(
+            guidance,
+            "provider-mutation-manual-required"
+          );
+        }
         if (ports.mutationRecovery.operation.providerRecovery) {
           ports.mutationRecovery.operation.providerRecovery.state =
             "rollback_pending";

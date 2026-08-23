@@ -27,7 +27,9 @@ import {
   sanitizeResumeTarget,
   OPERATION_SCHEMA_VERSION,
   STAGE_VERIFY,
-  toClientView
+  toClientView,
+  canStartRollback,
+  legacyRecoveryQuarantine
 } from "./operations.js";
 import type { OperationStore } from "./operation-store.js";
 import {
@@ -807,7 +809,19 @@ describe("cooperative control functional coverage", () => {
     const restored = await restart();
     const recovered = restored.get(op.operationId);
     expect(recovered.schemaVersion).toBe(OPERATION_SCHEMA_VERSION);
-    expect(recovered.state).toBe("input_required");
+    // A version 1 record cannot say which provider requests it had in flight,
+    // so a restart quarantines it rather than resuming the input prompt and
+    // walking forward over work it cannot see.
+    expect(recovered.state).toBe("failed_partial");
+    expect(recovered.failure.code).toBe("operation-legacy-unrecoverable");
+    expect(recovered.providerRecovery.state).toBe("unrecoverable_legacy");
+    expect(legacyRecoveryQuarantine(recovered)).toContain(
+      "will neither continue the setup nor delete anything"
+    );
+    expect(canStartRollback(recovered)).toMatchObject({
+      ok: false,
+      code: "rollback-legacy-unrecoverable"
+    });
     expect(recovered.control.attempts).toEqual({
       setup: 1,
       verification: 0,
@@ -820,6 +834,37 @@ describe("cooperative control functional coverage", () => {
       headSha: null,
       workflowFiles: []
     });
+  });
+
+  it("still restores a current-version input prompt for the customer to answer", async () => {
+    const { first, filePath, restart } = await persistedRegistries();
+    const op = operation();
+    first.start(op);
+    requireInput(op, {
+      code: "app-selection-required",
+      message: "Choose an App Registration."
+    });
+    op.resumeRequest = {
+      needsAzureCredentials: true,
+      azure: {},
+      environment: {
+        repo: "contoso/store",
+        environment: "dev",
+        provider: "azure"
+      }
+    };
+    await first.persist();
+    // Untouched on disk: the record already carries the current schema.
+    expect(
+      JSON.parse(await fs.readFile(filePath, "utf8")).operations[0]
+        .schemaVersion
+    ).toBe(OPERATION_SCHEMA_VERSION);
+
+    const recovered = (await restart()).get(op.operationId);
+
+    expect(recovered.state).toBe("input_required");
+    expect(recovered.recoveryState).toBe("waiting_input");
+    expect(legacyRecoveryQuarantine(recovered)).toBeNull();
   });
 
   it("keeps the browser view free of secrets, evidence, and the private ledger", async () => {

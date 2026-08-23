@@ -288,10 +288,18 @@ export type ProviderRecoveryRecord = {
     | "reconciling"
     | "rollback_pending"
     | "manual_required"
+    // A record written before the mutation journal existed and caught
+    // mid-flight. There is no evidence of what it had started, so neither a
+    // forward attempt nor a deletion can be justified from it.
+    | "unrecoverable_legacy"
     | "complete";
   guidance: string | null;
   mutations: ProviderMutationRecord[];
 };
+
+// The first schema version whose records carry a provider mutation journal. A
+// nonterminal record older than this cannot say what it had in flight.
+export const PROVIDER_JOURNAL_SCHEMA_VERSION = 5;
 
 const PROVIDER_MUTATION_STATUSES = Object.freeze([
   "prepared",
@@ -362,6 +370,7 @@ function readProviderRecovery(value: any): ProviderRecoveryRecord {
         "reconciling",
         "rollback_pending",
         "manual_required",
+        "unrecoverable_legacy",
         "complete"
       ].includes(source.state)
     ) ?
@@ -479,9 +488,15 @@ export function settleProviderMutation(
   return true;
 }
 
-export function unresolvedProviderMutations(op: any): ProviderMutationRecord[] {
+export function unresolvedProviderMutations(
+  op: any,
+  kinds?: readonly string[]
+): ProviderMutationRecord[] {
+  const wanted = kinds ? new Set(kinds) : null;
   return readProviderRecovery(op?.providerRecovery).mutations.filter(
-    (entry) => entry.status === "prepared" || entry.status === "outcome_unknown"
+    (entry) =>
+      (entry.status === "prepared" || entry.status === "outcome_unknown") &&
+      (!wanted || wanted.has(entry.kind))
   );
 }
 
@@ -510,6 +525,69 @@ export function providerRecoveryManualGuidance(op: any): string | null {
     manualMutation?.evidence ||
     "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
   );
+}
+
+const UNRECOVERABLE_LEGACY_GUIDANCE =
+  "This setup was recorded by an older version of Radius that did not journal the provider requests it had in flight, and the extension restarted before it finished. " +
+  "Radius cannot tell which cloud or GitHub resources that attempt had already created, so it will neither continue the setup nor delete anything on its guess. " +
+  "Review the App Registration, federated credentials, role assignments, GitHub environment, and setup workflow files for this repository, remove anything you do not want, then start a new setup.";
+
+/**
+ * The reason a record predating the mutation journal cannot be acted on.
+ *
+ * Kept separate from `providerRecoveryManualGuidance` because the two refusals
+ * have different shapes: manual-required names a specific resource whose
+ * ownership is unproven, while this one admits Radius does not know what the
+ * attempt touched at all.
+ */
+export function legacyRecoveryQuarantine(op: any): string | null {
+  const recovery = readProviderRecovery(op?.providerRecovery);
+  if (recovery.state !== "unrecoverable_legacy") return null;
+  return recovery.guidance || UNRECOVERABLE_LEGACY_GUIDANCE;
+}
+
+/**
+ * Move a nonterminal pre-journal record into durable quarantine.
+ *
+ * Answers whether it did, so the caller can stop reconciling: no later branch
+ * can improve on "Radius does not know what this attempt started".
+ */
+export function quarantineUnrecoverableLegacy(op: any): boolean {
+  if (!op || isTerminalState(op.state)) return false;
+  const recovery = readProviderRecovery(op.providerRecovery);
+  // A record that carries journal entries described its own work, however old
+  // its stamp is, and the journal branches above already handled it.
+  if (recovery.mutations.length > 0) return false;
+  const restored = Number(op.restoredSchemaVersion);
+  if (
+    !Number.isFinite(restored) ||
+    restored >= PROVIDER_JOURNAL_SCHEMA_VERSION
+  ) {
+    return false;
+  }
+  const now = nowIso();
+  op.providerRecovery = {
+    state: "unrecoverable_legacy",
+    guidance: UNRECOVERABLE_LEGACY_GUIDANCE,
+    mutations: []
+  };
+  op.state = "failed_partial";
+  op.endedAt = now;
+  op.lastActivityAt = now;
+  op.executionActive = false;
+  op.failure = {
+    code: "operation-legacy-unrecoverable",
+    stage: op.currentStage,
+    stepSeq: null,
+    message: UNRECOVERABLE_LEGACY_GUIDANCE,
+    classification: "user-fixable"
+  };
+  op.recoveryState = "manual_required";
+  for (const stage of op.stages || []) {
+    if (stage.state === "running") stage.state = "failed";
+    else if (stage.state === "pending") stage.state = "skipped";
+  }
+  return true;
 }
 
 const MAX_RETAINED_COMMANDS = 20;
@@ -2345,6 +2423,8 @@ export function ambiguousSetupOwnership(ledger: any): string | null {
 }
 
 export function ambiguousProviderMutation(op: any): string | null {
+  const legacy = legacyRecoveryQuarantine(op);
+  if (legacy) return legacy;
   const manual = providerRecoveryManualGuidance(op);
   if (manual) return manual;
   const unresolved = unresolvedProviderMutations(op);
@@ -2761,6 +2841,13 @@ export function canStartRollback(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
+  const legacy = legacyRecoveryQuarantine(op);
+  if (legacy)
+    return {
+      ok: false,
+      code: "rollback-legacy-unrecoverable",
+      detail: legacy
+    };
   // Successful verification is the completion boundary, so a verified
   // environment is never rolled back through the setup record.
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
@@ -2888,6 +2975,9 @@ export function canExitSetup(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
+  const legacy = legacyRecoveryQuarantine(op);
+  if (legacy)
+    return { ok: false, code: "exit-legacy-unrecoverable", detail: legacy };
   // A verified environment is finished work, not an abandoned attempt. It is
   // removed with Delete Environment, exactly as a rollback is refused for it.
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
@@ -2971,6 +3061,13 @@ export function canRetryCleanup(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
+  const legacy = legacyRecoveryQuarantine(op);
+  if (legacy)
+    return {
+      ok: false,
+      code: "cleanup-retry-legacy-unrecoverable",
+      detail: legacy
+    };
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return { ok: false, code: "cleanup-retry-ledger-missing" };
   if (hasReachedSetupCommitPoint(op)) {
@@ -3063,6 +3160,11 @@ function isExecutableCleanupTarget(op: any, target: RollbackTarget): boolean {
  */
 export function hasUnfinishedCleanupAuthority(op: any): boolean {
   if (!op || !isTerminalState(op.state)) return false;
+  // An unproven mutation is the one claim that has no ledger entry behind it:
+  // the resource it may have created is precisely the one Radius could not
+  // record. Releasing the repository here would let a second setup start
+  // against it, which is the collision the journal exists to prevent.
+  if (unresolvedProviderMutations(op).length > 0) return true;
   const rollback = canStartRollback(op);
   if (
     rollback.ok &&
@@ -4397,6 +4499,11 @@ export function fromPersistedOperation(value: any): any {
   // gives every reader the current shape; the missing proof refuses rollback.
   record.setupArtifacts = readSetupArtifactLedger(value.setupArtifacts);
   record.stopRequested = Boolean(record.control.stop.requestedAt);
+  // Kept off the persisted key set on purpose: it describes this load, not the
+  // record. `reconcileRestoredOperation` reads it once and, when the record is
+  // too old to have journaled what it was doing, writes a durable quarantine
+  // that outlives the stamp below.
+  record.restoredSchemaVersion = record.schemaVersion;
   record.schemaVersion = OPERATION_SCHEMA_VERSION;
   if (record.verification?.runId != null) {
     record.verification.runId = String(record.verification.runId);
@@ -4417,6 +4524,12 @@ export function reconcileRestoredOperation(op: any): any {
     return op;
   }
   if (isTerminalState(op.state)) return op;
+  // A record written before the journal existed, caught mid-flight. Its ledger
+  // says what Radius had finished, and nothing at all says what it had started:
+  // the mutation that was in the air when the process died left no trace. So a
+  // retry could create a second App Registration and a rollback could delete a
+  // resource this attempt never made. Quarantine it durably and say why.
+  if (quarantineUnrecoverableLegacy(op)) return op;
   // A stop the customer already paid for outlives the process that was going to
   // honor it. Nothing is mid-flight after a restart, so the boundary is here.
   if (shouldStop(op)) {
