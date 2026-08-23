@@ -270,8 +270,13 @@ import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import { executeRecoverableMutation } from "./server/services/provider-mutation-recovery.js";
 import {
   pendingBranchDelete,
-  reconcileRecoveredBranchDelete
+  reconcileRecoveredBranchDelete,
+  REF_PAGE_SIZE
 } from "./server/services/recovered-branch-delete.js";
+import {
+  parseEnvironmentListingPage,
+  proveAbsentFromListing
+} from "./server/services/resource-absence.js";
 import {
   readRecoveredVerificationIdentity,
   recoverVerificationRun,
@@ -2774,24 +2779,40 @@ export async function resolveCleanupGitHubContext({
               `${reread.stderr}\n${reread.stdout}`
             )
           ) {
-            // GitHub answers 404 both for an environment that is gone and for a
-            // repository this token can no longer see, and the second answer
-            // arrives with the environment still in place. The same executor
-            // that just read the environment reads the repository, so a 404
-            // only means "absent" when the account provably still has the
-            // visibility that would have shown it.
-            const repoPath = repositoryApiPath(path);
-            const repository =
-              repoPath ?
-                await executor.run(["api", repoPath], { timeout: 12000 })
-              : null;
-            if (
-              repository &&
-              (repository.code === 0 || repository.code === "0")
-            )
-              return;
+            // GitHub answers 404 both for an environment that is gone and for
+            // one this token is not allowed to see, and it decides that per
+            // resource: reading the repository proves nothing about the Actions
+            // environments API. So the corroborating read is the environments
+            // listing itself, read to its end by the same executor, and absence
+            // only means absence when the whole listing came back without it.
+            const target = environmentNameFromApiPath(path);
+            const listingPath = environmentsApiPath(path);
+            const proof =
+              target && listingPath ?
+                await proveAbsentFromListing({
+                  target,
+                  resource: "environment",
+                  scope: listingPath.replace(/^\/repos\//, ""),
+                  readPage: (page) =>
+                    executor.run(
+                      [
+                        "api",
+                        `${listingPath}?per_page=${ENVIRONMENT_PAGE_SIZE}&page=${page}`
+                      ],
+                      { timeout: 12000 }
+                    ),
+                  parsePage: (stdout) =>
+                    parseEnvironmentListingPage(stdout, ENVIRONMENT_PAGE_SIZE)
+                })
+              : {
+                  state: "unknown" as const,
+                  detail:
+                    "Radius could not derive the environments listing for the path it deleted through."
+                };
+            if (proof.state === "absent") return;
             throw new Error(
-              "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. GitHub reported the environment as absent, but the selected account could not read the repository, so that answer may be masked access rather than a completed delete."
+              "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. " +
+                proof.detail
             );
           }
           throw new Error(
@@ -2804,13 +2825,33 @@ export async function resolveCleanupGitHubContext({
   };
 }
 
-/** The `/repos/{owner}/{repo}` path an environment API path belongs to. */
-export function repositoryApiPath(environmentApiPath: string): string | null {
-  const match = /^\/repos\/([^/]+)\/([^/]+)\/environments\//.exec(
-    environmentApiPath
-  );
-  return match ? `/repos/${match[1]}/${match[2]}` : null;
+/** The page size the environments listing is requested with, and read back against. */
+export const ENVIRONMENT_PAGE_SIZE = 100;
+
+/** The `/repos/{owner}/{repo}/environments` listing an environment path belongs to. */
+export function environmentsApiPath(environmentApiPath: string): string | null {
+  const match = ENVIRONMENT_API_PATH.exec(environmentApiPath);
+  return match ? `/repos/${match[1]}/${match[2]}/environments` : null;
 }
+
+/** The environment an API path names, decoded back to its canonical name. */
+export function environmentNameFromApiPath(
+  environmentApiPath: string
+): string | null {
+  const match = ENVIRONMENT_API_PATH.exec(environmentApiPath);
+  if (!match) return null;
+  try {
+    const name = decodeURIComponent(match[3]);
+    return name || null;
+  } catch {
+    // A path Radius cannot decode is one it cannot compare against a listing,
+    // so it proves nothing rather than comparing the escaped form.
+    return null;
+  }
+}
+
+const ENVIRONMENT_API_PATH =
+  /^\/repos\/([^/]+)\/([^/]+)\/environments\/([^/?#]+)$/;
 
 export async function deleteNewlyCreatedGitHubEnvironment(
   artifact:
@@ -5435,7 +5476,16 @@ function createInstanceRequestCoordinator(
           "api",
           `/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`
         ]),
-      readRepository: (repo) => executor.run(["api", `/repos/${repo}`])
+      // The same permission the 404 came from. Matching-refs answers with every
+      // ref sharing the prefix, so the account either can see this repository's
+      // refs — in which case the branch's absence from the listing is real — or
+      // cannot, in which case nothing is concluded.
+      listBranchRefs: (repo, branch, page) =>
+        executor.run([
+          "api",
+          `/repos/${repo}/git/matching-refs/heads/${encodeURIComponent(branch)}` +
+            `?per_page=${REF_PAGE_SIZE}&page=${page}`
+        ])
     });
     if (outcome.state === "removed") {
       addLegacyStep(op, `✅ ${outcome.evidence}`);

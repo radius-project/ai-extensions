@@ -8,6 +8,7 @@ import {
   parseBranchDeleteTarget,
   pendingBranchDelete,
   reconcileRecoveredBranchDelete,
+  REF_PAGE_SIZE,
   type BranchRefReadResult,
   type RecoveredBranchDeleteOutcome
 } from "./recovered-branch-delete.js";
@@ -99,16 +100,16 @@ describe("finding the delete a record still owes an answer for", () => {
 
 type ReconcileInput = Parameters<typeof reconcileRecoveredBranchDelete>[0];
 
-// Every case needs the repository read that a 404 is corroborated against.
-// Only the masked-access cases care what it answers, so the default is a
-// repository the selected account can still read and each masked case says so
-// explicitly.
+// Every case needs the ref listing that a 404 is corroborated against. Only the
+// masked-access and pagination cases care what it answers, so the default is a
+// listing the selected account can complete which does not hold the branch, and
+// each other case supplies its own.
 function reconcile(
-  input: Omit<ReconcileInput, "readRepository"> &
-    Partial<Pick<ReconcileInput, "readRepository">>
+  input: Omit<ReconcileInput, "listBranchRefs"> &
+    Partial<Pick<ReconcileInput, "listBranchRefs">>
 ): Promise<RecoveredBranchDeleteOutcome> {
   return reconcileRecoveredBranchDelete({
-    readRepository: async () => refRead(),
+    listBranchRefs: async () => refRead({ stdout: "[]" }),
     ...input
   });
 }
@@ -267,57 +268,180 @@ describe("settling a recovered setup-branch delete", () => {
   });
 
   describe("a 404 that may be masked access rather than a completed delete", () => {
-    it("proves absence only after the same account still reads the repository", async () => {
+    const NOT_FOUND = { code: 1, stderr: "HTTP 404: Not Found" };
+    const refPage = (...refs: string[]) =>
+      refRead({ stdout: JSON.stringify(refs.map((ref) => ({ ref }))) });
+
+    it("proves absence only from a ref listing the same account can complete", async () => {
       const operation = operationWithPendingDelete();
-      const repositoryReads: string[] = [];
+      const listed: Array<[string, string, number]> = [];
 
       const outcome = await reconcile({
         operation,
         mutation: operation.providerRecovery.mutations[0],
-        readBranchRef: async () =>
-          refRead({ code: 1, stderr: "HTTP 404: Not Found" }),
-        readRepository: async (repo) => {
-          repositoryReads.push(repo);
-          return refRead({ stdout: JSON.stringify({ full_name: REPO }) });
+        readBranchRef: async () => refRead(NOT_FOUND),
+        listBranchRefs: async (repo, branch, page) => {
+          listed.push([repo, branch, page]);
+          return refPage("refs/heads/radius/setup-dev-workflows-other");
         }
       });
 
-      expect(repositoryReads).toEqual([REPO]);
+      expect(listed).toEqual([[REPO, BRANCH, 1]]);
       expect(outcome).toMatchObject({ state: "removed", branch: BRANCH });
-      expect(guidanceOf.bind(null, outcome)).toThrow();
       expect(operation.providerRecovery.mutations[0]).toMatchObject({
         status: "confirmed",
-        evidence: expect.stringContaining("can still read")
+        evidence: expect.stringContaining("read every branch")
       });
     });
 
-    it("refuses to call the branch gone when the repository read also fails", async () => {
+    it("refuses absence when the account may read the repository but not its refs", async () => {
       const operation = operationWithPendingDelete();
 
       const outcome = await reconcile({
         operation,
         mutation: operation.providerRecovery.mutations[0],
-        readBranchRef: async () =>
-          refRead({ code: 1, stderr: "HTTP 404: Not Found" }),
-        readRepository: async () =>
-          refRead({ code: 1, stderr: "HTTP 404: Not Found" })
+        readBranchRef: async () => refRead(NOT_FOUND),
+        // Repository metadata is readable; the refs API is not. GitHub answers
+        // 404 per resource, so the endpoint 404 proves nothing on its own.
+        listBranchRefs: async () =>
+          refRead({ code: 1, stderr: "HTTP 403: Resource not accessible" })
       });
 
       expect(outcome).toMatchObject({ state: "unreadable", branch: BRANCH });
       expect(guidanceOf(outcome)).toContain("masked access");
+      expect(guidanceOf(outcome)).toContain("HTTP 403");
       // Still unresolved, so nothing downstream may report the branch removed.
       expect(pendingBranchDelete(operation)).not.toBeNull();
     });
 
-    it("refuses to call the branch gone when the repository cannot be reached", async () => {
+    it("refuses absence when the listing itself is a 404", async () => {
       const operation = operationWithPendingDelete();
 
       const outcome = await reconcile({
         operation,
         mutation: operation.providerRecovery.mutations[0],
-        readBranchRef: async () =>
-          refRead({ code: 1, stderr: "HTTP 404: Not Found" }),
-        readRepository: async () => {
+        readBranchRef: async () => refRead(NOT_FOUND),
+        listBranchRefs: async () => refRead(NOT_FOUND)
+      });
+
+      expect(outcome.state).toBe("unreadable");
+      expect(pendingBranchDelete(operation)).not.toBeNull();
+    });
+
+    it("refuses absence when the listing still holds the branch", async () => {
+      const operation = operationWithPendingDelete();
+
+      const outcome = await reconcile({
+        operation,
+        mutation: operation.providerRecovery.mutations[0],
+        readBranchRef: async () => refRead(NOT_FOUND),
+        listBranchRefs: async () =>
+          refPage(`refs/heads/${BRANCH}`, "refs/heads/main")
+      });
+
+      expect(outcome).toMatchObject({
+        state: "manual_required",
+        branch: BRANCH
+      });
+      expect(guidanceOf(outcome)).toContain("still lists it");
+      expect(operation.providerRecovery.mutations[0].status).toBe(
+        "manual_required"
+      );
+    });
+
+    it("reads every page before calling the branch gone", async () => {
+      const operation = operationWithPendingDelete();
+      const pages: number[] = [];
+      const full = Array.from(
+        { length: REF_PAGE_SIZE },
+        (_unused, index) => `refs/heads/radius/setup-dev-workflows-${index}`
+      );
+
+      const outcome = await reconcile({
+        operation,
+        mutation: operation.providerRecovery.mutations[0],
+        readBranchRef: async () => refRead(NOT_FOUND),
+        listBranchRefs: async (_repo, _branch, page) => {
+          pages.push(page);
+          return page === 1 ? refPage(...full) : refPage("refs/heads/tail");
+        }
+      });
+
+      expect(pages).toEqual([1, 2]);
+      expect(outcome.state).toBe("removed");
+    });
+
+    it("never calls a branch gone from a page that may have been cut short", async () => {
+      const operation = operationWithPendingDelete();
+      const full = Array.from(
+        { length: REF_PAGE_SIZE },
+        (_unused, index) => `refs/heads/radius/setup-dev-workflows-${index}`
+      );
+
+      const outcome = await reconcile({
+        operation,
+        mutation: operation.providerRecovery.mutations[0],
+        readBranchRef: async () => refRead(NOT_FOUND),
+        // Every page comes back full, so the listing never ends and the branch
+        // could be on the page after the one Radius stopped at.
+        listBranchRefs: async () => refPage(...full)
+      });
+
+      expect(outcome.state).toBe("unreadable");
+      expect(guidanceOf(outcome)).toContain("did not end within");
+      expect(pendingBranchDelete(operation)).not.toBeNull();
+    });
+
+    it("finds the branch on a later page rather than reporting it gone", async () => {
+      const operation = operationWithPendingDelete();
+      const full = Array.from(
+        { length: REF_PAGE_SIZE },
+        (_unused, index) => `refs/heads/radius/setup-dev-workflows-${index}`
+      );
+
+      const outcome = await reconcile({
+        operation,
+        mutation: operation.providerRecovery.mutations[0],
+        readBranchRef: async () => refRead(NOT_FOUND),
+        listBranchRefs: async (_repo, _branch, page) =>
+          page === 1 ? refPage(...full) : refPage(`refs/heads/${BRANCH}`)
+      });
+
+      expect(outcome.state).toBe("manual_required");
+      expect(guidanceOf(outcome)).toContain("still lists it");
+    });
+
+    it.each([
+      ["an unreadable body", refRead({ stdout: "<html>" })],
+      ["a listing that is not an array", refRead({ stdout: "{}" })],
+      ["an entry with no ref", refRead({ stdout: JSON.stringify([{}]) })],
+      [
+        "an entry whose ref is not a string",
+        refRead({ stdout: JSON.stringify([{ ref: 7 }]) })
+      ]
+    ])("refuses absence for %s", async (_label, response) => {
+      const operation = operationWithPendingDelete();
+
+      const outcome = await reconcile({
+        operation,
+        mutation: operation.providerRecovery.mutations[0],
+        readBranchRef: async () => refRead(NOT_FOUND),
+        listBranchRefs: async () => response
+      });
+
+      expect(outcome.state).toBe("unreadable");
+      expect(guidanceOf(outcome)).toContain("could not read");
+      expect(pendingBranchDelete(operation)).not.toBeNull();
+    });
+
+    it("refuses absence when the listing cannot be reached at all", async () => {
+      const operation = operationWithPendingDelete();
+
+      const outcome = await reconcile({
+        operation,
+        mutation: operation.providerRecovery.mutations[0],
+        readBranchRef: async () => refRead(NOT_FOUND),
+        listBranchRefs: async () => {
           throw new Error("the token was revoked");
         }
       });
@@ -327,15 +451,14 @@ describe("settling a recovered setup-branch delete", () => {
       expect(pendingBranchDelete(operation)).not.toBeNull();
     });
 
-    it("names a non-Error repository read failure rather than dropping it", async () => {
+    it("names a non-Error listing failure rather than dropping it", async () => {
       const operation = operationWithPendingDelete();
 
       const outcome = await reconcile({
         operation,
         mutation: operation.providerRecovery.mutations[0],
-        readBranchRef: async () =>
-          refRead({ code: 1, stderr: "HTTP 404: Not Found" }),
-        readRepository: async () => {
+        readBranchRef: async () => refRead(NOT_FOUND),
+        listBranchRefs: async () => {
           throw "spawn failed";
         }
       });
@@ -343,7 +466,7 @@ describe("settling a recovered setup-branch delete", () => {
       expect(guidanceOf(outcome)).toContain("spawn failed");
     });
 
-    it("accepts a string-zero repository read as proof of visibility", async () => {
+    it("accepts a string-zero listing status", async () => {
       const operation = operationWithPendingDelete();
 
       const outcome = await reconcile({
@@ -355,13 +478,13 @@ describe("settling a recovered setup-branch delete", () => {
             stdout: "gh: Not Found (HTTP 404)",
             stderr: ""
           }),
-        readRepository: async () => refRead({ code: "0" })
+        listBranchRefs: async () => refRead({ code: "0", stdout: "[]" })
       });
 
       expect(outcome.state).toBe("removed");
     });
 
-    it("does not read the repository when the branch is still present", async () => {
+    it("does not list refs at all when the branch is still present", async () => {
       const operation = operationWithPendingDelete();
 
       const outcome = await reconcile({
@@ -369,7 +492,7 @@ describe("settling a recovered setup-branch delete", () => {
         mutation: operation.providerRecovery.mutations[0],
         readBranchRef: async () =>
           refRead({ stdout: JSON.stringify({ object: { sha: BASE } }) }),
-        readRepository: async () => {
+        listBranchRefs: async () => {
           throw new Error("a present branch needs no corroboration");
         }
       });

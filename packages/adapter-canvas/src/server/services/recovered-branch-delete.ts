@@ -3,6 +3,13 @@ import {
   unresolvedProviderMutations,
   type ProviderMutationRecord
 } from "../../operations.js";
+import {
+  parseRefListingPage,
+  proveAbsentFromListing
+} from "./resource-absence.js";
+
+/** The page size the ref listing is requested with, and read back against. */
+export const REF_PAGE_SIZE = 100;
 
 // Recovering the one destructive request setup issues on its own behalf.
 //
@@ -82,7 +89,11 @@ export async function reconcileRecoveredBranchDelete(input: {
   operation: object;
   mutation: ProviderMutationRecord;
   readBranchRef(repo: string, branch: string): Promise<BranchRefReadResult>;
-  readRepository(repo: string): Promise<BranchRefReadResult>;
+  listBranchRefs(
+    repo: string,
+    branch: string,
+    page: number
+  ): Promise<BranchRefReadResult>;
 }): Promise<RecoveredBranchDeleteOutcome> {
   const target = parseBranchDeleteTarget(input.mutation.target);
   if (!target) {
@@ -116,32 +127,41 @@ export async function reconcileRecoveredBranchDelete(input: {
         `${read.stderr || ""}\n${read.stdout || ""}`
       )
     ) {
-      // GitHub returns the same 404 for a ref that is gone and for a repository
-      // the selected account can no longer see. Only the second read separates
-      // them, and only the same account's read counts: a branch that is merely
-      // invisible is a branch still holding the customer's work.
-      let repository: BranchRefReadResult;
-      try {
-        repository = await input.readRepository(target.repo);
-      } catch (error) {
+      // GitHub returns the same 404 for a ref that is gone and for a ref this
+      // token is not allowed to see, and it decides that per resource: an
+      // account can read a repository's metadata and still be refused its refs.
+      // So the corroborating read has to be in the same permission family — a
+      // ref listing the account can actually complete — and the branch has to
+      // be missing from all of it. A branch that is merely invisible is a
+      // branch still holding the customer's work.
+      const proof = await proveAbsentFromListing({
+        target: `refs/heads/${target.branch}`,
+        resource: "branch",
+        scope: target.repo,
+        readPage: (page) =>
+          input.listBranchRefs(target.repo, target.branch, page),
+        parsePage: (stdout) => parseRefListingPage(stdout, REF_PAGE_SIZE)
+      });
+      if (proof.state === "unknown") {
         return {
           state: "unreadable",
           branch: target.branch,
-          guidance:
-            `GitHub reported branch "${target.branch}" in ${target.repo} as absent, but Radius could not confirm the selected account can still read that repository: ` +
-            `${error instanceof Error ? error.message : String(error)}. That answer may be masked access rather than a completed delete, so Radius changed nothing further.`
+          guidance: `${proof.detail} Radius changed nothing further.`
         };
       }
-      if (repository.code !== 0 && repository.code !== "0") {
-        return {
-          state: "unreadable",
-          branch: target.branch,
-          guidance:
-            `GitHub reported branch "${target.branch}" in ${target.repo} as absent, but the selected account could not read that repository, ` +
-            "so the answer may be masked access rather than a completed delete. Radius changed nothing further."
-        };
+      if (proof.state === "present") {
+        const guidance =
+          `GitHub reported branch "${target.branch}" in ${target.repo} as gone from its own endpoint but still lists it, ` +
+          "so Radius cannot say whether its deletion took effect. Review that branch and remove it yourself if it is unwanted.";
+        settleProviderMutation(
+          input.operation,
+          input.mutation.mutationId,
+          "manual_required",
+          guidance
+        );
+        return { state: "manual_required", branch: target.branch, guidance };
       }
-      const evidence = `GitHub confirmed the recovered setup branch "${target.branch}" is absent, and the selected account can still read ${target.repo}.`;
+      const evidence = `GitHub confirmed the recovered setup branch "${target.branch}" is absent. ${proof.evidence}`;
       settleProviderMutation(
         input.operation,
         input.mutation.mutationId,
