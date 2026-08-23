@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { remediationView } from "@radius-project/core";
 import {
   activeDeploymentMutation,
   addGraphProgress,
@@ -2431,8 +2432,14 @@ describe("azureLoginRequiredResponse", () => {
       error:
         'No active Azure session. Run "az login --use-device-code" in your terminal, then click Verify Credentials again.',
       code: "az-login-required",
-      tenantId
+      tenantId,
+      // The prose is unchanged; the runnable form of the same guidance rides
+      // alongside it so the canvas can offer to run it.
+      remediation: remediationView("azure-cli-login", { tenantId })
     });
+    expect(azureLoginRequiredResponse({ tenantId }).remediation.command).toBe(
+      `az login --use-device-code --tenant ${tenantId}`
+    );
   });
 
   it("returns structured tenant-specific guidance for the wrong active tenant", () => {
@@ -2536,6 +2543,68 @@ describe("azureCliAssistDisplayPrompt", () => {
   it("summarizes the install case", () => {
     expect(azureCliAssistDisplayPrompt({ action: "install" })).toContain(
       "Installing Azure CLI"
+    );
+  });
+});
+
+describe("azure-cli-assist registry migration contract", () => {
+  // Frozen copies of the prompts this route produced before they moved into the
+  // core remediation registry. `/api/azure-cli-assist` is a shipped contract, so
+  // the migration is only correct if the bytes are unchanged.
+  const LEGACY_LOGIN_INSTRUCTIONS = [
+    "Run `az login --use-device-code --tenant 11111111-2222-3333-4444-555555555555` in this Copilot session.",
+    "For that command, remove COPILOT_AGENT_SESSION_ID from the az process environment so Azure CLI does not inject it into the authentication request.",
+    "Use the shell-appropriate way to unset the variable only for the login invocation, and show me the device code and sign-in URL."
+  ].join(" ");
+  const LEGACY_LOGIN_PROMPT = [
+    "The Radius canvas needs an active Azure CLI session before it can verify these credentials.",
+    LEGACY_LOGIN_INSTRUCTIONS,
+    "After the login finishes, return to the Radius canvas and click Verify Credentials again."
+  ].join("\n\n");
+  const LEGACY_INSTALL_PROMPT = [
+    "Azure CLI is not installed in this environment, so the Radius canvas can't verify Azure credentials yet.",
+    `Please install Azure CLI, then ${LEGACY_LOGIN_INSTRUCTIONS.replace(" --tenant 11111111-2222-3333-4444-555555555555", "")}`,
+    "After the install and login finish, return to the Radius canvas and click Verify Credentials again."
+  ].join("\n\n");
+
+  it("reproduces the legacy login prompt byte for byte", () => {
+    expect(
+      buildAzureCliAssistPrompt({
+        action: "login",
+        tenantId: "11111111-2222-3333-4444-555555555555"
+      })
+    ).toBe(LEGACY_LOGIN_PROMPT);
+  });
+
+  it("reproduces the legacy install prompt byte for byte", () => {
+    expect(buildAzureCliAssistPrompt({ action: "install" })).toBe(
+      LEGACY_INSTALL_PROMPT
+    );
+  });
+
+  it("reproduces the legacy display prompts byte for byte", () => {
+    expect(azureCliAssistDisplayPrompt({ action: "login" })).toBe(
+      "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials."
+    );
+    expect(azureCliAssistDisplayPrompt({ action: "install" })).toBe(
+      "Installing Azure CLI and signing in so the Radius canvas can verify these Azure credentials."
+    );
+  });
+
+  it.each([
+    ["an unknown action", { action: "wipe", tenantId: "" }],
+    ["a non-string tenant id", { action: "login", tenantId: 7 }],
+    ["a tenant id that is not a guid", { action: "login", tenantId: "nope" }]
+  ])("stays on the tenant-agnostic login prompt for %s", (_label, input) => {
+    expect(
+      buildAzureCliAssistPrompt(
+        input as Parameters<typeof buildAzureCliAssistPrompt>[0]
+      )
+    ).toBe(
+      LEGACY_LOGIN_PROMPT.replace(
+        " --tenant 11111111-2222-3333-4444-555555555555",
+        ""
+      )
     );
   });
 });

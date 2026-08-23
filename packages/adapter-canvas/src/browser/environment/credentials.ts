@@ -4,6 +4,9 @@
 // deep-linking, and resuming an in-flight operation belong to the page
 // controller that composes this module with the Environments pane, not here.
 
+import { remediationView } from "@radius-project/core/remediations";
+import { createCommandAction } from "../command-action.js";
+import type { CommandActionHandle } from "../command-action.js";
 import { escapeBrowserHtml } from "../html.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { isRecord, readArray, readBoolean, readString } from "../json.js";
@@ -19,6 +22,7 @@ import type {
   EnvironmentDecisionPort,
   EnvironmentFormPreset
 } from "./environments.js";
+import type { RemediationView } from "@radius-project/core/remediations";
 import type { EnvironmentConfirmDialog } from "./confirm-dialog.js";
 
 export const CREDENTIALS_ENTRY_KEY = "environment-credentials";
@@ -29,7 +33,21 @@ export const GITHUB_IDENTITY_PATH = "/api/github-identity";
 export const AZURE_CLI_ASSIST_PATH = "/api/azure-cli-assist";
 export const VERIFY_AZURE_PATH = "/api/verify-azure-login";
 export const VERIFY_AWS_PATH = "/api/verify-aws-login";
-export const GHCR_COPY_RESET_MS = 1500;
+/**
+ * Rebuild a remediation view from a server payload.
+ *
+ * Only the id and its parameters are taken from the payload; the command text
+ * is rebuilt locally from the registry, so a payload can never name a command
+ * of its own. A remediation that does not resolve is dropped rather than shown
+ * as an action that cannot run.
+ */
+export function payloadRemediation(payload: unknown): RemediationView | null {
+  if (!isRecord(payload)) return null;
+  const entry = payload["remediation"];
+  if (!isRecord(entry)) return null;
+  const view = remediationView(entry["id"], entry["params"]);
+  return view.runnable ? view : null;
+}
 
 export interface CredentialProfile {
   name: string;
@@ -89,6 +107,8 @@ export interface CredentialsPaneDependencies {
 
 export interface CredentialsPaneOptions {
   repo: string;
+  /** Nonce for mutating requests; run-command hand-off is rejected without it. */
+  mutationNonce: string;
   decisions: EnvironmentDecisionPort;
   confirmDialog?: EnvironmentConfirmDialog;
 }
@@ -281,9 +301,8 @@ export function initializeCredentialsPane(
   const btnVerifyAws = context.dom.inputById("btn-verify-aws");
   const credGhcrStatus = context.dom.byId("cred-ghcr-status");
   const credGhcrCommandRow = context.dom.byId("cred-ghcr-command-row");
-  const credGhcrCommand = context.dom.byId("cred-ghcr-command");
   const credGhcrRetry = context.dom.inputById("cred-ghcr-retry");
-  const credGhcrCopy = context.dom.byId("cred-ghcr-copy");
+  const credVerifyAction = context.dom.byId("cred-verify-action");
   const envVerifyModal = context.dom.byId("env-verify-modal");
   const envVerifyTitle = context.dom.byId("env-verify-title");
   const azureCliAssistModal = context.dom.byId("azure-cli-assist-modal");
@@ -321,9 +340,8 @@ export function initializeCredentialsPane(
     !btnVerifyAws ||
     !credGhcrStatus ||
     !credGhcrCommandRow ||
-    !credGhcrCommand ||
     !credGhcrRetry ||
-    !credGhcrCopy ||
+    !credVerifyAction ||
     !envVerifyModal ||
     !envVerifyTitle ||
     !azureCliAssistModal ||
@@ -368,20 +386,48 @@ export function initializeCredentialsPane(
     credPanelAws.style.display = isAws ? "" : "none";
   };
 
+  const commandActions = new Map<DomElement, CommandActionHandle>();
+  const mountCommandAction = (
+    host: DomElement,
+    remediation: RemediationView | null,
+    idPrefix: string
+  ): void => {
+    commandActions.get(host)?.dispose();
+    commandActions.delete(host);
+    if (remediation === null) {
+      host.replaceChildren();
+      return;
+    }
+    commandActions.set(
+      host,
+      createCommandAction(context, {
+        host,
+        remediation,
+        mutationNonce: options.mutationNonce,
+        idPrefix
+      })
+    );
+  };
+
   const resetVerification = (): void => {
     formToken += 1;
     credVerified = null;
+    mountCommandAction(credVerifyAction, null, "cred-verify");
     credVerifyStatus.style.display = "none";
     credVerifyStatus.innerHTML = "";
     credVerifyHint.style.display = "";
     updateSaveState();
   };
 
-  const verifyError = (message: string): void => {
+  const verifyError = (
+    message: string,
+    remediation: RemediationView | null = null
+  ): void => {
     credVerifyStatus.style.display = "block";
     credVerifyStatus.innerHTML = `<span style="color:var(--rad-danger);">${escapeBrowserHtml(
       message
     )}</span>`;
+    mountCommandAction(credVerifyAction, remediation, "cred-verify");
   };
 
   const verifyInfo = (message: string): void => {
@@ -406,7 +452,7 @@ export function initializeCredentialsPane(
   const applyGitHubAccessView = (identity: GitHubPackagesIdentity): void => {
     const view = renderGitHubAccessView(identity);
     credPackagesVerified = view.packagesVerified;
-    credGhcrCommandRow.style.display = view.commandVisible ? "flex" : "none";
+    credGhcrCommandRow.style.display = view.commandVisible ? "block" : "none";
     credGhcrRetry.style.display = view.retryVisible ? "" : "none";
     if (view.statusHtml !== null) {
       credGhcrStatus.innerHTML = view.statusHtml;
@@ -414,7 +460,18 @@ export function initializeCredentialsPane(
       credGhcrStatus.textContent = view.statusText;
     }
     credGhcrStatus.style.color = view.statusColor;
-    credGhcrCommand.textContent = view.command;
+    mountCommandAction(
+      credGhcrCommandRow,
+      view.commandVisible ?
+        payloadRemediation({
+          remediation: {
+            id: "github-packages-scope",
+            params: { login: identity.actingLogin }
+          }
+        })
+      : null,
+      "cred-ghcr"
+    );
     updateSaveState();
   };
 
@@ -741,17 +798,6 @@ export function initializeCredentialsPane(
   });
 
   scope.on(credGhcrRetry, "click", () => loadGitHubAccess());
-  scope.on(credGhcrCopy, "click", () => {
-    const command = credGhcrCommand.textContent ?? "";
-    void context.clipboard.write(command).then((ok) => {
-      if (!active || !ok) return;
-      credGhcrCopy.textContent = "Copied";
-      scope.after(GHCR_COPY_RESET_MS, () => {
-        credGhcrCopy.textContent = "Copy command";
-      });
-    });
-  });
-
   scope.on(azureCliAssistCancel, "click", () => {
     const fallbackMessage = pendingAssist?.fallbackMessage ?? "";
     closeAssistPrompt();
@@ -816,7 +862,7 @@ export function initializeCredentialsPane(
               showAssistPrompt("install", returnedTenantId, error);
               return;
             }
-            verifyError(error);
+            verifyError(error, payloadRemediation(payload));
             return;
           }
           const returnedTenantId = readString(payload, "tenantId");
@@ -870,7 +916,7 @@ export function initializeCredentialsPane(
           btnVerifyAws.textContent = "Verify Credentials";
           const error = readString(payload, "error");
           if (error !== "") {
-            verifyError(error);
+            verifyError(error, payloadRemediation(payload));
             return;
           }
           const returnedAccountId = readString(payload, "accountId");
@@ -969,6 +1015,8 @@ export function initializeCredentialsPane(
       active = false;
       tableAbort?.abort();
       release(rows);
+      for (const action of commandActions.values()) action.dispose();
+      commandActions.clear();
       scope.teardown();
     }
   };

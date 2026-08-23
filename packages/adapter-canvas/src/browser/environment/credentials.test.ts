@@ -6,8 +6,8 @@ import {
   CREDENTIAL_PROFILES_PATH,
   CREDENTIAL_SAVE_PATH,
   CREDENTIALS_ENTRY_KEY,
-  GHCR_COPY_RESET_MS,
   GITHUB_IDENTITY_PATH,
+  payloadRemediation,
   VERIFY_AWS_PATH,
   VERIFY_AZURE_PATH,
   azureCliAssistPromptView,
@@ -23,6 +23,7 @@ import type { CredentialProfile } from "./credentials.js";
 const USAGE_LOOKUP_URL = "/api/list-environments?repo=octo%2Fapp";
 import {
   createDeferred,
+  fakeText,
   createFakeBrowser,
   createFakeElement,
   createFakeInput,
@@ -64,9 +65,8 @@ function buildElements() {
     btnVerifyAws: createFakeInput("btn-verify-aws"),
     credGhcrStatus: createFakeElement("cred-ghcr-status"),
     credGhcrCommandRow: createFakeElement("cred-ghcr-command-row"),
-    credGhcrCommand: createFakeElement("cred-ghcr-command"),
     credGhcrRetry: createFakeInput("cred-ghcr-retry"),
-    credGhcrCopy: createFakeElement("cred-ghcr-copy"),
+    credVerifyAction: createFakeElement("cred-verify-action"),
     envVerifyModal: createFakeElement("env-verify-modal"),
     envVerifyTitle: createFakeElement("env-verify-title"),
     azureCliAssistModal: createFakeElement("azure-cli-assist-modal"),
@@ -105,7 +105,7 @@ function renderPage(repo = "octo/app") {
   };
   const initialized = initializeCredentialsPane(
     browser.context,
-    { repo, decisions, confirmDialog },
+    { repo, mutationNonce: "test-nonce", decisions, confirmDialog },
     dependencies
   );
   if (!isCredentialsPaneController(initialized)) {
@@ -337,6 +337,7 @@ describe("credentials pane initialization", () => {
       browser.context,
       {
         repo: "octo/app",
+        mutationNonce: "test-nonce",
         decisions: { confirm: () => true, notify: () => {} }
       },
       {
@@ -357,7 +358,11 @@ describe("credentials pane initialization", () => {
 
     const second = initializeCredentialsPane(
       page.browser.context,
-      { repo: "octo/app", decisions: page.decisions },
+      {
+        repo: "octo/app",
+        mutationNonce: "test-nonce",
+        decisions: page.decisions
+      },
       page.dependencies
     );
     expect(isCredentialsPaneController(second)).toBe(false);
@@ -749,10 +754,13 @@ describe("GitHub Packages identity check", () => {
     );
     page.elements.newCredBtn.dispatch("click");
     await flushPromises();
-    expect(page.elements.credGhcrCommandRow.style.display).toBe("flex");
+    expect(page.elements.credGhcrCommandRow.style.display).toBe("block");
     expect(page.elements.credGhcrRetry.style.display).toBe("");
-    expect(page.elements.credGhcrCommand.textContent).toContain(
-      "gh auth switch"
+    expect(fakeText(page.elements.credGhcrCommandRow)).toContain(
+      "gh auth switch -h github.com -u octocat"
+    );
+    expect(fakeText(page.elements.credGhcrCommandRow)).toContain(
+      "Run with Copilot"
     );
   });
 
@@ -807,65 +815,6 @@ describe("GitHub Packages identity check", () => {
     expect(calls[1]?.url).toBe(`${GITHUB_IDENTITY_PATH}?fresh=1`);
   });
 
-  it("copies the command and resets the label after a delay", async () => {
-    const page = renderPage();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
-    );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
-    page.elements.credGhcrCopy.dispatch("click");
-    await flushPromises();
-    expect(page.browser.clipboard.writes).toEqual([
-      page.elements.credGhcrCommand.textContent
-    ]);
-    expect(page.elements.credGhcrCopy.textContent).toBe("Copied");
-    page.browser.clock.tick(GHCR_COPY_RESET_MS);
-    expect(page.elements.credGhcrCopy.textContent).toBe("Copy command");
-  });
-
-  it("copies an empty string when the command text has not been set", async () => {
-    const page = renderPage();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
-    );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
-    page.elements.credGhcrCommand.textContent = null;
-    page.elements.credGhcrCopy.dispatch("click");
-    await flushPromises();
-    expect(page.browser.clipboard.writes).toEqual([""]);
-  });
-
-  it("does not relabel the copy button when the clipboard write is unsuccessful", async () => {
-    const page = renderPage();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
-    );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
-    page.browser.clipboard.write = vi.fn(() => Promise.resolve(false));
-    page.elements.credGhcrCopy.dispatch("click");
-    await flushPromises();
-    expect(page.elements.credGhcrCopy.textContent).not.toBe("Copied");
-  });
-
-  it("ignores a copy confirmation that resolves after teardown", async () => {
-    const page = renderPage();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
-    );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
-    const deferred = createDeferred<boolean>();
-    page.browser.clipboard.write = vi.fn(() => deferred.promise);
-    page.elements.credGhcrCopy.dispatch("click");
-    page.controller.teardown();
-    deferred.resolve(true);
-    await flushPromises();
-    expect(page.elements.credGhcrCopy.textContent).not.toBe("Copied");
-  });
-
   it("ignores a late identity check response that resolves after teardown", async () => {
     const page = renderPage();
     const deferred = createDeferred<HttpResponse>();
@@ -880,6 +829,128 @@ describe("GitHub Packages identity check", () => {
     );
     await expect(flushPromises()).resolves.not.toThrow();
     expect(page.elements.credGhcrStatus.innerHTML).toBe("");
+  });
+});
+
+describe("payloadRemediation", () => {
+  it("rebuilds a view from an id and its parameters", () => {
+    const view = payloadRemediation({
+      remediation: { id: "aws-cli-login", params: {} }
+    });
+
+    expect(view?.id).toBe("aws-cli-login");
+    expect(view?.command).toContain("aws sso login");
+  });
+
+  it("ignores a payload that is not a record", () => {
+    expect(payloadRemediation("nope")).toBeNull();
+  });
+
+  it("ignores a payload without a remediation record", () => {
+    expect(payloadRemediation({ remediation: "aws-cli-login" })).toBeNull();
+  });
+
+  it("ignores a remediation that cannot be resolved", () => {
+    expect(
+      payloadRemediation({ remediation: { id: "made-up", params: {} } })
+    ).toBeNull();
+  });
+});
+
+describe("verify remediation callouts", () => {
+  it("offers to run the command a failed Azure verification suggests", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
+      jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
+    );
+    page.elements.newCredBtn.dispatch("click");
+    await flushPromises();
+    page.elements.credNameInput.value = "acme";
+    page.elements.azTenantId.value = "tenant-in-form";
+    page.elements.azSubId.value = "sub-in-form";
+    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
+      jsonResponse({
+        error: "Azure subscription is not selected.",
+        code: "az-subscription",
+        remediation: {
+          id: "azure-subscription-set",
+          params: { subscriptionId: "11111111-2222-3333-4444-555555555555" }
+        }
+      })
+    );
+
+    page.elements.btnVerifyAzure.dispatch("click");
+    await flushPromises();
+
+    expect(fakeText(page.elements.credVerifyAction)).toContain(
+      "az account set --subscription 11111111-2222-3333-4444-555555555555"
+    );
+  });
+
+  it("offers to run the command a failed AWS verification suggests", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
+      jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
+    );
+    page.elements.newCredBtn.dispatch("click");
+    await flushPromises();
+    page.elements.credProviderSelect.value = "aws";
+    page.elements.credProviderSelect.dispatch("change");
+    page.elements.credNameInput.value = "acme";
+    page.elements.awsAccountId.value = "123456789012";
+    page.elements.awsRegion.value = "us-west-2";
+    page.browser.net.handle(VERIFY_AWS_PATH, () =>
+      jsonResponse({
+        error: "No active AWS session.",
+        remediation: { id: "aws-cli-login", params: {} }
+      })
+    );
+
+    page.elements.btnVerifyAws.dispatch("click");
+    await flushPromises();
+
+    expect(fakeText(page.elements.credVerifyAction)).toContain("aws sso login");
+  });
+
+  it("clears mounted callouts on teardown", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
+      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
+    );
+    page.elements.newCredBtn.dispatch("click");
+    await flushPromises();
+    expect(page.elements.credGhcrCommandRow.children).toHaveLength(1);
+
+    page.controller.teardown();
+
+    expect(page.elements.credGhcrCommandRow.children).toHaveLength(0);
+  });
+
+  it("clears a previous callout when verification is reset", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
+      jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
+    );
+    page.elements.newCredBtn.dispatch("click");
+    await flushPromises();
+    page.elements.credProviderSelect.value = "aws";
+    page.elements.credProviderSelect.dispatch("change");
+    page.elements.credNameInput.value = "acme";
+    page.elements.awsAccountId.value = "123456789012";
+    page.elements.awsRegion.value = "us-west-2";
+    page.browser.net.handle(VERIFY_AWS_PATH, () =>
+      jsonResponse({
+        error: "No active AWS session.",
+        remediation: { id: "aws-cli-login", params: {} }
+      })
+    );
+    page.elements.btnVerifyAws.dispatch("click");
+    await flushPromises();
+
+    page.elements.credProviderSelect.value = "azure";
+    page.elements.credProviderSelect.dispatch("change");
+
+    expect(page.elements.credVerifyAction.children).toHaveLength(0);
   });
 });
 
@@ -1696,26 +1767,16 @@ describe("teardown", () => {
     expect(page.browser.net.calls).toHaveLength(2);
   });
 
-  it("cancels a pending clipboard-copy reset timer on teardown", async () => {
-    const page = renderPage();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
-    );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
-    page.elements.credGhcrCopy.dispatch("click");
-    await flushPromises();
-    expect(page.browser.clock.pending).toBeGreaterThan(0);
-    page.controller.teardown();
-    expect(page.browser.clock.pending).toBe(0);
-  });
-
   it("allows re-initializing after teardown", () => {
     const page = renderPage();
     page.controller.teardown();
     const reinitialized = initializeCredentialsPane(
       page.browser.context,
-      { repo: "octo/app", decisions: page.decisions },
+      {
+        repo: "octo/app",
+        mutationNonce: "test-nonce",
+        decisions: page.decisions
+      },
       page.dependencies
     );
     expect(isCredentialsPaneController(reinitialized)).toBe(true);

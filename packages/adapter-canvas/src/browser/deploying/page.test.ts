@@ -11,6 +11,7 @@ import {
   createDeferred,
   createFakeBrowser,
   createFakeElement,
+  fakeText,
   createFakeInput,
   createFakeSelect,
   fakeById,
@@ -125,7 +126,7 @@ function fixture(options: FixtureOptions = {}) {
   // real browser would make it discoverable via getElementById once the
   // markup renders; production wiring (context.dom.byId) finds it exactly as
   // it would find the real parsed element.
-  const copyPushBtn = createFakeInput("deploy-copy-push");
+  const pushActionHost = createFakeElement("deploy-push-action");
   const fixCredentialsBtn = createFakeInput("deploy-fix-credentials");
   if (withProgressModal) {
     elements.push(
@@ -137,7 +138,7 @@ function fixture(options: FixtureOptions = {}) {
       progressFailActions,
       failRepairNote,
       backBtn,
-      copyPushBtn,
+      pushActionHost,
       fixCredentialsBtn
     );
   }
@@ -191,7 +192,7 @@ function fixture(options: FixtureOptions = {}) {
     progressFailActions,
     failRepairNote,
     backBtn,
-    copyPushBtn,
+    pushActionHost,
     fixCredentialsBtn,
     deleteModal,
     deleteBody,
@@ -203,6 +204,7 @@ function fixture(options: FixtureOptions = {}) {
 
 function init(page: ReturnType<typeof fixture>) {
   return initializeDeployingPage(page.browser.context, {
+    mutationNonce: "test-nonce",
     repo: page.repo,
     branch: page.branch
   });
@@ -259,6 +261,7 @@ describe("initializeDeployingPage guards and lifecycle", () => {
         browser.document.add(element);
       }
       const teardown = initializeDeployingPage(browser.context, {
+        mutationNonce: "test-nonce",
         repo: "octo/app",
         branch: "main"
       });
@@ -362,7 +365,11 @@ describe("initializeDeployingPage guards and lifecycle", () => {
 describe("application select", () => {
   it("shows 'No repository' and skips the fetch when repo is empty", async () => {
     const page = fixture({ repo: "" });
-    initializeDeployingPage(page.browser.context, { repo: "", branch: "main" });
+    initializeDeployingPage(page.browser.context, {
+      repo: "",
+      mutationNonce: "test-nonce",
+      branch: "main"
+    });
     await flushPromises();
     expect(page.appSelect.innerHTML).toContain("No repository");
   });
@@ -412,7 +419,11 @@ describe("application select", () => {
 describe("environment select", () => {
   it("shows 'No repository' and skips the fetch when repo is empty", async () => {
     const page = fixture({ repo: "" });
-    initializeDeployingPage(page.browser.context, { repo: "", branch: "main" });
+    initializeDeployingPage(page.browser.context, {
+      repo: "",
+      mutationNonce: "test-nonce",
+      branch: "main"
+    });
     await flushPromises();
     expect(page.envSelect.innerHTML).toContain("No repository");
   });
@@ -471,6 +482,7 @@ describe("branch select", () => {
   it("falls back to the session branch when repo is empty", async () => {
     const page = fixture({ repo: "", branch: "feature" });
     initializeDeployingPage(page.browser.context, {
+      mutationNonce: "test-nonce",
       repo: "",
       branch: "feature"
     });
@@ -617,7 +629,11 @@ describe("deploy button state", () => {
 describe("deployments table", () => {
   it("shows a placeholder row when there is no repository", async () => {
     const page = fixture({ repo: "" });
-    initializeDeployingPage(page.browser.context, { repo: "", branch: "main" });
+    initializeDeployingPage(page.browser.context, {
+      repo: "",
+      mutationNonce: "test-nonce",
+      branch: "main"
+    });
     await flushPromises();
     expect(page.tableBody.innerHTML).toContain("No application deployments");
   });
@@ -1560,7 +1576,7 @@ describe("deploy flow", () => {
     );
   });
 
-  it("shows the branch-not-pushed panel and wires the copy-push button", async () => {
+  it("shows the branch-not-pushed panel and offers to push the branch", async () => {
     const page = fixture();
     init(page);
     await flushPromises();
@@ -1579,20 +1595,13 @@ describe("deploy flow", () => {
     await flushPromises();
 
     expect(page.progressTitle.innerHTML).toContain("Branch not pushed yet");
-    expect(page.progressSubtitle.innerHTML).toContain("git push -u origin");
-    // The markup rendered into progressSubtitle.innerHTML is a plain string
-    // in the fake DOM (not parsed into real nodes), so the button under test
-    // is the pre-registered document-level element with the same id that
-    // production code discovers via context.dom.byId.
-    const copyBtn = page.copyPushBtn;
-    copyBtn.dispatch("click");
-    await flushPromises();
-    expect(page.browser.clipboard.writes).toContain(
+    // The markup rendered into progressSubtitle.innerHTML is a plain string in
+    // the fake DOM (not parsed into real nodes), so the callout mounts into the
+    // pre-registered document-level host that production discovers by id.
+    expect(fakeText(page.pushActionHost)).toContain(
       "git push -u origin feature"
     );
-    expect(copyBtn.textContent).toBe("Copied");
-    page.browser.clock.tick(1500);
-    expect(copyBtn.textContent).toBe("Copy");
+    expect(fakeText(page.pushActionHost)).toContain("Run with Copilot");
   });
 
   it("falls back to 'your branch' when the branch-not-pushed failure omits errorBranch", async () => {
@@ -1762,35 +1771,9 @@ describe("deploy flow", () => {
     expect(page.failRepairNote.textContent).toContain("Copilot is analyzing");
     expect(page.deployBtn.disabled).toBe(false);
 
-    // showDeployFailed unconditionally rebinds the copy-push button
-    // regardless of failure kind; a generic failure has no errorBranch, so
-    // the copied command falls back to an empty branch name.
-    page.copyPushBtn.dispatch("click");
-    await flushPromises();
-    expect(page.browser.clipboard.writes).toContain("git push -u origin ");
-  });
-
-  it("does not mark the copy button 'Copied' when the clipboard write fails", async () => {
-    const page = fixture();
-    init(page);
-    await flushPromises();
-    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
-    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
-      jsonResponse({
-        status: "failed",
-        errorKind: "branch-not-pushed",
-        errorBranch: "feature",
-        handoff: { pending: false, state: "idle" }
-      })
-    );
-    vi.spyOn(page.browser.clipboard, "write").mockResolvedValueOnce(false);
-    page.deployBtn.dispatch("click");
-    await flushPromises();
-    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
-    await flushPromises();
-    page.copyPushBtn.dispatch("click");
-    await flushPromises();
-    expect(page.copyPushBtn.textContent).not.toBe("Copied");
+    // A generic failure has no branch to push, so no run-command callout is
+    // offered at all rather than one naming an empty branch.
+    expect(page.pushActionHost.children).toHaveLength(0);
   });
 
   it("shows the handoff-pending note for a retryable handoff state", async () => {

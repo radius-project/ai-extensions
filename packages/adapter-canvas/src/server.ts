@@ -14,6 +14,7 @@ import { rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildRemediation,
   computeGraphDiff,
   deployStatusKeys,
   fetchBicepFromRepo,
@@ -23,8 +24,11 @@ import {
   resolveRecipeOutputs,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
+  remediationSessionMessage,
+  remediationView,
   stateRegistryForEnvironment
 } from "@radius-project/core";
+import type { Remediation, RemediationView } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import {
   sharedCredentials,
@@ -202,6 +206,10 @@ import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js"
 import { composeAzureAutoSetupDependencies } from "./server/azure-auto-setup-dependencies.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
+import {
+  createRemediationRoutes,
+  productionRemediationDependencies
+} from "./server/routes/remediations.js";
 import {
   createGraphsPlanningRoutes,
   createGraphsPlanningStreamRoutes
@@ -803,6 +811,17 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   errorMessage
 });
 
+// Suggested terminal commands are handed to the Copilot session, never run by
+// this server. The route rebuilds each command from the core registry, so the
+// only seams it needs are that same session hook and the error formatter.
+const remediationRoutes = createRemediationRoutes(
+  productionRemediationDependencies({
+    runSessionPrompt: (prompt) =>
+      invokeSessionPrompt(sessionPromptHandler, prompt),
+    errorMessage
+  })
+);
+
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   defaultBranchForState,
@@ -1142,6 +1161,7 @@ const serverRoutes = createServerRouteTable({
   ...azureAutoSetupRoutes,
   ...identityProfilesRoutes,
   ...identityAuthRoutes,
+  ...remediationRoutes,
   ...graphsPlanningRoutes,
   ...graphsPlanningStreamRoutes,
   ...graphsPlanningWritesRoutes,
@@ -1703,12 +1723,18 @@ export function azureLoginRequiredResponse({
   error: string;
   code: string;
   tenantId: string;
+  remediation: RemediationView;
 } {
   const error =
     activeTenantId ?
       `Active Azure session is tenant ${activeTenantId}, not ${tenantId}. Run "az login --use-device-code --tenant ${tenantId}" in your terminal, then click Verify Credentials again.`
     : 'No active Azure session. Run "az login --use-device-code" in your terminal, then click Verify Credentials again.';
-  return { error, code: "az-login-required", tenantId };
+  return {
+    error,
+    code: "az-login-required",
+    tenantId,
+    remediation: remediationView("azure-cli-login", { tenantId })
+  };
 }
 
 export async function invokeSessionPrompt(
@@ -1732,46 +1758,46 @@ export async function invokeSessionPrompt(
   }
 }
 
-export function buildAzureCliAssistPrompt({
+// The Azure CLI assist prompts now come from the shared remediation registry in
+// core, so this route and /api/run-remediation cannot drift apart in wording,
+// command shape, or tenant handling. The registry reproduces the original text
+// exactly; `server.test.ts` pins that against the frozen legacy strings.
+function azureCliAssistRemediation({
   action = "login",
   tenantId = ""
-}: AzureCliAssistInput = {}): string {
-  const safeTenantId =
-    typeof tenantId === "string" && isUuid(tenantId.trim()) ?
-      tenantId.trim()
-    : "";
-  const loginCommand = `az login --use-device-code${
-    safeTenantId ? ` --tenant ${safeTenantId}` : ""
-  }`;
-  const loginInstructions = [
-    `Run \`${loginCommand}\` in this Copilot session.`,
-    "For that command, remove COPILOT_AGENT_SESSION_ID from the az process environment so Azure CLI does not inject it into the authentication request.",
-    "Use the shell-appropriate way to unset the variable only for the login invocation, and show me the device code and sign-in URL."
-  ].join(" ");
-  if (action === "install") {
-    return [
-      "Azure CLI is not installed in this environment, so the Radius canvas can't verify Azure credentials yet.",
-      `Please install Azure CLI, then ${loginInstructions}`,
-      "After the install and login finish, return to the Radius canvas and click Verify Credentials again."
-    ].join("\n\n");
+}: AzureCliAssistInput = {}): Remediation {
+  const id = action === "install" ? "azure-cli-install" : "azure-cli-login";
+  const requested = typeof tenantId === "string" ? tenantId.trim() : "";
+  const result = buildRemediation(
+    id,
+    isUuid(requested) ? { tenantId: requested } : {}
+  );
+  // Unreachable: both Azure ids build unconditionally, and the tenant is only
+  // passed once `isUuid` accepted it. Reaching here would mean the registry
+  // stopped offering an id this route names, which no test can stage without
+  // replacing the registry itself.
+  /* v8 ignore next 3 */
+  if (!result.ok) {
+    throw new Error(`Azure CLI assist is unavailable: ${result.reason}`);
   }
-  return [
-    "The Radius canvas needs an active Azure CLI session before it can verify these credentials.",
-    loginInstructions,
-    "After the login finishes, return to the Radius canvas and click Verify Credentials again."
-  ].join("\n\n");
+  return result.remediation;
+}
+
+export function buildAzureCliAssistPrompt(
+  input: AzureCliAssistInput = {}
+): string {
+  return remediationSessionMessage(azureCliAssistRemediation(input)).prompt;
 }
 
 // Timeline stand-in for buildAzureCliAssistPrompt. The canvas clicks Verify
 // Credentials on the user's behalf, so the turn it injects should read as a
 // status line, not as multi-paragraph instructions the user appears to have
 // typed. The agent still receives the full prompt.
-export function azureCliAssistDisplayPrompt({
-  action = "login"
-}: AzureCliAssistInput = {}): string {
-  return action === "install" ?
-      "Installing Azure CLI and signing in so the Radius canvas can verify these Azure credentials."
-    : "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials.";
+export function azureCliAssistDisplayPrompt(
+  input: AzureCliAssistInput = {}
+): string {
+  return remediationSessionMessage(azureCliAssistRemediation(input))
+    .displayPrompt;
 }
 
 // Pairs the agent-facing Azure CLI prompt with its timeline stand-in so the two
@@ -1779,10 +1805,7 @@ export function azureCliAssistDisplayPrompt({
 export function azureCliAssistMessage(
   input: AzureCliAssistInput = {}
 ): SessionPromptMessage {
-  return {
-    prompt: buildAzureCliAssistPrompt(input),
-    displayPrompt: azureCliAssistDisplayPrompt(input)
-  };
+  return remediationSessionMessage(azureCliAssistRemediation(input));
 }
 
 // Fire the app.bicep handoff at most once per repo+branch(es) for a given

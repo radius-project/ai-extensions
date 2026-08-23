@@ -1,0 +1,14 @@
+---
+"radius": minor
+---
+
+Turn the terminal commands the canvas suggests into actions you can run without leaving it.
+
+Several canvas surfaces used to stop and tell you to go run a command — sign in to Azure CLI, sign in to AWS CLI, grant the GitHub CLI a missing scope, push the current branch — with the command buried in prose. Two of them offered **Copy command**; none offered to run anything.
+
+Those suggestions now render as a callout with the command shown verbatim, **Copy**, and **Run with Copilot**. Clicking Run asks the Copilot session to run it in the terminal you are already working in, and the callout points back at the canvas control that re-checks (Verify Credentials, Retry) once it finishes.
+
+- The command you run is rebuilt server-side from a stable identifier through a single registry in `packages/core`, never from text the page supplied. Parameters are structurally validated identifiers only — a GUID tenant or subscription, a GitHub login, a git branch — and commands are argv arrays rather than composed shell strings, so a suggestion cannot be turned into a different command.
+- A command that changes state beyond the click — a machine-wide GitHub account switch, a granted token scope, or a `git push` — asks a second time in place, naming what changes. The new `POST /api/run-remediation` route independently refuses it without that confirmation, so the guard does not depend on the page.
+- The callout only claims what it can observe. It reports confirming, sending, handed off, hand-off failed, and cancelled; it never reports a success for a command it did not run. When a command cannot be built safely — an unpushable branch name, for example — Run is offered disabled with the reason stated, and Copy still works.
+- `/api/azure-cli-assist` is re-implemented on the same registry with its request and response payloads unchanged, and existing error prose is untouched, so nothing regresses for a client that ignores the new structured field.
