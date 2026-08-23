@@ -8,7 +8,7 @@
 // same container replaces them instead of stacking.
 
 import { buildGraph, resolveGraphSettings } from "./build.js";
-import { createDetailsPanel } from "./details.js";
+import { createDetailsPanel, safeExternalUrl } from "./details.js";
 import { layoutGraph } from "./layout.js";
 import {
   buildCategoryLegendHtml,
@@ -103,6 +103,7 @@ interface ActiveRender {
   mounted: MountedGraph | null;
   panel: DetailsPanel | null;
   host: DomElement | null;
+  legend: DomElement | null;
 }
 
 export function createGraphSurface(
@@ -114,16 +115,15 @@ export function createGraphSurface(
   // Open an external URL the way clicking a native target="_blank" anchor
   // would, which the host opens in the system browser.
   function openExternal(url: string): void {
-    if (!url) return;
-    context.external.open(url);
+    const safeUrl = safeExternalUrl(url);
+    if (safeUrl) context.external.open(safeUrl);
   }
 
   // Open a repo-relative worktree file in the Copilot editor canvas. The
   // webview has no SDK session handle, so it asks the local canvas server,
   // which opens the file in the editor. localSource is a coarse page-level flag
   // (repo and branch match the workspace), so a file that is not actually on
-  // this checkout answers non-2xx and the click falls back to the remote URL —
-  // the link is never a dead end.
+  // this checkout answers non-2xx and the page attempts the remote fallback.
   function openLocalSource(
     relPath: string,
     line: number,
@@ -170,6 +170,7 @@ export function createGraphSurface(
     if (current.mounted) current.mounted.unmount();
     if (current.panel) current.panel.destroy();
     if (current.host) current.host.remove();
+    if (current.legend) current.legend.remove();
   }
 
   // Clear DOM a prior render created (its React host and details panel) plus any
@@ -194,24 +195,26 @@ export function createGraphSurface(
     container: DomElement,
     settings: GraphSettings,
     resources: readonly GraphResource[]
-  ): void {
+  ): DomElement | null {
     // Diff mode intentionally shows no legend; status is encoded directly on
     // node borders and edges.
-    if (!settings.showLegend || settings.diffMode) return;
+    if (!settings.showLegend || settings.diffMode) return null;
     const parent = parentOf(container);
-    if (!parent) return;
+    if (!parent) return null;
     if (settings.deployMode) {
       const legend = context.dom.createElement("div");
       legend.className = LEGEND_CLASS;
-      legend.innerHTML = buildStatusLegendHtml();
+      legend.innerHTML = buildStatusLegendHtml(resources);
       parent.insertBefore(legend, container);
-      return;
+      return legend;
     }
     const categories = collectLegendCategories(resources);
+    if (categories.length === 0) return null;
     const legend = context.dom.createElement("div");
     legend.className = LEGEND_CLASS;
     legend.innerHTML = buildCategoryLegendHtml(categories);
     parent.insertBefore(legend, container);
+    return legend;
   }
 
   function emptyController(
@@ -256,7 +259,12 @@ export function createGraphSurface(
 
     const settings = resolveGraphSettings(options);
     if (!resources || resources.length === 0) {
-      const record: ActiveRender = { mounted: null, panel: null, host: null };
+      const record: ActiveRender = {
+        mounted: null,
+        panel: null,
+        host: null,
+        legend: null
+      };
       active.set(containerId, record);
       container.innerHTML = "";
       return emptyController(containerId, container, options, record);
@@ -273,7 +281,12 @@ export function createGraphSurface(
     const built = buildGraph(settings, resources);
     layoutGraph(vendor.dagre, built.nodes, built.edges);
 
-    const record: ActiveRender = { mounted: null, panel: null, host: null };
+    const record: ActiveRender = {
+      mounted: null,
+      panel: null,
+      host: null,
+      legend: null
+    };
     active.set(containerId, record);
 
     // Mount React into a child host so the details panel and legend (siblings
@@ -315,7 +328,7 @@ export function createGraphSurface(
     });
     record.mounted = mounted;
 
-    renderLegend(container, settings, built.resources);
+    record.legend = renderLegend(container, settings, built.resources);
 
     const controller: GraphController = {
       update(next) {
@@ -327,6 +340,14 @@ export function createGraphSurface(
         }
         const rebuilt = buildGraph(settings, next);
         layoutGraph(vendor.dagre, rebuilt.nodes, rebuilt.edges);
+        if (record.legend) {
+          record.legend.innerHTML =
+            settings.deployMode ?
+              buildStatusLegendHtml(rebuilt.resources)
+            : buildCategoryLegendHtml(
+                collectLegendCategories(rebuilt.resources)
+              );
+        }
         if (!mounted.update(rebuilt.nodes, rebuilt.edges)) {
           return render(containerId, next, options);
         }

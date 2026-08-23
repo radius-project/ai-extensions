@@ -21,6 +21,7 @@ import {
   srcLineFromRef,
   srcPathFromRef
 } from "./model.js";
+import { azurePortalUrl } from "./details.js";
 // Imported from the `graph` subpath rather than the package root: the root
 // barrel also re-exports the workflow modules, and `workflows/delete.ts` reads
 // `process.env` at module scope. Bundling that into a browser entry ships a
@@ -236,7 +237,8 @@ function cloudOutputsOf(resource: GraphResource): ResourceOutput[] {
       cloud.push({
         name: output.name || "",
         type: output.type || "",
-        id: output.id
+        id: output.id,
+        ...(output.portalUrl ? { portalUrl: output.portalUrl } : {})
       });
     }
   }
@@ -376,7 +378,15 @@ export function buildGraph(
       deployMessage: resource.deployMessage || "",
       deployBadgeKind: settings.deployMode ? badgeKind : "",
       deployBadge: settings.deployMode ? radiusDeployBadgeSvg(badgeKind) : "",
-      portalUrl: resource.portalUrl || "",
+      // Radius publishes portalUrl on the concrete output resource, not its
+      // modeled parent. Resolved graphs keep one parent node, so carry the same
+      // representative output used for the type label onto that clickable card.
+      portalUrl:
+        resource.portalUrl ||
+        resolved?.portalUrl ||
+        (resolved?.id?.startsWith("/subscriptions/") ?
+          azurePortalUrl(resolved.id)
+        : ""),
       cloudResources: JSON.stringify(cloudOutputsOf(resource))
     });
 
