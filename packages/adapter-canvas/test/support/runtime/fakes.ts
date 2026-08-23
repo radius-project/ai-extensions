@@ -98,6 +98,9 @@ export interface FakeDependenciesOptions {
   headCommits?: Record<string, string>;
   // Answer for workspaceSourceChangedSince; undefined means "git cannot say".
   sourceChangedSince?: boolean;
+  // Answer for workspaceModelRecoverable. Defaults to true, the ordinary case
+  // of a committed, unmodified model, so tests opt in to the risky states.
+  modelRecoverable?: boolean;
   generatorVersion?: string;
   // Worktree file listings keyed `<repo>@<branch>`. A missing key resolves to
   // null, matching fetchWorkspaceTree's "could not list" answer.
@@ -339,6 +342,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       ),
       workspaceSourceChangedSince: vi.fn(
         async () => options.sourceChangedSince
+      ),
+      workspaceModelRecoverable: vi.fn(async () =>
+        options.modelRecoverable === undefined ? true : options.modelRecoverable
       ),
       branchHeadCommit: vi.fn(
         async (repo: string, branch: string) =>

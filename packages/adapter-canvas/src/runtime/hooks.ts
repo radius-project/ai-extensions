@@ -483,16 +483,19 @@ export function appModelRefreshMessage(status: AppModelStatus): HandoffMessage {
   };
 }
 
-// Prompt sent when a graph canvas renders a model that needs regenerating AND
-// was hand-edited after generation, so the refresh would take work with it.
+// Prompt sent when a graph canvas renders a model that needs regenerating and
+// whose content the refresh would take with it. Two cases reach here: a model
+// edited after it was generated, and a model with no origin record that git
+// cannot give back because it is untracked or already modified.
 // The view is NOT blocked for these: the file on disk is what would deploy, so it
-// is the honest thing to render. But regenerating would destroy content the user
-// wrote deliberately, so the refresh is offered rather than taken. A hand edit on
-// a model that needs no refresh never reaches here, and is not mentioned at all.
+// is the honest thing to render. But regenerating would destroy content that
+// exists nowhere else, so the refresh is offered rather than taken. A hand edit
+// on a model that needs no refresh never reaches here, and a model with no record
+// that IS committed and clean does not either: git has that one.
 export function appModelUnverifiedPrompt(status: AppModelStatus): string {
   const where = status.repo ? ` for ${status.repo}` : "";
   return [
-    `The Radius graph${where} rendered from the existing .radius/app.bicep on branch \`${status.branch}\`, but that model needs to be regenerated and was edited after it was generated.`,
+    `The Radius graph${where} rendered from the existing .radius/app.bicep on branch \`${status.branch}\`, but that model needs to be regenerated and doing so would discard content that exists nowhere else.`,
     "",
     status.freshness.reason,
     "",
@@ -510,7 +513,7 @@ export function appModelUnverifiedDisplayPrompt(
   status: AppModelStatus
 ): string {
   const where = status.repo ? ` for ${status.repo}` : "";
-  return `Asking whether to regenerate the manually edited application model${where} (branch \`${status.branch}\`).`;
+  return `Asking before regenerating the application model${where} (branch \`${status.branch}\`).`;
 }
 
 export function appModelUnverifiedMessage(

@@ -1051,7 +1051,7 @@ describe("appModelUnverifiedPrompt", () => {
 
   it("omits the repo phrase from the timeline when the repo is unknown", () => {
     expect(appModelUnverifiedDisplayPrompt(modelStatus("", "feat"))).toContain(
-      "manually edited application model (branch `feat`)"
+      "Asking before regenerating the application model (branch `feat`)"
     );
   });
 });

@@ -805,6 +805,32 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(message.displayPrompt).toContain("acme/widgets");
   });
 
+  // A missing record says nothing about who wrote the model, so the question
+  // that decides the overwrite is whether git can give it back. An untracked or
+  // already modified file exists nowhere else, so replacing it is theirs to
+  // approve even though nothing proves they edited it.
+  it("asks before replacing a model with no record that git cannot restore", async () => {
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" },
+      modelRecoverable: false
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledTimes(1);
+    const message = (session.send as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as { prompt: string };
+    expect(message.prompt).toContain("exists nowhere else");
+    expect(message.prompt).toContain("would be lost");
+  });
+
   // A hand edit is permanent and the user cannot accept it, so raising it while
   // the model is otherwise current would ask the same question every session.
   it("says nothing about a hand edit that needs no regeneration", async () => {

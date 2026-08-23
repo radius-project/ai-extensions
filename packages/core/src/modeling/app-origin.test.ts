@@ -172,11 +172,12 @@ describe("evaluateAppModelFreshness", () => {
     expect(result.origin).toEqual(origin());
   });
 
-  it("regenerates without confirmation a model with no origin", () => {
+  it("regenerates without confirmation a recoverable model with no origin", () => {
     const result = evaluateAppModelFreshness({
       ...current,
       model: MODEL,
-      originText: null
+      originText: null,
+      modelRecoverable: true
     });
 
     expect(result.status).toBe("unrecorded");
@@ -185,11 +186,34 @@ describe("evaluateAppModelFreshness", () => {
     expect(result.reason).toContain(APP_ORIGIN_REPO_PATH);
   });
 
+  // Without a record we cannot tell whether anyone edited the model, so the
+  // question that decides the overwrite is whether git can give it back.
+  it.each([
+    ["uncommitted or untracked", false],
+    ["unknown to git", undefined]
+  ])(
+    "requires confirmation for a model with no origin that is %s",
+    (_label, modelRecoverable) => {
+      const result = evaluateAppModelFreshness({
+        ...current,
+        model: MODEL,
+        originText: null,
+        modelRecoverable
+      });
+
+      expect(result.status).toBe("unrecorded");
+      expect(result.stale).toBe(true);
+      expect(result.requiresConfirmation).toBe(true);
+      expect(result.reason).toContain("exists nowhere else");
+    }
+  );
+
   it("regenerates without confirmation a model with an unparseable origin", () => {
     const result = evaluateAppModelFreshness({
       ...current,
       model: MODEL,
-      originText: "{ not json"
+      originText: "{ not json",
+      modelRecoverable: true
     });
 
     expect(result.status).toBe("unrecorded");

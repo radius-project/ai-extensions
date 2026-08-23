@@ -66,11 +66,12 @@ export interface AppModelFreshness {
   // trusted. `missing` is not stale, since there is nothing to refresh and it
   // has to be generated, so callers can keep the two paths distinct.
   stale: boolean;
-  // True when the model was changed after it was generated, so regenerating
-  // would destroy work someone did deliberately and the user has to approve the
-  // overwrite first. A model with no origin record does not qualify: nothing
-  // shows anyone touched it, and every model written before records existed
-  // would otherwise prompt on its first graph open.
+  // True when regenerating could destroy work that exists nowhere else, so the
+  // user has to approve the overwrite first. Two cases qualify: a model edited
+  // after it was generated, and a model with no origin record that git cannot
+  // give back. A model with no record that IS committed and clean does not:
+  // nothing shows anyone touched it, git still has it, and every model written
+  // before records existed would otherwise prompt on its first graph open.
   requiresConfirmation: boolean;
   // Human-readable statement of the evidence, safe to put in an agent prompt.
   reason: string;
@@ -96,6 +97,12 @@ export interface AppModelFreshnessInput {
   sourceChanged?: boolean;
   // Current generator version. Empty when it could not be resolved.
   generatorVersion?: string | null;
+  // Whether the model on disk could be recovered after an overwrite, because it
+  // is committed and unmodified. Only consulted when there is no origin record,
+  // where it decides whether replacing the file can destroy anything. Undefined
+  // means unknown, which is treated as "not recoverable": we would rather ask
+  // than overwrite a file we cannot show is safe to overwrite.
+  modelRecoverable?: boolean;
   // Fingerprints the model the same way the writer did. Injected because this
   // package must stay free of Node built-ins (see normalizeAppBicep).
   hashAppBicep(content: string): string;
@@ -208,10 +215,20 @@ export function evaluateAppModelFreshness(
 
   const origin = parseAppOrigin(input.originText);
   if (!origin) {
+    // Without a record we cannot tell whether anyone edited this model, so the
+    // question we can answer instead is whether overwriting it would cost them
+    // anything. A committed, unmodified file survives in git, and regeneration
+    // writes only the working tree, so the user can read the diff and undo it.
+    // An untracked or already-modified file exists nowhere else, so replacing
+    // it is final and is theirs to approve.
+    const recoverable = input.modelRecoverable === true;
     return freshness(
       "unrecorded",
-      `The model has no usable ${APP_ORIGIN_REPO_PATH} origin record, so the source revision it was generated from and whether it still compiles cannot be established.`,
-      null
+      recoverable ?
+        `The model has no usable ${APP_ORIGIN_REPO_PATH} origin record, so the source revision it was generated from and whether it still compiles cannot be established.`
+      : `The model has no usable ${APP_ORIGIN_REPO_PATH} origin record, so the source revision it was generated from and whether it still compiles cannot be established. It also has uncommitted changes or is untracked, so regenerating it would discard content that exists nowhere else.`,
+      null,
+      !recoverable
     );
   }
 

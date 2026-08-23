@@ -325,6 +325,39 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.requiresConfirmation).toBe(true);
   });
 
+  it("requires confirmation for a model with no record git cannot restore", async () => {
+    const { resolveAppModelStatus } = helpers({
+      modelRecoverable: false,
+      bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
+      headCommits: { "workspace:/workspace": COMMIT }
+    });
+
+    const status = await resolveAppModelStatus(
+      "acme/widgets",
+      "main",
+      WORKSPACE_STATE
+    );
+
+    expect(status.freshness.status).toBe("unrecorded");
+    expect(status.freshness.requiresConfirmation).toBe(true);
+  });
+
+  // Asking git costs a subprocess, so it is only worth it when the answer can
+  // change what we do: on the workspace branch, with no record to judge by.
+  it("does not ask git about recoverability once a record exists", async () => {
+    const { resolveAppModelStatus, deps } = helpers({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: origin()
+      },
+      headCommits: { "workspace:/workspace": COMMIT }
+    });
+
+    await resolveAppModelStatus("acme/widgets", "main", WORKSPACE_STATE);
+
+    expect(deps.appModel.workspaceModelRecoverable).not.toHaveBeenCalled();
+  });
+
   it("stays quiet about a hand edit when nothing else needs regenerating", async () => {
     const { resolveAppModelStatus } = helpers({
       sourceChangedSince: false,
