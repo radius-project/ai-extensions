@@ -1036,9 +1036,9 @@ describe("writeBicepCompileConfig", () => {
       expect(() => writeBicepCompileConfig(dir, "", undefined, "")).toThrow(
         /no reference could be derived from the rad release/
       );
-      expect(() =>
-        writeBicepCompileConfig(dir, "", undefined, "")
-      ).not.toThrow(/the release of the managed rad binary could not be read/);
+      expect(() => writeBicepCompileConfig(dir, "", undefined, "")).not.toThrow(
+        /the release of the managed rad binary could not be read/
+      );
     });
   });
 });
