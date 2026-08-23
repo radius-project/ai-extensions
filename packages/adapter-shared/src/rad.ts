@@ -1530,13 +1530,20 @@ function readRepositoryBicepConfig(
  * the model against a different contract than it targets, so an actionable
  * error is raised instead. The reason is embedded in the message because
  * callers routinely run with the default no-op logger (issue #173).
+ *
+ * The message states only what is known here — that no reference was available.
+ * Why the derived one is missing (no binary located, an unreadable version, or
+ * one that maps to no release channel) is reported by
+ * {@link resolveRadiusExtensionRef} through `log`, so this must not assert a
+ * single cause on its behalf.
  */
 function requireRadiusExtensionRef(ref: string, reason: string): string {
   if (ref) return ref;
   throw new Error(
     `Cannot determine which Radius Bicep extension to compile with: ${reason}, ` +
-      "and the release of the managed rad binary could not be read. Pin it by setting " +
-      `"extensions.radius" in .radius/bicepconfig.json (for example "${RADIUS_EXTENSION_REGISTRY}:0.60").`
+      "and no reference could be derived from the rad release that would run the " +
+      'compile. Pin it by setting "extensions.radius" in .radius/bicepconfig.json ' +
+      `(for example "${RADIUS_EXTENSION_REGISTRY}:0.60").`
   );
 }
 
@@ -1559,9 +1566,9 @@ function requireRadiusExtensionRef(ref: string, reason: string): string {
  * `radiusExtensionRef` is the reference derived from the rad binary that will
  * run the compile (see {@link resolveRadiusExtensionRef}). It is used only when
  * the repository does not pin one — when no applicable bicepconfig.json exists,
- * it is unreadable, or it omits `extensions.radius`. When it is empty in one of
- * those cases this throws rather than falling back to a floating tag, so a
- * compile never silently runs against a schema that does not match the
+ * it is unreadable, or its `extensions.radius` is absent or blank. When it is
+ * empty in one of those cases this throws rather than falling back to a floating
+ * tag, so a compile never silently runs against a schema that does not match the
  * toolchain.
  *
  * Returns the effective config object written to disk, so callers can report the
@@ -1593,19 +1600,28 @@ export function writeBicepCompileConfig(
 
     const extensionsSource =
       isPlainObject(parsed.extensions) ? parsed.extensions : {};
-    const radiusRef =
+    // A blank pin is treated as no pin: written through verbatim it would
+    // produce an unresolvable `extensions.radius` (BCP204) and send the empty
+    // string to the artifact copier below as if it were a local path.
+    const pinnedRadius =
       typeof extensionsSource.radius === "string" ?
-        extensionsSource.radius
-      : requireRadiusExtensionRef(
-          fallbackRef,
-          "the repository bicepconfig.json does not pin extensions.radius"
-        );
+        extensionsSource.radius.trim()
+      : "";
+    const radiusRef =
+      pinnedRadius ||
+      requireRadiusExtensionRef(
+        fallbackRef,
+        "the repository bicepconfig.json does not pin extensions.radius"
+      );
     const extensions: Record<string, unknown> & { radius: string } = {
       ...extensionsSource,
       radius: radiusRef
     };
     for (const ref of Object.values(extensions)) {
-      if (typeof ref !== "string") continue;
+      // Blank aliases are preserved in the config but never resolved as local
+      // artifacts: `path.resolve(root, "")` is the workspace directory itself,
+      // which the copier would report as an unreadable artifact.
+      if (typeof ref !== "string" || !ref.trim()) continue;
       if (!isOciExtensionRef(ref))
         copyLocalExtensionArtifact(radArtifactsDir, dir, ref, log);
     }

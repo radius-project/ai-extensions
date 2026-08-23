@@ -913,6 +913,66 @@ describe("writeBicepCompileConfig", () => {
     );
   });
 
+  it("trims surrounding whitespace from a repository pin", () => {
+    fs.writeFileSync(
+      path.join(ws, "bicepconfig.json"),
+      JSON.stringify({
+        extensions: { radius: "  br:biceptypes.azurecr.io/radius:0.48  " }
+      })
+    );
+    writeBicepCompileConfig(dir, ws, undefined, DERIVED);
+    expect(readConfig().extensions.radius).toBe(
+      "br:biceptypes.azurecr.io/radius:0.48"
+    );
+  });
+
+  it.each([
+    ["an empty", ""],
+    ["a whitespace-only", "   "]
+  ])(
+    "treats %s repository pin as no pin and uses the derived reference",
+    (_label, pinned) => {
+      // Written through verbatim this would emit an unresolvable
+      // `extensions.radius` (BCP204) and be handed to the artifact copier as if
+      // it were a local path.
+      fs.writeFileSync(
+        path.join(ws, "bicepconfig.json"),
+        JSON.stringify({ extensions: { radius: pinned } })
+      );
+      const log = vi.fn();
+      writeBicepCompileConfig(dir, ws, log, DERIVED);
+      expect(readConfig().extensions.radius).toBe(DERIVED);
+      expect(log.mock.calls.map(([m]) => m).join("\n")).not.toContain(
+        "extension artifact"
+      );
+    }
+  );
+
+  it("fails closed on a blank repository pin when nothing can be derived", () => {
+    fs.writeFileSync(
+      path.join(ws, "bicepconfig.json"),
+      JSON.stringify({ extensions: { radius: "   " } })
+    );
+    expect(() => writeBicepCompileConfig(dir, ws, undefined, "")).toThrow(
+      /does not pin extensions\.radius/
+    );
+  });
+
+  it("preserves a blank extension alias without resolving it as an artifact", () => {
+    // `path.resolve(root, "")` is the workspace directory itself, so copying it
+    // fails with EISDIR and logs a warning naming no artifact at all.
+    fs.writeFileSync(
+      path.join(ws, "bicepconfig.json"),
+      JSON.stringify({ extensions: { radius: DERIVED, customTypes: "" } })
+    );
+    const log = vi.fn();
+    writeBicepCompileConfig(dir, ws, log, DERIVED);
+    expect(readConfig().extensions.customTypes).toBe("");
+    expect(log.mock.calls.map(([m]) => m).join("\n")).not.toContain(
+      "extension artifact"
+    );
+  });
+
   describe("fail-closed when no extension reference can be established", () => {
     // Regression guard for issue #487: substituting a floating tag compiles the
     // model against a contract it does not target, so the compile must not run.
@@ -966,6 +1026,19 @@ describe("writeBicepCompileConfig", () => {
         /Pin it by setting "extensions\.radius" in \.radius\/bicepconfig\.json/
       );
       expect(fs.existsSync(path.join(dir, "bicepconfig.json"))).toBe(false);
+    });
+
+    it("does not assert a cause it cannot know for the missing reference", () => {
+      // The throw also fires when a version was readable but mapped to no
+      // release channel, so claiming the binary could not be read would send
+      // the user after the wrong problem. The specific cause is logged by
+      // resolveRadiusExtensionRef instead.
+      expect(() => writeBicepCompileConfig(dir, "", undefined, "")).toThrow(
+        /no reference could be derived from the rad release/
+      );
+      expect(() =>
+        writeBicepCompileConfig(dir, "", undefined, "")
+      ).not.toThrow(/the release of the managed rad binary could not be read/);
     });
   });
 });
