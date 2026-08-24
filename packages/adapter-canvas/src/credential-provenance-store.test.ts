@@ -87,36 +87,35 @@ describe("createFileCredentialProvenanceStore", () => {
   });
 
   it("keeps the lock directory mtime fresh with a heartbeat while held", async () => {
+    const directory = await tempDirectory();
+    const lockDir = path.join(directory, ".lock");
+    // A tiny heartbeat cadence so the mtime refresh fires many times per second.
+    // Spy on fs.utimes so the assertion proves the heartbeat ran without
+    // depending on filesystem mtime granularity.
     const utimesSpy = vi.spyOn(fs, "utimes");
-    const intervalSpy = vi.spyOn(globalThis, "setInterval");
+    const store = createFileCredentialProvenanceStore({
+      directory,
+      lockHeartbeatMs: 5
+    });
+    let release: () => void = () => {};
+    const running = store.withLock(
+      () => new Promise<void>((resolve) => (release = resolve))
+    );
     try {
-      const directory = await tempDirectory();
-      const store = createFileCredentialProvenanceStore({ directory });
-      let release: () => void = () => {};
-      const running = store.withLock(
-        () => new Promise<void>((resolve) => (release = resolve))
-      );
-      // Wait until the heartbeat interval has been scheduled, which only happens
-      // once the lock is acquired (after the real mkdir/writeFile I/O).
-      for (let i = 0; i < 50 && intervalSpy.mock.calls.length === 0; i++) {
-        await new Promise((resolve) => setImmediate(resolve));
+      // Wait until at least one heartbeat has refreshed the lock directory.
+      let refreshed = false;
+      for (let i = 0; i < 200 && !refreshed; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        refreshed = utimesSpy.mock.calls.some((call) => call[0] === lockDir);
       }
-      expect(intervalSpy).toHaveBeenCalled();
-      const tick = intervalSpy.mock.calls[0][0] as () => void;
-      utimesSpy.mockClear();
-      tick();
-      await new Promise((resolve) => setImmediate(resolve));
-      const lockDir = path.join(directory, ".lock");
-      expect(utimesSpy).toHaveBeenCalled();
-      expect(utimesSpy.mock.calls[0][0]).toBe(lockDir);
+      expect(refreshed).toBe(true);
+    } finally {
       release();
       await running;
-      // The heartbeat is cleared and the lock released when work resolves.
-      await expect(fs.stat(lockDir)).rejects.toMatchObject({ code: "ENOENT" });
-    } finally {
-      intervalSpy.mockRestore();
       utimesSpy.mockRestore();
     }
+    // The heartbeat is cleared and the lock released when work resolves.
+    await expect(fs.stat(lockDir)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("ignores non-json files but fails closed on corrupt records", async () => {

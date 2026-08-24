@@ -25,16 +25,21 @@ function fileName(key: string): string {
 
 export function createFileCredentialProvenanceStore({
   directory,
-  report = () => {}
+  report = () => {},
+  lockHeartbeatMs = 60_000
 }: {
   directory: string;
   report?: CredentialProvenanceStoreReporter;
+  // How often the lock holder refreshes the lock directory's mtime. Injectable
+  // so tests can drive the heartbeat quickly; defaults to a production cadence
+  // comfortably shorter than the STALE_LOCK_MS steal threshold.
+  lockHeartbeatMs?: number;
 }): CredentialProvenanceStore {
   const lockDirectory = path.join(directory, ".lock");
   // While a holder works, refresh the lock directory's mtime on this cadence so
   // a long-but-live holder is never mistaken for a crashed one and stolen. It
   // must be comfortably shorter than the STALE_LOCK_MS steal threshold.
-  const LOCK_HEARTBEAT_MS = 60_000;
+  const LOCK_HEARTBEAT_MS = lockHeartbeatMs;
   const STALE_LOCK_MS = 5 * 60_000;
   const readFile = async (filePath: string): Promise<unknown | null> => {
     let raw: string;
