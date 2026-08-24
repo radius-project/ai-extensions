@@ -387,7 +387,7 @@ describe("ensureGitHubEnvironment", () => {
 
 describe("deleteGitHubEnvironmentIdempotent", () => {
   function deletePorts(
-    gh: (args: string[]) => Promise<{ code: number; stderr?: string }>
+    gh: (args: string[]) => Promise<{ code: number | string; stderr?: string }>
   ) {
     const calls: string[][] = [];
     const invalidated: string[] = [];
@@ -421,6 +421,19 @@ describe("deleteGitHubEnvironmentIdempotent", () => {
     expect(calls).toEqual([
       ["api", "--method", "DELETE", "/repos/octo/app/environments/prod%20env"]
     ]);
+    expect(invalidated).toEqual(["octo/app"]);
+  });
+
+  it("treats a string '0' exit code as a successful delete", async () => {
+    const { ports, invalidated } = deletePorts(async () => ({ code: "0" }));
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome).toEqual({ outcome: "deleted" });
     expect(invalidated).toEqual(["octo/app"]);
   });
 

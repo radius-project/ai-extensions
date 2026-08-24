@@ -56,6 +56,9 @@ import {
   type CredentialProvenanceRecord,
   type CredentialRetentionReason
 } from "../../credential-provenance.js";
+import type { GitHubEnvDeletionOutcome } from "./github-environment.js";
+
+export type { GitHubEnvDeletionOutcome };
 
 export interface DeletionCommandResult {
   code?: string | number;
@@ -70,11 +73,6 @@ export interface DeletionCommandResult {
 // a hard stop — the whole deletion is aborted so nothing else is torn down.
 export interface RadiusEnvDeletionOutcome {
   outcome: "deleted" | "not_found" | "failed" | "apps_present";
-  detail?: string;
-}
-
-export interface GitHubEnvDeletionOutcome {
-  outcome: "deleted" | "not_found" | "failed";
   detail?: string;
 }
 
