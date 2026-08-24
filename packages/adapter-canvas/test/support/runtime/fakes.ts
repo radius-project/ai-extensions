@@ -45,7 +45,7 @@ import type {
   CanvasServerEntry,
   SessionPromptMessage
 } from "../../../src/server.js";
-import type { CanvasGraphResource } from "../../../src/shared.js";
+import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
 
 export interface FakeServer {
   close: Mock;
@@ -149,6 +149,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       repo: string;
       branches: string[];
       page: string;
+      state?: CanvasState;
     }) => Promise<unknown>;
     deployRepairHandoff?:
       | ((input: {

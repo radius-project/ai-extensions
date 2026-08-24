@@ -663,6 +663,10 @@ export async function handleLoadGraphStream(
 
     if (content) {
       sendProgress("Found existing app.bicep — parsing resources...");
+      // A model that exists can still no longer describe its source. The runtime
+      // classifies it and decides what, if anything, to say; the graph still
+      // streams either way.
+      dependencies.triggerAppBicepHandoff(entry, repo, branch);
     } else {
       const source = evaluateAppSource(
         await dependencies.listBranchPaths(entry, repo, branch)

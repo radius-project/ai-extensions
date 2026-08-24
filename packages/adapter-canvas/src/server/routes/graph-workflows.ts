@@ -379,9 +379,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         branch
       });
     }
-    // Both single-branch routes hand off as the "graph" page. plan-graph doing
-    // so is pre-existing and load-bearing: the handoff dedupe key derives from
-    // the page, so changing it here would re-trigger a handoff already made.
+    // Both single-branch routes hand off as the "graph" page. The runtime's
+    // dedupe key no longer derives from the page, but the page still names the
+    // view in the prompt, and the graph view is the one the user is told to
+    // reopen from either route.
     dependencies.triggerAppBicepHandoff(entry, repo, branch, "graph");
     return json(200, {
       error: GENERATING_APP_BICEP_MESSAGE,
@@ -463,6 +464,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           );
         }
         addEvent("checking_model", "succeeded", "Found the application model.");
+        // A model that exists can still no longer describe its source. The
+        // runtime classifies it and decides whether that is worth a refresh, the
+        // user's agreement, or only a note; the graph itself still renders.
+        dependencies.triggerAppBicepHandoff(entry, repo, branch, "graph");
       } else {
         addEvent(
           "checking_model",
@@ -679,6 +684,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         );
       }
       addEvent("checking_model", "succeeded", "Found the application model.");
+      // Same freshness reconcile as load-graph: the planned view renders from
+      // the same model, so a drift it can see must not go unreported merely
+      // because the user reached it from a different tab.
+      dependencies.triggerAppBicepHandoff(entry, repo, branch, "graph");
 
       const staged = await pipeline.stageArtifacts({
         entry,
@@ -913,6 +922,15 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "checking_model",
         "succeeded",
         "Found application model content to compare."
+      );
+      // Reported for both branches even when only one carries a model: the
+      // runtime classifies each side and stays silent about the missing one,
+      // which the diff renders as an added or removed application.
+      dependencies.triggerAppBicepHandoff(
+        entry,
+        repo,
+        [data.base, data.head],
+        "graph-diff"
       );
 
       // Ordering is load-bearing and matches legacy exactly: BOTH sides are

@@ -369,6 +369,21 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs).toHaveLength(1);
     });
 
+    it("reports a rendered model so drift is still noticed after it exists", async () => {
+      const harness = start({ selections: { main: selectionOf() } });
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(harness.handoffs).toEqual([
+        {
+          repo: "octo/app",
+          branches: "main",
+          page: "graph",
+          hasEntry: true
+        }
+      ]);
+    });
+
     it("hands off when the branch has a Dockerfile the skill can build from", async () => {
       const harness = start({
         selections: { main: selectionOf({ content: null }) },
@@ -718,8 +733,24 @@ describe("graph planning workflows", () => {
         repo: "octo/app",
         branch: "main"
       });
-      // "graph", not "planned": the handoff key is derived from the page.
+      // "graph", not "planned": the prompt names the view the user is told to
+      // reopen, and both single-branch routes point at the graph.
       expect(harness.handoffs[0]?.page).toBe("graph");
+    });
+
+    it("reports a rendered plan's model so drift is still noticed after it exists", async () => {
+      const harness = start({ selections: { main: selectionOf() } });
+
+      await harness.run("planGraph", '{"repo":"octo/app"}');
+
+      expect(harness.handoffs).toEqual([
+        {
+          repo: "octo/app",
+          branches: "main",
+          page: "graph",
+          hasEntry: true
+        }
+      ]);
     });
 
     it("refuses the plan when the branch has no Dockerfile", async () => {
@@ -1165,8 +1196,42 @@ describe("graph planning workflows", () => {
       const outcome = await harness.run("diffBranches", diffBody);
 
       expect(outcome.status).toBe(200);
-      expect(harness.handoffs).toEqual([]);
+      // Reported for both branches: the runtime classifies each side and stays
+      // silent about the one the diff renders as an added application.
+      expect(harness.handoffs).toEqual([
+        {
+          repo: "octo/app",
+          branches: ["main", "feature/x"],
+          page: "graph-diff",
+          hasEntry: true
+        }
+      ]);
       expect(harness.state.diffResources).toHaveLength(1);
+    });
+
+    it("reports a rendered diff's models so drift on either branch is still noticed", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
+        },
+        staged: {
+          main: { dir: "", remote: false },
+          "feature/x": { dir: "", remote: false }
+        },
+        compiled: { main: [], "feature/x": [] }
+      });
+
+      await harness.run("diffBranches", diffBody);
+
+      expect(harness.handoffs).toEqual([
+        {
+          repo: "octo/app",
+          branches: ["main", "feature/x"],
+          page: "graph-diff",
+          hasEntry: true
+        }
+      ]);
     });
 
     it("compares two branches of an unnamed repo as an empty repo", async () => {
