@@ -186,14 +186,14 @@ export function commandActionSpecs(
     {
       tag: "button",
       id: `${idPrefix}-copy`,
-      className: "rad-btn rad-btn-secondary",
+      className: "rad-btn rad-btn--neutral",
       text: view.copy.label,
       attrs: { type: "button", title: view.copy.title }
     },
     {
       tag: "button",
       id: `${idPrefix}-run`,
-      className: "rad-btn rad-btn-primary",
+      className: "rad-btn rad-btn--primary",
       text: view.run.label,
       attrs: {
         type: "button",
@@ -206,7 +206,7 @@ export function commandActionSpecs(
     buttons.push({
       tag: "button",
       id: `${idPrefix}-cancel`,
-      className: "rad-btn rad-btn-secondary",
+      className: "rad-btn rad-btn--neutral",
       text: "Cancel",
       attrs: { type: "button" }
     });
