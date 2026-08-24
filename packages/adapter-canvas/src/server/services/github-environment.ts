@@ -319,30 +319,19 @@ export async function ensureGitHubEnvironment(input: {
                 "Radius left it in place and will not retry or delete it."
             };
           }
-          const proof = proveGitHubEnvironmentCreated({
-            preflight: "created_candidate",
-            putResponseBody: JSON.stringify(reread.json),
-            putStartedAtMs
-          });
-          if (!proof.proven) {
-            return {
-              state: "manual_required" as const,
-              guidance:
-                `GitHub environment "${input.repo}:${canonical}" exists after the interrupted request, ` +
-                "but GitHub did not provide enough creation provenance to prove this operation owns it. " +
-                "Radius left it unchanged and will not retry or delete it."
-            };
-          }
+          // Nobody saw GitHub answer this PUT, so no id was ever recorded for
+          // it. What sits under the name now may be what the interrupted
+          // request made or what somebody made afterwards, and a creation
+          // timestamp cannot tell those apart — a replacement made inside the
+          // tolerance window fits it exactly as well. The read is evidence for
+          // a person, never a claim of ownership.
+          const observed = parseEnvironmentProviderId(reread.json);
           return {
-            state: "applied" as const,
-            value: {
-              code: 0,
-              stdout: JSON.stringify(reread.json),
-              stderr: ""
-            },
-            providerId: parseEnvironmentProviderId(reread.json),
-            evidence:
-              "The exact environment identity and creation timestamp matched the interrupted operation."
+            state: "manual_required" as const,
+            guidance:
+              `GitHub environment "${input.repo}:${canonical}"${observed ? ` (id ${observed})` : ""} exists after the interrupted request, ` +
+              "but Radius never recorded an id for the environment that request created, so it cannot tell this one from an environment created since. " +
+              "Radius left it unchanged and will not retry or delete it. Review it and remove it yourself if it is unwanted."
           };
         }
       });
