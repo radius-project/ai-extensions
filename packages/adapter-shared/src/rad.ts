@@ -127,6 +127,12 @@ export interface RunRadAppGraphOptions {
   log?: Logger;
   timeout?: number;
   saveGraphJsonTo?: string;
+  /**
+   * The already-resolved binary to spawn. Callers that read a release from a
+   * binary before compiling pass it here so the version they pinned and the
+   * process they run are the same binary; omitted, it is resolved here.
+   */
+  radPath?: string;
 }
 
 /** Options for {@link resolveRadiusExtensionRef}. */
@@ -1242,20 +1248,39 @@ export async function runRadBicepPublish({
 
 /**
  * resolveRadForGraph - resolve a `rad` binary to run `rad app graph` WITHOUT
- * running the version check or a download on the hot path. The `rad version --cli`
+ * running a fresh version check or download on the hot path. The `rad version --cli`
  * check (and any resulting upgrade) runs in the ensureRadBinary() warm-up on every
  * extension load; a graph build reuses that result rather than repeating it.
  * Resolution order:
- *   1. the binary the load-time ensureRadBinary() has already cached, else
- *   2. a binary already present on disk (RADIUS_RAD_BINARY or the managed path),
+ *   1. an in-flight load-time ensureRadBinary(), awaited to completion, else
+ *   2. the binary that ensure has already cached, else
+ *   3. a binary already present on disk (RADIUS_RAD_BINARY or the managed path),
  *      used as-is with no version check, else
- *   3. as a fallback when the cache is empty and nothing is on disk yet (e.g. the
- *      load-time ensure has not finished resolving), call ensureRadBinary(),
- *      reusing the in-flight load-time ensure if one is running.
+ *   4. as a fallback when nothing is on disk yet, call ensureRadBinary().
+ *
+ * Step 1 exists for correctness, not speed. The load-time warm-up publishes an
+ * upgraded binary by atomically renaming it over the managed path, so a caller
+ * that resolved beforehand holds a path whose contents can change underneath it.
+ * A graph build that reads a release from the pre-upgrade binary and then
+ * executes the post-upgrade one would pin its bicepconfig to one release and
+ * compile with another — exactly the schema/toolchain mismatch this module
+ * exists to prevent. Waiting for the reconciliation to settle makes the binary
+ * stable for the rest of the process: reconciliation runs at most once, so once
+ * it has finished nothing replaces the binary again.
+ *
+ * A failed warm-up is not fatal here — it falls through to whatever is on disk,
+ * preserving offline and air-gapped use.
  */
 export async function resolveRadForGraph({
   log = noop
 }: { log?: Logger } = {}): Promise<string> {
+  if (ensurePromise) {
+    try {
+      return await ensurePromise;
+    } catch {
+      /* fall through to whatever is already on disk */
+    }
+  }
   if (cachedRadPath && isExecutableFile(cachedRadPath)) return cachedRadPath;
   const existing = resolveExistingRadBinary();
   if (existing) return existing;
@@ -1282,10 +1307,11 @@ export async function runRadAppGraph(
   {
     log = noop,
     timeout = 120000,
-    saveGraphJsonTo = ""
+    saveGraphJsonTo = "",
+    radPath: providedRadPath = ""
   }: RunRadAppGraphOptions = {}
 ): Promise<unknown> {
-  const radPath = await resolveRadForGraph({ log });
+  const radPath = providedRadPath || (await resolveRadForGraph({ log }));
   await ensureManagedBicep(radPath, { log, timeout });
   // Resolve to an absolute path: rad runs from a temp cwd, so a relative arg
   // would no longer point at the file.
@@ -1672,9 +1698,10 @@ export async function buildGraphViaRad(
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-bicep-"));
   const bicepFile = path.join(dir, "app.bicep");
   try {
-    // Resolve the binary up front so the compile config can be pinned to the
-    // release that will actually run the compile. runRadAppGraph resolves again
-    // below and reuses this same cached/on-disk binary.
+    // Resolve the binary up front and reuse it for the compile. resolveRadForGraph
+    // waits for any in-flight load-time reconciliation, so the release read here
+    // cannot be superseded by an upgrade mid-build, and passing the path to
+    // runRadAppGraph keeps the version read and the spawn on one binary.
     const radPath = await resolveRadForGraph({ log });
     const radiusExtensionRef =
       (await resolveRadiusExtensionRef({ log, radPath })) ?? "";
@@ -1691,7 +1718,8 @@ export async function buildGraphViaRad(
     try {
       const appGraph = await runRadAppGraph(bicepFile, {
         log,
-        saveGraphJsonTo
+        saveGraphJsonTo,
+        radPath
       });
       return filterGraphVisualizationResources(
         applicationGraphToResources(appGraph, definitionFile, content)

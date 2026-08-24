@@ -603,6 +603,64 @@ describe("resolveRadForGraph", () => {
 
     fs.rmSync(tmp, { recursive: true, force: true });
   });
+
+  // Forces the load-time-warm-up interleaving: a stale managed binary is on
+  // disk, a fire-and-forget ensureRadBinary() (as extension.ts issues at load)
+  // is reconciling it, and a graph build resolves in that window. The warm-up
+  // publishes the upgrade by renaming it over the same managed path, so
+  // resolving without waiting hands back a path whose contents change
+  // underneath the caller. POSIX-only: the fake binaries are shebang scripts.
+  const itPosix = process.platform === "win32" ? it.skip : it;
+  itPosix(
+    "waits for an in-flight warm-up so the release read is the release that runs",
+    async () => {
+      delete process.env.RADIUS_RAD_BINARY;
+      delete process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+      vi.resetModules();
+      const mod = await import("./rad.js");
+
+      const fakeRad = (version: string) =>
+        `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ version: ${JSON.stringify(version)} }));\n`;
+
+      // The stale binary the extension starts with.
+      fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_RAD_PATH, fakeRad("v0.59.0"));
+      fs.chmodSync(MANAGED_RAD_PATH, 0o755);
+
+      const tag = "v0.60.0";
+      const asset = mod.releaseAsset();
+      const calls: string[] = [];
+      mockHttpsGet(
+        {
+          [RELEASES_API]: {
+            body: JSON.stringify({
+              tag_name: tag,
+              assets: [{ name: asset, digest: "" }]
+            })
+          },
+          [`https://github.com/radius-project/radius/releases/download/${tag}/${asset}`]:
+            { body: fakeRad("v0.60.0") }
+        },
+        calls
+      );
+
+      // Started but deliberately not awaited, exactly as the extension does.
+      const warmUp = mod.ensureRadBinary();
+      const resolved = await mod.resolveRadForGraph();
+      const releaseRead = await mod.radBinaryVersion(resolved);
+      await warmUp;
+      const releaseThatRuns = await mod.radBinaryVersion(resolved);
+
+      // Resolving mid-warm-up must not observe the superseded release: without
+      // the wait this reads v0.59.0 and then executes v0.60.0, pinning
+      // bicepconfig to a different schema than the compile actually uses.
+      expect(releaseRead).toBe("v0.60.0");
+      expect(releaseThatRuns).toBe(releaseRead);
+      expect(mod.radiusExtensionRefForVersion(releaseRead)).toBe(
+        "br:biceptypes.azurecr.io/radius:0.60"
+      );
+    }
+  );
 });
 
 describe("buildGraphViaRad", () => {
