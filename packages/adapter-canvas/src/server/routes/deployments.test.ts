@@ -1598,6 +1598,28 @@ describe("deployments routes (SU-06)", () => {
       );
     });
 
+    it("does not retry for a whitespace-only injected token", async () => {
+      const { recording, context: ctx } = deleteContext();
+      let calls = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({ GH_TOKEN: "   " }),
+          runGh: () => {
+            calls += 1;
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: "workflow scope missing"
+            });
+          }
+        })
+      );
+
+      expect(calls).toBe(1);
+      expect(recording.status).toBe(400);
+    });
+
     it("still retries when GH_TOKEN is empty but GITHUB_TOKEN is set", async () => {
       const { recording, context: ctx } = deleteContext();
       let calls = 0;

@@ -222,7 +222,7 @@ let _ghStrategy: GhTokenStrategy | null = null;
 // without spawning a second `gh auth token` per read.
 let _ghPackageCredentialPromise: Promise<GhPackageCredentialResolution> | null =
   null;
-const GH_KEYRING_TOKEN_TIMEOUT_MS = 3000;
+const GH_KEYRING_TOKEN_TIMEOUT_MS = 8000;
 
 // Parse `gh auth status` text into structured accounts. Pure so it can be unit
 // tested against real gh output across versions. Each account block looks like:
