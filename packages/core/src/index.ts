@@ -19,6 +19,7 @@ export {
   deployStatusKeys,
   filterGraphVisualizationResources,
   lookupDeployStatus,
+  mergeDeployedGraphMetadata,
   projectDeployedGraph
 } from "./graph/index.js";
 export type { DeployStatus } from "./graph/index.js";
@@ -39,6 +40,7 @@ export {
   evaluateAppSource,
   findWorkspaceManifests,
   unsupportedAppSourceReport,
+  STAGING_DIR_PREFIX,
   fetchBicepFromRepo,
   fetchRecipePack,
   resolveRecipeOutputs

@@ -26,6 +26,7 @@ interface DiffState {
   base: string;
   head: string;
   resources: unknown[];
+  modelingError: string;
 }
 
 function parseState(context: BrowserContext): DiffState {
@@ -34,7 +35,8 @@ function parseState(context: BrowserContext): DiffState {
     repo: readString(state, "repo"),
     base: readString(state, "base") || "main",
     head: readString(state, "head"),
-    resources: readArray(state, "resources")
+    resources: readArray(state, "resources"),
+    modelingError: readString(state, "modelingError")
   };
 }
 
@@ -72,6 +74,19 @@ export function initializeGraphDiffPage(
   let controller: GraphController | null = null;
   let progress: ScopeTimer | null = null;
   let progressView: GraphProgressView | null = null;
+  let modelingFailureVisible = Boolean(state.modelingError);
+  const showModelingFailure = (message: string): void => {
+    controller?.destroy();
+    controller = null;
+    requireBrowserFunction(globalScope, "radiusSetGraphError")(
+      "graph-container",
+      message
+    );
+    const status = context.dom.byId("diff-status");
+    if (status) status.style.display = "none";
+    modelingFailureVisible = true;
+  };
+  if (state.modelingError) showModelingFailure(state.modelingError);
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
@@ -113,6 +128,11 @@ export function initializeGraphDiffPage(
     const head = headElement.value;
     const repo = repoInput?.value ?? state.repo;
     if (!repo || !base || !head) return;
+    if (modelingFailureVisible) {
+      const graphContainer = context.dom.byId("graph-container");
+      if (graphContainer) graphContainer.innerHTML = "";
+      modelingFailureVisible = false;
+    }
     const requestGeneration = ++generation;
     requestAbort = context.net.createAbort();
     showStatus(context, `Comparing ${base} → ${head}…`, "info");
@@ -163,11 +183,15 @@ export function initializeGraphDiffPage(
         } else {
           const error = readString(payload, "error");
           if (error) {
-            showStatus(
-              context,
-              `Error computing diff: ${error}. Please ensure both branches exist and contain a valid .radius/app.bicep.`,
-              "error"
-            );
+            if (readBoolean(payload, "modelingFailed")) {
+              showModelingFailure(error);
+            } else {
+              showStatus(
+                context,
+                `Error computing diff: ${error}. Please ensure both branches exist and contain a valid .radius/app.bicep.`,
+                "error"
+              );
+            }
           } else if (readBoolean(payload, "reload")) {
             context.nav.reload();
           } else {
@@ -213,11 +237,11 @@ export function initializeGraphDiffPage(
   void populateDiffBranches(context, state.repo, {
     preferBase: state.base,
     preferHead: state.head,
-    autoCompare: state.resources.length === 0,
+    autoCompare: state.resources.length === 0 && !state.modelingError,
     lifecycle: entry
   });
 
-  if (renderGraph) {
+  if (renderGraph && !state.modelingError) {
     controller = asGraphController(
       renderGraph("graph-container", state.resources, {
         diffMode: true,

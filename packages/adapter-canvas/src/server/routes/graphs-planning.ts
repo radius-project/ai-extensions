@@ -2,9 +2,20 @@ import {
   evaluateAppSource,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
+import {
+  asGraphModelingFailure,
+  GraphModelingFailure
+} from "../../graph-modeling-failure.js";
 import type { DeployStatus } from "@radius-project/core";
-import type { DeployProgress } from "../../deploy-artifacts.js";
+import type {
+  DeployProgress,
+  WorkflowArtifact
+} from "../../deploy-artifacts.js";
 import { recordGraphBuildEvent } from "../../shared.js";
+import type {
+  GraphRepairAttempt,
+  GraphRepairRequest
+} from "../../graph-model-repair.js";
 import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { GraphProgressRecord, GraphProgressView } from "../../shared.js";
@@ -24,7 +35,11 @@ import type { CanvasServerEntry } from "../types.js";
 // handler from quietly reaching for `read`, `status`, `sequence` or
 // `controlPlaneLog`, none of which the legacy branch touched.
 export interface DeployedGraphStatusReader {
-  graph(): Promise<{ graph: unknown | null; status: string }>;
+  graph(): Promise<{
+    graph: unknown | null;
+    status: string;
+    artifact?: WorkflowArtifact | null;
+  }>;
   progress(): Promise<DeployProgress | null>;
 }
 
@@ -80,6 +95,7 @@ export interface GraphsPlanningReadsDependencies {
     modeled: unknown[],
     statusByKey: Map<string, DeployStatus>
   ): unknown[];
+  mergeDeployedGraphMetadata(modeled: unknown[], deployed: unknown): unknown[];
   canvasGraphResources(values: unknown[]): CanvasGraphResource[];
   applyDeployMessages(
     resources: CanvasGraphResource[],
@@ -186,9 +202,11 @@ export function handleProgress(
 //   terminal - a deployment's status is known.
 //   greyed   - nothing is known; every node renders pending.
 //
-// The deploy monitor's resources are seeded before the artifact read, so fresher
-// in-session statuses win. Topology has one authority: graphResources for the
-// selected repo and branch, populated on demand through the graph workflow.
+// The deploy monitor seeds status before the artifact read. A validated
+// artifact is a newer monotonic snapshot for the same run, so its mentioned
+// keys overwrite the seed while omitted resources retain monitor state.
+// Topology has one authority: graphResources for the selected repo and branch,
+// populated on demand through the graph workflow.
 export async function handleDeployedGraph(
   context: CanvasRequestContext,
   dependencies: GraphsPlanningReadsDependencies
@@ -276,11 +294,8 @@ export async function handleDeployedGraph(
     state.deployStatus === "in_progress" && sessionMatchesSelection;
 
   const statusByKey = new Map<string, DeployStatus>();
-  // The resources the deploy monitor tracks are the freshest status this process
-  // has, both during a run and after it settles. Seed from them first so a
-  // terminal deploy keeps its colors even when the artifact read comes back
-  // empty — repainting a just-deployed app as pending would reproduce the very
-  // bug this transport replaced.
+  // Seed the resources the deploy monitor tracks so an empty artifact read keeps
+  // their status. A valid artifact later overwrites only the keys it mentions.
   if (sessionMatchesSelection && Array.isArray(state.deployingResources)) {
     for (const resource of state.deployingResources) {
       const status = resource?.deployStatus as DeployStatus | undefined;
@@ -318,23 +333,50 @@ export async function handleDeployedGraph(
     publishedGraph = result.graph;
     readOk = result.status === "ok" || result.status === "stale";
     progress = await reader.progress();
-    updatedAt = progress?.updatedAt || null;
-    if (progress?.application) resolvedApp = progress.application;
-    if (
-      progress?.runId != null &&
+    const artifactRunMismatchesSession =
+      sessionMatchesSelection &&
       state.deployRunId != null &&
-      String(progress.runId) !== String(state.deployRunId)
-    ) {
-      statusByKey.clear();
-    }
-    for (const [key, status] of dependencies.buildDeployStatusMap(progress)) {
-      if (!statusByKey.has(key)) statusByKey.set(key, status);
-    }
-    // The first-wins guard is load-bearing above, where `statusByKey` arrives
-    // pre-seeded. Here `messageByKey` is only ever filled from this one Map, so
-    // the guard is unreachable — an equivalent mutant, preserved verbatim.
-    for (const [key, message] of dependencies.buildDeployMessageMap(progress)) {
-      if (!messageByKey.has(key)) messageByKey.set(key, message);
+      progress?.runId != null &&
+      String(progress.runId) !== String(state.deployRunId);
+    const attemptBoundary = Math.max(
+      state.deployStartedAt ?? 0,
+      state.deployFinishedAt ?? 0
+    );
+    const artifactCreatedAt = Date.parse(result.artifact?.created_at ?? "");
+    const mismatchedArtifactIsNewer =
+      !artifactRunMismatchesSession ||
+      (!deploying &&
+        attemptBoundary > 0 &&
+        Number.isFinite(artifactCreatedAt) &&
+        artifactCreatedAt > attemptBoundary);
+    const activeArtifactMatchesRun =
+      deploying ?
+        state.deployRunId != null &&
+        progress?.runId != null &&
+        String(progress.runId) === String(state.deployRunId)
+      : mismatchedArtifactIsNewer;
+    if (!activeArtifactMatchesRun) {
+      // Run discovery has not completed, or an unscoped read found a previous
+      // run. Keep the active monitor state and do not expose stale graph metadata.
+      publishedGraph = null;
+      readOk = false;
+      progress = null;
+    } else {
+      updatedAt = progress?.updatedAt || null;
+      if (progress?.application) resolvedApp = progress.application;
+      if (artifactRunMismatchesSession) {
+        statusByKey.clear();
+      }
+      for (const [key, status] of dependencies.buildDeployStatusMap(progress)) {
+        statusByKey.set(key, status);
+      }
+      // Messages have no in-session seed, so first-wins only protects duplicate
+      // weaker identity keys within this one snapshot.
+      for (const [key, message] of dependencies.buildDeployMessageMap(
+        progress
+      )) {
+        if (!messageByKey.has(key)) messageByKey.set(key, message);
+      }
     }
   } catch (e) {
     // A status read failure must not blank the tab: fall through to the seeded
@@ -400,8 +442,30 @@ export async function handleDeployedGraph(
       state.graphResources
     : [];
 
+  const plannedMetadataMatchesSelection =
+    terminalConclusion !== "failure" &&
+    !!state.deployProvider &&
+    state.plannedProvider === state.deployProvider &&
+    state.plannedRepo === repo &&
+    state.plannedBranch === branch &&
+    (!requestedEnv ||
+      (!!state.plannedEnvironment &&
+        namedSelectionPartMatches(state.plannedEnvironment, requestedEnv))) &&
+    Array.isArray(state.plannedResources);
+  const providerResolvedTopology = dependencies.mergeDeployedGraphMetadata(
+    topology,
+    plannedMetadataMatchesSelection ? state.plannedResources : null
+  );
+  const deploymentMetadata =
+    publishedGraph ??
+    (!deploying && sessionMatchesSelection ? state.deployedGraph : null) ??
+    null;
+  const enrichedTopology = dependencies.mergeDeployedGraphMetadata(
+    providerResolvedTopology,
+    deploymentMetadata
+  );
   const resources = dependencies.canvasGraphResources(
-    dependencies.projectDeployedGraph(topology, statusByKey)
+    dependencies.projectDeployedGraph(enrichedTopology, statusByKey)
   );
   // Attach the producer's per-resource message so a red node can explain itself
   // in the popup instead of just being red.
@@ -519,11 +583,17 @@ export interface GraphsPlanningStreamDependencies {
     context: { repo: string; branch: string },
     expectedToken: string
   ): boolean;
+  isCurrentSourceRef(entry: CanvasServerEntry, expectedToken: string): boolean;
   triggerAppBicepHandoff(
     entry: CanvasServerEntry,
     repo: string,
     branch: string
   ): void;
+  triggerGraphRepairHandoff(
+    entry: CanvasServerEntry,
+    request: GraphRepairRequest
+  ): GraphRepairAttempt;
+  clearGraphRepairAttempt(entry: CanvasServerEntry): void;
   fetchBicepSelection(
     entry: CanvasServerEntry,
     repo: string,
@@ -545,6 +615,7 @@ export interface GraphsPlanningStreamDependencies {
   ): Promise<unknown[]>;
   canvasGraphResources(values: unknown[]): CanvasGraphResource[];
   errorMessage(error: unknown): string;
+  logError(message: string): void;
 }
 
 // The progress log the Graph tab streams while `rad` models the app. The
@@ -643,18 +714,17 @@ export async function handleLoadGraphStream(
         bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
         log: sendProgress
       });
-    const resources = dependencies.canvasGraphResources(
-      await dependencies.buildGraphViaRad(
-        content,
-        selection.bicepPath || ".radius/app.bicep",
-        {
-          log: sendProgress,
-          saveGraphJsonTo: graphJsonPath,
-          radArtifactsDir,
-          cleanupRadArtifactsDir: radArtifactsRemote
-        }
-      )
+    const graphValues = await dependencies.buildGraphViaRad(
+      content,
+      selection.bicepPath || ".radius/app.bicep",
+      {
+        log: sendProgress,
+        saveGraphJsonTo: graphJsonPath,
+        radArtifactsDir,
+        cleanupRadArtifactsDir: radArtifactsRemote
+      }
     );
+    const resources = dependencies.canvasGraphResources(graphValues);
     sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
     if (
@@ -674,9 +744,32 @@ export async function handleLoadGraphStream(
     // supplied the app.bicep content (file is on disk).
     entry.state.graphFromWorkspace = selection.fromWorkspace;
     entry.state.activeGraphView = "graph";
+    dependencies.clearGraphRepairAttempt(entry);
 
     sendDone({ reload: true });
   } catch (e) {
+    const failure = asGraphModelingFailure(e);
+    if (failure instanceof GraphModelingFailure) {
+      dependencies.logError(
+        `[radius graph] modeling failed for ${repo}@${branch}: ${failure.diagnostic}`
+      );
+      if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
+        sendDone({ stale: true });
+        return;
+      }
+      const attempt = dependencies.triggerGraphRepairHandoff(entry, {
+        view: "graph",
+        repo,
+        branches: [branch],
+        diagnostic: failure.diagnostic
+      });
+      sendDone({
+        error: failure.message,
+        modelingFailed: true,
+        ...attempt
+      });
+      return;
+    }
     sendDone({ error: dependencies.errorMessage(e) });
   }
 }

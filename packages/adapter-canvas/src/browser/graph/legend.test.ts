@@ -19,11 +19,35 @@ describe("status legend", () => {
       "Deployed",
       "Failed"
     ]);
-    const html = buildStatusLegendHtml();
+    const html = buildStatusLegendHtml([
+      { name: "pending", deployStatus: "pending" },
+      { name: "deployed", deployStatus: "success" },
+      { name: "failed", deployStatus: "failed" }
+    ]);
     expect(html.split('class="legend-item"').length - 1).toBe(3);
     expect(html).toContain("Pending / deploying");
     expect(html.split("data:image/svg+xml,").length - 1).toBe(3);
     expect(html).toContain('width="14" height="14"');
+    expect(decodeURIComponent(html)).toContain(
+      "animation:spin 1s linear infinite"
+    );
+  });
+
+  it("shows only statuses present in the deployed graph", () => {
+    const terminal = buildStatusLegendHtml([
+      { name: "api", deployStatus: "success" },
+      { name: "db", deployStatus: "failed" }
+    ]);
+    expect(terminal).toContain("Deployed");
+    expect(terminal).toContain("Failed");
+    expect(terminal).not.toContain("Pending / deploying");
+    expect(decodeURIComponent(terminal)).not.toContain("animation:spin");
+
+    const live = buildStatusLegendHtml([
+      { name: "api", deployStatus: "in_progress" }
+    ]);
+    expect(live).toContain("Pending / deploying");
+    expect(decodeURIComponent(live)).toContain("animation:spin");
   });
 });
 

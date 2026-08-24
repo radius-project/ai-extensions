@@ -21,6 +21,7 @@ import {
   GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
   GRAPH_APP_BICEP_TIMEOUT_MS,
   GRAPH_PAGE_STATE_ID,
+  GRAPH_PLAN_BLOCKED_TITLE,
   GRAPH_PROGRESS_MS,
   GRAPH_RETRY_MS,
   GRAPH_STALE_RETRY_MS,
@@ -190,6 +191,111 @@ describe("initializeGraphPage", () => {
     expect(branch.listenerCount()).toBe(0);
   });
 
+  it("disables Plan Deployment while a loaded graph is being refreshed", async () => {
+    const { browser, button } = fixture({ loaded: true });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    browser.net.handle(
+      "/api/load-graph",
+      () => createDeferred<HttpResponse>().promise
+    );
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("plan");
+    expect(button.disabled).toBe(true);
+  });
+
+  it("enables Plan Deployment when the environment listing settles after the refresh", async () => {
+    const { browser, button } = fixture({ loaded: true });
+    const environments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      "/api/list-environments?repo=octo%2Fapp",
+      () => environments.promise
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/web" }] })
+    );
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    // The listing is what assigns the button its "plan" mode, so a graph that
+    // compiled before it arrives must still leave the button usable.
+    environments.resolve(
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("plan");
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("title")).toBeNull();
+  });
+
+  it("leaves Plan Deployment disabled when the model failed before the environment listing settles", async () => {
+    const { browser, button } = fixture({ loaded: true });
+    const environments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      "/api/list-environments?repo=octo%2Fapp",
+      () => environments.promise
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        error: "Your application model couldn't be compiled.",
+        modelingFailed: true
+      })
+    );
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: vi.fn() })
+    );
+    await flushPromises();
+
+    environments.resolve(
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("plan");
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toBe(GRAPH_PLAN_BLOCKED_TITLE);
+  });
+
+  it("does not re-enable a button owned by the create-environment mode", async () => {
+    const { browser, button } = fixture({ loaded: true });
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/web" }] })
+    );
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("create-env");
+    expect(button.disabled).toBe(false);
+  });
+
+  it("falls back to the rendered branch when the page has no branch selector", async () => {
+    const { browser, button } = fixture({
+      loaded: true,
+      withBranchSelect: false
+    });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/web" }] })
+    );
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("plan");
+    expect(button.disabled).toBe(false);
+  });
+
   it("polls progress immediately and then once per interval, ignoring a late response", async () => {
     const { browser } = fixture({ loaded: false });
     browser.net.supportsAbort = false;
@@ -262,6 +368,75 @@ describe("initializeGraphPage", () => {
     expect(setError).toHaveBeenCalledTimes(1);
     expect(status?.textContent).toBe("");
     expect(status?.style.display).toBe("none");
+  });
+
+  it("disables planning when the selected model does not compile", async () => {
+    const setError = vi.fn();
+    const { browser, button, branch } = fixture({ loaded: false });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        error: "Your application model couldn't be compiled.",
+        modelingFailed: true
+      })
+    );
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
+    await flushPromises();
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "until the application model"
+    );
+    expect(branch.listenerCount("change")).toBe(1);
+  });
+
+  it("still offers environment creation when the model does not compile", async () => {
+    // Creating an environment is a prerequisite the model cannot invalidate, so
+    // a compile failure must not strand a repository with no environment.
+    const { browser, button } = fixture({ loaded: false });
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        error: "Your application model couldn't be compiled.",
+        modelingFailed: true
+      })
+    );
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: vi.fn() })
+    );
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("create-env");
+    expect(button.disabled).toBe(false);
+  });
+
+  it("keeps Plan Deployment disabled while a changed branch is compiling", async () => {
+    const { browser, branch, button } = fixture({ loaded: true });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/web" }] })
+    );
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(button.dataset.mode).toBe("plan");
+
+    browser.net.handle(
+      "/api/load-graph",
+      () => createDeferred<HttpResponse>().promise
+    );
+    branch.value = "another";
+    branch.dispatch("change");
+
+    expect(button.disabled).toBe(true);
   });
 
   it("silently skips the status update when no status element exists", async () => {
