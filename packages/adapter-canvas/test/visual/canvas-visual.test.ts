@@ -12,6 +12,7 @@ import {
   type CanvasHarness
 } from "../e2e/support/canvas-harness.js";
 import type { Page } from "@playwright/test";
+import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 
 type Theme = "dark" | "light";
@@ -605,5 +606,35 @@ test.describe("Radius Canvas visual baselines", () => {
         await screenshot(page, `vi-07-deploy-${status}-${theme}.png`);
       });
     }
+  }
+
+  for (const theme of ["light", "dark"] as const) {
+    test(`VI-08 run-command callout in ${theme}`, async ({ page, canvas }) => {
+      test.setTimeout(45_000);
+      await seed(canvas, { activeSubtab: "credentials" });
+      // Drop write:packages from the keyring account. That is what turns the
+      // GitHub Packages row from a verified note into a run-command callout,
+      // which is the only state that renders the callout's styling.
+      await canvas.setGitHubKeyringScopes(["repo"]);
+      await gotoVisual(page, canvas, "credentials", theme);
+      await page
+        .getByRole("button", { name: "New Credential Profile" })
+        .click();
+      await expect(page.locator("#cred-form")).toBeVisible();
+
+      const row = page.locator("#cred-ghcr-command-row");
+      await expect(row).toBeVisible({ timeout: 15_000 });
+      await row.scrollIntoViewIfNeeded();
+
+      // Pin the callout itself: the command text, Copy, and Run with Copilot.
+      await expect(row).toContainText("gh auth refresh");
+      await expect(
+        row.getByRole("button", { name: COMMAND_RUN_LABEL })
+      ).toBeVisible();
+      await expect(row.getByRole("button", { name: "Copy" })).toBeVisible();
+      await expect(page.locator("#cred-ghcr-retry")).toBeVisible();
+
+      await screenshot(page, `vi-08-run-command-callout-${theme}.png`);
+    });
   }
 });
