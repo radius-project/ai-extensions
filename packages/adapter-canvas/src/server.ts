@@ -78,6 +78,7 @@ import {
 } from "./azure-oidc.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage } from "./ghcr.js";
+import { classifyProvider } from "./provider-classification.js";
 import {
   appParams,
   resolveDeployParams,
@@ -990,17 +991,10 @@ async function discoverEnvironmentTarget(
     vars[line.slice(0, tab)] = line.slice(tab + 1);
   }
   // Classify the provider by the presence of a canonical, exact-named
-  // configuration variable rather than a regex over every variable name joined
-  // together. A substring test like /AZURE_/ matches a user-defined
-  // `MY_AZURE_THING` (misclassifying an AWS environment as Azure), and any
-  // variable whose value contained a newline would have split into phantom
-  // names above. Keying off the exact canonical name each provider always
-  // writes avoids both.
-  let provider = "";
-  if (Object.prototype.hasOwnProperty.call(vars, "AZURE_CLIENT_ID"))
-    provider = "azure";
-  else if (Object.prototype.hasOwnProperty.call(vars, "AWS_EKS_CLUSTER_NAME"))
-    provider = "aws";
+  // configuration variable (see classifyProvider) rather than a regex over
+  // every variable name, and share that logic with the environment listing so
+  // the two paths never disagree about the same environment.
+  const provider = classifyProvider(vars);
   let repoId = 0;
   if (provider === "azure") {
     const repoIdOutput = await runCommand(
@@ -4305,13 +4299,11 @@ function createInstanceRequestCoordinator(
     for (const op of operations.all()) {
       // Resume a delete operation that was mid-flight when the process
       // restarted. The runner is resume-safe (each stage re-runs only while
-      // pending/running), so re-scheduling converges. An operation waiting on
-      // the app-registration prompt (input_required) is left alone — it resumes
-      // only when the user answers.
+      // pending/running), so re-scheduling converges. Delete operations never
+      // enter input_required, so there is no prompt state to skip here.
       if (
         op.kind === "delete" &&
         !op.endedAt &&
-        op.state !== INPUT_REQUIRED_STATE &&
         !serverOwnedTasks.has(op.operationId)
       ) {
         scheduleServerOwnedTask(op.operationId, () =>

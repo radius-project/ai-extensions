@@ -29,6 +29,7 @@ export type {
   DeleteOperationRecord,
   DeleteStartResult
 } from "./environments-types.js";
+import { classifyProvider } from "../../provider-classification.js";
 // Parameters for the app.bicep the deploy will run against. Resolves the branch
 // the same way the deploy route does (caller's selection, else the repo default)
 // and locates `.radius/app.bicep` then `app.bicep`. Every failure degrades to a
@@ -235,11 +236,12 @@ export async function handleDeleteEnvironment(
       return;
     }
     const clientId = target.clientId;
-    // Include the Azure cleanup stages whenever the environment is Azure-backed,
-    // even if the AZURE_CLIENT_ID could not be read. A missing client id is
-    // exactly when a federated credential is most likely orphaned, so the runner
-    // surfaces a warning for the credential and app-registration stages rather
-    // than silently skipping them (which would hide the orphan).
+    // Provider is guaranteed "azure" here (every other provider returned above),
+    // and an environment is only classified Azure when its canonical
+    // AZURE_CLIENT_ID variable is present, so the client id was readable and the
+    // Azure credential/app-registration cleanup stages always run. The flag is
+    // kept rather than inlined to `true` so the stage set stays explicit at the
+    // one place it is decided.
     const includeAzureCleanup = provider === "azure";
     const op = dependencies.createOperation({
       kind: "delete",
@@ -568,10 +570,7 @@ export async function handleListEnvironments(
         }
         if (!("RADIUS_MANAGED" in vars)) return null;
 
-        let provider = "";
-        const varNames = Object.keys(vars).join("\n");
-        if (/AZURE_/.test(varNames)) provider = "azure";
-        else if (/AWS_/.test(varNames)) provider = "aws";
+        let provider: string = classifyProvider(vars);
 
         const credentialProfile = vars.RADIUS_CREDENTIAL_PROFILE || "";
 

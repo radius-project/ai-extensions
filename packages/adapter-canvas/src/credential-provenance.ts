@@ -389,6 +389,14 @@ function createRegistry(): CredentialProvenanceRegistry {
     },
     async removeCredential(clientId, credentialId) {
       await serialize(async () => {
+        // Refresh from the store first, the same way record/list do, so a record
+        // file written by another session is included in `matches` and actually
+        // removed. Callers hold the provenance lock, but keeping the refresh
+        // here means the "remove exactly what is on disk" guarantee lives in
+        // this module rather than depending on every caller listing first.
+        if (store) {
+          entries = requireCredentialProvenanceRecords(await store.load());
+        }
         const matches = entries.filter(
           (entry) =>
             normalized(entry.clientId) === normalized(clientId) &&
@@ -400,6 +408,11 @@ function createRegistry(): CredentialProvenanceRegistry {
     },
     async clearEnvironment(repoId, environment) {
       await serialize(async () => {
+        // Refresh from the store first (see removeCredential) so a shared-consumer
+        // record written by another session is not silently left behind.
+        if (store) {
+          entries = requireCredentialProvenanceRecords(await store.load());
+        }
         const matches = entries.filter(
           (entry) =>
             entry.repoId === repoId && entry.environment === environment

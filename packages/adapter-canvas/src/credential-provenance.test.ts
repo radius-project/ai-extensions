@@ -306,6 +306,17 @@ describe("credential provenance registry", () => {
     expect(allCredentialProvenance()).toEqual([]);
   });
 
+  it("reloads durable state before removing a credential so another session's record is included", async () => {
+    const store = memoryStore();
+    const loadSpy = vi.spyOn(store, "load");
+    await configureCredentialProvenanceStore(store);
+    await recordCredentialProvenance(record());
+    loadSpy.mockClear();
+    await removeCredentialProvenance("app-1", "credential-1");
+    expect(loadSpy).toHaveBeenCalled();
+    expect(allCredentialProvenance()).toEqual([]);
+  });
+
   it("clears only one repository environment", async () => {
     await configureCredentialProvenanceStore(memoryStore());
     await recordCredentialProvenance(record());
@@ -320,6 +331,17 @@ describe("credential provenance registry", () => {
     expect(allCredentialProvenance().map((entry) => entry.environment)).toEqual(
       ["prod"]
     );
+  });
+
+  it("reloads durable state before clearing an environment", async () => {
+    const store = memoryStore();
+    const loadSpy = vi.spyOn(store, "load");
+    await configureCredentialProvenanceStore(store);
+    await recordCredentialProvenance(record());
+    loadSpy.mockClear();
+    await clearEnvironmentCredentialProvenance(5, "dev");
+    expect(loadSpy).toHaveBeenCalled();
+    expect(allCredentialProvenance()).toEqual([]);
   });
 
   it("supports a disabled store", async () => {

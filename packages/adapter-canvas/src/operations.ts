@@ -1144,11 +1144,6 @@ function summarizeDelete(op: any, env: string): string {
         stage ? stage.label.toLowerCase() : "working"
       }…`;
     }
-    case INPUT_REQUIRED_STATE:
-      return (
-        (op.inputRequired && op.inputRequired.message) ||
-        `Deleting ${env} needs a decision from you.`
-      );
     case "succeeded":
       return `Environment "${env}" deleted.`;
     case "succeeded_with_warnings": {
@@ -1414,9 +1409,10 @@ export function reconcileRestoredOperation(op: any): any {
     op.request = structuredClone(op.deleteRecovery);
   }
   if (op.inputRequired) {
-    // A delete op parked on the app-registration prompt has no resumeRequest,
-    // but its rebuilt request is enough to resume once the user answers.
-    if (op.resumeRequest || (op.kind === OPERATION_KIND_DELETE && op.request)) {
+    // Only create operations ever park on an input_required prompt (Azure
+    // auto-setup). Delete operations never enter input_required — the
+    // app-registration prompt was removed — so there is no delete branch here.
+    if (op.resumeRequest) {
       op.state = INPUT_REQUIRED_STATE;
       op.recoveryState = "waiting_input";
       return op;

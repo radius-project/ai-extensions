@@ -277,7 +277,13 @@ describe("runEnvironmentDeletion — environment still has deployed applications
   });
 });
 
-describe("runEnvironmentDeletion — aws provider", () => {
+// AWS is not a supported provider yet: the delete route rejects every non-Azure
+// environment before an operation is ever created, so an AWS op never reaches
+// this runner. These cases therefore exercise the runner's provider-agnostic
+// "no Azure cleanup" path (includeAzureCleanup: false) — the stage-selection and
+// best-effort logic shared by any environment that skips credential teardown —
+// not a real end-to-end AWS deletion, which cannot happen.
+describe("runEnvironmentDeletion — no Azure-cleanup path (e.g. non-Azure)", () => {
   it("runs only radius env + github env stages, never az", async () => {
     const op = makeOp({ provider: "aws", includeAzureCleanup: false });
     const ports = makePorts();

@@ -87,7 +87,8 @@ const {
   generateVerifyWorkflow,
   generateDeployWorkflow,
   generateDeleteWorkflow,
-  configureVerifyGhcrProbe
+  configureVerifyGhcrProbe,
+  computeBundledWorkflowDirs
 } = await import("./infra.js");
 
 const VERIFY_PATH = ".github/workflows/radius-verify-credentials.yml";
@@ -265,6 +266,22 @@ describe("generateDeleteWorkflow", () => {
     ];
     expect(provider).toContain("app_names<<${delimiter}");
     expect(provider).not.toContain('echo "app_names=${app_names}"');
+  });
+});
+
+describe("computeBundledWorkflowDirs", () => {
+  it("walks up to .github/extension when running from source (not a bundle)", () => {
+    const dirs = computeBundledWorkflowDirs(
+      "/repo/packages/adapter-canvas/src"
+    );
+    expect(dirs[0]).toBe("/repo/packages/adapter-canvas/src/workflows");
+    expect(dirs.some((d) => d.endsWith("/.github/extension"))).toBe(true);
+  });
+
+  it("uses only the sibling workflows dir when running from a built bundle", () => {
+    const dirs = computeBundledWorkflowDirs("/install/plugins/radius/dist");
+    expect(dirs).toEqual(["/install/plugins/radius/dist/workflows"]);
+    expect(dirs.some((d) => d.includes(".github"))).toBe(false);
   });
 });
 

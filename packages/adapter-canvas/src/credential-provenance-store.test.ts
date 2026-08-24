@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -86,6 +86,39 @@ describe("createFileCredentialProvenanceStore", () => {
     expect(entered).toEqual(["first", "second"]);
   });
 
+  it("keeps the lock directory mtime fresh with a heartbeat while held", async () => {
+    const utimesSpy = vi.spyOn(fs, "utimes");
+    const intervalSpy = vi.spyOn(globalThis, "setInterval");
+    try {
+      const directory = await tempDirectory();
+      const store = createFileCredentialProvenanceStore({ directory });
+      let release: () => void = () => {};
+      const running = store.withLock(
+        () => new Promise<void>((resolve) => (release = resolve))
+      );
+      // Wait until the heartbeat interval has been scheduled, which only happens
+      // once the lock is acquired (after the real mkdir/writeFile I/O).
+      for (let i = 0; i < 50 && intervalSpy.mock.calls.length === 0; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(intervalSpy).toHaveBeenCalled();
+      const tick = intervalSpy.mock.calls[0][0] as () => void;
+      utimesSpy.mockClear();
+      tick();
+      await new Promise((resolve) => setImmediate(resolve));
+      const lockDir = path.join(directory, ".lock");
+      expect(utimesSpy).toHaveBeenCalled();
+      expect(utimesSpy.mock.calls[0][0]).toBe(lockDir);
+      release();
+      await running;
+      // The heartbeat is cleared and the lock released when work resolves.
+      await expect(fs.stat(lockDir)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      intervalSpy.mockRestore();
+      utimesSpy.mockRestore();
+    }
+  });
+
   it("ignores non-json files but fails closed on corrupt records", async () => {
     const directory = await tempDirectory();
     await fs.writeFile(path.join(directory, "ignore.txt"), "x");
@@ -96,9 +129,10 @@ describe("createFileCredentialProvenanceStore", () => {
       report: (diagnostic) => diagnostics.push(diagnostic)
     });
     await expect(store.load()).rejects.toThrow(
-      "Credential provenance is incomplete"
+      'Credential provenance file "broken.json" is incomplete'
     );
     expect(diagnostics[0].code).toBe("credential-provenance-corrupt");
+    expect(diagnostics[0].message).toContain("broken.json");
   });
 
   it("reports an unreadable directory and record", async () => {
@@ -112,9 +146,7 @@ describe("createFileCredentialProvenanceStore", () => {
     await expect(store.load()).rejects.toThrow(
       "Credential provenance could not be listed"
     );
-    await expect(store.read("key")).rejects.toThrow(
-      "Credential provenance could not be read"
-    );
+    await expect(store.read("key")).rejects.toThrow("could not be read");
     expect(diagnostics.map((entry) => entry.code)).toEqual([
       "credential-provenance-unavailable",
       "credential-provenance-unavailable"

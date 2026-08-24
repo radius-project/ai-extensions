@@ -26,7 +26,7 @@ import {
 import type { DeployWorkflowOptions } from "@radius-project/core";
 import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import {
   fetchFileFromRepoResult,
@@ -151,18 +151,33 @@ async function fetchRadiusTemplate(
 // Candidate directories to read a bundled static workflow template from, in
 // priority order. `import.meta.url` resolves to the compiled bundle
 // (plugins/radius/dist/extension.mjs or the installed copy) at runtime, whose
-// sibling `workflows/` directory is populated by build.mjs; in tests and
-// source runs it resolves to this file under `src/`, so the repository's own
-// `.github/extension/` (found by walking up) is the source of truth.
+// sibling `workflows/` directory is populated by build.mjs. When running from a
+// built bundle that sibling is the ONLY source of truth: the walk up to a
+// `.github/extension/` directory is deliberately skipped so a production install
+// can never read a `delete-environment.yml` that happens to sit in the user's
+// own repository checkout. In tests and source runs `import.meta.url` resolves
+// to this file under `src/`, so the walk locates the repository's own
+// `.github/extension/`.
 function bundledWorkflowDirs(): string[] {
-  const here = dirname(fileURLToPath(import.meta.url));
+  return computeBundledWorkflowDirs(dirname(fileURLToPath(import.meta.url)));
+}
+
+// Pure, testable core of bundledWorkflowDirs: given the directory this module
+// runs from, return the candidate template directories in priority order.
+export function computeBundledWorkflowDirs(here: string): string[] {
   const dirs = [join(here, "workflows")];
-  let cursor = here;
-  for (let depth = 0; depth < 8; depth++) {
-    dirs.push(join(cursor, ".github", "extension"));
-    const parent = dirname(cursor);
-    if (parent === cursor) break;
-    cursor = parent;
+  // A built bundle lives in a `dist/` directory; source/test runs live under
+  // `src/`. Only fall back to walking up for the in-repo `.github/extension/`
+  // templates when NOT running from a build output.
+  const runningFromBundle = here.split(sep).includes("dist");
+  if (!runningFromBundle) {
+    let cursor = here;
+    for (let depth = 0; depth < 8; depth++) {
+      dirs.push(join(cursor, ".github", "extension"));
+      const parent = dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
   }
   return dirs;
 }

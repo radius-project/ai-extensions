@@ -31,6 +31,11 @@ export function createFileCredentialProvenanceStore({
   report?: CredentialProvenanceStoreReporter;
 }): CredentialProvenanceStore {
   const lockDirectory = path.join(directory, ".lock");
+  // While a holder works, refresh the lock directory's mtime on this cadence so
+  // a long-but-live holder is never mistaken for a crashed one and stolen. It
+  // must be comfortably shorter than the STALE_LOCK_MS steal threshold.
+  const LOCK_HEARTBEAT_MS = 60_000;
+  const STALE_LOCK_MS = 5 * 60_000;
   const readFile = async (filePath: string): Promise<unknown | null> => {
     let raw: string;
     try {
@@ -46,20 +51,36 @@ export function createFileCredentialProvenanceStore({
       }
       report({
         code: "credential-provenance-unavailable",
-        message: `Could not read credential provenance: ${String(error)}`
+        message: `Could not read credential provenance file "${path.basename(
+          filePath
+        )}": ${String(error)}`
       });
-      throw new Error("Credential provenance could not be read.", {
-        cause: error
-      });
+      throw new Error(
+        `Credential provenance file "${path.basename(
+          filePath
+        )}" could not be read.`,
+        {
+          cause: error
+        }
+      );
     }
     try {
       return JSON.parse(raw);
     } catch (error) {
       report({
         code: "credential-provenance-corrupt",
-        message: `Invalid credential provenance prevented a complete read: ${String(error)}`
+        message: `Invalid credential provenance file "${path.basename(
+          filePath
+        )}" prevented a complete read; move or delete it to recover: ${String(
+          error
+        )}`
       });
-      throw new Error("Credential provenance is incomplete.", { cause: error });
+      throw new Error(
+        `Credential provenance file "${path.basename(
+          filePath
+        )}" is incomplete.`,
+        { cause: error }
+      );
     }
   };
 
@@ -145,7 +166,7 @@ export function createFileCredentialProvenanceStore({
             throw error;
           }
           const stat = await fs.stat(lockDirectory).catch(() => null);
-          if (stat && Date.now() - stat.mtimeMs > 5 * 60_000) {
+          if (stat && Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
             await fs.rm(lockDirectory, { recursive: true, force: true });
             continue;
           }
@@ -158,9 +179,22 @@ export function createFileCredentialProvenanceStore({
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
       }
+      // Keep the lock's mtime fresh while we hold it. A holder that legitimately
+      // runs longer than STALE_LOCK_MS (setup wraps az calls and replication-lag
+      // retries in this lock) would otherwise look crashed and have its lock
+      // stolen, letting a second process mutate provenance concurrently. If this
+      // process crashes the interval stops, the mtime goes stale, and the lock
+      // is correctly reclaimed. `unref` so the timer never keeps the event loop
+      // alive on its own.
+      const heartbeat = setInterval(() => {
+        const when = new Date();
+        void fs.utimes(lockDirectory, when, when).catch(() => {});
+      }, LOCK_HEARTBEAT_MS);
+      (heartbeat as { unref?: () => void }).unref?.();
       try {
         return await work();
       } finally {
+        clearInterval(heartbeat);
         const currentOwner = await fs
           .readFile(ownerFile, "utf8")
           .catch(() => "");

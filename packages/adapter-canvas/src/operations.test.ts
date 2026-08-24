@@ -758,13 +758,6 @@ describe("summaries and announcements", () => {
       failure: { code: "boom", message: "no" }
     });
     expect(summarize(failed)).toBe('Deleting environment "dev" failed.');
-
-    const prompting = newOp({
-      kind: OPERATION_KIND_DELETE,
-      stages: buildDeleteStages()
-    });
-    requireInput(prompting, { message: "Delete the app registration?" });
-    expect(summarize(prompting)).toBe("Delete the app registration?");
   });
 
   it("words every terminal and fallback state for a delete operation", () => {
@@ -776,14 +769,6 @@ describe("summaries and announcements", () => {
       mutate(op);
       return op;
     };
-
-    // input_required with no message falls back to the delete-worded prompt.
-    const promptFallback = make((op) => {
-      requireInput(op, {});
-    });
-    expect(summarize(promptFallback)).toBe(
-      "Deleting dev needs a decision from you."
-    );
 
     // succeeded_with_warnings pluralises correctly for more than one warning.
     const twoWarnings = make((op) => {
@@ -1206,37 +1191,6 @@ describe("registry", () => {
     expect(back.request).toMatchObject({ clientId: "app-1" });
   });
 
-  it("hydrates an input-required delete operation as waiting for input through the store", async () => {
-    let envelope = null;
-    const store = {
-      async load() {
-        return envelope;
-      },
-      async save(next) {
-        envelope = structuredClone(next);
-      }
-    };
-    const first = createRegistry({ store });
-    const op = newDeleteOp({ credentialConsumerRetirementReady: true });
-    enterStage(op, STAGE_REVIEW_APP_REGISTRATION);
-    requireInput(op, {
-      code: "confirm-credential-retirement",
-      message: "Proceed?"
-    });
-    first.put(op);
-    await first.persist();
-
-    const restored = createRegistry({ store });
-    await restored.hydrate();
-    const back = restored.get(op.operationId);
-    expect(back.state).toBe("input_required");
-    expect(back.recoveryState).toBe("waiting_input");
-    expect(back.request).toMatchObject({
-      clientId: "app-1",
-      credentialConsumerRetirementReady: true
-    });
-  });
-
   it("skips invalid persisted records, reports them, and rewrites a clean envelope", async () => {
     const valid = newOp();
     requireInput(valid, { code: "choose-app", message: "Choose an app." });
@@ -1459,24 +1413,6 @@ describe("startup reconciliation", () => {
     expect(
       restored.stages.find((s) => s.id === STAGE_DELETE_CREDENTIAL).state
     ).toBe("pending");
-  });
-
-  it("restores an input-required delete operation from its typed recovery request", () => {
-    const op = newDeleteOp();
-    enterStage(op, STAGE_REVIEW_APP_REGISTRATION);
-    requireInput(op, {
-      code: "confirm-credential-retirement",
-      message: "Proceed?"
-    });
-    const restored = fromPersistedOperation(toPersistedOperation(op));
-    // Delete ops never populate resumeRequest — only deleteRecovery carries the inputs.
-    expect(restored.resumeRequest).toBeUndefined();
-
-    reconcileRestoredOperation(restored);
-
-    expect(restored.state).toBe("input_required");
-    expect(restored.recoveryState).toBe("waiting_input");
-    expect(restored.request).toMatchObject({ clientId: "app-1" });
   });
 
   it("falls back to failed_partial for a delete op with no recoverable request", () => {
