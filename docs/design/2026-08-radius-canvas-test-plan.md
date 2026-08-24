@@ -21,12 +21,11 @@ Start with the status table. Use the phase sections for the work still to come. 
 | 2     | Complete    | Gave all 40 local API routes one owner and removed the old fallback path                     | [#339](https://github.com/radius-project/ai-extensions/pull/339) through [#382](https://github.com/radius-project/ai-extensions/pull/382) are merged                                                                                                             |
 | 3     | Complete    | Split page rendering into smaller modules while preserving the seven page outputs            | [#379](https://github.com/radius-project/ai-extensions/pull/379) is merged                                                                                                                                                                                       |
 | 4     | Complete    | Moved browser behavior into testable TypeScript and removed the duplicate JavaScript sources | Foundation [#393](https://github.com/radius-project/ai-extensions/pull/393) and graph [#394](https://github.com/radius-project/ai-extensions/pull/394) are merged; final browser behavior is in [#395](https://github.com/radius-project/ai-extensions/pull/395) |
-| 5     | Not started | Combine extension, local API, and packaged-extension checks into permanent CI gates          | —                                                                                                                                                                                                                                                                |
-| 6     | Not started | Test the interface in real Chromium, including keyboard and accessibility behavior           | —                                                                                                                                                                                                                                                                |
-| 7     | Not started | Add reviewed screenshots and scheduled reliability checks                                    | —                                                                                                                                                                                                                                                                |
+| 5     | Complete    | Combine extension, local API, and packaged-extension checks into permanent CI gates          | —                                                                                                                                                                                                                                                                |
+| 6     | Complete    | Test the interface in real Chromium, including keyboard and accessibility behavior           | —                                                                                                                                                                                                                                                                |
+| 7     | Complete    | Add reviewed screenshots and scheduled reliability checks                                    | —                                                                                                                                                                                                                                                                |
 | 8     | Not started | Test installation and panel lifecycle in a supported Copilot host before release             | —                                                                                                                                                                                                                                                                |
 
-Phase 4 is complete and meets BU-01–BU-14 in #395.
 
 ## Rules for every change
 
@@ -100,25 +99,23 @@ Phase 4 moved graph, credential, environment, deployment, navigation, heartbeat,
 
 Completion evidence: BU-01–BU-14 pass; all 12 entries build safely and appear once; no extra browser file is requested while the page runs; the former `client.ts` and page-specific JavaScript strings are removed; browser coverage is 100% in all four measures; and extension, local API, page, build, and packaged-extension checks pass. Phases 0–4 do not claim real browser layout, focus, iframe, React Flow, accessibility, or keyboard coverage.
 
-## Remaining phases
-
 ### Phase 5: permanent extension and server test gates
 
 Combine the extension setup, local API, and packaged-extension checks already introduced by earlier phases. Fill any missing lifecycle, route, cleanup, branch, resume, package, cancellation, and GitHub authentication cases. Cover close or shutdown during startup, external calls, mutations, and subprocess execution; prove that late results cannot change newer state. Test injected tokens, stored accounts, scope-based fallback, explicit account choice, package credentials, redaction, and authentication failures without using real secrets. Make the complete checks required for pull requests and publishing.
 
-Complete when all three suites run without live GitHub or cloud access, produce short logs with no secrets, and block regressions in CI.
+Completion evidence: all three suites run without live GitHub or cloud access, produce short logs with no secrets, and block regressions in CI.
 
 ### Phase 6: real browser behavior
 
 Run the interface in Chromium with controlled data. Cover the workflows in Appendix B, including graph details and links, GitHub identity and account selection, credentials, safe environment and deployment actions, branch selection, recovery, progress, resume, keyboard use, and accessibility. Prove that authentication errors and account mismatches are clear without exposing tokens. Prove that navigation and teardown abort browser-owned work, ignore late callbacks, and do not falsely report durable server work as cancelled.
 
-Complete when these checks are repeatable without a public content network, personal login, or mutable repository, and useful traces are saved when they fail.
+Completion evidence: these checks are repeatable without a public content network, personal login, or mutable repository, and useful traces are saved when they fail.
 
 ### Phase 7: screenshots and reliability
 
 Add the selected screenshots in Appendix D and scheduled checks for empty or partial data, expired caches, repeated polling, cancellation races, timeouts, multiple instances, cleanup, GitHub authentication command behavior on supported operating systems, and Windows/macOS paths. Screenshot changes require a clear product reason and human review.
 
-Complete when screenshots are stable, changed paths pass their reliability checks, and retry-only passes are recorded.
+Completion evidence: screenshots are stable, changed paths pass their reliability checks, and retry-only passes are recorded.
 
 ### Phase 8: supported-host qualification
 
@@ -144,7 +141,7 @@ The full plan is complete when every requirement in the appendices has a passing
 
 ## Open decisions
 
-1. Should production continue loading pinned vendor assets from unpkg, or should a later change package them?
+1. Should production continue loading pinned vendor assets from unpkg, or should a later change package them? No, we are including vendor packages in the plugin
 2. What request-size limit and common local API error format, if any, should be approved as a separate behavior change?
 
 ## Appendices
