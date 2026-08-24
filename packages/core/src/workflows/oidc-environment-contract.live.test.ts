@@ -31,8 +31,13 @@ import { VERIFY_AZURE_FILE } from "./verify.js";
 
 const LIVE = !!process.env.RUN_LIVE_WORKFLOW_TESTS;
 
+// The ref whose templates are validated. CI sets this to the PR head on pull
+// requests so a PR checks its own `.github/extension/` templates; otherwise it
+// falls back to RADIUS_REF (`main`).
+const LIVE_REF = process.env.RADIUS_LIVE_REF?.trim() || RADIUS_REF;
+
 async function fetchWorkflow(file: string): Promise<string> {
-  const url = `https://raw.githubusercontent.com/${RADIUS_WORKFLOW_REPO}/${RADIUS_REF}/${RADIUS_WORKFLOW_DIR}/${file}`;
+  const url = `https://raw.githubusercontent.com/${RADIUS_WORKFLOW_REPO}/${LIVE_REF}/${RADIUS_WORKFLOW_DIR}/${file}`;
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`failed to fetch ${url}: ${res.status} ${res.statusText}`);

@@ -64,7 +64,7 @@ env:
 jobs:
   delete:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}
 `,
   [DELETE_AWS_FILE]: `name: delete-aws
 on:
@@ -74,7 +74,7 @@ env:
 jobs:
   delete:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}
 `
 };
 
@@ -172,7 +172,7 @@ describe("generateDeleteWorkflow", () => {
       DELETE_ENV_AZURE_FILE
     ]) {
       expect(files[file]).toContain(
-        `radius-project/radius/.github/extension/actions/delete-resource@${DELETE_RADIUS_REF}`
+        `radius-project/ai-extensions/.github/extension/actions/delete-resource@${DELETE_RADIUS_REF}`
       );
       expect(files[file]).not.toContain("{{RADIUS_REF}}");
     }
@@ -235,7 +235,7 @@ describe("generateDeleteWorkflow", () => {
 
   it("names the upstream source in the missing-template error", () => {
     expect(() => generateDeleteWorkflow("prod", {})).toThrow(
-      `radius-project/radius/.github/extension at "${DELETE_RADIUS_REF}"`
+      `radius-project/ai-extensions/.github/extension at "${DELETE_RADIUS_REF}"`
     );
   });
 
