@@ -36,9 +36,20 @@ const LIVE = !!process.env.RUN_LIVE_WORKFLOW_TESTS;
 // falls back to RADIUS_REF (`main`).
 const LIVE_REF = process.env.RADIUS_LIVE_REF?.trim() || RADIUS_REF;
 
+// radius-project/ai-extensions is an internal repo, so the templates are not
+// reachable over anonymous raw.githubusercontent.com. Fetch them through the
+// authenticated GitHub contents API (raw media type) using the CI token.
 async function fetchWorkflow(file: string): Promise<string> {
-  const url = `https://raw.githubusercontent.com/${RADIUS_WORKFLOW_REPO}/${LIVE_REF}/${RADIUS_WORKFLOW_DIR}/${file}`;
-  const res = await fetch(url);
+  const token = process.env.GITHUB_TOKEN?.trim();
+  const url = `https://api.github.com/repos/${RADIUS_WORKFLOW_REPO}/contents/${RADIUS_WORKFLOW_DIR}/${file}?ref=${encodeURIComponent(LIVE_REF)}`;
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github.raw",
+    "User-Agent": "radius-ai-extensions-live-tests"
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  const res = await fetch(url, { headers });
   if (!res.ok) {
     throw new Error(`failed to fetch ${url}: ${res.status} ${res.statusText}`);
   }
