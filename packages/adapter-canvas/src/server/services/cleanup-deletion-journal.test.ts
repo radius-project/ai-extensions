@@ -214,6 +214,86 @@ describe("issuing one cleanup deletion through the journal", () => {
     expect(test.deletes).toEqual([1]);
   });
 
+  describe("the pre-delete identity gate", () => {
+    it("refuses a first delete whose name now answers for another resource", async () => {
+      const test = harness({
+        confirmRecordedIdentity: async () => ({
+          decision: "refuse" as const,
+          detail: "The name belongs to a replacement."
+        }),
+        runDelete: async () => {
+          throw new Error("a refused identity must not be deleted");
+        }
+      });
+
+      const settled = await test.run();
+
+      expect(settled).toEqual({
+        outcome: "skipped",
+        detail: "The name belongs to a replacement."
+      });
+      expect(test.deletes).toEqual([]);
+      expect(test.operation.providerRecovery.mutations).toEqual([]);
+    });
+
+    it("settles an outstanding delete through reconciliation instead of the gate", async () => {
+      // The gate answers before the journal is consulted, so letting it short
+      // circuit here would return without the settle the entry is owed, and the
+      // operation would quarantine a resource it had just proven gone.
+      const test = harness({
+        runDelete: async () => lost(),
+        readExactIdentity: async () => "unreadable"
+      });
+      await test.run();
+
+      const settled = await test.run({
+        confirmRecordedIdentity: async () => {
+          throw new Error("an outstanding delete is reconciled, not re-gated");
+        },
+        runDelete: async () => {
+          throw new Error("an unresolved delete must not be reissued");
+        },
+        readExactIdentity: async () => "absent"
+      });
+
+      expect(settled).toEqual({ outcome: "not_found", detail: null });
+      expect(test.deletes).toEqual([1]);
+      expect(unresolvedProviderMutations(test.operation)).toEqual([]);
+    });
+
+    it("gates again when the provider rejected the delete outright", async () => {
+      // A rejected delete left the resource in place and nothing to reconcile,
+      // so the next pass reissues one — and that delete is a first delete.
+      const gates: number[] = [];
+      const test = harness({
+        runDelete: async () => ({
+          code: 1,
+          stdout: "",
+          stderr: "AuthorizationFailed"
+        }),
+        isAlreadyAbsent: () => false
+      });
+      await test.run();
+
+      const settled = await test.run({
+        confirmRecordedIdentity: async () => {
+          gates.push(gates.length + 1);
+          return { decision: "refuse" as const, detail: "Identity changed." };
+        },
+        runDelete: async () => {
+          throw new Error("a refused identity must not be deleted");
+        }
+      });
+
+      expect(gates).toEqual([1]);
+      expect(settled).toEqual({
+        outcome: "skipped",
+        detail: "Identity changed."
+      });
+      expect(test.deletes).toEqual([1]);
+    });
+  });
+
   it("does not delete when the record of the delete cannot be saved", async () => {
     const test = harness({
       persist: async () => {

@@ -3,6 +3,7 @@ import {
   ProviderMutationRecoveryError,
   type ProviderMutationCommandResult
 } from "./provider-mutation-recovery.js";
+import { providerMutationRecord } from "../../operations.js";
 
 // Journaling the deletions a rollback issues, so a lost answer never becomes a
 // second delete.
@@ -98,11 +99,25 @@ export async function executeJournaledCleanupDeletion(input: {
    * `delete` is the only verdict that lets the request go out. `absent` settles
    * the artifact without one, because a resource that is provably gone is
    * nothing to address a delete at. `refuse` hands it to the customer.
+   *
+   * Only consulted for a delete this pass is about to issue. A journaled attempt
+   * that is still outstanding is owed a settle, and answering it from here would
+   * return without one, so reconciliation reads that identity instead.
    */
   confirmRecordedIdentity?(): Promise<CleanupIdentityVerdict>;
 }): Promise<CleanupDeletionOutcome> {
   let alreadyAbsent = false;
-  if (input.confirmRecordedIdentity) {
+  const journaled = providerMutationRecord(
+    input.operation,
+    cleanupDeletionKind(input.artifactType),
+    input.identity
+  );
+  // The states that reissue the delete: never journaled, or journaled and
+  // conclusively rejected, which leaves nothing behind to reconcile. Every other
+  // status routes into `reconcile` below, which owns both the read and the
+  // settle that releases the operation.
+  const willIssueDelete = !journaled || journaled.status === "not_applied";
+  if (input.confirmRecordedIdentity && willIssueDelete) {
     const verdict = await input.confirmRecordedIdentity();
     if (verdict.decision === "refuse") {
       return { outcome: "skipped", detail: verdict.detail };
