@@ -87,6 +87,7 @@ export function initializePlannedGraphPage(
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
+  let selectionQueuedWhileLoading = false;
   const showModelingFailure = (message: string): void => {
     controller?.destroy();
     controller = null;
@@ -273,6 +274,7 @@ export function initializePlannedGraphPage(
     run,
     () => {
       if (entry.active) {
+        plan.planPending = false;
         applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
       }
     },
@@ -283,14 +285,18 @@ export function initializePlannedGraphPage(
   // deploy does not exist yet, and the request may still fail.
   const queue = (immediate = false): void => {
     plan.requestFailed = false;
-    if (button && button.dataset.mode === "deploy") button.disabled = true;
+    plan.planPending = true;
+    applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
+    if (plan.selectorsPending) {
+      selectionQueuedWhileLoading = true;
+      return;
+    }
     schedule(immediate);
   };
 
   for (const selector of [app, branch, environment]) {
     if (!selector) continue;
     entry.on(selector, "change", () => {
-      applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
       queue();
     });
   }
@@ -326,7 +332,12 @@ export function initializePlannedGraphPage(
     repo: page.repo,
     environmentProviders: providers,
     defaultBranch: page.branch,
-    defaultEnvironment: page.environment
+    defaultEnvironment: page.environment,
+    onSelectorsReady: () => {
+      if (!entry.active || !selectionQueuedWhileLoading) return;
+      selectionQueuedWhileLoading = false;
+      schedule();
+    }
   }).then(() => {
     if (!entry.active) return;
     if (page.resources.length === 0) queue(true);

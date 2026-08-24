@@ -258,6 +258,7 @@ export function parseDeployProgressArtifact(
   } catch {
     return null;
   }
+
   if (!isRecord(parsed)) return null;
   if (parsed.schemaVersion !== DEPLOY_PROGRESS_SCHEMA_VERSION) return null;
   if (typeof parsed.application !== "string" || !parsed.application)
@@ -323,6 +324,79 @@ export function parseDeployProgressArtifact(
     state: typeof parsed.state === "string" ? parsed.state : undefined,
     resources
   };
+}
+
+/**
+ * Rad may write build progress to stdout before emitting the graph JSON. The
+ * deploy workflow redirects that combined stream into deploy-graph.json, so
+ * locate the first complete JSON document rather than rejecting valid graph
+ * metadata because of the human-readable preamble.
+ */
+export function parseDeployGraphArtifact(text?: string | null): unknown | null {
+  if (!text) return null;
+  let arrayGraph: unknown[] | null = null;
+  for (let start = 0; start < text.length; start++) {
+    const first = text[start];
+    if (first !== "{" && first !== "[") continue;
+    const expectedClosers: string[] = [];
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+    for (let index = start; index < text.length; index++) {
+      const character = text[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (character === "\\") {
+          escaped = true;
+        } else if (character === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+      } else if (character === "{") {
+        expectedClosers.push("}");
+      } else if (character === "[") {
+        expectedClosers.push("]");
+      } else if (character === "}" || character === "]") {
+        if (expectedClosers.pop() !== character) break;
+        if (expectedClosers.length === 0) {
+          end = index + 1;
+          break;
+        }
+      }
+    }
+    if (end < 0) continue;
+    try {
+      const parsed: unknown = JSON.parse(text.slice(start, end));
+      if (isRecord(parsed) && isGraphResourceArray(parsed.resources)) {
+        return parsed;
+      }
+      if (isGraphResourceArray(parsed) && arrayGraph === null) {
+        arrayGraph = parsed;
+      }
+    } catch {
+      // A balanced fragment in the preamble is not necessarily valid JSON.
+    }
+  }
+  return arrayGraph;
+}
+
+function isGraphResourceArray(value: unknown): value is unknown[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (resource) =>
+        isRecord(resource) &&
+        ("id" in resource ||
+          "name" in resource ||
+          "type" in resource ||
+          "connections" in resource ||
+          "outputResources" in resource)
+    )
+  );
 }
 
 function normalizeDeployStatusField(value: unknown): DeployStatus | undefined {
@@ -857,15 +931,9 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
             inspectedArtifacts.set(artifact.id, empty("malformed"));
           continue;
         }
-        let graph: unknown | null = null;
         const graphText = files[DEPLOY_STATUS_FILES.graph];
-        if (graphText) {
-          try {
-            graph = JSON.parse(graphText);
-          } catch {
-            sawMalformed = true;
-          }
-        }
+        const graph = parseDeployGraphArtifact(graphText);
+        if (graphText && graph === null) sawMalformed = true;
         result = {
           status: "ok",
           progress,
