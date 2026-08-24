@@ -19,6 +19,7 @@ import {
 } from "./operations-control.js";
 import { routeKey } from "../route-table.js";
 import {
+  acceptCommand,
   beginRetryAttempt,
   canRetryCleanup,
   finish,
@@ -30,7 +31,9 @@ import {
   recordGitHubEnvironment,
   requestStop,
   requireInput,
+  setCommandState,
   stopAtBoundary,
+  EXIT_COMMAND_KIND,
   STAGE_VERIFY
 } from "../../operations.js";
 import {
@@ -248,6 +251,7 @@ describe("POST /api/operations/{id}/stop", () => {
       code: "app-selection-required",
       message: "Choose an identity."
     });
+
     const out = await drive(handleStopOperation, op, "stop");
 
     expect(out.recording.status).toBe(200);
@@ -259,6 +263,30 @@ describe("POST /api/operations/{id}/stop", () => {
     expect(announced).toEqual([op.operationId]);
     expect(op.journey.notifiedAt).toBeTruthy();
   });
+
+  it.each(["rollback", "retry_cleanup", EXIT_COMMAND_KIND] as const)(
+    "rejects Stop while %s cleanup owns the operation",
+    async (kind) => {
+      const op = newOperation();
+      const accepted = acceptCommand(op, {
+        kind,
+        attempt: 1,
+        target: "cleanup#owned"
+      });
+      setCommandState(op, accepted.command.commandId, "running");
+
+      const out = await drive(handleStopOperation, op, "stop");
+
+      expect(out.recording.status).toBe(409);
+      expect(out.payload()).toMatchObject({
+        code: "operation-cleanup-not-stoppable",
+        error:
+          "Cleanup is already running and cannot be stopped. Wait for it to finish."
+      });
+      expect(op.stopRequested).toBe(false);
+      expect(out.journal.persistCalls).toBe(0);
+    }
+  );
 
   it("returns the saved result when the same stop arrives twice", async () => {
     const op = newOperation();

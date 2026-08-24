@@ -354,6 +354,23 @@ export async function handleStopOperation(
   if (!resolved) return;
   const { operationId, operation } = resolved;
 
+  const activeCommand = findActiveCommand(operation);
+  if (
+    activeCommand &&
+    (activeCommand.kind === "rollback" ||
+      activeCommand.kind === "retry_cleanup" ||
+      activeCommand.kind === EXIT_COMMAND_KIND)
+  ) {
+    sendJson(context, 409, {
+      error:
+        "Cleanup is already running and cannot be stopped. Wait for it to finish.",
+      code: "operation-cleanup-not-stoppable",
+      operationId,
+      operation: clientView(operation)
+    });
+    return;
+  }
+
   const snapshot: unknown = snapshotRetryState(operation);
   // Announcing is deferred until the write lands: a cancellation that a failed
   // write rolls back must never be reported as an ended setup.
