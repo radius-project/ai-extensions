@@ -567,7 +567,9 @@ export async function handleDeleteDeployment(
       const retryAllowed = shouldRetryWithKeyringCredential({
         stderr: first.stderr,
         timedOut: first.timedOut,
-        hasInjectedToken: !!(env.GH_TOKEN || env.GITHUB_TOKEN)
+        hasInjectedToken: Boolean(
+          env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim()
+        )
       });
       if (!retryAllowed) return first;
       const fallbackEnv = { ...env };

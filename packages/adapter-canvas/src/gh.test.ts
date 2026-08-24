@@ -15,6 +15,7 @@ interface LoadGhOptions {
   token?: string | null;
   githubToken?: string | null;
   userTokens?: Record<string, string>;
+  userTokenErrors?: Record<string, Error>;
   apiLogin?: string;
   commandResult?: {
     error?: string;
@@ -163,6 +164,7 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
     token = null,
     githubToken,
     userTokens = {},
+    userTokenErrors = {},
     apiLogin = "",
     commandResult,
     ghVersion = "gh version 2.96.0",
@@ -194,6 +196,8 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
       const ui = a.indexOf("--user");
       if (ui !== -1) {
         const login = a[ui + 1];
+        if (Object.prototype.hasOwnProperty.call(userTokenErrors, login))
+          return done(userTokenErrors[login], "");
         if (Object.prototype.hasOwnProperty.call(userTokens, login))
           return done(null, userTokens[login]);
         return done(new Error("no token for user"), "");
@@ -898,7 +902,7 @@ describe.sequential("selected GitHub executor", () => {
     expect(tokenLookup?.[2].env.GH_TOKEN).toBeUndefined();
     expect(tokenLookup?.[2].env.GITHUB_TOKEN).toBeUndefined();
     expect(tokenLookup?.[2].env.GH_HOST).toBeUndefined();
-    expect(tokenLookup?.[2].timeout).toBe(3000);
+    expect(tokenLookup?.[2].timeout).toBe(8000);
 
     childProcess.execFile.mockClear();
     await executor.verifyIdentity();
@@ -906,6 +910,31 @@ describe.sequential("selected GitHub executor", () => {
     expect(options.env.GH_TOKEN).toBe("opaque-keyring-secret");
     expect(options.env.GITHUB_TOKEN).toBeUndefined();
     expect(executor.credentialSource).toBe("keyring");
+  });
+
+  it("pins the injected credential when the selected keyring lookup times out", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenDuplicateLogin,
+      keyring: STATUS.keyringDuplicateLogin,
+      userTokenErrors: {
+        dupuser: Object.assign(new Error("timed out"), {
+          code: null,
+          killed: true,
+          signal: "SIGTERM"
+        })
+      },
+      apiLogin: "dupuser"
+    });
+
+    const executor = await gh.createSelectedGhExecutor("dupuser");
+    childProcess.execFile.mockClear();
+    await executor.verifyIdentity();
+
+    expect(executor.credentialSource).toBe("injected");
+    expect(childProcess.execFile.mock.calls[0]?.[2].env.GH_TOKEN).toBe(
+      "selected-injected-token"
+    );
   });
 
   it("reports an actionable error when GitHub CLI predates multi-account token lookup", async () => {
@@ -1291,6 +1320,31 @@ describe.sequential("getGhPackageCredentials", () => {
       username: "tokuser",
       source: "injected-token"
     });
+  });
+
+  it("reports injected credential source when keyring lookup times out", async () => {
+    const { getGhPackageCredentials } = await loadGh("linux", {
+      token: "injected-pub",
+      withToken: STATUS.tokenPubActive,
+      keyring: STATUS.keyringPubAndEmu,
+      userTokenErrors: {
+        pubuser: Object.assign(new Error("timed out"), {
+          code: null,
+          killed: true,
+          signal: "SIGTERM"
+        })
+      }
+    });
+
+    await expect(getGhPackageCredentials()).resolves.toEqual({
+      token: "injected-pub",
+      username: "pubuser",
+      source: "injected-token"
+    });
+    const tokenLookup = childProcess.execFile.mock.calls.find(
+      ([, args]) => args[0] === "auth" && args[1] === "token"
+    );
+    expect(tokenLookup?.[2].timeout).toBe(8000);
   });
 
   it("ignores a whitespace-only GH_TOKEN when GITHUB_TOKEN is usable", async () => {
