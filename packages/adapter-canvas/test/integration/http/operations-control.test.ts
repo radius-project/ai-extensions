@@ -30,6 +30,10 @@ import {
   INPUT_REQUIRED_STATE,
   STAGE_VERIFY
 } from "../../../src/operations.js";
+import {
+  CLEANUP_COMMANDS,
+  cleanupRunnerKind
+} from "../../../src/server/services/cleanup-commands.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type {
   OperationActionRecord,
@@ -526,6 +530,11 @@ describe("stop, then continue or roll back, over the socket", () => {
     expect(harness.scheduled).toEqual([
       { kind: "rollback", instanceId: "panel-b", commandId: accepted.commandId }
     ]);
+    // The kind the route schedules is a runner key, not the persisted command
+    // kind. Recovery has to make the same translation, so both are pinned to
+    // the one table that actually holds a deletion spec.
+    expect(CLEANUP_COMMANDS[harness.scheduled[0].kind]).toBeDefined();
+    expect(cleanupRunnerKind("rollback")).toBe(harness.scheduled[0].kind);
 
     // While cleanup owns the record, no forward retry and no stop are offered.
     const during = await poll(entry.baseUrl, accepted.statusUrl);

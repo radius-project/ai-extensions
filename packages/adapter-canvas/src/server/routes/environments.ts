@@ -586,48 +586,12 @@ export async function handleVerifyStatus(
       });
       return;
     }
-    const dispatchedAt =
-      verifyOp?.verification?.dispatchedAt ||
-      entry?.state?.deployDispatchedAt ||
-      0;
-    let runId: number | string | null =
+    const runId: number | string | null =
       verifyOp?.verification?.runId || entry?.state?.verifyRunId || null;
     if (!runId) {
-      const workflow =
-        verifyOp?.verification?.workflow || dependencies.verifyWorkflowFile;
-      runId =
-        selectedExecutor ?
-          await dependencies.findWorkflowRun(
-            repo,
-            workflow,
-            dispatchedAt,
-            null,
-            selectedExecutor
-          )
-        : await dependencies.findWorkflowRun(
-            repo,
-            workflow,
-            dispatchedAt,
-            null
-          );
-      if (runId && verifyOp) {
-        verifyOp.verification = {
-          dispatchedAt: verifyOp.verification.dispatchedAt,
-          workflow: verifyOp.verification.workflow,
-          ref: verifyOp.verification.ref,
-          environment: verifyOp.verification.environment,
-          runId: String(runId),
-          runUrl: "https://github.com/" + repo + "/actions/runs/" + runId
-        };
-        await dependencies.persistBestEffort({
-          operation: verifyOp,
-          persist: () => dependencies.persistOperations(),
-          report: (diagnostic) =>
-            dependencies.reportOperationDiagnostic(diagnostic)
-        });
-      } else if (runId && entry) entry.state!.verifyRunId = runId;
-    }
-    if (!runId) {
+      // GitHub's run-list response has no operation-specific dispatch marker.
+      // Baseline ID and time can narrow candidates but cannot prove identity, so
+      // monitoring must wait for a run ID established by a stronger contract.
       respond({ state: "pending", runId: null });
       return;
     }

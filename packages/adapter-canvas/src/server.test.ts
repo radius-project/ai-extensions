@@ -10,6 +10,7 @@ import {
   azureCliAssistDisplayPrompt,
   azureCliAssistMessage,
   cleanupAzureSetupArtifacts,
+  cleanupProviderRecoveryDisposition,
   cleanupGitHubEnvironmentArtifact,
   rollbackCommittedWorkflowFiles,
   guardStopBoundary,
@@ -32,10 +33,15 @@ import {
   invokeSessionPrompt,
   localDeploymentBlocksMutation,
   preflightGhcrPackageWriteAccess,
+  environmentsApiPath,
+  environmentNameFromApiPath,
+  quarantineUnsettledCleanupDeletions,
   resetListingCaches,
   resetDeploymentViewState,
   resolveCleanupGitHubContext,
   releaseDeploymentMutation,
+  reopenProviderReconciliation,
+  resolveAcknowledgedVerificationRun,
   reserveDeploymentMutation,
   resolveDeploymentEnvironment,
   resolveDeployStatus,
@@ -44,6 +50,7 @@ import {
   triggerDeployRepairHandoff,
   setDeployFailureNotice,
   triggerDeployFailureNotice,
+  unmarkedVerificationRunGuidance,
   classifyDeployDispatchFailure,
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
   DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
@@ -53,6 +60,9 @@ import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import {
   createOperation,
   finish,
+  prepareProviderMutation,
+  settleProviderMutation,
+  getSetupArtifactLedger,
   recordAzureApp,
   recordCleanupState,
   recordCommittedWorkflowFile,
@@ -60,8 +70,18 @@ import {
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
   recordServicePrincipal,
+  reconcileRestoredOperation,
+  fromPersistedOperation,
+  toPersistedOperation,
+  unresolvedProviderMutations,
+  providerRecoveryManualGuidance,
+  hasUnfinishedCleanupAuthority,
+  canStartRollback,
+  canRetryCleanup,
+  canExitSetup,
   requestStop,
   toClientView,
+  cleanupTargetKey,
   unresolvedCleanupTargets
 } from "./operations.js";
 import type { CanvasState } from "./shared.js";
@@ -94,6 +114,129 @@ describe("DEPLOY_RAD_COMMANDS_STEP", () => {
       expect(environments.get("octo/app")).toBeUndefined();
       expect(deployments.get("octo/app")).toBeUndefined();
     });
+  });
+});
+
+describe("verification dispatch recovery", () => {
+  it("never adopts one or many unmarked retry runs", () => {
+    expect(unmarkedVerificationRunGuidance(1)).toContain(
+      "does not expose an operation-specific dispatch marker"
+    );
+    expect(unmarkedVerificationRunGuidance(2)).toContain(
+      "will not guess which run belongs to this operation"
+    );
+    expect(unmarkedVerificationRunGuidance(0)).toBeNull();
+  });
+
+  it("adopts an exact marked run after an acknowledged retry dispatch", async () => {
+    const pauses: number[] = [];
+
+    await expect(
+      resolveAcknowledgedVerificationRun({
+        operationMarker: "op_retry",
+        pause: async (milliseconds) => {
+          pauses.push(milliseconds);
+        },
+        discover: async () => ({ state: "applied", value: "4242" }),
+        actionsUrl:
+          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
+      })
+    ).resolves.toEqual({ state: "applied", runId: "4242" });
+    expect(pauses).toEqual([5000]);
+  });
+
+  it("fails closed when an acknowledged retry cannot expose an exact run", async () => {
+    await expect(
+      resolveAcknowledgedVerificationRun({
+        operationMarker: "op_retry",
+        pause: async () => {},
+        discover: async () => {
+          throw new Error("run list unavailable");
+        },
+        actionsUrl:
+          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
+      })
+    ).resolves.toMatchObject({
+      state: "manual_required",
+      guidance: expect.stringContaining(
+        "could not confirm the exact marked run"
+      )
+    });
+  });
+
+  it("does not inspect or adopt runs for an acknowledged legacy retry", async () => {
+    let inspected = false;
+    await expect(
+      resolveAcknowledgedVerificationRun({
+        operationMarker: "",
+        pause: async () => {
+          throw new Error("legacy retries must not wait for adoption");
+        },
+        discover: async () => {
+          inspected = true;
+          return { state: "applied", value: "unrelated" };
+        },
+        actionsUrl:
+          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
+      })
+    ).resolves.toMatchObject({
+      state: "manual_required",
+      guidance: expect.stringContaining("does not expose")
+    });
+    expect(inspected).toBe(false);
+  });
+
+  describe("in-process provider reconciliation", () => {
+    it("atomically reopens a terminalized unknown outcome for the scheduler", () => {
+      const operation = createOperation({ operationId: "op_recovery" });
+      prepareProviderMutation(operation, {
+        kind: "azure_federated_credential.create",
+        target: "app:dev"
+      });
+
+      finish(operation, "failed_partial", {
+        failure: { code: "provider-mutation-outcome-unknown" }
+      });
+
+      expect(reopenProviderReconciliation(operation)).toBe(true);
+      expect(operation).toMatchObject({
+        state: "running",
+        endedAt: null,
+        executionActive: false,
+        recoveryState: "provider_reconciliation_pending"
+      });
+    });
+  });
+
+  describe("cleanup provider recovery gate", () => {
+    it.each([
+      [
+        "azure_federated_credential.create",
+        "app:dev",
+        false,
+        "blocks destructive cleanup before reconciliation"
+      ],
+      [
+        "github_branch.delete",
+        "octo/app:refs/heads/radius/setup:abc",
+        true,
+        "allows only the exact delete recovery to resume"
+      ]
+    ])(
+      "prevents successful cleanup for unresolved %s and %s",
+      (kind, target, mayStartDestructiveCleanup) => {
+        const operation = createOperation({ operationId: "op_cleanup" });
+        prepareProviderMutation(operation, { kind, target });
+
+        expect(cleanupProviderRecoveryDisposition(operation)).toEqual({
+          blockers: [
+            expect.objectContaining({ kind, target, status: "prepared" })
+          ],
+          mayStartDestructiveCleanup,
+          mayCompleteCleanup: false
+        });
+      }
+    );
   });
 });
 
@@ -394,6 +537,224 @@ describe("ensureServicePrincipal", () => {
     ]);
   });
 
+  // A principal that answers now is not automatically one that was there
+  // before: this operation may have made it and crashed before the ledger
+  // caught up. Reading that as pre-existing leaves it behind at rollback.
+  describe("a principal found again after a crash", () => {
+    const NOT_FOUND = {
+      code: 1,
+      stdout: "",
+      stderr: "Request_ResourceNotFound: Resource 'app-1' does not exist"
+    };
+
+    function journalled() {
+      return createOperation({
+        operationId: "op_sp",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+    }
+
+    async function crashAfterConfirm(createStdout: string) {
+      const operation = journalled();
+      // First run: absent, create acknowledged, then the process dies before
+      // the ledger records anything.
+      let call = 0;
+      await ensureServicePrincipal(
+        "app-1",
+        async () => {
+          call += 1;
+          return call === 1 ? NOT_FOUND : (
+              { code: 0, stdout: createStdout, stderr: "" }
+            );
+        },
+        { operation, persist: async () => {} }
+      );
+      return operation;
+    }
+
+    async function restart(operation: object, objectId: string) {
+      const calls: string[][] = [];
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) => {
+          calls.push(args);
+          return { code: 0, stdout: `${objectId}\n`, stderr: "" };
+        },
+        {
+          operation: operation as object & { operationId: string },
+          persist: async () => {}
+        }
+      );
+      return { result, calls };
+    }
+
+    it("settles the object id in the same write that confirms the create", async () => {
+      const operation = await crashAfterConfirm(
+        JSON.stringify({ id: "sp-object-1", appId: "app-1" })
+      );
+
+      expect(operation.providerRecovery.mutations).toEqual([
+        expect.objectContaining({
+          kind: "azure_service_principal.create",
+          status: "confirmed",
+          providerId: "sp-object-1"
+        })
+      ]);
+    });
+
+    it("claims the principal whose object id the confirmation recorded", async () => {
+      const operation = await crashAfterConfirm(
+        JSON.stringify({ id: "sp-object-1", appId: "app-1" })
+      );
+
+      const { result, calls } = await restart(operation, "sp-object-1");
+
+      // Owned, so a rollback removes it. Reading it back is one lookup — the
+      // create is never reissued.
+      expect(result).toEqual({
+        ok: true,
+        state: "created",
+        origin: "this_operation",
+        objectId: "sp-object-1"
+      });
+      expect(calls).toEqual([
+        ["ad", "sp", "show", "--id", "app-1", "--query", "id", "-o", "tsv"]
+      ]);
+    });
+
+    it("claims nothing when a different object answers for the application", async () => {
+      const operation = await crashAfterConfirm(
+        JSON.stringify({ id: "sp-object-1", appId: "app-1" })
+      );
+
+      const { result, calls } = await restart(operation, "sp-object-2");
+
+      expect(result).toMatchObject({
+        ok: true,
+        state: "created_candidate",
+        origin: "unknown",
+        objectId: "sp-object-2"
+      });
+      expect(calls).toHaveLength(1);
+    });
+
+    it("claims nothing when the confirmation recorded no object id", async () => {
+      const operation = await crashAfterConfirm("");
+
+      const { result } = await restart(operation, "sp-object-1");
+
+      // Legacy confirmation, or a create Entra acknowledged without a body.
+      // Either way there is nothing to match, so ownership is not assumed.
+      expect(result).toMatchObject({
+        state: "created_candidate",
+        origin: "unknown"
+      });
+    });
+
+    it.each([["prepared"], ["outcome_unknown"]])(
+      "neither replays nor claims a create left %s",
+      async (status) => {
+        const operation = journalled();
+        const mutation = prepareProviderMutation(operation, {
+          kind: "azure_service_principal.create",
+          target: "app-1"
+        });
+        settleProviderMutation(
+          operation,
+          mutation.mutationId,
+          status as never,
+          "the answer was lost"
+        );
+
+        const { result, calls } = await restart(operation, "sp-object-1");
+
+        expect(result).toMatchObject({
+          state: "created_candidate",
+          origin: "unknown",
+          objectId: "sp-object-1"
+        });
+        expect(calls).toEqual([
+          ["ad", "sp", "show", "--id", "app-1", "--query", "id", "-o", "tsv"]
+        ]);
+      }
+    );
+
+    it("hands over a create Radius already gave up on", async () => {
+      const operation = journalled();
+      const mutation = prepareProviderMutation(operation, {
+        kind: "azure_service_principal.create",
+        target: "app-1"
+      });
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "manual_required",
+        "Entra could not be read after the interrupted create."
+      );
+
+      const { result } = await restart(operation, "sp-object-1");
+
+      expect(result).toEqual({
+        ok: false,
+        stderr: "Entra could not be read after the interrupted create."
+      });
+    });
+
+    it("reuses a principal whose create this operation was refused", async () => {
+      const operation = journalled();
+      const mutation = prepareProviderMutation(operation, {
+        kind: "azure_service_principal.create",
+        target: "app-1"
+      });
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "not_applied",
+        "Entra rejected the create."
+      );
+
+      const { result } = await restart(operation, "sp-object-1");
+
+      // The create never landed, so whatever answers now predates it.
+      expect(result).toEqual({
+        ok: true,
+        state: "reused",
+        origin: "pre_existing",
+        objectId: "sp-object-1"
+      });
+    });
+
+    it("still reuses a principal no journal entry mentions", async () => {
+      const operation = journalled();
+
+      const { result } = await restart(operation, "sp-object-1");
+
+      // Nothing was ever issued for it, so it is genuinely somebody else's.
+      expect(result).toEqual({
+        ok: true,
+        state: "reused",
+        origin: "pre_existing",
+        objectId: "sp-object-1"
+      });
+    });
+
+    it("carries the recorded object id through a save and reload", async () => {
+      const operation = await crashAfterConfirm(
+        JSON.stringify({ id: "sp-object-1", appId: "app-1" })
+      );
+
+      const restored = fromPersistedOperation(toPersistedOperation(operation));
+      const { result } = await restart(restored, "sp-object-1");
+
+      expect(result).toMatchObject({
+        state: "created",
+        origin: "this_operation"
+      });
+    });
+  });
+
   it("fails closed when the precheck returns an empty object id", async () => {
     const result = await ensureServicePrincipal("app-1", async () => ({
       code: 0,
@@ -451,6 +812,273 @@ describe("ensureServicePrincipal", () => {
       stderr: "Request_ResourceNotFound: Resource 'app-1' does not exist"
     });
   });
+
+  describe("journaling the create so a restart cannot repeat it", () => {
+    function recovery() {
+      const operation = createOperation({ operationId: "op_sp" });
+      return {
+        operation,
+        port: { operation, persist: async () => {} }
+      };
+    }
+
+    const absent = {
+      code: 1,
+      stdout: "",
+      stderr: "Request_ResourceNotFound: Resource 'app-1' does not exist"
+    };
+
+    it("records the create before issuing it and confirms it afterwards", async () => {
+      const { operation, port } = recovery();
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) => (args[2] === "create" ? { code: 0 } : absent),
+        port
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        state: "created",
+        origin: "this_operation"
+      });
+      expect(operation.providerRecovery.mutations).toEqual([
+        expect.objectContaining({
+          kind: "azure_service_principal.create",
+          target: "app-1",
+          providerIdempotencyKey: "app-1",
+          status: "confirmed"
+        })
+      ]);
+    });
+
+    it("adopts the exact principal for this client id rather than creating a second one", async () => {
+      const { operation, port } = recovery();
+      const creates: string[][] = [];
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) => {
+          if (args[2] === "create") {
+            creates.push(args);
+            return { code: 1, stdout: "", stderr: "", timedOut: true };
+          }
+          return creates.length === 0 ?
+              absent
+            : { code: 0, stdout: "sp-object-1\n", stderr: "" };
+        },
+        port
+      );
+
+      // Present after this attempt's own create but never provably created by
+      // it, so the object id is adopted and ownership is not.
+      expect(result).toEqual({
+        ok: true,
+        state: "created_candidate",
+        origin: "unknown",
+        objectId: "sp-object-1"
+      });
+      expect(creates).toHaveLength(1);
+      expect(operation.providerRecovery.mutations[0]).toMatchObject({
+        status: "confirmed",
+        evidence: expect.stringContaining("exact application client id")
+      });
+    });
+
+    it("never reissues the create when a restart replays the same step", async () => {
+      const { operation, port } = recovery();
+      const creates: string[][] = [];
+      const runAz = async (args: string[]) => {
+        const identity = answersFederatedCredentialIdentity(args);
+        if (identity) return identity;
+        if (args[2] === "create") {
+          creates.push(args);
+          return { code: 1, stdout: "", stderr: "", timedOut: true };
+        }
+        return creates.length === 0 ?
+            absent
+          : { code: 0, stdout: "sp-object-1\n", stderr: "" };
+      };
+
+      await ensureServicePrincipal("app-1", runAz, port);
+      const replay = await ensureServicePrincipal("app-1", runAz, port);
+
+      // The second pass finds the principal in its precheck, so it reuses it
+      // and never reaches the create at all.
+      expect(creates).toHaveLength(1);
+      expect(replay).toMatchObject({ ok: true, objectId: "sp-object-1" });
+      expect(operation.providerRecovery.mutations).toHaveLength(1);
+    });
+
+    it("reports a definite Entra refusal without journaling a phantom principal", async () => {
+      const { operation, port } = recovery();
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) =>
+          args[2] === "create" ?
+            {
+              code: 1,
+              stdout: "",
+              stderr:
+                "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+            }
+          : absent,
+        port
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        stderr: expect.stringContaining("Insufficient privileges")
+      });
+      expect(operation.providerRecovery.mutations[0].status).toBe(
+        "not_applied"
+      );
+    });
+
+    it("settles as not applied when Entra proves no principal exists", async () => {
+      const { operation, port } = recovery();
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) =>
+          args[2] === "create" ?
+            { code: 1, stdout: "", stderr: "", timedOut: true }
+          : absent,
+        port
+      );
+
+      expect(result.ok).toBe(false);
+      expect(operation.providerRecovery.mutations[0].status).toBe(
+        "not_applied"
+      );
+    });
+
+    it("refuses to create a principal once reconciliation demanded a rollback", async () => {
+      const { operation, port } = recovery();
+      operation.providerRecovery.state = "rollback_pending";
+
+      await expect(
+        ensureServicePrincipal(
+          "app-1",
+          async (args) => {
+            if (args[2] === "create") {
+              throw new Error("no create may run while a rollback is pending");
+            }
+            return absent;
+          },
+          port
+        )
+      ).rejects.toMatchObject({ code: "provider-mutation-rollback-pending" });
+    });
+
+    it("leaves an unreadable directory unresolved instead of guessing", async () => {
+      const { operation, port } = recovery();
+      let created = false;
+
+      await expect(
+        ensureServicePrincipal(
+          "app-1",
+          async (args) => {
+            if (args[2] === "create") {
+              created = true;
+              return { code: 1, stdout: "", stderr: "", timedOut: true };
+            }
+            return created ?
+                { code: 1, stdout: "", stderr: "the directory did not answer" }
+              : absent;
+          },
+          port
+        )
+      ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+
+      expect(operation.providerRecovery.mutations[0].status).toBe(
+        "outcome_unknown"
+      );
+    });
+
+    it("treats an empty reconciliation object id as unreadable rather than absent", async () => {
+      const { operation, port } = recovery();
+      let created = false;
+
+      await expect(
+        ensureServicePrincipal(
+          "app-1",
+          async (args) => {
+            if (args[2] === "create") {
+              created = true;
+              return { code: 1, stdout: "", stderr: "", timedOut: true };
+            }
+            return created ? { code: 0, stdout: "  \n", stderr: "" } : absent;
+          },
+          port
+        )
+      ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+
+      expect(operation.providerRecovery.mutations[0].evidence).toContain(
+        "empty object id"
+      );
+    });
+
+    it("stops before the create when the precheck itself failed for another reason", async () => {
+      const { operation, port } = recovery();
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) => {
+          if (args[2] === "create") {
+            throw new Error("a failed precheck must not reach the create");
+          }
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "HTTP 503: Service Unavailable"
+          };
+        },
+        port
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        stderr: "HTTP 503: Service Unavailable"
+      });
+      expect(operation.providerRecovery.mutations).toEqual([]);
+    });
+  });
+});
+
+describe("deriving the environments listing a delete path belongs to", () => {
+  it("names the listing and the environment the path targets", () => {
+    expect(environmentsApiPath("/repos/octo/app/environments/dev")).toBe(
+      "/repos/octo/app/environments"
+    );
+    expect(environmentNameFromApiPath("/repos/octo/app/environments/dev")).toBe(
+      "dev"
+    );
+  });
+
+  it("decodes the environment back to the name a listing reports", () => {
+    expect(
+      environmentNameFromApiPath("/repos/octo/app/environments/needs%20space")
+    ).toBe("needs space");
+  });
+
+  it("refuses a name it cannot decode rather than comparing the escaped form", () => {
+    expect(
+      environmentNameFromApiPath("/repos/octo/app/environments/%E0%A4%A")
+    ).toBeNull();
+  });
+
+  it.each([
+    ["a repository path with no environment", "/repos/octo/app"],
+    ["the listing path itself", "/repos/octo/app/environments"],
+    ["a nested path below the environment", "/repos/octo/app/environments/a/b"],
+    ["an unrelated path", "/user/repos"],
+    ["an empty path", ""]
+  ])("returns null for %s", (_label, path) => {
+    expect(environmentsApiPath(path)).toBeNull();
+    expect(environmentNameFromApiPath(path)).toBeNull();
+  });
 });
 
 describe("resolveCleanupGitHubContext", () => {
@@ -502,11 +1130,213 @@ describe("resolveCleanupGitHubContext", () => {
       ["api", "/repos/octo/app"],
       expect.objectContaining({ timeout: 20000 })
     );
-    expect(executor.runOrThrow).toHaveBeenCalledWith(
+    expect(executor.run).toHaveBeenCalledWith(
       ["api", "--method", "DELETE", "/repos/octo/app/environments/dev"],
-      "Could not delete the GitHub environment",
       { timeout: 20000 }
     );
+  });
+
+  describe("a timed-out environment delete answered with 404", () => {
+    const DELETE_ARGS = [
+      "api",
+      "--method",
+      "DELETE",
+      "/repos/octo/app/environments/dev"
+    ];
+    const TIMED_OUT = {
+      code: 1,
+      stdout: "",
+      stderr: "terminated",
+      timedOut: true
+    };
+    const listing = (names: string[], totalCount = names.length) => ({
+      code: 0,
+      stdout: JSON.stringify({
+        total_count: totalCount,
+        environments: names.map((name) => ({ name }))
+      }),
+      stderr: ""
+    });
+
+    // The delete, the 404 that starts the proof, then the listing pages the
+    // caller supplies, then the confirming reread of the environment itself.
+    const NOT_FOUND = { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+
+    function timedOutDelete(
+      ...responses: unknown[]
+    ): ReturnType<typeof selectedExecutor> {
+      const run = vi.fn();
+      run.mockResolvedValueOnce(TIMED_OUT).mockResolvedValueOnce(NOT_FOUND);
+      for (const response of responses) run.mockResolvedValueOnce(response);
+      run.mockResolvedValue(NOT_FOUND);
+      return selectedExecutor({ run });
+    }
+
+    async function context(executor: ReturnType<typeof selectedExecutor>) {
+      return resolveCleanupGitHubContext({
+        targets: [{ artifactType: "github_environment" }],
+        selectedLogin: "octocat",
+        createExecutor: async () => executor
+      });
+    }
+
+    it("proves absence from the environments listing the same account can read", async () => {
+      const executor = timedOutDelete(listing(["prod", "staging"]));
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).resolves.toBeUndefined();
+      expect(executor.run).toHaveBeenCalledTimes(4);
+      expect(executor.run).toHaveBeenNthCalledWith(
+        3,
+        ["api", "/repos/octo/app/environments?per_page=100&page=1"],
+        expect.objectContaining({ timeout: 12000 })
+      );
+      // The listing is assembled request by request, so absence is confirmed
+      // once more against the environment's own endpoint.
+      expect(executor.run).toHaveBeenLastCalledWith(
+        ["api", "/repos/octo/app/environments/dev"],
+        expect.objectContaining({ timeout: 12000 })
+      );
+    });
+
+    it.each([
+      [
+        "the Actions environments API is refused",
+        { code: 1, stdout: "", stderr: "HTTP 403: Resource not accessible" }
+      ],
+      [
+        "the listing itself answers 404",
+        { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
+      ]
+    ])("refuses absence when %s", async (_label, response) => {
+      // Repository metadata being readable proves nothing about the Actions
+      // environments permission: GitHub answers 404 per resource, so only a
+      // listing the account can actually complete separates gone from hidden.
+      const executor = timedOutDelete(response);
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("masked access rather than a completed delete");
+    });
+
+    it("refuses absence when the listing still holds the environment", async () => {
+      const executor = timedOutDelete(listing(["dev", "prod"]));
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("is still present");
+    });
+
+    it("reads every page before calling the environment gone", async () => {
+      const first = Array.from({ length: 100 }, (_u, index) => `env-${index}`);
+      const second = Array.from({ length: 50 }, (_u, index) => `late-${index}`);
+      const executor = timedOutDelete(
+        listing(first, 150),
+        listing(second, 150)
+      );
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).resolves.toBeUndefined();
+      expect(executor.run).toHaveBeenCalledTimes(5);
+      expect(executor.run).toHaveBeenNthCalledWith(
+        4,
+        ["api", "/repos/octo/app/environments?per_page=100&page=2"],
+        expect.anything()
+      );
+    });
+
+    it("finds the environment on a later page rather than reporting it gone", async () => {
+      const first = Array.from({ length: 100 }, (_u, index) => `env-${index}`);
+      const executor = timedOutDelete(
+        listing(first, 101),
+        listing(["dev"], 101)
+      );
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("is still present");
+    });
+
+    it("refuses absence when the listing stops short of the count GitHub reports", async () => {
+      // A short page that does not reach total_count was truncated somewhere,
+      // so its silence about the environment is not evidence.
+      const executor = timedOutDelete(listing(["prod"], 12));
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("ended after 1 of 12 entries");
+    });
+
+    it.each([
+      ["an unreadable body", { code: 0, stdout: "<html>", stderr: "" }],
+      [
+        "an array instead of an envelope",
+        { code: 0, stdout: "[]", stderr: "" }
+      ],
+      [
+        "an envelope with no environments",
+        { code: 0, stdout: JSON.stringify({ total_count: 0 }), stderr: "" }
+      ],
+      [
+        "an entry with no name",
+        {
+          code: 0,
+          stdout: JSON.stringify({ total_count: 1, environments: [{}] }),
+          stderr: ""
+        }
+      ]
+    ])("refuses absence for %s", async (_label, response) => {
+      const executor = timedOutDelete(response);
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("could not read");
+    });
+
+    it("accepts an envelope that reports no total at all", async () => {
+      const executor = timedOutDelete({
+        code: 0,
+        stdout: JSON.stringify({ environments: [{ name: "prod" }] }),
+        stderr: ""
+      });
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).resolves.toBeUndefined();
+    });
+
+    it("keeps a timed-out delete unknown when the path names no environment", async () => {
+      const executor = timedOutDelete();
+
+      await expect(
+        (await context(executor)).deleteEnvironment([
+          "api",
+          "--method",
+          "DELETE",
+          "/user/repos"
+        ])
+      ).rejects.toThrow("could not derive the environments listing");
+      expect(executor.run).toHaveBeenCalledTimes(2);
+    });
+
+    it("still refuses when the environment is readable after the timeout", async () => {
+      const run = vi
+        .fn()
+        .mockResolvedValueOnce(TIMED_OUT)
+        .mockResolvedValueOnce({
+          code: 0,
+          stdout: JSON.stringify({ name: "dev" }),
+          stderr: ""
+        });
+      const executor = selectedExecutor({ run });
+
+      await expect(
+        (await context(executor)).deleteEnvironment(DELETE_ARGS)
+      ).rejects.toThrow("identity is still present");
+      expect(run).toHaveBeenCalledTimes(2);
+    });
   });
 
   it("fails closed when a cleanup record has no selected GitHub account", async () => {
@@ -775,7 +1605,134 @@ describe("rollbackCommittedWorkflowFiles", () => {
   });
 });
 
+// The real call order for one delete: the pre-delete identity read, the
+// listing pages when a 404 or a lost answer has to be proven, and the
+// confirming reread. Scripting them by role keeps each test saying which
+// answer it is exercising.
+const ENV_NOT_FOUND = { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+const ENV_PRESENT = {
+  code: 0,
+  stdout: JSON.stringify({ id: "env-1", name: "dev" }),
+  stderr: ""
+};
+function envListing(names: string[]) {
+  return {
+    code: 0,
+    stdout: JSON.stringify({
+      total_count: names.length,
+      environments: names.map((name) => ({ name }))
+    }),
+    stderr: ""
+  };
+}
+function environmentReader(
+  script: {
+    identity?: unknown;
+    listing?: unknown;
+    reread?: unknown;
+  } = {}
+) {
+  let sawIdentity = false;
+  const reads: string[] = [];
+  const read = async (args: string[]) => {
+    reads.push(args[1]);
+    if (args[1].includes("/environments?")) {
+      return (script.listing ?? envListing(["prod"])) as never;
+    }
+    if (!sawIdentity) {
+      sawIdentity = true;
+      return (script.identity ?? ENV_PRESENT) as never;
+    }
+    return (script.reread ?? ENV_NOT_FOUND) as never;
+  };
+  return Object.assign(read, { reads });
+}
+
+// The Service Principal delete reads Entra's own object id back first and
+// requires it to match the ledger, so a principal recreated for the same
+// application is never what gets removed.
+function answersServicePrincipalIdentity(
+  args: string[]
+): { code: number; stdout: string; stderr: string } | null {
+  if (
+    args[0] !== "ad" ||
+    args[1] !== "sp" ||
+    args[2] !== "show" ||
+    args[args.indexOf("--query") + 1] !== "id"
+  ) {
+    return null;
+  }
+  return {
+    code: 0,
+    stdout: `${args[args.indexOf("--id") + 1]}\n`,
+    stderr: ""
+  };
+}
+
+// Every name-addressed Azure delete first reads the resource's own id back and
+// requires it to match the ledger. The fakes answer that read the way Azure
+// would for a resource this attempt still owns.
+function answersRecordedIdentity(
+  args: string[]
+): { code: number; stdout: string; stderr: string } | null {
+  return (
+    answersServicePrincipalIdentity(args) ??
+    answersFederatedCredentialIdentity(args)
+  );
+}
+
+function answersFederatedCredentialIdentity(
+  args: string[]
+): { code: number; stdout: string; stderr: string } | null {
+  if (
+    !args.includes("federated-credential") ||
+    !args.includes("--federated-credential-id") ||
+    args[args.indexOf("--query") + 1] !== "id"
+  ) {
+    return null;
+  }
+  const name = args[args.indexOf("--federated-credential-id") + 1];
+  return { code: 0, stdout: `fic-${name}\n`, stderr: "" };
+}
+
 describe("cleanupAzureSetupArtifacts", () => {
+  it("removes a Service Principal this operation added to somebody else's app", async () => {
+    const op = newAzureOp();
+    // The customer already had the App Registration; Radius only added the
+    // principal. Leaving that behind because the app is theirs would leak the
+    // one resource this setup actually created.
+    recordAzureApp(op, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-1"
+    });
+    recordServicePrincipal(op, {
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+
+    const deletes: string[][] = [];
+    const pass = await cleanupAzureSetupArtifacts(op, {
+      runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
+        if (args.includes("delete")) deletes.push(args);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    });
+
+    // Addressed by Entra's own object id, never by the application it belongs
+    // to — that would reach a principal recreated for the same application.
+    expect(deletes).toEqual([["ad", "sp", "delete", "--id", "sp-1"]]);
+    expect(
+      pass.results.map((entry: any) => `${entry.artifactType}:${entry.outcome}`)
+    ).toEqual(["service_principal:deleted"]);
+    // The application it belongs to is untouched.
+    expect(op.setupArtifacts.azureApp.state).toBe("reused");
+  });
+
   it("deletes only created Azure artifacts in reverse dependency order", async () => {
     const op = newAzureOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });
@@ -786,13 +1743,16 @@ describe("cleanupAzureSetupArtifacts", () => {
     });
     recordCreatedFederatedCredential(op, {
       name: "radius-dev",
-      subject: "repo:octo/app:environment:dev"
+      subject: "repo:octo/app:environment:dev",
+      providerId: "fic-radius-dev"
     });
     recordCreatedFederatedCredential(op, {
       name: "radius-dev-pr",
-      subject: "repo:octo/app:pull_request"
+      subject: "repo:octo/app:pull_request",
+      providerId: "fic-radius-dev-pr"
     });
     recordCreatedRoleAssignment(op, {
+      assignmentId: "assignment-1",
       role: "Contributor",
       scope: "/subscriptions/sub/resourceGroups/rg",
       principalObjectId: "sp-1"
@@ -807,35 +1767,24 @@ describe("cleanupAzureSetupArtifacts", () => {
     const calls: string[][] = [];
     const cleanup = await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
         calls.push(args);
         return { code: 0, stdout: "", stderr: "" };
       }
     });
 
+    // The AKS assignment was recorded without an assignment id, so it can only
+    // be addressed by assignee/role/scope. That triple matches a replacement
+    // grant just as well as this attempt's, so it is refused rather than
+    // deleted, and no `az` call is made for it at all.
     expect(calls).toEqual([
       [
         "role",
         "assignment",
         "delete",
-        "--assignee-object-id",
-        "sp-1",
-        "--role",
-        "Azure Kubernetes Service RBAC Cluster Admin",
-        "--scope",
-        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/cluster",
-        "--output",
-        "none"
-      ],
-      [
-        "role",
-        "assignment",
-        "delete",
-        "--assignee-object-id",
-        "sp-1",
-        "--role",
-        "Contributor",
-        "--scope",
-        "/subscriptions/sub/resourceGroups/rg",
+        "--ids",
+        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Authorization/roleAssignments/assignment-1",
         "--output",
         "none"
       ],
@@ -859,16 +1808,23 @@ describe("cleanupAzureSetupArtifacts", () => {
         "--federated-credential-id",
         "radius-dev"
       ],
-      ["ad", "sp", "delete", "--id", "app-1"],
+      ["ad", "sp", "delete", "--id", "sp-1"],
       ["ad", "app", "delete", "--id", "app-1"]
     ]);
-    expect(cleanup.state).toBe("succeeded");
-    expect(cleanup.warnings).toEqual([]);
+    expect(cleanup.state).toBe("succeeded_with_warnings");
+    expect(cleanup.warnings).toEqual([
+      expect.stringContaining("no stable provider identity")
+    ]);
     expect(op.setupArtifacts.cleanup).toMatchObject({
-      state: "succeeded",
+      state: "succeeded_with_warnings",
       attempts: 1
     });
     expect(op.setupArtifacts.cleanup.results).toHaveLength(6);
+    expect(
+      op.setupArtifacts.cleanup.results.filter(
+        (entry: { outcome: string }) => entry.outcome === "skipped"
+      )
+    ).toHaveLength(1);
   });
 
   it("treats not-found as success and preserves reused resources", async () => {
@@ -881,7 +1837,8 @@ describe("cleanupAzureSetupArtifacts", () => {
     });
     recordCreatedFederatedCredential(op, {
       name: "radius-dev",
-      subject: "repo:octo/app:environment:dev"
+      subject: "repo:octo/app:environment:dev",
+      providerId: "fic-radius-dev"
     });
     recordCreatedRoleAssignment(op, {
       role: "Contributor",
@@ -892,6 +1849,8 @@ describe("cleanupAzureSetupArtifacts", () => {
     const calls: string[][] = [];
     const cleanup = await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
         calls.push(args);
         return args[0] === "role" ?
             {
@@ -908,20 +1867,9 @@ describe("cleanupAzureSetupArtifacts", () => {
       }
     });
 
+    // The role assignment carries no assignment id, so it can only be matched
+    // by assignee/role/scope and is refused rather than deleted by attribute.
     expect(calls).toEqual([
-      [
-        "role",
-        "assignment",
-        "delete",
-        "--assignee-object-id",
-        "sp-1",
-        "--role",
-        "Contributor",
-        "--scope",
-        "/subscriptions/sub/resourceGroups/rg",
-        "--output",
-        "none"
-      ],
       [
         "ad",
         "app",
@@ -933,21 +1881,609 @@ describe("cleanupAzureSetupArtifacts", () => {
         "radius-dev"
       ]
     ]);
-    expect(cleanup.state).toBe("succeeded");
-    expect(cleanup.warnings).toEqual([]);
+    expect(cleanup.state).toBe("succeeded_with_warnings");
+    expect(cleanup.warnings).toEqual([
+      expect.stringContaining("no stable provider identity")
+    ]);
     expect(op.setupArtifacts.cleanup.results).toMatchObject([
-      { outcome: "not_found", artifactType: "role_assignment" },
+      { outcome: "skipped", artifactType: "role_assignment" },
       { outcome: "not_found", artifactType: "federated_credential" }
     ]);
+  });
+
+  describe("a cleanup delete whose answer was lost", () => {
+    function azureOp() {
+      const op = newAzureOp();
+      recordAzureApp(op, { state: "created", appId: "app-1" });
+      recordServicePrincipal(op, {
+        state: "created",
+        appId: "app-1",
+        objectId: "sp-1"
+      });
+      recordCreatedFederatedCredential(op, {
+        name: "radius-dev",
+        subject: "repo:octo/app:environment:dev",
+        providerId: "fic-radius-dev"
+      });
+      recordCreatedRoleAssignment(op, {
+        assignmentId: "assignment-1",
+        role: "Contributor",
+        scope: "/subscriptions/sub/resourceGroups/rg",
+        principalObjectId: "sp-1"
+      });
+      return op;
+    }
+
+    const lost = { code: 1, stdout: "", stderr: "terminated", timedOut: true };
+
+    it("writes the delete down before issuing it", async () => {
+      const op = azureOp();
+      const journalled: string[][] = [];
+
+      await cleanupAzureSetupArtifacts(op, {
+        runAz: async (args: string[]) =>
+          answersRecordedIdentity(args) ?? {
+            code: 0,
+            stdout: "",
+            stderr: ""
+          },
+        persistJournal: async () => {
+          journalled.push(
+            op.providerRecovery.mutations.map(
+              (entry: { kind: string; status: string }) =>
+                `${entry.kind}:${entry.status}`
+            )
+          );
+        }
+      });
+
+      // Every delete is `prepared` on disk before it goes out and settled after,
+      // so a crash at any point reloads a record that knows the request existed.
+      expect(journalled[0]).toEqual([
+        "role_assignment.cleanup_delete:prepared"
+      ]);
+      expect(journalled.at(-1)).toEqual([
+        "role_assignment.cleanup_delete:confirmed",
+        "federated_credential.cleanup_delete:confirmed",
+        "service_principal.cleanup_delete:confirmed",
+        "azure_app.cleanup_delete:confirmed"
+      ]);
+    });
+
+    it.each([
+      ["a role assignment", "role", "role_assignment"],
+      [
+        "a federated credential",
+        "federated-credential",
+        "federated_credential"
+      ],
+      ["a Service Principal", "sp", "service_principal"],
+      ["an App Registration", "app", "azure_app"]
+    ])(
+      "never reissues the delete for %s that is still present",
+      async (_label, marker, artifactType) => {
+        const op = azureOp();
+        const deletes: string[][] = [];
+        const runAz = async (args: string[]) => {
+          const identity = answersRecordedIdentity(args);
+          if (identity) return identity;
+          const isTarget =
+            marker === "role" ? args[0] === "role"
+            : marker === "federated-credential" ?
+              args.includes("federated-credential")
+            : marker === "sp" ? args[1] === "sp"
+            : args[1] === "app" && !args.includes("federated-credential");
+          if (!isTarget) return { code: 0, stdout: "", stderr: "" };
+          if (args.includes("delete")) {
+            deletes.push(args);
+            return lost;
+          }
+          // The reread finds the resource still there: a replacement, or a
+          // delete that never landed. Either way Radius must not try again.
+          return { code: 0, stdout: '["present"]', stderr: "" };
+        };
+
+        const first = await cleanupAzureSetupArtifacts(op, { runAz });
+        const retry = await cleanupAzureSetupArtifacts(op, { runAz });
+
+        expect(deletes).toHaveLength(1);
+        const outcomeOf = (pass: { results: Array<Record<string, unknown>> }) =>
+          pass.results.find((entry) => entry.artifactType === artifactType)
+            ?.outcome;
+        expect(outcomeOf(first)).toBe("skipped");
+        expect(outcomeOf(retry)).toBe("skipped");
+      }
+    );
+
+    it("settles a lost delete once the exact identity reads back absent", async () => {
+      const op = azureOp();
+      let appDeletes = 0;
+      const runAz = async (args: string[]) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
+        const isApp =
+          args[1] === "app" && !args.includes("federated-credential");
+        if (!isApp) return { code: 0, stdout: "", stderr: "" };
+        if (args.includes("delete")) {
+          appDeletes += 1;
+          return lost;
+        }
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "Request_ResourceNotFound: Resource 'app-1' does not exist"
+        };
+      };
+
+      const pass = await cleanupAzureSetupArtifacts(op, { runAz });
+
+      expect(appDeletes).toBe(1);
+      expect(
+        pass.results.find((entry) => entry.artifactType === "azure_app")
+      ).toMatchObject({ outcome: "not_found" });
+      expect(op.setupArtifacts.azureApp.state).toBe("deleted");
+      expect(unresolvedProviderMutations(op)).toEqual([]);
+    });
+
+    it("leaves the delete unresolved when the identity cannot be read at all", async () => {
+      const op = azureOp();
+      const pass = await cleanupAzureSetupArtifacts(op, {
+        runAz: async (args) =>
+          args.includes("delete") ? lost : (
+            { code: 1, stdout: "", stderr: "HTTP 503: Service Unavailable" }
+          )
+      });
+
+      expect(pass.state).toBe("succeeded_with_warnings");
+      // Nothing may report this rollback complete while an issued delete has no
+      // answer, and the ledger keeps claiming every resource.
+      expect(
+        unresolvedProviderMutations(op).map((entry) => entry.kind)
+      ).toEqual([
+        "role_assignment.cleanup_delete",
+        // No entry for the principal: its identity could not be read, so no
+        // delete was issued for it in the first place.
+        "azure_app.cleanup_delete"
+      ]);
+      expect(op.setupArtifacts.azureApp.state).toBe("created");
+      expect(op.setupArtifacts.servicePrincipal.state).toBe("created");
+    });
+
+    it("survives a restart and reconciles instead of replaying", async () => {
+      const op = azureOp();
+      const deletes: string[][] = [];
+      const runAz = async (args: string[]) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
+        if (args.includes("delete")) {
+          deletes.push(args);
+          return lost;
+        }
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "Request_ResourceNotFound: Resource does not exist"
+        };
+      };
+
+      await cleanupAzureSetupArtifacts(op, { runAz });
+      const restored = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(op))
+      );
+      await cleanupAzureSetupArtifacts(restored, { runAz });
+
+      // One delete per artifact across the crash: the reload found each entry
+      // already settled from the reread rather than issuing it again.
+      expect(deletes).toHaveLength(4);
+    });
+
+    it("hands an unsettleable delete to the customer instead of locking the repo", async () => {
+      const op = azureOp();
+      await cleanupAzureSetupArtifacts(op, {
+        runAz: async (args) =>
+          args.includes("delete") ? lost : (
+            { code: 1, stdout: "", stderr: "HTTP 503: Service Unavailable" }
+          )
+      });
+      expect(unresolvedProviderMutations(op)).not.toEqual([]);
+      finish(op, "failed_partial", { failure: { code: "x" } });
+      // A terminal record with an unresolved delete holds the repository, and
+      // nothing left alive would ever reread it.
+      expect(hasUnfinishedCleanupAuthority(op)).toBe(true);
+
+      const named = quarantineUnsettledCleanupDeletions(op);
+
+      // Nothing is left that only a live reconciliation could clear, so the
+      // record stops holding the repository against a new setup. The principal
+      // is not among them: its identity was unreadable, so no delete for it was
+      // ever issued.
+      expect(named).toBe(2);
+      expect(unresolvedProviderMutations(op)).toEqual([]);
+      expect(providerRecoveryManualGuidance(op)).toContain(
+        "will not repeat that delete"
+      );
+      expect(hasUnfinishedCleanupAuthority(op)).toBe(false);
+      // And it still refuses every destructive command, so the resource is
+      // named rather than deleted a second time.
+      expect(canStartRollback(op).ok).toBe(false);
+      expect(canRetryCleanup(op).ok).toBe(false);
+      expect(canExitSetup(op).ok).toBe(false);
+    });
+
+    it("names nothing when every delete settled", async () => {
+      const op = azureOp();
+      await cleanupAzureSetupArtifacts(op, {
+        runAz: async () => ({ code: 0, stdout: "", stderr: "" })
+      });
+
+      expect(quarantineUnsettledCleanupDeletions(op)).toBe(0);
+      expect(providerRecoveryManualGuidance(op)).toBeNull();
+    });
+
+    it("stops the pass when the journal cannot be saved", async () => {
+      const op = azureOp();
+      const deletes: string[][] = [];
+
+      const pass = await cleanupAzureSetupArtifacts(op, {
+        runAz: async (args) => {
+          const identity = answersRecordedIdentity(args);
+          if (identity) return identity;
+          if (args.includes("delete")) deletes.push(args);
+          return { code: 0, stdout: "", stderr: "" };
+        },
+        persistJournal: async () => {
+          throw new Error("disk full");
+        }
+      });
+
+      // Nothing was deleted and nothing after the failure was attempted: a
+      // rollback that cannot account for its own deletions stops.
+      expect(deletes).toEqual([]);
+      expect(pass.state).toBe("succeeded_with_warnings");
+      expect(pass.results).toHaveLength(1);
+      expect(pass.results[0]).toMatchObject({
+        outcome: "warning",
+        detail: expect.stringContaining("could not save the record")
+      });
+      expect(op.setupArtifacts.azureApp.state).toBe("created");
+    });
+  });
+
+  describe("a federated credential name the customer may have reused", () => {
+    function claimed(providerId: string | null) {
+      const op = newAzureOp();
+      recordAzureApp(op, { state: "created", appId: "app-1" });
+      recordCreatedFederatedCredential(op, {
+        name: "radius-dev",
+        subject: "repo:octo/app:environment:dev",
+        ...(providerId === null ? {} : { providerId })
+      });
+      return op;
+    }
+
+    async function attempt(op: ReturnType<typeof claimed>, liveId: unknown) {
+      const deletes: string[][] = [];
+      const pass = await cleanupAzureSetupArtifacts(op, {
+        runAz: async (args) => {
+          const asksForId =
+            args.includes("federated-credential") &&
+            args[args.indexOf("--query") + 1] === "id";
+          if (asksForId) return liveId as never;
+          if (args.includes("delete")) deletes.push(args);
+          return { code: 0, stdout: "", stderr: "" };
+        }
+      });
+      return { pass, deletes };
+    }
+
+    const credentialOutcome = (pass: {
+      results: Array<Record<string, unknown>>;
+    }) =>
+      pass.results.find(
+        (entry) => entry.artifactType === "federated_credential"
+      );
+
+    it("deletes when the credential still carries the id Radius recorded", async () => {
+      const op = claimed("fic-1");
+
+      const { pass, deletes } = await attempt(op, {
+        code: 0,
+        stdout: "fic-1\n",
+        stderr: ""
+      });
+
+      expect(
+        deletes.filter((args) => args.includes("federated-credential"))
+      ).toHaveLength(1);
+      expect(credentialOutcome(pass)).toMatchObject({ outcome: "deleted" });
+    });
+
+    it("removes nothing when the name now answers for a different credential", async () => {
+      const op = claimed("fic-1");
+
+      const { pass, deletes } = await attempt(op, {
+        code: 0,
+        stdout: "fic-2\n",
+        stderr: ""
+      });
+
+      expect(
+        deletes.filter((args) => args.includes("federated-credential"))
+      ).toEqual([]);
+      expect(credentialOutcome(pass)).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining("different provider id")
+      });
+    });
+
+    it("removes nothing for a record written before the id was captured", async () => {
+      const op = claimed(null);
+
+      const { pass, deletes } = await attempt(op, {
+        code: 0,
+        stdout: "fic-1\n",
+        stderr: ""
+      });
+
+      expect(
+        deletes.filter((args) => args.includes("federated-credential"))
+      ).toEqual([]);
+      expect(credentialOutcome(pass)).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining("without the provider id")
+      });
+    });
+
+    it.each([
+      [
+        "the read is refused",
+        {
+          code: 1,
+          stdout: "",
+          stderr: "AuthorizationFailed: cannot read this credential"
+        },
+        "confirm its identity"
+      ],
+      [
+        "Entra reports no id",
+        { code: 0, stdout: "  \n", stderr: "" },
+        "did not report an id"
+      ]
+    ])("removes nothing when %s", async (_label, liveId, expected) => {
+      const op = claimed("fic-1");
+
+      const { pass, deletes } = await attempt(op, liveId);
+
+      expect(
+        deletes.filter((args) => args.includes("federated-credential"))
+      ).toEqual([]);
+      expect(credentialOutcome(pass)).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining(expected)
+      });
+    });
+
+    it("settles without a delete when the credential is already gone", async () => {
+      const op = claimed("fic-1");
+
+      const { pass, deletes } = await attempt(op, {
+        code: 1,
+        stdout: "",
+        stderr: "Request_ResourceNotFound: the credential does not exist"
+      });
+
+      // Entra says it is not there. Nothing needs deleting, and a delete
+      // addressed by name could only reach a later credential.
+      expect(
+        deletes.filter((args) => args.includes("federated-credential"))
+      ).toEqual([]);
+      expect(credentialOutcome(pass)?.outcome).toBe("not_found");
+    });
+  });
+
+  // A principal is addressed by Entra's object id, never by the application it
+  // belongs to: that application can be given a new principal, and a delete
+  // keyed on the appId would remove the customer's.
+  describe("a Service Principal the application may have replaced", () => {
+    function claimed(objectId: string | null) {
+      const op = newAzureOp();
+      recordServicePrincipal(op, {
+        state: "created",
+        origin: "this_operation",
+        appId: "app-1",
+        ...(objectId === null ? {} : { objectId })
+      });
+      return op;
+    }
+
+    async function attempt(
+      op: ReturnType<typeof claimed>,
+      liveId: unknown = { code: 0, stdout: "sp-1\n", stderr: "" }
+    ) {
+      const deletes: string[][] = [];
+      const pass = await cleanupAzureSetupArtifacts(op, {
+        runAz: async (args) => {
+          const asksForId =
+            args[1] === "sp" &&
+            args[2] === "show" &&
+            args[args.indexOf("--query") + 1] === "id";
+          if (asksForId) return liveId as never;
+          if (args.includes("delete")) deletes.push(args);
+          return { code: 0, stdout: "", stderr: "" };
+        }
+      });
+      return { pass, deletes };
+    }
+
+    const outcome = (pass: { results: Array<Record<string, unknown>> }) =>
+      pass.results.find((entry) => entry.artifactType === "service_principal");
+
+    it("deletes by object id when that is what still answers", async () => {
+      const op = claimed("sp-1");
+
+      const { pass, deletes } = await attempt(op);
+
+      expect(deletes).toEqual([["ad", "sp", "delete", "--id", "sp-1"]]);
+      expect(outcome(pass)).toMatchObject({ outcome: "deleted" });
+      expect(op.setupArtifacts.servicePrincipal.state).toBe("deleted");
+    });
+
+    it("writes the object id into the identity the journal records", async () => {
+      const op = claimed("sp-1");
+
+      const { pass } = await attempt(op);
+
+      // Keyed on the object id, so a replacement for the same application is a
+      // different target to the journal and to a retry.
+      expect(outcome(pass)?.identity).toBe("sp-1|app-1");
+    });
+
+    it("removes nothing when the application now has a different principal", async () => {
+      const op = claimed("sp-1");
+
+      const { pass, deletes } = await attempt(op, {
+        code: 0,
+        stdout: "sp-2\n",
+        stderr: ""
+      });
+
+      expect(deletes).toEqual([]);
+      expect(outcome(pass)).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining("different provider id")
+      });
+      expect(op.setupArtifacts.servicePrincipal.state).toBe("created");
+    });
+
+    it("removes nothing for a record that only ever held the application id", async () => {
+      const op = claimed(null);
+
+      const { pass, deletes } = await attempt(op);
+
+      expect(deletes).toEqual([]);
+      expect(outcome(pass)).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining(
+          "without Microsoft Entra's own object id"
+        )
+      });
+      expect(op.setupArtifacts.servicePrincipal.state).toBe("created");
+    });
+
+    it.each([
+      [
+        "the read is refused",
+        {
+          code: 1,
+          stdout: "",
+          stderr: "AuthorizationFailed: caller cannot read this principal"
+        },
+        "confirm its identity"
+      ],
+      [
+        "Entra reports no id",
+        { code: 0, stdout: "  \n", stderr: "" },
+        "did not report an id"
+      ]
+    ])("removes nothing when %s", async (_label, liveId, expected) => {
+      const op = claimed("sp-1");
+
+      const { pass, deletes } = await attempt(op, liveId);
+
+      expect(deletes).toEqual([]);
+      expect(outcome(pass)).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining(expected)
+      });
+      expect(op.setupArtifacts.servicePrincipal.state).toBe("created");
+    });
+
+    it("retries a target an earlier version keyed before the object id led", async () => {
+      const op = claimed("sp-1");
+      // What the previous build wrote: keyed on the application alone.
+      recordCleanupState(op, {
+        attempts: 1,
+        state: "succeeded_with_warnings",
+        results: [
+          {
+            attempt: 1,
+            artifactType: "service_principal",
+            target: "app-1",
+            identity: "app-1",
+            outcome: "warning",
+            detail: "Entra was unreachable."
+          }
+        ]
+      });
+
+      const deletes: string[][] = [];
+      const pass = await cleanupAzureSetupArtifacts(op, {
+        // The retry names its targets from what the earlier pass recorded.
+        only: new Set(unresolvedCleanupTargets(op).map(cleanupTargetKey)),
+        runAz: async (args) => {
+          const identity = answersRecordedIdentity(args);
+          if (identity) return identity;
+          if (args.includes("delete")) deletes.push(args);
+          return { code: 0, stdout: "", stderr: "" };
+        }
+      });
+
+      // The retry has to recognize its own outstanding target, or the
+      // principal stays claimed and unremovable for good.
+      expect(deletes).toEqual([["ad", "sp", "delete", "--id", "sp-1"]]);
+      expect(outcome(pass)).toMatchObject({ outcome: "deleted" });
+    });
+
+    it("reconciles a lost delete against the exact object id", async () => {
+      const op = claimed("sp-1");
+      const reads: string[][] = [];
+      const deletes: string[][] = [];
+
+      await cleanupAzureSetupArtifacts(op, {
+        runAz: async (args) => {
+          if (args[2] === "show") {
+            reads.push(args);
+            return args.includes("--query") ?
+                { code: 0, stdout: "sp-1\n", stderr: "" }
+              : { code: 0, stdout: "", stderr: "" };
+          }
+          if (args.includes("delete")) {
+            deletes.push(args);
+            return { code: 1, stdout: "", stderr: "", timedOut: true };
+          }
+          return { code: 0, stdout: "", stderr: "" };
+        },
+        persistJournal: async () => {}
+      });
+
+      // The delete went out once and was never answered. Reconciliation reads
+      // the same object id back rather than repeating it.
+      expect(deletes).toEqual([["ad", "sp", "delete", "--id", "sp-1"]]);
+      expect(
+        reads.filter((args) => args.includes("sp-1")).length
+      ).toBeGreaterThan(1);
+      // Journaled against the object id, so a reconciliation after a restart
+      // reads back the exact principal the delete was aimed at.
+      expect(
+        op.providerRecovery.mutations.find(
+          (entry: any) => entry.kind === "service_principal.cleanup_delete"
+        )
+      ).toMatchObject({ target: "sp-1|app-1" });
+    });
   });
 
   it("is idempotent across repeated cleanup attempts", async () => {
     const op = newAzureOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });
-    recordServicePrincipal(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
 
     await cleanupAzureSetupArtifacts(op, {
-      runAz: async () => ({ code: 0, stdout: "", stderr: "" })
+      runAz: async (args) =>
+        answersRecordedIdentity(args) ?? { code: 0, stdout: "", stderr: "" }
     });
     // Proof of removal moves ownership: both artifacts are recorded as gone, so
     // a repeat attempt has nothing left it may act on and issues no `az` call.
@@ -956,6 +2492,8 @@ describe("cleanupAzureSetupArtifacts", () => {
     const repeatedCalls: string[][] = [];
     const second = await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
         repeatedCalls.push(args);
         return { code: 0, stdout: "", stderr: "" };
       }
@@ -986,6 +2524,7 @@ describe("cleanupAzureSetupArtifacts", () => {
       objectId: "sp-1"
     });
     recordCreatedRoleAssignment(op, {
+      assignmentId: "assignment-1",
       role: "Contributor",
       scope: "/subscriptions/sub",
       principalObjectId: "sp-1"
@@ -995,7 +2534,8 @@ describe("cleanupAzureSetupArtifacts", () => {
     // ledger is asked what it holds at the moment each delete returns.
     const observed: Array<{ outcomes: string[]; state: string }> = [];
     await cleanupAzureSetupArtifacts(op, {
-      runAz: async () => ({ code: 0, stdout: "", stderr: "" }),
+      runAz: async (args) =>
+        answersRecordedIdentity(args) ?? { code: 0, stdout: "", stderr: "" },
       onResultRecorded: () => {
         observed.push({
           state: op.setupArtifacts.cleanup.state,
@@ -1037,13 +2577,20 @@ describe("cleanupAzureSetupArtifacts", () => {
     recordGitHubEnvironment(op, {
       state: "created",
       repo: "octo/app",
-      name: "dev"
+      name: "dev",
+      providerId: "env-1"
     });
     await cleanupGitHubEnvironmentArtifact(op, {
       attempt: 1,
       runDeleteEnvironment: async () => {
         throw new Error("GitHub returned 502.");
-      }
+      },
+      // Nothing can prove the environment gone, so it stays claimed and a
+      // rollback retry still has it to target.
+      readEnvironment: environmentReader({
+        listing: { code: 1, stdout: "", stderr: "HTTP 500: server error" },
+        reread: { code: 1, stdout: "", stderr: "HTTP 500: server error" }
+      })
     });
     recordCleanupState(op, {
       state: "running",
@@ -1052,7 +2599,7 @@ describe("cleanupAzureSetupArtifacts", () => {
           attempt: 1,
           artifactType: "github_environment",
           target: "octo/app:dev",
-          identity: "octo/app:dev",
+          identity: "env-1|octo/app:dev",
           outcome: "warning",
           detail: "GitHub returned 502."
         }
@@ -1061,7 +2608,12 @@ describe("cleanupAzureSetupArtifacts", () => {
 
     const seen: string[][] = [];
     await cleanupAzureSetupArtifacts(op, {
-      runAz: async () => ({ code: 0, stdout: "", stderr: "" }),
+      runAz: async (args: string[]) =>
+        answersRecordedIdentity(args) ?? {
+          code: 0,
+          stdout: "",
+          stderr: ""
+        },
       onResultRecorded: () => {
         seen.push(
           op.setupArtifacts.cleanup.results.map(
@@ -1086,14 +2638,23 @@ describe("cleanupAzureSetupArtifacts", () => {
   it("retries only the named unresolved targets on a cleanup retry", async () => {
     const op = newAzureOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });
-    recordServicePrincipal(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
 
     // First attempt: the Service Principal goes, the App Registration does not.
     await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) =>
-        args.includes("app") && args.includes("delete") ?
-          { code: 1, stdout: "", stderr: "Azure CLI returned 429." }
-        : { code: 0, stdout: "", stderr: "" }
+        answersRecordedIdentity(args) ??
+        (args.includes("app") && args.includes("delete") ?
+          {
+            code: 1,
+            stdout: "",
+            stderr: "TooManyRequests: Azure CLI is being throttled."
+          }
+        : { code: 0, stdout: "", stderr: "" })
     });
     expect(op.setupArtifacts.servicePrincipal.state).toBe("deleted");
     expect(op.setupArtifacts.azureApp.state).toBe("created");
@@ -1102,6 +2663,8 @@ describe("cleanupAzureSetupArtifacts", () => {
     const retry = await cleanupAzureSetupArtifacts(op, {
       only: new Set(["azure_app#app-1"]),
       runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
         retriedCalls.push(args);
         return { code: 0, stdout: "", stderr: "" };
       }
@@ -1129,6 +2692,8 @@ describe("cleanupAzureSetupArtifacts", () => {
     const result = await cleanupAzureSetupArtifacts(op, {
       only: new Set(["azure_app#some-other-app"]),
       runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
         calls.push(args);
         return { code: 0, stdout: "", stderr: "" };
       }
@@ -1138,6 +2703,36 @@ describe("cleanupAzureSetupArtifacts", () => {
     expect(result.state).toBe("not_needed");
     expect([...result.attemptedKeys]).toEqual([]);
     expect(op.setupArtifacts.azureApp.state).toBe("created");
+  });
+
+  it("reconciles a timed-out Azure delete by its stable provider id", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    const calls: string[][] = [];
+
+    const cleanup = await cleanupAzureSetupArtifacts(op, {
+      runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
+        calls.push(args);
+        return args.includes("delete") ?
+            { code: 1, stdout: "", stderr: "terminated", timedOut: true }
+          : {
+              code: 1,
+              stdout: "",
+              stderr: "Request_ResourceNotFound: app was not found"
+            };
+      }
+    });
+
+    expect(cleanup.state).toBe("succeeded");
+    expect(cleanup.results).toMatchObject([
+      { artifactType: "azure_app", outcome: "not_found" }
+    ]);
+    expect(calls).toEqual([
+      ["ad", "app", "delete", "--id", "app-1"],
+      ["ad", "app", "show", "--id", "app-1", "-o", "none"]
+    ]);
   });
 
   it("records warnings and continues when a delete fails", async () => {
@@ -1150,9 +2745,11 @@ describe("cleanupAzureSetupArtifacts", () => {
     });
     recordCreatedFederatedCredential(op, {
       name: "radius-dev",
-      subject: "repo:octo/app:environment:dev"
+      subject: "repo:octo/app:environment:dev",
+      providerId: "fic-radius-dev"
     });
     recordCreatedRoleAssignment(op, {
+      assignmentId: "assignment-1",
       role: "Contributor",
       scope: "/subscriptions/sub/resourceGroups/rg",
       principalObjectId: "sp-1"
@@ -1161,6 +2758,8 @@ describe("cleanupAzureSetupArtifacts", () => {
     const calls: string[][] = [];
     const cleanup = await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
         calls.push(args);
         return args[0] === "role" ?
             {
@@ -1180,12 +2779,8 @@ describe("cleanupAzureSetupArtifacts", () => {
         "role",
         "assignment",
         "delete",
-        "--assignee-object-id",
-        "sp-1",
-        "--role",
-        "Contributor",
-        "--scope",
-        "/subscriptions/sub/resourceGroups/rg",
+        "--ids",
+        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Authorization/roleAssignments/assignment-1",
         "--output",
         "none"
       ],
@@ -1199,7 +2794,7 @@ describe("cleanupAzureSetupArtifacts", () => {
         "--federated-credential-id",
         "radius-dev"
       ],
-      ["ad", "sp", "delete", "--id", "app-1"],
+      ["ad", "sp", "delete", "--id", "sp-1"],
       ["ad", "app", "delete", "--id", "app-1"]
     ]);
     expect(op.setupArtifacts.cleanup).toMatchObject({
@@ -1215,7 +2810,8 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
     recordGitHubEnvironment(op, {
       state: "created",
       repo: "octo/app",
-      name: "dev"
+      name: "dev",
+      providerId: "env-1"
     });
     const calls: string[][] = [];
     const steps: string[] = [];
@@ -1225,7 +2821,8 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
       runDeleteEnvironment: async (args) => {
         calls.push(args);
       },
-      steps
+      steps,
+      readEnvironment: environmentReader()
     });
 
     expect(calls).toEqual([
@@ -1237,7 +2834,7 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
         attempt: 1,
         artifactType: "github_environment",
         target: "octo/app:dev",
-        identity: "octo/app:dev",
+        identity: "env-1|octo/app:dev",
         outcome: "deleted"
       }
     ]);
@@ -1250,7 +2847,8 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
     recordGitHubEnvironment(op, {
       state: "created",
       repo: "octo/app",
-      name: "dev"
+      name: "dev",
+      providerId: "env-1"
     });
     const invalidated: string[] = [];
 
@@ -1259,7 +2857,8 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
       runDeleteEnvironment: async () => {},
       invalidateEnvironmentListing: (repo) => {
         invalidated.push(repo);
-      }
+      },
+      readEnvironment: environmentReader()
     });
 
     // Without this the picker keeps serving the rolled-back environment from
@@ -1294,7 +2893,8 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
         runDeleteEnvironment,
         invalidateEnvironmentListing: (repo) => {
           invalidated.push(repo);
-        }
+        },
+        readEnvironment: environmentReader()
       });
 
       // The environment is still there, so a listing that still shows it is
@@ -1315,7 +2915,8 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
       attempt: 2,
       runDeleteEnvironment: async () => {
         throw new Error("must not delete an environment it cannot claim");
-      }
+      },
+      readEnvironment: environmentReader()
     });
 
     expect(result.attempted).toBe(true);
@@ -1329,27 +2930,487 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
     expect(op.setupArtifacts.githubEnvironment.state).toBe("created_candidate");
   });
 
-  it("keeps claiming the environment when the delete fails", async () => {
+  it("keeps claiming the environment when GitHub refuses the delete", async () => {
     const op = newAzureOp();
     recordGitHubEnvironment(op, {
       state: "created",
       repo: "octo/app",
-      name: "dev"
+      name: "dev",
+      providerId: "env-1"
     });
 
     const result = await cleanupGitHubEnvironmentArtifact(op, {
       attempt: 1,
       runDeleteEnvironment: async () => {
-        throw new Error("GitHub API request failed.");
-      }
+        throw new Error("HTTP 403: Resource not accessible by integration");
+      },
+      readEnvironment: environmentReader()
     });
 
+    // GitHub composed the refusal, so nothing was removed and the retry may
+    // reissue exactly this delete.
     expect(result.results).toMatchObject([
-      { outcome: "warning", detail: "GitHub API request failed." }
+      {
+        outcome: "warning",
+        detail: "HTTP 403: Resource not accessible by integration"
+      }
     ]);
-    expect(result.warnings).toEqual([
-      'Failed to delete GitHub environment "dev": GitHub API request failed.'
+    expect(result.warnings[0]).toContain("HTTP 403");
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+    expect(
+      op.providerRecovery.mutations.map(
+        (entry: { kind: string; status: string }) =>
+          `${entry.kind}:${entry.status}`
+      )
+    ).toEqual(["github_environment.cleanup_delete:not_applied"]);
+  });
+
+  it("leaves the environment delete unresolved when its answer is lost", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "env-1"
+    });
+    let deletes = 0;
+
+    const result = await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 1,
+      runDeleteEnvironment: async () => {
+        deletes += 1;
+        throw new Error(
+          "Outcome unknown after provider timeout; Radius will not repeat this delete blindly."
+        );
+      },
+      // The environment cannot be read back either, so nothing settles it.
+      readEnvironment: environmentReader({
+        listing: { code: 1, stdout: "", stderr: "HTTP 500: server error" },
+        reread: { code: 1, stdout: "", stderr: "HTTP 500: server error" }
+      })
+    });
+
+    expect(deletes).toBe(1);
+    expect(result.results[0].outcome).toBe("warning");
+    // Unresolved, so the ledger still claims the environment and no pass may
+    // report this rollback complete.
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+    expect(unresolvedProviderMutations(op).map((entry) => entry.kind)).toEqual([
+      "github_environment.cleanup_delete"
     ]);
+  });
+
+  it("settles a lost environment delete once the environment reads back absent", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "env-1"
+    });
+
+    const result = await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 1,
+      runDeleteEnvironment: async () => {
+        throw new Error(
+          "Outcome unknown after provider timeout; Radius will not repeat this delete blindly."
+        );
+      },
+      // The identity read, the listing the account can complete, then the
+      // confirming reread. A bare 404 alone would not be enough.
+      readEnvironment: environmentReader({ listing: envListing(["prod"]) })
+    });
+
+    expect(result.results[0].outcome).toBe("not_found");
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+    expect(unresolvedProviderMutations(op)).toEqual([]);
+  });
+
+  it("refuses to delete an environment that came back after a lost delete", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "env-1"
+    });
+    let deletes = 0;
+    const runDeleteEnvironment = async () => {
+      deletes += 1;
+      throw new Error(
+        "Outcome unknown after provider timeout; Radius will not repeat this delete blindly."
+      );
+    };
+    // The customer rebuilt the environment while Radius was down, so the name
+    // now answers for their resource rather than this attempt's leftover.
+    const readEnvironment = environmentReader({
+      listing: envListing(["dev"]),
+      reread: ENV_PRESENT
+    });
+
+    const first = await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 1,
+      runDeleteEnvironment,
+      readEnvironment
+    });
+    const retry = await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 2,
+      runDeleteEnvironment,
+      readEnvironment
+    });
+
+    expect(first.results[0].outcome).toBe("skipped");
+    expect(retry.results[0].outcome).toBe("skipped");
+    // One delete, ever. The retry resolves to the journal's refusal instead of
+    // removing the replacement.
+    expect(deletes).toBe(1);
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+  });
+
+  describe("a DELETE the environments API answers 404", () => {
+    function listing(names: string[]) {
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          total_count: names.length,
+          environments: names.map((name) => ({ name }))
+        }),
+        stderr: ""
+      };
+    }
+
+    function claimedEnvironment() {
+      const op = newAzureOp();
+      recordGitHubEnvironment(op, {
+        state: "created",
+        repo: "octo/app",
+        name: "dev",
+        providerId: "env-1"
+      });
+      return op;
+    }
+
+    it("does not report a removal when the listing is refused", async () => {
+      const op = claimedEnvironment();
+      const invalidated: string[] = [];
+      let deletes = 0;
+
+      const result = await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: 1,
+        runDeleteEnvironment: async () => {
+          deletes += 1;
+          throw new Error("HTTP 404: Not Found");
+        },
+        // Repository metadata may be readable; the Actions environments API is
+        // not. GitHub answers 404 per resource, so the DELETE's own 404 proves
+        // nothing about whether the environment is gone.
+        readEnvironment: environmentReader({
+          listing: {
+            code: 1,
+            stdout: "",
+            stderr: "HTTP 403: Resource not accessible"
+          }
+        }),
+        invalidateEnvironmentListing: (repo) => invalidated.push(repo)
+      });
+
+      expect(deletes).toBe(1);
+      expect(result.results[0].outcome).toBe("warning");
+      // Ownership never moves and the picker's cache is never released.
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+      expect(invalidated).toEqual([]);
+      expect(
+        unresolvedProviderMutations(op).map((entry) => entry.kind)
+      ).toEqual(["github_environment.cleanup_delete"]);
+    });
+
+    it("refuses when the listing still holds the environment", async () => {
+      const op = claimedEnvironment();
+      const invalidated: string[] = [];
+
+      const result = await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: 1,
+        runDeleteEnvironment: async () => {
+          throw new Error("HTTP 404: Not Found");
+        },
+        // The name answers for something the account can list, so the 404 was
+        // masked access rather than a removal.
+        readEnvironment: environmentReader({
+          listing: listing(["dev", "prod"]),
+          reread: ENV_PRESENT
+        }),
+        invalidateEnvironmentListing: (repo) => invalidated.push(repo)
+      });
+
+      expect(result.results[0].outcome).toBe("skipped");
+      expect(result.results[0].detail).toContain("still present");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+      expect(invalidated).toEqual([]);
+    });
+
+    it("settles not_found only from an exhaustive listing and a confirming reread", async () => {
+      const op = claimedEnvironment();
+      const invalidated: string[] = [];
+      const reads: string[] = [];
+      const reader = environmentReader({
+        listing: listing(["prod", "staging"])
+      });
+
+      const result = await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: 1,
+        runDeleteEnvironment: async () => {
+          throw new Error("HTTP 404: Not Found");
+        },
+        readEnvironment: (args: string[]) => {
+          reads.push(args[1]);
+          return reader(args);
+        },
+        invalidateEnvironmentListing: (repo) => invalidated.push(repo)
+      });
+
+      // Identity first, then the listing, then the confirming reread.
+      expect(reads).toEqual([
+        "/repos/octo/app/environments/dev",
+        "/repos/octo/app/environments?per_page=100&page=1",
+        "/repos/octo/app/environments/dev"
+      ]);
+      expect(result.results[0].outcome).toBe("not_found");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+      expect(invalidated).toEqual(["octo/app"]);
+      expect(unresolvedProviderMutations(op)).toEqual([]);
+    });
+
+    it("issues the delete exactly once whatever the proof decides", async () => {
+      const op = claimedEnvironment();
+      let deletes = 0;
+      const ports = {
+        runDeleteEnvironment: async () => {
+          deletes += 1;
+          throw new Error("HTTP 404: Not Found");
+        },
+        readEnvironment: environmentReader({
+          listing: listing(["dev"]),
+          reread: ENV_PRESENT
+        })
+      };
+
+      await cleanupGitHubEnvironmentArtifact(op, { attempt: 1, ...ports });
+      await cleanupGitHubEnvironmentArtifact(op, { attempt: 2, ...ports });
+
+      expect(deletes).toBe(1);
+    });
+  });
+
+  describe("a name the customer may have reused", () => {
+    function claimed(providerId: string | null) {
+      const op = newAzureOp();
+      recordGitHubEnvironment(op, {
+        state: "created",
+        repo: "octo/app",
+        name: "dev",
+        ...(providerId === null ? {} : { providerId })
+      });
+      return op;
+    }
+
+    async function attempt(
+      op: ReturnType<typeof claimed>,
+      readEnvironment?: (
+        args: string[]
+      ) => Promise<{ code: number; stdout: string; stderr: string }>
+    ) {
+      const deletes: string[][] = [];
+      const invalidated: string[] = [];
+      const result = await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: 1,
+        runDeleteEnvironment: async (args) => {
+          deletes.push(args);
+        },
+        ...(readEnvironment ? { readEnvironment } : {}),
+        invalidateEnvironmentListing: (repo) => invalidated.push(repo)
+      });
+      return { result, deletes, invalidated };
+    }
+
+    it("deletes when the environment still carries the id Radius recorded", async () => {
+      const op = claimed("env-1");
+
+      const { result, deletes, invalidated } = await attempt(
+        op,
+        environmentReader()
+      );
+
+      expect(deletes).toHaveLength(1);
+      expect(result.results[0].outcome).toBe("deleted");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+      expect(invalidated).toEqual(["octo/app"]);
+    });
+
+    it("removes nothing when the customer recreated the name under a new id", async () => {
+      const op = claimed("env-1");
+
+      const { result, deletes, invalidated } = await attempt(
+        op,
+        environmentReader({
+          identity: {
+            code: 0,
+            stdout: JSON.stringify({ id: "env-2", name: "dev" }),
+            stderr: ""
+          }
+        })
+      );
+
+      // Same name, different environment. Deleting it would remove the
+      // customer's replacement rather than this attempt's leftover.
+      expect(deletes).toEqual([]);
+      expect(result.results[0]).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining("different id")
+      });
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+      expect(invalidated).toEqual([]);
+    });
+
+    it("removes nothing for a record written before the id was captured", async () => {
+      const op = claimed(null);
+
+      const { result, deletes } = await attempt(op, environmentReader());
+
+      expect(deletes).toEqual([]);
+      expect(result.results[0]).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining("without GitHub's own id")
+      });
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+    });
+
+    it.each([
+      [
+        "the read is forbidden",
+        { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" },
+        "confirm its identity"
+      ],
+      [
+        "GitHub reports no id",
+        { code: 0, stdout: JSON.stringify({ name: "dev" }), stderr: "" },
+        "did not report an id"
+      ],
+      [
+        "GitHub returns an unreadable body",
+        { code: 0, stdout: "<html>", stderr: "" },
+        "did not report an id"
+      ]
+    ])("removes nothing when %s", async (_label, identity, expected) => {
+      const op = claimed("env-1");
+
+      const { result, deletes } = await attempt(
+        op,
+        environmentReader({ identity })
+      );
+
+      expect(deletes).toEqual([]);
+      expect(result.results[0]).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining(expected)
+      });
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+    });
+
+    it("settles without a delete when the environment is already gone", async () => {
+      const op = claimed("env-1");
+
+      const { result, deletes, invalidated } = await attempt(
+        op,
+        environmentReader({ identity: ENV_NOT_FOUND })
+      );
+
+      // Absence is proven from a listing the account can read, so there is
+      // nothing to address a delete at — and issuing one anyway could only
+      // ever reach whichever environment takes the name next.
+      expect(deletes).toEqual([]);
+      expect(result.results[0].outcome).toBe("not_found");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+      expect(invalidated).toEqual(["octo/app"]);
+    });
+
+    it("refuses when a 404 cannot be corroborated by a listing", async () => {
+      const op = claimed("env-1");
+
+      const { result, deletes } = await attempt(
+        op,
+        environmentReader({
+          identity: ENV_NOT_FOUND,
+          listing: { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" }
+        })
+      );
+
+      // GitHub answers 404 for an environment this token may not see, so the
+      // endpoint alone proves nothing.
+      expect(deletes).toEqual([]);
+      expect(result.results[0]).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining("could not prove from a listing")
+      });
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+    });
+
+    it("refuses when the listing still reports the environment", async () => {
+      const op = claimed("env-1");
+
+      const { result, deletes } = await attempt(
+        op,
+        environmentReader({
+          identity: ENV_NOT_FOUND,
+          listing: envListing(["dev", "prod"])
+        })
+      );
+
+      expect(deletes).toEqual([]);
+      expect(result.results[0]).toMatchObject({ outcome: "skipped" });
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+    });
+
+    it("removes nothing when it has no way to read the environment back", async () => {
+      const op = claimed("env-1");
+
+      const { result, deletes } = await attempt(op);
+
+      expect(deletes).toEqual([]);
+      expect(result.results[0]).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining("no way to read")
+      });
+    });
+  });
+
+  it("stops before deleting the environment when the journal cannot be saved", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "env-1"
+    });
+    let deletes = 0;
+
+    const result = await cleanupGitHubEnvironmentArtifact(op, {
+      attempt: 1,
+      runDeleteEnvironment: async () => {
+        deletes += 1;
+      },
+      persistJournal: async () => {
+        throw new Error("disk full");
+      },
+      readEnvironment: environmentReader()
+    });
+
+    // The record of what Radius was about to delete did not reach disk, so the
+    // delete never went out.
+    expect(deletes).toBe(0);
+    expect(result.results[0]).toMatchObject({
+      outcome: "warning",
+      detail: expect.stringContaining("could not save the record")
+    });
     expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
   });
 
@@ -1358,12 +3419,14 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
     recordGitHubEnvironment(op, {
       state: "created",
       repo: "octo/app",
-      name: "dev"
+      name: "dev",
+      providerId: "env-1"
     });
 
     const result = await cleanupGitHubEnvironmentArtifact(op, {
       attempt: 1,
-      runDeleteEnvironment: null
+      runDeleteEnvironment: null,
+      readEnvironment: environmentReader()
     });
 
     expect(result.results).toMatchObject([{ outcome: "warning" }]);
@@ -1383,7 +3446,8 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
       attempt: 1,
       runDeleteEnvironment: async () => {
         throw new Error("must not delete a reused environment");
-      }
+      },
+      readEnvironment: environmentReader()
     });
 
     expect(result).toEqual({ results: [], warnings: [], attempted: false });
@@ -1521,6 +3585,187 @@ describe("guardStopBoundary", () => {
 });
 
 describe("finalizeSetupFailure", () => {
+  // Reading the ledger back out is only meaningful for a record that has one,
+  // so a missing ledger is a broken fixture rather than a soft assertion.
+  function ledgerOf(op: Parameters<typeof getSetupArtifactLedger>[0]) {
+    const ledger = getSetupArtifactLedger(op);
+    if (!ledger) throw new Error("expected the operation to carry a ledger");
+    return ledger;
+  }
+
+  // A setup that created cloud and GitHub resources and then issued the one
+  // destructive request it makes on its own behalf: deleting the setup branch a
+  // recovered attempt had created.
+  function quarantinedSetup() {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "env-1"
+    });
+    prepareProviderMutation(op, {
+      kind: "github_branch.delete",
+      target: "octo/app\u0000radius/setup-dev\u0000base-1"
+    });
+    return op;
+  }
+
+  it("removes nothing while a provider mutation is quarantined", async () => {
+    // The setup-branch delete GitHub refused settles as manual_required and the
+    // record then says Radius started no rollback. Running the pre-commit
+    // cleanup anyway would delete the Azure identity and the GitHub environment
+    // in the same breath as that sentence.
+    const op = quarantinedSetup();
+    const guidance =
+      'Radius could not remove the setup branch "radius/setup-dev" it recovered. Remove that exact branch yourself, then start setup again.';
+    settleProviderMutation(
+      op,
+      op.providerRecovery.mutations[0].mutationId,
+      "manual_required",
+      guidance
+    );
+
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: guidance,
+      code: "provider-mutation-manual-required",
+      extra: { steps: [] },
+      steps: [],
+      runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
+        throw new Error(`Azure must not be mutated: ${args.join(" ")}`);
+      },
+      runDeleteEnvironment: async (args) => {
+        throw new Error(`GitHub must not be mutated: ${args.join(" ")}`);
+      }
+    });
+
+    expect(failure.body.providerRecoveryGuidance).toBe(guidance);
+    expect(failure.body.cleanup).toMatchObject({
+      rollbackAttempted: false,
+      state: "not_needed"
+    });
+    // The resources are still recorded as present, so the customer can act on
+    // them and a later rollback still has something to remove.
+    expect(ledgerOf(op).githubEnvironment.state).toBe("created");
+    expect(ledgerOf(op).azureApp.state).toBe("created");
+  });
+
+  it("removes nothing while a delete outcome is merely unproven", async () => {
+    // The reconcile read failed, so the delete settles `outcome_unknown` rather
+    // than `manual_required`. The request still reached GitHub, so the resource
+    // set this attempt owns is just as unknown as in the refused case.
+    const op = quarantinedSetup();
+    settleProviderMutation(
+      op,
+      op.providerRecovery.mutations[0].mutationId,
+      "outcome_unknown",
+      "The delete response was lost."
+    );
+
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "outcome unknown",
+      code: "provider-mutation-outcome-unknown",
+      extra: { steps: [] },
+      steps: [],
+      runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
+        throw new Error(`Azure must not be mutated: ${args.join(" ")}`);
+      },
+      runDeleteEnvironment: async (args) => {
+        throw new Error(`GitHub must not be mutated: ${args.join(" ")}`);
+      }
+    });
+
+    expect(failure.body.providerRecoveryGuidance).toContain(
+      "has not confirmed the outcome of github_branch.delete"
+    );
+    expect(failure.body.cleanup).toMatchObject({ state: "not_needed" });
+    expect(ledgerOf(op).githubEnvironment.state).toBe("created");
+  });
+
+  it("removes nothing when the quarantine is carried by a sticky rollback", async () => {
+    // `settleProviderMutation` keeps `rollback_pending` and clears the
+    // recovery-level guidance, so the refusal is readable only through the
+    // mutation's own evidence. That is the shape production actually produces.
+    const op = quarantinedSetup();
+    op.providerRecovery.state = "rollback_pending";
+    settleProviderMutation(
+      op,
+      op.providerRecovery.mutations[0].mutationId,
+      "manual_required",
+      "Remove that exact branch yourself, then start setup again."
+    );
+    expect(op.providerRecovery.state).toBe("rollback_pending");
+    expect(op.providerRecovery.guidance).toBeNull();
+
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "refused",
+      code: "provider-mutation-manual-required",
+      extra: { steps: [] },
+      steps: [],
+      runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
+        throw new Error(`Azure must not be mutated: ${args.join(" ")}`);
+      },
+      runDeleteEnvironment: async (args) => {
+        throw new Error(`GitHub must not be mutated: ${args.join(" ")}`);
+      }
+    });
+
+    expect(failure.body.providerRecoveryGuidance).toBe(
+      "Remove that exact branch yourself, then start setup again."
+    );
+    expect(ledgerOf(op).githubEnvironment.state).toBe("created");
+  });
+
+  it("still rolls back once the quarantined mutation is settled", async () => {
+    // The recovered delete succeeded, which is exactly the case that must go on
+    // to remove the rest of what this attempt created.
+    const op = quarantinedSetup();
+    op.providerRecovery.state = "rollback_pending";
+    settleProviderMutation(
+      op,
+      op.providerRecovery.mutations[0].mutationId,
+      "confirmed",
+      "GitHub confirmed the recovered setup branch is absent."
+    );
+
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "rolled back",
+      code: "provider-mutation-recovered-rollback",
+      extra: { steps: [] },
+      steps: [],
+      runAz: async (args: string[]) =>
+        answersRecordedIdentity(args) ?? {
+          code: 0,
+          stdout: "",
+          stderr: ""
+        },
+      runDeleteEnvironment: async () => {},
+      readEnvironment: environmentReader()
+    });
+
+    expect(failure.body.cleanup).toMatchObject({
+      rollbackBeforeCommit: true,
+      state: "succeeded"
+    });
+    expect(ledgerOf(op).githubEnvironment.state).toBe("deleted");
+  });
+
   it("rolls back newly created GitHub and Azure artifacts before any workflow commit", async () => {
     const op = newAzureOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });
@@ -1531,9 +3776,11 @@ describe("finalizeSetupFailure", () => {
     });
     recordCreatedFederatedCredential(op, {
       name: "radius-dev",
-      subject: "repo:octo/app:environment:dev"
+      subject: "repo:octo/app:environment:dev",
+      providerId: "fic-radius-dev"
     });
     recordCreatedRoleAssignment(op, {
+      assignmentId: "assignment-1",
       role: "Contributor",
       scope: "/subscriptions/sub/resourceGroups/rg",
       principalObjectId: "sp-1"
@@ -1541,7 +3788,8 @@ describe("finalizeSetupFailure", () => {
     recordGitHubEnvironment(op, {
       state: "created",
       repo: "octo/app",
-      name: "dev"
+      name: "dev",
+      providerId: "env-1"
     });
 
     const ghCalls: string[][] = [];
@@ -1556,12 +3804,15 @@ describe("finalizeSetupFailure", () => {
       },
       steps: [],
       runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
         azCalls.push(args);
         return { code: 0, stdout: "", stderr: "" };
       },
       runDeleteEnvironment: async (args) => {
         ghCalls.push(args);
-      }
+      },
+      readEnvironment: environmentReader()
     });
 
     expect(failure.status).toBe(400);
@@ -1610,12 +3861,8 @@ describe("finalizeSetupFailure", () => {
         "role",
         "assignment",
         "delete",
-        "--assignee-object-id",
-        "sp-1",
-        "--role",
-        "Contributor",
-        "--scope",
-        "/subscriptions/sub/resourceGroups/rg",
+        "--ids",
+        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Authorization/roleAssignments/assignment-1",
         "--output",
         "none"
       ],
@@ -1629,7 +3876,7 @@ describe("finalizeSetupFailure", () => {
         "--federated-credential-id",
         "radius-dev"
       ],
-      ["ad", "sp", "delete", "--id", "app-1"],
+      ["ad", "sp", "delete", "--id", "sp-1"],
       ["ad", "app", "delete", "--id", "app-1"]
     ]);
   });
@@ -1644,9 +3891,11 @@ describe("finalizeSetupFailure", () => {
     });
     recordCreatedFederatedCredential(op, {
       name: "radius-dev",
-      subject: "repo:octo/app:environment:dev"
+      subject: "repo:octo/app:environment:dev",
+      providerId: "fic-radius-dev"
     });
     recordCreatedRoleAssignment(op, {
+      assignmentId: "assignment-1",
       role: "Contributor",
       scope: "/subscriptions/sub/resourceGroups/rg",
       principalObjectId: "sp-1"
@@ -1654,7 +3903,8 @@ describe("finalizeSetupFailure", () => {
     recordGitHubEnvironment(op, {
       state: "created",
       repo: "octo/app",
-      name: "dev"
+      name: "dev",
+      providerId: "env-1"
     });
 
     const failure = await finalizeSetupFailure(op, {
@@ -1663,17 +3913,22 @@ describe("finalizeSetupFailure", () => {
       code: "original-failure",
       steps: [],
       runAz: async (args) =>
-        args[0] === "role" ?
+        answersRecordedIdentity(args) ??
+        (args[0] === "role" ?
           {
             code: 1,
             stdout: "",
             stderr:
               "AuthorizationFailed: caller cannot delete this role assignment."
           }
-        : { code: 0, stdout: "", stderr: "" },
+        : { code: 0, stdout: "", stderr: "" }),
       runDeleteEnvironment: async () => {
         throw new Error("GitHub delete exploded");
-      }
+      },
+      readEnvironment: environmentReader({
+        listing: { code: 1, stdout: "", stderr: "HTTP 500: server error" },
+        reread: { code: 1, stdout: "", stderr: "HTTP 500: server error" }
+      })
     });
 
     expect(failure.body.error).toBe("original failure");
@@ -1687,7 +3942,9 @@ describe("finalizeSetupFailure", () => {
     expect((failure.body.cleanup as any).warnings).toEqual(
       expect.arrayContaining([
         expect.stringContaining("AuthorizationFailed"),
-        expect.stringContaining("GitHub delete exploded")
+        // The GitHub delete's answer was never established, so the environment
+        // stays claimed instead of being reported as removed.
+        expect.stringContaining("Outcome unknown after provider timeout")
       ])
     );
   });
@@ -1762,7 +4019,8 @@ describe("finalizeSetupFailure", () => {
     recordGitHubEnvironment(op, {
       state: "created",
       repo: "octo/app",
-      name: "dev"
+      name: "dev",
+      providerId: "env-1"
     });
     recordCommittedWorkflowFile(op, {
       path: ".github/workflows/radius-verify-credentials.yml",
@@ -1806,7 +4064,8 @@ describe("finalizeSetupFailure", () => {
     recordGitHubEnvironment(op, {
       state: "created",
       repo: "octo/app",
-      name: "dev"
+      name: "dev",
+      providerId: "env-1"
     });
     recordCommittedWorkflowFile(op, {
       path: ".github/workflows/radius-verify-credentials.yml",

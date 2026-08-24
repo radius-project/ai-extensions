@@ -22,10 +22,13 @@ import {
 import type {
   AzureAutoSetupApplicationInput,
   AzureAutoSetupApplicationResult,
+  AzureAutoSetupCommandResult,
   AzureAutoSetupOperation,
   AzureAutoSetupWorkflow,
   RadiusAppProvenanceInput
 } from "./azure-auto-setup-types.js";
+import { providerMutationRecord } from "../../operations.js";
+import { executeRecoverableMutation } from "../services/provider-mutation-recovery.js";
 
 export const ENTRA_APP_RETENTION_NOTICE =
   "Radius retains this app registration if you later delete the environment; environment deletion removes only that environment's federated identity credential.";
@@ -109,8 +112,20 @@ export async function resolveAzureAutoSetupApplication({
     }
   }
 
-  let existingClientId = requestedClientId;
-  if (!existingClientId) {
+  const applicationMutationKind = "azure_application.create";
+  const applicationMutationTarget = `${oidc.fullName}:${environment}:${appName}`;
+  const pendingApplicationCreate = providerMutationRecord(
+    operation,
+    applicationMutationKind,
+    applicationMutationTarget
+  );
+  const recoveringApplicationCreate =
+    pendingApplicationCreate?.status === "prepared" ||
+    pendingApplicationCreate?.status === "outcome_unknown" ||
+    pendingApplicationCreate?.status === "confirmed";
+
+  let existingClientId = recoveringApplicationCreate ? "" : requestedClientId;
+  if (!recoveringApplicationCreate && !existingClientId) {
     const variable = await runGitHubJson(
       `/repos/${oidc.fullName}/environments/${encodeURIComponent(
         environment
@@ -199,7 +214,7 @@ export async function resolveAzureAutoSetupApplication({
       appName
     });
 
-  if (existingClientId) {
+  if (!recoveringApplicationCreate && existingClientId) {
     steps.push(
       `Verifying the repository's existing AZURE_CLIENT_ID: ${existingClientId}...`
     );
@@ -302,7 +317,7 @@ export async function resolveAzureAutoSetupApplication({
       }
     };
 
-    if (explicitAppId) {
+    if (!recoveringApplicationCreate && explicitAppId) {
       if (!isUuid(explicitAppId)) {
         await fail(
           400,
@@ -422,7 +437,7 @@ export async function resolveAzureAutoSetupApplication({
         hasUnownedMatch: matches.length > ownedMatches.length,
         radiusProvenance: unownedRadiusProvenance,
         existingClientId,
-        createNew: createNewApp
+        createNew: createNewApp || recoveringApplicationCreate
       });
       if (selection.action === "error") {
         await fail(
@@ -488,35 +503,129 @@ export async function resolveAzureAutoSetupApplication({
         }
       } else {
         steps.push(`Creating Entra app registration: ${appName}...`);
-        const createResult = await runAz(
-          buildAppCreateArgs({
-            appName,
-            serviceManagementReference
-          }).filter((arg): arg is string => typeof arg === "string")
-        );
-        if (createResult.code !== 0) {
+        const createResult = await executeRecoverableMutation<string>({
+          operation: operation as AzureAutoSetupOperation & {
+            providerRecovery?: unknown;
+          },
+          kind: applicationMutationKind,
+          target: applicationMutationTarget,
+          persist: () => operations.persist(),
+          mutate: () =>
+            runAz(
+              buildAppCreateArgs({
+                appName,
+                serviceManagementReference
+              }).filter((arg): arg is string => typeof arg === "string")
+            ),
+          accept: (result) => result.stdout.trim(),
+          reconcile: async () => {
+            const lookup = await runAz([
+              "ad",
+              "app",
+              "list",
+              "--filter",
+              `displayName eq '${appName}'`,
+              "--query",
+              "[].{appId:appId,displayName:displayName,tags:tags}",
+              "-o",
+              "json"
+            ]);
+            if (lookup.code !== 0 && lookup.code !== "0") {
+              throw new Error(
+                lookup.stderr || "The App Registration state could not be read."
+              );
+            }
+            let candidates: Array<{
+              appId?: unknown;
+              displayName?: unknown;
+              tags?: unknown;
+            }>;
+            try {
+              const parsed: unknown = JSON.parse(lookup.stdout || "[]");
+              candidates = Array.isArray(parsed) ? parsed : [];
+            } catch {
+              throw new Error(
+                "The App Registration recovery lookup was unreadable."
+              );
+            }
+            const recordedAppId =
+              (
+                operation.setupArtifacts?.azureApp?.origin ===
+                  "this_operation" &&
+                typeof operation.setupArtifacts.azureApp.appId === "string"
+              ) ?
+                operation.setupArtifacts.azureApp.appId
+              : "";
+            const operationTag = buildRadiusAppProvenanceTags({
+              operationId: operation.operationId
+            }).find((tag) => tag.includes(operation.operationId));
+            const exact = candidates.filter(
+              (candidate) =>
+                candidate.displayName === appName &&
+                typeof candidate.appId === "string" &&
+                candidate.appId &&
+                (candidate.appId === recordedAppId ||
+                  (operationTag &&
+                    Array.isArray(candidate.tags) &&
+                    candidate.tags.includes(operationTag)))
+            );
+            if (exact.length === 0) {
+              if (candidates.length === 0) {
+                throw new Error(
+                  "No operation-provenanced App Registration is visible yet."
+                );
+              }
+              return {
+                state: "manual_required",
+                guidance:
+                  `One or more recent App Registrations named "${appName}" are visible, but none carries this operation's immutable provenance or a provider ID Radius saved before losing the response. ` +
+                  "Radius will not adopt, modify, or delete any of them."
+              };
+            }
+            if (exact.length > 1) {
+              return {
+                state: "manual_required",
+                guidance:
+                  `Multiple App Registrations named "${appName}" appeared during the interrupted request. ` +
+                  "Radius will not guess which application belongs to this operation or create another one."
+              };
+            }
+            const appId = String(exact[0].appId);
+            return {
+              state: "applied",
+              value: appId,
+              evidence:
+                "The exact App Registration provider identity or immutable Radius operation provenance matched the interrupted operation."
+            };
+          }
+        });
+        if (createResult.state === "not_applied") {
+          const rejected = createResult.result;
           if (
             !serviceManagementReference &&
-            isServiceManagementReferenceError(createResult.stderr)
+            isServiceManagementReferenceError(rejected?.stderr)
           ) {
             await fail(
               400,
               "This Entra tenant requires a Service Management Reference on new App Registrations. " +
                 "Enter your Service Management Reference (for Microsoft-internal tenants, your Service Tree ID GUID) and retry.",
               "service-management-reference-required",
-              { steps, azError: createResult.stderr }
+              { steps, azError: rejected?.stderr || "" }
             );
             return null;
           }
           await fail(
             400,
-            "Failed to create App Registration: " + createResult.stderr,
+            "Failed to create App Registration: " +
+              (rejected?.stderr ||
+                rejected?.stdout ||
+                "The request was rejected."),
             "app-create-failed",
-            { steps, azError: createResult.stderr }
+            { steps, azError: rejected?.stderr || "" }
           );
           return null;
         }
-        clientId = createResult.stdout.trim();
+        clientId = createResult.value;
         applicationState = "created";
         steps.push(`✅ Entra app registration created: ${clientId}`);
         operations.recordAzureApp(operation, {
@@ -541,12 +650,60 @@ export async function resolveAzureAutoSetupApplication({
         steps.push(
           "Assigning the signed-in user as an owner of the new App Registration..."
         );
-        const ownerAdd = await runAz(
-          buildAppOwnerAddArgs({
-            appId: clientId,
-            ownerObjectId: signedIn.id
-          })
-        );
+        const ownerMutation =
+          await executeRecoverableMutation<AzureAutoSetupCommandResult>({
+            operation,
+            kind: "azure_app_owner.add",
+            target: `${clientId}:${signedIn.id}`,
+            providerIdempotencyKey: `${clientId}:${signedIn.id}`,
+            persist: operations.persist,
+            mutate: async () => {
+              const result = await runAz(
+                buildAppOwnerAddArgs({
+                  appId: clientId,
+                  ownerObjectId: signedIn.id
+                })
+              );
+              return isAppOwnerAlreadyAssignedError(result.stderr) ?
+                  { ...result, code: 0 }
+                : result;
+            },
+            accept: (result) => result,
+            reconcile: async () => {
+              const owners = await runAz(
+                buildAppOwnerListArgs({ appId: clientId })
+              );
+              if (owners.code !== 0 && owners.code !== "0") {
+                throw new Error(
+                  owners.stderr ||
+                    owners.stdout ||
+                    "App Registration owners could not be read."
+                );
+              }
+              const ownerIds = parseDirectoryObjectIds(owners.stdout);
+              return ownerIds.includes(signedIn.id.toLowerCase()) ?
+                  {
+                    state: "applied" as const,
+                    value: { code: 0, stdout: owners.stdout, stderr: "" },
+                    evidence:
+                      "The exact App Registration and signed-in owner identity matched."
+                  }
+                : {
+                    state: "not_applied" as const,
+                    evidence:
+                      "Microsoft Entra confirmed the signed-in user is not an owner."
+                  };
+            }
+          });
+        const ownerAdd =
+          ownerMutation.state === "applied" ?
+            ownerMutation.value
+          : ownerMutation.result || {
+              code: 1,
+              stdout: "",
+              stderr:
+                "Microsoft Entra confirmed the owner assignment was not applied."
+            };
         if (
           ownerAdd.code !== 0 &&
           !isAppOwnerAlreadyAssignedError(ownerAdd.stderr)
@@ -585,6 +742,7 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         }
         steps.push("✅ Signed-in user verified as App Registration owner");
+        if (!(await checkpoint())) return null;
 
         const provenanceTags = buildRadiusAppProvenanceTags({
           repo: oidc.fullName,
@@ -594,9 +752,60 @@ export async function resolveAzureAutoSetupApplication({
         steps.push(
           "Applying Radius provenance tags to the new App Registration..."
         );
-        const tagPatch = await runAz(
-          buildAppTagPatchArgs({ appId: clientId, tags: provenanceTags })
-        );
+        const tagMutation =
+          await executeRecoverableMutation<AzureAutoSetupCommandResult>({
+            operation,
+            kind: "azure_app_tags.patch",
+            target: `${clientId}:${operation.operationId}`,
+            providerIdempotencyKey: clientId,
+            persist: operations.persist,
+            mutate: () =>
+              runAz(
+                buildAppTagPatchArgs({ appId: clientId, tags: provenanceTags })
+              ),
+            accept: (result) => result,
+            reconcile: async () => {
+              const shown = await runAz(
+                buildAppTagShowArgs({ appId: clientId })
+              );
+              if (shown.code !== 0 && shown.code !== "0") {
+                throw new Error(
+                  shown.stderr ||
+                    shown.stdout ||
+                    "App Registration tags could not be read."
+                );
+              }
+              const tags = parseAppTags(shown.stdout);
+              if (!tags) {
+                throw new Error(
+                  "Microsoft Entra returned unreadable App Registration tags."
+                );
+              }
+              const missing = missingRequiredAppTags(tags, provenanceTags);
+              return missing.length === 0 ?
+                  {
+                    state: "applied" as const,
+                    value: { code: 0, stdout: shown.stdout, stderr: "" },
+                    evidence:
+                      "The exact App Registration carries every Radius operation provenance tag."
+                  }
+                : {
+                    state: "manual_required" as const,
+                    guidance:
+                      `App Registration "${clientId}" does not carry the exact Radius operation provenance tags. ` +
+                      "Radius will not overwrite or delete it based on display name."
+                  };
+            }
+          });
+        const tagPatch =
+          tagMutation.state === "applied" ?
+            tagMutation.value
+          : tagMutation.result || {
+              code: 1,
+              stdout: "",
+              stderr:
+                "Microsoft Entra confirmed the provenance tag update was not applied."
+            };
         if (tagPatch.code !== 0) {
           await rollbackCreatedAppAndFail(
             "Failed to apply Radius provenance tags to the new App Registration: " +
@@ -638,6 +847,7 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         }
         steps.push("✅ Radius provenance tags verified");
+        if (!(await checkpoint())) return null;
       }
     }
   }

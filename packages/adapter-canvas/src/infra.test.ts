@@ -87,10 +87,33 @@ const {
   generateVerifyWorkflow,
   generateDeployWorkflow,
   generateDeleteWorkflow,
-  configureVerifyGhcrProbe
+  configureVerifyGhcrProbe,
+  configureVerifyOperationMarker
 } = await import("./infra.js");
 
 const VERIFY_PATH = ".github/workflows/radius-verify-credentials.yml";
+
+describe("verification operation marker", () => {
+  it("adds the dispatch input and run title exposed by GitHub run metadata", () => {
+    const workflow = configureVerifyOperationMarker(`
+name: verify
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+`);
+
+    expect(workflow).toContain(
+      "run-name: Radius verify ${{ inputs.environment }} [${{ inputs.radius_operation }}]"
+    );
+    expect(workflow).toContain("      radius_operation:");
+    expect(workflow).toContain("        required: false");
+  });
+});
 
 // Build the full expected committed-file map the extension would produce for one
 // environment, so tests can seed an "in sync" branch.
