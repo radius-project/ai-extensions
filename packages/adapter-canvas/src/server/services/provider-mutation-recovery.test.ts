@@ -888,6 +888,26 @@ describe("edges the recovery record must still describe honestly", () => {
     );
   });
 
+  it("propagates caller-classified reconciliation failures unchanged", async () => {
+    const operation = createOperation({ operationId: "op_test" });
+    const authorizationError = new Error("selected account forbidden");
+
+    await expect(
+      executeRecoverableMutation({
+        operation,
+        kind: "github_workflow.dispatch_retry",
+        target: "octo/app:verify",
+        persist: async () => {},
+        mutate: async () => command({ code: 1, timedOut: true }),
+        accept: () => null,
+        reconcile: async () => {
+          throw authorizationError;
+        },
+        rethrowReconciliationError: (error) => error === authorizationError
+      })
+    ).rejects.toBe(authorizationError);
+  });
+
   it("still refuses a quarantined step whose guidance was not recorded", async () => {
     const operation = createOperation({ operationId: "op_test" });
     const mutation = prepareProviderMutation(operation, {

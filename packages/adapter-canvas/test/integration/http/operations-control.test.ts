@@ -8,6 +8,7 @@ import { createOperationsStatusRoutes } from "../../../src/server/routes/operati
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import {
   newOperation,
+  mergeHandoff,
   retryableSetup,
   reusedOnlyFailure,
   stoppedSetup,
@@ -64,6 +65,13 @@ interface Harness {
   scheduled: Array<{ kind: string; instanceId: string; commandId: string }>;
   createScheduled: Array<{ instanceId: string; operationId: string }>;
   registry: ReturnType<typeof createRegistry>;
+  setPullRequestMergeCheck(
+    check: () => Promise<
+      | { state: "merged" }
+      | { state: "open" }
+      | { state: "unavailable"; login: string; detail: string }
+    >
+  ): void;
 }
 
 function start(): Harness {
@@ -73,6 +81,13 @@ function start(): Harness {
   const scheduled: Harness["scheduled"] = [];
   const createScheduled: Harness["createScheduled"] = [];
   const invalidatedListings: string[] = [];
+  let pullRequestMergeCheck = (): Promise<
+    | { state: "merged" }
+    | { state: "open" }
+    | { state: "unavailable"; login: string; detail: string }
+  > => {
+    throw new Error("checkPullRequestMerge must not run over the socket");
+  };
 
   const persistOperations = () => {
     persistCalls.push("persist");
@@ -86,9 +101,7 @@ function start(): Harness {
       persistOperations,
       // Merge-proof eligibility is the route unit suite's to decide; no journey
       // here may reach GitHub for it, so the port refuses rather than answers.
-      isPullRequestMerged: () => {
-        throw new Error("isPullRequestMerged must not run over the socket");
-      },
+      checkPullRequestMerge: () => pullRequestMergeCheck(),
       schedule: ({ kind, instanceId, commandId }) => {
         scheduled.push({ kind, instanceId, commandId });
         return true;
@@ -193,7 +206,10 @@ function start(): Harness {
     scheduled,
     createScheduled,
     registry,
-    invalidatedListings
+    invalidatedListings,
+    setPullRequestMergeCheck: (check) => {
+      pullRequestMergeCheck = check;
+    }
   };
 }
 
@@ -425,6 +441,35 @@ describe("operation controls real-loopback HIT", () => {
     expect(await unknown.text()).toBe("unmatched");
   });
 
+  it("fails closed over HTTP when the selected account cannot verify the setup pull request", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = seed(harness, mergeHandoff());
+    op.context = { githubLogin: "alice" };
+    harness.setPullRequestMergeCheck(() =>
+      Promise.resolve({
+        state: "unavailable",
+        login: "alice",
+        detail: "selected credential unavailable"
+      })
+    );
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/retry/verification`
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      code: "verification-retry-github-account-unavailable",
+      error:
+        "Radius could not verify the setup pull request with @alice. Re-check that GitHub account and try again.",
+      detail: "selected credential unavailable"
+    });
+    expect(harness.persistCalls).toEqual(["persist"]);
+    expect(harness.scheduled).toEqual([]);
+  });
+
   it("refuses a control request that cannot prove it came from the panel", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
@@ -528,7 +573,11 @@ describe("stop, then continue or roll back, over the socket", () => {
     const accepted = await body(response);
     expect(accepted.operationId).toBe(op.operationId);
     expect(harness.scheduled).toEqual([
-      { kind: "rollback", instanceId: "panel-b", commandId: accepted.commandId }
+      {
+        kind: "rollback",
+        instanceId: "panel-b",
+        commandId: accepted.commandId
+      }
     ]);
     // The kind the route schedules is a runner key, not the persisted command
     // kind. Recovery has to make the same translation, so both are pinned to
@@ -583,6 +632,7 @@ describe("stop, then continue or roll back, over the socket", () => {
     // dispatched, the run failed at Azure Login. The environment is unfinished,
     // so both choices are on offer over the same socket.
     const op = seed(harness, newOperation());
+    op.context = { githubLogin: "alice" };
     recordAzureApp(op, {
       state: "created",
       appId: "app-1",

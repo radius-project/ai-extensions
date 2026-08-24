@@ -23,6 +23,7 @@ import {
   canRetryCleanup,
   finish,
   finishSucceeded,
+  markVerificationRetryAcquisition,
   onOperationTerminal,
   recordAzureApp,
   recordCleanupState,
@@ -152,7 +153,7 @@ interface Journal {
 
 // The route module calls the pure model directly, so the only doubles a test
 // needs are the genuine I/O seams: the registry lookup, the durable write, the
-// merge proof, and the per-instance runner. `get` and `isPullRequestMerged`
+// merge proof, and the per-instance runner. `get` and `checkPullRequestMerge`
 // throw until a scenario models them, so a route that reaches an seam it must
 // not touch fails instead of quietly succeeding.
 function dependencies(
@@ -172,8 +173,8 @@ function dependencies(
       journal.persistCalls += 1;
       return Promise.resolve();
     },
-    isPullRequestMerged: () => {
-      throw new Error("isPullRequestMerged not stubbed");
+    checkPullRequestMerge: () => {
+      throw new Error("checkPullRequestMerge not stubbed");
     },
     schedule: ({ kind, instanceId, commandId }) => {
       journal.scheduled.push({ kind, instanceId, commandId });
@@ -406,9 +407,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     const op = mergeHandoff();
     const asked: Array<string | null> = [];
     const out = await drive(handleRetryOperation, op, "retry/verification", {
-      isPullRequestMerged: (_operation, pullRequestUrl) => {
+      checkPullRequestMerge: (_operation, pullRequestUrl) => {
         asked.push(pullRequestUrl);
-        return Promise.resolve(false);
+        return Promise.resolve({ state: "open" });
       }
     });
 
@@ -425,7 +426,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
   it("repeats verification once the setup pull request has merged", async () => {
     const op = mergeHandoff();
     const out = await drive(handleRetryOperation, op, "retry/verification", {
-      isPullRequestMerged: () => Promise.resolve(true)
+      checkPullRequestMerge: () => Promise.resolve({ state: "merged" })
     });
 
     expect(out.recording.status).toBe(202);
@@ -434,6 +435,11 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       `${op.operationId}:retry_verification:1:verification`
     );
     expect(payload.operation.currentStage).toBe(STAGE_VERIFY);
+    expect(op.verification).toMatchObject({
+      acquisitionPending: true,
+      retryCommandId: payload.commandId,
+      retryClassification: "workflow-installation-pending"
+    });
     // The action_required verdict is kept as history.
     expect(payload.operation.outcomes).toEqual([
       expect.objectContaining({
@@ -449,6 +455,24 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
         commandId: payload.commandId
       }
     ]);
+  });
+
+  it("removes the pending acquisition marker when verification retry cannot be saved", async () => {
+    const op = mergeHandoff();
+    const previousVerification = structuredClone(op.verification);
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
+      checkPullRequestMerge: () => Promise.resolve({ state: "merged" }),
+      persistOperations: () => Promise.reject(new Error("disk gone"))
+    });
+
+    expect(out.recording.status).toBe(500);
+    expect(out.payload()).toMatchObject({
+      code: "verification-retry-persist-failed",
+      detail: "disk gone"
+    });
+    expect(op.state).toBe("action_required");
+    expect(op.verification).toEqual(previousVerification);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("repeats verification without a merge proof for an Azure RBAC failure", async () => {
@@ -478,10 +502,10 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
   it("refuses when the record changed while the pull request was checked", async () => {
     const op = mergeHandoff();
     const out = await drive(handleRetryOperation, op, "retry/verification", {
-      isPullRequestMerged: () => {
+      checkPullRequestMerge: () => {
         // A concurrent retry reopened the record while GitHub was answering.
         beginRetryAttempt(op, "verification");
-        return Promise.resolve(true);
+        return Promise.resolve({ state: "merged" });
       }
     });
 
@@ -496,9 +520,9 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     // claim.
     const op = mergeHandoff({ pullRequestUrl: null });
     const out = await drive(handleRetryOperation, op, "retry/verification", {
-      isPullRequestMerged: (_operation, pullRequestUrl) => {
+      checkPullRequestMerge: (_operation, pullRequestUrl) => {
         expect(pullRequestUrl).toBeNull();
-        return Promise.resolve(false);
+        return Promise.resolve({ state: "open" });
       }
     });
 
@@ -507,6 +531,51 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       code: "verification-retry-pull-request-open",
       pullRequestUrl: null
     });
+  });
+
+  it("does not restore stale provisional state over a concurrent accepted retry", async () => {
+    const op = mergeHandoff();
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
+      checkPullRequestMerge: () => {
+        beginRetryAttempt(op, "verification");
+        op.verification = {
+          operationMarker: "concurrent-marker"
+        };
+        markVerificationRetryAcquisition(op, "concurrent-command");
+        return Promise.resolve({ state: "open" });
+      }
+    });
+
+    expect(out.recording.status).toBe(409);
+    expect(op.verification).toMatchObject({
+      operationMarker: "concurrent-marker",
+      retryCommandId: "concurrent-command"
+    });
+  });
+
+  it("fails closed when the selected account cannot verify the setup pull request", async () => {
+    const op = mergeHandoff();
+    op.context = { githubLogin: "alice" };
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
+      checkPullRequestMerge: () =>
+        Promise.resolve({
+          state: "unavailable",
+          login: "alice",
+          detail: "selected credential unavailable"
+        })
+    });
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "verification-retry-github-account-unavailable",
+      error:
+        "Radius could not verify the setup pull request with @alice. Re-check that GitHub account and try again.",
+      detail: "selected credential unavailable",
+      pullRequestUrl: "https://github.com/contoso/store/pull/7"
+    });
+    expect(op.state).toBe("action_required");
+    expect(out.journal.persistCalls).toBe(1);
+    expect(out.journal.scheduled).toEqual([]);
   });
 
   it("names no repository rather than the word undefined in a lock conflict", async () => {

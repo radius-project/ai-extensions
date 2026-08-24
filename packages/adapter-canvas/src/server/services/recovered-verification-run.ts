@@ -83,6 +83,7 @@ export async function recoverVerificationRun(input: {
   runId: unknown;
   identity: RecoveredVerificationIdentity;
   listRuns(): Promise<VerificationRunListResult>;
+  isAuthorizationError?(error: unknown): boolean;
 }): Promise<RecoveredVerificationRunOutcome> {
   if (input.runId != null && String(input.runId)) return { state: "monitor" };
   const { identity } = input;
@@ -102,6 +103,7 @@ export async function recoverVerificationRun(input: {
   try {
     listed = await input.listRuns();
   } catch (error) {
+    if (input.isAuthorizationError?.(error)) throw error;
     return handOff(
       `the workflow runs could not be read: ${
         error instanceof Error ? error.message : String(error)

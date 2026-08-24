@@ -563,6 +563,41 @@ export async function handleVerifyStatus(
       });
       return;
     }
+    const pinnedLogin =
+      typeof verifyOp?.context?.githubLogin === "string" ?
+        verifyOp.context.githubLogin.trim()
+      : "";
+    if (operationId && verifyOp && !pinnedLogin) {
+      dependencies.addLegacyStep(
+        verifyOp,
+        "❌ The saved GitHub account for credential verification is missing."
+      );
+      dependencies.finish(verifyOp, "failed_partial", {
+        failure: {
+          code: "verification-retry-github-account-missing",
+          stage: verifyOp.currentStage,
+          stepSeq: null,
+          message:
+            "Radius cannot monitor credential verification because this operation does not name the GitHub account that started it. Start a new environment setup after re-checking the account.",
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      await dependencies.persistBestEffort({
+        operation: verifyOp,
+        persist: dependencies.persistOperations,
+        report: dependencies.reportOperationDiagnostic
+      });
+      respond({
+        state: "failed",
+        terminal: true,
+        code: "verification-retry-github-account-missing",
+        runId: verifyOp.verification?.runId || null,
+        error:
+          "Radius cannot monitor credential verification because this operation does not name the GitHub account that started it."
+      });
+      return;
+    }
     if (verifyOp && !dependencies.hasCompleteVerificationIdentity(verifyOp)) {
       respond({
         state: "expired",
@@ -575,10 +610,6 @@ export async function handleVerifyStatus(
       operationId ?
         dependencies.getSelectedGitHubExecutor(operationId) || undefined
       : undefined;
-    const pinnedLogin =
-      typeof verifyOp?.context?.githubLogin === "string" ?
-        verifyOp.context.githubLogin.trim()
-      : "";
     if (operationId && pinnedLogin && !selectedExecutor) {
       respond({
         state: "pending",
@@ -709,6 +740,56 @@ export async function handleVerifyStatus(
     }
     respond({ state: "failed", runId, runUrl, error: errMsg });
   } catch (e) {
+    const failedOperation: any =
+      operationId ? dependencies.getOperation(operationId) : null;
+    const failedExecutor =
+      operationId ?
+        dependencies.getSelectedGitHubExecutor(operationId) || undefined
+      : undefined;
+    const failedLogin =
+      typeof failedOperation?.context?.githubLogin === "string" ?
+        failedOperation.context.githubLogin.trim()
+      : "";
+    if (
+      failedOperation &&
+      failedExecutor &&
+      dependencies.isSelectedGitHubAuthorizationError(e)
+    ) {
+      const account = failedLogin ? `@${failedLogin}` : "the selected account";
+      const message = `Radius could not use ${account} to monitor credential verification. Re-check that account and retry verification.`;
+      dependencies.addLegacyStep(
+        failedOperation,
+        `❌ Could not use ${account} to monitor credential verification.`
+      );
+      failedOperation.verification = {
+        ...(failedOperation.verification || {}),
+        accountUnavailablePhase: "monitor"
+      };
+      dependencies.finish(failedOperation, "failed_partial", {
+        failure: {
+          code: "verification-retry-github-account-unavailable",
+          stage: dependencies.stageVerify,
+          stepSeq: null,
+          message,
+          classification: "user-fixable",
+          evidence: dependencies.errorMessage(e)
+        }
+      });
+      await dependencies.persistBestEffort({
+        operation: failedOperation,
+        persist: () => dependencies.persistOperations(),
+        report: (diagnostic) =>
+          dependencies.reportOperationDiagnostic(diagnostic)
+      });
+      respond({
+        state: "failed",
+        terminal: true,
+        code: "verification-retry-github-account-unavailable",
+        runId: failedOperation?.verification?.runId || null,
+        error: message
+      });
+      return;
+    }
     respond({ state: "unknown", error: dependencies.errorMessage(e) });
   }
 }
