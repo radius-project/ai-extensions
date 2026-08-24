@@ -200,6 +200,10 @@ export interface PublishTargetsDependencies {
     value: unknown,
     fallback: string | null | undefined
   ): string;
+  resolveStagingDirPrefix(
+    workspacePath: string | null | undefined,
+    value: unknown
+  ): string;
   validateGhcrTargetForRepo(
     target: unknown,
     workspaceRepo: string | null | undefined
@@ -313,6 +317,7 @@ export interface OperationsDependencies {
 // here, so a test can construct a complete fake without importing any adapter
 // module (server.ts/gh.ts/workspace.ts/...) or performing real I/O.
 export interface RadiusExtensionDependencies {
+  logError(message: string): void;
   session: SessionHolder;
   servers: Map<string, CanvasServerEntry>;
   getOrCreateServer(

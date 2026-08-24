@@ -459,6 +459,38 @@ describe("workspaceSourceChangedSince", () => {
     }
   });
 
+  it.each([
+    ["unstaged", false],
+    ["staged", true]
+  ])("is true for %s tracked source changes", async (_label, staged) => {
+    const { dir, first } = await checkout();
+    try {
+      await fs.writeFile(path.join(dir, "src", "app.js"), "console.log(4)\n");
+      if (staged) execFileSync("git", ["add", "src/app.js"], { cwd: dir });
+
+      expect(await workspaceSourceChangedSince(dir, first)).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is true for untracked source and ignores untracked generated files", async () => {
+    const { dir, first } = await checkout();
+    try {
+      await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+      await fs.writeFile(
+        path.join(dir, ".radius", "app.bicep"),
+        "resource {}\n"
+      );
+      expect(await workspaceSourceChangedSince(dir, first)).toBe(false);
+
+      await fs.writeFile(path.join(dir, "src", "new.js"), "export {};\n");
+      expect(await workspaceSourceChangedSince(dir, first)).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("is true when a source change rides along with a model change", async () => {
     const { dir, first } = await checkout();
     try {

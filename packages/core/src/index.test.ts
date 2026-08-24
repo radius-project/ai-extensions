@@ -18,6 +18,7 @@ const EXPECTED_FUNCTIONS = [
   "deployStatusKeys",
   "filterGraphVisualizationResources",
   "lookupDeployStatus",
+  "mergeDeployedGraphMetadata",
   "projectDeployedGraph",
   "evaluateAppModelFreshness",
   "normalizeAppBicep",
@@ -51,6 +52,10 @@ const EXPECTED_VALUES = [
   "UNSUPPORTED_NO_DOCKERFILE_MESSAGE",
   "UNIDENTIFIED_APPLICATION_MESSAGE",
   "WORKSPACE_MANIFEST_FILES",
+  // The staging rules are core's specification for the bundled promote script
+  // and are reached through the modeling barrel; only the directory prefix is
+  // public, because publish-targets.ts confines tool paths against it.
+  "STAGING_DIR_PREFIX",
   "RADIUS_REF",
   "RADIUS_WORKFLOW_REPO",
   "RADIUS_WORKFLOW_DIR",
@@ -80,6 +85,10 @@ const MODULE_INTERNAL_NAMES = [
   "deriveConcreteResource",
   "parseRecipePack",
   "findDockerfiles",
+  "evaluateStagedRun",
+  "publishableFiles",
+  "requiredStagedFiles",
+  "isPublishableExtraArtifact",
   "isDockerfilePath",
   "isIgnoredSourcePath",
   "defaultDeployTemplateVars",

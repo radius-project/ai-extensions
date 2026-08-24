@@ -27,6 +27,7 @@ import {
 import {
   resolveExistingRadiusArtifact,
   resolveRadiusArtifactTarget,
+  resolveStagingDirPrefix,
   validateGhcrTargetForRepo
 } from "../../../src/publish-targets.js";
 import {
@@ -180,6 +181,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   } = {};
 
   const deps: RadiusExtensionDependencies = {
+    logError: vi.fn(),
     session: sessionHolder,
     servers,
     getOrCreateServer,
@@ -289,6 +291,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     publishTargets: {
       resolveExistingRadiusArtifact: vi.fn(resolveExistingRadiusArtifact),
       resolveRadiusArtifactTarget: vi.fn(resolveRadiusArtifactTarget),
+      resolveStagingDirPrefix: vi.fn(resolveStagingDirPrefix),
       validateGhcrTargetForRepo: vi.fn(validateGhcrTargetForRepo)
     },
     hostCallbacks: {

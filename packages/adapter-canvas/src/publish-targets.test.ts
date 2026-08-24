@@ -6,6 +6,7 @@ import { test } from "vitest";
 import {
   resolveExistingRadiusArtifact,
   resolveRadiusArtifactTarget,
+  resolveStagingDirPrefix,
   validateGhcrTargetForRepo
 } from "./publish-targets.js";
 
@@ -231,4 +232,55 @@ test.skipIf(!SYMLINK_OK)("allows a real subdirectory under .radius/", () => {
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }
+});
+
+// resolveStagingDirPrefix — a modeling run writes into `.radius/.staging-<runId>/`
+// and the publish tool's defaults have to move with it. The argument stays
+// confined under `.radius/` and must additionally name a direct `.staging-*`
+// child, so it cannot redirect the defaults anywhere else.
+test("resolveStagingDirPrefix returns a .radius-relative prefix", () => {
+  assert.equal(
+    resolveStagingDirPrefix(WS, ".staging-run-1"),
+    ".staging-run-1/"
+  );
+  assert.equal(
+    resolveStagingDirPrefix(WS, ".radius/.staging-run-1"),
+    ".staging-run-1/"
+  );
+});
+
+test("resolveStagingDirPrefix returns an empty prefix when no directory is given", () => {
+  for (const value of [undefined, null, "", "   "]) {
+    assert.equal(resolveStagingDirPrefix(WS, value), "");
+  }
+});
+
+test("resolveStagingDirPrefix rejects anything that is not a direct staging child", () => {
+  for (const value of [
+    "custom-types",
+    ".staging-",
+    "nested/.staging-run",
+    ".staging-run/nested",
+    "."
+  ]) {
+    assert.throws(
+      () => resolveStagingDirPrefix(WS, value),
+      /must be a \.staging-\* directory/
+    );
+  }
+});
+
+test("resolveStagingDirPrefix rejects paths that escape the workspace", () => {
+  assert.throws(
+    () => resolveStagingDirPrefix(WS, "../.staging-run"),
+    /invalid path/
+  );
+  assert.throws(
+    () => resolveStagingDirPrefix(WS, "/tmp/.staging-run"),
+    /not absolute/
+  );
+  assert.throws(
+    () => resolveStagingDirPrefix(null, ".staging-run"),
+    /No repository workspace is open/
+  );
 });

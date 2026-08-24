@@ -5,9 +5,15 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import {
+  graphProgressElapsed,
+  graphProgressStages
+} from "../../../test/support/browser/graph-progress.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import {
@@ -95,6 +101,8 @@ function fixture(options: FixtureOptions = {}) {
   const modalText = createFakeElement("deployed-deleting-text");
 
   const elements = [state];
+  const progressHost = createFakeElement("deployed-progress-steps");
+  elements.push(progressHost);
   if (withAppSelect) elements.push(appSelect);
   if (withEnvSelect) elements.push(envSelect);
   if (withAction) elements.push(action);
@@ -160,7 +168,8 @@ function fixture(options: FixtureOptions = {}) {
     logOutput,
     container,
     modal,
-    modalText
+    modalText,
+    progressHost
   };
 }
 
@@ -241,6 +250,67 @@ describe("initializeDeployedGraphPage", () => {
     expect(appSelect.listenerCount()).toBe(0);
     expect(envSelect.listenerCount()).toBe(0);
     expect(browser.clock.pending).toBe(0);
+  });
+
+  it("does not show a deploying legend for a never-deployed graph", async () => {
+    const { browser } = fixture();
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          resources: [{ id: "app/web", deployStatus: "pending" }],
+          mode: "greyed",
+          branch: "feature"
+        })
+    );
+    const render = vi.fn();
+
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    expect(render).toHaveBeenCalledWith(
+      "graph-container",
+      expect.any(Array),
+      expect.objectContaining({ deployMode: true, showLegend: false })
+    );
+  });
+
+  it("remounts when a live graph becomes terminal so legend settings follow the mode", async () => {
+    const { browser } = fixture();
+    let mode = "live";
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          resources: [{ id: "app/web", deployStatus: "success" }],
+          mode,
+          branch: "feature"
+        })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () =>
+      jsonResponse({ status: "complete", logsNew: [], logTotal: 0 })
+    );
+    const update = vi.fn();
+    const destroy = vi.fn();
+    const render = vi.fn(() => ({ update, destroy }));
+
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+    expect(render).toHaveBeenCalledTimes(1);
+
+    mode = "terminal";
+    browser.clock.tick(DEPLOYED_GRAPH_POLL_MS);
+    await flushPromises();
+
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(update).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledTimes(2);
   });
 
   it("polls only a live graph and pauses while hidden", async () => {
@@ -549,6 +619,51 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.logger.errors.length).toBeGreaterThan(0);
   });
 
+  it("shows a modeled workflow error returned by the graph route", async () => {
+    const { browser, status } = fixture();
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse(
+          { error: "Application model compilation failed." },
+          false,
+          400
+        )
+    );
+
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(status.className).toBe("status error");
+    expect(status.textContent).toBe("Application model compilation failed.");
+  });
+
+  it("retries while application model generation is pending", async () => {
+    const { browser } = fixture();
+    let calls = 0;
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => {
+        calls++;
+        return calls === 1 ?
+            jsonResponse({
+              error: "Copilot is generating .radius/app.bicep.",
+              retry: true
+            })
+          : jsonResponse({ resources: [], mode: "greyed" });
+      }
+    );
+
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(calls).toBe(1);
+
+    browser.clock.tick(DEPLOYED_GRAPH_POLL_MS);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+  });
+
   it("keeps a rendered graph on screen when a later refresh fails", async () => {
     const { browser, appSelect, status } = fixture();
     const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
@@ -578,6 +693,40 @@ describe("initializeDeployedGraphPage", () => {
     await flushPromises();
 
     expect(status.className).not.toBe("status error");
+  });
+
+  it("keeps a rendered graph and reports a later modeled workflow error", async () => {
+    const { browser, appSelect, note, status } = fixture();
+    const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
+    let call = 0;
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => {
+        call++;
+        return call === 1 ?
+            jsonResponse({
+              resources: [{ id: "app/web" }],
+              mode: "terminal",
+              branch: "feature"
+            })
+          : jsonResponse(
+              { error: "Application model compilation failed." },
+              false,
+              400
+            );
+      }
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: () => controller })
+    );
+    await flushPromises();
+
+    appSelect.dispatch("change");
+    await flushPromises();
+
+    expect(status.className).not.toBe("status error");
+    expect(note.textContent).toBe("Application model compilation failed.");
   });
 
   it("ignores a stale graph response superseded by another selection", async () => {
@@ -2118,5 +2267,69 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.net.calls.filter((call) => call.url === url).length).toBe(
       before + 1
     );
+  });
+  describe("graph build progress", () => {
+    const stageText = graphProgressStages;
+
+    it("shows the loading stage while the first request is in flight", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => createDeferred<HttpResponse>().promise
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.loading_deployment}:running`
+      ]);
+      expect(graphProgressElapsed(progressHost)).toMatch(/^\d+:\d{2}$/);
+      expect(fakeText(progressHost)).not.toMatch(/%/);
+    });
+
+    it("clears the panel once the deployed graph arrives", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => jsonResponse({ resources: [{ id: "app/web" }], mode: "greyed" })
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([]);
+      expect(fakeText(progressHost)).toBe("");
+    });
+
+    it("reports the failure once in the status banner, clearing the panel", async () => {
+      const { browser, progressHost, status } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => Promise.reject(new Error("graph service down"))
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(status.textContent).toBe(
+        "The deployed application graph could not be loaded."
+      );
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("states the failure on the panel when there is no status banner", async () => {
+      const { browser, progressHost } = fixture({ withStatus: false });
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => Promise.reject(new Error("graph service down"))
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      // The panel is the only surface left, so it carries the failure rather
+      // than being cleared and leaving the outcome unreported.
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.loading_deployment}:failed`
+      ]);
+      expect(fakeText(progressHost)).not.toContain("graph service down");
+    });
   });
 });

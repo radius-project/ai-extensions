@@ -11,6 +11,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./graph": "./src/graph/index.ts",
+    "./modeling": "./src/modeling/index.ts",
     "./platforms": "./src/platforms/index.ts"
   },
   "scripts": {

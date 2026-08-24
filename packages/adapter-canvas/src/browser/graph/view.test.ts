@@ -74,7 +74,11 @@ function renderCard(
   vendor: ReturnType<typeof createGraphVendor>;
 } {
   const vendor = createGraphVendor();
-  const recorded: Recorded = { local: [], toggled: [], opened: [] };
+  const recorded: Recorded = {
+    local: [],
+    toggled: [],
+    opened: []
+  };
   const component = createNodeComponent(vendor, resolveGraphSettings(options), {
     openLocalSource: (path, line, fallback) =>
       recorded.local.push([path, line, fallback]),
@@ -223,6 +227,37 @@ describe("node card", () => {
     expect(recorded.toggled).toEqual([["app/web", owner]]);
   });
 
+  it("renders a deployed node's concrete portal URL as a native link", () => {
+    const portalUrl = "https://portal.azure.com/resource/mysql";
+    const { tree, recorded } = renderCard(node({ portalUrl }), {
+      deployMode: true
+    });
+    const link = findByClass(tree, "rad-node__portal nodrag nopan nokey");
+
+    expect(props(link)).toMatchObject({
+      href: portalUrl,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      "aria-label": "Open web in Azure Portal"
+    });
+    callHandler(link, "onClick");
+    expect(recorded.opened).toEqual([]);
+  });
+
+  it("does not render an unsafe deployed portal link", () => {
+    const { tree, recorded } = renderCard(
+      node({ portalUrl: "javascript:alert(1)" }),
+      { deployMode: true }
+    );
+
+    callHandler(findByClass(tree, "rad-node"), "onClick");
+
+    expect(
+      findByClass(tree, "rad-node__portal nodrag nopan nokey")
+    ).toBeUndefined();
+    expect(recorded.opened).toEqual([["app/web", null]]);
+  });
+
   it("falls back to the clicked element when there is no card ancestor", () => {
     const { tree, recorded } = renderCard(node());
     const dots = createFakeElement("dots");
@@ -309,7 +344,7 @@ describe("node card", () => {
   });
 
   it.each([
-    ["progress", "In progress", " rad-node__badge--progress"],
+    ["progress", "In progress", ""],
     ["success", "Deployed", ""],
     ["failed", "Failed", ""]
   ])(

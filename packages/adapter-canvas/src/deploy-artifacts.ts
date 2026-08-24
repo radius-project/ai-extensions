@@ -78,6 +78,7 @@ export interface DeployProgressResource {
   id?: string;
   name: string;
   type: string;
+  outputResourceIds?: string[];
   provisioningState?: string;
   status?: DeployStatus;
   message?: string;
@@ -257,6 +258,7 @@ export function parseDeployProgressArtifact(
   } catch {
     return null;
   }
+
   if (!isRecord(parsed)) return null;
   if (parsed.schemaVersion !== DEPLOY_PROGRESS_SCHEMA_VERSION) return null;
   if (typeof parsed.application !== "string" || !parsed.application)
@@ -284,6 +286,15 @@ export function parseDeployProgressArtifact(
       id: typeof raw.id === "string" ? raw.id : undefined,
       name,
       type: typeof raw.type === "string" ? raw.type : "",
+      outputResourceIds:
+        Array.isArray(raw.outputResourceIds) ?
+          raw.outputResourceIds
+            .filter(
+              (value): value is string =>
+                typeof value === "string" && value.trim() !== ""
+            )
+            .map((value) => value.trim())
+        : undefined,
       provisioningState:
         typeof raw.provisioningState === "string" ?
           raw.provisioningState
@@ -313,6 +324,79 @@ export function parseDeployProgressArtifact(
     state: typeof parsed.state === "string" ? parsed.state : undefined,
     resources
   };
+}
+
+/**
+ * Rad may write build progress to stdout before emitting the graph JSON. The
+ * deploy workflow redirects that combined stream into deploy-graph.json, so
+ * locate the first complete JSON document rather than rejecting valid graph
+ * metadata because of the human-readable preamble.
+ */
+export function parseDeployGraphArtifact(text?: string | null): unknown | null {
+  if (!text) return null;
+  let arrayGraph: unknown[] | null = null;
+  for (let start = 0; start < text.length; start++) {
+    const first = text[start];
+    if (first !== "{" && first !== "[") continue;
+    const expectedClosers: string[] = [];
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+    for (let index = start; index < text.length; index++) {
+      const character = text[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (character === "\\") {
+          escaped = true;
+        } else if (character === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+      } else if (character === "{") {
+        expectedClosers.push("}");
+      } else if (character === "[") {
+        expectedClosers.push("]");
+      } else if (character === "}" || character === "]") {
+        if (expectedClosers.pop() !== character) break;
+        if (expectedClosers.length === 0) {
+          end = index + 1;
+          break;
+        }
+      }
+    }
+    if (end < 0) continue;
+    try {
+      const parsed: unknown = JSON.parse(text.slice(start, end));
+      if (isRecord(parsed) && isGraphResourceArray(parsed.resources)) {
+        return parsed;
+      }
+      if (isGraphResourceArray(parsed) && arrayGraph === null) {
+        arrayGraph = parsed;
+      }
+    } catch {
+      // A balanced fragment in the preamble is not necessarily valid JSON.
+    }
+  }
+  return arrayGraph;
+}
+
+function isGraphResourceArray(value: unknown): value is unknown[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (resource) =>
+        isRecord(resource) &&
+        ("id" in resource ||
+          "name" in resource ||
+          "type" in resource ||
+          "connections" in resource ||
+          "outputResources" in resource)
+    )
+  );
 }
 
 function normalizeDeployStatusField(value: unknown): DeployStatus | undefined {
@@ -405,6 +489,13 @@ export function buildDeployStatusMap(
 ): Map<string, DeployStatus> {
   const map = new Map<string, DeployStatus>();
   if (!progress || !Array.isArray(progress.resources)) return map;
+  // Reserve authoritative modeled ids before adding output aliases. A concrete
+  // output can be shared by multiple parents or equal another parent's id; an
+  // alias must never claim that parent's exact key.
+  for (const resource of progress.resources) {
+    const id = (resource.id || "").trim();
+    if (id && !map.has(id)) map.set(id, resolveResourceStatus(resource));
+  }
   for (const resource of progress.resources) {
     const status = resolveResourceStatus(resource);
     for (const key of deployStatusKeys(resource)) {
@@ -431,10 +522,22 @@ export function buildDeployMessageMap(
 ): Map<string, string> {
   const map = new Map<string, string>();
   if (!progress || !Array.isArray(progress.resources)) return map;
+  const directIds = new Set(
+    progress.resources
+      .map((resource) => (resource.id || "").trim())
+      .filter(Boolean)
+  );
   for (const resource of progress.resources) {
+    const id = (resource.id || "").trim();
+    const message = (resource.message || "").trim();
+    if (id && message && !map.has(id)) map.set(id, message);
+  }
+  for (const resource of progress.resources) {
+    const resourceId = (resource.id || "").trim();
     const message = (resource.message || "").trim();
     if (!message) continue;
     for (const key of deployStatusKeys(resource)) {
+      if (directIds.has(key) && key !== resourceId) continue;
       if (!map.has(key)) map.set(key, message);
     }
   }
@@ -828,15 +931,9 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
             inspectedArtifacts.set(artifact.id, empty("malformed"));
           continue;
         }
-        let graph: unknown | null = null;
         const graphText = files[DEPLOY_STATUS_FILES.graph];
-        if (graphText) {
-          try {
-            graph = JSON.parse(graphText);
-          } catch {
-            sawMalformed = true;
-          }
-        }
+        const graph = parseDeployGraphArtifact(graphText);
+        if (graphText && graph === null) sawMalformed = true;
         result = {
           status: "ok",
           progress,

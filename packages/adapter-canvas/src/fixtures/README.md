@@ -14,6 +14,8 @@ The producer (`radius-project/radius`, the `publish-deploy-status` composite act
 |------------------------|----------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------|
 | `deploy-progress.json` | A real run, artifact `radius-deploy-status-dev-todolist` | All three status branches (`success`, `failed`, `in_progress`), a populated failure `message`, and an empty-string `id` |
 
+The fixture predates the optional schema-version-1 `resources[].outputResourceIds` field introduced by `radius-project/radius#12782`. Its omission is intentional compatibility coverage: consumers must continue to accept existing artifacts, while focused parser tests cover the additive exact-ID correlation field.
+
 The empty-string `id` on the `queue` resource is deliberate and load-bearing. `rad resource list -o json` does not always populate an id, and the producer emits `""` rather than omitting the field. If `""` were ever treated as a real key, every id-less resource in a payload would collide on one map entry and take each other's status.
 
 ## Changing a fixture

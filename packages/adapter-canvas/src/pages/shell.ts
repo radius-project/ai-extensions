@@ -55,6 +55,7 @@ ${feedbackWidget()}
 <style>@keyframes radius-spin { to { transform: rotate(360deg); } }</style>
 ${browserScriptTag("heartbeat")}
 ${browserScriptTag("operation-chip")}
+${browserScriptTag("graph-chip")}
 </body>
 </html>`;
 }

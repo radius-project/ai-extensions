@@ -1,6 +1,8 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
+import { RadProcessError } from "@radius-project/adapter-shared";
+import { UNSUPPORTED_NO_DOCKERFILE_MESSAGE } from "@radius-project/core";
 import { createRequestContext } from "../request-context.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { CanvasServerEntry } from "../types.js";
@@ -10,6 +12,7 @@ import {
   type GraphsPlanningStreamDependencies,
   type LoadGraphStreamBicepSelection
 } from "./graphs-planning.js";
+import { GRAPH_MODELING_FAILURE_MESSAGE } from "../../graph-progress-contract.js";
 
 // ── Recorder ─────────────────────────────────────────────────────────────────
 // The stream handler writes SSE frames through `response.write` and terminates
@@ -117,6 +120,8 @@ interface Options {
   buildThrows?: unknown;
   commit?: boolean;
   token?: string;
+  currentSourceRef?: boolean;
+  paths?: string[];
 }
 
 interface Fakes {
@@ -158,15 +163,31 @@ function fakes(options: Options = {}): Fakes {
       expect(givenEntry).toBe(entry);
       return options.commit ?? true;
     },
+    isCurrentSourceRef: () => options.currentSourceRef ?? true,
     triggerAppBicepHandoff: (givenEntry, repo, branch) => {
       calls.push(`triggerAppBicepHandoff(${repo}|${branch})`);
       expect(givenEntry).toBe(entry);
     },
+    triggerGraphRepairHandoff: () => {
+      calls.push("triggerGraphRepairHandoff");
+      return {
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
+      };
+    },
+    clearGraphRepairAttempt: () => {},
     fetchBicepSelection: (givenEntry, repo, branch) => {
       calls.push(`fetchBicepSelection(${repo}|${branch})`);
       expect(givenEntry).toBe(entry);
       if (options.fetchThrows) return Promise.reject(options.fetchThrows);
       return Promise.resolve(sel);
+    },
+    listBranchPaths: (givenEntry, repo, branch) => {
+      calls.push(`listBranchPaths(${repo}|${branch})`);
+      expect(givenEntry).toBe(entry);
+      return Promise.resolve(options.paths ?? []);
     },
     workspaceGraphJsonPath: (_state, bicepRepoPath) => {
       calls.push(`workspaceGraphJsonPath(${bicepRepoPath})`);
@@ -197,7 +218,10 @@ function fakes(options: Options = {}): Fakes {
     // Distinct from the raw message so a handler that formats the error itself
     // instead of using the injected formatter is detectable.
     errorMessage: (error) =>
-      `formatted:${error instanceof Error ? error.message : String(error)}`
+      `formatted:${error instanceof Error ? error.message : String(error)}`,
+    logError: (message) => {
+      calls.push(`logError(${message})`);
+    }
   };
   return { deps, entry, calls };
 }
@@ -329,6 +353,28 @@ describe("graphs-planning load-graph-stream route", () => {
     expect(calls.some((c) => c.startsWith("buildGraphViaRad"))).toBe(false);
   });
 
+  it("refuses a missing model when the source has no usable Dockerfile", async () => {
+    const { deps, calls } = fakes({
+      selection: selection({ content: null }),
+      paths: ["README.md", ".devcontainer/Dockerfile"]
+    });
+
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+
+    expect(frames(recording.stream).at(-1)).toEqual({
+      event: "done",
+      data: {
+        error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+        appBicepUnsupported: true,
+        repo: REPO,
+        branch: DEFAULT_BRANCH
+      }
+    });
+    expect(
+      calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
+    ).toBe(false);
+  });
+
   it("models the app, commits the source ref, records provenance, and streams a reload done frame", async () => {
     const state: CanvasState = {};
     const { deps, calls, entry } = fakes({ state });
@@ -428,13 +474,64 @@ describe("graphs-planning load-graph-stream route", () => {
     });
   });
 
-  it("streams a formatted error done frame when the compile throws", async () => {
-    const { deps } = fakes({ buildThrows: new Error("rad failed") });
+  it("keeps compile diagnostics out of the terminal done frame", async () => {
+    const { deps, calls } = fakes({
+      buildThrows: new Error("rad app graph failed", {
+        cause: new RadProcessError("rad exited", "BCP035: invalid model", "")
+      })
+    });
     const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
     expect(frames(recording.stream).at(-1)).toEqual({
       event: "done",
-      data: { error: "formatted:rad failed" }
+      data: {
+        error: GRAPH_MODELING_FAILURE_MESSAGE,
+        modelingFailed: true,
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
+      }
     });
+    // One failure, one server log: a second line would misreport how many
+    // compiles actually ran.
+    expect(
+      calls.filter((call) =>
+        call.startsWith("logError([radius graph] modeling")
+      )
+    ).toHaveLength(1);
+  });
+
+  it("preserves a graph toolchain failure without Bicep diagnostics", async () => {
+    const { deps } = fakes({
+      buildThrows: new RadProcessError(
+        "managed Bicep download failed",
+        "",
+        "connection refused"
+      )
+    });
+
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+    expect(frames(recording.stream).at(-1)).toEqual({
+      event: "done",
+      data: { error: "formatted:managed Bicep download failed" }
+    });
+  });
+
+  it("does not repair a compile failure from a superseded stream", async () => {
+    const { deps, calls } = fakes({
+      currentSourceRef: false,
+      buildThrows: new Error("rad app graph failed", {
+        cause: new RadProcessError("rad exited", "BCP035: invalid model", "")
+      })
+    });
+
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+
+    expect(frames(recording.stream).at(-1)).toEqual({
+      event: "done",
+      data: { stale: true }
+    });
+    expect(calls).not.toContain("triggerGraphRepairHandoff");
   });
 
   it("frames every event as event/data with a blank-line terminator and a single trailing terminator", async () => {

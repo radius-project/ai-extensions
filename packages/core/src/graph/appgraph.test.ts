@@ -34,7 +34,9 @@ function sampleAppGraph(): { resources: any[]; icons: Record<string, string> } {
             id: `${frontendId}/output`,
             name: "frontend-output",
             type: "Microsoft.App/containerApps",
-            iconHash: outputIconHash
+            iconHash: outputIconHash,
+            portalUrl:
+              "https://portal.azure.com/#@tenant/resource/subscriptions/s/resourceGroups/rg/providers/Microsoft.App/containerApps/frontend"
           }
         ],
         diffHash: frontendHash,
@@ -72,6 +74,9 @@ describe("applicationGraphToResources", () => {
     expect(frontend.iconHash).toBe(frontendIconHash);
     expect(frontend.icon).toBe(frontendIcon);
     expect(frontend.outputResources[0].icon).toBe(outputIcon);
+    expect(frontend.outputResources[0].portalUrl).toBe(
+      "https://portal.azure.com/#@tenant/resource/subscriptions/s/resourceGroups/rg/providers/Microsoft.App/containerApps/frontend"
+    );
   });
 
   it("preserves outbound edges and rebuilds inbound edges", () => {

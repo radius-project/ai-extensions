@@ -8,7 +8,7 @@
 // same container replaces them instead of stacking.
 
 import { buildGraph, resolveGraphSettings } from "./build.js";
-import { createDetailsPanel } from "./details.js";
+import { createDetailsPanel, safeExternalUrl } from "./details.js";
 import { layoutGraph } from "./layout.js";
 import {
   buildCategoryLegendHtml,
@@ -35,15 +35,13 @@ const FLOW_HOST_CLASS = "rad-flow-host";
 const FLOW_HOST_STYLE = "position:absolute; inset:0; width:100%; height:100%;";
 const LEGEND_CLASS = "legend";
 
+// The panel rendered by src/browser/graph/progress.ts supplies the spinner,
+// title, activity line, elapsed clock and stage list, so this fragment only
+// mounts the host it draws into.
 export const GRAPH_LOADING_HTML =
-  '<div style="padding:20px; max-width:500px; margin:0 auto;">' +
-  '<div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">' +
-  '<div class="spinner"></div>' +
-  '<span style="font-size:14px; font-weight:600; color:var(--rad-text);">Generating Application Graph</span>' +
-  "</div>" +
-  '<div id="progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>' +
-  "</div>" +
-  '<style>.spinner{width:20px;height:20px;border:3px solid var(--rad-stroke);border-top-color:var(--rad-brand);border-radius:50%;animation:spin 0.8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.step-done::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--rad-success);margin-right:8px;vertical-align:1px}.step-active::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;border:2px solid var(--rad-brand);box-sizing:border-box;margin-right:8px;vertical-align:1px}.step-active{color:var(--rad-text);font-weight:500}</style>';
+  '<div style="padding:20px; max-width:560px; margin:0 auto;">' +
+  '<div id="progress-steps"></div>' +
+  "</div>";
 
 // A rendered graph. update() re-lays out a new resource list and pushes it into
 // the mounted view, preserving the viewport; destroy() unmounts everything the
@@ -105,6 +103,7 @@ interface ActiveRender {
   mounted: MountedGraph | null;
   panel: DetailsPanel | null;
   host: DomElement | null;
+  legend: DomElement | null;
 }
 
 export function createGraphSurface(
@@ -116,16 +115,15 @@ export function createGraphSurface(
   // Open an external URL the way clicking a native target="_blank" anchor
   // would, which the host opens in the system browser.
   function openExternal(url: string): void {
-    if (!url) return;
-    context.external.open(url);
+    const safeUrl = safeExternalUrl(url);
+    if (safeUrl) context.external.open(safeUrl);
   }
 
   // Open a repo-relative worktree file in the Copilot editor canvas. The
   // webview has no SDK session handle, so it asks the local canvas server,
   // which opens the file in the editor. localSource is a coarse page-level flag
   // (repo and branch match the workspace), so a file that is not actually on
-  // this checkout answers non-2xx and the click falls back to the remote URL —
-  // the link is never a dead end.
+  // this checkout answers non-2xx and the page attempts the remote fallback.
   function openLocalSource(
     relPath: string,
     line: number,
@@ -172,6 +170,7 @@ export function createGraphSurface(
     if (current.mounted) current.mounted.unmount();
     if (current.panel) current.panel.destroy();
     if (current.host) current.host.remove();
+    if (current.legend) current.legend.remove();
   }
 
   // Clear DOM a prior render created (its React host and details panel) plus any
@@ -196,24 +195,26 @@ export function createGraphSurface(
     container: DomElement,
     settings: GraphSettings,
     resources: readonly GraphResource[]
-  ): void {
+  ): DomElement | null {
     // Diff mode intentionally shows no legend; status is encoded directly on
     // node borders and edges.
-    if (!settings.showLegend || settings.diffMode) return;
+    if (!settings.showLegend || settings.diffMode) return null;
     const parent = parentOf(container);
-    if (!parent) return;
+    if (!parent) return null;
     if (settings.deployMode) {
       const legend = context.dom.createElement("div");
       legend.className = LEGEND_CLASS;
-      legend.innerHTML = buildStatusLegendHtml();
+      legend.innerHTML = buildStatusLegendHtml(resources);
       parent.insertBefore(legend, container);
-      return;
+      return legend;
     }
     const categories = collectLegendCategories(resources);
+    if (categories.length === 0) return null;
     const legend = context.dom.createElement("div");
     legend.className = LEGEND_CLASS;
     legend.innerHTML = buildCategoryLegendHtml(categories);
     parent.insertBefore(legend, container);
+    return legend;
   }
 
   function emptyController(
@@ -258,7 +259,12 @@ export function createGraphSurface(
 
     const settings = resolveGraphSettings(options);
     if (!resources || resources.length === 0) {
-      const record: ActiveRender = { mounted: null, panel: null, host: null };
+      const record: ActiveRender = {
+        mounted: null,
+        panel: null,
+        host: null,
+        legend: null
+      };
       active.set(containerId, record);
       container.innerHTML = "";
       return emptyController(containerId, container, options, record);
@@ -275,7 +281,12 @@ export function createGraphSurface(
     const built = buildGraph(settings, resources);
     layoutGraph(vendor.dagre, built.nodes, built.edges);
 
-    const record: ActiveRender = { mounted: null, panel: null, host: null };
+    const record: ActiveRender = {
+      mounted: null,
+      panel: null,
+      host: null,
+      legend: null
+    };
     active.set(containerId, record);
 
     // Mount React into a child host so the details panel and legend (siblings
@@ -317,7 +328,7 @@ export function createGraphSurface(
     });
     record.mounted = mounted;
 
-    renderLegend(container, settings, built.resources);
+    record.legend = renderLegend(container, settings, built.resources);
 
     const controller: GraphController = {
       update(next) {
@@ -329,6 +340,14 @@ export function createGraphSurface(
         }
         const rebuilt = buildGraph(settings, next);
         layoutGraph(vendor.dagre, rebuilt.nodes, rebuilt.edges);
+        if (record.legend) {
+          record.legend.innerHTML =
+            settings.deployMode ?
+              buildStatusLegendHtml(rebuilt.resources)
+            : buildCategoryLegendHtml(
+                collectLegendCategories(rebuilt.resources)
+              );
+        }
         if (!mounted.update(rebuilt.nodes, rebuilt.edges)) {
           return render(containerId, next, options);
         }
