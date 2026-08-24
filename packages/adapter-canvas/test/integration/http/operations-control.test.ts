@@ -15,6 +15,7 @@ import {
   type OperationFixture
 } from "../../support/server/operation-fixtures.js";
 import {
+  acceptCommand,
   buildStages,
   createOperation,
   createRegistry,
@@ -26,6 +27,7 @@ import {
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
   recordServicePrincipal,
+  setCommandState,
   stopAtBoundary,
   toClientView,
   INPUT_REQUIRED_STATE,
@@ -384,6 +386,33 @@ describe("operation controls real-loopback HIT", () => {
     expect(polled.stop.requested).toBe(true);
     expect(polled.nextTransition.code).toBe("stopping");
   });
+
+  it.each(["rollback", "retry_cleanup", "exit_setup"] as const)(
+    "rejects Stop over HTTP while %s cleanup is running",
+    async (kind) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+      const op = seed(harness, newOperation());
+      const accepted = acceptCommand(op, {
+        kind,
+        attempt: 1,
+        target: "cleanup#owned"
+      });
+      setCommandState(op, accepted.command.commandId, "running");
+
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/stop`
+      );
+
+      expect(response.status).toBe(409);
+      expect(await body(response)).toMatchObject({
+        code: "operation-cleanup-not-stoppable"
+      });
+      expect(op.stopRequested).toBe(false);
+      expect(harness.persistCalls).toEqual([]);
+    }
+  );
 
   it("continues an interrupted setup and schedules it on the receiving instance", async () => {
     const harness = start();
