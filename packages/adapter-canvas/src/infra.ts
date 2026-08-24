@@ -26,7 +26,7 @@ import {
 import type { DeployWorkflowOptions } from "@radius-project/core";
 import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "node:url";
-import { dirname, join, sep } from "node:path";
+import { dirname, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import {
   fetchFileFromRepoResult,
@@ -159,18 +159,27 @@ async function fetchRadiusTemplate(
 // to this file under `src/`, so the walk locates the repository's own
 // `.github/extension/`.
 function bundledWorkflowDirs(): string[] {
-  return computeBundledWorkflowDirs(dirname(fileURLToPath(import.meta.url)));
+  const here = dirname(fileURLToPath(import.meta.url));
+  return computeBundledWorkflowDirs(here, existsSync(join(here, "workflows")));
 }
 
 // Pure, testable core of bundledWorkflowDirs: given the directory this module
-// runs from, return the candidate template directories in priority order.
-export function computeBundledWorkflowDirs(here: string): string[] {
+// runs from and whether its sibling `workflows/` directory exists, return the
+// candidate template directories in priority order.
+export function computeBundledWorkflowDirs(
+  here: string,
+  bundleWorkflowsPresent: boolean
+): string[] {
   const dirs = [join(here, "workflows")];
-  // A built bundle lives in a `dist/` directory; source/test runs live under
-  // `src/`. Only fall back to walking up for the in-repo `.github/extension/`
-  // templates when NOT running from a build output.
-  const runningFromBundle = here.split(sep).includes("dist");
-  if (!runningFromBundle) {
+  // The presence of the sibling `workflows/` directory (populated by build.mjs
+  // beside the installed extension.mjs) is what tells us we are running from a
+  // built bundle — every install layout has it, but no path-segment name is
+  // reliable across them (`~/.copilot/extensions/radius/`,
+  // `~/.copilot/installed-plugins/.../radius-edge/`, and in-repo
+  // `plugins/radius/dist/` all differ). When it is present that sibling is the
+  // only source of truth, so skip the walk up to the in-repo `.github/extension/`
+  // templates. Source/test runs have no sibling `workflows/`, so they walk up.
+  if (!bundleWorkflowsPresent) {
     let cursor = here;
     for (let depth = 0; depth < 8; depth++) {
       dirs.push(join(cursor, ".github", "extension"));

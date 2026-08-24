@@ -11,7 +11,7 @@ export interface GitHubEnvironmentCommandResult {
 // This delete primitive is deliberately shared: both the Delete Environment flow
 // (PR #398) and Create-Environment rollback (separate PR) remove a GitHub
 // environment with the identical idempotent contract. The design note
-// `docs/design/2026-08-shared-cleanup-rollback-delete.md`
+// `docs/design/2026-08-environment-deletion-cloud-cleanup.md`
 // (§ Compatibility → Rollback compatibility) calls this out as a primitive that
 // must live in one place so the two flows never drift on how a "not found"
 // result is classified or when the environment-list cache is invalidated. Each

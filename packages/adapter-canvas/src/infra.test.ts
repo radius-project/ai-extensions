@@ -270,17 +270,33 @@ describe("generateDeleteWorkflow", () => {
 });
 
 describe("computeBundledWorkflowDirs", () => {
-  it("walks up to .github/extension when running from source (not a bundle)", () => {
+  it("walks up to .github/extension when running from source (no sibling workflows dir)", () => {
     const dirs = computeBundledWorkflowDirs(
-      "/repo/packages/adapter-canvas/src"
+      "/repo/packages/adapter-canvas/src",
+      false
     );
     expect(dirs[0]).toBe("/repo/packages/adapter-canvas/src/workflows");
     expect(dirs.some((d) => d.endsWith("/.github/extension"))).toBe(true);
   });
 
   it("uses only the sibling workflows dir when running from a built bundle", () => {
-    const dirs = computeBundledWorkflowDirs("/install/plugins/radius/dist");
+    const dirs = computeBundledWorkflowDirs(
+      "/install/plugins/radius/dist",
+      true
+    );
     expect(dirs).toEqual(["/install/plugins/radius/dist/workflows"]);
+    expect(dirs.some((d) => d.includes(".github"))).toBe(false);
+  });
+
+  it("skips the walk for installed layouts with no dist segment", () => {
+    // Real installs have no `dist` path segment (e.g.
+    // ~/.copilot/extensions/radius/ or .../radius-edge/), so keying off the
+    // sibling workflows dir is what makes the guard hold for them.
+    const dirs = computeBundledWorkflowDirs(
+      "/Users/me/.copilot/extensions/radius",
+      true
+    );
+    expect(dirs).toEqual(["/Users/me/.copilot/extensions/radius/workflows"]);
     expect(dirs.some((d) => d.includes(".github"))).toBe(false);
   });
 });
