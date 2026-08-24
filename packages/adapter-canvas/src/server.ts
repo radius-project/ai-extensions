@@ -158,6 +158,7 @@ import {
   setCommandState,
   providerMutationId,
   providerMutationRecord,
+  optionalIdentityString,
   provenOwnedCleanupTargets,
   providerRecoveryManualGuidance,
   settleProviderMutation,
@@ -3066,12 +3067,74 @@ export async function ensureServicePrincipal(
       stderr: String(result.stderr || "").trim()
     };
   };
+  const pendingCreate =
+    mutationRecovery ?
+      providerMutationRecord(
+        mutationRecovery.operation,
+        "azure_service_principal.create",
+        clientId
+      )
+    : null;
   const before = await readObjectId();
   if (before.ok && before.objectId) {
+    // A principal that is here now is not automatically one that was here
+    // before. This operation may have created it and crashed before the ledger
+    // caught up, and reading that as pre-existing would leave a principal
+    // Radius made behind at rollback. The journal is asked first.
+    if (!pendingCreate) {
+      return {
+        ok: true,
+        state: "reused",
+        origin: "pre_existing",
+        objectId: before.objectId
+      };
+    }
+    if (pendingCreate.status === "manual_required") {
+      return {
+        ok: false,
+        stderr:
+          pendingCreate.evidence ||
+          `Radius cannot prove who created the Service Principal for application ${clientId}.`
+      };
+    }
+    if (pendingCreate.status === "not_applied") {
+      // Entra refused this operation's create, so what answers now predates it.
+      return {
+        ok: true,
+        state: "reused",
+        origin: "pre_existing",
+        objectId: before.objectId
+      };
+    }
+    if (pendingCreate.status === "confirmed") {
+      const recorded = pendingCreate.providerId || null;
+      if (recorded && recorded === before.objectId) {
+        // Entra acknowledged the create and recorded this exact object id, so
+        // the rollback owns it even though the crash beat the ledger.
+        return {
+          ok: true,
+          state: "created",
+          origin: "this_operation",
+          objectId: before.objectId
+        };
+      }
+      // Either the confirmation predates object ids being recorded, or the
+      // principal under this application is a different object than the one
+      // this operation made. Neither proves ownership, so nothing is claimed
+      // and nothing will be deleted.
+      return {
+        ok: true,
+        state: "created_candidate",
+        origin: "unknown",
+        objectId: before.objectId
+      };
+    }
+    // prepared or outcome_unknown: the create was issued and never answered.
+    // It is not replayed, and it is not claimed either.
     return {
       ok: true,
-      state: "reused",
-      origin: "pre_existing",
+      state: "created_candidate",
+      origin: "unknown",
       objectId: before.objectId
     };
   }
@@ -3091,6 +3154,16 @@ export async function ensureServicePrincipal(
   }
 
   const createArgs = ["ad", "sp", "create", "--id", clientId];
+  const createdObjectId = (result: Partial<CommandResult>): string | null => {
+    try {
+      const body = JSON.parse(String(result.stdout || "")) as {
+        id?: unknown;
+      };
+      return optionalIdentityString(body?.id);
+    } catch {
+      return null;
+    }
+  };
   const runCreate = async (): Promise<CommandResult> => {
     const result = await runAz(createArgs);
     return {
@@ -3107,7 +3180,7 @@ export async function ensureServicePrincipal(
         ok: true,
         state: "created",
         origin: "this_operation",
-        objectId: null
+        objectId: createdObjectId(create)
       };
     }
     const after = await readObjectId();
@@ -3137,7 +3210,11 @@ export async function ensureServicePrincipal(
     providerIdempotencyKey: clientId,
     persist: mutationRecovery.persist,
     mutate: runCreate,
-    accept: () => "",
+    accept: (result) => createdObjectId(result) || "",
+    // Settled with the confirmed status, so a crash between Entra's answer and
+    // the ledger still leaves a restart able to tell this principal from one
+    // that was already there.
+    providerIdOf: (result) => createdObjectId(result),
     reconcile: async () => {
       const after = await readObjectId();
       if (after.ok && after.objectId) {
@@ -3191,7 +3268,7 @@ export async function ensureServicePrincipal(
         ok: true,
         state: "created",
         origin: "this_operation",
-        objectId: null
+        objectId: recovered.value || null
       };
 }
 
