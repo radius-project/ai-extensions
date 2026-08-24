@@ -23,6 +23,13 @@ import {
 } from "../../source-refs.js";
 import { defaultBranchForState } from "../../workspace.js";
 import {
+  GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
+  GRAPH_APP_BICEP_MAX_WAIT_MESSAGE,
+  GRAPH_APP_BICEP_MAX_WAIT_MS,
+  GRAPH_APP_BICEP_STALLED_MESSAGE,
+  GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+} from "../../graph-progress-contract.js";
+import {
   addGraphProgress,
   beginPlannedGraphRequest,
   canReuseModeledGraph,
@@ -78,6 +85,9 @@ interface PipelineScript {
   compileThrows?: Record<string, Error>;
   stageLogs?: Record<string, string>;
   compileLogs?: Record<string, string>;
+  // Whether the workspace shows a modeling run in flight. Read only while an
+  // answer is asking the page to keep waiting for the model.
+  modelingRunActive?: boolean;
   // Runs after the named stage, so a test can move the world on mid-request.
   afterStage?: () => void;
   afterCompile?: () => void;
@@ -98,6 +108,9 @@ interface Harness {
   }>;
   recipes: unknown[];
   plannedOutputs: unknown[];
+  // How many times an answer asked the workspace whether a modeling run is in
+  // flight. Kept out of `order` so it cannot perturb stage-ordering assertions.
+  modelingObservations: { count: number };
   workflows: GraphPlanningWorkflows;
   setEntryMissing(missing: boolean): void;
   advanceClock(ms: number): void;
@@ -134,6 +147,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   // capture a start time is distinguishable from one that started at 0.
   let clockMs = 1_000;
   const order: string[] = [];
+  const modelingObservations = { count: 0 };
   const handoffs: HandoffCall[] = [];
   const recipePackCalls: string[] = [];
   const recipeResolutions: Harness["recipeResolutions"] = [];
@@ -211,6 +225,10 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     },
     listBranchPaths: (_entry, _repo, branch) =>
       Promise.resolve(harnessScript.branchPaths?.[branch] ?? []),
+    observeModelingRun: () => {
+      modelingObservations.count++;
+      return Promise.resolve(harnessScript.modelingRunActive === true);
+    },
     prepareSourceRefResources,
     setSourceRefResources,
     isCurrentSourceRefToken,
@@ -258,6 +276,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     recipeResolutions,
     recipes,
     plannedOutputs,
+    modelingObservations,
     setEntryMissing(missing) {
       entryMissing = missing;
     },
@@ -392,6 +411,96 @@ describe("graph planning workflows", () => {
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
       expect(outcome.payload).toMatchObject({ needsAppBicep: true });
       expect(harness.handoffs).toHaveLength(1);
+    });
+
+    describe("the app.bicep wait", () => {
+      // The regression this replaced: a flat wall clock cut off a run that was
+      // still working and reported the repository as unmodelable.
+      it("keeps asking the page to wait while a modeling run stays alive", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) },
+          modelingRunActive: true
+        });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS * 4);
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+        expect(outcome.payload.appBicepWaitExpired).toBeUndefined();
+        expect(harness.modelingObservations.count).toBe(2);
+      });
+
+      it("ends the wait when no modeling run is ever observed", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) }
+        });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS);
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        // `needsAppBicep` is dropped, which is what stops a page that only
+        // knows to retry while it is set.
+        expect(outcome.payload.needsAppBicep).toBeUndefined();
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+          appBicepWaitExpired: true,
+          repo: "octo/app",
+          branch: "main"
+        });
+        expect(messages(harness.state).at(-1)).toBe(
+          GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+        );
+        expect(
+          harness.state.graphProgressRecords?.graph?.graphProgressActive
+        ).toBe(false);
+      });
+
+      it("reports a run that started and then stopped as stalled", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) },
+          modelingRunActive: true
+        });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        harness.script.modelingRunActive = false;
+        harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS);
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_STALLED_MESSAGE,
+          appBicepWaitExpired: true
+        });
+      });
+
+      // A wedged run holds its staging directory forever, so only the ceiling
+      // can end the wait.
+      it("ends a wait that never stops looking alive at the ceiling", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) },
+          modelingRunActive: true
+        });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        harness.advanceClock(GRAPH_APP_BICEP_MAX_WAIT_MS);
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_MAX_WAIT_MESSAGE,
+          appBicepWaitExpired: true
+        });
+      });
+
+      // The probe reads the filesystem, so an answer that is not asking the
+      // page to wait must not pay for it.
+      it("only probes for a modeling run while an answer asks the page to wait", async () => {
+        const harness = start({ selections: { main: selectionOf() } });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(harness.modelingObservations.count).toBe(0);
+      });
     });
 
     it("refuses instead of handing off when the branch has no Dockerfile", async () => {

@@ -23,21 +23,12 @@ import type { GraphResource } from "../graph/model.js";
 import type { GraphController } from "../graph/surface.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";
-import {
-  GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
-  GRAPH_APP_BICEP_TIMEOUT_MS
-} from "../../graph-progress-contract.js";
 
 const ENTRY_KEY = "graph-page";
 export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
 export const GRAPH_RETRY_MS = 10_000;
 export const GRAPH_STALE_RETRY_MS = 1_000;
 export const GRAPH_PROGRESS_MS = 800;
-// How long the page waits for Copilot to author .radius/app.bicep before it
-// gives up. Nothing reports back when the modeling skill finishes or refuses —
-// the page only learns by asking again — so an unbounded retry would spin
-// forever on a repository the skill cannot model at all.
-export { GRAPH_APP_BICEP_TIMEOUT_MESSAGE, GRAPH_APP_BICEP_TIMEOUT_MS };
 
 interface GraphPageState {
   repo: string;
@@ -116,9 +107,6 @@ export function initializeGraphPage(
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
-  // When the current wait for Copilot to author .radius/app.bicep began, or
-  // null when the page is not waiting on one.
-  let appBicepWaitStartedAtMs: number | null = null;
   let renderedOptions: GraphOptions | null = null;
 
   const stopProgress = (): void => {
@@ -180,7 +168,6 @@ export function initializeGraphPage(
     requestAbort?.abort();
     requestAbort = null;
     requestActive = false;
-    appBicepWaitStartedAtMs = null;
     if (retry !== null) entry.cancel(retry);
     retry = null;
     stopProgress();
@@ -332,16 +319,10 @@ export function initializeGraphPage(
           return;
         }
         // The work continues off-page while Copilot authors the model, so the
-        // panel keeps running rather than being torn down and rebuilt.
+        // panel keeps running rather than being torn down and rebuilt. The
+        // server owns how long that wait may last and drops `needsAppBicep`
+        // when it expires, which lands the answer on the error path below.
         if (readBoolean(payload, "needsAppBicep")) {
-          const now = context.clock.now();
-          if (appBicepWaitStartedAtMs === null) appBicepWaitStartedAtMs = now;
-          if (now - appBicepWaitStartedAtMs >= GRAPH_APP_BICEP_TIMEOUT_MS) {
-            appBicepWaitStartedAtMs = null;
-            stopProgress();
-            showFailure(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
-            return;
-          }
           showStatus(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
@@ -353,7 +334,6 @@ export function initializeGraphPage(
           });
           return;
         }
-        appBicepWaitStartedAtMs = null;
         if (readBoolean(payload, "stale")) {
           showStatus(
             context,
@@ -372,7 +352,6 @@ export function initializeGraphPage(
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
-        appBicepWaitStartedAtMs = null;
         const message = "Failed to generate the application graph.";
         stopProgress();
         context.logger.error("Radius graph request failed.", error);

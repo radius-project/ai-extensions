@@ -41,6 +41,7 @@ export {
   findWorkspaceManifests,
   unsupportedAppSourceReport,
   STAGING_DIR_PREFIX,
+  isStagingDirName,
   fetchBicepFromRepo,
   fetchRecipePack,
   resolveRecipeOutputs

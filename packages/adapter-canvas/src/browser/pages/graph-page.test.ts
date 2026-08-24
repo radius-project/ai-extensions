@@ -17,9 +17,8 @@ import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { formatElapsed } from "../progress-format.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
+import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
 import {
-  GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
-  GRAPH_APP_BICEP_TIMEOUT_MS,
   GRAPH_PAGE_STATE_ID,
   GRAPH_PROGRESS_MS,
   GRAPH_RETRY_MS,
@@ -1238,9 +1237,53 @@ describe("initializeGraphPage", () => {
       ]);
     });
 
-    it("gives up on the app.bicep wait once it exceeds the timeout", async () => {
+    it("stops retrying once the server ends the app.bicep wait", async () => {
       const setError = vi.fn();
       const { browser, progressHost, status } = fixture({ loaded: false });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        // The server owns the wait: once it expires it drops `needsAppBicep`
+        // and answers with the reason, which is what ends the page's polling.
+        return calls < 3 ?
+            jsonResponse({ needsAppBicep: true })
+          : jsonResponse({
+              error: GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+              appBicepWaitExpired: true
+            });
+      });
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        browser.clock.tick(GRAPH_RETRY_MS);
+        await flushPromises();
+      }
+      const settled = calls;
+      browser.clock.tick(GRAPH_RETRY_MS * 5);
+      await flushPromises();
+
+      expect(settled).toBe(3);
+      expect(calls).toBe(settled);
+      expect(setError).toHaveBeenCalledWith(
+        "graph-container",
+        GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+      );
+      expect(status?.textContent).toBe("");
+      // The failure belongs on the graph surface alone; a frozen panel left
+      // underneath would state it a second time.
+      expect(graphProgressStages(progressHost)).toEqual([]);
+    });
+
+    // The page must not impose a budget of its own: a modeling run that is
+    // demonstrably working keeps `needsAppBicep` coming, and the page keeps
+    // asking for as long as the server says to.
+    it("keeps polling for as long as the server answers needsAppBicep", async () => {
+      const setError = vi.fn();
+      const { browser } = fixture({ loaded: false });
       let calls = 0;
       browser.net.handle("/api/load-graph", () => {
         calls++;
@@ -1252,27 +1295,13 @@ describe("initializeGraphPage", () => {
       );
       await flushPromises();
 
-      // Nothing reports back when the modeling skill refuses a repository it
-      // cannot model, so the wait has to end on its own instead of polling for
-      // a file that will never arrive.
-      const attempts = Math.ceil(GRAPH_APP_BICEP_TIMEOUT_MS / GRAPH_RETRY_MS);
-      for (let attempt = 0; attempt < attempts; attempt++) {
+      for (let attempt = 0; attempt < 200; attempt++) {
         browser.clock.tick(GRAPH_RETRY_MS);
         await flushPromises();
       }
-      const settled = calls;
-      browser.clock.tick(GRAPH_RETRY_MS * 5);
-      await flushPromises();
 
-      expect(calls).toBe(settled);
-      expect(setError).toHaveBeenCalledWith(
-        "graph-container",
-        GRAPH_APP_BICEP_TIMEOUT_MESSAGE
-      );
-      expect(status?.textContent).toBe("");
-      // The failure belongs on the graph surface alone; a frozen panel left
-      // underneath would state it a second time.
-      expect(graphProgressStages(progressHost)).toEqual([]);
+      expect(calls).toBe(201);
+      expect(setError).not.toHaveBeenCalled();
     });
 
     it("stops immediately when the server says the skill cannot model the repo", async () => {

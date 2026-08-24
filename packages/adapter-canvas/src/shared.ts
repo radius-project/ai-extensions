@@ -152,7 +152,12 @@ export interface GraphProgressRecord {
   graphProgressKey: string;
   graphProgressOwner: number;
   graphProgressAwaitingModel: boolean;
-  graphProgressDeadlineAtMs?: number;
+  // Accounting for the app.bicep wait, owned by the graph workflow that answers
+  // the request. `graphProgressLastActivityAtMs` stays absent until a modeling
+  // run is actually observed, because "never seen" and "seen a while ago" fail
+  // the wait with different explanations.
+  graphProgressWaitStartedAtMs?: number;
+  graphProgressLastActivityAtMs?: number;
 }
 
 // Append one event to the instance's build record.

@@ -22,6 +22,10 @@ const ENTRY_KEY = "planned-graph-page";
 export const PLANNED_GRAPH_STATE_ID = "radius-planned-graph-state";
 export const PLAN_DEBOUNCE_MS = 150;
 export const PLAN_PROGRESS_MS = 800;
+// How long to wait before asking again while Copilot authors the model. The
+// server decides when the wait has run out and answers with an error instead of
+// `needsAppBicep`, which ends the loop.
+export const PLAN_RETRY_MS = 10_000;
 
 interface PlannedPageState {
   repo: string;
@@ -88,6 +92,16 @@ export function initializePlannedGraphPage(
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
   let selectionQueuedWhileLoading = false;
+  let appBicepRetry: ScopeTimer | null = null;
+  // Re-issues the current selection. Assigned once the scheduler exists, since
+  // the retry must go through the same serialization as a user-driven request
+  // rather than starting a second overlapping compile.
+  let requeue: (() => void) | null = null;
+
+  const stopAppBicepRetry = (): void => {
+    if (appBicepRetry !== null) entry.cancel(appBicepRetry);
+    appBicepRetry = null;
+  };
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
@@ -101,6 +115,7 @@ export function initializePlannedGraphPage(
 
   const run = (isCurrent: () => boolean): Promise<void> => {
     if (!entry.active) return Promise.resolve();
+    stopAppBicepRetry();
     const selectedBranch = branch?.value.trim() || page.branch;
     const selectedEnvironment = environment?.value ?? "";
     const selectedProvider =
@@ -216,6 +231,13 @@ export function initializePlannedGraphPage(
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the planned graph will appear once it is saved.",
             "info"
           );
+          // Nothing announces the model's arrival, so the planned graph only
+          // learns by asking again. Without this the page reported the wait once
+          // and then sat there permanently, even after the model landed.
+          appBicepRetry = entry.after(PLAN_RETRY_MS, () => {
+            appBicepRetry = null;
+            requeue?.();
+          });
           return;
         }
         const error = readString(payload, "error");
@@ -257,10 +279,14 @@ export function initializePlannedGraphPage(
     },
     PLAN_DEBOUNCE_MS
   );
+  requeue = () => {
+    schedule(true);
+  };
 
   // Hold the deploy action closed while a plan is pending: the preview it would
   // deploy does not exist yet, and the request may still fail.
   const queue = (immediate = false): void => {
+    stopAppBicepRetry();
     plan.requestFailed = false;
     plan.planPending = true;
     applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);

@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { IGNORED_SOURCE_DIRS } from "@radius-project/core";
+import { IGNORED_SOURCE_DIRS, isStagingDirName } from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 
 export interface CanvasSessionWorkspace {
@@ -371,6 +371,30 @@ function isLegacyRadiusAppModel(content: string): boolean {
       content
     )
   );
+}
+
+// Whether a modeling run is currently in flight in the workspace checkout.
+//
+// A run creates `.radius/.staging-<runId>/` before it writes anything and
+// removes it when it finishes, so the directory's presence is the only evidence
+// the product has that Copilot is actively modeling rather than idle. The graph
+// spends its wait budget on the absence of this signal, never on its presence.
+//
+// Any read failure answers false. This decides whether to keep waiting, so an
+// unreadable `.radius/` must let the wait end rather than renew it forever.
+export async function modelingRunActive(
+  workspacePath: string | null | undefined
+): Promise<boolean> {
+  if (!workspacePath) return false;
+  try {
+    const dir = safeWorkspacePath(workspacePath, ".radius");
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    return entries.some(
+      (entry) => entry.isDirectory() && isStagingDirName(entry.name)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function hasRadiusApplicationModel(

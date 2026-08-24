@@ -15,6 +15,7 @@ import {
   hasRadiusApplicationModel,
   fetchWorkspaceTree,
   isWorkspacePath,
+  modelingRunActive,
   workspaceHeadCommit,
   workspaceSourceChangedSince
 } from "./workspace.js";
@@ -281,6 +282,69 @@ describe("workspaceFileExists", () => {
       expect(await workspaceFileExists(dir, "../outside.txt")).toBe(false);
       expect(await workspaceFileExists("", "src/main.go")).toBe(false);
       expect(await workspaceFileExists(dir, "")).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("modelingRunActive", () => {
+  async function workspaceDir(): Promise<string> {
+    return fs.mkdtemp(path.join(os.tmpdir(), "radius-staging-"));
+  }
+
+  it("is true while a staging directory is present", async () => {
+    const dir = await workspaceDir();
+    try {
+      await fs.mkdir(path.join(dir, ".radius", ".staging-run-7"), {
+        recursive: true
+      });
+      expect(await modelingRunActive(dir)).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is false once the run removes its staging directory", async () => {
+    const dir = await workspaceDir();
+    try {
+      const staging = path.join(dir, ".radius", ".staging-run-7");
+      await fs.mkdir(staging, { recursive: true });
+      await fs.rm(staging, { recursive: true, force: true });
+      await fs.writeFile(path.join(dir, ".radius", "app.bicep"), "// model\n");
+      expect(await modelingRunActive(dir)).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Only a directory counts. A file whose name happens to match is not a run,
+  // and treating it as one would keep the graph waiting indefinitely.
+  it("ignores a non-directory entry and a bare prefix", async () => {
+    const dir = await workspaceDir();
+    try {
+      await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+      await fs.writeFile(path.join(dir, ".radius", ".staging-x"), "");
+      await fs.mkdir(path.join(dir, ".radius", ".staging"), {
+        recursive: true
+      });
+      expect(await modelingRunActive(dir)).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Answering false is what lets an unreadable workspace end the wait rather
+  // than renew it forever.
+  it("is false with no .radius directory, no workspace, or an unreadable one", async () => {
+    const dir = await workspaceDir();
+    try {
+      expect(await modelingRunActive(dir)).toBe(false);
+      expect(await modelingRunActive("")).toBe(false);
+      expect(await modelingRunActive(null)).toBe(false);
+      expect(await modelingRunActive(undefined)).toBe(false);
+      await fs.writeFile(path.join(dir, ".radius"), "not a directory");
+      expect(await modelingRunActive(dir)).toBe(false);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }

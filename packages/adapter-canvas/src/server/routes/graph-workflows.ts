@@ -3,7 +3,7 @@ import {
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
 import { recordGraphBuildEvent } from "../../shared.js";
-import { GRAPH_APP_BICEP_TIMEOUT_MS } from "../../graph-progress-contract.js";
+import { evaluateAppBicepWait } from "../../graph-progress-contract.js";
 import type {
   CanvasGraphResource,
   CanvasState,
@@ -128,6 +128,10 @@ export interface GraphWorkflowDependencies<
     baseResources: CanvasGraphResource[],
     headResources: CanvasGraphResource[]
   ): CanvasGraphResource[];
+  // Whether a modeling run is in flight for this instance's workspace. Read
+  // only while a request is answering `needsAppBicep`, so the wait renews on
+  // evidence of work rather than on a wall clock.
+  observeModelingRun(state: CanvasState): Promise<boolean>;
   record(value: unknown): Record<string, unknown>;
   optionalString(value: unknown): string;
   errorMessage(error: unknown): string;
@@ -231,28 +235,51 @@ function endGraphProgress(
   if (!record) return;
   record.graphProgressActive = false;
   record.graphProgressAwaitingModel = false;
-  delete record.graphProgressDeadlineAtMs;
+  delete record.graphProgressWaitStartedAtMs;
+  delete record.graphProgressLastActivityAtMs;
 }
 
 // Close the record for every outcome except the app.bicep handoff. That build
 // genuinely continues off-page while Copilot authors the model, so it stays in
 // flight and keeps narrating the wait to whichever page is looking.
+//
+// The wait is also decided here, because this is the one place every graph
+// route's `needsAppBicep` answer passes through. An expired wait is converted
+// into an ordinary error outcome: `needsAppBicep` is dropped, so a page that
+// only knows to retry while it is set stops retrying without needing its own
+// clock, and the pages that never retried still report the failure.
 function settleGraphProgress(
   state: CanvasState,
   handle: GraphProgressHandle | undefined,
   outcome: GraphWorkflowOutcome,
-  nowMs: number
+  nowMs: number,
+  modelingRunActive: boolean
 ): GraphWorkflowOutcome {
   if (!handle || !isCurrentGraphProgress(state, handle)) return outcome;
   const record = graphProgressRecord(state, handle.view);
   if (!record) return outcome;
-  if (outcome.payload.needsAppBicep === true) {
-    record.graphProgressAwaitingModel = true;
-    record.graphProgressDeadlineAtMs ??= nowMs + GRAPH_APP_BICEP_TIMEOUT_MS;
-  } else {
+  if (outcome.payload.needsAppBicep !== true) {
     endGraphProgress(state, handle);
+    return outcome;
   }
-  return outcome;
+  record.graphProgressAwaitingModel = true;
+  record.graphProgressWaitStartedAtMs ??= nowMs;
+  if (modelingRunActive) record.graphProgressLastActivityAtMs = nowMs;
+  const wait = evaluateAppBicepWait({
+    nowMs,
+    waitStartedAtMs: record.graphProgressWaitStartedAtMs,
+    lastActivityAtMs: record.graphProgressLastActivityAtMs ?? null
+  });
+  if (wait.status === "waiting") return outcome;
+  appendGraphEvent(record, "creating_model", "failed", wait.message);
+  endGraphProgress(state, handle);
+  const payload: Record<string, unknown> = {
+    ...outcome.payload,
+    error: wait.message,
+    appBicepWaitExpired: true
+  };
+  delete payload.needsAppBicep;
+  return { kind: outcome.kind, status: outcome.status, payload };
 }
 
 function appendGraphEvent(
@@ -318,15 +345,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       outcome = json(400, { error });
     }
     const state = hooks.state();
-    if (state) {
-      settleGraphProgress(
-        state,
-        hooks.progressHandle(),
-        outcome,
-        dependencies.now()
-      );
-    }
-    return outcome;
+    if (!state) return outcome;
+    // Only an answer that asks the page to keep waiting needs the liveness
+    // probe, so the ordinary success and failure paths pay nothing for it.
+    const modelingRunActive =
+      outcome.payload.needsAppBicep === true ?
+        await dependencies.observeModelingRun(state)
+      : false;
+    return settleGraphProgress(
+      state,
+      hooks.progressHandle(),
+      outcome,
+      dependencies.now(),
+      modelingRunActive
+    );
   }
 
   // The app-bicep modeling skill refuses outright — before writing anything —

@@ -20,6 +20,7 @@ import {
   DIFF_DEBOUNCE_MS,
   DIFF_PROGRESS_MS,
   DIFF_PROGRESS_STEPS_ID,
+  DIFF_RETRY_MS,
   GRAPH_DIFF_STATE_ID,
   initializeGraphDiffPage
 } from "./graph-diff-page.js";
@@ -299,6 +300,93 @@ describe("initializeGraphDiffPage", () => {
     expect(status.textContent).toContain(
       "Copilot is generating .radius/app.bicep"
     );
+  });
+
+  // Nothing announces the model's arrival, so a page that reported the wait
+  // once and then stopped asking never recovered — even after the model landed.
+  it("keeps asking until the model lands, then renders the diff", async () => {
+    const renderGraph = vi.fn();
+    const { browser, head, status } = fixture();
+    let calls = 0;
+    browser.net.handle("/api/diff-branches", () => {
+      calls++;
+      return calls < 3 ?
+          jsonResponse({ needsAppBicep: true })
+        : jsonResponse({ message: "Graphs are identical." });
+    });
+    browser.net.handle("/api/progress?view=diff", () =>
+      jsonResponse({ events: [] })
+    );
+    initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: renderGraph
+    });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      browser.clock.tick(DIFF_RETRY_MS);
+      await flushPromises();
+    }
+
+    expect(calls).toBe(3);
+    expect(status.textContent).toBe("Graphs are identical.");
+  });
+
+  it("stops asking once the server ends the wait", async () => {
+    const { browser, head, status } = fixture();
+    let calls = 0;
+    browser.net.handle("/api/diff-branches", () => {
+      calls++;
+      return jsonResponse({
+        error: "No modeling run has started.",
+        appBicepWaitExpired: true
+      });
+    });
+    browser.net.handle("/api/progress?view=diff", () =>
+      jsonResponse({ events: [] })
+    );
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    browser.clock.tick(DIFF_RETRY_MS * 5);
+    await flushPromises();
+
+    expect(calls).toBe(1);
+    expect(status.textContent).toContain("No modeling run has started.");
+  });
+
+  // A pending retry must not fire a request for a selection the user replaced.
+  it("abandons a pending retry when the selection changes", async () => {
+    const { browser, head, base } = fixture();
+    const bodies: string[] = [];
+    browser.net.handle("/api/diff-branches", (init) => {
+      bodies.push(String(init?.body ?? ""));
+      return jsonResponse({ needsAppBicep: true });
+    });
+    browser.net.handle("/api/progress?view=diff", () =>
+      jsonResponse({ events: [] })
+    );
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    base.value = "another";
+    base.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    const settled = bodies.length;
+    browser.clock.tick(DIFF_RETRY_MS);
+    await flushPromises();
+
+    expect(bodies).toHaveLength(settled + 1);
+    expect(bodies.at(-1)).toContain('"base":"another"');
   });
 
   it("shows the refusal verbatim when the skill cannot model the repo", async () => {

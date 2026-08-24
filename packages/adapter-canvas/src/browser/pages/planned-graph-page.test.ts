@@ -20,7 +20,8 @@ import {
   initializePlannedGraphPage,
   PLANNED_GRAPH_STATE_ID,
   PLAN_DEBOUNCE_MS,
-  PLAN_PROGRESS_MS
+  PLAN_PROGRESS_MS,
+  PLAN_RETRY_MS
 } from "./planned-graph-page.js";
 import { DEPLOYMENTS_PATH } from "../repositories.js";
 
@@ -654,6 +655,84 @@ describe("initializePlannedGraphPage", () => {
     expect(status.textContent).toContain(
       "Copilot is generating .radius/app.bicep"
     );
+  });
+
+  // Nothing announces the model's arrival, so a page that reported the wait
+  // once and then stopped asking never recovered — even after the model landed.
+  it("keeps asking until the model lands, then renders the planned graph", async () => {
+    const renderGraph = vi.fn();
+    const { browser, status } = fixture();
+    let calls = 0;
+    browser.net.handle("/api/plan-graph", () => {
+      calls++;
+      return calls < 3 ?
+          jsonResponse({ needsAppBicep: true })
+        : jsonResponse({ reload: true });
+    });
+    initializePlannedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: renderGraph })
+    );
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      browser.clock.tick(PLAN_RETRY_MS);
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+    }
+
+    expect(calls).toBe(3);
+    expect(browser.nav.reloads).toBe(1);
+    expect(status.textContent).toContain("Copilot is generating");
+  });
+
+  it("stops asking once the server ends the wait", async () => {
+    const { browser, status } = fixture();
+    let calls = 0;
+    browser.net.handle("/api/plan-graph", () => {
+      calls++;
+      return jsonResponse({
+        error: "No modeling run has started.",
+        appBicepWaitExpired: true
+      });
+    });
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    browser.clock.tick(PLAN_RETRY_MS * 5);
+    await flushPromises();
+
+    expect(calls).toBe(1);
+    expect(status.textContent).toBe("Error: No modeling run has started.");
+  });
+
+  // A pending retry must not fire a request for a selection the user replaced.
+  it("abandons a pending retry when the selection changes", async () => {
+    const { browser, branch } = fixture();
+    const bodies: string[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
+      bodies.push(String(init?.body ?? ""));
+      return jsonResponse({ needsAppBicep: true });
+    });
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+    const settled = bodies.length;
+    browser.clock.tick(PLAN_RETRY_MS);
+    await flushPromises();
+
+    expect(bodies).toHaveLength(settled + 1);
+    expect(bodies.at(-1)).toContain('"branch":"another"');
   });
 
   it("keeps external error detail out of user-visible failures", async () => {
