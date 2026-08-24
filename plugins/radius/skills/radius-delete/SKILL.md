@@ -1,6 +1,6 @@
 ---
 name: radius-delete
-description: Delete a Radius application deployment (or remove a GitHub deploy environment) via the Radius canvas. Use when the user asks to delete, remove, or tear down a deployed Radius application, or to remove a deploy environment.
+description: Delete a Radius application deployment, or delete a deploy environment and clean up its cloud state (Radius environment, Azure federated credential, and GitHub environment), via the Radius canvas. Use when the user asks to delete, remove, or tear down a deployed Radius application or a deploy environment.
 ---
 
 # Radius — Delete a Deployment or Environment
