@@ -106,10 +106,11 @@ For example `mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.
 
 Do NOT guess the module's parameter or output names, and do NOT guess the version to pin. Verify both against the module's real interface, in this order.
 
-**First, look for an existing recipe pack that already uses the same module.** Search `resource-types-contrib/recipe-packs/azure/` by **module path, not by type name**:
+**First, look for an existing recipe pack that already uses the same module.** The Azure packs live in `recipe-packs/azure/` in `radius-project/resource-types-contrib`. Search them by **module path, not by type name** — no local clone is required:
 
 ```text
-grep -rn "avm/res/event-hub/namespace" recipe-packs/
+gh api repos/radius-project/resource-types-contrib/contents/recipe-packs/azure/aks-recipepack.bicep \
+  --jq '.content' | base64 -d | grep -n "avm/res/event-hub/namespace"
 ```
 
 A pack may use the module under a type name unrelated to the one you are generating — the canonical Azure pack provisions `Radius.Data/mongoDatabases` from `avm/res/document-db/database-account` and `Radius.Messaging/kafka` from `avm/res/event-hub/namespace`, so grepping for `cosmos` or `eventHub` finds nothing while grepping the module path finds both. When a pack entry exists, reuse its pinned version, its `parameters`, and its `outputs` mapping as-is; those values are already known to work together.
