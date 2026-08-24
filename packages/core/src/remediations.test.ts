@@ -510,7 +510,7 @@ describe("remediationSessionMessage", () => {
           "For that command, remove COPILOT_AGENT_SESSION_ID from the az process environment so Azure CLI does not inject it into the authentication request.",
           "Use the shell-appropriate way to unset the variable only for the login invocation, and show me the device code and sign-in URL."
         ].join(" "),
-        "After the login finishes, return to the Radius canvas and click Verify Credentials again."
+        "Your task ends when the command finishes. Then tell the user: After the login finishes, return to the Radius canvas and click Verify Credentials again. Do not carry out that step yourself; it belongs to the user in the Radius canvas."
       ].join("\n\n")
     );
     expect(message.displayPrompt).toBe(
@@ -529,7 +529,7 @@ describe("remediationSessionMessage", () => {
           "For that command, remove COPILOT_AGENT_SESSION_ID from the az process environment so Azure CLI does not inject it into the authentication request.",
           "Use the shell-appropriate way to unset the variable only for the login invocation, and show me the device code and sign-in URL."
         ].join(" "),
-        "After the install and login finish, return to the Radius canvas and click Verify Credentials again."
+        "Your task ends when the command finishes. Then tell the user: After the install and login finish, return to the Radius canvas and click Verify Credentials again. Do not carry out that step yourself; it belongs to the user in the Radius canvas."
       ].join("\n\n")
     );
     expect(message.displayPrompt).toBe(
@@ -569,7 +569,7 @@ describe("remediationSessionMessage", () => {
     );
     expect(message.prompt).toContain("are not committed");
     expect(message.displayPrompt).toBe(
-      "Committing the generated Radius files and pushing feature/login to GitHub so the Radius canvas can deploy it."
+      "Committing the generated Radius files and pushing feature/login to GitHub."
     );
   });
 
@@ -582,9 +582,7 @@ describe("remediationSessionMessage", () => {
       "Run `git push -u origin feature/login` in this Copilot session."
     );
     expect(message.prompt).not.toContain("```console");
-    expect(message.displayPrompt).toBe(
-      "Pushing feature/login to GitHub so the Radius canvas can deploy it."
-    );
+    expect(message.displayPrompt).toBe("Pushing feature/login to GitHub.");
   });
 
   it("omits the worktree line for machine-level commands", () => {
@@ -617,4 +615,45 @@ describe("remediationSessionMessage", () => {
 
     expect(message.displayPrompt).toContain(expected);
   });
+
+  // The push remediation exists because the canvas could not deploy. Naming
+  // deployment anywhere in the agent's prompt read as an instruction, and the
+  // agent went and deployed instead of stopping at the push. Retrying the
+  // deploy is the user's action in the canvas, which is what the callout says.
+  it.each([
+    ["with generated paths", { branch: "feature/login", paths: ".radius" }],
+    ["with a bare push", { branch: "feature/login" }]
+  ])("never asks the agent to deploy after a push %s", (_name, params) => {
+    const message = remediationSessionMessage(build("git-push-branch", params));
+
+    expect(message.displayPrompt).not.toMatch(/deploy/i);
+    expect(message.prompt).toContain(
+      "Your task ends when the command finishes."
+    );
+    expect(message.prompt).toContain(
+      "Do not carry out that step yourself; it belongs to the user in the Radius canvas."
+    );
+  });
+
+  // followUp is written in the user's second person and names a canvas UI step.
+  // Appending it bare left the agent reading "return to the Radius canvas and
+  // deploy again" as its own next action.
+  it.each(REMEDIATION_IDS)(
+    "relays the %s follow-up as the user's step, not the agent's",
+    (id) => {
+      const remediation = build(id, VALID_PARAMS[id]);
+      const message = remediationSessionMessage(remediation);
+
+      expect(message.prompt).toContain(
+        `Then tell the user: ${remediation.followUp}`
+      );
+      expect(message.prompt).not.toMatch(
+        new RegExp(`\\n\\n${escapeRegExp(remediation.followUp)}$`)
+      );
+    }
+  );
 });
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

@@ -2550,24 +2550,36 @@ describe("azureCliAssistDisplayPrompt", () => {
 describe("azure-cli-assist registry migration contract", () => {
   // Frozen copies of the prompts this route produced before they moved into the
   // core remediation registry. `/api/azure-cli-assist` is a shipped contract, so
-  // the migration is only correct if the bytes are unchanged.
+  // the migration is only correct if the bytes are unchanged, apart from the one
+  // divergence recorded below.
   const LEGACY_LOGIN_INSTRUCTIONS = [
     "Run `az login --use-device-code --tenant 11111111-2222-3333-4444-555555555555` in this Copilot session.",
     "For that command, remove COPILOT_AGENT_SESSION_ID from the az process environment so Azure CLI does not inject it into the authentication request.",
     "Use the shell-appropriate way to unset the variable only for the login invocation, and show me the device code and sign-in URL."
   ].join(" ");
+  const LEGACY_LOGIN_FOLLOW_UP =
+    "After the login finishes, return to the Radius canvas and click Verify Credentials again.";
+  const LEGACY_INSTALL_FOLLOW_UP =
+    "After the install and login finish, return to the Radius canvas and click Verify Credentials again.";
+  // The trailing follow-up line is the one deliberate divergence from the legacy
+  // bytes. It is written in the user's voice and names a step in the canvas UI,
+  // so the agent read it as its own next action and carried it out — deploying
+  // for the user rather than stopping at the command it was asked to run. It is
+  // now relayed as the user's step. Every line before it is still frozen.
+  const relayed = (followUp: string): string =>
+    `Your task ends when the command finishes. Then tell the user: ${followUp} Do not carry out that step yourself; it belongs to the user in the Radius canvas.`;
   const LEGACY_LOGIN_PROMPT = [
     "The Radius canvas needs an active Azure CLI session before it can verify these credentials.",
     LEGACY_LOGIN_INSTRUCTIONS,
-    "After the login finishes, return to the Radius canvas and click Verify Credentials again."
+    relayed(LEGACY_LOGIN_FOLLOW_UP)
   ].join("\n\n");
   const LEGACY_INSTALL_PROMPT = [
     "Azure CLI is not installed in this environment, so the Radius canvas can't verify Azure credentials yet.",
     `Please install Azure CLI, then ${LEGACY_LOGIN_INSTRUCTIONS.replace(" --tenant 11111111-2222-3333-4444-555555555555", "")}`,
-    "After the install and login finish, return to the Radius canvas and click Verify Credentials again."
+    relayed(LEGACY_INSTALL_FOLLOW_UP)
   ].join("\n\n");
 
-  it("reproduces the legacy login prompt byte for byte", () => {
+  it("reproduces the legacy login prompt, with the follow-up relayed", () => {
     expect(
       buildAzureCliAssistPrompt({
         action: "login",
@@ -2576,7 +2588,7 @@ describe("azure-cli-assist registry migration contract", () => {
     ).toBe(LEGACY_LOGIN_PROMPT);
   });
 
-  it("reproduces the legacy install prompt byte for byte", () => {
+  it("reproduces the legacy install prompt, with the follow-up relayed", () => {
     expect(buildAzureCliAssistPrompt({ action: "install" })).toBe(
       LEGACY_INSTALL_PROMPT
     );

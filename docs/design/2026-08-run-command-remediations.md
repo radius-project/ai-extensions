@@ -210,6 +210,25 @@ and a follow-up sentence.
 its timeline stand-in `displayPrompt` in one place, so the two cannot be swapped
 or drift at a call site.
 
+The follow-up sentence has two audiences, and conflating them was a real defect.
+It is written in the user's voice and names a step in the canvas UI — verify,
+retry, deploy. The callout shows it to the user as-is, which is correct. The
+agent also reads the prompt, and appending the bare sentence read as an
+instruction: asked only to commit and push a branch, the agent went on to run
+the deployment itself, which is precisely the step the callout reserves for the
+user. So the prompt now relays it rather than repeating it, bounded explicitly:
+
+```text
+Your task ends when the command finishes. Then tell the user: <follow-up> Do
+not carry out that step yourself; it belongs to the user in the Radius canvas.
+```
+
+For the same reason no `git-push-branch` prompt or stand-in mentions
+deployment at all. The push remediation exists because the canvas could not
+deploy, but retrying the deploy is the user's action in the canvas, so naming it
+in the agent's prompt only invites the agent to take it. The stand-in reads
+`Committing the generated Radius files and pushing <branch> to GitHub.`
+
 `remediationView(id, params)` is the projection that travels to a UI. When the
 registry refuses, it still returns a complete view with `runnable: false` and
 `unsupportedReason` set, so a surface never has to decide what a refusal looks

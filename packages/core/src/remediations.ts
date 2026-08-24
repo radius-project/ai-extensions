@@ -544,8 +544,8 @@ function displayPromptFor(remediation: Remediation): string {
       return "Granting the GitHub CLI token the workflow scope the Radius canvas needs.";
     case "git-push-branch":
       return remediation.params.paths ?
-          `Committing the generated Radius files and pushing ${remediation.params.branch} to GitHub so the Radius canvas can deploy it.`
-        : `Pushing ${remediation.params.branch} to GitHub so the Radius canvas can deploy it.`;
+          `Committing the generated Radius files and pushing ${remediation.params.branch} to GitHub.`
+        : `Pushing ${remediation.params.branch} to GitHub.`;
   }
 }
 
@@ -573,8 +573,8 @@ function reasonFor(remediation: Remediation): string {
             .split(",")
             .join(", ")}) are not committed and the branch ${
             remediation.params.branch
-          } has not been pushed to GitHub, so the Radius canvas has nothing to deploy. Pushing on its own would not publish them.`
-        : `The branch ${remediation.params.branch} has not been pushed to GitHub yet, so the Radius canvas has nothing to deploy.`;
+          } has not been pushed to GitHub, so the Radius canvas cannot see them. Pushing on its own would not publish them.`
+        : `The branch ${remediation.params.branch} has not been pushed to GitHub yet, so the Radius canvas cannot see it.`;
   }
 }
 
@@ -614,7 +614,13 @@ export function remediationSessionMessage(
   if (remediation.cwd === "workspace") {
     lines.push("Run it from the repository worktree for this session.");
   }
-  lines.push(remediation.followUp);
+  // followUp is written for the user and names a step they take in the canvas
+  // UI: verify, retry, deploy. The agent reads this prompt, so handing it the
+  // bare sentence reads as an instruction and it goes and does the canvas step
+  // itself. Relay it explicitly instead, with the boundary stated.
+  lines.push(
+    `Your task ends when the command finishes. Then tell the user: ${remediation.followUp} Do not carry out that step yourself; it belongs to the user in the Radius canvas.`
+  );
   return {
     prompt: lines.join("\n\n"),
     displayPrompt: displayPromptFor(remediation)
