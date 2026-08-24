@@ -185,6 +185,7 @@ describe("canonical environment identity", () => {
 
     expect(op.setupArtifacts.githubEnvironment).toEqual({
       state: "created_candidate",
+      origin: "unknown",
       repo: "contoso/store",
       name: "Production"
     });
@@ -206,6 +207,7 @@ describe("canonical environment identity", () => {
 
     expect(op.setupArtifacts.githubEnvironment).toEqual({
       state: "reused",
+      origin: "unknown",
       repo: "contoso/store",
       name: "Staging"
     });
@@ -227,6 +229,7 @@ describe("canonical environment identity", () => {
 
     expect(op.setupArtifacts.githubEnvironment).toEqual({
       state: "reused",
+      origin: "unknown",
       repo: "fabrikam/store",
       name: "production"
     });

@@ -1199,6 +1199,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     });
     expect(harness.operation.setupArtifacts?.githubEnvironment).toEqual({
       state: "created_candidate",
+      origin: "unknown",
       repo: "octo/app",
       name: "dev"
     });
@@ -1750,7 +1751,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     // The stop lands while the GitHub environment is being created, so the
     // first boundary after that write is where it must be honored.
     harness.setJournalHook((entry) => {
-      if (entry === "bootstrapGHCRStatePackage") {
+      if (entry === "recordGitHubEnvironment:created_candidate") {
         harness.operation.stopRequested = true;
       }
     });

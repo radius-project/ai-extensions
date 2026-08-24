@@ -161,15 +161,6 @@ const COMMAND_STATUS_TEXT: Readonly<Record<string, string>> = {
   exit_setup: "Closing this setup and removing the resources Radius created…"
 };
 
-const STAGE_GLYPH: Readonly<Record<string, string>> = {
-  pending: "○",
-  running: "◐",
-  succeeded: "✓",
-  warning: "⚠",
-  failed: "✗",
-  skipped: "–"
-};
-
 const TERMINAL_STATES: ReadonlySet<string> = new Set([
   "succeeded",
   "succeeded_with_warnings",

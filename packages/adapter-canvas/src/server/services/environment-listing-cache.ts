@@ -21,6 +21,7 @@ export interface CachedEnvironmentListing {
 export interface EnvironmentListingCache {
   get(repo: string): CachedEnvironmentListing | undefined;
   set(repo: string, entry: CachedEnvironmentListing): void;
+  clear(): void;
   /**
    * Drop a repository's cached listing and mark every listing already in flight
    * for it as stale. This is the only eviction path.
@@ -42,6 +43,13 @@ export function createEnvironmentListingCache(): EnvironmentListingCache {
     invalidate: (repo) => {
       entries.delete(repo);
       generations.set(repo, generation(repo) + 1);
+    },
+    clear: () => {
+      const repos = new Set([...entries.keys(), ...generations.keys()]);
+      entries.clear();
+      for (const repo of repos) {
+        generations.set(repo, generation(repo) + 1);
+      }
     },
     generation
   };

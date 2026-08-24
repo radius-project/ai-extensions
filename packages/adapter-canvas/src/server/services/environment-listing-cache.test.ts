@@ -61,6 +61,20 @@ describe("createEnvironmentListingCache", () => {
     expect(cache.generation("octo/other")).toBe(0);
   });
 
+  it("clears every entry and invalidates listings already in flight", () => {
+    const cache = createEnvironmentListingCache();
+    cache.set("octo/app", { at: 1, payload: { environments: [] } });
+    cache.invalidate("octo/in-flight");
+    const appGeneration = cache.generation("octo/app");
+    const inFlightGeneration = cache.generation("octo/in-flight");
+
+    cache.clear();
+
+    expect(cache.get("octo/app")).toBeUndefined();
+    expect(cache.generation("octo/app")).toBe(appGeneration + 1);
+    expect(cache.generation("octo/in-flight")).toBe(inFlightGeneration + 1);
+  });
+
   it("lets a later listing replace an entry without touching the generation", () => {
     const cache = createEnvironmentListingCache();
     cache.set("octo/app", { at: 1, payload: { environments: [] } });

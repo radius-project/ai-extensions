@@ -595,7 +595,8 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
 
     expect(await resolveAzureAutoSetupApplication(test.input)).toEqual({
       clientId: APP_ID,
-      appName: "radius-deploy-octo-app"
+      appName: "radius-deploy-octo-app",
+      state: "reused"
     });
     expect(test.recorded[0]).toMatchObject({
       state: "reused",

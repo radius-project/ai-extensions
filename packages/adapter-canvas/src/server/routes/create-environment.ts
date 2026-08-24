@@ -317,6 +317,15 @@ export async function handleCreateEnvironment(
       }
       return rawPush(...items);
     };
+    const stopBoundary = (boundary: string) =>
+      dependencies.guardStopBoundary({
+        operation,
+        boundary,
+        persist: () => dependencies.persistOperations(),
+        report: (diagnostic) =>
+          dependencies.reportOperationDiagnostic(diagnostic),
+        respond
+      });
 
     // Preflight repo access + admin BEFORE any GitHub mutation. Reachable
     // directly when credentials already exist and azure-auto-setup is skipped,
@@ -343,6 +352,7 @@ export async function handleCreateEnvironment(
       return;
     }
 
+    if (!(await stopBoundary("before-ghcr-bootstrap"))) return;
     const ghcrPreflight =
       await dependencies.preflightGhcrPackageWriteAccess(selectedExecutor);
     if (!ghcrPreflight.ok) {
@@ -380,7 +390,8 @@ export async function handleCreateEnvironment(
         dependencies.recordGitHubEnvironment(operation, {
           state: "created_candidate",
           repo: error.createdCandidate.repo,
-          name: error.createdCandidate.name
+          name: error.createdCandidate.name,
+          origin: "unknown"
         });
       }
       throw error;
@@ -423,15 +434,6 @@ export async function handleCreateEnvironment(
       });
       respond(failure.status, failure.body);
     };
-    const stopBoundary = (boundary: string) =>
-      dependencies.guardStopBoundary({
-        operation,
-        boundary,
-        persist: () => dependencies.persistOperations(),
-        report: (diagnostic) =>
-          dependencies.reportOperationDiagnostic(diagnostic),
-        respond
-      });
     // Both gates in one call: the checkpoint saves the provenance of the write
     // that just finished, and the boundary then decides whether a stop recorded
     // while it ran should be honored before the next write starts.
@@ -461,10 +463,7 @@ export async function handleCreateEnvironment(
       );
     }
     const creationEvidence = ensuredEnvironment.creationEvidence;
-    if (
-      ensuredEnvironment.state === "created_candidate" &&
-      creationEvidence
-    ) {
+    if (ensuredEnvironment.state === "created_candidate" && creationEvidence) {
       const proof = proveGitHubEnvironmentCreated({
         preflight: ensuredEnvironment.state,
         putResponseBody: creationEvidence.putResponseBody,

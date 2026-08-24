@@ -13,7 +13,7 @@ export interface GitHubEnvironmentReadResult {
 
 export interface EnsuredGitHubEnvironment {
   name: string;
-  state: "created_candidate" | "reused";
+  state: "created" | "created_candidate" | "reused";
   creationEvidence?: {
     putResponseBody: string;
     putStartedAtMs: number;

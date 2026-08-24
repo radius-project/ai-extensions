@@ -309,7 +309,8 @@ describe("ensureGitHubEnvironment", () => {
       repo: "octo/app",
       requestedName: "production",
       readGitHubJson,
-      runGh
+      runGh,
+      now: () => 1_700_000_000_000
     });
     const second = await ensureGitHubEnvironment({
       repo: "octo/app",
@@ -320,7 +321,11 @@ describe("ensureGitHubEnvironment", () => {
 
     expect(first).toEqual({
       name: "Production",
-      state: "created_candidate"
+      state: "created_candidate",
+      creationEvidence: {
+        putResponseBody: JSON.stringify({ name: "Production" }),
+        putStartedAtMs: 1_700_000_000_000
+      }
     });
     expect(second).toEqual({ name: "Production", state: "reused" });
     expect(putCalls).toBe(1);
