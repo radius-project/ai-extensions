@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   createOperation,
+  prepareProviderMutation,
   promoteCreatedGitHubEnvironment,
+  settleProviderMutation,
   provenOwnedCleanupTargets,
   recordGitHubEnvironment,
   setCanonicalEnvironment
@@ -548,6 +550,44 @@ describe("the id a later rollback has to match", () => {
     );
   });
 
+  it("tells the customer when a restart cannot prove it owns the name", async () => {
+    const op = operation();
+    const test = dependencies(op);
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_environment.put",
+      target: "octo/app:production"
+    });
+    mutation.preparedAt = "2026-08-22T00:00:00.000Z";
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "confirmed",
+      null,
+      "1234567"
+    );
+
+    await runEnvironmentOperationWorkflow(
+      op,
+      successfulSelectedGhExecutor({
+        run: async () =>
+          command({
+            stdout: JSON.stringify({
+              id: 7654321,
+              name: "production",
+              created_at: "2026-08-22T00:00:00.000Z"
+            })
+          })
+      }),
+      test.dependencies
+    );
+
+    // Leaving it silently would hand back an environment nobody knows about.
+    expect(
+      test.events.filter((entry) => entry.includes("outside its cleanup scope"))
+    ).toHaveLength(1);
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("created_candidate");
+  });
+
   it("records no id when GitHub reports none, so the rollback refuses to guess", async () => {
     const op = operation();
     const test = dependencies(op, {
@@ -572,5 +612,55 @@ describe("the id a later rollback has to match", () => {
         .filter((entry) => entry.artifactType === "github_environment")
         .map((entry) => entry.identity)
     ).toEqual(["octo/app:production"]);
+  });
+});
+
+// The route that finalizes a failure builds the environment reader the cleanup
+// identity gate needs out of the executor it is handed. Handing it anything
+// else — or nothing — reads the environment as some other account.
+describe("the executor a failing workflow hands to cleanup", () => {
+  it("is the same pinned executor the workflow ran its GitHub work with", async () => {
+    const op = operation();
+    const handed: unknown[] = [];
+    const test = dependencies(op, {
+      preflightRepoAdmin: async () => "You need admin on octo/app.",
+      finalizeEnvironmentResolutionFailure: async (
+        _target,
+        _input,
+        executor
+      ) => {
+        handed.push(executor);
+      }
+    });
+    const executor = successfulSelectedGhExecutor();
+
+    await runEnvironmentOperationWorkflow(op, executor, test.dependencies);
+
+    expect(handed).toEqual([executor]);
+  });
+
+  it("is handed along after the environment exists, when there is something to clean", async () => {
+    const op = operation();
+    const handed: unknown[] = [];
+    const test = dependencies(op, {
+      preflightGhcrPackageWriteAccess: async () => ({
+        ok: false,
+        status: 403,
+        error: "Your token cannot write packages.",
+        code: "ghcr-package-write-required"
+      }),
+      finalizeEnvironmentResolutionFailure: async (
+        _target,
+        _input,
+        executor
+      ) => {
+        handed.push(executor);
+      }
+    });
+    const executor = successfulSelectedGhExecutor();
+
+    await runEnvironmentOperationWorkflow(op, executor, test.dependencies);
+
+    expect(handed).toEqual([executor]);
   });
 });

@@ -37,6 +37,7 @@ import {
   executeRecoverableMutation,
   ProviderMutationRecoveryError
 } from "../services/provider-mutation-recovery.js";
+import { selectedEnvironmentReader } from "../services/github-environment.js";
 import {
   findExactVerificationRun,
   hasPostDispatchVerificationRuns
@@ -290,6 +291,11 @@ export async function handleCreateEnvironment(
   let steps: string[] = [];
   let deleteGitHubEnvironmentRunner:
     ((args: string[]) => Promise<unknown>) | null = null;
+  // The cleanup's identity gate reads the environment back before deleting it.
+  // It has to read through the same account the environment was created with,
+  // or an access failure reads as "gone" and the delete goes out blind.
+  let readGitHubEnvironmentRunner:
+    ((args: string[]) => Promise<CreateEnvironmentCommandResult>) | null = null;
   try {
     const data: CreateEnvironmentRequestData = JSON.parse(body);
     const admission = await admitCreateEnvironmentRequest(data, dependencies);
@@ -318,6 +324,7 @@ export async function handleCreateEnvironment(
         throw new Error(detail || "GitHub API request failed.");
       }
     };
+    readGitHubEnvironmentRunner = selectedEnvironmentReader(selectedExecutor);
 
     steps = [];
     const rawPush = steps.push.bind(steps);
@@ -360,7 +367,8 @@ export async function handleCreateEnvironment(
           provider === "azure" ?
             (args: string[]) => dependencies.runAzCommand(args)
           : null,
-        runDeleteEnvironment: deleteGitHubEnvironmentRunner
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner,
+        readEnvironment: readGitHubEnvironmentRunner
       });
       respond(failure.status, failure.body);
       return;
@@ -375,7 +383,8 @@ export async function handleCreateEnvironment(
         error: ghcrPreflight.error,
         code: ghcrPreflight.code,
         steps,
-        runDeleteEnvironment: deleteGitHubEnvironmentRunner
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner,
+        readEnvironment: readGitHubEnvironmentRunner
       });
       respond(failure.status, failure.body);
       return;
@@ -448,7 +457,8 @@ export async function handleCreateEnvironment(
           provider === "azure" ?
             (args: string[]) => dependencies.runAzCommand(args)
           : null,
-        runDeleteEnvironment: deleteGitHubEnvironmentRunner
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner,
+        readEnvironment: readGitHubEnvironmentRunner
       });
       respond(failure.status, failure.body);
     };
@@ -1283,7 +1293,8 @@ export async function handleCreateEnvironment(
         op && op.provider === "azure" ?
           (args: string[]) => dependencies.runAzCommand(args)
         : null,
-      runDeleteEnvironment: deleteGitHubEnvironmentRunner
+      runDeleteEnvironment: deleteGitHubEnvironmentRunner,
+      readEnvironment: readGitHubEnvironmentRunner
     });
     respond(failure.status, failure.body);
   }

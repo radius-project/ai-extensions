@@ -285,7 +285,12 @@ import {
   branchRefReadArgs,
   isNotFoundResponse
 } from "./server/services/branch-absence.js";
-import { parseEnvironmentProviderId } from "./server/services/github-environment.js";
+import {
+  parseEnvironmentProviderId,
+  selectedEnvironmentReader
+} from "./server/services/github-environment.js";
+
+export { selectedEnvironmentReader };
 import {
   CleanupJournalPersistenceError,
   cleanupDeletionKind,
@@ -4960,7 +4965,8 @@ function createInstanceRequestCoordinator(
                             "GitHub API request failed."
                         );
                       }
-                    }
+                    },
+                    readEnvironment: selectedEnvironmentReader(executor)
                   });
                 }
               }),
@@ -4985,7 +4991,8 @@ function createInstanceRequestCoordinator(
                         "GitHub API request failed."
                     );
                   }
-                }
+                },
+                readEnvironment: selectedEnvironmentReader(selectedExecutor)
               });
             },
             getOperation: (id) => operations.get(id),

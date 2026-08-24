@@ -6,6 +6,7 @@ import {
 } from "../../operations.js";
 import {
   ensureGitHubEnvironment,
+  selectedEnvironmentReader,
   GitHubEnvironmentEnsureError,
   readEnsuredGitHubEnvironment,
   type GitHubEnvironmentCommandResult,
@@ -141,63 +142,188 @@ describe("ensureGitHubEnvironment", () => {
     });
   });
 
-  it("re-proves a restored confirmed PUT from durable absence and timestamp evidence", async () => {
-    const operation = createOperation({ operationId: "op_environment" });
-    const mutation = prepareProviderMutation(operation, {
-      kind: "github_environment.put",
-      target: "octo/app:production"
-    });
-    mutation.preparedAt = "2026-08-22T00:00:00.000Z";
-    settleProviderMutation(operation, mutation.mutationId, "confirmed");
+  // A confirmed PUT means GitHub made the environment, but the name it is under
+  // can be deleted and recreated by anyone. Ownership after a restart is proven
+  // by the id that write recorded still answering for the name — a creation
+  // timestamp alone would also fit the replacement.
+  describe("a confirmed PUT found again after a restart", () => {
+    function confirmed(providerId: string | null) {
+      const operation = createOperation({ operationId: "op_environment" });
+      const mutation = prepareProviderMutation(operation, {
+        kind: "github_environment.put",
+        target: "octo/app:production"
+      });
+      mutation.preparedAt = "2026-08-22T00:00:00.000Z";
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "confirmed",
+        null,
+        providerId
+      );
+      return operation;
+    }
 
-    await expect(
-      ensureGitHubEnvironment({
+    function restore(operation: object, json: Record<string, unknown>) {
+      return ensureGitHubEnvironment({
         repo: "octo/app",
         requestedName: "production",
-        readGitHubJson: async () =>
-          readResult({
-            json: {
-              name: "production",
-              created_at: "2026-08-22T00:00:00.000Z"
-            }
-          }),
+        readGitHubJson: async () => readResult({ json }),
         runGh: async () => {
           throw new Error("confirmed PUT must not replay");
         },
+        mutationRecovery: {
+          operation: operation as object & { operationId: string },
+          persist: async () => {}
+        }
+      });
+    }
+
+    it("proves ownership when the name still answers for the id it recorded", async () => {
+      await expect(
+        restore(confirmed("1234567"), {
+          id: 1234567,
+          name: "production",
+          created_at: "2026-08-22T00:00:00.000Z"
+        })
+      ).resolves.toEqual({
+        name: "production",
+        state: "created_candidate",
+        providerId: "1234567",
+        creationProof: { proven: true, detail: null }
+      });
+    });
+
+    it("proves nothing when the name was recreated under a new id", async () => {
+      // The customer deleted the environment and made another with the same
+      // name after the crash. Its creation timestamp fits the interrupted
+      // request just as well, so only the id can tell them apart.
+      await expect(
+        restore(confirmed("1234567"), {
+          id: 7654321,
+          name: "production",
+          created_at: "2026-08-22T00:00:01.000Z"
+        })
+      ).resolves.toEqual({
+        name: "production",
+        state: "created_candidate",
+        providerId: "7654321",
+        // Said out loud, so the customer is told a resource was left behind
+        // rather than finding it later with no explanation.
+        creationProof: {
+          proven: false,
+          detail: expect.stringContaining(
+            "not the 1234567 this request created"
+          )
+        }
+      });
+    });
+
+    it("proves nothing for a confirmed entry written before ids were recorded", async () => {
+      await expect(
+        restore(confirmed(null), {
+          id: 1234567,
+          name: "production",
+          created_at: "2026-08-22T00:00:00.000Z"
+        })
+      ).resolves.toEqual({
+        name: "production",
+        state: "created_candidate",
+        providerId: "1234567",
+        creationProof: {
+          proven: false,
+          detail: expect.stringContaining(
+            "before Radius captured GitHub's own id"
+          )
+        }
+      });
+    });
+
+    it("proves nothing when GitHub now reports no id for the name", async () => {
+      await expect(
+        restore(confirmed("1234567"), {
+          name: "production",
+          created_at: "2026-08-22T00:00:00.000Z"
+        })
+      ).resolves.toEqual({
+        name: "production",
+        state: "created_candidate",
+        providerId: null,
+        creationProof: {
+          proven: false,
+          detail: expect.stringContaining("reports id none")
+        }
+      });
+    });
+
+    it("records the id in the same write that confirms the mutation", async () => {
+      const operation = createOperation({ operationId: "op_environment" });
+      let persists = 0;
+
+      await ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) =>
+          apiPath === "/repos/octo/app" ?
+            readResult({ json: { full_name: "octo/app" } })
+          : readResult({ ok: false, status: 404, json: null }),
+        runGh: async () =>
+          result({
+            stdout: JSON.stringify({ id: 1234567, name: "production" })
+          }),
+        mutationRecovery: {
+          operation,
+          persist: async () => {
+            persists += 1;
+          }
+        }
+      });
+
+      const settled = operation.providerRecovery.mutations.find(
+        (entry: { kind: string }) => entry.kind === "github_environment.put"
+      );
+      // Status and id land together, so a crash cannot leave a confirmed
+      // mutation whose id was never written.
+      expect(settled).toMatchObject({
+        status: "confirmed",
+        providerId: "1234567"
+      });
+      expect(persists).toBeGreaterThan(0);
+    });
+
+    it("records the id the reconciling read found for a lost response", async () => {
+      const operation = createOperation({ operationId: "op_environment" });
+      let lookups = 0;
+
+      await ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) => {
+          if (apiPath === "/repos/octo/app") {
+            return readResult({ json: { full_name: "octo/app" } });
+          }
+          lookups += 1;
+          return lookups === 1 ?
+              readResult({ ok: false, status: 404, json: null })
+            : readResult({
+                json: {
+                  id: 1234567,
+                  name: "production",
+                  created_at: "2126-08-22T00:00:00.000Z"
+                }
+              });
+        },
+        runGh: async () => {
+          throw new Error("the response was lost");
+        },
         mutationRecovery: { operation, persist: async () => {} }
-      })
-    ).resolves.toEqual({
-      name: "production",
-      state: "created_candidate",
-      providerId: null,
-      creationProof: { proven: true, detail: null }
-    });
-  });
+      });
 
-  it("keeps a restored confirmed PUT outside cleanup when creation proof is unavailable", async () => {
-    const operation = createOperation({ operationId: "op_environment" });
-    const mutation = prepareProviderMutation(operation, {
-      kind: "github_environment.put",
-      target: "octo/app:production"
-    });
-    mutation.preparedAt = "2026-08-22T00:00:00.000Z";
-    settleProviderMutation(operation, mutation.mutationId, "confirmed");
-
-    const ensured = await ensureGitHubEnvironment({
-      repo: "octo/app",
-      requestedName: "production",
-      readGitHubJson: async () => readResult({ json: { name: "production" } }),
-      runGh: async () => {
-        throw new Error("confirmed PUT must not replay");
-      },
-      mutationRecovery: { operation, persist: async () => {} }
-    });
-
-    expect(ensured).toMatchObject({
-      name: "production",
-      state: "created_candidate",
-      providerId: null,
-      creationProof: { proven: false }
+      expect(
+        operation.providerRecovery.mutations.find(
+          (entry: { kind: string }) => entry.kind === "github_environment.put"
+        )
+      ).toMatchObject({ status: "confirmed", providerId: "1234567" });
     });
   });
 
@@ -540,4 +666,65 @@ describe("ensureGitHubEnvironment", () => {
       ]);
     }
   );
+});
+
+describe("selectedEnvironmentReader", () => {
+  it("reads through the executor it was built from, not ambient gh", async () => {
+    const seen: string[][] = [];
+    const read = selectedEnvironmentReader({
+      run: async (args) => {
+        seen.push(args);
+        return {
+          code: 0,
+          stdout: JSON.stringify({ id: 1234567, name: "dev" }),
+          stderr: ""
+        };
+      }
+    });
+
+    await expect(
+      read(["api", "/repos/octo/app/environments/dev"])
+    ).resolves.toEqual({
+      code: 0,
+      stdout: JSON.stringify({ id: 1234567, name: "dev" }),
+      stderr: ""
+    });
+    expect(seen).toEqual([["api", "/repos/octo/app/environments/dev"]]);
+  });
+
+  it.each([
+    [
+      "a refused read",
+      { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" },
+      { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" }
+    ],
+    [
+      "a missing resource reported with a string code",
+      { code: "1", stdout: "", stderr: "HTTP 404: Not Found" },
+      { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
+    ]
+  ])(
+    "keeps %s a failure rather than an empty answer",
+    async (_label, response, expected) => {
+      const read = selectedEnvironmentReader({
+        run: async () => response
+      });
+
+      // An empty, successful-looking result would read as "the environment is
+      // gone" and let a delete go out on a masked 404.
+      await expect(
+        read(["api", "/repos/octo/app/environments/dev"])
+      ).resolves.toEqual(expected);
+    }
+  );
+
+  it("treats an exit code it cannot parse as a failure", async () => {
+    const read = selectedEnvironmentReader({
+      run: async () => ({ code: undefined as never, stderr: "no answer" })
+    });
+
+    await expect(
+      read(["api", "/repos/octo/app/environments/dev"])
+    ).resolves.toEqual({ code: 1, stdout: "", stderr: "no answer" });
+  });
 });

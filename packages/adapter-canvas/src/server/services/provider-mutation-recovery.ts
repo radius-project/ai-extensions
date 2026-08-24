@@ -16,7 +16,16 @@ export interface ProviderMutationCommandResult {
 }
 
 export type ProviderMutationReconciliation<T> =
-  | { state: "applied"; value: T; evidence?: string }
+  | {
+      state: "applied";
+      value: T;
+      evidence?: string;
+      /**
+       * The provider's own immutable id for what this mutation wrote, settled
+       * in the same write as the status so no crash can separate them.
+       */
+      providerId?: string | null;
+    }
   | { state: "not_applied"; evidence?: string }
   | { state: "manual_required"; guidance: string };
 
@@ -277,7 +286,8 @@ async function reconcileMutation<T>(
     operation,
     mutation.mutationId,
     outcome.state === "applied" ? "confirmed" : "not_applied",
-    outcome.evidence || null
+    outcome.evidence || null,
+    outcome.state === "applied" ? (outcome.providerId ?? null) : null
   );
   requireRecoveryRollback(operation, mutation);
   await persistOrThrow(persist, "after reconciliation");
@@ -295,6 +305,13 @@ export async function executeRecoverableMutation<T>(input: {
   persist(): Promise<void>;
   mutate(): Promise<ProviderMutationCommandResult>;
   accept(result: ProviderMutationCommandResult): T;
+  /**
+   * Read the provider's own immutable id out of the response it acknowledged
+   * with, so it is settled together with the confirmed status. A resource whose
+   * name can be reused is otherwise indistinguishable from its replacement
+   * after a restart.
+   */
+  providerIdOf?(result: ProviderMutationCommandResult, value: T): string | null;
   reconcile(): Promise<ProviderMutationReconciliation<T>>;
   /**
    * Turn a conclusive provider rejection into a manual blocker in the same
@@ -351,6 +368,9 @@ export async function executeRecoverableMutation<T>(input: {
       mutation.preparedAt = new Date().toISOString();
       mutation.updatedAt = mutation.preparedAt;
       mutation.evidence = null;
+      // The refused attempt made nothing, so any id it once carried belongs to
+      // an earlier world and must not be matched against what this one writes.
+      mutation.providerId = null;
       // The refused attempt's intent described the world it was about to write
       // into. That world has moved on, so a fresh attempt journals the state it
       // actually read rather than inheriting a predecessor that is no longer
@@ -386,7 +406,8 @@ export async function executeRecoverableMutation<T>(input: {
         input.operation,
         mutation.mutationId,
         "confirmed",
-        "The provider acknowledged the mutation."
+        "The provider acknowledged the mutation.",
+        input.providerIdOf?.(result, value) ?? null
       );
       await persistOrThrow(input.persist, "after the provider acknowledged it");
       return { state: "applied", value, recovered: false };
