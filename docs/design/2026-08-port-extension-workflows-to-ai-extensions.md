@@ -90,6 +90,17 @@ graph TD
   tmpl -- "install pinned yq" --> yq
 ```
 
+### Migration strategy
+
+The overriding principle is **port first, verify working, then delete** — never remove anything from `radius-project/radius` until the equivalent asset is present, self-contained, and green in `radius-project/ai-extensions`. The two repositories are allowed to hold the same `.github/extension/` tree during the transition; the duplicate is harmless because generated user workflows only ever reference one owner, so there is no window in which deploys break. This ordering is what keeps the move low-risk: at every step there is a working copy of the workflows somewhere, and the radius removal (PR [radius#12719](https://github.com/radius-project/radius/pull/12719)) is the *last* action, gated on the ai-extensions copy being proven.
+
+To keep the port itself as error-proof as possible, the move is deliberately mechanical and minimal:
+
+- **Copy, don't rewrite.** Files are ported byte-for-byte wherever possible (the shell scripts, `install-yq.sh` verified by SHA-256). The only edits are the unavoidable ones: the `uses:` owner (`radius-project/radius` → `radius-project/ai-extensions`) and the `RADIUS_WORKFLOW_REPO` constant.
+- **One behavioral change, isolated.** The sole logic change is making `load-contrib-catalog` self-contained (fetch the catalog by ref, install `yq` from a co-located script). Every other file is a transport-only move, which shrinks the surface area for mistakes and makes review a diff of owners rather than logic.
+- **Reuse the existing pattern.** Fetching the catalog "by ref over HTTPS" is the same contract-fetch pattern the extension already uses for templates, so no new mechanism is introduced.
+- **Maintain parity with `radius/main` until cutover.** Assets added to `radius`'s `.github/extension/` after the initial port (for example the live deploy-progress action, `refresh-azure-oidc-token`, `action-shell-syntax` and `verify-azure` tests) must be ported into ai-extensions *before* the radius removal merges, or that functionality is lost. The removal PR is held until this parity is confirmed.
+
 ### Detailed design
 
 The change is where the composite action obtains its two runtime dependencies — the catalog file and `yq`.
@@ -194,17 +205,20 @@ The `load-contrib-catalog` step logs the catalog URL fetch and `install-yq` prog
 
 ## Development plan
 
+The steps are ordered so that `radius-project/ai-extensions` is complete and proven before anything is removed from `radius-project/radius`. Each step is a gate on the next.
+
 1. Port `.github/extension/` from radius and rewrite `uses:` refs — checked in.
 1. Rewire `packages/core` and `packages/adapter-canvas` constants/comments and update tests — checked in.
 1. Make `load-contrib-catalog` self-contained (co-locate `install-yq.sh`, fetch catalog by ref), update README/Changeset — checked in (commit `2b538a2a`, PR [#424](https://github.com/radius-project/ai-extensions/pull/424)).
-1. Validate on CI (build, Vitest, lint) once the PR runs in the hosted environment.
-1. Separately: decide catalog ownership and, if agreed, remove the duplicated `.github/extension/` from `radius-project/radius`.
+1. **Reach parity with `radius/main`.** Port any extension assets added to radius after the initial port (live deploy-progress action, `refresh-azure-oidc-token`, `action-shell-syntax` test, `verify-azure` test) into ai-extensions so nothing is left behind.
+1. **Prove it works.** CI on #424 is green (build, Vitest, lint) and a real Azure and AWS deploy from a user repo succeeds end to end against the ai-extensions copy.
+1. **Only then remove from radius.** Merge the radius removal (PR [radius#12719](https://github.com/radius-project/radius/pull/12719)) that deletes the duplicated `.github/extension/` and its consumer-side wiring, keeping `deploy/manifest/defaults.yaml` in radius (fetched by ref at runtime). This PR stays in draft until the steps above are done.
 
 ## Open questions
 
 1. **Should `catalog-ref` be pinned rather than `main`?** Floating `main` preserves prior behavior but is not reproducible. Pinning to the commit the `ai-extensions` templates were validated against is safer — do we thread a pinned radius catalog ref through the generator alongside `{{RADIUS_REF}}`?
 1. **Long-term catalog ownership.** Is fetching `defaults.yaml` from radius the permanent boundary, or should the catalog (and its verification) eventually move to `ai-extensions` or a dedicated repo?
-1. **Radius duplicate removal.** Removing `.github/extension/` from radius requires reworking radius's `verify-resource-types-manifest` CI, which `find`s that folder and runs `verify-contrib-consumers.sh`. What is the agreed scope and timing?
+1. **Radius duplicate removal timing.** The removal PR ([radius#12719](https://github.com/radius-project/radius/pull/12719)) is ready but gated on ai-extensions parity and a proven deploy (see Migration strategy). The open item is confirming the parity checklist — specifically porting the newer radius-only assets (deploy-progress, `refresh-azure-oidc-token`, `action-shell-syntax`/`verify-azure` tests) — before it merges.
 
 ## Alternatives considered
 
