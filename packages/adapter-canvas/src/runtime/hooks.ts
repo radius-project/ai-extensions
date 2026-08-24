@@ -4,13 +4,15 @@
 // the radius-app-bicep skill (the agent) — this adapter never fabricates bicep.
 // But the application-graph views require that file to exist AND to still
 // describe the branch it sits on. This module holds the decision logic for a
-// pre-tool-use hook that intercepts the tool calls which generate a graph *from*
-// app.bicep (opening a graph canvas page, or producing the PR graph diff
-// markdown) and denies the call when there is no app.bicep yet, or when the one
-// on the workspace branch is stale, instructing the agent to run the
-// radius-app-bicep skill to create/refresh and SAVE .radius/app.bicep first,
-// then retry. The extension itself never writes bicep; it only triggers the
-// skill.
+// pre-tool-use hook that intercepts opening a graph canvas page and denies the
+// call when there is no app.bicep yet, or when the one on the workspace branch
+// is stale, instructing the agent to run the radius-app-bicep skill to
+// create/refresh and SAVE .radius/app.bicep first, then retry. The extension
+// itself never writes bicep; it only triggers the skill.
+//
+// Opening a graph page is the ONLY trigger. Authoring is prompted from exactly
+// one place so a single missing model cannot produce two authoring turns — see
+// graphTriggerTargets for why the PR graph-diff tool is deliberately excluded.
 //
 // Kept as a pure module (no SDK imports, no top-level joinSession) so the hook
 // decision can be unit-tested in isolation from extension.ts.
@@ -194,18 +196,15 @@ export function graphTriggerTargets(
     };
   }
 
-  if (toolName === "radius_generate_pr_diff_markdown") {
-    const branches = [
-      optionalString(args.baseBranch),
-      optionalString(args.headBranch)
-    ].filter((branch): branch is string => Boolean(branch));
-    return {
-      repo: optionalString(args.repo) || "",
-      branches: branches.length ? branches : [undefined],
-      comparesCommittedBranches: true
-    };
-  }
-
+  // radius_generate_pr_diff_markdown is deliberately NOT a trigger. It compares
+  // the models committed on two named refs, while modeling only ever writes the
+  // working tree — so denying the call and handing off to the skill cannot put a
+  // model on either ref, and the retry lands on the same denial. The tool
+  // already degrades on its own: with no model on either side it returns an
+  // "unavailable" result, which the pull-request guard turns into "create the
+  // pull request without a graph diff section". Denying it here only added a
+  // second authoring prompt on top of the one the graph canvas already raises,
+  // in the middle of pull-request creation.
   return null;
 }
 

@@ -406,7 +406,7 @@ export function createRadiusExtension(
     canvases: [createRadiusCanvas(deps)],
     tools: createRadiusTools(deps),
     hooks: {
-      // Guards the graph-generating tool calls: denies the call and instructs
+      // Guards opening a graph canvas page: denies the call and instructs
       // the agent to author + SAVE .radius/app.bicep via the radius-app-bicep
       // skill first when no bicep exists. It fails open on any hook error.
       onPreToolUse: async (input) => {
@@ -429,13 +429,7 @@ export function createRadiusExtension(
               }
             }
           );
-          if (graphDecision) {
-            pullRequestGraphDiffGuard.recordDeniedGraphDiff(
-              input,
-              graphDecision.permissionDecisionReason
-            );
-            return graphDecision;
-          }
+          if (graphDecision) return graphDecision;
         } catch {
           // Graph generation remains fail-open; the PR guard below owns its
           // own fail-closed diagnostics once a Radius model is active.

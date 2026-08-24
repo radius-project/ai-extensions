@@ -314,39 +314,24 @@ describe("graphTriggerTargets", () => {
     });
   });
 
-  it("maps radius_generate_pr_diff_markdown to its repo + branches", () => {
+  // The PR graph-diff tool compares committed refs, and modeling only writes the
+  // working tree — so a denial here could never be satisfied, and it duplicated
+  // the authoring prompt the graph canvas already raises.
+  it("returns null for the pull-request graph-diff tool", () => {
     expect(
       graphTriggerTargets("radius_generate_pr_diff_markdown", {
         repo: "a/b",
         baseBranch: "main",
         headBranch: "feat"
       })
-    ).toEqual({
-      repo: "a/b",
-      branches: ["main", "feat"],
-      comparesCommittedBranches: true
-    });
-  });
-
-  it("falls back to [undefined] when the pr-diff tool omits branches", () => {
-    expect(
-      graphTriggerTargets("radius_generate_pr_diff_markdown", { repo: "a/b" })
-    ).toEqual({
-      repo: "a/b",
-      branches: [undefined],
-      comparesCommittedBranches: true
-    });
+    ).toBeNull();
   });
 
   it("tolerates missing/invalid toolArgs", () => {
     expect(graphTriggerTargets("open_canvas", undefined)).toBeNull();
     expect(
       graphTriggerTargets("radius_generate_pr_diff_markdown", null)
-    ).toEqual({
-      repo: "",
-      branches: [undefined],
-      comparesCommittedBranches: true
-    });
+    ).toBeNull();
   });
 });
 
@@ -439,6 +424,16 @@ const OPEN_GRAPH = {
     input: { page: "graph", repo: "a/b", branch: "feat" }
   }
 };
+
+function openGraphDiff(baseBranch: string, headBranch: string, repo = "a/b") {
+  return {
+    toolName: "open_canvas",
+    toolArgs: {
+      canvasId: "radius",
+      input: { page: "graph-diff", repo, baseBranch, headBranch }
+    }
+  };
+}
 
 describe("evaluateAppBicepHook", () => {
   it("allows (undefined) when the tool is not a graph trigger", async () => {
@@ -622,13 +617,7 @@ describe("evaluateAppBicepHook", () => {
       appSource
     });
 
-    const out = await evaluateAppBicepHook(
-      {
-        toolName: "radius_generate_pr_diff_markdown",
-        toolArgs: { repo: "a/b", baseBranch: "base", headBranch: "head" }
-      },
-      deps
-    );
+    const out = await evaluateAppBicepHook(openGraphDiff("base", "head"), deps);
 
     expect(out?.additionalContext).toContain("Create it now");
     expect(appSource.mock.calls.map((call) => call[1])).toEqual([
@@ -724,13 +713,7 @@ describe("evaluateAppBicepHook", () => {
       appModelStatus
     });
 
-    await evaluateAppBicepHook(
-      {
-        toolName: "radius_generate_pr_diff_markdown",
-        toolArgs: { repo: "a/b", baseBranch: "main", headBranch: "topic" }
-      },
-      deps
-    );
+    await evaluateAppBicepHook(openGraphDiff("main", "topic"), deps);
 
     expect(appModelStatus.mock.calls.map((call) => call[1])).toEqual([
       "main",
@@ -854,18 +837,15 @@ describe("evaluateAppBicepHook", () => {
       )
     });
 
-    const out = await evaluateAppBicepHook(
-      {
-        toolName: "radius_generate_pr_diff_markdown",
-        toolArgs: { repo: "a/b", baseBranch: "main", headBranch: "feat" }
-      },
-      deps
-    );
+    const out = await evaluateAppBicepHook(openGraphDiff("main", "feat"), deps);
 
     expect(out).toBeUndefined();
   });
 
-  it("denies a graph-diff when both branches are missing app.bicep", async () => {
+  // The PR graph-diff tool is no longer a trigger: it reads committed refs that
+  // an authoring handoff cannot change, and the tool reports its own
+  // "no model on either branch" outcome to the pull-request guard.
+  it("never inspects the model for the pull-request graph-diff tool", async () => {
     const deps = makeDeps({
       state: { contextRepo: "a/b" },
       appModelStatus: vi.fn(async (repo: string, branch: string) =>
@@ -881,6 +861,22 @@ describe("evaluateAppBicepHook", () => {
       deps
     );
 
+    expect(out).toBeUndefined();
+    expect(deps.workspaceState).not.toHaveBeenCalled();
+    expect(deps.appModelStatus).not.toHaveBeenCalled();
+    expect(deps.appSource).not.toHaveBeenCalled();
+  });
+
+  it("denies a graph-diff when both branches are missing app.bicep", async () => {
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "missing" })
+      )
+    });
+
+    const out = await evaluateAppBicepHook(openGraphDiff("main", "feat"), deps);
+
     expect(out?.permissionDecision).toBe("deny");
   });
 
@@ -894,13 +890,7 @@ describe("evaluateAppBicepHook", () => {
       )
     });
 
-    const out = await evaluateAppBicepHook(
-      {
-        toolName: "radius_generate_pr_diff_markdown",
-        toolArgs: { repo: "a/b", baseBranch: "main", headBranch: "feat" }
-      },
-      deps
-    );
+    const out = await evaluateAppBicepHook(openGraphDiff("main", "feat"), deps);
 
     expect(out?.permissionDecisionReason).toContain("feat");
   });

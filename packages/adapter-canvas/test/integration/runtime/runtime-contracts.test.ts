@@ -335,12 +335,28 @@ describe("P0-A Radius runtime registration contract", () => {
       baseBranch: "main",
       headBranch: "feature"
     };
-    const deniedDiff = await harness.extension.hooks.onPreToolUse({
-      toolName: "radius_generate_pr_diff_markdown",
+    // The graph-diff tool is deliberately not intercepted: it reads committed
+    // refs that an authoring handoff cannot change, so it runs and reports its
+    // own "no model on either branch" outcome instead of being denied.
+    await expect(
+      harness.extension.hooks.onPreToolUse({
+        toolName: "radius_generate_pr_diff_markdown",
+        toolArgs: diffArgs,
+        workingDirectory: "/worktrees/widgets"
+      })
+    ).resolves.toBeUndefined();
+
+    const diffTool = harness.extension.tools.find(
+      ({ name }) => name === "radius_generate_pr_diff_markdown"
+    );
+    if (!diffTool) throw new Error("PR graph diff tool was not registered");
+    const diffResult = await diffTool.handler(diffArgs);
+    await harness.extension.hooks.onPostToolUse({
+      toolName: diffTool.name,
       toolArgs: diffArgs,
+      toolResult: diffResult,
       workingDirectory: "/worktrees/widgets"
     });
-    expect(deniedDiff).toMatchObject({ permissionDecision: "deny" });
 
     const result = await harness.extension.hooks.onPreToolUse({
       toolName: "create_pull_request",

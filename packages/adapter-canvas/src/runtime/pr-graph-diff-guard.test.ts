@@ -241,30 +241,6 @@ describe("pull request application graph diff guard", () => {
     expect(deps.getDefaultBranch).toHaveBeenCalledOnce();
   });
 
-  it("allows the PR after the graph tool is denied", async () => {
-    const { guard } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
-    guard.recordDeniedGraphDiff(graphDiff(), "No committed model exists");
-
-    const result = await guard.onPreToolUse(pullRequest("Summary"));
-
-    expect(result).not.toHaveProperty("permissionDecision");
-    expect(result?.additionalContext).toContain("No committed model exists");
-  });
-
-  it("ignores denied tools that are not identifiable graph diff attempts", () => {
-    const { guard } = setup();
-
-    guard.recordDeniedGraphDiff(
-      { toolName: "some_other_tool", toolArgs: {} },
-      "denied"
-    );
-    guard.recordDeniedGraphDiff(
-      { toolName: "radius_generate_pr_diff_markdown", toolArgs: {} },
-      "denied"
-    );
-  });
-
   it("allows the PR after graph generation fails", async () => {
     const { guard } = setup(true);
     await guard.activateAtSessionStart("/worktrees/widgets");
