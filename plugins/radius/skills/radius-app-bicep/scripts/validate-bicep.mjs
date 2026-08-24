@@ -18,12 +18,13 @@
 // agree.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 const STAGING_RUN_RECORD = "run.json";
 const REPAIR_ATTEMPT_BUDGET = 5;
+const REPAIR_COMPILE_LIMIT = REPAIR_ATTEMPT_BUDGET + 1;
 
 function repairBudgetSpentMessage(attempts) {
   return (
@@ -73,7 +74,7 @@ function parseRepairState(value) {
 
 function evaluateRepairAttempt(state) {
   const attempt = state.attempts + 1;
-  if (state.attempts >= REPAIR_ATTEMPT_BUDGET) {
+  if (state.attempts >= REPAIR_COMPILE_LIMIT) {
     return {
       verdict: "exhausted",
       allowed: false,
@@ -116,45 +117,78 @@ function fingerprintCompilerOutput(output) {
 // The staged run this compile belongs to, or null when the model is not inside
 // one. Only the run record's presence makes a directory a staged run: a plain
 // `.radius/app.bicep`, or any other caller, has no budget.
+//
+// `unusable` marks a record that exists but cannot be trusted to hold a count.
+// That is a refusal rather than a free pass: an unreadable counter is
+// indistinguishable from a spent one, and guessing "not spent" is exactly the
+// guess that lets a stuck run compile forever.
 function readRunRecord(app) {
   const file = path.join(path.dirname(app), STAGING_RUN_RECORD);
   let text;
   try {
     text = readFileSync(file, "utf8");
-  } catch {
-    return null;
+  } catch (error) {
+    // A record that is absent means this is not a staged run. A record that
+    // exists but cannot be read is a staged run whose bookkeeping is broken.
+    if (error.code === "ENOENT") return null;
+    return { file, record: null, state: null, unusable: true };
   }
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch {
-    // A record that exists but cannot be parsed still marks a staged run. It is
-    // not rewritten, because overwriting it would destroy the baseline the
-    // publish check needs; the run simply gets no budget enforcement.
-    return { file, record: null, state: parseRepairState(null) };
+    return { file, record: null, state: null, unusable: true };
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { file, record: null, state: parseRepairState(null) };
+    return { file, record: null, state: null, unusable: true };
   }
-  return { file, record: parsed, state: parseRepairState(parsed.repair) };
+  return {
+    file,
+    record: parsed,
+    state: parseRepairState(parsed.repair),
+    unusable: false
+  };
 }
 
-// Records the attempt back into the run record. A failure to write is reported
-// but does not fail an otherwise successful compile: the budget is a guard rail,
-// and losing it must not turn a model that compiles into a modeling failure.
-function recordAttempt(run, fingerprint) {
-  if (run.record === null) return;
+// Records the attempt BEFORE the compiler runs, so an attempt that dies partway
+// — a crash, a timeout, a cancelled turn — has still been counted. Counting
+// afterwards meant an interrupted compile left the budget untouched, so the
+// very failure mode the bound exists to stop was the one that disabled it.
+//
+// Written through a temporary file and renamed into place, because a rename
+// within a directory either happens or does not: a process killed mid-write
+// cannot leave a truncated record that reads as "no attempts yet" and hands the
+// run an unbounded budget.
+function reserveAttempt(run, fingerprint) {
   const updated = {
     ...run.record,
     repair: nextRepairState(run.state, fingerprint)
   };
+  const temporary = `${run.file}.${process.pid}.tmp`;
   try {
-    writeFileSync(run.file, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+    writeFileSync(temporary, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+    renameSync(temporary, run.file);
+    return "";
   } catch (error) {
-    console.error(
-      `Could not record this compile in ${run.file}: ${error.message}. The repair budget is not being counted for this run.`
-    );
+    try {
+      unlinkSync(temporary);
+    } catch {
+      // The temporary file may never have been created; nothing to clean up.
+    }
+    return error.message;
   }
+}
+
+// The single statement for a staged run whose bookkeeping cannot be trusted.
+// Refusing here costs a compile that might have succeeded, which is recoverable
+// and visible; the alternative silently removes the limit.
+function brokenRecordMessage(file, detail) {
+  return (
+    `The repair budget for this modeling run could not be recorded in ${file}${detail ? `: ${detail}` : ""}. ` +
+    "The application model was not compiled, because a budget that cannot be counted cannot be enforced, " +
+    "and an uncounted repair loop is what this limit exists to prevent. " +
+    "Start the modeling run again with promote-app-model.mjs --begin."
+  );
 }
 
 function diagnostics(output) {
@@ -411,6 +445,13 @@ function main() {
     return check(app);
   }
 
+  // Fail closed: a staged run whose record cannot be parsed or read has no
+  // trustworthy count, and compiling anyway would grant it an unlimited one.
+  if (run.unusable) {
+    console.error(brokenRecordMessage(run.file, ""));
+    return 1;
+  }
+
   // Refused before the compiler is spawned: once the budget is spent there is
   // nothing more to learn from another identical failure, and compiling anyway
   // would invite one more repair.
@@ -420,16 +461,38 @@ function main() {
     return 1;
   }
 
+  // The attempt is charged before the compile, and the run stops if it cannot
+  // be, so the budget holds even when the compile never returns.
+  const reserved = reserveAttempt(run, run.state.fingerprint);
+  if (reserved) {
+    console.error(brokenRecordMessage(run.file, reserved));
+    return 1;
+  }
+
   const status = check(app);
   const fingerprint =
     status === 0 ? null : fingerprintCompilerOutput(reported.join("\n"));
   if (isRepeatedFailure(run.state, fingerprint)) {
     console.error(REPEATED_FAILURE_MESSAGE);
   }
-  recordAttempt(run, fingerprint);
-  if (status !== 0 && decision.attempt >= REPAIR_ATTEMPT_BUDGET) {
+
+  // The reservation above recorded the attempt with the previous fingerprint,
+  // because this compile's was not known yet. Store the real one now. A failure
+  // here costs only the repeat detection, since the attempt is already counted,
+  // so it is reported without failing a compile that otherwise passed.
+  const recorded = reserveAttempt(
+    { ...run, state: { ...run.state, attempts: decision.attempt - 1 } },
+    fingerprint
+  );
+  if (recorded) {
     console.error(
-      `This was attempt ${decision.attempt} of ${REPAIR_ATTEMPT_BUDGET}; the repair budget is now spent and the checker will refuse to compile this run again.`
+      `Could not record what this compile reported in ${run.file}: ${recorded}. The attempt is counted, but a repeated failure may not be recognized.`
+    );
+  }
+
+  if (status !== 0 && decision.attempt >= REPAIR_COMPILE_LIMIT) {
+    console.error(
+      `This was compile ${decision.attempt} of ${REPAIR_COMPILE_LIMIT}; the repair budget is now spent and the checker will refuse to compile this run again.`
     );
   }
   return status;

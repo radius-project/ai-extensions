@@ -4,6 +4,7 @@ import {
   CONCURRENT_EDIT_MESSAGE,
   CUSTOM_TYPE_STAGED_FILES,
   REPAIR_ATTEMPT_BUDGET,
+  REPAIR_COMPILE_LIMIT,
   REPEATED_FAILURE_MESSAGE,
   REQUIRED_STAGED_FILES,
   STAGING_DIR_PREFIX,
@@ -422,7 +423,7 @@ describe("parseRepairState", () => {
 });
 
 describe("evaluateRepairAttempt", () => {
-  it.each([0, 1, REPAIR_ATTEMPT_BUDGET - 1])(
+  it.each([0, 1, REPAIR_COMPILE_LIMIT - 1])(
     "allows a compile after %i attempts",
     (attempts) => {
       const decision = evaluateRepairAttempt({ attempts, fingerprint: null });
@@ -437,12 +438,12 @@ describe("evaluateRepairAttempt", () => {
 
   it("refuses the compile after the budget is spent", () => {
     const decision = evaluateRepairAttempt({
-      attempts: REPAIR_ATTEMPT_BUDGET,
+      attempts: REPAIR_COMPILE_LIMIT,
       fingerprint: "abc"
     });
     expect(decision.verdict).toBe("exhausted");
     expect(decision.allowed).toBe(false);
-    expect(decision.attempt).toBe(REPAIR_ATTEMPT_BUDGET + 1);
+    expect(decision.attempt).toBe(REPAIR_COMPILE_LIMIT + 1);
     expect(decision.reason).toContain(String(REPAIR_ATTEMPT_BUDGET));
     expect(decision.reason).toContain("no application definition was written");
   });
@@ -450,7 +451,7 @@ describe("evaluateRepairAttempt", () => {
   it("stays refused beyond the budget", () => {
     expect(
       evaluateRepairAttempt({
-        attempts: REPAIR_ATTEMPT_BUDGET + 5,
+        attempts: REPAIR_COMPILE_LIMIT + 5,
         fingerprint: null
       }).allowed
     ).toBe(false);
@@ -458,6 +459,18 @@ describe("evaluateRepairAttempt", () => {
 
   it("is the budget the deploy-failure repair loop uses", () => {
     expect(REPAIR_ATTEMPT_BUDGET).toBe(5);
+  });
+
+  // The budget counts repairs, so a run gets one more compile than that: the
+  // first compile is what reveals the problem rather than an attempt to fix it.
+  it("allows one compile beyond the repair budget", () => {
+    expect(REPAIR_COMPILE_LIMIT).toBe(REPAIR_ATTEMPT_BUDGET + 1);
+    expect(
+      evaluateRepairAttempt({
+        attempts: REPAIR_ATTEMPT_BUDGET,
+        fingerprint: null
+      }).allowed
+    ).toBe(true);
   });
 });
 

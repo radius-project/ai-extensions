@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, describe, it, test } from "vitest";
 import {
   REPAIR_ATTEMPT_BUDGET,
+  REPAIR_COMPILE_LIMIT,
   REPEATED_FAILURE_MESSAGE,
   STAGING_RUN_RECORD,
   evaluateRepairAttempt,
@@ -324,6 +325,20 @@ function runChecker(directory: string, env: NodeJS.ProcessEnv, appSource = "") {
     encoding: "utf8",
     env: { ...process.env, ...env }
   });
+}
+
+// Runs the checker against files that are already in place, for the cases that
+// make the directory unwritable: runChecker rewrites app.bicep on every call,
+// which the lock would block before the checker ever started.
+function rerunChecker(directory: string, env: NodeJS.ProcessEnv) {
+  return spawnSync(
+    process.execPath,
+    [checker, path.join(directory, "app.bicep")],
+    {
+      encoding: "utf8",
+      env: { ...process.env, ...env }
+    }
+  );
 }
 
 function sarif(results: unknown[]): string {
@@ -1132,6 +1147,31 @@ test("rejects a local module argument from captured Bicep output", () => {
 // installed plugin where the workspace packages do not exist, so these tests
 // also assert the two copies agree.
 
+// One SARIF diagnostic, at a given line, so a case can vary the rule, the text,
+// and the position independently.
+function diagnostic(ruleId: string, text: string, startLine: number) {
+  return {
+    level: "error",
+    ruleId,
+    message: { text },
+    locations: [
+      {
+        physicalLocation: {
+          artifactLocation: { uri: "file:///tmp/app.bicep" },
+          region: { startLine }
+        }
+      }
+    ]
+  };
+}
+
+// Compiler output holding a single Bicep diagnostic.
+function bcp(code: number, text: string, startLine: number): string {
+  return sarif([
+    diagnostic(`BCP${code.toString().padStart(3, "0")}`, text, startLine)
+  ]);
+}
+
 const failure = sarif([
   {
     level: "error",
@@ -1230,7 +1270,7 @@ describe("repair budget", () => {
   it("warns on the boundary attempt that the budget is now spent", () => {
     const directory = temporaryDirectory();
     stagedRun(directory, {
-      attempts: REPAIR_ATTEMPT_BUDGET - 1,
+      attempts: REPAIR_COMPILE_LIMIT - 1,
       fingerprint: null
     });
 
@@ -1244,7 +1284,7 @@ describe("repair budget", () => {
   it("refuses a compile past the budget without running Bicep at all", () => {
     const directory = temporaryDirectory();
     stagedRun(directory, {
-      attempts: REPAIR_ATTEMPT_BUDGET,
+      attempts: REPAIR_COMPILE_LIMIT,
       fingerprint: "abc"
     });
     // A compiler that would pass, so a status of 1 can only come from the
@@ -1266,7 +1306,7 @@ describe("repair budget", () => {
     assert.match(result.stderr, /no application definition was written/u);
     assert.equal(fs.existsSync(path.join(directory, "spawned")), false);
     assert.deepEqual(readRepair(directory), {
-      attempts: REPAIR_ATTEMPT_BUDGET,
+      attempts: REPAIR_COMPILE_LIMIT,
       fingerprint: "abc"
     });
   });
@@ -1306,10 +1346,10 @@ describe("repair budget", () => {
     stagedRun(directory);
 
     const statuses = Array.from(
-      { length: REPAIR_ATTEMPT_BUDGET },
+      { length: REPAIR_COMPILE_LIMIT },
       () => runChecker(directory, fakeBicep(directory, failure, 1)).status
     );
-    assert.deepEqual(statuses, Array(REPAIR_ATTEMPT_BUDGET).fill(1));
+    assert.deepEqual(statuses, Array(REPAIR_COMPILE_LIMIT).fill(1));
 
     const refused = runChecker(directory, fakeBicep(directory, failure, 1));
     assert.match(
@@ -1318,7 +1358,7 @@ describe("repair budget", () => {
     );
     assert.equal(
       (readRepair(directory) as { attempts: number }).attempts,
-      REPAIR_ATTEMPT_BUDGET
+      REPAIR_COMPILE_LIMIT
     );
   });
 
@@ -1340,24 +1380,26 @@ describe("repair budget", () => {
     ["malformed JSON", "{ not json"],
     ["a JSON array", "[]"],
     ["a JSON scalar", '"run"']
-  ])("compiles without a budget when the run record is %s", (_name, text) => {
+  ])("refuses to compile a staged run whose record is %s", (_name, text) => {
     const directory = temporaryDirectory();
     writeRunRecord(directory, text);
 
     const result = runChecker(directory, fakeBicep(directory, failure, 1));
 
+    // Fail closed: an unreadable counter is indistinguishable from a spent
+    // one, so compiling would hand the run an unlimited budget.
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /BCP057/u);
-    assert.doesNotMatch(result.stderr, /repair budget/u);
-    // The unusable record is left alone rather than overwritten, because it may
-    // still hold the baseline the publish check needs.
+    assert.match(result.stderr, /could not be recorded/u);
+    assert.doesNotMatch(result.stderr, /BCP057/u);
+    // The unusable record is left alone rather than overwritten, because it
+    // may still hold the baseline the publish check needs.
     assert.equal(
       fs.readFileSync(path.join(directory, STAGING_RUN_RECORD), "utf8"),
       text
     );
   });
 
-  it("ignores an unusable repair field and starts the count fresh", () => {
+  it("starts the count fresh when only the repair field is unusable", () => {
     const directory = temporaryDirectory();
     stagedRun(directory, { attempts: "many", fingerprint: 7 });
 
@@ -1388,22 +1430,61 @@ describe("repair budget", () => {
     process.getuid() !== 0;
 
   it.runIf(unwritable)(
-    "does not fail a passing compile when the attempt cannot be recorded",
+    "refuses to compile when the attempt cannot be recorded",
     () => {
       const directory = temporaryDirectory();
       stagedRun(directory);
-      fs.chmodSync(path.join(directory, STAGING_RUN_RECORD), 0o444);
+      // The directory is what must be unwritable: the attempt is staged through
+      // a temporary file next to the record, so a read-only record alone would
+      // still be replaceable by the rename. Everything the run needs is written
+      // before the lock goes on.
+      const env = fakeBicep(directory, sarif([]), 0);
+      fs.writeFileSync(path.join(directory, "app.bicep"), "");
+      fs.chmodSync(directory, 0o555);
 
-      const result = runChecker(directory, fakeBicep(directory, sarif([]), 0));
+      try {
+        const result = rerunChecker(directory, env);
 
-      assert.equal(result.status, 0);
-      assert.match(result.stderr, /repair budget is not being counted/u);
+        // A compile that cannot be counted is refused rather than run: letting
+        // it through leaves the budget stuck and the loop unbounded.
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /could not be recorded/u);
+      } finally {
+        fs.chmodSync(directory, 0o755);
+      }
+    }
+  );
+
+  it.runIf(unwritable)(
+    "keeps refusing rather than allowing an uncounted loop",
+    () => {
+      const directory = temporaryDirectory();
+      stagedRun(directory);
+      const env = fakeBicep(directory, failure, 1);
+      fs.writeFileSync(path.join(directory, "app.bicep"), "");
+      fs.chmodSync(directory, 0o555);
+
+      try {
+        // Before this was fail-closed, a record that could not be updated left
+        // the count frozen, so every later compile was allowed forever. Run
+        // more times than the budget allows, so a frozen counter would show up
+        // as a compile that should have been refused.
+        const attempts = REPAIR_COMPILE_LIMIT + 2;
+        const statuses = Array.from(
+          { length: attempts },
+          () => rerunChecker(directory, env).status
+        );
+
+        assert.deepEqual(statuses, Array(attempts).fill(1));
+      } finally {
+        fs.chmodSync(directory, 0o755);
+      }
     }
   );
 
   it("counts a run that never leaves a staging directory separately", () => {
     const first = temporaryDirectory();
-    stagedRun(first, { attempts: REPAIR_ATTEMPT_BUDGET, fingerprint: "abc" });
+    stagedRun(first, { attempts: REPAIR_COMPILE_LIMIT, fingerprint: "abc" });
     assert.equal(runChecker(first, fakeBicep(first, failure, 1)).status, 1);
 
     // A different run, with its own record: the previous run's spent budget
@@ -1454,45 +1535,76 @@ describe("agreement with the core repair rules", () => {
     }
   );
 
-  // Repeat detection compares two pure implementations over the same compiler
-  // output, so the matrix is checked without spawning anything: core's
-  // fingerprint of what the checker printed, against the fingerprint the
-  // checker itself recorded. One end-to-end case below proves the script is
-  // actually wired to its own copy.
+  // Each case is driven through the checker, so the script's own copy of the
+  // fingerprinting is what produces the recorded value and core only supplies
+  // the verdict to compare against. Calling core for both sides would leave the
+  // duplicated logic in validate-bicep.mjs untested by the very test that
+  // exists to pin it.
   it.each([
     {
       name: "an identical failure",
-      first: "app.bicep:12:5: error BCP057: missing",
-      second: "app.bicep:12:5: error BCP057: missing",
+      first: bcp(57, "missing", 12),
+      second: bcp(57, "missing", 12),
       repeated: true
     },
     {
       name: "the same failure at a shifted line",
-      first: "app.bicep:12:5: error BCP057: missing",
-      second: "app.bicep:48:9: error BCP057: missing",
+      first: bcp(57, "missing", 12),
+      second: bcp(57, "missing", 48),
       repeated: true
     },
     {
       name: "the same failures in a different order",
-      first: "app.bicep:1:1: error one\napp.bicep:2:1: error two",
-      second: "app.bicep:9:1: error two\napp.bicep:3:1: error one",
+      first: sarif([
+        diagnostic("BCP057", "first problem", 1),
+        diagnostic("BCP062", "second problem", 2)
+      ]),
+      second: sarif([
+        diagnostic("BCP062", "second problem", 9),
+        diagnostic("BCP057", "first problem", 3)
+      ]),
       repeated: true
     },
     {
       name: "a different failure",
-      first: "app.bicep:12:5: error BCP057: missing",
-      second: "app.bicep:12:5: error BCP062: invalid",
+      first: bcp(57, "missing", 12),
+      second: bcp(62, "invalid", 12),
       repeated: false
     }
   ])("agrees on whether $name is a repeat", ({ first, second, repeated }) => {
-    const recorded = parseRepairState({
-      attempts: 1,
-      fingerprint: fingerprintCompilerOutput(first)
-    });
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+
+    runChecker(directory, fakeBicep(directory, first, 1));
+    const afterFirst = parseRepairState(readRepair(directory));
+    runChecker(directory, fakeBicep(directory, second, 1));
+    const afterSecond = parseRepairState(readRepair(directory));
+
+    // The script recorded both fingerprints; core decides whether they mean
+    // the same failure. Agreement is that verdict matching what the script
+    // told the agent.
+    assert.equal(
+      isRepeatedFailure(afterFirst, afterSecond.fingerprint),
+      repeated
+    );
+  });
+
+  // The script's fingerprint of a given compiler output must be the value core
+  // would compute from the same text, or the two could agree on every pair
+  // above while disagreeing about what a fingerprint is.
+  it("records the fingerprint core would compute", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, bcp(57, "missing", 12), 1)
+    );
+    const recorded = parseRepairState(readRepair(directory));
 
     assert.equal(
-      isRepeatedFailure(recorded, fingerprintCompilerOutput(second)),
-      repeated
+      recorded.fingerprint,
+      fingerprintCompilerOutput(result.stderr)
     );
   });
 

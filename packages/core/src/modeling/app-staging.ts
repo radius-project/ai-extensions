@@ -359,12 +359,20 @@ function parseStagedOriginHash(text: unknown): string | null {
 // exactly one modeling run: a counter that outlived the run would refuse a
 // legitimate fresh run because of a stuck one last week.
 
-// Compiles allowed per modeling run. Matched to DEPLOY_REPAIR_ATTEMPT_CAP, the
-// budget the deploy-failure repair loop uses, so the product has one answer to
+// Repairs allowed per modeling run, on top of the run's first compile. The
+// first compile is what reveals the problem, so charging the budget for it
+// would leave one fewer chance to fix it than the number says.
+//
+// Deliberately the same quantity as DEPLOY_REPAIR_ATTEMPT_CAP, which allows
+// this many repair-and-redeploy cycles after the initial failed deploy: both
+// count repair cycles after the first failure, so the product has one answer to
 // "how many times do we retry a repair on app.bicep". Not to be confused with
 // DEPLOY_HANDOFF_MAX_ATTEMPTS, which counts deliveries of the handoff message
 // rather than repairs.
 export const REPAIR_ATTEMPT_BUDGET = 5;
+
+// Compiles a run may perform: the first, plus one per allowed repair.
+export const REPAIR_COMPILE_LIMIT = REPAIR_ATTEMPT_BUDGET + 1;
 
 // What the checker has recorded about this run's compiles.
 export interface RepairState {
@@ -426,7 +434,7 @@ export function parseRepairState(value: unknown): RepairState {
 // Whether the checker may compile again, given what this run has already done.
 export function evaluateRepairAttempt(state: RepairState): RepairDecision {
   const attempt = state.attempts + 1;
-  if (state.attempts >= REPAIR_ATTEMPT_BUDGET) {
+  if (state.attempts >= REPAIR_COMPILE_LIMIT) {
     return {
       verdict: "exhausted",
       allowed: false,
