@@ -1,10 +1,12 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { computeGraphDiff } from "@radius-project/core";
+import { RadProcessError } from "@radius-project/adapter-shared";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createGraphsPlanningWritesRoutes } from "../../../src/server/routes/graphs-planning-writes.js";
 import { createGraphPlanningWorkflows } from "../../../src/server/routes/graph-workflows.js";
+import { GRAPH_MODELING_FAILURE_MESSAGE } from "../../../src/graph-progress-contract.js";
 import type {
   AppBicepSelection,
   GraphPipeline
@@ -26,15 +28,19 @@ import type { CanvasServerContainer } from "../../../src/server/create-canvas-se
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
 
 let container: CanvasServerContainer | undefined;
+// Everything the workflows sent to the server log instead of the canvas.
+let loggedErrors: string[] = [];
 
 afterEach(async () => {
   await container?.stopAll();
   container = undefined;
+  loggedErrors = [];
 });
 
 interface PipelineScript {
   selections: Record<string, AppBicepSelection>;
   compiled: Record<string, CanvasGraphResource[]>;
+  compileThrows?: unknown;
   branchPaths?: string[];
   afterCompile?: () => void;
 }
@@ -83,6 +89,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     bicepPathOf: (selection) => selection.bicepPath || ".radius/app.bicep",
     stageArtifacts: () => Promise.resolve({ dir: "", remote: false }),
     compileResources: ({ selection }) => {
+      if (active.compileThrows) return Promise.reject(active.compileThrows);
       const compiled = scripted(
         active.compiled,
         selection.branch,
@@ -105,6 +112,13 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         readInstanceEntry: () => (entryMissing ? undefined : { state }),
         pipeline,
         triggerAppBicepHandoff: () => {},
+        triggerGraphRepairHandoff: () => ({
+          attempt: 1,
+          maxAttempts: 3,
+          repairing: true,
+          repairExhausted: false
+        }),
+        clearGraphRepairAttempt: () => {},
         listBranchPaths: () => Promise.resolve(active.branchPaths ?? []),
         prepareSourceRefResources,
         setSourceRefResources,
@@ -134,6 +148,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         optionalString: (value) => (typeof value === "string" ? value : ""),
         errorMessage: (error) =>
           error instanceof Error ? error.message : String(error),
+        logError: (message) => {
+          loggedErrors.push(message);
+        },
         now: () => nowMs
       })
     })
@@ -253,6 +270,41 @@ describe("graphs-planning writes real-loopback HIT", () => {
         "JSON"
       );
     }
+    expect(loggedErrors).toEqual([]);
+  });
+
+  it("keeps app.bicep validation diagnostics out of the graph response", async () => {
+    const harness = start({
+      selections: { main: selectionOf("main", "resource app = {}") },
+      compileThrows: new Error("rad app graph failed", {
+        cause: new RadProcessError(
+          "rad exited with code 1",
+          "Error BCP035: missing required property",
+          ""
+        )
+      })
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app"}'
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: GRAPH_MODELING_FAILURE_MESSAGE,
+      modelingFailed: true,
+      attempt: 1,
+      maxAttempts: 3,
+      repairing: true,
+      repairExhausted: false
+    });
+    expect(harness.state.graphLoaded).toBeUndefined();
+    expect(loggedErrors).toEqual([
+      "[radius graph] modeling failed for octo/app@main: Error BCP035: missing required property"
+    ]);
   });
 
   it("plans the graph through the recipe pack over a real socket", async () => {

@@ -214,6 +214,7 @@ export interface CanvasState {
   diffHead?: string;
   diffTargetRepo?: string;
   diffError?: string;
+  diffModelingFailed?: boolean;
   branches?: string[];
   branchShas?: Record<string, string>;
   contextRepo?: string;
@@ -254,6 +255,15 @@ export interface CanvasState {
   graphBuildGeneration?: number;
   progressMessages?: string[];
   appBicepHandoffKey?: string;
+  graphRepairAttempts?: Partial<
+    Record<
+      GraphProgressView,
+      {
+        contextKey: string;
+        attempts: number;
+      }
+    >
+  >;
   deployEnvName?: string;
   deployAppName?: string;
   deployDispatchedAt?: number;

@@ -173,6 +173,9 @@ const KNOWN_STATE_FIELDS: readonly (keyof CanvasState)[] = [
   "deployingBranch",
   "plannedRepo",
   "plannedBranch",
+  "plannedEnvironment",
+  "plannedProvider",
+  "deployProvider",
   "graphTargetRepo",
   "graphBranch",
   "workspaceRepo",
@@ -1136,7 +1139,7 @@ describe("graphs-planning read routes (SU-09)", () => {
         await run("/api/deployed-graph", handleDeployedGraph, deps)
       );
       expect(payload.resources[0].deployStatus).toBe("in_progress");
-      expect(payload.resources[0].outputResources).toEqual([]);
+      expect(payload.resources[0].outputResources ?? []).toEqual([]);
       expect(payload.updatedAt).toBeNull();
     }
   );
@@ -1496,6 +1499,184 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(payload.resources).toHaveLength(1);
     expect(payload.resources[0].connections).toEqual(modeled.connections);
     expect(payload.resources[0].outputResources).toEqual(outputs);
+  });
+
+  it("preserves matching planned provider types when deployed metadata is sparse", async () => {
+    const calls: Calls = { log: [] };
+    const modeled = {
+      id: "mysql",
+      name: "mysql",
+      type: "Radius.Data/mySqlDatabases",
+      connections: [{ id: "api", direction: "Inbound" }]
+    };
+    const plannedOutputs = [
+      {
+        id: "planned-server",
+        name: "server",
+        type: "Microsoft.DBforMySQL/flexibleServers"
+      }
+    ];
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        graphTargetRepo: CONTEXT_REPO,
+        graphBranch: "main",
+        graphResources: [modeled],
+        plannedRepo: CONTEXT_REPO,
+        plannedBranch: "main",
+        plannedEnvironment: DEPLOY_ENV,
+        plannedProvider: "azure",
+        deployProvider: "azure",
+        plannedResources: [{ ...modeled, outputResources: plannedOutputs }]
+      },
+      reader: {
+        graph: {
+          graph: {
+            resources: [{ ...modeled, outputResources: [] }]
+          },
+          status: "ok"
+        }
+      }
+    });
+
+    const payload = payloadOf(
+      await run(
+        `/api/deployed-graph?environment=${DEPLOY_ENV}`,
+        handleDeployedGraph,
+        deps
+      )
+    );
+    expect(payload.resources).toHaveLength(1);
+    expect(payload.resources[0].connections).toEqual(modeled.connections);
+    expect(payload.resources[0].outputResources).toEqual(plannedOutputs);
+    expect(payload.resources[0].deployStatus).toBe("pending");
+  });
+
+  it("does not borrow planned outputs after a failed deployment", async () => {
+    const calls: Calls = { log: [] };
+    const modeled = {
+      id: "mysql",
+      name: "mysql",
+      type: "Radius.Data/mySqlDatabases"
+    };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        graphTargetRepo: CONTEXT_REPO,
+        graphBranch: "main",
+        graphResources: [modeled],
+        plannedRepo: CONTEXT_REPO,
+        plannedBranch: "main",
+        plannedEnvironment: DEPLOY_ENV,
+        plannedProvider: "azure",
+        deployProvider: "azure",
+        plannedResources: [
+          {
+            ...modeled,
+            outputResources: [
+              {
+                id: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/missing",
+                type: "Microsoft.DBforMySQL/flexibleServers",
+                portalUrl: "https://portal.azure.com/#@tenant/resource/missing"
+              }
+            ]
+          }
+        ],
+        deployStatus: "failed",
+        deployRunId: 7
+      },
+      reader: {
+        graph: {
+          graph: { resources: [{ ...modeled, outputResources: [] }] },
+          status: "ok"
+        }
+      }
+    });
+
+    const payload = payloadOf(
+      await run(
+        `/api/deployed-graph?environment=${DEPLOY_ENV}`,
+        handleDeployedGraph,
+        deps
+      )
+    );
+
+    expect(payload.resources[0].outputResources).toEqual([]);
+    expect(payload.resources[0].deployStatus).toBe("failed");
+  });
+
+  it("does not use provider metadata planned for another environment", async () => {
+    const calls: Calls = { log: [] };
+    const modeled = {
+      id: "mysql",
+      name: "mysql",
+      type: "Radius.Data/mySqlDatabases"
+    };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        graphTargetRepo: CONTEXT_REPO,
+        graphBranch: "main",
+        graphResources: [modeled],
+        plannedRepo: CONTEXT_REPO,
+        plannedBranch: "main",
+        plannedEnvironment: OTHER_ENV,
+        plannedProvider: "azure",
+        deployProvider: "azure",
+        plannedResources: [
+          {
+            ...modeled,
+            outputResources: [{ type: "Microsoft.DBforMySQL/flexibleServers" }]
+          }
+        ]
+      }
+    });
+
+    const payload = payloadOf(
+      await run(
+        `/api/deployed-graph?environment=${DEPLOY_ENV}`,
+        handleDeployedGraph,
+        deps
+      )
+    );
+    expect(payload.resources[0].outputResources).toEqual([]);
+  });
+
+  it("does not use planned metadata from another provider", async () => {
+    const calls: Calls = { log: [] };
+    const modeled = {
+      id: "mysql",
+      name: "mysql",
+      type: "Radius.Data/mySqlDatabases"
+    };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        graphTargetRepo: CONTEXT_REPO,
+        graphBranch: "main",
+        graphResources: [modeled],
+        plannedRepo: CONTEXT_REPO,
+        plannedBranch: "main",
+        plannedEnvironment: DEPLOY_ENV,
+        plannedProvider: "azure",
+        deployProvider: "aws",
+        plannedResources: [
+          {
+            ...modeled,
+            outputResources: [{ type: "Microsoft.DBforMySQL/flexibleServers" }]
+          }
+        ]
+      }
+    });
+
+    const payload = payloadOf(
+      await run(
+        `/api/deployed-graph?environment=${DEPLOY_ENV}`,
+        handleDeployedGraph,
+        deps
+      )
+    );
+    expect(payload.resources[0].outputResources).toEqual([]);
   });
 
   it("builds modeled topology instead of reading published graph resources", async () => {

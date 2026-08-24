@@ -379,9 +379,6 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   .rad-node__head { display: flex; align-items: center; gap: 10px; }
   .rad-node__icon { width: 40px; height: 40px; flex: none; object-fit: contain; }
   .rad-node__badge { position: absolute; right: 12px; top: 12px; width: 22px; height: 22px; object-fit: contain; pointer-events: none; }
-  .rad-node__badge--progress { animation: rad-node-spin 1s linear infinite; }
-  @keyframes rad-node-spin { to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) { .rad-node__badge--progress { animation: none; } }
   .rad-node__title { font-weight: 600; font-size: 16px; color: var(--rad-text); }
   .rad-node__type {
     width: 100%; min-width: 0; overflow: hidden; white-space: nowrap;
@@ -403,6 +400,10 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     min-width: 24px; min-height: 24px;
   }
   .rad-node__dots:hover { background: var(--rad-bg-subtle); color: var(--rad-text); }
+  .rad-node__portal {
+    display: block; color: inherit; text-decoration: none; cursor: pointer;
+  }
+  .rad-node__portal:focus-visible { outline: 2px solid var(--rad-link); outline-offset: 2px; }
 
   .field { margin: 8px 0; }
   .field-label { font-weight: 500; color: var(--rad-text-tertiary); font-size: 12px; }

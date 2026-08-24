@@ -123,6 +123,12 @@ describe("pageShell", () => {
     expect(typeStyles).toContain("white-space: nowrap");
   });
 
+  it("shows a pointer over a deployed node portal link", () => {
+    const html = pageShell("My Title", "<p>hello</p>");
+    const portalStyles = html.match(/\.rad-node__portal\s*\{([^}]*)\}/)?.[1];
+    expect(portalStyles).toContain("cursor: pointer");
+  });
+
   it("derives graph line colours from text/background, not host border tokens", () => {
     const html = pageShell("My Title", "<p>hello</p>");
     // Primer's --border-color-muted is FAINTER than --border-color-default, so

@@ -191,7 +191,11 @@ describe("detail rows", () => {
         portalUrl: "https://portal.test/live",
         cloudId: "/subscriptions/s/rg/one",
         cloudResources: JSON.stringify([
-          { name: "two", id: "/subscriptions/s/rg/two" },
+          {
+            name: "two",
+            id: "/subscriptions/s/rg/two",
+            portalUrl: "https://portal.azure.com/#@tenant/resource/exact"
+          },
           { type: "Microsoft.Sql/servers", id: "/subscriptions/s/rg/three" },
           { type: "/", id: "/subscriptions/s/rg/unnamed" },
           { id: "/subscriptions/s/rg/four" },
@@ -204,6 +208,9 @@ describe("detail rows", () => {
     expect(joined).toContain('href="https://portal.test/live"');
     expect(joined).toContain(azurePortalUrl("/subscriptions/s/rg/one"));
     expect(joined).toContain("two in Azure portal");
+    expect(joined).toContain(
+      'href="https://portal.azure.com/#@tenant/resource/exact"'
+    );
     expect(joined).toContain("servers in Azure portal");
     expect(joined).toContain("resource in Azure portal");
   });
@@ -218,11 +225,22 @@ describe("detail rows", () => {
       settings(),
       node({
         portalUrl: "javascript:alert(1)",
-        cloudResources: JSON.stringify([{ name: "bad", id: "relative" }])
+        cloudResources: JSON.stringify([
+          { name: "bad", id: "relative" },
+          {
+            name: "unsafe",
+            id: "/subscriptions/s/rg/unsafe",
+            portalUrl: "javascript:alert(1)"
+          }
+        ])
       })
     );
     expect(rows.join("")).not.toContain("javascript:");
     expect(rows.join("")).not.toContain("bad in Azure portal");
+    expect(rows.join("")).not.toContain("javascript:");
+    expect(rows.join("")).toContain(
+      azurePortalUrl("/subscriptions/s/rg/unsafe")
+    );
     expect(
       buildDetailRows(
         settings(),

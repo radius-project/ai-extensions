@@ -252,6 +252,67 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.clock.pending).toBe(0);
   });
 
+  it("does not show a deploying legend for a never-deployed graph", async () => {
+    const { browser } = fixture();
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          resources: [{ id: "app/web", deployStatus: "pending" }],
+          mode: "greyed",
+          branch: "feature"
+        })
+    );
+    const render = vi.fn();
+
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    expect(render).toHaveBeenCalledWith(
+      "graph-container",
+      expect.any(Array),
+      expect.objectContaining({ deployMode: true, showLegend: false })
+    );
+  });
+
+  it("remounts when a live graph becomes terminal so legend settings follow the mode", async () => {
+    const { browser } = fixture();
+    let mode = "live";
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          resources: [{ id: "app/web", deployStatus: "success" }],
+          mode,
+          branch: "feature"
+        })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () =>
+      jsonResponse({ status: "complete", logsNew: [], logTotal: 0 })
+    );
+    const update = vi.fn();
+    const destroy = vi.fn();
+    const render = vi.fn(() => ({ update, destroy }));
+
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+    expect(render).toHaveBeenCalledTimes(1);
+
+    mode = "terminal";
+    browser.clock.tick(DEPLOYED_GRAPH_POLL_MS);
+    await flushPromises();
+
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(update).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledTimes(2);
+  });
+
   it("polls only a live graph and pauses while hidden", async () => {
     const { browser } = fixture();
     const url =
