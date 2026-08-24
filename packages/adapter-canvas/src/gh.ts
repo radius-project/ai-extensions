@@ -478,7 +478,8 @@ function ensurePackageCredential(): Promise<GhPackageCredentialResolution> {
         };
       }
     }
-    const injected = getInjectedGhToken();
+    const injected =
+      snapshot.tokenAcct?.login === login ? getInjectedGhToken() : "";
     if (injected) {
       return {
         ok: true,

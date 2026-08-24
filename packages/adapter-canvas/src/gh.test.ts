@@ -1347,6 +1347,21 @@ describe.sequential("getGhPackageCredentials", () => {
     expect(tokenLookup?.[2].timeout).toBe(8000);
   });
 
+  it("does not relabel another account's injected token when keyring lookup fails", async () => {
+    const { getGhPackageCredentials } = await loadGh("linux", {
+      token: "injected-token-for-tokuser",
+      withToken: STATUS.tokenNoWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      userTokenErrors: {
+        keyuser: new Error("keyring unavailable")
+      }
+    });
+
+    await expect(getGhPackageCredentials()).rejects.toThrow(
+      "Could not obtain a GitHub token for @keyuser"
+    );
+  });
+
   it("ignores a whitespace-only GH_TOKEN when GITHUB_TOKEN is usable", async () => {
     const { getGhPackageCredentials } = await loadGh("linux", {
       token: "   ",

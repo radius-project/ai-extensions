@@ -372,6 +372,30 @@ describe("runWorkflowRollback", () => {
     expect(journal.deleted).toEqual([]);
   });
 
+  it("blocks when it cannot determine whether the setup pull request merged", async () => {
+    const { ports: p, journal } = ports({
+      pullRequest: { status: "unknown", detail: "HTTP 500" }
+    });
+
+    const outcome = await rollback(p, {
+      commit: commit({
+        mode: "pull_request",
+        branch: "radius/setup",
+        baseBranch: "main",
+        pullRequestUrl: "https://github.com/contoso/store/pull/7"
+      }),
+      files: [file({ mode: "pull_request", branch: "radius/setup" })]
+    });
+
+    expect(outcome.blocked).toBe(true);
+    expect(outcome.results[0]).toMatchObject({
+      outcome: "warning",
+      detail: expect.stringContaining("could not determine")
+    });
+    expect(journal.deleted).toEqual([]);
+    expect(journal.branches).toEqual([]);
+  });
+
   it("closes an open setup pull request when mixed-branch files require individual reverts", async () => {
     const setupBranch = "radius/setup";
     const { ports: p, journal } = ports({

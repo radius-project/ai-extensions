@@ -119,10 +119,8 @@ export interface WorkflowRollbackInput {
  * Deleting the branch is only correct while every recorded file lives on it and
  * the pull request has not landed. A merged pull request means the workflows
  * are installed on a branch the repository uses, so deleting the setup branch
- * would remove nothing that matters; an unreadable pull request is treated the
- * same way, because reverting file by file verifies and removes exactly the
- * artifacts the ledger names instead of discarding a branch Radius cannot
- * describe.
+ * would remove nothing that matters. The caller rejects an unreadable pull
+ * request before selecting either mutation mode.
  */
 export function selectWorkflowRollbackMode(
   commit: WorkflowRollbackCommitState,
@@ -232,6 +230,15 @@ export async function runWorkflowRollback(
         pullRequestUrl: input.commit.pullRequestUrl
       })
     : null;
+  if (pullRequest?.status === "unknown") {
+    const detail = `Radius could not determine whether the setup pull request merged, so it left every workflow and dependent resource in place. ${pullRequest.detail}`;
+    accumulated.warnings.push(detail);
+    accumulated.steps.push(`⚠️ ${detail}`);
+    for (const file of input.files) {
+      accumulated.results.push(result(input.attempt, file, "warning", detail));
+    }
+    return { ...accumulated, blocked: true };
+  }
   const merged = pullRequest?.status === "merged";
   const mode = selectWorkflowRollbackMode(
     input.commit,

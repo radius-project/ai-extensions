@@ -3085,8 +3085,8 @@ describe("retry eligibility", () => {
       {
         artifactType: "azure_app",
         target: "radius (app-1)",
-        identity: null,
-        key: "azure_app#radius (app-1)",
+        identity: "app-1",
+        key: "azure_app#app-1",
         detail: "Azure CLI returned 429."
       }
     ]);

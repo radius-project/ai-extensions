@@ -2610,19 +2610,27 @@ export function canExitSetup(op: any): any {
   };
 }
 
-function isProvenOwnedCleanupTarget(ledger: any, result: any): boolean {
+function findProvenOwnedCleanupTarget(
+  ledger: any,
+  result: any
+): LedgerArtifactEntry | null {
   const key = cleanupTargetKey(result);
-  return ledgerArtifacts(ledger, ["created"]).some(
-    (entry) =>
-      entry.kind === result.artifactType &&
-      // The ledger can hold several workflow files, so a warning about one is
-      // not proof of ownership of another; every other kind is claimed whole.
-      (entry.kind !== "workflow_file" ||
-        cleanupTargetKey({
-          artifactType: "workflow_file",
-          identity: cleanupArtifactIdentity("workflow_file", entry.artifact),
-          target: entry.target
-        }) === key)
+  const hasRecordedIdentity = Boolean(normalizeIdentityPart(result?.identity));
+  const singularKinds = new Set([
+    "azure_app",
+    "service_principal",
+    "github_environment"
+  ]);
+  return (
+    ledgerArtifacts(ledger, ["created"]).find((entry) => {
+      if (entry.kind !== result.artifactType) return false;
+      if (!hasRecordedIdentity && singularKinds.has(entry.kind)) return true;
+      return artifactMatchKeys(
+        entry.kind,
+        cleanupArtifactIdentity(entry.kind, entry.artifact),
+        [entry.target]
+      ).has(key);
+    }) ?? null
   );
 }
 
@@ -2639,20 +2647,28 @@ export function unresolvedCleanupTargets(op: any): any[] {
   if (!ledger) return [];
   return cleanupAttemptResults(ledger)
     .filter((entry: any) => entry.outcome === "warning")
-    .filter((entry: any) => isProvenOwnedCleanupTarget(ledger, entry))
-    .map((entry: any) => ({
-      artifactType: entry.artifactType,
-      target: String(entry.target || ""),
-      identity:
-        entry.identity == null || entry.identity === "" ?
-          null
-        : String(entry.identity),
-      key: cleanupTargetKey(entry),
-      detail:
-        entry.detail == null || entry.detail === "" ?
-          null
-        : String(entry.detail)
-    }));
+    .map((entry: any) => {
+      const artifact = findProvenOwnedCleanupTarget(ledger, entry);
+      if (!artifact) return null;
+      const identity = cleanupArtifactIdentity(
+        artifact.kind,
+        artifact.artifact
+      );
+      return {
+        artifactType: entry.artifactType,
+        target: String(entry.target || ""),
+        identity,
+        key: cleanupTargetKey({
+          artifactType: entry.artifactType,
+          identity
+        }),
+        detail:
+          entry.detail == null || entry.detail === "" ?
+            null
+          : String(entry.detail)
+      };
+    })
+    .filter((entry: any) => entry !== null);
 }
 
 export function canRetryCleanup(op: any): any {
