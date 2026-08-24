@@ -285,6 +285,11 @@ export type ProviderMutationRecord = {
   preparedAt: string;
   updatedAt: string;
   providerIdempotencyKey: string | null;
+  // The provider's own immutable id for the resource this mutation wrote,
+  // captured in the same write that settled the mutation. A restart that finds
+  // a confirmed entry compares this against what the name answers for now, so
+  // a resource deleted and recreated under that name is never adopted.
+  providerId?: string | null;
   intent?: Record<string, string | number | boolean | null>;
   // How many times reconciliation has failed to read this mutation's provider
   // state. Bounded so an unreadable resource becomes a named hand-off instead
@@ -354,6 +359,7 @@ function readProviderRecovery(value: any): ProviderRecoveryRecord {
             ) ?
               entry.providerIdempotencyKey
             : null,
+          providerId: optionalIdentityString(entry.providerId),
           ...(entry.intent && typeof entry.intent === "object" ?
             {
               intent: Object.fromEntries(
@@ -468,7 +474,8 @@ export function settleProviderMutation(
   op: any,
   mutationId: string,
   status: ProviderMutationStatus,
-  evidence: string | null = null
+  evidence: string | null = null,
+  providerId: string | null = null
 ): boolean {
   if (!PROVIDER_MUTATION_STATUSES.includes(status)) return false;
   const recovery = readProviderRecovery(op?.providerRecovery);
@@ -479,6 +486,16 @@ export function settleProviderMutation(
   if (!mutation) return false;
   mutation.status = status;
   mutation.updatedAt = nowIso();
+  // Written here rather than by a follow-up call, so a crash can never land
+  // between "the provider acknowledged this" and "here is what it made".
+  const settledProviderId = optionalIdentityString(providerId);
+  if (settledProviderId) mutation.providerId = settledProviderId;
+  else if (status !== "confirmed") {
+    // Any other status says this mutation did not leave that resource behind,
+    // so the id it once carried is not evidence for anything a later pass
+    // would match against.
+    mutation.providerId = null;
+  }
   mutation.evidence =
     typeof evidence === "string" && evidence.trim() ? evidence.trim() : null;
   if (rollbackPending) {

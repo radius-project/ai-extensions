@@ -145,6 +145,71 @@ describe("provider mutation recovery journal", () => {
     expect(unresolvedProviderMutations(restored)).toHaveLength(1);
   });
 
+  describe("the id a confirmed mutation recorded", () => {
+    function settled(status: string, providerId: string | null) {
+      const op = createOperation({
+        operationId: "op_mutation_id",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_environment.put",
+        target: "octo/app:prod"
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        status as never,
+        null,
+        providerId
+      );
+      return op;
+    }
+
+    const entry = (op: any) => op.providerRecovery.mutations[0];
+
+    it("survives a save and reload", () => {
+      const restored = fromPersistedOperation(
+        toPersistedOperation(settled("confirmed", "1234567"))
+      );
+
+      expect(entry(restored).providerId).toBe("1234567");
+    });
+
+    it("reads a mutation written before ids existed as having none", () => {
+      const persisted = toPersistedOperation(
+        settled("confirmed", "1234567")
+      ) as any;
+      delete persisted.providerRecovery.mutations[0].providerId;
+
+      expect(entry(fromPersistedOperation(persisted)).providerId).toBeNull();
+    });
+
+    it("is cleared when a later settle says the mutation left nothing behind", () => {
+      const op = settled("confirmed", "1234567");
+
+      settleProviderMutation(
+        op,
+        entry(op).mutationId,
+        "not_applied",
+        "the provider rejected it"
+      );
+
+      // A stale id here would let a later pass match a resource this mutation
+      // never made.
+      expect(entry(op).providerId).toBeNull();
+    });
+
+    it("is kept when a confirmed settle carries no new id", () => {
+      const op = settled("confirmed", "1234567");
+
+      settleProviderMutation(op, entry(op).mutationId, "confirmed", "reread");
+
+      expect(entry(op).providerId).toBe("1234567");
+    });
+  });
+
   describe("the provider's own id for a name the customer can reuse", () => {
     function claimed() {
       const op = createOperation({

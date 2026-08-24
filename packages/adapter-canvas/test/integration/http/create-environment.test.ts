@@ -100,6 +100,9 @@ interface Harness {
   }>;
   failures: Array<Record<string, unknown>>;
   cleanupErrors: string[];
+  /** Whether each finalizeSetupFailure was handed a pinned environment reader. */
+  cleanupReaders: boolean[];
+  cleanupReads: Array<{ code: number; stdout: string; stderr: string }>;
 }
 
 const TEMP_BODY_PATH = "/tmp/create-environment-body.json";
@@ -185,6 +188,9 @@ function start(script: Script = {}): Harness {
   const committedFiles: Harness["committedFiles"] = [];
   const failures: Array<Record<string, unknown>> = [];
   const cleanupErrors: string[] = [];
+  const cleanupReaders: boolean[] = [];
+  const cleanupReads: Array<{ code: number; stdout: string; stderr: string }> =
+    [];
   let persistCalls = 0;
 
   // `stages` and `steps` are present because the real stop guard closes the
@@ -368,6 +374,18 @@ function start(script: Script = {}): Harness {
     finalizeSetupFailure: async (_operation, input) => {
       failures.push(input);
       journal.push(`finalizeSetupFailure:${String(input.code)}`);
+      // The cleanup's identity gate cannot run without a reader, and a reader
+      // that is not the operation's own account answers for the wrong login.
+      cleanupReaders.push(typeof input.readEnvironment === "function");
+      const readEnvironment = input.readEnvironment;
+      if (
+        script.exerciseCleanupDelete &&
+        typeof readEnvironment === "function"
+      ) {
+        cleanupReads.push(
+          await readEnvironment(["api", "/repos/octo/app/environments/dev"])
+        );
+      }
       const runDeleteEnvironment = input.runDeleteEnvironment;
       if (
         script.exerciseCleanupDelete &&
@@ -632,7 +650,9 @@ function start(script: Script = {}): Harness {
     commitStates,
     committedFiles,
     failures,
-    cleanupErrors
+    cleanupErrors,
+    cleanupReaders,
+    cleanupReads
   };
 }
 
@@ -813,8 +833,90 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
       expect(harness.ghCalls).toContain(
         "api --method DELETE /repos/octo/app/environments/dev"
       );
+      // Without a reader the cleanup's identity gate has nothing to compare
+      // the recorded id against and refuses to delete at all.
+      expect(harness.cleanupReaders).toEqual([true]);
     }
   );
+
+  it("reads the environment back through the account the operation selected", async () => {
+    const harness = start({
+      repoAdminRefusal: "You need admin on octo/app.",
+      preparedEnvironment: {
+        requestedName: "dev",
+        canonicalName: "dev",
+        state: "created_candidate"
+      },
+      exerciseCleanupDelete: true,
+      gh: [
+        {
+          match: /^api \/repos\/octo\/app\/environments\/dev$/,
+          result: {
+            code: 0,
+            stdout: JSON.stringify({ id: 1234567, name: "dev" })
+          }
+        },
+        {
+          match: /^api --method DELETE \/repos\/octo\/app\/environments\/dev$/,
+          result: { code: "0" }
+        }
+      ]
+    });
+
+    await post({
+      repo: "octo/app",
+      environment: "dev",
+      operationEnvironment: "dev",
+      operationId: "op-http"
+    });
+
+    // The read went through the selected executor, so it answers for the
+    // account that made the environment rather than whichever login the
+    // ambient CLI happens to hold.
+    expect(harness.ghCalls).toContain("api /repos/octo/app/environments/dev");
+    expect(harness.cleanupReads).toEqual([
+      {
+        code: 0,
+        stdout: JSON.stringify({ id: 1234567, name: "dev" }),
+        stderr: ""
+      }
+    ]);
+  });
+
+  it("hands an access failure to the cleanup rather than reporting absence", async () => {
+    const harness = start({
+      repoAdminRefusal: "You need admin on octo/app.",
+      preparedEnvironment: {
+        requestedName: "dev",
+        canonicalName: "dev",
+        state: "created_candidate"
+      },
+      exerciseCleanupDelete: true,
+      gh: [
+        {
+          match: /^api \/repos\/octo\/app\/environments\/dev$/,
+          result: { code: 1, stderr: "HTTP 403: Forbidden" }
+        },
+        {
+          match: /^api --method DELETE \/repos\/octo\/app\/environments\/dev$/,
+          result: { code: "0" }
+        }
+      ]
+    });
+
+    await post({
+      repo: "octo/app",
+      environment: "dev",
+      operationEnvironment: "dev",
+      operationId: "op-http"
+    });
+
+    // The refusal is propagated as a refusal. Collapsing it into an empty
+    // result would read as "the environment is gone" to the caller.
+    expect(harness.cleanupReads).toEqual([
+      { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" }
+    ]);
+  });
 });
 
 describe("create-environment real-loopback HIT: the seven-step workflow", () => {

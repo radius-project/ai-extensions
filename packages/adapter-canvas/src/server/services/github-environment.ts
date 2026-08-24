@@ -150,6 +150,36 @@ export function readEnsuredGitHubEnvironment(
   };
 }
 
+/**
+ * Read a GitHub environment back through the account that created it.
+ *
+ * The cleanup's identity gate compares the id the name answers for now against
+ * the one the ledger recorded, and refuses to delete when it cannot read.
+ * Reading on ambient `gh` would answer for whichever account the shell happens
+ * to hold, so every cleanup path is handed a reader pinned to the executor the
+ * operation selected. A refusal stays a refusal: an unreadable environment must
+ * never come back as an empty, successful-looking answer that reads as absence.
+ */
+export function selectedEnvironmentReader(executor: {
+  run(args: string[]): Promise<{
+    code: string | number;
+    stdout?: string;
+    stderr?: string;
+  }>;
+}): (args: string[]) => Promise<GitHubEnvironmentCommandResult> {
+  return async (args) => {
+    const result = await executor.run(args);
+    const code = Number(result.code);
+    return {
+      // A code that will not parse is not a success. Anything but an exact 0
+      // leaves the caller unable to claim the environment is gone.
+      code: Number.isFinite(code) ? code : 1,
+      stdout: String(result.stdout || ""),
+      stderr: String(result.stderr || "")
+    };
+  };
+}
+
 export async function ensureGitHubEnvironment(input: {
   repo: string;
   requestedName: string;
@@ -188,11 +218,29 @@ export async function ensureGitHubEnvironment(input: {
       return { name, state: "reused", providerId: listedProviderId };
     }
     if (pendingMutation.status === "confirmed") {
-      const creationProof = proveGitHubEnvironmentCreated({
-        preflight: "created_candidate",
-        putResponseBody: JSON.stringify(lookup.json),
-        putStartedAtMs: Date.parse(pendingMutation.preparedAt)
-      });
+      // The confirmed write recorded the id GitHub made. Ownership is proven by
+      // that id still answering for the name — never by a creation timestamp,
+      // which a resource deleted and recreated here would also satisfy.
+      const confirmedProviderId = pendingMutation.providerId || null;
+      const identityMatches = Boolean(
+        confirmedProviderId &&
+        listedProviderId &&
+        confirmedProviderId === listedProviderId
+      );
+      const creationProof: GitHubEnvironmentCreationProof =
+        identityMatches ?
+          proveGitHubEnvironmentCreated({
+            preflight: "created_candidate",
+            putResponseBody: JSON.stringify(lookup.json),
+            putStartedAtMs: Date.parse(pendingMutation.preparedAt)
+          })
+        : {
+            proven: false,
+            detail:
+              confirmedProviderId ?
+                `The environment under that name reports id ${listedProviderId || "none"}, not the ${confirmedProviderId} this request created, so it is a different environment.`
+              : "The interrupted request was recorded before Radius captured GitHub's own id for the environment, so it cannot tell this one from a replacement created under the same name."
+          };
       return {
         name,
         state: "created_candidate",
@@ -248,6 +296,7 @@ export async function ensureGitHubEnvironment(input: {
         persist: input.mutationRecovery.persist,
         mutate: () => input.runGh(mutationArgs),
         accept: (result) => result,
+        providerIdOf: (result) => parseCommandEnvironmentProviderId(result),
         reconcile: async () => {
           const reread = await input.readGitHubJson(path);
           if (!reread.ok) {
@@ -291,6 +340,7 @@ export async function ensureGitHubEnvironment(input: {
               stdout: JSON.stringify(reread.json),
               stderr: ""
             },
+            providerId: parseEnvironmentProviderId(reread.json),
             evidence:
               "The exact environment identity and creation timestamp matched the interrupted operation."
           };
