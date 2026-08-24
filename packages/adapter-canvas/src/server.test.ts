@@ -536,6 +536,224 @@ describe("ensureServicePrincipal", () => {
     ]);
   });
 
+  // A principal that answers now is not automatically one that was there
+  // before: this operation may have made it and crashed before the ledger
+  // caught up. Reading that as pre-existing leaves it behind at rollback.
+  describe("a principal found again after a crash", () => {
+    const NOT_FOUND = {
+      code: 1,
+      stdout: "",
+      stderr: "Request_ResourceNotFound: Resource 'app-1' does not exist"
+    };
+
+    function journalled() {
+      return createOperation({
+        operationId: "op_sp",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+    }
+
+    async function crashAfterConfirm(createStdout: string) {
+      const operation = journalled();
+      // First run: absent, create acknowledged, then the process dies before
+      // the ledger records anything.
+      let call = 0;
+      await ensureServicePrincipal(
+        "app-1",
+        async () => {
+          call += 1;
+          return call === 1 ? NOT_FOUND : (
+              { code: 0, stdout: createStdout, stderr: "" }
+            );
+        },
+        { operation, persist: async () => {} }
+      );
+      return operation;
+    }
+
+    async function restart(operation: object, objectId: string) {
+      const calls: string[][] = [];
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) => {
+          calls.push(args);
+          return { code: 0, stdout: `${objectId}\n`, stderr: "" };
+        },
+        {
+          operation: operation as object & { operationId: string },
+          persist: async () => {}
+        }
+      );
+      return { result, calls };
+    }
+
+    it("settles the object id in the same write that confirms the create", async () => {
+      const operation = await crashAfterConfirm(
+        JSON.stringify({ id: "sp-object-1", appId: "app-1" })
+      );
+
+      expect(operation.providerRecovery.mutations).toEqual([
+        expect.objectContaining({
+          kind: "azure_service_principal.create",
+          status: "confirmed",
+          providerId: "sp-object-1"
+        })
+      ]);
+    });
+
+    it("claims the principal whose object id the confirmation recorded", async () => {
+      const operation = await crashAfterConfirm(
+        JSON.stringify({ id: "sp-object-1", appId: "app-1" })
+      );
+
+      const { result, calls } = await restart(operation, "sp-object-1");
+
+      // Owned, so a rollback removes it. Reading it back is one lookup — the
+      // create is never reissued.
+      expect(result).toEqual({
+        ok: true,
+        state: "created",
+        origin: "this_operation",
+        objectId: "sp-object-1"
+      });
+      expect(calls).toEqual([
+        ["ad", "sp", "show", "--id", "app-1", "--query", "id", "-o", "tsv"]
+      ]);
+    });
+
+    it("claims nothing when a different object answers for the application", async () => {
+      const operation = await crashAfterConfirm(
+        JSON.stringify({ id: "sp-object-1", appId: "app-1" })
+      );
+
+      const { result, calls } = await restart(operation, "sp-object-2");
+
+      expect(result).toMatchObject({
+        ok: true,
+        state: "created_candidate",
+        origin: "unknown",
+        objectId: "sp-object-2"
+      });
+      expect(calls).toHaveLength(1);
+    });
+
+    it("claims nothing when the confirmation recorded no object id", async () => {
+      const operation = await crashAfterConfirm("");
+
+      const { result } = await restart(operation, "sp-object-1");
+
+      // Legacy confirmation, or a create Entra acknowledged without a body.
+      // Either way there is nothing to match, so ownership is not assumed.
+      expect(result).toMatchObject({
+        state: "created_candidate",
+        origin: "unknown"
+      });
+    });
+
+    it.each([["prepared"], ["outcome_unknown"]])(
+      "neither replays nor claims a create left %s",
+      async (status) => {
+        const operation = journalled();
+        const mutation = prepareProviderMutation(operation, {
+          kind: "azure_service_principal.create",
+          target: "app-1"
+        });
+        settleProviderMutation(
+          operation,
+          mutation.mutationId,
+          status as never,
+          "the answer was lost"
+        );
+
+        const { result, calls } = await restart(operation, "sp-object-1");
+
+        expect(result).toMatchObject({
+          state: "created_candidate",
+          origin: "unknown",
+          objectId: "sp-object-1"
+        });
+        expect(calls).toEqual([
+          ["ad", "sp", "show", "--id", "app-1", "--query", "id", "-o", "tsv"]
+        ]);
+      }
+    );
+
+    it("hands over a create Radius already gave up on", async () => {
+      const operation = journalled();
+      const mutation = prepareProviderMutation(operation, {
+        kind: "azure_service_principal.create",
+        target: "app-1"
+      });
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "manual_required",
+        "Entra could not be read after the interrupted create."
+      );
+
+      const { result } = await restart(operation, "sp-object-1");
+
+      expect(result).toEqual({
+        ok: false,
+        stderr: "Entra could not be read after the interrupted create."
+      });
+    });
+
+    it("reuses a principal whose create this operation was refused", async () => {
+      const operation = journalled();
+      const mutation = prepareProviderMutation(operation, {
+        kind: "azure_service_principal.create",
+        target: "app-1"
+      });
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "not_applied",
+        "Entra rejected the create."
+      );
+
+      const { result } = await restart(operation, "sp-object-1");
+
+      // The create never landed, so whatever answers now predates it.
+      expect(result).toEqual({
+        ok: true,
+        state: "reused",
+        origin: "pre_existing",
+        objectId: "sp-object-1"
+      });
+    });
+
+    it("still reuses a principal no journal entry mentions", async () => {
+      const operation = journalled();
+
+      const { result } = await restart(operation, "sp-object-1");
+
+      // Nothing was ever issued for it, so it is genuinely somebody else's.
+      expect(result).toEqual({
+        ok: true,
+        state: "reused",
+        origin: "pre_existing",
+        objectId: "sp-object-1"
+      });
+    });
+
+    it("carries the recorded object id through a save and reload", async () => {
+      const operation = await crashAfterConfirm(
+        JSON.stringify({ id: "sp-object-1", appId: "app-1" })
+      );
+
+      const restored = fromPersistedOperation(toPersistedOperation(operation));
+      const { result } = await restart(restored, "sp-object-1");
+
+      expect(result).toMatchObject({
+        state: "created",
+        origin: "this_operation"
+      });
+    });
+  });
+
   it("fails closed when the precheck returns an empty object id", async () => {
     const result = await ensureServicePrincipal("app-1", async () => ({
       code: 0,
@@ -1447,6 +1665,39 @@ function answersCredentialIdentity(
 }
 
 describe("cleanupAzureSetupArtifacts", () => {
+  it("removes a Service Principal this operation added to somebody else's app", async () => {
+    const op = newAzureOp();
+    // The customer already had the App Registration; Radius only added the
+    // principal. Leaving that behind because the app is theirs would leak the
+    // one resource this setup actually created.
+    recordAzureApp(op, {
+      state: "reused",
+      origin: "pre_existing",
+      appId: "app-1"
+    });
+    recordServicePrincipal(op, {
+      state: "created",
+      origin: "this_operation",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+
+    const deletes: string[][] = [];
+    const pass = await cleanupAzureSetupArtifacts(op, {
+      runAz: async (args) => {
+        if (args.includes("delete")) deletes.push(args);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    });
+
+    expect(deletes).toEqual([["ad", "sp", "delete", "--id", "app-1"]]);
+    expect(
+      pass.results.map((entry: any) => `${entry.artifactType}:${entry.outcome}`)
+    ).toEqual(["service_principal:deleted"]);
+    // The application it belongs to is untouched.
+    expect(op.setupArtifacts.azureApp.state).toBe("reused");
+  });
+
   it("deletes only created Azure artifacts in reverse dependency order", async () => {
     const op = newAzureOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });
