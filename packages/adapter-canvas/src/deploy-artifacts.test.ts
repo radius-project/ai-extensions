@@ -13,6 +13,7 @@ import {
   isLiveSlotArtifactName,
   MAX_ARTIFACT_CANDIDATES,
   normalizeProvisioningState,
+  parseDeployGraphArtifact,
   parseDeployProgressArtifact,
   resolveResourceStatus,
   sanitizeArtifactSegment,
@@ -210,6 +211,71 @@ describe("parseDeployProgressArtifact", () => {
     expect(parsed?.environment).toBe("dev");
     expect(parsed?.sequence).toBe(1);
     expect(parsed?.resources).toHaveLength(1);
+  });
+
+  describe("parseDeployGraphArtifact", () => {
+    const graph = {
+      resources: [
+        {
+          id: "mysql",
+          outputResources: [
+            {
+              id: "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/mysql",
+              portalUrl:
+                "https://portal.azure.com/#@tenant/resource/subscriptions/sub/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/mysql"
+            }
+          ]
+        }
+      ]
+    };
+
+    it("preserves a producer graph beneath Rad build progress output", () => {
+      expect(
+        parseDeployGraphArtifact(
+          `Compiling .radius/app.bicep\nBuilding {model}...\n${JSON.stringify(graph)}\nDone in 4.2s\n`
+        )
+      ).toEqual(graph);
+    });
+
+    it("ignores structured log records before and after the graph document", () => {
+      const graphWithBraces = {
+        ...graph,
+        resources: [
+          { ...graph.resources[0], message: "created {successfully}" }
+        ]
+      };
+      expect(
+        parseDeployGraphArtifact(
+          `${JSON.stringify({ level: "info" })}\n${JSON.stringify(graphWithBraces)}\n${JSON.stringify({ level: "done" })}\n`
+        )
+      ).toEqual(graphWithBraces);
+    });
+
+    it("ignores non-resource array log records before the graph document", () => {
+      expect(
+        parseDeployGraphArtifact(
+          `${JSON.stringify(["starting build"])}\n${JSON.stringify(graph)}\n`
+        )
+      ).toEqual(graph);
+    });
+
+    it("accepts exact object and array documents", () => {
+      expect(parseDeployGraphArtifact(JSON.stringify(graph))).toEqual(graph);
+      expect(parseDeployGraphArtifact('[{"id":"one"}]')).toEqual([
+        { id: "one" }
+      ]);
+    });
+
+    it("rejects empty, scalar, and malformed content", () => {
+      expect(parseDeployGraphArtifact()).toBeNull();
+      expect(parseDeployGraphArtifact("")).toBeNull();
+      expect(parseDeployGraphArtifact("progress\n42")).toBeNull();
+      expect(parseDeployGraphArtifact("progress\n{broken")).toBeNull();
+      expect(
+        parseDeployGraphArtifact('{"level":"info"}\n{"message":"done"}')
+      ).toBeNull();
+      expect(parseDeployGraphArtifact('["starting build"]')).toBeNull();
+    });
   });
 
   it("rejects an unknown schemaVersion rather than guessing", () => {
@@ -893,6 +959,40 @@ describe("createDeployStatusReader", () => {
     expect(progress?.application).toBe("todolist");
     const { graph } = await reader.graph();
     expect(graph).toEqual({ resources: [{ name: "frontend" }] });
+  });
+
+  it("reads portal metadata when Rad prefixes graph JSON with build progress", async () => {
+    const portalUrl =
+      "https://portal.azure.com/#@tenant/resource/subscriptions/sub/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/mysql";
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist")
+      ],
+      downloadArtifact: async () => ({
+        ...okFiles(),
+        [DEPLOY_STATUS_FILES.graph]:
+          "Compiling .radius/app.bicep\nBuilding .radius/app.bicep...\n" +
+          JSON.stringify({
+            resources: [
+              {
+                id: "mysql",
+                outputResources: [{ id: "/subscriptions/sub/mysql", portalUrl }]
+              }
+            ]
+          }) +
+          '\n{"level":"info","message":"complete"}\n'
+      })
+    });
+
+    expect((await reader.graph()).graph).toEqual({
+      resources: [
+        {
+          id: "mysql",
+          outputResources: [{ id: "/subscriptions/sub/mysql", portalUrl }]
+        }
+      ]
+    });
   });
 
   it("surfaces the control-plane log when the artifact carries one", async () => {

@@ -88,6 +88,25 @@ export function initializePlannedGraphPage(
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
   let selectionQueuedWhileLoading = false;
+  const showModelingFailure = (message: string): void => {
+    controller?.destroy();
+    controller = null;
+    const wrapper = context.dom.byId("graph-container-wrapper");
+    if (wrapper) wrapper.innerHTML = '<div id="graph-container"></div>';
+    requireBrowserFunction(globalScope, "radiusSetGraphError")(
+      "graph-container",
+      message
+    );
+    const statusElement = context.dom.byId("plan-status");
+    if (statusElement) statusElement.style.display = "none";
+    if (button) {
+      button.disabled = true;
+      button.setAttribute(
+        "title",
+        "Deploy Application is unavailable until the application model compiles."
+      );
+    }
+  };
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
@@ -219,6 +238,10 @@ export function initializePlannedGraphPage(
           return;
         }
         const error = readString(payload, "error");
+        if (readBoolean(payload, "modelingFailed") && error) {
+          showModelingFailure(error);
+          return;
+        }
         status(
           context,
           error ?

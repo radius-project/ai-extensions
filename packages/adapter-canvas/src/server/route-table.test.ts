@@ -214,7 +214,15 @@ const productionHandlers = {
     defaultBranchForState: () => "main",
     prepareSourceRef: () => ({ token: "" }),
     commitSourceRef: () => true,
+    isCurrentSourceRef: () => true,
     triggerAppBicepHandoff: () => {},
+    triggerGraphRepairHandoff: () => ({
+      attempt: 1,
+      maxAttempts: 3,
+      repairing: true,
+      repairExhausted: false
+    }),
+    clearGraphRepairAttempt: () => {},
     fetchBicepSelection: () =>
       Promise.resolve({
         content: null,
@@ -228,7 +236,8 @@ const productionHandlers = {
       Promise.resolve({ dir: "", remote: false }),
     buildGraphViaRad: () => Promise.resolve([]),
     canvasGraphResources: () => [],
-    errorMessage: (error) => String(error)
+    errorMessage: (error) => String(error),
+    logError: () => {}
   }),
   ...createGraphsPlanningWritesRoutes({
     workflows: createGraphPlanningWorkflows({
@@ -251,6 +260,13 @@ const productionHandlers = {
         removeDirectory: () => {}
       }),
       triggerAppBicepHandoff: () => {},
+      triggerGraphRepairHandoff: () => ({
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
+      }),
+      clearGraphRepairAttempt: () => {},
       listBranchPaths: () => Promise.resolve([]),
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,
@@ -266,6 +282,7 @@ const productionHandlers = {
       record: () => ({}),
       optionalString: () => "",
       errorMessage: (error) => String(error),
+      logError: () => {},
       now: () => 0
     })
   }),
