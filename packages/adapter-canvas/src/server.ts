@@ -242,6 +242,7 @@ import {
   withCredentialProvenanceLock
 } from "./credential-provenance.js";
 import { classifyCompletedDeleteEnvRun } from "./server/services/delete-env-run-classifier.js";
+import { deleteGitHubEnvironmentIdempotent as deleteGitHubEnvironmentPrimitive } from "./server/services/github-environment.js";
 import type {
   RadiusEnvDeletionOutcome,
   GitHubEnvDeletionOutcome
@@ -2567,29 +2568,20 @@ async function deleteRadiusEnvironmentViaWorkflow(
 
 // Delete the GitHub Environment. Idempotent: a 404 (already gone) is reported as
 // `not_found`, not a failure, so a re-run after a partial deletion converges.
+// The classification and cache-invalidation logic is the shared cleanup
+// primitive in `server/services/github-environment.ts`; this wrapper only binds
+// the server's `gh` runner and environment-list cache to it. Create-Environment
+// rollback binds the same primitive to its own ports.
 async function deleteGitHubEnvironmentIdempotent(
   repo: string,
   environment: string
 ): Promise<GitHubEnvDeletionOutcome> {
-  const result = await runGhForDeploy([
-    "api",
-    "--method",
-    "DELETE",
-    "/repos/" + repo + "/environments/" + encodeURIComponent(environment)
-  ]);
-  if (result.code === 0) {
-    envListCache.delete(repo);
-    return { outcome: "deleted" };
-  }
-  if (/HTTP 404|not found/i.test(result.stderr || "")) {
-    envListCache.delete(repo);
-    return { outcome: "not_found" };
-  }
-  return {
-    outcome: "failed",
-    detail:
-      (result.stderr || "").trim() || "Deleting the GitHub environment failed."
-  };
+  return deleteGitHubEnvironmentPrimitive(repo, environment, {
+    runGh: (args) => runGhForDeploy(args),
+    invalidateEnvListCache: (target) => {
+      envListCache.delete(target);
+    }
+  });
 }
 
 function sleepMs(milliseconds: number): Promise<void> {

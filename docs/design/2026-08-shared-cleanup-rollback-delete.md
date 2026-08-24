@@ -131,7 +131,7 @@ Leave rollback and deletion with their own copies of every primitive (GitHub-env
 
 ##### Disadvantages
 
-- The same `gh api DELETE .../environments/{env}` (already in `server.ts:deleteGitHubEnvironmentIdempotent`) and the same idempotent FIC-delete logic get written twice, and can drift.
+- The same `gh api DELETE .../environments/{env}` (now the shared `github-environment.ts:deleteGitHubEnvironmentIdempotent`) and the same idempotent FIC-delete logic would otherwise be written twice, and could drift.
 - Two different "cleanup result" vocabularies means the UI reports "deleted / already gone / left in place" inconsistently between the flows.
 - Bug fixes (e.g. a new "not found" phrasing from the CLI) must be applied in two places.
 
@@ -164,7 +164,7 @@ The following is **duplicated today (or about to be) and should be extracted**:
 
 1. **Cleanup-result vocabulary + stable identity.** Delete (`server/services/environment-deletion.ts`) currently reports through its own `DeletionCommandResult` and free-text steps, and never feeds `recordCleanupState`. Rollback introduces a `cleanupArtifactIdentity` helper (stable IDs: app→appId, service principal→appId/objectId, FIC→`name@subject`, role→`role@scope`, GH env→`repo:env`, workflow→`branch:path`) and a cleanup-result record. Extract one `cleanup-identity.ts` and route the delete flow's outcomes through `recordCleanupState` / `projectCleanupSummary`.
 
-2. **GitHub-environment delete + env-list cache invalidation.** Delete has `deleteGitHubEnvironmentIdempotent` (`server.ts`, ~line 2293): a 404-tolerant `gh api DELETE /repos/{repo}/environments/{env}` that also calls `envListCache.delete(repo)`. Rollback needs the identical primitive. Extract `github-environment.ts` with one `deleteGitHubEnvironment(repo, env)` used by both.
+2. **GitHub-environment delete + env-list cache invalidation.** *Extracted in PR #398.* The 404-tolerant `deleteGitHubEnvironmentIdempotent(repo, env, ports)` now lives in the shared `server/services/github-environment.ts` module (alongside the create-side `ensureGitHubEnvironment` primitive), taking an injected `runGh` and `invalidateEnvListCache` port. `server.ts` binds its `gh` runner and `envListCache` to it; the rollback runner binds its own ports to the same primitive so the "how a 404 becomes `not_found`" and "when the env-list cache is invalidated" rules are guaranteed identical.
 
 3. **Idempotent federated-credential delete.** Both delete recorded/derived FICs with `buildFederatedCredentialDeleteArgs` + `runAz`, treating `not_found` as success. Only the *source* of the identities differs (delete: the per-environment `repo:...:environment:<env>` pattern; rollback: ledger entries). Extract a shared "delete these FIC identities" helper.
 
@@ -184,7 +184,7 @@ The following **must stay separate** — sharing it would be a safety bug:
 
 ### API design (if applicable)
 
-N/A for the shared-primitive extraction — no HTTP route, canvas action, tool, or `packages/core` signature changes. The rollback flow introduces its own routes (`POST /api/operations/{operationId}/rollback`, `.../exit`, `.../retry/cleanup`) in its own PR; those are outside this document. The internal TypeScript service signatures introduced here (for example `deleteGitHubEnvironment(repo, env)` and `cleanupArtifactIdentity(artifact)`) are module-local and not a public contract.
+N/A for the shared-primitive extraction — no HTTP route, canvas action, tool, or `packages/core` signature changes. The rollback flow introduces its own routes (`POST /api/operations/{operationId}/rollback`, `.../exit`, `.../retry/cleanup`) in its own PR; those are outside this document. The internal TypeScript service signatures introduced here (for example `deleteGitHubEnvironmentIdempotent(repo, env, ports)` and `cleanupArtifactIdentity(artifact)`) are module-local and not a public contract.
 
 ### Implementation details
 
@@ -197,7 +197,7 @@ N/A. All of this lives in the canvas adapter. The primitives call `az`/`gh` and 
 New shared services under `src/server/services/`:
 
 - `cleanup-identity.ts` — `cleanupArtifactIdentity(artifact)` returning the stable identity, plus the shared cleanup-result type. Delete's outcomes are mapped onto `recordCleanupState` / `projectCleanupSummary` (already in `operations.ts`).
-- `github-environment.ts` — `deleteGitHubEnvironment(repo, env)` moved out of `server.ts:deleteGitHubEnvironmentIdempotent`, including `envListCache` invalidation. `environment-deletion.ts` and the rollback runner both call it.
+- `github-environment.ts` — `deleteGitHubEnvironmentIdempotent(repo, env, ports)` (extracted in PR #398), co-located with the create-side `ensureGitHubEnvironment` primitive. `environment-deletion.ts` (via `server.ts` wiring) calls it today; the rollback runner binds its own `runGh` / `invalidateEnvListCache` ports to the same function.
 - `azure-cleanup.ts` — idempotent FIC delete, plus a rollback-only app-registration delete + last-second recheck, built on the existing `azure-oidc.ts` builders and a `runAz` port. The delete flow calls only the FIC-delete primitive; the app-registration delete is invoked solely by the rollback runner.
 - A shared `not_found` classifier, folding in `delete-env-run-classifier.ts`.
 
@@ -221,6 +221,7 @@ N/A. No new dependencies, exports, or bundle changes. A Changeset entry (`patch`
 - A primitive that genuinely fails records a `warning` on its cleanup result and returns it; the orchestrator decides whether that warning is fatal. This preserves delete's current fail-closed rule: if the Radius-environment delete cannot be confirmed, the flow stops before removing the federated credential and GitHub environment that a retry needs.
 - The rollback-only app-registration recheck fails closed: if re-listing credentials fails, or a credential reappeared while the prompt was open, the app is **left in place** with a warning rather than deleted. The delete flow always leaves the app registration in place regardless, so it never reaches this recheck.
 - Because both flows report through `projectCleanupSummary`, a partial failure surfaces the same way in both UIs (a retryable partial-failure state).
+- The delete flow's app-registration reminder ("left in place — remove it in Azure yourself") is surfaced when the operation **concludes** — `succeeded` or `succeeded_with_warnings` (the latter includes retained/shared-FIC cases). On a hard fail-closed stop (for example the Radius-environment delete could not be confirmed), the panel shows the steps completed so far plus a retry message and does **not** show the app-registration reminder, because nothing was fully torn down and the user has not reached the end of a deletion.
 
 ## Test plan
 
@@ -244,7 +245,7 @@ Testing challenges: the primitives do real `az`/`gh` I/O, so they are injected b
 ## Compatibility (optional)
 
 - **Backward compatible.** Delete Environment must keep working for environments created before the artifact ledger existed, so it continues to rely on live discovery + confirmation, not on provenance.
-- **Coexisting PRs.** Both the rollback PR and PR #398 modify `operations.ts`. Recommended sequence: land them independently, then rebase one onto the other and do the extraction as a follow-up, so neither PR is blocked.
+- **Coexisting PRs.** Both the rollback PR and PR #398 modify `operations.ts`. Recommended sequence: land them independently, then rebase one onto the other and finish the remaining extraction as a follow-up, so neither PR is blocked. PR #398 already extracts the shared GitHub-environment delete primitive (see Detailed design item 2), so rollback binds to it rather than re-authoring it.
 
 ## Monitoring and logging
 
@@ -253,7 +254,7 @@ Each primitive appends a human-readable step to the operation (`addStep`) and pe
 ## Development plan
 
 1. **Land both flows independently.** Delete Environment (PR #398) and the rollback PR ship on their own; they already share the operation framework, ledger, and Azure builders.
-2. **Extract shared primitives (follow-up).** In dependency order: `cleanup-identity.ts`, then `github-environment.ts`, then `azure-cleanup.ts`, then the shared `not_found` classifier. Each lands with unit tests.
+2. **Extract shared primitives.** In dependency order: `cleanup-identity.ts`, then `github-environment.ts` (delete primitive **done in PR #398**), then `azure-cleanup.ts`, then the shared `not_found` classifier. Each lands with unit tests.
 3. **Route delete through the shared summary.** Map `environment-deletion.ts` outcomes onto `recordCleanupState` / `projectCleanupSummary`; update its tests and the HTTP-integration coverage.
 4. **Refactor both orchestrators** to call the primitives, keeping order, eligibility, and policy in each flow. Rebuild `plugins/radius/dist` and keep the artifact suite green.
 5. **(Optional, gated on the open question below)** teach delete to consume creation provenance when present.

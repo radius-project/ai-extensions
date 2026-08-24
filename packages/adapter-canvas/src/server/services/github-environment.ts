@@ -4,6 +4,65 @@ export interface GitHubEnvironmentCommandResult {
   stderr: string;
 }
 
+// Result of deleting a GitHub Environment. `deleted` removed a live environment;
+// `not_found` means it was already gone (idempotent success); `failed` records a
+// best-effort warning without asserting anything was torn down.
+//
+// This delete primitive is deliberately shared: both the Delete Environment flow
+// (PR #398) and Create-Environment rollback (separate PR) remove a GitHub
+// environment with the identical idempotent contract. The design note
+// `docs/design/2026-08-shared-cleanup-rollback-delete.md` (§ Detailed design,
+// item 2) calls this out as a primitive that must live in one place so the two
+// flows never drift on how a "not found" result is classified or when the
+// environment-list cache is invalidated. Each flow keeps its own decision layer
+// (which environment, and whether it is allowed to delete it) and only calls
+// this primitive to do the work.
+export interface GitHubEnvDeletionOutcome {
+  outcome: "deleted" | "not_found" | "failed";
+  detail?: string;
+}
+
+// The narrow I/O the delete primitive needs, injected so it can be unit-tested
+// with a deterministic fake and reused by any flow regardless of how that flow
+// runs `gh` or holds the environment-list cache.
+export interface GitHubEnvironmentDeletionPorts {
+  // Run a `gh` command. Never throws; a spawn failure surfaces as a non-zero
+  // `code` with `stderr`.
+  runGh(args: string[]): Promise<{ code: number | string; stderr?: string }>;
+  // Drop the cached environment list for the repo so the next listing reflects
+  // the deletion. Called on every path that converges the environment to "gone"
+  // (both `deleted` and `not_found`), never on a genuine failure.
+  invalidateEnvListCache(repo: string): void;
+}
+
+// Delete the GitHub Environment. Idempotent: a 404 (already gone) is reported as
+// `not_found`, not a failure, so a re-run after a partial deletion converges.
+export async function deleteGitHubEnvironmentIdempotent(
+  repo: string,
+  environment: string,
+  ports: GitHubEnvironmentDeletionPorts
+): Promise<GitHubEnvDeletionOutcome> {
+  const result = await ports.runGh([
+    "api",
+    "--method",
+    "DELETE",
+    "/repos/" + repo + "/environments/" + encodeURIComponent(environment)
+  ]);
+  if (result.code === 0 || result.code === "0") {
+    ports.invalidateEnvListCache(repo);
+    return { outcome: "deleted" };
+  }
+  if (/HTTP 404|not found/i.test(result.stderr || "")) {
+    ports.invalidateEnvListCache(repo);
+    return { outcome: "not_found" };
+  }
+  return {
+    outcome: "failed",
+    detail:
+      (result.stderr || "").trim() || "Deleting the GitHub environment failed."
+  };
+}
+
 export interface GitHubEnvironmentReadResult {
   ok: boolean;
   status?: number | null;
