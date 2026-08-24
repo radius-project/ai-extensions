@@ -286,7 +286,7 @@ function buildAwsCliLogin(): Remediation {
     impact: "low",
     confirmTitle: "Start AWS login?",
     confirmBody:
-      "No active AWS session was found. Copilot will start AWS SSO login, or run `aws configure` instead if this machine uses static credentials.",
+      "No active AWS session was found. Copilot will run `aws sso login`. If this machine uses static credentials rather than SSO, cancel and run `aws configure` yourself instead.",
     confirmLabel: "Start AWS login",
     followUp:
       "After the login finishes, return to the Radius canvas and click Verify again."

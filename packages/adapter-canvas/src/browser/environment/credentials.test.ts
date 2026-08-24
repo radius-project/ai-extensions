@@ -307,10 +307,55 @@ describe("GitHub Packages identity parsing and rendering", () => {
     expect(view.packagesVerified).toBe(false);
     expect(view.commandVisible).toBe(true);
     expect(view.retryVisible).toBe(true);
-    expect(view.command).toBe(
+    expect(view.remediation?.command).toBe(
       "gh auth switch -h github.com -u octocat && gh auth refresh -h github.com -s read:packages -s write:packages"
     );
   });
+
+  // The row's visibility and the command it hosts used to be decided
+  // separately, so a login the registry rejects left an empty row on screen
+  // under status text telling the user to run the command below.
+  it("falls back to the no-account view when the login is not usable", () => {
+    const view = renderGitHubAccessView({
+      error: "",
+      actingLogin: "not a valid login!",
+      actingHasPackages: false
+    });
+
+    expect(view.commandVisible).toBe(false);
+    expect(view.remediation).toBeNull();
+    expect(view.retryVisible).toBe(false);
+    expect(view.statusText).toContain("Could not detect a GitHub CLI account");
+  });
+
+  it.each([
+    ["missing login", { error: "", actingLogin: "", actingHasPackages: false }],
+    [
+      "identity error",
+      { error: "boom", actingLogin: "octocat", actingHasPackages: false }
+    ],
+    [
+      "verified",
+      { error: "", actingLogin: "octocat", actingHasPackages: true }
+    ],
+    [
+      "needs scope",
+      { error: "", actingLogin: "octocat", actingHasPackages: false }
+    ],
+    [
+      "unusable login",
+      { error: "", actingLogin: "bad login!", actingHasPackages: false }
+    ]
+  ])(
+    "never shows the command row without a command for %s",
+    (_name, identity) => {
+      const view = renderGitHubAccessView(identity);
+
+      // The row is visible exactly when there is a runnable command to host.
+      // Asserting non-null is not enough: a refused build still yields a view.
+      expect(view.commandVisible).toBe(view.remediation?.runnable === true);
+    }
+  );
 });
 
 describe("Azure CLI assist prompt copy", () => {

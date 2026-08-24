@@ -87,7 +87,7 @@ export interface GitHubAccessView {
   statusHtml: string | null;
   statusColor: string;
   commandVisible: boolean;
-  command: string;
+  remediation: RemediationView | null;
   retryVisible: boolean;
 }
 
@@ -180,17 +180,21 @@ export function parseGitHubPackagesIdentity(
 export function renderGitHubAccessView(
   identity: GitHubPackagesIdentity
 ): GitHubAccessView {
+  // No account we can name, so there is no command we can offer. Both the
+  // unreadable-identity case and an acting login the registry will not accept
+  // land here, because in either one Radius cannot build the switch safely.
+  const noAccount: GitHubAccessView = {
+    packagesVerified: false,
+    statusText:
+      "Could not detect a GitHub CLI account. Sign in with gh auth login, then retry.",
+    statusHtml: null,
+    statusColor: "var(--rad-danger)",
+    commandVisible: false,
+    remediation: null,
+    retryVisible: false
+  };
   if (identity.error !== "" || identity.actingLogin === "") {
-    return {
-      packagesVerified: false,
-      statusText:
-        "Could not detect a GitHub CLI account. Sign in with gh auth login, then retry.",
-      statusHtml: null,
-      statusColor: "var(--rad-danger)",
-      commandVisible: false,
-      command: "",
-      retryVisible: false
-    };
+    return noAccount;
   }
   if (identity.actingHasPackages) {
     return {
@@ -201,11 +205,21 @@ export function renderGitHubAccessView(
       )}</strong>.`,
       statusColor: "var(--rad-primary)",
       commandVisible: false,
-      command: "",
+      remediation: null,
       retryVisible: false
     };
   }
-  const command = `gh auth switch -h github.com -u ${identity.actingLogin} && gh auth refresh -h github.com -s read:packages -s write:packages`;
+  // Resolve the command here rather than at the mount site. A non-empty login
+  // is not necessarily one the registry will build a command from, and when
+  // the row's visibility was decided separately the two disagreed: the row
+  // appeared, empty, under status text telling the user to run the command
+  // below. One answer drives the status, the row, and the callout.
+  const remediation = remediationView("github-packages-scope", {
+    login: identity.actingLogin
+  });
+  if (!remediation.runnable) {
+    return noAccount;
+  }
   return {
     packagesVerified: false,
     statusText: "",
@@ -216,7 +230,7 @@ export function renderGitHubAccessView(
       "<strong>Note:</strong> <code>gh auth switch</code> changes the active account machine-wide until you switch back.",
     statusColor: "var(--rad-warning)",
     commandVisible: true,
-    command,
+    remediation,
     retryVisible: true
   };
 }
@@ -460,18 +474,7 @@ export function initializeCredentialsPane(
       credGhcrStatus.textContent = view.statusText;
     }
     credGhcrStatus.style.color = view.statusColor;
-    mountCommandAction(
-      credGhcrCommandRow,
-      view.commandVisible ?
-        payloadRemediation({
-          remediation: {
-            id: "github-packages-scope",
-            params: { login: identity.actingLogin }
-          }
-        })
-      : null,
-      "cred-ghcr"
-    );
+    mountCommandAction(credGhcrCommandRow, view.remediation, "cred-ghcr");
     updateSaveState();
   };
 
