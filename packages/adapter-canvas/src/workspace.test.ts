@@ -15,7 +15,7 @@ import {
   hasRadiusApplicationModel,
   fetchWorkspaceTree,
   isWorkspacePath,
-  modelingRunActive,
+  modelingRunLastActivityAtMs,
   workspaceHeadCommit,
   workspaceSourceChangedSince
 } from "./workspace.js";
@@ -288,31 +288,67 @@ describe("workspaceFileExists", () => {
   });
 });
 
-describe("modelingRunActive", () => {
+describe("modelingRunLastActivityAtMs", () => {
   async function workspaceDir(): Promise<string> {
     return fs.mkdtemp(path.join(os.tmpdir(), "radius-staging-"));
   }
 
-  it("is true while a staging directory is present", async () => {
+  it("reports when a staging directory was created", async () => {
     const dir = await workspaceDir();
     try {
-      await fs.mkdir(path.join(dir, ".radius", ".staging-run-7"), {
+      const staging = path.join(dir, ".radius", ".staging-run-7");
+      await fs.mkdir(staging, {
         recursive: true
       });
-      expect(await modelingRunActive(dir)).toBe(true);
+      const expected = (await fs.stat(staging)).mtimeMs;
+      expect(await modelingRunLastActivityAtMs(dir)).toBe(expected);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
 
-  it("is false once the run removes its staging directory", async () => {
+  it("reports the newest staged artifact activity", async () => {
+    const dir = await workspaceDir();
+    try {
+      const staging = path.join(dir, ".radius", ".staging-run-7");
+      const appBicep = path.join(staging, "app.bicep");
+      await fs.mkdir(staging, { recursive: true });
+      await fs.writeFile(appBicep, "// model\n");
+      await fs.utimes(staging, new Date(1_000), new Date(1_000));
+      await fs.utimes(appBicep, new Date(2_000), new Date(2_000));
+      const expected = (await fs.stat(appBicep)).mtimeMs;
+
+      expect(await modelingRunLastActivityAtMs(dir)).toBe(expected);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the newest activity across concurrent staging directories", async () => {
+    const dir = await workspaceDir();
+    try {
+      const older = path.join(dir, ".radius", ".staging-run-7");
+      const newer = path.join(dir, ".radius", ".staging-run-8");
+      await fs.mkdir(older, { recursive: true });
+      await fs.mkdir(newer, { recursive: true });
+      await fs.utimes(older, new Date(1_000), new Date(1_000));
+      await fs.utimes(newer, new Date(2_000), new Date(2_000));
+      const expected = (await fs.stat(newer)).mtimeMs;
+
+      expect(await modelingRunLastActivityAtMs(dir)).toBe(expected);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports no activity once the run removes its staging directory", async () => {
     const dir = await workspaceDir();
     try {
       const staging = path.join(dir, ".radius", ".staging-run-7");
       await fs.mkdir(staging, { recursive: true });
       await fs.rm(staging, { recursive: true, force: true });
       await fs.writeFile(path.join(dir, ".radius", "app.bicep"), "// model\n");
-      expect(await modelingRunActive(dir)).toBe(false);
+      expect(await modelingRunLastActivityAtMs(dir)).toBeNull();
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
@@ -328,23 +364,23 @@ describe("modelingRunActive", () => {
       await fs.mkdir(path.join(dir, ".radius", ".staging"), {
         recursive: true
       });
-      expect(await modelingRunActive(dir)).toBe(false);
+      expect(await modelingRunLastActivityAtMs(dir)).toBeNull();
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
 
-  // Answering false is what lets an unreadable workspace end the wait rather
+  // Answering null is what lets an unreadable workspace end the wait rather
   // than renew it forever.
-  it("is false with no .radius directory, no workspace, or an unreadable one", async () => {
+  it("reports no activity with no .radius directory, no workspace, or an unreadable one", async () => {
     const dir = await workspaceDir();
     try {
-      expect(await modelingRunActive(dir)).toBe(false);
-      expect(await modelingRunActive("")).toBe(false);
-      expect(await modelingRunActive(null)).toBe(false);
-      expect(await modelingRunActive(undefined)).toBe(false);
+      expect(await modelingRunLastActivityAtMs(dir)).toBeNull();
+      expect(await modelingRunLastActivityAtMs("")).toBeNull();
+      expect(await modelingRunLastActivityAtMs(null)).toBeNull();
+      expect(await modelingRunLastActivityAtMs(undefined)).toBeNull();
       await fs.writeFile(path.join(dir, ".radius"), "not a directory");
-      expect(await modelingRunActive(dir)).toBe(false);
+      expect(await modelingRunLastActivityAtMs(dir)).toBeNull();
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }

@@ -85,9 +85,9 @@ interface PipelineScript {
   compileThrows?: Record<string, Error>;
   stageLogs?: Record<string, string>;
   compileLogs?: Record<string, string>;
-  // Whether the workspace shows a modeling run in flight. Read only while an
-  // answer is asking the page to keep waiting for the model.
-  modelingRunActive?: boolean;
+  // Newest activity from a modeling run. Read only while an answer is asking
+  // the page to keep waiting for the model.
+  modelingActivityAtMs?: number;
   // Runs after the named stage, so a test can move the world on mid-request.
   afterStage?: () => void;
   afterCompile?: () => void;
@@ -227,7 +227,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       Promise.resolve(harnessScript.branchPaths?.[branch] ?? []),
     observeModelingRun: () => {
       modelingObservations.count++;
-      return Promise.resolve(harnessScript.modelingRunActive === true);
+      return Promise.resolve(harnessScript.modelingActivityAtMs ?? null);
     },
     prepareSourceRefResources,
     setSourceRefResources,
@@ -419,11 +419,13 @@ describe("graph planning workflows", () => {
       it("keeps asking the page to wait while a modeling run stays alive", async () => {
         const harness = start({
           selections: { main: selectionOf({ content: null }) },
-          modelingRunActive: true
+          modelingActivityAtMs: 1_000
         });
 
         await harness.run("loadGraph", '{"repo":"octo/app"}');
         harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS * 4);
+        harness.script.modelingActivityAtMs =
+          1_000 + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS * 4;
         const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
 
         expect(outcome.payload).toMatchObject({ needsAppBicep: true });
@@ -460,11 +462,10 @@ describe("graph planning workflows", () => {
       it("reports a run that started and then stopped as stalled", async () => {
         const harness = start({
           selections: { main: selectionOf({ content: null }) },
-          modelingRunActive: true
+          modelingActivityAtMs: 1_000
         });
 
         await harness.run("loadGraph", '{"repo":"octo/app"}');
-        harness.script.modelingRunActive = false;
         harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS);
         const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
 
@@ -474,12 +475,28 @@ describe("graph planning workflows", () => {
         });
       });
 
-      // A wedged run holds its staging directory forever, so only the ceiling
-      // can end the wait.
-      it("ends a wait that never stops looking alive at the ceiling", async () => {
+      it("does not let an abandoned prior run keep renewing the wait", async () => {
         const harness = start({
           selections: { main: selectionOf({ content: null }) },
-          modelingRunActive: true
+          modelingActivityAtMs: 999
+        });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS);
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_STALLED_MESSAGE,
+          appBicepWaitExpired: true
+        });
+      });
+
+      // A continuously active run can still wedge, so the hard ceiling remains
+      // the final bound.
+      it("ends a continuously active wait at the ceiling", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) },
+          modelingActivityAtMs: 1_000
         });
 
         await harness.run("loadGraph", '{"repo":"octo/app"}');

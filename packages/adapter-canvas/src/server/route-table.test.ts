@@ -235,7 +235,7 @@ const productionHandlers = {
         removeDirectory: () => {}
       }),
       triggerAppBicepHandoff: () => {},
-      observeModelingRun: () => Promise.resolve(false),
+      observeModelingRun: () => Promise.resolve(null),
       listBranchPaths: () => Promise.resolve([]),
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,

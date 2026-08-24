@@ -75,8 +75,8 @@ describe("evaluateAppBicepWait", () => {
     });
   });
 
-  // A run that wedges holding its staging directory renews the idle budget on
-  // every poll, so only the ceiling can end it.
+  // A run that keeps producing filesystem activity can still exceed the total
+  // budget, so only the ceiling can end it.
   it("gives up at the ceiling even while the run still looks alive", () => {
     const nowMs = START + GRAPH_APP_BICEP_MAX_WAIT_MS;
     expect(

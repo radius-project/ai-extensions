@@ -128,10 +128,9 @@ export interface GraphWorkflowDependencies<
     baseResources: CanvasGraphResource[],
     headResources: CanvasGraphResource[]
   ): CanvasGraphResource[];
-  // Whether a modeling run is in flight for this instance's workspace. Read
-  // only while a request is answering `needsAppBicep`, so the wait renews on
-  // evidence of work rather than on a wall clock.
-  observeModelingRun(state: CanvasState): Promise<boolean>;
+  // Newest filesystem activity from a modeling run in this instance's
+  // workspace. Read only while a request is answering `needsAppBicep`.
+  observeModelingRun(state: CanvasState): Promise<number | null>;
   record(value: unknown): Record<string, unknown>;
   optionalString(value: unknown): string;
   errorMessage(error: unknown): string;
@@ -253,7 +252,7 @@ function settleGraphProgress(
   handle: GraphProgressHandle | undefined,
   outcome: GraphWorkflowOutcome,
   nowMs: number,
-  modelingRunActive: boolean
+  modelingActivityAtMs: number | null
 ): GraphWorkflowOutcome {
   if (!handle || !isCurrentGraphProgress(state, handle)) return outcome;
   const record = graphProgressRecord(state, handle.view);
@@ -264,7 +263,13 @@ function settleGraphProgress(
   }
   record.graphProgressAwaitingModel = true;
   record.graphProgressWaitStartedAtMs ??= nowMs;
-  if (modelingRunActive) record.graphProgressLastActivityAtMs = nowMs;
+  if (modelingActivityAtMs !== null) {
+    const lastActivityAtMs = record.graphProgressLastActivityAtMs;
+    record.graphProgressLastActivityAtMs =
+      lastActivityAtMs === undefined ? modelingActivityAtMs : (
+        Math.max(lastActivityAtMs, modelingActivityAtMs)
+      );
+  }
   const wait = evaluateAppBicepWait({
     nowMs,
     waitStartedAtMs: record.graphProgressWaitStartedAtMs,
@@ -348,16 +353,16 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     if (!state) return outcome;
     // Only an answer that asks the page to keep waiting needs the liveness
     // probe, so the ordinary success and failure paths pay nothing for it.
-    const modelingRunActive =
+    const modelingActivityAtMs =
       outcome.payload.needsAppBicep === true ?
         await dependencies.observeModelingRun(state)
-      : false;
+      : null;
     return settleGraphProgress(
       state,
       hooks.progressHandle(),
       outcome,
       dependencies.now(),
-      modelingRunActive
+      modelingActivityAtMs
     );
   }
 

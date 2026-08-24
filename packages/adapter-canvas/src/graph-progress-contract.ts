@@ -13,17 +13,17 @@
 // is spent only while nothing is happening.
 //
 // The liveness signal is on disk: a modeling run creates
-// `.radius/.staging-<runId>/` before it writes anything and removes it when it
-// finishes (see `app-staging.ts` in `@radius-project/core`). Its presence
-// separates "still working" from "nothing is happening", and only the latter
-// spends the budget.
+// `.radius/.staging-<runId>/` before it writes anything and updates that
+// directory or its staged artifacts as it works (see `app-staging.ts` in
+// `@radius-project/core`). The newest modification time separates "still
+// working" from an abandoned staging directory left by a cancelled run.
 
 // How long the wait tolerates seeing no modeling run at all.
 export const GRAPH_APP_BICEP_IDLE_TIMEOUT_MS = 300_000;
 
 // Hard ceiling on the whole wait, spent whether or not a run looks alive. A run
-// that wedges while holding its staging directory would otherwise renew the idle
-// budget indefinitely, which is the unbounded wait this contract exists to
+// that keeps producing activity without finishing would otherwise renew the
+// idle budget indefinitely, which is the unbounded wait this contract exists to
 // prevent.
 export const GRAPH_APP_BICEP_MAX_WAIT_MS = 1_800_000;
 

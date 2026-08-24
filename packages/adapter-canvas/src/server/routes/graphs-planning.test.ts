@@ -744,8 +744,8 @@ describe("graphs-planning read routes (SU-09)", () => {
     ).toBeUndefined();
   });
 
-  // A run that wedges while holding its staging directory would renew the idle
-  // budget forever, so the ceiling is what actually bounds the wait.
+  // A run that keeps producing filesystem activity would renew the idle budget
+  // forever, so the ceiling is what ultimately bounds the wait.
   it("expires a modeling run that never stops looking alive", async () => {
     const calls: Calls = { log: [] };
     const nowMs = 1_000 + GRAPH_APP_BICEP_MAX_WAIT_MS;

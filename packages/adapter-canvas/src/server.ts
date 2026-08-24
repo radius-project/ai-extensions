@@ -93,7 +93,7 @@ import {
   resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
-  modelingRunActive,
+  modelingRunLastActivityAtMs,
   resolveSessionId,
   toSafeRepoRelPath,
   workspaceGraphJsonPath
@@ -877,7 +877,8 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     resolveRecipeOutputs(github, resources, recipes, provider),
   computeGraphDiff: (baseResources, headResources) =>
     computeGraphDiff(baseResources, headResources),
-  observeModelingRun: (state) => modelingRunActive(state.workspacePath),
+  observeModelingRun: (state) =>
+    modelingRunLastActivityAtMs(state.workspacePath),
   record,
   optionalString,
   errorMessage,

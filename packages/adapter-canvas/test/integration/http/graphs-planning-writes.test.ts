@@ -105,7 +105,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         readInstanceEntry: () => (entryMissing ? undefined : { state }),
         pipeline,
         triggerAppBicepHandoff: () => {},
-        observeModelingRun: () => Promise.resolve(false),
+        observeModelingRun: () => Promise.resolve(null),
         listBranchPaths: () => Promise.resolve(active.branchPaths ?? []),
         prepareSourceRefResources,
         setSourceRefResources,
