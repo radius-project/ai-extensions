@@ -5,7 +5,6 @@ import {
   type EnsuredGitHubEnvironment
 } from "./github-environment.js";
 import type { GitHubEnvironmentReadResult } from "./github-environment.js";
-import { proveGitHubEnvironmentCreated } from "./github-environment-provenance.js";
 
 export interface EnvironmentOperationRecord {
   operationId: string;
@@ -198,32 +197,31 @@ export async function runEnvironmentOperationWorkflow(
     // GitHub's own id for the environment, so a rollback can tell what this
     // request wrote from a replacement the customer created under the same
     // name. Without it the cleanup gate has nothing to match and refuses.
-    providerId: ensured.providerId,
-    origin: ensured.state === "reused" ? "pre_existing" : "unknown"
+    providerId: ensured.providerId
   });
-  if (ensured.state === "created_candidate" && ensured.creationEvidence) {
-    const proof = proveGitHubEnvironmentCreated({
-      preflight: ensured.state,
-      putResponseBody: ensured.creationEvidence.putResponseBody,
-      putStartedAtMs: ensured.creationEvidence.putStartedAtMs
-    });
-    if (
-      proof.proven &&
-      dependencies.promoteCreatedGitHubEnvironment(operation, {
-        repo: operation.repo,
-        name: ensured.name
-      })
-    ) {
-      dependencies.addLegacyStep(
-        operation,
-        `✅ GitHub environment "${ensured.name}" created by this setup — Radius owns it and can remove it.`
-      );
-    } else if (!proof.proven) {
-      dependencies.addLegacyStep(
-        operation,
-        `ℹ️ Radius left GitHub environment "${ensured.name}" outside its cleanup scope. ${proof.detail}`
-      );
-    }
+  // The proof is settled inside `ensureGitHubEnvironment` rather than derived
+  // here, because a reconciled mutation proves ownership from the re-read body
+  // against the journalled start time and this call site has neither.
+  if (
+    ensured.creationProof?.proven &&
+    dependencies.promoteCreatedGitHubEnvironment(operation, {
+      repo: operation.repo,
+      name: ensured.name
+    })
+  ) {
+    dependencies.addLegacyStep(
+      operation,
+      `✅ GitHub environment "${ensured.name}" created by this setup — Radius owns it and can remove it.`
+    );
+  } else if (
+    ensured.state === "created_candidate" &&
+    ensured.creationProof &&
+    !ensured.creationProof.proven
+  ) {
+    dependencies.addLegacyStep(
+      operation,
+      `ℹ️ Radius left GitHub environment "${ensured.name}" outside its cleanup scope. ${ensured.creationProof.detail}`
+    );
   }
   if (requestedName === ensured.name) {
     dependencies.addLegacyStep(

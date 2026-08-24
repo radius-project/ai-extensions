@@ -66,7 +66,6 @@ describe("ensureGitHubEnvironment", () => {
     const ensured = await ensureGitHubEnvironment({
       repo: "octo/app",
       requestedName: "Production West",
-      now: () => 1_700_000_000_000,
       readGitHubJson: async (apiPath) => {
         reads.push(apiPath);
         return apiPath === "/repos/octo/app" ?
@@ -76,9 +75,13 @@ describe("ensureGitHubEnvironment", () => {
       runGh: async (args) => {
         mutations.push(args);
         return result({
-          stdout: JSON.stringify({ name: "Production West" })
+          stdout: JSON.stringify({
+            name: "Production West",
+            created_at: "2026-08-22T00:00:00.000Z"
+          })
         });
-      }
+      },
+      now: () => Date.parse("2026-08-22T00:00:00.000Z")
     });
 
     expect(ensured).toEqual({

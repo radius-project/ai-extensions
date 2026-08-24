@@ -4060,6 +4060,81 @@ describe("retry eligibility", () => {
     expect(canRetryCleanup(op)).toMatchObject({ ok: true });
   });
 
+  it.each([
+    [
+      "a service principal keyed on the application alone",
+      (op) =>
+        recordServicePrincipal(op, {
+          state: "created",
+          appId: "app-1",
+          objectId: "sp-1"
+        }),
+      {
+        artifactType: "service_principal",
+        target: "app-1",
+        identity: "app-1"
+      },
+      "service_principal#sp-1|app-1"
+    ],
+    [
+      "a GitHub environment keyed on repo and name alone",
+      (op) =>
+        recordGitHubEnvironment(op, {
+          state: "created",
+          repo: "contoso/store",
+          name: "dev",
+          providerId: "1234567"
+        }),
+      {
+        artifactType: "github_environment",
+        target: "contoso/store:dev",
+        identity: "contoso/store:dev"
+      },
+      "github_environment#1234567|contoso/store:dev"
+    ]
+  ])(
+    "retries %s that an earlier version recorded before the provider id led",
+    (_name, record, result, expectedKey) => {
+      const op = newOp();
+      record(op);
+      warnedCleanup(op, [
+        {
+          ...result,
+          outcome: "warning",
+          detail: "The provider was unreachable."
+        }
+      ]);
+      finish(op, "failed_partial", { failure: { code: "setup-failed" } });
+
+      // Refusing the older identity would leave the artifact claimed by a
+      // record nothing can ever match, so it could never be removed.
+      expect(unresolvedCleanupTargets(op)).toMatchObject([
+        { artifactType: result.artifactType, key: expectedKey }
+      ]);
+    }
+  );
+
+  it("still refuses a recorded identity that names a different artifact", () => {
+    const op = newOp();
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    warnedCleanup(op, [
+      {
+        artifactType: "service_principal",
+        target: "app-2",
+        identity: "app-2",
+        outcome: "warning",
+        detail: "Entra was unreachable."
+      }
+    ]);
+    finish(op, "failed_partial", { failure: { code: "setup-failed" } });
+
+    expect(unresolvedCleanupTargets(op)).toEqual([]);
+  });
+
   it("drops a workflow retry target the ledger no longer holds", () => {
     const op = newOp();
     recordCommittedWorkflowFile(op, provenWorkflowFile());

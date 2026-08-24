@@ -3167,6 +3167,34 @@ export function canExitSetup(op: any): any {
   };
 }
 
+/**
+ * The kinds whose identity is led by a provider id, so a record written before
+ * that id was captured still names the same artifact by its trailing form.
+ */
+const PROVIDER_ID_LED_ARTIFACTS: ReadonlySet<string> = new Set([
+  "service_principal",
+  "federated_credential",
+  "github_environment"
+]);
+
+/**
+ * The identity an earlier version wrote for this artifact, before the provider
+ * id led it, or "" when the kind is not led by one.
+ *
+ * A retry has to recognize a target its own earlier pass recorded, or the
+ * artifact stays claimed and can never be removed. Matching the older form is
+ * safe because it only decides which target a retry names: the delete still
+ * reads the resource back and refuses unless the recorded provider id answers.
+ */
+function legacyCleanupArtifactIdentity(
+  artifactType: string,
+  identity: string
+): string {
+  if (!PROVIDER_ID_LED_ARTIFACTS.has(artifactType)) return "";
+  const separator = identity.indexOf("|");
+  return separator === -1 ? "" : identity.slice(separator + 1);
+}
+
 function findProvenOwnedCleanupTarget(
   ledger: any,
   result: any
@@ -3182,11 +3210,11 @@ function findProvenOwnedCleanupTarget(
     ledgerArtifacts(ledger, ["created"]).find((entry) => {
       if (entry.kind !== result.artifactType) return false;
       if (!hasRecordedIdentity && singularKinds.has(entry.kind)) return true;
-      return artifactMatchKeys(
-        entry.kind,
-        cleanupArtifactIdentity(entry.kind, entry.artifact),
-        [entry.target]
-      ).has(key);
+      const identity = cleanupArtifactIdentity(entry.kind, entry.artifact);
+      return artifactMatchKeys(entry.kind, identity, [
+        entry.target,
+        legacyCleanupArtifactIdentity(entry.kind, identity)
+      ]).has(key);
     }) ?? null
   );
 }

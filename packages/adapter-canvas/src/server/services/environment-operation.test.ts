@@ -521,7 +521,7 @@ describe("the id a later rollback has to match", () => {
         id: 1234567,
         node_id: "MDExOkVudmlyb25tZW50MTIzNDU2Nw==",
         name: "production",
-        created_at: "2026-08-22T00:00:00.000Z"
+        created_at: new Date(NOW).toISOString()
       }),
       test.dependencies
     );
@@ -557,7 +557,7 @@ describe("the id a later rollback has to match", () => {
       kind: "github_environment.put",
       target: "octo/app:production"
     });
-    mutation.preparedAt = "2026-08-22T00:00:00.000Z";
+    mutation.preparedAt = new Date(NOW).toISOString();
     settleProviderMutation(
       op,
       mutation.mutationId,
@@ -574,7 +574,7 @@ describe("the id a later rollback has to match", () => {
             stdout: JSON.stringify({
               id: 7654321,
               name: "production",
-              created_at: "2026-08-22T00:00:00.000Z"
+              created_at: new Date(NOW).toISOString()
             })
           })
       }),
@@ -599,7 +599,7 @@ describe("the id a later rollback has to match", () => {
       op,
       creates({
         name: "production",
-        created_at: "2026-08-22T00:00:00.000Z"
+        created_at: new Date(NOW).toISOString()
       }),
       test.dependencies
     );
