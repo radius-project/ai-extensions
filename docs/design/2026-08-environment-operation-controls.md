@@ -285,9 +285,11 @@ Cleanup commands include a digest of the exact artifact keys selected for deleti
 
 #### Cooperative Stop
 
-The Stop route persists the request and returns `202`. It never kills a child process. Setup checks Stop before a mutation and after the checkpoint that records the preceding mutation. Azure identity setup, GitHub environment creation, workflow commits, and verification dispatch use these boundaries.
+The Stop route never kills a child process. It returns `200` when it can cancel an idle input prompt immediately, `202` when active setup or verification must reach a safe boundary, and `409` after the operation has finished.
 
-When the operation waits for input, Stop may finish immediately because no external mutation is active. When an executor is active, Stop remains pending until the executor reaches a boundary. The operation records the boundary that honored the request.
+Setup checks Stop before a mutation and after the checkpoint that records the preceding mutation. Azure identity setup, GitHub environment creation, workflow commits, and verification dispatch use these boundaries. When an executor is active, Stop remains pending until the executor reaches one, and the operation records which boundary honored the request.
+
+Rollback, Retry rollback, and Exit cleanup are different. Each runs as one durable cleanup pass with no Stop boundary between deletions. The UI therefore offers no Stop action while cleanup runs, and the Stop route returns `409 operation-cleanup-not-stoppable` without recording a request. The customer waits for cleanup to finish; warnings then offer Retry rollback or manual guidance.
 
 #### Input resume
 
