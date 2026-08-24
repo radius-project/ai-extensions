@@ -6,11 +6,12 @@ import {
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
+  expireGraphProgressWait,
   recordGraphBuildEvent,
   resolveCredentialsFilePath,
   sharedCredentials
 } from "./shared.js";
-import type { GraphBuildEvent } from "./shared.js";
+import type { GraphBuildEvent, GraphProgressRecord } from "./shared.js";
 
 const REPO = "octo-test/creds-" + Math.random().toString(36).slice(2);
 
@@ -128,6 +129,36 @@ describe("graph build record", () => {
       (event) => `${event.sequence}:${event.stage}:${event.state}`
     );
   }
+
+  it("retains a terminal app-model wait verdict for an in-flight retry", () => {
+    const record: GraphProgressRecord = {
+      graphBuildEvents: [],
+      graphProgressGeneration: 1,
+      graphProgressStartedAtMs: 1_000,
+      graphProgressActive: true,
+      graphProgressView: "graph",
+      graphProgressKey: "octo/app@main",
+      graphProgressOwner: 1,
+      graphProgressAwaitingModel: true,
+      graphProgressWaitStartedAtMs: 1_000,
+      graphProgressLastActivityAtMs: 2_000
+    };
+
+    expireGraphProgressWait(record, "The modeling wait expired.");
+
+    expect(record).toMatchObject({
+      graphProgressActive: false,
+      graphProgressAwaitingModel: false,
+      graphProgressWaitExpiredMessage: "The modeling wait expired."
+    });
+    expect(record.graphProgressWaitStartedAtMs).toBeUndefined();
+    expect(record.graphProgressLastActivityAtMs).toBeUndefined();
+    expect(record.graphBuildEvents.at(-1)).toMatchObject({
+      stage: "creating_model",
+      state: "failed",
+      detail: "The modeling wait expired."
+    });
+  });
 
   it("starts a record on the first event and numbers events in order", () => {
     const state: EventStore = {};

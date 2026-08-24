@@ -91,3 +91,6 @@ export function evaluateAppBicepWait(
         message: GRAPH_APP_BICEP_STALLED_MESSAGE
       };
 }
+
+export const GRAPH_MODELING_FAILURE_MESSAGE =
+  "Radius could not build the application graph from .radius/app.bicep. Ask Copilot to review the application model, then try again.";

@@ -182,6 +182,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   } = {};
 
   const deps: RadiusExtensionDependencies = {
+    logError: vi.fn(),
     session: sessionHolder,
     servers,
     getOrCreateServer,

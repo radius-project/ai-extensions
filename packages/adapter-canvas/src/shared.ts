@@ -158,6 +158,10 @@ export interface GraphProgressRecord {
   // the wait with different explanations.
   graphProgressWaitStartedAtMs?: number;
   graphProgressLastActivityAtMs?: number;
+  // A terminal wait verdict retained for this exact graphProgressKey. The
+  // browser may already have one retry in flight when progress polling expires
+  // the wait; retaining the verdict prevents that request from restarting it.
+  graphProgressWaitExpiredMessage?: string;
 }
 
 // Append one event to the instance's build record.
@@ -194,6 +198,22 @@ export function recordGraphBuildEvent(
   events.push({ sequence: events.length + 1, ...event });
 }
 
+export function expireGraphProgressWait(
+  record: GraphProgressRecord,
+  message: string
+): void {
+  recordGraphBuildEvent(record, {
+    stage: "creating_model",
+    state: "failed",
+    detail: message
+  });
+  record.graphProgressActive = false;
+  record.graphProgressAwaitingModel = false;
+  record.graphProgressWaitExpiredMessage = message;
+  delete record.graphProgressWaitStartedAtMs;
+  delete record.graphProgressLastActivityAtMs;
+}
+
 export interface CanvasState {
   [key: string]: unknown;
   graphResources?: CanvasGraphResource[] | null;
@@ -219,6 +239,7 @@ export interface CanvasState {
   diffHead?: string;
   diffTargetRepo?: string;
   diffError?: string;
+  diffModelingFailed?: boolean;
   branches?: string[];
   branchShas?: Record<string, string>;
   contextRepo?: string;
@@ -259,6 +280,15 @@ export interface CanvasState {
   graphBuildGeneration?: number;
   progressMessages?: string[];
   appBicepHandoffKey?: string;
+  graphRepairAttempts?: Partial<
+    Record<
+      GraphProgressView,
+      {
+        contextKey: string;
+        attempts: number;
+      }
+    >
+  >;
   deployEnvName?: string;
   deployAppName?: string;
   deployDispatchedAt?: number;

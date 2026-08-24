@@ -122,14 +122,32 @@ export function createAppModelHandoff(
     );
 
     if (!present.length) {
-      const sources = await Promise.all(
-        targets.map((branch) => deps.evaluateSource(repo, branch, context))
-      );
+      // Reserve the key before the asynchronous source probe. Modeled, Planned,
+      // and Diff can all discover the same missing model together; without this
+      // reservation they each pass the check above while the first probe is in
+      // flight and send duplicate authoring turns.
+      if (state) state.appBicepHandoffKey = key;
+      let sources: AppSourceEvaluation[];
+      try {
+        sources = await Promise.all(
+          targets.map((branch) => deps.evaluateSource(repo, branch, context))
+        );
+      } catch (error) {
+        if (state?.appBicepHandoffKey === key) {
+          delete state.appBicepHandoffKey;
+        }
+        throw error;
+      }
       // The modeling skill cannot author this repository at all. Deliberately
       // does NOT consume the key: adding a Dockerfile later must make the next
       // render eligible for the handoff.
-      if (sources.every((source) => source.status === "none")) return;
-      if (state) state.appBicepHandoffKey = key;
+      if (sources.every((source) => source.status === "none")) {
+        if (state?.appBicepHandoffKey === key) {
+          delete state.appBicepHandoffKey;
+        }
+        return;
+      }
+      if (state && state.appBicepHandoffKey !== key) return;
       deps.send(appBicepHandoffMessage(repo, page, targets));
       return;
     }

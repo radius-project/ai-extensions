@@ -42,7 +42,8 @@ describe("graphDiffPage", () => {
       repo: "octo/app",
       base: "main",
       head: "feature",
-      resources: []
+      resources: [],
+      modelingError: ""
     });
   });
 
@@ -59,6 +60,7 @@ describe("graphDiffPage", () => {
       diffHead: "feature",
       diffResources: resources
     });
+
     expect(html).toContain("+1 added");
     expect(html).toContain("-1 removed");
     expect(html).toContain("~1 modified");
@@ -67,7 +69,30 @@ describe("graphDiffPage", () => {
       repo: "octo/app",
       base: "main",
       head: "feature",
-      resources
+      resources,
+      modelingError: ""
+    });
+  });
+
+  it("renders an empty diff compilation failure on the graph surface", () => {
+    const html = graphDiffPage({
+      diffTargetRepo: "octo/app",
+      diffBase: "main",
+      diffHead: "feature",
+      diffError: "Your application model couldn't be compiled.",
+      diffModelingFailed: true
+    });
+
+    expect(html).toContain('<div id="graph-container"></div>');
+    expect(html).toContain(
+      'id="diff-status" class="status error" style="display:none;"'
+    );
+    expect(readBrowserPageState(html, "radius-graph-diff-state")).toEqual({
+      repo: "octo/app",
+      base: "main",
+      head: "feature",
+      resources: [],
+      modelingError: "Your application model couldn't be compiled."
     });
   });
 

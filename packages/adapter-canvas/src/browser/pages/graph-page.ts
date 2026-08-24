@@ -29,6 +29,10 @@ export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
 export const GRAPH_RETRY_MS = 10_000;
 export const GRAPH_STALE_RETRY_MS = 1_000;
 export const GRAPH_PROGRESS_MS = 800;
+// Why the primary button is inert after a modeling failure. The graph surface
+// carries the diagnostic; this only explains the disabled control.
+export const GRAPH_PLAN_BLOCKED_TITLE =
+  "Plan Deployment is unavailable until the application model compiles.";
 
 interface GraphPageState {
   repo: string;
@@ -108,6 +112,28 @@ export function initializeGraphPage(
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
   let renderedOptions: GraphOptions | null = null;
+  // Whether the selected branch's model has compiled. It starts pending even
+  // for a server-rendered graph, because that page immediately re-requests the
+  // graph and the refresh decides the real state.
+  let modelState: "pending" | "ready" | "failed" = "pending";
+
+  // Keep the primary button in step with the compile state. The server renders
+  // the button without a mode and loadModeledEnvState assigns "plan" later, so
+  // the two inputs settle in either order; re-applying both here is what stops
+  // a late environment listing from leaving a compiled model unplannable. The
+  // create-env and unavailable modes own their own enablement.
+  const syncPrimaryButton = (): void => {
+    if (!button) return;
+    const mode = button.dataset.mode;
+    if (mode === "create-env" || mode === "unavailable") return;
+    const branch = branchSelect ? branchSelect.value : page.branch;
+    button.disabled = modelState !== "ready" || !branch;
+    if (modelState === "failed") {
+      button.setAttribute("title", GRAPH_PLAN_BLOCKED_TITLE);
+    } else {
+      button.removeAttribute("title");
+    }
+  };
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
@@ -301,6 +327,8 @@ export function initializeGraphPage(
       .then((payload) => {
         if (requestGeneration !== generation) return;
         if (isRecord(payload) && Array.isArray(payload.resources)) {
+          modelState = "ready";
+          syncPrimaryButton();
           stopProgress();
           showStatus(context, "Application graph ready.", "info");
           showLoadedGraph();
@@ -348,7 +376,13 @@ export function initializeGraphPage(
         }
         const error = readString(payload, "error");
         stopProgress();
-        if (error) showFailure(error);
+        if (error) {
+          if (readBoolean(payload, "modelingFailed")) {
+            modelState = "failed";
+            syncPrimaryButton();
+          }
+          showFailure(error);
+        }
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
@@ -368,9 +402,8 @@ export function initializeGraphPage(
   if (branchSelect) {
     entry.on(branchSelect, "change", () => {
       stopRequest();
-      if (button && button.dataset.mode !== "create-env") {
-        button.disabled = !branchSelect.value;
-      }
+      modelState = "pending";
+      syncPrimaryButton();
       if (branchSelect.value) {
         load();
       }
@@ -381,6 +414,8 @@ export function initializeGraphPage(
   }
 
   if (page.loaded) {
+    modelState = "pending";
+    syncPrimaryButton();
     const graphOptions: GraphOptions = {
       repoUrl: githubRepositoryUrl(page.repo),
       branch: page.branch,
@@ -404,6 +439,8 @@ export function initializeGraphPage(
       .then((payload) => {
         if (refreshGeneration !== generation) return;
         if (isRecord(payload) && Array.isArray(payload.resources)) {
+          modelState = "ready";
+          syncPrimaryButton();
           renderOrUpdate(parseGraphResources(payload.resources), {
             ...graphOptions,
             localSource: sourceProvenance(payload)
@@ -414,14 +451,27 @@ export function initializeGraphPage(
             "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.",
             "info"
           );
+          // A preloaded graph refresh can discover that the model disappeared
+          // just like the initial load can. Re-enter the ordinary retrying path
+          // so the page recovers when Copilot publishes the replacement model.
+          retry = entry.after(GRAPH_RETRY_MS, () => {
+            retry = null;
+            load({ continuing: true });
+          });
         } else {
           const error = readString(payload, "error");
           if (error) {
-            showStatus(
-              context,
-              `Unable to refresh the application graph: ${error}`,
-              "error"
-            );
+            if (readBoolean(payload, "modelingFailed")) {
+              modelState = "failed";
+              syncPrimaryButton();
+              showFailure(error);
+            } else {
+              showStatus(
+                context,
+                `Unable to refresh the application graph: ${error}`,
+                "error"
+              );
+            }
           }
         }
       })
@@ -448,15 +498,16 @@ export function initializeGraphPage(
   )
     .then(() => {
       if (!entry.active || hasLoadedGraph || !branchSelect?.value) return;
-      if (button && button.dataset.mode !== "create-env")
-        button.disabled = false;
+      syncPrimaryButton();
       load();
     })
     .catch((error: unknown) => {
       context.logger.error("Radius could not load graph branches.", error);
       showStatus(context, "Unable to load branches.", "error");
     });
-  loadModeledEnvState(context, page.repo, () => entry.active);
+  void loadModeledEnvState(context, page.repo, () => entry.active).then(() => {
+    if (entry.active) syncPrimaryButton();
+  });
 
   entry.onTeardown(() => {
     stopRequest();

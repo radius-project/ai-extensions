@@ -23,6 +23,10 @@ import {
   fenceDeployDiagnostic,
   DEPLOY_DIAGNOSTIC_NOTE
 } from "../deploy-diagnostics.js";
+import {
+  infrastructureFailureSummaryList,
+  modelFailureSummaryList
+} from "../model-failure-policy.js";
 import type { AppModelStatus } from "./graph-context.js";
 
 interface DeployRepairDetails {
@@ -265,8 +269,8 @@ export function deployRepairHandoffPrompt(
   lines.push(
     "",
     "First decide what kind of failure this is:",
-    "- A modeling or schema failure points at .radius/app.bicep — unknown resource type or API version, unknown or missing property, an invalid reference between resources, a wrong credential shape, or a Bicep parse or compile error. Repair these.",
-    "- An infrastructure or environment failure (recipe download or execution, provider mismatch, cluster, credential, or connectivity problems) is not caused by the app model. Do not repair the model for these: report the failure and the workflow run URL to the user, and do not redeploy.",
+    `- A modeling or schema failure points at .radius/app.bicep — ${modelFailureSummaryList()}. Repair these.`,
+    `- An infrastructure or environment failure (${infrastructureFailureSummaryList()}) is not caused by the app model. Do not repair the model for these: report the failure and the workflow run URL to the user, and do not redeploy.`,
     "",
     `For a modeling or schema failure: ${SKILL_HANDOFF}`,
     `Then commit the repaired .radius/app.bicep and push it to ${branchName} before redeploying. The deploy runs on GitHub Actions against that branch as it exists on GitHub, so a fix left only in the local worktree is not deployed — the workflow would check out and redeploy the unchanged file. If you cannot push to that branch (for example it is protected), stop and tell the user, or open a pull request; do not redeploy an unchanged branch.`,

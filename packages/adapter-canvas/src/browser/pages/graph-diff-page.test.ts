@@ -34,6 +34,7 @@ interface FixtureOptions {
   withRepoInput?: boolean;
   withBaseSelect?: boolean;
   withHeadSelect?: boolean;
+  modelingError?: string;
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -45,11 +46,18 @@ function fixture(options: FixtureOptions = {}) {
     withStatus = true,
     withRepoInput = true,
     withBaseSelect = true,
-    withHeadSelect = true
+    withHeadSelect = true,
+    modelingError = ""
   } = options;
   const browser = createFakeBrowser();
   const state = createFakeElement(GRAPH_DIFF_STATE_ID);
-  state.textContent = JSON.stringify({ repo, base, head, resources });
+  state.textContent = JSON.stringify({
+    repo,
+    base,
+    head,
+    resources,
+    modelingError
+  });
   const repoInput = createFakeInput("diff-repo-select", repo);
   const app = createFakeSelect("diff-app");
   const baseSelect = createFakeSelect("base-branch");
@@ -58,7 +66,8 @@ function fixture(options: FixtureOptions = {}) {
   headSelect.value = head;
   const status = createFakeElement("diff-status");
   const progressHost = createFakeElement(DIFF_PROGRESS_STEPS_ID);
-  const elements = [state, app, progressHost];
+  const graphContainer = createFakeElement("graph-container");
+  const elements = [state, app, progressHost, graphContainer];
   if (withRepoInput) elements.push(repoInput);
   if (withBaseSelect) elements.push(baseSelect);
   if (withHeadSelect) elements.push(headSelect);
@@ -90,7 +99,8 @@ function fixture(options: FixtureOptions = {}) {
     base: baseSelect,
     head: headSelect,
     status,
-    progressHost
+    progressHost,
+    graphContainer
   };
 }
 
@@ -166,6 +176,7 @@ describe("initializeGraphDiffPage", () => {
     initializeGraphDiffPage(browser.context, {
       radiusRenderGraph: vi.fn()
     });
+
     await flushPromises();
 
     head.dispatch("change");
@@ -175,6 +186,61 @@ describe("initializeGraphDiffPage", () => {
     expect(status.className).toBe("status error");
     expect(status.textContent).not.toContain("secret-shaped");
     expect(browser.logger.errors).toHaveLength(1);
+  });
+
+  it("renders a compile failure only on the graph surface", async () => {
+    const { browser, head, status } = fixture({
+      resources: [{ id: "existing" }]
+    });
+    const setError = vi.fn();
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({
+        error: "Your application model couldn't be compiled.",
+        modelingFailed: true
+      })
+    );
+    initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn(),
+      radiusSetGraphError: setError
+    });
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "Your application model couldn't be compiled."
+    );
+    expect(status.style.display).toBe("none");
+    expect(head.listenerCount("change")).toBe(1);
+  });
+
+  it("shows a preloaded compile failure without immediately retrying", async () => {
+    const { browser, status, graphContainer, head } = fixture({
+      modelingError: "Your application model couldn't be compiled."
+    });
+    const setError = vi.fn();
+
+    initializeGraphDiffPage(browser.context, {
+      radiusSetGraphError: setError
+    });
+    await flushPromises();
+
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "Your application model couldn't be compiled."
+    );
+    expect(status.style.display).toBe("none");
+    expect(
+      browser.net.calls.some((call) => call.url === "/api/diff-branches")
+    ).toBe(false);
+
+    graphContainer.innerHTML = "stale compile failure";
+    browser.net.handle("/api/diff-branches", () => jsonResponse({}));
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    expect(graphContainer.innerHTML).toBe("");
   });
 
   it("hides status silently when no status element exists", async () => {
@@ -377,15 +443,18 @@ describe("initializeGraphDiffPage", () => {
     head.dispatch("change");
     browser.clock.tick(DIFF_DEBOUNCE_MS);
     await flushPromises();
+    const halfDebounce = Math.floor(DIFF_DEBOUNCE_MS / 2);
+    browser.clock.tick(DIFF_RETRY_MS - halfDebounce);
     base.value = "another";
     base.dispatch("change");
-    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    browser.clock.tick(halfDebounce);
     await flushPromises();
-    const settled = bodies.length;
-    browser.clock.tick(DIFF_RETRY_MS);
+    expect(bodies).toHaveLength(1);
+
+    browser.clock.tick(DIFF_DEBOUNCE_MS - halfDebounce);
     await flushPromises();
 
-    expect(bodies).toHaveLength(settled + 1);
+    expect(bodies).toHaveLength(2);
     expect(bodies.at(-1)).toContain('"base":"another"');
   });
 

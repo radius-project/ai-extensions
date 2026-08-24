@@ -224,6 +224,120 @@ describe("createAppModelHandoff", () => {
     expect(sent[0].displayPrompt).toContain("Generating the application model");
   });
 
+  it("reserves a missing-model handoff while source evaluation is in flight", async () => {
+    const state: CanvasState = {};
+    let release!: (source: AppSourceEvaluation) => void;
+    const source = new Promise<AppSourceEvaluation>((resolve) => {
+      release = resolve;
+    });
+    const evaluateSource = vi.fn(() => source);
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      evaluateSource
+    });
+
+    const first = handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    });
+    await vi.waitFor(() => expect(evaluateSource).toHaveBeenCalledTimes(1));
+    const second = handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "planned",
+      state
+    });
+    release(MODELABLE);
+    await Promise.all([first, second]);
+
+    expect(evaluateSource).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("releases a missing-model reservation when source evaluation fails", async () => {
+    const state: CanvasState = {};
+    const evaluateSource = vi
+      .fn<() => Promise<AppSourceEvaluation>>()
+      .mockRejectedValueOnce(new Error("source unavailable"))
+      .mockResolvedValue(MODELABLE);
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      evaluateSource
+    });
+    const request = {
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    };
+
+    await expect(handOff(request)).rejects.toThrow("source unavailable");
+    expect(state.appBicepHandoffKey).toBeUndefined();
+    await handOff(request);
+
+    expect(evaluateSource).toHaveBeenCalledTimes(2);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("does not clear a newer reservation when an older source probe fails", async () => {
+    const state: CanvasState = {};
+    let rejectSource!: (error: Error) => void;
+    const evaluateSource = vi.fn(
+      () =>
+        new Promise<AppSourceEvaluation>((_resolve, reject) => {
+          rejectSource = reject;
+        })
+    );
+    const { handOff } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      evaluateSource
+    });
+    const pending = handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    });
+    await vi.waitFor(() => expect(evaluateSource).toHaveBeenCalledOnce());
+    state.appBicepHandoffKey = "newer-request";
+
+    rejectSource(new Error("source unavailable"));
+
+    await expect(pending).rejects.toThrow("source unavailable");
+    expect(state.appBicepHandoffKey).toBe("newer-request");
+  });
+
+  it("does not send an older handoff after a newer reservation replaces it", async () => {
+    const state: CanvasState = {};
+    let releaseSource!: (source: AppSourceEvaluation) => void;
+    const evaluateSource = vi.fn(
+      () =>
+        new Promise<AppSourceEvaluation>((resolve) => {
+          releaseSource = resolve;
+        })
+    );
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      evaluateSource
+    });
+    const pending = handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    });
+    await vi.waitFor(() => expect(evaluateSource).toHaveBeenCalledOnce());
+    state.appBicepHandoffKey = "newer-request";
+
+    releaseSource(MODELABLE);
+    await pending;
+
+    expect(sent).toEqual([]);
+    expect(state.appBicepHandoffKey).toBe("newer-request");
+  });
+
   it("names the view it was asked about in the authoring prompt", async () => {
     const { handOff, sent } = harness({
       statuses: {

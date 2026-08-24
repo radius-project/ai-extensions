@@ -671,6 +671,9 @@ describe("graphs-planning read routes (SU-09)", () => {
       state?.graphProgressRecords?.graph?.graphProgressWaitStartedAtMs
     ).toBeUndefined();
     expect(
+      state?.graphProgressRecords?.graph?.graphProgressWaitExpiredMessage
+    ).toBe(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
+    expect(
       state?.graphProgressRecords?.graph?.graphBuildEvents.at(-1)
     ).toMatchObject({
       stage: "creating_model",

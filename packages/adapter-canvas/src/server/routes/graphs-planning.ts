@@ -2,13 +2,21 @@ import {
   evaluateAppSource,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
+import {
+  asGraphModelingFailure,
+  GraphModelingFailure
+} from "../../graph-modeling-failure.js";
 import type { DeployStatus } from "@radius-project/core";
 import type {
   DeployProgress,
   WorkflowArtifact
 } from "../../deploy-artifacts.js";
-import { recordGraphBuildEvent } from "../../shared.js";
+import { expireGraphProgressWait } from "../../shared.js";
 import { evaluateAppBicepWait } from "../../graph-progress-contract.js";
+import type {
+  GraphRepairAttempt,
+  GraphRepairRequest
+} from "../../graph-model-repair.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { GraphProgressRecord, GraphProgressView } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
@@ -136,15 +144,7 @@ export function handleProgress(
       lastActivityAtMs: record.graphProgressLastActivityAtMs ?? null
     });
     if (wait.status === "waiting") continue;
-    recordGraphBuildEvent(record, {
-      stage: "creating_model",
-      state: "failed",
-      detail: wait.message
-    });
-    record.graphProgressActive = false;
-    record.graphProgressAwaitingModel = false;
-    delete record.graphProgressWaitStartedAtMs;
-    delete record.graphProgressLastActivityAtMs;
+    expireGraphProgressWait(record, wait.message);
   }
   const requestedView = url.searchParams.get("view");
   const record =
@@ -586,11 +586,17 @@ export interface GraphsPlanningStreamDependencies {
     context: { repo: string; branch: string },
     expectedToken: string
   ): boolean;
+  isCurrentSourceRef(entry: CanvasServerEntry, expectedToken: string): boolean;
   triggerAppBicepHandoff(
     entry: CanvasServerEntry,
     repo: string,
     branch: string
   ): void;
+  triggerGraphRepairHandoff(
+    entry: CanvasServerEntry,
+    request: GraphRepairRequest
+  ): GraphRepairAttempt;
+  clearGraphRepairAttempt(entry: CanvasServerEntry): void;
   fetchBicepSelection(
     entry: CanvasServerEntry,
     repo: string,
@@ -612,6 +618,7 @@ export interface GraphsPlanningStreamDependencies {
   ): Promise<unknown[]>;
   canvasGraphResources(values: unknown[]): CanvasGraphResource[];
   errorMessage(error: unknown): string;
+  logError(message: string): void;
 }
 
 // The progress log the Graph tab streams while `rad` models the app. The
@@ -714,18 +721,17 @@ export async function handleLoadGraphStream(
         bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
         log: sendProgress
       });
-    const resources = dependencies.canvasGraphResources(
-      await dependencies.buildGraphViaRad(
-        content,
-        selection.bicepPath || ".radius/app.bicep",
-        {
-          log: sendProgress,
-          saveGraphJsonTo: graphJsonPath,
-          radArtifactsDir,
-          cleanupRadArtifactsDir: radArtifactsRemote
-        }
-      )
+    const graphValues = await dependencies.buildGraphViaRad(
+      content,
+      selection.bicepPath || ".radius/app.bicep",
+      {
+        log: sendProgress,
+        saveGraphJsonTo: graphJsonPath,
+        radArtifactsDir,
+        cleanupRadArtifactsDir: radArtifactsRemote
+      }
     );
+    const resources = dependencies.canvasGraphResources(graphValues);
     sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
 
     if (
@@ -745,9 +751,32 @@ export async function handleLoadGraphStream(
     // supplied the app.bicep content (file is on disk).
     entry.state.graphFromWorkspace = selection.fromWorkspace;
     entry.state.activeGraphView = "graph";
+    dependencies.clearGraphRepairAttempt(entry);
 
     sendDone({ reload: true });
   } catch (e) {
+    const failure = asGraphModelingFailure(e);
+    if (failure instanceof GraphModelingFailure) {
+      dependencies.logError(
+        `[radius graph] modeling failed for ${repo}@${branch}: ${failure.diagnostic}`
+      );
+      if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
+        sendDone({ stale: true });
+        return;
+      }
+      const attempt = dependencies.triggerGraphRepairHandoff(entry, {
+        view: "graph",
+        repo,
+        branches: [branch],
+        diagnostic: failure.diagnostic
+      });
+      sendDone({
+        error: failure.message,
+        modelingFailed: true,
+        ...attempt
+      });
+      return;
+    }
     sendDone({ error: dependencies.errorMessage(e) });
   }
 }

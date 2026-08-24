@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { RadProcessError } from "@radius-project/adapter-shared";
 import {
   computeGraphDiff,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
@@ -9,6 +10,7 @@ import {
   type GraphWorkflowDependencies,
   type GraphWorkflowOutcome
 } from "./graph-workflows.js";
+import { GRAPH_MODELING_FAILURE_MESSAGE } from "../../graph-progress-contract.js";
 import type {
   AppBicepSelection,
   CompileResourcesInput,
@@ -41,6 +43,7 @@ import type {
   CanvasState,
   GraphBuildEvent
 } from "../../shared.js";
+import { expireGraphProgressWait } from "../../shared.js";
 
 // `record`, `optionalString` and `errorMessage` are module-private in
 // `server.ts`, so they are mirrored here verbatim rather than exported solely
@@ -59,6 +62,12 @@ function record(value: unknown): Record<string, unknown> {
 
 function optionalString(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function validationFailure(detail: string): Error {
+  return new Error("rad app graph failed", {
+    cause: new RadProcessError("rad exited with code 1", detail, "")
+  });
 }
 
 interface HandoffCall {
@@ -88,6 +97,7 @@ interface PipelineScript {
   // Newest activity from a modeling run. Read only while an answer is asking
   // the page to keep waiting for the model.
   modelingActivityAtMs?: number;
+  observeModelingRun?: () => Promise<number | null>;
   // Runs after the named stage, so a test can move the world on mid-request.
   afterStage?: () => void;
   afterCompile?: () => void;
@@ -111,6 +121,8 @@ interface Harness {
   // How many times an answer asked the workspace whether a modeling run is in
   // flight. Kept out of `order` so it cannot perturb stage-ordering assertions.
   modelingObservations: { count: number };
+  // Everything the workflows sent to the diagnostics sink instead of the canvas.
+  loggedErrors: string[];
   workflows: GraphPlanningWorkflows;
   setEntryMissing(missing: boolean): void;
   advanceClock(ms: number): void;
@@ -161,6 +173,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   };
   const recipes: unknown[] = [];
   const plannedOutputs: unknown[] = [];
+  const loggedErrors: string[] = [];
 
   function requireScripted<T>(
     table: Record<string, T>,
@@ -223,11 +236,21 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     triggerAppBicepHandoff: (handoffEntry, repo, branches, page) => {
       handoffs.push({ repo, branches, page, hasEntry: !!handoffEntry });
     },
+    triggerGraphRepairHandoff: () => ({
+      attempt: 1,
+      maxAttempts: 3,
+      repairing: true,
+      repairExhausted: false
+    }),
+    clearGraphRepairAttempt: () => {},
     listBranchPaths: (_entry, _repo, branch) =>
       Promise.resolve(harnessScript.branchPaths?.[branch] ?? []),
     observeModelingRun: () => {
       modelingObservations.count++;
-      return Promise.resolve(harnessScript.modelingActivityAtMs ?? null);
+      return (
+        harnessScript.observeModelingRun?.() ??
+        Promise.resolve(harnessScript.modelingActivityAtMs ?? null)
+      );
     },
     prepareSourceRefResources,
     setSourceRefResources,
@@ -256,6 +279,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     record,
     optionalString,
     errorMessage,
+    logError: (message) => {
+      loggedErrors.push(message);
+    },
     now: () => clockMs
   };
 
@@ -277,6 +303,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     recipes,
     plannedOutputs,
     modelingObservations,
+    loggedErrors,
     setEntryMissing(missing) {
       entryMissing = missing;
     },
@@ -323,6 +350,7 @@ describe("graph planning workflows", () => {
       expect(outcome.status).toBe(400);
       expect(outcome.kind).toBe("json");
       expect(outcome.payload.error).toContain("JSON");
+      expect(harness.loggedErrors).toEqual([]);
     });
 
     it("answers 503 without a Content-Type when the instance entry is gone", async () => {
@@ -506,6 +534,66 @@ describe("graph planning workflows", () => {
         expect(outcome.payload).toMatchObject({
           error: GRAPH_APP_BICEP_MAX_WAIT_MESSAGE,
           appBicepWaitExpired: true
+        });
+      });
+
+      it("returns a retained expiry instead of restarting the wait", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) }
+        });
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        const record = harness.state.graphProgressRecords?.graph;
+        if (!record) throw new Error("expected graph progress record");
+        const generation = record?.graphProgressGeneration;
+        const startedAtMs = record?.graphProgressStartedAtMs;
+        expireGraphProgressWait(record, GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
+
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+          appBicepWaitExpired: true
+        });
+        expect(harness.state.graphProgressRecords?.graph).toMatchObject({
+          graphProgressGeneration: generation,
+          graphProgressStartedAtMs: startedAtMs,
+          graphProgressActive: false,
+          graphProgressWaitExpiredMessage: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+        });
+      });
+
+      it("honors an expiry recorded while the activity probe is in flight", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) }
+        });
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        let releaseObservation!: (value: number | null) => void;
+        let markObservationStarted!: () => void;
+        const observationStarted = new Promise<void>((resolve) => {
+          markObservationStarted = resolve;
+        });
+        harness.script.observeModelingRun = () => {
+          markObservationStarted();
+          return new Promise<number | null>((resolve) => {
+            releaseObservation = resolve;
+          });
+        };
+
+        const pending = harness.run("loadGraph", '{"repo":"octo/app"}');
+        await observationStarted;
+        const record = harness.state.graphProgressRecords?.graph;
+        if (!record) throw new Error("expected graph progress record");
+        expireGraphProgressWait(record, GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
+        releaseObservation(null);
+        const outcome = await pending;
+
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+          appBicepWaitExpired: true
+        });
+        expect(record).toMatchObject({
+          graphProgressActive: false,
+          graphProgressWaitExpiredMessage: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
         });
       });
 
@@ -722,6 +810,155 @@ describe("graph planning workflows", () => {
 
       expect(outcome.status).toBe(400);
       expect(outcome.payload).toEqual({ error: "EBUSY" });
+      expect(harness.loggedErrors).toEqual([]);
+    });
+
+    // Issue #475: the graph pages render a failed load as graph content, so
+    // rad's Bicep diagnostics used to appear in the canvas where the
+    // application graph belongs.
+    it("keeps rad's Bicep validation output out of the response and the progress stages", async () => {
+      const radOutput = [
+        "rad app graph failed: rad exited with code 1",
+        '/tmp/rad-bicep-abc/app.bicep(31,5) : Error BCP035: The specified "object" declaration is missing the following required properties: "application".',
+        '/tmp/rad-bicep-abc/app.bicep(42,18) : Error BCP062: The referenced declaration with name "redis" is not valid.',
+        "Compiled with radius extension: br:ghcr.io/radius-project/bicep-types-radius:latest"
+      ].join("\n");
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: false } },
+        compileThrows: { main: validationFailure(radOutput) }
+      });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.status).toBe(400);
+      expect(outcome.payload).toEqual({
+        error: `${GRAPH_MODELING_FAILURE_MESSAGE} app.bicep line 31: The specified "object" declaration is missing the following required properties: "application".`,
+        modelingFailed: true,
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
+      });
+      expect(messages(harness.state)).not.toContain(radOutput);
+      expect(
+        messages(harness.state).some((detail) => detail.includes("BCP035"))
+      ).toBe(false);
+      expect(stages(harness.state).at(-1)).toBe("building_graph:failed");
+      expect(harness.state.graphLoaded).toBeUndefined();
+      expect(harness.loggedErrors).toEqual([
+        `[radius graph] modeling failed for octo/app@main: ${radOutput}`
+      ]);
+      expect(repair).toHaveBeenCalledWith(harness.entry, {
+        view: "graph",
+        repo: "octo/app",
+        branches: ["main"],
+        diagnostic: radOutput
+      });
+    });
+
+    it("does not repair a modeled failure after its source selection changes", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: false } },
+        compileThrows: {
+          main: validationFailure("BCP035: stale invalid model")
+        },
+        afterStage: () => {
+          prepareSourceRefResources(harness.entry, "graph", {
+            repo: "octo/other",
+            branch: "main"
+          });
+        }
+      });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(repair).not.toHaveBeenCalled();
+    });
+
+    it("preserves a graph toolchain failure that has no Bicep diagnostic", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: false } },
+        compileThrows: {
+          main: new RadProcessError(
+            "managed Bicep download failed",
+            "",
+            "connection refused"
+          )
+        }
+      });
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toEqual({
+        error: "managed Bicep download failed"
+      });
+      expect(harness.loggedErrors).toEqual([]);
+    });
+
+    it("preserves BCP204 extension failures without starting model repair", async () => {
+      const processError = new RadProcessError(
+        "rad exited with code 1",
+        'Error BCP204: Extension "radius" is not recognized.',
+        ""
+      );
+      const error = new Error(
+        "rad app graph failed\nCompiled with radius extension: br:example/radius:1.0",
+        { cause: processError }
+      );
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: false } },
+        compileThrows: { main: error }
+      });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toEqual({ error: error.message });
+      expect(repair).not.toHaveBeenCalled();
+      expect(harness.loggedErrors).toEqual([]);
+    });
+
+    it("repairs a rad-level model failure without a BCP code", async () => {
+      const diagnostic = 'resource type "Applications.Db/redis" not recognized';
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: false } },
+        compileThrows: {
+          main: validationFailure(diagnostic)
+        }
+      });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toMatchObject({
+        error: GRAPH_MODELING_FAILURE_MESSAGE,
+        modelingFailed: true
+      });
+      expect(repair).toHaveBeenCalledWith(harness.entry, {
+        view: "graph",
+        repo: "octo/app",
+        branches: ["main"],
+        diagnostic
+      });
     });
 
     it("does not reuse a cached graph when the definition hash moved", async () => {
@@ -1110,6 +1347,33 @@ describe("graph planning workflows", () => {
       expect(outcome.kind).toBe("json");
       expect(harness.state.plannedRepo).toBeUndefined();
     });
+
+    it("does not repair a planned failure after its source selection changes", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ branch: "main" }) },
+        staged: { main: { dir: "/tmp/stage", remote: true } },
+        compileThrows: {
+          main: validationFailure("BCP035: stale invalid plan")
+        },
+        afterStage: () => {
+          prepareSourceRefResources(harness.entry, "planned", {
+            repo: "octo/other",
+            branch: "main"
+          });
+        }
+      });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
+
+      await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","branch":"main","provider":"azure"}'
+      );
+
+      expect(repair).not.toHaveBeenCalled();
+    });
   });
 
   describe("POST /api/diff-branches", () => {
@@ -1420,15 +1684,27 @@ describe("graph planning workflows", () => {
           main: { dir: "", remote: false },
           "feature/x": { dir: "", remote: false }
         },
-        compileThrows: { main: new Error("rad exited 1") }
+        compileThrows: { main: validationFailure("BCP035: invalid model") }
       });
 
       const outcome = await harness.run("diffBranches", diffBody);
 
       expect(outcome.status).toBe(400);
       expect(outcome.kind).toBe("json");
-      expect(outcome.payload).toEqual({ error: "rad exited 1" });
-      expect(harness.state.diffError).toBe("rad exited 1");
+      expect(outcome.payload).toEqual({
+        error: GRAPH_MODELING_FAILURE_MESSAGE,
+        modelingFailed: true,
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
+      });
+      // The compare page reads `diffError` straight into its markup, so the
+      // recorded failure is the same short sentence, not rad's output.
+      expect(harness.state.diffError).toBe(GRAPH_MODELING_FAILURE_MESSAGE);
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] modeling failed for octo/app@main: BCP035: invalid model"
+      ]);
     });
 
     it("leaves the diff error alone when a newer selection already replaced it", async () => {
@@ -1441,7 +1717,9 @@ describe("graph planning workflows", () => {
           main: { dir: "", remote: false },
           "feature/x": { dir: "", remote: false }
         },
-        compileThrows: { main: new Error("rad exited 1") },
+        compileThrows: {
+          main: validationFailure("BCP035: stale invalid model")
+        },
         afterStage: () => {
           // Only fires once both sides have staged; harmless to run twice.
           prepareSourceRefResources(harness.entry, "diff", {
@@ -1451,6 +1729,10 @@ describe("graph planning workflows", () => {
           });
         }
       });
+      const repair = vi.spyOn(
+        harness.dependencies,
+        "triggerGraphRepairHandoff"
+      );
 
       const outcome = await harness.run("diffBranches", diffBody);
 
@@ -1458,6 +1740,7 @@ describe("graph planning workflows", () => {
       // The failure belongs to a selection no longer on screen, so it must not
       // paint an error over the newer one.
       expect(harness.state.diffError).toBeUndefined();
+      expect(repair).not.toHaveBeenCalled();
     });
   });
 
@@ -1495,6 +1778,7 @@ describe("graph planning workflows", () => {
       expect(harness.state.plannedRepo).toBeUndefined();
       expect(harness.state.resolvedRecipes).toBeUndefined();
       expect(harness.state.activeGraphView).toBeUndefined();
+      expect(harness.loggedErrors).toEqual([]);
       expect(
         harness.state.graphProgressRecords?.planned?.graphBuildEvents.at(-1)
       ).toEqual({
@@ -1532,19 +1816,32 @@ describe("graph planning workflows", () => {
       expect(harness.order).toEqual(["select:main"]);
       expect(harness.handoffs).toEqual([]);
       expect(harness.state.plannedRepo).toBeUndefined();
+      expect(harness.loggedErrors).toEqual([]);
     });
 
     it("surfaces a compilation failure as 400 after staging and commits no planned state", async () => {
       const harness = planHarness({
-        compileThrows: { main: new Error("rad bicep build-graph exited 1") }
+        compileThrows: {
+          main: validationFailure("BCP035: invalid model")
+        }
       });
 
       const outcome = await harness.run("planGraph", planBody);
 
       expect(outcome.status).toBe(400);
       expect(outcome.payload).toEqual({
-        error: "rad bicep build-graph exited 1"
+        error: GRAPH_MODELING_FAILURE_MESSAGE,
+        modelingFailed: true,
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
       });
+      // rad's Bicep diagnostics are the exact text issue #475 kept out of the
+      // graph surface: they survive only in the server log.
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] modeling failed for octo/app@main: BCP035: invalid model"
+      ]);
       expect(harness.order).toEqual([
         "select:main",
         "stage:main",
@@ -1563,6 +1860,7 @@ describe("graph planning workflows", () => {
 
       expect(outcome.status).toBe(400);
       expect(outcome.payload).toEqual({ error: "recipe pack offline" });
+      expect(harness.loggedErrors).toEqual([]);
     });
   });
 
