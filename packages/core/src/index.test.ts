@@ -21,6 +21,7 @@ const EXPECTED_FUNCTIONS = [
   "mergeDeployedGraphMetadata",
   "projectDeployedGraph",
   "evaluateAppModelFreshness",
+  "freshnessIdentity",
   "normalizeAppBicep",
   "parseAppOrigin",
   "serializeAppOrigin",

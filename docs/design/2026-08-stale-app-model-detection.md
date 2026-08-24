@@ -101,6 +101,15 @@ Regeneration writes the working tree and never commits. So an app model that is 
 
 Two places in the code handle this. `evaluateAppBicepHook` holds the graph back when regenerating is safe. `maybeHandoffAppBicep` covers everything else, including openings the first one never sees, such as a reload after source links are attached, or the user simply clicking the panel open. Without it, those openings would quietly show a stale app model, which is the original problem in a different place.
 
+### Saying it once, without saying it once too often
+
+Both places report a problem once and then stay quiet until it changes, so opening the same graph repeatedly does not repeat the same message. That means each needs a key describing what it already said, and `freshnessIdentity` in `packages/core/src/modeling/app-origin.ts` builds the part of that key that describes the evidence.
+
+Getting it wrong in the other direction is worse than repeating a message. If two different situations share a key, the second one is never reported at all. Two things are easy to miss here:
+
+- An app model with no origin record has no record to identify it, so every one of them on a branch would look the same and swapping the file for a different one would go unnoticed. Its own fingerprint stands in for the record.
+- Whether an app model is safe to replace can change without the app model changing at all, by committing it or by adding a gitignore rule that matches it. So the key carries that too, and a verdict of "regenerate silently" is never mistaken for "ask first".
+
 ### Deciding whether source changed
 
 Comparing `sourceCommit` to `HEAD` does not work. Committing a freshly generated app model moves `HEAD` past the commit it recorded, so every committed app model would immediately look stale, regenerate, and look stale again on the next commit.

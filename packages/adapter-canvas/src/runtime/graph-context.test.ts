@@ -342,6 +342,28 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.requiresConfirmation).toBe(true);
   });
 
+  // A git failure must not read as "safe to replace". The model could be
+  // untracked and we simply could not see it, so the user is asked instead.
+  it("asks for confirmation when the recoverability check throws", async () => {
+    const { resolveAppModelStatus, deps } = helpers({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
+      headCommits: { "workspace:/workspace": COMMIT }
+    });
+    deps.appModel.workspaceModelRecoverable = async () => {
+      throw new Error("git exploded");
+    };
+
+    const status = await resolveAppModelStatus(
+      "acme/widgets",
+      "main",
+      WORKSPACE_STATE
+    );
+
+    expect(status.freshness.status).toBe("unrecorded");
+    expect(status.freshness.requiresConfirmation).toBe(true);
+    expect(status.freshness.reason).toContain("Git could not say");
+  });
+
   // Asking git costs a subprocess, so it is only worth it when the answer can
   // change what we do: on the workspace branch, with no record to judge by.
   it("does not ask git about recoverability once a record exists", async () => {

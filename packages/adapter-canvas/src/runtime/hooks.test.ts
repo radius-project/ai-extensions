@@ -356,6 +356,7 @@ interface StatusOverrides {
   requiresConfirmation?: boolean;
   reason?: string;
   sourceCommit?: string;
+  appBicepHash?: string;
 }
 
 function modelStatus(
@@ -374,6 +375,7 @@ function modelStatus(
       requiresConfirmation:
         overrides.requiresConfirmation ?? status === "manually-edited",
       reason: overrides.reason ?? `because it is ${status}`,
+      appBicepHash: overrides.appBicepHash ?? "sha256:model",
       origin:
         overrides.sourceCommit === undefined ?
           null
@@ -816,6 +818,48 @@ describe("evaluateAppBicepHook", () => {
       (await evaluateAppBicepHook(OPEN_GRAPH, deps))?.permissionDecision
     ).toBe("deny");
     expect(await evaluateAppBicepHook(OPEN_GRAPH, deps)).toBeUndefined();
+  });
+
+  // An unrecorded model carries no record, so without its own fingerprint every
+  // one of them on a branch shares a key. Swapping the file for a different one
+  // would then look like the request already made, and never be denied.
+  it("asks again when an unrecorded model is replaced by a different one", async () => {
+    let appBicepHash = "sha256:first";
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "unrecorded", appBicepHash })
+      )
+    });
+
+    expect(
+      (await evaluateAppBicepHook(OPEN_GRAPH, deps))?.permissionDecision
+    ).toBe("deny");
+    appBicepHash = "sha256:second";
+
+    expect(
+      (await evaluateAppBicepHook(OPEN_GRAPH, deps))?.permissionDecision
+    ).toBe("deny");
+  });
+
+  // The same model can stop being safe to replace without its bytes changing at
+  // all: a gitignore rule starts matching it, or it is removed from the index.
+  // The verdict flips from "regenerate silently" to "ask", so the key must too.
+  it("does not treat an unsafe unrecorded model as an already-requested refresh", () => {
+    const safe = refreshRequestKey(
+      modelStatus("a/b", "feat", {
+        status: "unrecorded",
+        requiresConfirmation: false
+      })
+    );
+    const unsafe = refreshRequestKey(
+      modelStatus("a/b", "feat", {
+        status: "unrecorded",
+        requiresConfirmation: true
+      })
+    );
+
+    expect(safe).not.toBe(unsafe);
   });
 
   it("asks again when a regeneration produced new evidence", async () => {

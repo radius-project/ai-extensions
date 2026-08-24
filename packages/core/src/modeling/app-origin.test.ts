@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   APP_ORIGIN_REPO_PATH,
   evaluateAppModelFreshness,
+  freshnessIdentity,
   normalizeAppBicep,
   parseAppOrigin,
   serializeAppOrigin,
@@ -129,6 +130,55 @@ describe("serializeAppOrigin", () => {
 
   it("round-trips through the parser", () => {
     expect(parseAppOrigin(serializeAppOrigin(origin()))).toEqual(origin());
+  });
+});
+
+describe("freshnessIdentity", () => {
+  const base = {
+    status: "unrecorded" as const,
+    stale: true,
+    requiresConfirmation: false,
+    reason: "r",
+    appBicepHash: "sha256:one",
+    origin: null
+  };
+
+  // Two verdicts that call for different actions must never share a key, or the
+  // second one is silently treated as already reported.
+  it("separates an unrecorded model that is safe to replace from one that is not", () => {
+    expect(freshnessIdentity(base)).not.toBe(
+      freshnessIdentity({ ...base, requiresConfirmation: true })
+    );
+  });
+
+  it("separates two different unrecorded models", () => {
+    expect(freshnessIdentity(base)).not.toBe(
+      freshnessIdentity({ ...base, appBicepHash: "sha256:two" })
+    );
+  });
+
+  it("is stable for the same verdict about the same model", () => {
+    expect(freshnessIdentity(base)).toBe(freshnessIdentity({ ...base }));
+  });
+
+  // A recorded model is identified by its record, so its own bytes add nothing.
+  // Leaving them out keeps a regeneration that reproduces identical content from
+  // reading as new evidence.
+  it("ignores the fingerprint when a record supplies the identity", () => {
+    const recorded = {
+      ...base,
+      status: "source-changed" as const,
+      origin: {
+        generatedAt: "2026-08-11T05:32:32.000Z",
+        sourceCommit: "a".repeat(40),
+        skillVersion: "0.1.0-test",
+        appBicepHash: "sha256:recorded"
+      }
+    };
+
+    expect(freshnessIdentity(recorded)).toBe(
+      freshnessIdentity({ ...recorded, appBicepHash: "sha256:different" })
+    );
   });
 });
 

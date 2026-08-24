@@ -29,6 +29,7 @@ import {
 } from "../deploy-diagnostics.js";
 import {
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+  freshnessIdentity,
   unsupportedAppSourceReport
 } from "@radius-project/core";
 import type { AppSourceEvaluation } from "@radius-project/core";
@@ -351,17 +352,17 @@ export async function evaluateAppBicepHook(
   };
 }
 
-// Identifies one staleness signal: the same branch, classification, and recorded
-// origin describe the same request to regenerate. A regeneration changes the
-// record, so genuinely new drift produces a new key.
+// Identifies one staleness signal: the same branch, classification, and evidence
+// describe the same request to regenerate. A regeneration changes the evidence,
+// so genuinely new drift produces a new key. freshnessIdentity supplies the
+// evidence half, including the part that keeps an unrecorded model that is safe
+// to replace from being confused with one that is not.
 export function refreshRequestKey(status: AppModelStatus): string {
-  const origin = status.freshness.origin;
   return [
     status.repo,
     status.branch,
     status.freshness.status,
-    origin?.sourceCommit ?? "",
-    origin?.skillVersion ?? ""
+    freshnessIdentity(status.freshness)
   ].join("::");
 }
 

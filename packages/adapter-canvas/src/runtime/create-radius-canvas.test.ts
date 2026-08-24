@@ -831,6 +831,40 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(message.prompt).toContain("would be lost");
   });
 
+  // `unrecorded` has two outcomes now, and only one of them is safe. The dedupe
+  // key has to carry which one it was, or a model that starts committed and
+  // clean caches the silent verdict and keeps it after the file stops being
+  // recoverable, which is the overwrite the guard exists to prevent.
+  it("asks when a recoverable model with no record becomes unrecoverable", async () => {
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" }
+    });
+    const session = deps.session.get();
+    const open = () =>
+      canvas.open(
+        ctx("radius-panel", {
+          page: "graph",
+          repo: "acme/widgets",
+          branch: "main"
+        })
+      );
+
+    await open();
+    expect(session.send).toHaveBeenCalledTimes(1);
+    expect(
+      (session.send as ReturnType<typeof vi.fn>).mock.calls[0][0].prompt
+    ).not.toContain("would be lost");
+
+    // The user edits the model, or a gitignore rule starts matching it.
+    deps.appModel.workspaceModelRecoverable = (async () => false) as never;
+
+    await open();
+    expect(session.send).toHaveBeenCalledTimes(2);
+    expect(
+      (session.send as ReturnType<typeof vi.fn>).mock.calls[1][0].prompt
+    ).toContain("would be lost");
+  });
+
   // A hand edit is permanent and the user cannot accept it, so raising it while
   // the model is otherwise current would ask the same question every session.
   it("says nothing about a hand edit that needs no regeneration", async () => {
