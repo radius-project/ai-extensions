@@ -104,7 +104,27 @@ source: 'mcr.microsoft.com/bicep/avm/res/<service>/<resource>:<x.y.z>'
 
 For example `mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.3`. Use an AVM module only when a maintained module matches the required Azure resource exactly and can be pinned to a version. Do NOT use a loose or approximate match; if you are not confident it is an exact fit, author a recipe instead (4b). The module's inputs and outputs are wired through the recipe pack entry's `parameters` and `outputs` maps (step 5).
 
-Do NOT guess the module's parameter or output names. Verify them against the module's real interface: an existing recipe pack that already uses the same AVM module (in `resource-types-contrib/recipepack/azure/`) or the module's published spec. Use the exact output names the module emits (for example the AVM `service-bus/namespace` module emits `primaryConnectionString`, not an invented name like `serviceBusConnectionString`), set the parameters the module requires (such as the SKU), and set auth-relevant parameters the connection depends on (for example `disableLocalAuth: false` when the output is a shared-access connection string). Pin the exact version whose interface you verified: if you confirmed the parameter and output names from a recipe pack that pins `:x.y.z`, pin `:x.y.z`, not a different version (an older or newer module may rename parameters or outputs).
+Do NOT guess the module's parameter or output names, and do NOT guess the version to pin. Verify both against the module's real interface, in this order.
+
+**First, look for an existing recipe pack that already uses the same module.** Search `resource-types-contrib/recipe-packs/azure/` by **module path, not by type name**:
+
+```text
+grep -rn "avm/res/event-hub/namespace" recipe-packs/
+```
+
+A pack may use the module under a type name unrelated to the one you are generating — the canonical Azure pack provisions `Radius.Data/mongoDatabases` from `avm/res/document-db/database-account` and `Radius.Messaging/kafka` from `avm/res/event-hub/namespace`, so grepping for `cosmos` or `eventHub` finds nothing while grepping the module path finds both. When a pack entry exists, reuse its pinned version, its `parameters`, and its `outputs` mapping as-is; those values are already known to work together.
+
+**Only when no pack uses the module**, read the interface from the **pinned version's** source, never the default branch:
+
+```text
+https://raw.githubusercontent.com/Azure/bicep-registry-modules/avm/res/<service>/<resource>/<x.y.z>/avm/res/<service>/<resource>/main.bicep
+```
+
+The `main` branch and the module README document the newest release. Reading them while pinning an older version is how a mapping ends up naming an output that does not exist at the pinned version — `primaryConnectionString` on `service-bus/namespace` exists from `0.15.0` onward, but not in `0.12.0`.
+
+Radius rejects a mapping to an output the pinned module does not declare, failing the deploy with `InvalidRecipeOutputs` before provisioning starts. Verifying the interface up front avoids that round trip; note that the check covers `outputs` only, so a wrong or missing `parameters` key still surfaces later as a provisioning or runtime auth failure.
+
+Use the exact output names the module emits (for example the AVM `service-bus/namespace` module emits `primaryConnectionString`, not an invented name like `serviceBusConnectionString`), set the parameters the module requires (such as the SKU), and set auth-relevant parameters the connection depends on (for example `disableLocalAuth: false` when the output is a shared-access connection string). Pin the exact version whose interface you verified: if you confirmed the parameter and output names from a recipe pack that pins `:x.y.z`, pin `:x.y.z`, not a different version (an older or newer module may rename parameters or outputs).
 
 #### 4b. Authored recipe (fallback): `<staging-dir>/<type>-recipe.bicep`
 
@@ -150,7 +170,7 @@ target: br:ghcr.io/<owner>/<repo>/<recipe>:<tag>
 
 ### 5. Author the recipe pack: `<staging-dir>/custom-recipe-pack.bicep`
 
-The recipe pack registers the recipe for the custom type. It is a `Radius.Core/recipePacks` resource whose `recipes` map is keyed by the full type name. Model it on `recipepack/azure/aks-recipepack.bicep` in `resource-types-contrib`:
+The recipe pack registers the recipe for the custom type. It is a `Radius.Core/recipePacks` resource whose `recipes` map is keyed by the full type name. Model it on `recipe-packs/azure/aks-recipepack.bicep` in `resource-types-contrib`:
 
 ```bicep
 extension radius
@@ -204,6 +224,7 @@ Use the custom type as `Radius.Resources/<typeNamePlural>@2025-08-01-preview` an
 - Every generated type declares an optional `codeReference` string, and `custom-types.tgz` was republished from the manifest that declares it.
 - `custom-types.yaml`, `custom-types.tgz`, and `custom-recipe-pack.bicep` exist in `.radius/`, plus `<type>-recipe.bicep` when one was authored.
 - The recipe pack `source` resolves: a pinned MCR AVM path (4a), or a GHCR path that was actually published (4b).
+- For an AVM `source`, every value in the pack's `outputs` map — including the nested `secrets` values — appears as an `output` in the **pinned version's** `main.bicep`, and every `parameters` key appears as a `param`. Verified against `<x.y.z>`, not the module's default branch or README.
 - The recipe pack `parameters` cover the module's required inputs (via `{{context}}`), and `outputs` map every `readOnly` property of the type (sensitive ones under `secrets`).
 - An authored recipe returns `output result object = { resources, values, secrets }`, with `values` and `secrets` keyed by the type's property names.
 - The generated type is Azure-provisionable. A non-Azure need was reported, not invented.
