@@ -109,15 +109,29 @@ function cloudRows(data: GraphNodeData): string[] {
   const rows: string[] = [];
   for (const entry of parsed) {
     if (typeof entry !== "object" || entry === null) continue;
-    const record = entry as { name?: unknown; type?: unknown; id?: unknown };
+    const record = entry as {
+      name?: unknown;
+      type?: unknown;
+      id?: unknown;
+      portalUrl?: unknown;
+    };
     const name = typeof record.name === "string" ? record.name : "";
     const type = typeof record.type === "string" ? record.type : "";
     const id = typeof record.id === "string" ? record.id : "";
     if (!id.startsWith("/subscriptions/")) continue;
+    const producerUrl =
+      typeof record.portalUrl === "string" ?
+        safeExternalUrl(record.portalUrl)
+      : "";
     const label =
       name || (type ? type.split("/").pop() || "" : "") || "resource";
     rows.push(
-      linkRow(ICON_LINK, label + " in Azure portal", azurePortalUrl(id), false)
+      linkRow(
+        ICON_LINK,
+        label + " in Azure portal",
+        producerUrl || azurePortalUrl(id),
+        false
+      )
     );
   }
   return rows;

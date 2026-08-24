@@ -434,12 +434,26 @@ export async function handleDeployedGraph(
       state.graphResources
     : [];
 
+  const plannedMetadataMatchesSelection =
+    terminalConclusion !== "failure" &&
+    !!state.deployProvider &&
+    state.plannedProvider === state.deployProvider &&
+    state.plannedRepo === repo &&
+    state.plannedBranch === branch &&
+    (!requestedEnv ||
+      (!!state.plannedEnvironment &&
+        namedSelectionPartMatches(state.plannedEnvironment, requestedEnv))) &&
+    Array.isArray(state.plannedResources);
+  const providerResolvedTopology = dependencies.mergeDeployedGraphMetadata(
+    topology,
+    plannedMetadataMatchesSelection ? state.plannedResources : null
+  );
   const deploymentMetadata =
     publishedGraph ??
     (!deploying && sessionMatchesSelection ? state.deployedGraph : null) ??
     null;
   const enrichedTopology = dependencies.mergeDeployedGraphMetadata(
-    topology,
+    providerResolvedTopology,
     deploymentMetadata
   );
   const resources = dependencies.canvasGraphResources(
