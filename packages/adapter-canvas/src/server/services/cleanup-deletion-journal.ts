@@ -25,6 +25,14 @@ export interface CleanupDeletionCommandResult extends ProviderMutationCommandRes
 /** What a read of the exact immutable identity found. */
 export type ExactIdentityRead = "absent" | "present" | "unreadable";
 
+/**
+ * What the pre-delete identity read decided about the resource under the name.
+ */
+export type CleanupIdentityVerdict =
+  | { decision: "delete" }
+  | { decision: "absent" }
+  | { decision: "refuse"; detail: string };
+
 export type CleanupDeletionOutcome =
   | { outcome: "deleted"; detail: null }
   | { outcome: "not_found"; detail: null }
@@ -86,14 +94,24 @@ export async function executeJournaledCleanupDeletion(input: {
    * Supplied for resources whose name the customer may reuse: an environment or
    * a federated credential deleted and recreated under the same name is a
    * different resource, and a delete addressed by name would remove theirs.
-   * Returning a refusal string stops the delete and hands it over.
+   *
+   * `delete` is the only verdict that lets the request go out. `absent` settles
+   * the artifact without one, because a resource that is provably gone is
+   * nothing to address a delete at. `refuse` hands it to the customer.
    */
-  confirmRecordedIdentity?(): Promise<string | null>;
+  confirmRecordedIdentity?(): Promise<CleanupIdentityVerdict>;
 }): Promise<CleanupDeletionOutcome> {
   let alreadyAbsent = false;
   if (input.confirmRecordedIdentity) {
-    const mismatch = await input.confirmRecordedIdentity();
-    if (mismatch) return { outcome: "skipped", detail: mismatch };
+    const verdict = await input.confirmRecordedIdentity();
+    if (verdict.decision === "refuse") {
+      return { outcome: "skipped", detail: verdict.detail };
+    }
+    if (verdict.decision === "absent") {
+      // Nothing is there to delete. Issuing one anyway would address a name
+      // whose next owner Radius has no claim on.
+      return { outcome: "not_found", detail: null };
+    }
   }
   try {
     const removal = await executeRecoverableMutation<"deleted" | "not_found">({

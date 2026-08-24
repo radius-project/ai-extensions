@@ -293,6 +293,7 @@ import {
 export { selectedEnvironmentReader };
 import {
   CleanupJournalPersistenceError,
+  type CleanupIdentityVerdict,
   cleanupDeletionKind,
   executeJournaledCleanupDeletion,
   isCleanupDeletionKind,
@@ -3572,31 +3573,47 @@ export async function cleanupAzureSetupArtifacts(
         : "unreadable";
     };
 
-    async function confirmRecordedIdentity(): Promise<string | null> {
+    async function confirmRecordedIdentity(): Promise<CleanupIdentityVerdict> {
       const recorded = deletion.recordedProviderId;
       if (!recorded) {
-        return `${label} was recorded without the provider id that tells it from a resource recreated under the same name, so Radius will not delete it. Review it and remove it yourself if it is unwanted.`;
+        return {
+          decision: "refuse",
+          detail: `${label} was recorded without the provider id that tells it from a resource recreated under the same name, so Radius will not delete it. Review it and remove it yourself if it is unwanted.`
+        };
       }
       let current: Partial<CommandResult>;
       try {
         current = await runAz(deletion.identityArgs as string[]);
       } catch (error) {
-        return `Radius could not read ${label} to confirm its identity: ${errorMessage(error)}. It removed nothing.`;
+        return {
+          decision: "refuse",
+          detail: `Radius could not read ${label} to confirm its identity: ${errorMessage(error)}. It removed nothing.`
+        };
       }
       if (current.code !== 0 && current.code !== "0") {
-        // A resource that is already gone is nothing to mistake for a
-        // replacement, so the delete still runs and the provider settles it.
-        return isAzureCleanupNotFound(deletion.artifactType, current) ? null : (
-            `Radius could not read ${label} to confirm its identity, so it removed nothing.`
-          );
+        // Already gone. There is nothing under the name to delete, so the
+        // artifact settles without a request that could only ever reach
+        // whichever resource takes the name next.
+        if (isAzureCleanupNotFound(deletion.artifactType, current)) {
+          return { decision: "absent" };
+        }
+        return {
+          decision: "refuse",
+          detail: `Radius could not read ${label} to confirm its identity, so it removed nothing.`
+        };
       }
       const live = String(current.stdout || "").trim();
       if (!live) {
-        return `The provider did not report an id for ${label}, so Radius cannot confirm it is the resource it created. It removed nothing.`;
+        return {
+          decision: "refuse",
+          detail: `The provider did not report an id for ${label}, so Radius cannot confirm it is the resource it created. It removed nothing.`
+        };
       }
-      return live === recorded ? null : (
-          `${label} now has a different provider id than the one Radius created, so the name belongs to a replacement. Radius removed nothing.`
-        );
+      if (live === recorded) return { decision: "delete" };
+      return {
+        decision: "refuse",
+        detail: `${label} now has a different provider id than the one Radius created, so the name belongs to a replacement. Radius removed nothing.`
+      };
     }
 
     let settled: CleanupDeletionOutcome;
@@ -3872,24 +3889,57 @@ export async function cleanupGitHubEnvironmentArtifact(
       // reconciliation below, which proves absence through the listing.
       // Names are reused. Before the one delete goes out, the environment
       // answering to this name has to still be the one the ledger recorded.
-      confirmRecordedIdentity: async () => {
+      confirmRecordedIdentity: async (): Promise<CleanupIdentityVerdict> => {
         const recorded = optionalString(artifact.providerId);
         if (!recorded) {
-          return `GitHub environment "${target}" was recorded without GitHub's own id for it, so Radius cannot tell it from an environment recreated under the same name. Review it and delete it yourself if it is unwanted.`;
+          return {
+            decision: "refuse",
+            detail: `GitHub environment "${target}" was recorded without GitHub's own id for it, so Radius cannot tell it from an environment recreated under the same name. Review it and delete it yourself if it is unwanted.`
+          };
         }
         if (!readEnvironment) {
-          return `Radius has no way to read GitHub environment "${target}" back, so it cannot confirm the environment under that name is still the one it created.`;
+          return {
+            decision: "refuse",
+            detail: `Radius has no way to read GitHub environment "${target}" back, so it cannot confirm the environment under that name is still the one it created.`
+          };
         }
         let current: CommandResult;
         try {
           current = await readEnvironment(["api", environmentPath]);
         } catch (error) {
-          return `Radius could not read GitHub environment "${target}" to confirm its identity: ${errorMessage(error)}. It removed nothing.`;
+          return {
+            decision: "refuse",
+            detail: `Radius could not read GitHub environment "${target}" to confirm its identity: ${errorMessage(error)}. It removed nothing.`
+          };
         }
         if (current.code !== 0 && current.code !== "0") {
-          return isNotFoundResponse(current) ? null : (
-              `Radius could not read GitHub environment "${target}" to confirm its identity, so it removed nothing.`
+          // A bare 404 here is what GitHub answers for an environment this
+          // token may not see, so it authorizes nothing on its own. Absence has
+          // to come from a listing the same account can actually read, and a
+          // resource that is gone settles without a delete being issued at all.
+          if (!isNotFoundResponse(current)) {
+            return {
+              decision: "refuse",
+              detail: `Radius could not read GitHub environment "${target}" to confirm its identity, so it removed nothing.`
+            };
+          }
+          let proof: Awaited<ReturnType<typeof proveEnvironmentAbsentAt>>;
+          try {
+            proof = await proveEnvironmentAbsentAt(
+              environmentPath,
+              readEnvironment
             );
+          } catch (error) {
+            return {
+              decision: "refuse",
+              detail: `Radius could not confirm whether GitHub environment "${target}" is gone: ${errorMessage(error)}. It removed nothing.`
+            };
+          }
+          if (proof.state === "absent") return { decision: "absent" };
+          return {
+            decision: "refuse",
+            detail: `GitHub answered 404 for environment "${target}", but Radius could not prove from a listing the selected account can read that it is actually gone, so it removed nothing.`
+          };
         }
         let live: string | null;
         try {
@@ -3898,11 +3948,17 @@ export async function cleanupGitHubEnvironmentArtifact(
           live = null;
         }
         if (!live) {
-          return `GitHub did not report an id for environment "${target}", so Radius cannot confirm it is the environment it created. It removed nothing.`;
+          return {
+            decision: "refuse",
+            detail: `GitHub did not report an id for environment "${target}", so Radius cannot confirm it is the environment it created. It removed nothing.`
+          };
         }
-        return live === recorded ? null : (
-            `GitHub environment "${target}" now has a different id than the one Radius created, so the name belongs to a replacement. Radius removed nothing.`
-          );
+        return live === recorded ?
+            { decision: "delete" }
+          : {
+              decision: "refuse",
+              detail: `GitHub environment "${target}" now has a different id than the one Radius created, so the name belongs to a replacement. Radius removed nothing.`
+            };
       },
       isAlreadyAbsent: (result) =>
         isNotFoundResponse(result) ? "unproven" : false,

@@ -1974,7 +1974,7 @@ describe("cleanupAzureSetupArtifacts", () => {
       });
     });
 
-    it("still deletes when the credential is already gone at the identity read", async () => {
+    it("settles without a delete when the credential is already gone", async () => {
       const op = claimed("fic-1");
 
       const { pass, deletes } = await attempt(op, {
@@ -1983,12 +1983,12 @@ describe("cleanupAzureSetupArtifacts", () => {
         stderr: "Request_ResourceNotFound: the credential does not exist"
       });
 
-      // Nothing under the name to mistake for a replacement, so the one
-      // delete still goes out and the provider settles it.
+      // Entra says it is not there. Nothing needs deleting, and a delete
+      // addressed by name could only reach a later credential.
       expect(
         deletes.filter((args) => args.includes("federated-credential"))
-      ).toHaveLength(1);
-      expect(credentialOutcome(pass)?.outcome).toBe("deleted");
+      ).toEqual([]);
+      expect(credentialOutcome(pass)?.outcome).toBe("not_found");
     });
   });
 
@@ -2825,18 +2825,58 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
       expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
     });
 
-    it("still deletes when the environment is already gone at the identity read", async () => {
+    it("settles without a delete when the environment is already gone", async () => {
       const op = claimed("env-1");
 
-      const { result, deletes } = await attempt(
+      const { result, deletes, invalidated } = await attempt(
         op,
         environmentReader({ identity: ENV_NOT_FOUND })
       );
 
-      // A 404 here is not a mismatch — there is nothing under the name to
-      // mistake for a replacement, so the delete proceeds and settles.
-      expect(deletes).toHaveLength(1);
-      expect(result.results[0].outcome).toBe("deleted");
+      // Absence is proven from a listing the account can read, so there is
+      // nothing to address a delete at — and issuing one anyway could only
+      // ever reach whichever environment takes the name next.
+      expect(deletes).toEqual([]);
+      expect(result.results[0].outcome).toBe("not_found");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+      expect(invalidated).toEqual(["octo/app"]);
+    });
+
+    it("refuses when a 404 cannot be corroborated by a listing", async () => {
+      const op = claimed("env-1");
+
+      const { result, deletes } = await attempt(
+        op,
+        environmentReader({
+          identity: ENV_NOT_FOUND,
+          listing: { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" }
+        })
+      );
+
+      // GitHub answers 404 for an environment this token may not see, so the
+      // endpoint alone proves nothing.
+      expect(deletes).toEqual([]);
+      expect(result.results[0]).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining("could not prove from a listing")
+      });
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+    });
+
+    it("refuses when the listing still reports the environment", async () => {
+      const op = claimed("env-1");
+
+      const { result, deletes } = await attempt(
+        op,
+        environmentReader({
+          identity: ENV_NOT_FOUND,
+          listing: envListing(["dev", "prod"])
+        })
+      );
+
+      expect(deletes).toEqual([]);
+      expect(result.results[0]).toMatchObject({ outcome: "skipped" });
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
     });
 
     it("removes nothing when it has no way to read the environment back", async () => {

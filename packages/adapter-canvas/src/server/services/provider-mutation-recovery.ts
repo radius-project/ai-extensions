@@ -90,9 +90,10 @@ function requireRecoveryRollback(
 export function providerMutationOutcomeUnknown(
   result: ProviderMutationCommandResult
 ): boolean {
-  if (result.timedOut !== true && (result.code === 0 || result.code === "0")) {
-    return false;
-  }
+  // A timeout, a kill, or a signal is never a success, whatever the exit code
+  // says. Only an unambiguous zero is read as an answer.
+  if (result.timedOut === true) return true;
+  if (result.code === 0 || result.code === "0") return false;
   return classifyProviderMutationFailure(result) !== "not_applied";
 }
 
@@ -400,6 +401,27 @@ export async function executeRecoverableMutation<T>(input: {
         input.persist
       );
     }
+    // Ambiguity is read before success. A command that timed out, was killed,
+    // or died on a signal can still exit 0 on some runners, and accepting that
+    // as an acknowledgement records a mutation nobody saw the provider answer.
+    if (providerMutationOutcomeUnknown(result)) {
+      settleProviderMutation(
+        input.operation,
+        mutation.mutationId,
+        "outcome_unknown",
+        "The provider request ended without an answer Radius could trust."
+      );
+      await persistOrThrow(
+        input.persist,
+        "after the provider response was inconclusive"
+      );
+      return reconcileMutation(
+        input.operation,
+        mutation,
+        input.reconcile,
+        input.persist
+      );
+    }
     if (result.code === 0 || result.code === "0") {
       const value = input.accept(result);
       settleProviderMutation(
@@ -412,53 +434,37 @@ export async function executeRecoverableMutation<T>(input: {
       await persistOrThrow(input.persist, "after the provider acknowledged it");
       return { state: "applied", value, recovered: false };
     }
-    if (!providerMutationOutcomeUnknown(result)) {
-      const manualGuidance = input.rejectionGuidance?.(result);
-      if (manualGuidance) {
-        settleProviderMutation(
-          input.operation,
-          mutation.mutationId,
-          "manual_required",
-          manualGuidance
-        );
-        await persistOrThrow(
-          input.persist,
-          "after the provider refused a destructive request"
-        );
-        throw new ProviderMutationRecoveryError(
-          manualGuidance,
-          "provider-mutation-manual-required"
-        );
-      }
+    // Everything ambiguous was settled above, so what is left is an answer the
+    // provider composed: a rejection that leaves the resource untouched.
+    const manualGuidance = input.rejectionGuidance?.(result);
+    if (manualGuidance) {
       settleProviderMutation(
         input.operation,
         mutation.mutationId,
-        "not_applied",
-        (
-          result.stderr ||
-          result.stdout ||
-          "The provider rejected the request."
-        ).trim()
+        "manual_required",
+        manualGuidance
       );
-      await persistOrThrow(input.persist, "after the provider rejected it");
-      return { state: "not_applied", result };
+      await persistOrThrow(
+        input.persist,
+        "after the provider refused a destructive request"
+      );
+      throw new ProviderMutationRecoveryError(
+        manualGuidance,
+        "provider-mutation-manual-required"
+      );
     }
     settleProviderMutation(
       input.operation,
       mutation.mutationId,
-      "outcome_unknown",
-      "The provider request timed out before Radius received a response."
+      "not_applied",
+      (
+        result.stderr ||
+        result.stdout ||
+        "The provider rejected the request."
+      ).trim()
     );
-    await persistOrThrow(
-      input.persist,
-      "after the provider response timed out"
-    );
-    return reconcileMutation(
-      input.operation,
-      mutation,
-      input.reconcile,
-      input.persist
-    );
+    await persistOrThrow(input.persist, "after the provider rejected it");
+    return { state: "not_applied", result };
   }
 
   if (

@@ -917,3 +917,94 @@ describe("edges the recovery record must still describe honestly", () => {
     });
   });
 });
+
+// A runner can report a clean exit for a command it gave up waiting on. Reading
+// that as an acknowledgement records a mutation nobody saw the provider answer,
+// and the next pass treats it as settled fact.
+describe("a success code on a request that was cut short", () => {
+  async function attempt(
+    response: Partial<{
+      code: string | number;
+      stdout: string;
+      stderr: string;
+      timedOut: boolean;
+    }>,
+    reconcile = async () =>
+      ({ state: "not_applied", evidence: "nothing was created" }) as const
+  ) {
+    const operation = createOperation({ operationId: "op_ambiguous" });
+    const states: string[] = [];
+    const mutate = vi.fn(async () => command(response));
+    const outcome = await executeRecoverableMutation({
+      operation,
+      kind: "github_environment.put",
+      target: "octo/app:prod",
+      persist: async () => {
+        states.push(operation.providerRecovery.mutations[0]?.status);
+      },
+      mutate,
+      accept: () => "accepted",
+      providerIdOf: () => "should-not-be-recorded",
+      reconcile
+    }).catch((error: unknown) => error);
+    return { operation, states, mutate, outcome };
+  }
+
+  it("reconciles a timed-out exit 0 instead of confirming it", async () => {
+    const { operation, states, mutate } = await attempt({
+      code: 0,
+      timedOut: true
+    });
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(states).toEqual(["prepared", "outcome_unknown", "not_applied"]);
+    // No id is settled from an answer nobody can vouch for.
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied",
+      providerId: null
+    });
+  });
+
+  it.each([
+    // Each of these reports a shape a runner can produce for a request that
+    // never got an answer, including ones that carry a success exit code.
+    ["a timed-out string zero", { code: "0", timedOut: true }],
+    ["a timed-out request that also failed", { code: 1, timedOut: true }],
+    ["a process killed by a signal", { code: "SIGKILL" }],
+    ["a status that means the shell died", { code: 137 }]
+  ])("reconciles %s rather than confirming it", async (_label, response) => {
+    const { operation, states } = await attempt(response);
+
+    // The whole sequence, so a change that confirmed first and reconciled
+    // afterwards could not satisfy it.
+    expect(states).toEqual(["prepared", "outcome_unknown", "not_applied"]);
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied",
+      providerId: null
+    });
+  });
+
+  it("still confirms an unambiguous success", async () => {
+    const { operation, states } = await attempt({ code: 0, stdout: "{}" });
+
+    expect(states).toEqual(["prepared", "confirmed"]);
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "confirmed",
+      providerId: "should-not-be-recorded"
+    });
+  });
+
+  it("hands a cut-short request that cannot be read to the customer", async () => {
+    const { operation, outcome } = await attempt(
+      { code: 0, timedOut: true },
+      async () => {
+        throw new Error("the provider cannot be read");
+      }
+    );
+
+    expect(outcome).toBeInstanceOf(ProviderMutationRecoveryError);
+    expect(operation.providerRecovery.mutations[0].status).toBe(
+      "outcome_unknown"
+    );
+  });
+});

@@ -4,6 +4,7 @@ import {
   prepareProviderMutation,
   settleProviderMutation
 } from "../../operations.js";
+import { ProviderMutationRecoveryError } from "./provider-mutation-recovery.js";
 import {
   ensureGitHubEnvironment,
   selectedEnvironmentReader,
@@ -100,45 +101,100 @@ describe("ensureGitHubEnvironment", () => {
     ]);
   });
 
-  it("adopts an exact environment after a timed-out PUT instead of retrying", async () => {
-    const operation = createOperation({ operationId: "op_environment" });
-    let environmentReads = 0;
-    let putCalls = 0;
-    const ensured = await ensureGitHubEnvironment({
-      repo: "octo/app",
-      requestedName: "production",
-      readGitHubJson: async (apiPath) => {
-        if (apiPath === "/repos/octo/app") {
-          return readResult({ json: { full_name: "octo/app" } });
-        }
-        environmentReads += 1;
-        return environmentReads === 1 ?
-            readResult({ ok: false, status: 404 })
-          : readResult({
-              json: {
-                name: "production",
-                created_at: "2026-08-22T00:00:00.000Z"
-              }
-            });
-      },
-      runGh: async () => {
-        putCalls += 1;
-        return result({ code: 1, timedOut: true });
-      },
-      mutationRecovery: { operation, persist: async () => {} },
-      now: () => Date.parse("2026-08-22T00:00:00.000Z")
+  // A PUT nobody saw the answer to recorded no id. What sits under the name
+  // afterwards may be what it made or what somebody made since, and a creation
+  // timestamp fits both — so the read is handed to a person, never adopted.
+  describe("an environment found after a PUT with no acknowledged id", () => {
+    async function interrupted(
+      rereadJson: Record<string, unknown>,
+      putStartedAt = "2026-08-22T00:00:00.000Z"
+    ) {
+      const operation = createOperation({ operationId: "op_environment" });
+      let environmentReads = 0;
+      let putCalls = 0;
+      const failure = await ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) => {
+          if (apiPath === "/repos/octo/app") {
+            return readResult({ json: { full_name: "octo/app" } });
+          }
+          environmentReads += 1;
+          return environmentReads === 1 ?
+              readResult({ ok: false, status: 404 })
+            : readResult({ json: rereadJson });
+        },
+        runGh: async () => {
+          putCalls += 1;
+          return result({ code: 1, timedOut: true });
+        },
+        mutationRecovery: { operation, persist: async () => {} },
+        now: () => Date.parse(putStartedAt)
+      }).catch((error: unknown) => error);
+      return { operation, failure, putCalls };
+    }
+
+    it("refuses to claim it, however well the timestamp fits", async () => {
+      const { operation, failure, putCalls } = await interrupted({
+        name: "production",
+        created_at: "2026-08-22T00:00:00.000Z"
+      });
+
+      expect(failure).toBeInstanceOf(ProviderMutationRecoveryError);
+      expect((failure as ProviderMutationRecoveryError).code).toBe(
+        "provider-mutation-manual-required"
+      );
+      expect((failure as Error).message).toContain(
+        "never recorded an id for the environment"
+      );
+      // The PUT is not retried and the environment is not adopted.
+      expect(putCalls).toBe(1);
+      expect(operation.providerRecovery).toMatchObject({
+        state: "manual_required",
+        mutations: [{ status: "manual_required", providerId: null }]
+      });
     });
 
-    expect(ensured).toEqual({
-      name: "production",
-      state: "created_candidate",
-      providerId: null,
-      creationProof: { proven: true, detail: null }
+    it("refuses a replacement created inside the tolerance window", async () => {
+      // The customer made their own environment under this name seconds after
+      // the interrupted request. Its creation time is indistinguishable.
+      const { operation, failure } = await interrupted({
+        id: 7654321,
+        name: "production",
+        created_at: "2026-08-22T00:00:30.000Z"
+      });
+
+      expect((failure as Error).message).toContain("id 7654321");
+      expect(operation.providerRecovery.mutations[0]).toMatchObject({
+        status: "manual_required",
+        providerId: null
+      });
     });
-    expect(putCalls).toBe(1);
-    expect(operation.providerRecovery).toMatchObject({
-      state: "complete",
-      mutations: [{ status: "confirmed" }]
+
+    it("still settles a reread that proves the environment absent", async () => {
+      const operation = createOperation({ operationId: "op_environment" });
+      let environmentReads = 0;
+
+      const failure = await ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) => {
+          if (apiPath === "/repos/octo/app") {
+            return readResult({ json: { full_name: "octo/app" } });
+          }
+          environmentReads += 1;
+          return readResult({ ok: false, status: 404 });
+        },
+        runGh: async () => result({ code: 1, timedOut: true }),
+        mutationRecovery: { operation, persist: async () => {} }
+      }).catch((error: unknown) => error);
+
+      // Absence is an answer, so the mutation resolves rather than hanging.
+      expect(failure).toBeInstanceOf(GitHubEnvironmentEnsureError);
+      expect(environmentReads).toBeGreaterThan(0);
+      expect(operation.providerRecovery.mutations[0]).toMatchObject({
+        status: "not_applied"
+      });
     });
   });
 
@@ -289,41 +345,6 @@ describe("ensureGitHubEnvironment", () => {
         providerId: "1234567"
       });
       expect(persists).toBeGreaterThan(0);
-    });
-
-    it("records the id the reconciling read found for a lost response", async () => {
-      const operation = createOperation({ operationId: "op_environment" });
-      let lookups = 0;
-
-      await ensureGitHubEnvironment({
-        repo: "octo/app",
-        requestedName: "production",
-        readGitHubJson: async (apiPath) => {
-          if (apiPath === "/repos/octo/app") {
-            return readResult({ json: { full_name: "octo/app" } });
-          }
-          lookups += 1;
-          return lookups === 1 ?
-              readResult({ ok: false, status: 404, json: null })
-            : readResult({
-                json: {
-                  id: 1234567,
-                  name: "production",
-                  created_at: "2126-08-22T00:00:00.000Z"
-                }
-              });
-        },
-        runGh: async () => {
-          throw new Error("the response was lost");
-        },
-        mutationRecovery: { operation, persist: async () => {} }
-      });
-
-      expect(
-        operation.providerRecovery.mutations.find(
-          (entry: { kind: string }) => entry.kind === "github_environment.put"
-        )
-      ).toMatchObject({ status: "confirmed", providerId: "1234567" });
     });
   });
 
