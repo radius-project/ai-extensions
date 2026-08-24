@@ -1403,6 +1403,29 @@ function strongerOrigin(current: any, next: any): SetupArtifactOrigin {
  * that patch on its own would read as a different resource and discard the
  * first call's state.
  */
+/**
+ * The identity a patch is judged against.
+ *
+ * A saved record that does not carry the provider's own id yet is not a
+ * different resource from the same record once that id arrives — the Service
+ * Principal's object id turns up in a second call, after the create recorded
+ * only the application it belongs to. Judging that patch on the full identity
+ * would read the new id as a replacement and throw away the provenance the
+ * first call proved. So the comparison drops whichever id the saved record does
+ * not have; once it has one, a different id really is a different resource.
+ */
+function provenanceComparisonIdentity(
+  artifactType: SetupCleanupArtifactType | string,
+  current: any,
+  candidate: any
+): string {
+  const compared: Record<string, unknown> = { ...(candidate || {}) };
+  for (const field of ["providerId", "objectId"]) {
+    if (!normalizeIdentityPart(current?.[field])) compared[field] = null;
+  }
+  return cleanupArtifactIdentity(artifactType, compared);
+}
+
 export function reconcileArtifactProvenance(
   artifactType: SetupCleanupArtifactType | string,
   current: any,
@@ -1417,7 +1440,11 @@ export function reconcileArtifactProvenance(
     merged[key] = value;
   }
   const currentIdentity = cleanupArtifactIdentity(artifactType, current);
-  const mergedIdentity = cleanupArtifactIdentity(artifactType, merged);
+  const mergedIdentity = provenanceComparisonIdentity(
+    artifactType,
+    current,
+    merged
+  );
   if (currentIdentity && currentIdentity !== mergedIdentity) {
     // A different resource occupies the slot now. Nothing the previous one
     // proved transfers to it, so the record is rebuilt from the patch alone
@@ -1870,11 +1897,15 @@ export function cleanupArtifactIdentity(
   switch (artifactType) {
     case "azure_app":
       return normalizeIdentityPart(artifact.appId);
-    case "service_principal":
-      return (
-        normalizeIdentityPart(artifact.appId) ||
-        normalizeIdentityPart(artifact.objectId)
-      );
+    case "service_principal": {
+      // The object id leads. An application's principal can be removed and a
+      // new one made for the same application, and that replacement answers to
+      // the same appId — so a delete keyed on the appId would reach it.
+      const objectId = normalizeIdentityPart(artifact.objectId);
+      const appId = normalizeIdentityPart(artifact.appId);
+      if (objectId && appId) return `${objectId}|${appId}`;
+      return objectId || appId;
+    }
     case "federated_credential":
       // The provider id leads, so a credential recreated under the same name
       // and subject is a different identity to the journal and to a delete.

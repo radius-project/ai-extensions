@@ -3493,20 +3493,33 @@ export async function cleanupAzureSetupArtifacts(
   }
 
   if (ledger.servicePrincipal.state === "created") {
-    const spId = String(
-      ledger.servicePrincipal.appId || ledger.servicePrincipal.objectId || ""
-    ).trim();
+    // Only the object id will do. `az ad sp delete --id <appId>` removes
+    // whichever principal that application has now, which is the replacement
+    // if the customer made one.
+    const spObjectId = optionalString(ledger.servicePrincipal.objectId);
     deletions.push({
       artifactType: "service_principal",
       artifact: ledger.servicePrincipal as Record<string, unknown>,
-      ...(spId ?
+      ...(spObjectId ?
         {
-          args: buildServicePrincipalDeleteArgs({ id: spId }),
-          readArgs: ["ad", "sp", "show", "--id", spId, "-o", "none"]
+          args: buildServicePrincipalDeleteArgs({ id: spObjectId }),
+          readArgs: ["ad", "sp", "show", "--id", spObjectId, "-o", "none"],
+          identityArgs: [
+            "ad",
+            "sp",
+            "show",
+            "--id",
+            spObjectId,
+            "--query",
+            "id",
+            "-o",
+            "tsv"
+          ],
+          recordedProviderId: spObjectId
         }
       : {
           missingDetail:
-            "Missing the Service Principal id needed to delete the created identity."
+            "The Service Principal was recorded without Microsoft Entra's own object id for it, so Radius cannot tell it from a principal recreated for the same application. Review it and remove it yourself if it is unwanted."
         })
     });
   }
@@ -3530,18 +3543,35 @@ export async function cleanupAzureSetupArtifacts(
 
   const selected =
     only ?
-      deletions.filter((deletion) =>
-        only.has(
-          cleanupTargetKey({
-            artifactType: deletion.artifactType,
-            identity: cleanupArtifactIdentity(
-              deletion.artifactType,
-              deletion.artifact
-            ),
-            target: cleanupTargetLabel(deletion.artifactType, deletion.artifact)
-          })
-        )
-      )
+      deletions.filter((deletion) => {
+        const label = cleanupTargetLabel(
+          deletion.artifactType,
+          deletion.artifact
+        );
+        // Matched on the label as well as the identity, because a result an
+        // earlier version wrote was keyed before the provider's own id led the
+        // identity. Without this a retry would find nothing to do and leave
+        // the target it was named for outstanding forever.
+        return (
+          only.has(
+            cleanupTargetKey({
+              artifactType: deletion.artifactType,
+              identity: cleanupArtifactIdentity(
+                deletion.artifactType,
+                deletion.artifact
+              ),
+              target: label
+            })
+          ) ||
+          only.has(
+            cleanupTargetKey({
+              artifactType: deletion.artifactType,
+              identity: "",
+              target: label
+            })
+          )
+        );
+      })
     : deletions;
   const attemptedKeys = new Set<string>();
 

@@ -81,6 +81,7 @@ import {
   canExitSetup,
   requestStop,
   toClientView,
+  cleanupTargetKey,
   unresolvedCleanupTargets
 } from "./operations.js";
 import type { CanvasState } from "./shared.js";
@@ -888,7 +889,7 @@ describe("ensureServicePrincipal", () => {
       const { operation, port } = recovery();
       const creates: string[][] = [];
       const runAz = async (args: string[]) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersFederatedCredentialIdentity(args);
         if (identity) return identity;
         if (args[2] === "create") {
           creates.push(args);
@@ -1647,10 +1648,40 @@ function environmentReader(
   return Object.assign(read, { reads });
 }
 
-// Every federated-credential delete first reads the credential's own id back
-// and requires it to match the ledger. The fakes answer that read the way Azure
-// would for a credential this attempt still owns.
-function answersCredentialIdentity(
+// The Service Principal delete reads Entra's own object id back first and
+// requires it to match the ledger, so a principal recreated for the same
+// application is never what gets removed.
+function answersServicePrincipalIdentity(
+  args: string[]
+): { code: number; stdout: string; stderr: string } | null {
+  if (
+    args[0] !== "ad" ||
+    args[1] !== "sp" ||
+    args[2] !== "show" ||
+    args[args.indexOf("--query") + 1] !== "id"
+  ) {
+    return null;
+  }
+  return {
+    code: 0,
+    stdout: `${args[args.indexOf("--id") + 1]}\n`,
+    stderr: ""
+  };
+}
+
+// Every name-addressed Azure delete first reads the resource's own id back and
+// requires it to match the ledger. The fakes answer that read the way Azure
+// would for a resource this attempt still owns.
+function answersRecordedIdentity(
+  args: string[]
+): { code: number; stdout: string; stderr: string } | null {
+  return (
+    answersServicePrincipalIdentity(args) ??
+    answersFederatedCredentialIdentity(args)
+  );
+}
+
+function answersFederatedCredentialIdentity(
   args: string[]
 ): { code: number; stdout: string; stderr: string } | null {
   if (
@@ -1685,12 +1716,16 @@ describe("cleanupAzureSetupArtifacts", () => {
     const deletes: string[][] = [];
     const pass = await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) => {
+        const identity = answersRecordedIdentity(args);
+        if (identity) return identity;
         if (args.includes("delete")) deletes.push(args);
         return { code: 0, stdout: "", stderr: "" };
       }
     });
 
-    expect(deletes).toEqual([["ad", "sp", "delete", "--id", "app-1"]]);
+    // Addressed by Entra's own object id, never by the application it belongs
+    // to — that would reach a principal recreated for the same application.
+    expect(deletes).toEqual([["ad", "sp", "delete", "--id", "sp-1"]]);
     expect(
       pass.results.map((entry: any) => `${entry.artifactType}:${entry.outcome}`)
     ).toEqual(["service_principal:deleted"]);
@@ -1732,7 +1767,7 @@ describe("cleanupAzureSetupArtifacts", () => {
     const calls: string[][] = [];
     const cleanup = await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         calls.push(args);
         return { code: 0, stdout: "", stderr: "" };
@@ -1773,7 +1808,7 @@ describe("cleanupAzureSetupArtifacts", () => {
         "--federated-credential-id",
         "radius-dev"
       ],
-      ["ad", "sp", "delete", "--id", "app-1"],
+      ["ad", "sp", "delete", "--id", "sp-1"],
       ["ad", "app", "delete", "--id", "app-1"]
     ]);
     expect(cleanup.state).toBe("succeeded_with_warnings");
@@ -1814,7 +1849,7 @@ describe("cleanupAzureSetupArtifacts", () => {
     const calls: string[][] = [];
     const cleanup = await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         calls.push(args);
         return args[0] === "role" ?
@@ -1887,7 +1922,7 @@ describe("cleanupAzureSetupArtifacts", () => {
 
       await cleanupAzureSetupArtifacts(op, {
         runAz: async (args: string[]) =>
-          answersCredentialIdentity(args) ?? {
+          answersRecordedIdentity(args) ?? {
             code: 0,
             stdout: "",
             stderr: ""
@@ -1930,7 +1965,7 @@ describe("cleanupAzureSetupArtifacts", () => {
         const op = azureOp();
         const deletes: string[][] = [];
         const runAz = async (args: string[]) => {
-          const identity = answersCredentialIdentity(args);
+          const identity = answersRecordedIdentity(args);
           if (identity) return identity;
           const isTarget =
             marker === "role" ? args[0] === "role"
@@ -1964,7 +1999,7 @@ describe("cleanupAzureSetupArtifacts", () => {
       const op = azureOp();
       let appDeletes = 0;
       const runAz = async (args: string[]) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         const isApp =
           args[1] === "app" && !args.includes("federated-credential");
@@ -2006,7 +2041,8 @@ describe("cleanupAzureSetupArtifacts", () => {
         unresolvedProviderMutations(op).map((entry) => entry.kind)
       ).toEqual([
         "role_assignment.cleanup_delete",
-        "service_principal.cleanup_delete",
+        // No entry for the principal: its identity could not be read, so no
+        // delete was issued for it in the first place.
         "azure_app.cleanup_delete"
       ]);
       expect(op.setupArtifacts.azureApp.state).toBe("created");
@@ -2017,7 +2053,7 @@ describe("cleanupAzureSetupArtifacts", () => {
       const op = azureOp();
       const deletes: string[][] = [];
       const runAz = async (args: string[]) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         if (args.includes("delete")) {
           deletes.push(args);
@@ -2058,8 +2094,10 @@ describe("cleanupAzureSetupArtifacts", () => {
       const named = quarantineUnsettledCleanupDeletions(op);
 
       // Nothing is left that only a live reconciliation could clear, so the
-      // record stops holding the repository against a new setup.
-      expect(named).toBe(3);
+      // record stops holding the repository against a new setup. The principal
+      // is not among them: its identity was unreadable, so no delete for it was
+      // ever issued.
+      expect(named).toBe(2);
       expect(unresolvedProviderMutations(op)).toEqual([]);
       expect(providerRecoveryManualGuidance(op)).toContain(
         "will not repeat that delete"
@@ -2088,7 +2126,7 @@ describe("cleanupAzureSetupArtifacts", () => {
 
       const pass = await cleanupAzureSetupArtifacts(op, {
         runAz: async (args) => {
-          const identity = answersCredentialIdentity(args);
+          const identity = answersRecordedIdentity(args);
           if (identity) return identity;
           if (args.includes("delete")) deletes.push(args);
           return { code: 0, stdout: "", stderr: "" };
@@ -2243,13 +2281,209 @@ describe("cleanupAzureSetupArtifacts", () => {
     });
   });
 
+  // A principal is addressed by Entra's object id, never by the application it
+  // belongs to: that application can be given a new principal, and a delete
+  // keyed on the appId would remove the customer's.
+  describe("a Service Principal the application may have replaced", () => {
+    function claimed(objectId: string | null) {
+      const op = newAzureOp();
+      recordServicePrincipal(op, {
+        state: "created",
+        origin: "this_operation",
+        appId: "app-1",
+        ...(objectId === null ? {} : { objectId })
+      });
+      return op;
+    }
+
+    async function attempt(
+      op: ReturnType<typeof claimed>,
+      liveId: unknown = { code: 0, stdout: "sp-1\n", stderr: "" }
+    ) {
+      const deletes: string[][] = [];
+      const pass = await cleanupAzureSetupArtifacts(op, {
+        runAz: async (args) => {
+          const asksForId =
+            args[1] === "sp" &&
+            args[2] === "show" &&
+            args[args.indexOf("--query") + 1] === "id";
+          if (asksForId) return liveId as never;
+          if (args.includes("delete")) deletes.push(args);
+          return { code: 0, stdout: "", stderr: "" };
+        }
+      });
+      return { pass, deletes };
+    }
+
+    const outcome = (pass: { results: Array<Record<string, unknown>> }) =>
+      pass.results.find((entry) => entry.artifactType === "service_principal");
+
+    it("deletes by object id when that is what still answers", async () => {
+      const op = claimed("sp-1");
+
+      const { pass, deletes } = await attempt(op);
+
+      expect(deletes).toEqual([["ad", "sp", "delete", "--id", "sp-1"]]);
+      expect(outcome(pass)).toMatchObject({ outcome: "deleted" });
+      expect(op.setupArtifacts.servicePrincipal.state).toBe("deleted");
+    });
+
+    it("writes the object id into the identity the journal records", async () => {
+      const op = claimed("sp-1");
+
+      const { pass } = await attempt(op);
+
+      // Keyed on the object id, so a replacement for the same application is a
+      // different target to the journal and to a retry.
+      expect(outcome(pass)?.identity).toBe("sp-1|app-1");
+    });
+
+    it("removes nothing when the application now has a different principal", async () => {
+      const op = claimed("sp-1");
+
+      const { pass, deletes } = await attempt(op, {
+        code: 0,
+        stdout: "sp-2\n",
+        stderr: ""
+      });
+
+      expect(deletes).toEqual([]);
+      expect(outcome(pass)).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining("different provider id")
+      });
+      expect(op.setupArtifacts.servicePrincipal.state).toBe("created");
+    });
+
+    it("removes nothing for a record that only ever held the application id", async () => {
+      const op = claimed(null);
+
+      const { pass, deletes } = await attempt(op);
+
+      expect(deletes).toEqual([]);
+      expect(outcome(pass)).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining(
+          "without Microsoft Entra's own object id"
+        )
+      });
+      expect(op.setupArtifacts.servicePrincipal.state).toBe("created");
+    });
+
+    it.each([
+      [
+        "the read is refused",
+        {
+          code: 1,
+          stdout: "",
+          stderr: "AuthorizationFailed: caller cannot read this principal"
+        },
+        "confirm its identity"
+      ],
+      [
+        "Entra reports no id",
+        { code: 0, stdout: "  \n", stderr: "" },
+        "did not report an id"
+      ]
+    ])("removes nothing when %s", async (_label, liveId, expected) => {
+      const op = claimed("sp-1");
+
+      const { pass, deletes } = await attempt(op, liveId);
+
+      expect(deletes).toEqual([]);
+      expect(outcome(pass)).toMatchObject({
+        outcome: "skipped",
+        detail: expect.stringContaining(expected)
+      });
+      expect(op.setupArtifacts.servicePrincipal.state).toBe("created");
+    });
+
+    it("retries a target an earlier version keyed before the object id led", async () => {
+      const op = claimed("sp-1");
+      // What the previous build wrote: keyed on the application alone.
+      recordCleanupState(op, {
+        attempts: 1,
+        state: "succeeded_with_warnings",
+        results: [
+          {
+            attempt: 1,
+            artifactType: "service_principal",
+            target: "app-1",
+            identity: "app-1",
+            outcome: "warning",
+            detail: "Entra was unreachable."
+          }
+        ]
+      });
+
+      const deletes: string[][] = [];
+      const pass = await cleanupAzureSetupArtifacts(op, {
+        // The retry names its targets from what the earlier pass recorded.
+        only: new Set(unresolvedCleanupTargets(op).map(cleanupTargetKey)),
+        runAz: async (args) => {
+          const identity = answersRecordedIdentity(args);
+          if (identity) return identity;
+          if (args.includes("delete")) deletes.push(args);
+          return { code: 0, stdout: "", stderr: "" };
+        }
+      });
+
+      // The retry has to recognize its own outstanding target, or the
+      // principal stays claimed and unremovable for good.
+      expect(deletes).toEqual([["ad", "sp", "delete", "--id", "sp-1"]]);
+      expect(outcome(pass)).toMatchObject({ outcome: "deleted" });
+    });
+
+    it("reconciles a lost delete against the exact object id", async () => {
+      const op = claimed("sp-1");
+      const reads: string[][] = [];
+      const deletes: string[][] = [];
+
+      await cleanupAzureSetupArtifacts(op, {
+        runAz: async (args) => {
+          if (args[2] === "show") {
+            reads.push(args);
+            return args.includes("--query") ?
+                { code: 0, stdout: "sp-1\n", stderr: "" }
+              : { code: 0, stdout: "", stderr: "" };
+          }
+          if (args.includes("delete")) {
+            deletes.push(args);
+            return { code: 1, stdout: "", stderr: "", timedOut: true };
+          }
+          return { code: 0, stdout: "", stderr: "" };
+        },
+        persistJournal: async () => {}
+      });
+
+      // The delete went out once and was never answered. Reconciliation reads
+      // the same object id back rather than repeating it.
+      expect(deletes).toEqual([["ad", "sp", "delete", "--id", "sp-1"]]);
+      expect(
+        reads.filter((args) => args.includes("sp-1")).length
+      ).toBeGreaterThan(1);
+      // Journaled against the object id, so a reconciliation after a restart
+      // reads back the exact principal the delete was aimed at.
+      expect(
+        op.providerRecovery.mutations.find(
+          (entry: any) => entry.kind === "service_principal.cleanup_delete"
+        )
+      ).toMatchObject({ target: "sp-1|app-1" });
+    });
+  });
+
   it("is idempotent across repeated cleanup attempts", async () => {
     const op = newAzureOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });
-    recordServicePrincipal(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
 
     await cleanupAzureSetupArtifacts(op, {
-      runAz: async () => ({ code: 0, stdout: "", stderr: "" })
+      runAz: async (args) =>
+        answersRecordedIdentity(args) ?? { code: 0, stdout: "", stderr: "" }
     });
     // Proof of removal moves ownership: both artifacts are recorded as gone, so
     // a repeat attempt has nothing left it may act on and issues no `az` call.
@@ -2258,7 +2492,7 @@ describe("cleanupAzureSetupArtifacts", () => {
     const repeatedCalls: string[][] = [];
     const second = await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         repeatedCalls.push(args);
         return { code: 0, stdout: "", stderr: "" };
@@ -2300,7 +2534,8 @@ describe("cleanupAzureSetupArtifacts", () => {
     // ledger is asked what it holds at the moment each delete returns.
     const observed: Array<{ outcomes: string[]; state: string }> = [];
     await cleanupAzureSetupArtifacts(op, {
-      runAz: async () => ({ code: 0, stdout: "", stderr: "" }),
+      runAz: async (args) =>
+        answersRecordedIdentity(args) ?? { code: 0, stdout: "", stderr: "" },
       onResultRecorded: () => {
         observed.push({
           state: op.setupArtifacts.cleanup.state,
@@ -2374,7 +2609,7 @@ describe("cleanupAzureSetupArtifacts", () => {
     const seen: string[][] = [];
     await cleanupAzureSetupArtifacts(op, {
       runAz: async (args: string[]) =>
-        answersCredentialIdentity(args) ?? {
+        answersRecordedIdentity(args) ?? {
           code: 0,
           stdout: "",
           stderr: ""
@@ -2403,18 +2638,23 @@ describe("cleanupAzureSetupArtifacts", () => {
   it("retries only the named unresolved targets on a cleanup retry", async () => {
     const op = newAzureOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });
-    recordServicePrincipal(op, { state: "created", appId: "app-1" });
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
 
     // First attempt: the Service Principal goes, the App Registration does not.
     await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) =>
-        args.includes("app") && args.includes("delete") ?
+        answersRecordedIdentity(args) ??
+        (args.includes("app") && args.includes("delete") ?
           {
             code: 1,
             stdout: "",
             stderr: "TooManyRequests: Azure CLI is being throttled."
           }
-        : { code: 0, stdout: "", stderr: "" }
+        : { code: 0, stdout: "", stderr: "" })
     });
     expect(op.setupArtifacts.servicePrincipal.state).toBe("deleted");
     expect(op.setupArtifacts.azureApp.state).toBe("created");
@@ -2423,7 +2663,7 @@ describe("cleanupAzureSetupArtifacts", () => {
     const retry = await cleanupAzureSetupArtifacts(op, {
       only: new Set(["azure_app#app-1"]),
       runAz: async (args) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         retriedCalls.push(args);
         return { code: 0, stdout: "", stderr: "" };
@@ -2452,7 +2692,7 @@ describe("cleanupAzureSetupArtifacts", () => {
     const result = await cleanupAzureSetupArtifacts(op, {
       only: new Set(["azure_app#some-other-app"]),
       runAz: async (args) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         calls.push(args);
         return { code: 0, stdout: "", stderr: "" };
@@ -2472,7 +2712,7 @@ describe("cleanupAzureSetupArtifacts", () => {
 
     const cleanup = await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         calls.push(args);
         return args.includes("delete") ?
@@ -2518,7 +2758,7 @@ describe("cleanupAzureSetupArtifacts", () => {
     const calls: string[][] = [];
     const cleanup = await cleanupAzureSetupArtifacts(op, {
       runAz: async (args) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         calls.push(args);
         return args[0] === "role" ?
@@ -2554,7 +2794,7 @@ describe("cleanupAzureSetupArtifacts", () => {
         "--federated-credential-id",
         "radius-dev"
       ],
-      ["ad", "sp", "delete", "--id", "app-1"],
+      ["ad", "sp", "delete", "--id", "sp-1"],
       ["ad", "app", "delete", "--id", "app-1"]
     ]);
     expect(op.setupArtifacts.cleanup).toMatchObject({
@@ -3399,7 +3639,7 @@ describe("finalizeSetupFailure", () => {
       extra: { steps: [] },
       steps: [],
       runAz: async (args) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         throw new Error(`Azure must not be mutated: ${args.join(" ")}`);
       },
@@ -3438,7 +3678,7 @@ describe("finalizeSetupFailure", () => {
       extra: { steps: [] },
       steps: [],
       runAz: async (args) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         throw new Error(`Azure must not be mutated: ${args.join(" ")}`);
       },
@@ -3476,7 +3716,7 @@ describe("finalizeSetupFailure", () => {
       extra: { steps: [] },
       steps: [],
       runAz: async (args) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         throw new Error(`Azure must not be mutated: ${args.join(" ")}`);
       },
@@ -3510,7 +3750,7 @@ describe("finalizeSetupFailure", () => {
       extra: { steps: [] },
       steps: [],
       runAz: async (args: string[]) =>
-        answersCredentialIdentity(args) ?? {
+        answersRecordedIdentity(args) ?? {
           code: 0,
           stdout: "",
           stderr: ""
@@ -3564,7 +3804,7 @@ describe("finalizeSetupFailure", () => {
       },
       steps: [],
       runAz: async (args) => {
-        const identity = answersCredentialIdentity(args);
+        const identity = answersRecordedIdentity(args);
         if (identity) return identity;
         azCalls.push(args);
         return { code: 0, stdout: "", stderr: "" };
@@ -3636,7 +3876,7 @@ describe("finalizeSetupFailure", () => {
         "--federated-credential-id",
         "radius-dev"
       ],
-      ["ad", "sp", "delete", "--id", "app-1"],
+      ["ad", "sp", "delete", "--id", "sp-1"],
       ["ad", "app", "delete", "--id", "app-1"]
     ]);
   });
@@ -3673,7 +3913,7 @@ describe("finalizeSetupFailure", () => {
       code: "original-failure",
       steps: [],
       runAz: async (args) =>
-        answersCredentialIdentity(args) ??
+        answersRecordedIdentity(args) ??
         (args[0] === "role" ?
           {
             code: 1,
