@@ -18,6 +18,7 @@ interface Journal {
   commands: Array<{ state: string; outcome?: string | null }>;
   persisted: number;
   monitored: string[];
+  boundaries: string[];
 }
 
 function operation(
@@ -52,7 +53,8 @@ function dependencies(
     steps: [],
     commands: [],
     persisted: 0,
-    monitored: []
+    monitored: [],
+    boundaries: []
   };
   const executor = successfulSelectedGhExecutor({
     login: "alice",
@@ -71,6 +73,10 @@ function dependencies(
     },
     unregisterExecutor: (operationId) => {
       journal.unregistered.push(operationId);
+    },
+    stopBoundary: async ({ boundary }) => {
+      journal.boundaries.push(boundary);
+      return true;
     },
     buildDispatchArgs: ({ workflowFile, targetRepo, envName, ref }) => [
       "workflow",
@@ -723,5 +729,124 @@ describe("verification retry selected account", () => {
 
     expect(createExecutor).not.toHaveBeenCalled();
     expect(deps.journal.persisted).toBe(0);
+  });
+});
+
+describe("verification retry stop boundaries", () => {
+  function stopAt(
+    boundary: string,
+    journal: () => Journal
+  ): VerificationRetryDependencies["stopBoundary"] {
+    return async ({ boundary: current, beforePersist }) => {
+      journal().boundaries.push(current);
+      if (current !== boundary) return true;
+      beforePersist();
+      return false;
+    };
+  }
+
+  it("visits both dispatch boundaries in order when no stop is recorded", async () => {
+    const op = operation();
+    const deps = dependencies();
+
+    await runVerificationRetry(op, "cmd-1", deps);
+
+    expect(deps.journal.boundaries).toEqual([
+      "before-verification-retry-dispatch",
+      "after-verification-retry-dispatch"
+    ]);
+    expect(deps.journal.monitored).toEqual(["op_retry"]);
+  });
+
+  it("honors a stop recorded while the selected account was being reacquired", async () => {
+    const op = operation();
+    const deps: VerificationRetryDependencies & { journal: Journal } =
+      dependencies({
+        stopBoundary: (input) =>
+          stopAt(
+            "before-verification-retry-dispatch",
+            () => deps.journal
+          )(input)
+      });
+
+    await runVerificationRetry(op, "cmd-1", deps);
+
+    // The account was acquired first, so the retry never dispatched and never
+    // wrote the dispatch-pending checkpoint.
+    expect(deps.journal.createdLogins).toEqual(["alice"]);
+    expect(deps.journal.dispatches).toEqual([]);
+    expect(deps.journal.monitored).toEqual([]);
+    expect(deps.journal.commands).toEqual([
+      { state: "running" },
+      { state: "finished", outcome: "cancelled" }
+    ]);
+    expect(deps.journal.unregistered).toEqual(["op_retry"]);
+  });
+
+  it("keeps the persisted run identity when a stop lands before monitoring", async () => {
+    const op = operation();
+    const deps: VerificationRetryDependencies & { journal: Journal } =
+      dependencies({
+        stopBoundary: (input) =>
+          stopAt("after-verification-retry-dispatch", () => deps.journal)(input)
+      });
+
+    await runVerificationRetry(op, "cmd-1", deps);
+
+    expect(deps.journal.dispatches).toHaveLength(1);
+    expect(deps.journal.monitored).toEqual([]);
+    expect(op.verification).toEqual({
+      dispatchedAt: 12345,
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: null,
+      runUrl: null
+    });
+    expect(deps.journal.commands.at(-1)).toEqual({
+      state: "finished",
+      outcome: "cancelled"
+    });
+    expect(deps.journal.unregistered).toEqual(["op_retry"]);
+  });
+
+  it("closes a stopped retry truthfully instead of reporting a dispatch failure", async () => {
+    const op = operation();
+    const deps: VerificationRetryDependencies & { journal: Journal } =
+      dependencies({
+        createExecutor: async (login) => {
+          deps.journal.createdLogins.push(login);
+          return successfulSelectedGhExecutor({
+            login: "alice",
+            run: async (args, commandOptions) => {
+              deps.journal.dispatches.push({
+                args,
+                timeout: commandOptions?.timeout
+              });
+              return { code: 1, stdout: "", stderr: "workflow missing" };
+            }
+          });
+        },
+        stopBoundary: (input) =>
+          stopAt(
+            "after-verification-retry-dispatch-attempt",
+            () => deps.journal
+          )(input)
+      });
+
+    await runVerificationRetry(op, "cmd-1", deps);
+
+    expect(deps.journal.dispatches).toHaveLength(1);
+    expect(op.failure).toBeUndefined();
+    expect(deps.journal.commands).toEqual([
+      { state: "running" },
+      { state: "finished", outcome: "cancelled" }
+    ]);
+    expect(
+      deps.journal.steps.some((step) =>
+        step.text.includes("Could not dispatch the verify workflow again")
+      )
+    ).toBe(false);
+    expect(deps.journal.unregistered).toEqual(["op_retry"]);
   });
 });

@@ -62,7 +62,8 @@ function harness(
     persist?: () => Promise<void>;
     finish?: AzureAutoSetupApplicationInput["dependencies"]["operations"]["finish"];
     report?: AzureAutoSetupApplicationInput["dependencies"]["operations"]["report"];
-    checkpoint?: () => Promise<boolean>;
+    stopBoundary?: AzureAutoSetupWorkflow["stopBoundary"];
+    checkpoint?: AzureAutoSetupWorkflow["checkpoint"];
     overrides?: Partial<
       Omit<AzureAutoSetupApplicationInput, "dependencies" | "workflow">
     >;
@@ -109,6 +110,7 @@ function harness(
     fail: async (status, error, code, extra = {}) => {
       failures.push({ status, error, code, extra });
     },
+    stopBoundary: options.stopBoundary ?? (async () => true),
     checkpoint:
       options.checkpoint ??
       (async () => {
@@ -274,6 +276,101 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
 
       expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
       expect(test.failures[0]).toMatchObject({ code });
+    }
+  );
+
+  it("honors Stop after a failed owner write before automatic rollback", async () => {
+    const test = harness({
+      checkpoint: async (boundary) =>
+        boundary !== "after-app-registration-owner-add",
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) return command({ stdout: "[]" });
+        if (line.startsWith("ad app create "))
+          return command({ stdout: APP_ID });
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
+        if (line.startsWith("ad app owner add ")) {
+          // A rejection Entra composed, so the journal settles the attempt
+          // without a reconciling read and the Stop lands on settled provenance.
+          return command({
+            code: 1,
+            stderr:
+              "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+          });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(test.failures).toEqual([]);
+  });
+
+  it("honors Stop after a rejected create instead of reporting the rejection", async () => {
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        boundary !== "after-app-registration-create-attempt",
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) return command({ stdout: "[]" });
+        if (line.startsWith("ad app create ")) {
+          return command({
+            code: 1,
+            stderr:
+              "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+          });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(test.failures).toEqual([]);
+  });
+
+  // Each checkpoint saves the write that just finished and then decides whether
+  // a Stop recorded while it ran is honored before the next one starts.
+  it.each([
+    ["after-app-registration-owner-verify", "rest --method PATCH "],
+    ["after-app-registration-tag-update", "ad app show "],
+    ["after-app-registration-tag-verify", ""]
+  ])(
+    "stops at the %s checkpoint without failing the operation",
+    async (boundary, forbiddenCommand) => {
+      const azCalls: string[] = [];
+      const requiredTags = buildRadiusAppProvenanceTags({
+        repo: "octo/app",
+        environment: "dev",
+        operationId: "op-app"
+      });
+      const test = harness({
+        checkpoint: async (current) => current !== boundary,
+        runAz: async (args) => {
+          const line = args.join(" ");
+          azCalls.push(line);
+          if (line.startsWith("ad app list ")) return command({ stdout: "[]" });
+          if (line.startsWith("ad app create "))
+            return command({ stdout: APP_ID });
+          if (line.startsWith("ad signed-in-user show "))
+            return command({ stdout: USER_ID });
+          if (line.startsWith("ad app owner add ")) return command();
+          if (line.startsWith("ad app owner list "))
+            return command({ stdout: USER_ID });
+          if (line.startsWith("rest --method PATCH ")) return command();
+          if (line.startsWith("ad app show ") && line.includes("--query tags"))
+            return command({ stdout: JSON.stringify(requiredTags) });
+          throw new Error(`unscripted az call: ${line}`);
+        }
+      });
+
+      expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+      expect(test.failures).toEqual([]);
+      if (forbiddenCommand) {
+        expect(azCalls.some((line) => line.startsWith(forbiddenCommand))).toBe(
+          false
+        );
+      }
     }
   );
 
@@ -1284,8 +1381,10 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       "persist",
       "persist",
       "checkpoint",
+      "checkpoint",
       "persist",
       "persist",
+      "checkpoint",
       "checkpoint"
     ]);
     expect(test.recorded[0]).toMatchObject({
@@ -1364,6 +1463,46 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       false
     );
   });
+
+  it.each([
+    ["before-app-registration-create", "ad app create "],
+    ["before-app-registration-owner-add", "ad app owner add "],
+    ["before-app-registration-tag-update", "rest --method PATCH "]
+  ])(
+    "starts no %s mutation after Stop is observed",
+    async (boundary, forbiddenCommand) => {
+      const azCalls: string[] = [];
+      const requiredTags = buildRadiusAppProvenanceTags({
+        repo: "octo/app",
+        environment: "dev",
+        operationId: "op-app"
+      });
+      const test = harness({
+        stopBoundary: async (current) => current !== boundary,
+        runAz: async (args) => {
+          const line = args.join(" ");
+          azCalls.push(line);
+          if (line.startsWith("ad app list ")) return command({ stdout: "[]" });
+          if (line.startsWith("ad app create "))
+            return command({ stdout: APP_ID });
+          if (line.startsWith("ad signed-in-user show "))
+            return command({ stdout: USER_ID });
+          if (line.startsWith("ad app owner add ")) return command();
+          if (line.startsWith("ad app owner list "))
+            return command({ stdout: USER_ID });
+          if (line.startsWith("rest --method PATCH ")) return command();
+          if (line.startsWith("ad app show ") && line.includes("--query tags"))
+            return command({ stdout: JSON.stringify(requiredTags) });
+          throw new Error(`unscripted az call: ${line}`);
+        }
+      });
+
+      expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+      expect(azCalls.some((line) => line.startsWith(forbiddenCommand))).toBe(
+        false
+      );
+    }
+  );
 
   it.each([
     ["signed-in-user", "app-owner-lookup-failed"],

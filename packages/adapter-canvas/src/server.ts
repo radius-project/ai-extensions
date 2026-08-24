@@ -235,6 +235,7 @@ import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
+import { honorStopBoundary } from "./server/services/operation-stop-boundary.js";
 import {
   CLEANUP_COMMANDS,
   cleanupRemovedGitHubEnvironment
@@ -273,7 +274,10 @@ import { createDeployRequestService } from "./server/services/deploy-request.js"
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
-import { executeRecoverableMutation } from "./server/services/provider-mutation-recovery.js";
+import {
+  executeRecoverableMutation,
+  providerMutationWillWrite
+} from "./server/services/provider-mutation-recovery.js";
 import {
   pendingBranchDelete,
   reconcileRecoveredBranchDelete
@@ -422,12 +426,13 @@ export async function guardStopBoundary({
   report?: (diagnostic: { code: string; message: string }) => void;
   respond: (status: number, body: Record<string, unknown>) => void;
 }): Promise<boolean> {
-  if (!shouldStop(operation)) return true;
-  // The terminal announcement waits for the durable write, so a cancellation
-  // that failed to save is never reported as a finished setup.
-  stopAtBoundary(operation, boundary, { announce: false });
-  const saved = await persistBestEffort({ operation, persist, report });
-  if (saved) announceOperationTerminal(operation);
+  const proceed = await honorStopBoundary({
+    operation,
+    boundary,
+    persist,
+    report
+  });
+  if (proceed) return true;
   respond(200, {
     cancelled: true,
     code: "operation-stopped",
@@ -927,6 +932,7 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
     ensureServicePrincipal,
     finalizeSetupFailure,
     persistMutationCheckpoint,
+    honorStopBoundary,
     sleep: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
@@ -1336,8 +1342,8 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   recordCommittedWorkflowFile: (operation, entry) => {
     recordCommittedWorkflowFile(operation, entry);
   },
-  deleteLegacyDeployWorkflow: (repo, executor) =>
-    deleteLegacyDeployWorkflow(repo, executor),
+  deleteLegacyDeployWorkflow: (repo, executor, beforeDelete) =>
+    deleteLegacyDeployWorkflow(repo, executor, beforeDelete),
   createPullRequestApi: (repo, head, base, title, body, executor) =>
     executor ?
       selectedCreatePullRequest(executor, repo, head, base, title, body)
@@ -3051,7 +3057,8 @@ export async function ensureServicePrincipal(
   mutationRecovery?: {
     operation: object & { operationId: string };
     persist(): Promise<void>;
-  }
+  },
+  beforeCreate: () => Promise<boolean> = async () => true
 ): Promise<
   | {
       ok: true;
@@ -3059,7 +3066,8 @@ export async function ensureServicePrincipal(
       origin: "unknown" | "pre_existing" | "this_operation";
       objectId: string | null;
     }
-  | { ok: false; stderr: string }
+  | { ok: false; stopped: true }
+  | { ok: false; stopped?: false; stderr: string }
 > {
   const showArgs = [
     "ad",
@@ -3190,6 +3198,21 @@ export async function ensureServicePrincipal(
       ...(result.timedOut === true ? { timedOut: true } : {})
     };
   };
+  const mutationKind = "azure_service_principal.create";
+  // Only a forward create is stoppable. A journaled attempt that reaches here to
+  // be reconciled is a read, and stopping before it would strand the provenance
+  // of a request nobody saw answered.
+  if (
+    (!mutationRecovery ||
+      providerMutationWillWrite(
+        mutationRecovery.operation,
+        mutationKind,
+        clientId
+      )) &&
+    !(await beforeCreate())
+  ) {
+    return { ok: false, stopped: true };
+  }
   if (!mutationRecovery) {
     const create = await runCreate();
     if (create.code === 0 || create.code === "0") {
@@ -3222,7 +3245,7 @@ export async function ensureServicePrincipal(
 
   const recovered = await executeRecoverableMutation<string>({
     operation: mutationRecovery.operation,
-    kind: "azure_service_principal.create",
+    kind: mutationKind,
     target: clientId,
     providerIdempotencyKey: clientId,
     persist: mutationRecovery.persist,
@@ -4653,8 +4676,9 @@ async function resolveEnvDeployment(
  */
 async function deleteLegacyDeployWorkflow(
   targetRepo: string,
-  executor?: SelectedGhExecutor
-): Promise<boolean> {
+  executor?: SelectedGhExecutor,
+  beforeDelete?: () => Promise<boolean>
+): Promise<boolean | "cancelled"> {
   const path = ".github/workflows/" + LEGACY_DEPLOY_WORKFLOW_FILE;
   if (executor) {
     const lookup = await executor.run(
@@ -4663,6 +4687,7 @@ async function deleteLegacyDeployWorkflow(
     );
     const sha = lookup.code === 0 ? lookup.stdout.trim() : "";
     if (!sha) return false;
+    if (beforeDelete && !(await beforeDelete())) return "cancelled";
     await executor.run(
       [
         "api",
@@ -5434,6 +5459,32 @@ function createInstanceRequestCoordinator(
         return;
       }
     }
+    // Response-neutral: this retry owns no HTTP response, so a stop closes the
+    // retry command truthfully and ends the operation without writing a body.
+    const retryStopBoundary = (boundary: string): Promise<boolean> =>
+      honorStopBoundary({
+        operation: op,
+        boundary,
+        persist: () => operations.persist(),
+        report: (diagnostic) => operations.report?.(diagnostic),
+        beforePersist: () =>
+          setCommandState(op, commandId, "finished", "cancelled")
+      });
+    const settleRetryDispatchForPendingStop = async (): Promise<void> => {
+      if (!shouldStop(op)) return;
+      let changed = false;
+      for (const mutation of unresolvedProviderMutations(op)) {
+        if (mutation.kind !== "github_workflow.dispatch_retry") continue;
+        settleProviderMutation(
+          op,
+          mutation.mutationId,
+          "manual_required",
+          "Radius could not reconcile the verification dispatch before Stop was requested. Review the marked workflow run in GitHub Actions; Radius will not redispatch or adopt a run on a guess."
+        );
+        changed = true;
+      }
+      if (changed) await operations.persist();
+    };
     const acquisition = await acquireSelectedExecutor(
       selectedLogin,
       acquisitionDeadline,
@@ -5448,6 +5499,10 @@ function createInstanceRequestCoordinator(
       }
     );
     if (acquisition.state !== "ready") {
+      await settleRetryDispatchForPendingStop();
+      if (!(await retryStopBoundary("after-verification-retry-acquisition"))) {
+        return;
+      }
       const expired = acquisition.state === "expired";
       addLegacyStep(
         op,
@@ -5502,6 +5557,11 @@ function createInstanceRequestCoordinator(
         };
         setCommandState(op, commandId, "running");
         if (!(await saveOperation(op))) return;
+        // The run identity this retry resumes is already durable, so a stop is
+        // honored before monitoring rather than after it starts.
+        if (!(await retryStopBoundary("after-verification-retry-dispatch"))) {
+          return;
+        }
         await monitorVerification(operationId);
         setCommandState(
           op,
@@ -5582,6 +5642,9 @@ function createInstanceRequestCoordinator(
           ],
           { timeout: 30000 }
         );
+        if (!(await retryStopBoundary("after-verification-retry-baseline"))) {
+          return;
+        }
         if (baseline.code !== 0 && baseline.code !== "0") {
           const authorizationError = await selectedCommandAuthorizationError(
             selectedExecutor,
@@ -5701,6 +5764,16 @@ function createInstanceRequestCoordinator(
         runUrl: null
       };
       await saveOperation(op);
+      if (
+        providerMutationWillWrite(
+          op,
+          "github_workflow.dispatch_retry",
+          mutationTarget
+        ) &&
+        !(await retryStopBoundary("before-verification-retry-dispatch-attempt"))
+      ) {
+        return;
+      }
       const discoverAcceptedRun = async () => {
         const listed = await selectedExecutor.run(
           [
@@ -5805,6 +5878,14 @@ function createInstanceRequestCoordinator(
         });
       } catch (error) {
         if (!isSelectedGhAuthorizationError(error)) throw error;
+        await settleRetryDispatchForPendingStop();
+        if (
+          !(await retryStopBoundary(
+            "after-verification-retry-dispatch-attempt"
+          ))
+        ) {
+          return;
+        }
         addLegacyStep(
           op,
           `❌ Could not use @${selectedLogin} to read verification runs.`
@@ -5839,6 +5920,13 @@ function createInstanceRequestCoordinator(
             )
           : null;
         if (authorizationError) {
+          if (
+            !(await retryStopBoundary(
+              "after-verification-retry-dispatch-attempt"
+            ))
+          ) {
+            return;
+          }
           addLegacyStep(
             op,
             `❌ Could not use @${selectedLogin} to dispatch verification.`
@@ -5860,6 +5948,16 @@ function createInstanceRequestCoordinator(
             }
           });
           await saveOperation(op);
+          return;
+        }
+        // The dispatch settled its own provenance before returning, so a stop
+        // recorded while it ran is honored here rather than after the failure
+        // path has closed the operation.
+        if (
+          !(await retryStopBoundary(
+            "after-verification-retry-dispatch-attempt"
+          ))
+        ) {
           return;
         }
         const detail =
@@ -5899,6 +5997,11 @@ function createInstanceRequestCoordinator(
           });
         } catch (error) {
           if (!isSelectedGhAuthorizationError(error)) throw error;
+          if (
+            !(await retryStopBoundary("after-verification-retry-run-adoption"))
+          ) {
+            return;
+          }
           addLegacyStep(
             op,
             `❌ Could not use @${selectedLogin} to read verification runs.`
@@ -5925,6 +6028,11 @@ function createInstanceRequestCoordinator(
         if (adoption.state === "applied") {
           acceptedRunId = adoption.runId;
         } else {
+          if (
+            !(await retryStopBoundary("after-verification-retry-run-adoption"))
+          ) {
+            return;
+          }
           verificationManualGuidance = adoption.guidance;
         }
       }
@@ -5960,6 +6068,11 @@ function createInstanceRequestCoordinator(
       }
       setCommandState(op, commandId, "running");
       await saveOperation(op);
+      // The run identity is durable, so a stop honored here still tells the
+      // customer which run this retry started.
+      if (!(await retryStopBoundary("after-verification-retry-dispatch"))) {
+        return;
+      }
       await monitorVerification(operationId);
       setCommandState(
         op,

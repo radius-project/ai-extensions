@@ -7,9 +7,10 @@ import {
 import { ProviderMutationRecoveryError } from "./provider-mutation-recovery.js";
 import {
   ensureGitHubEnvironment,
-  selectedEnvironmentReader,
+  GitHubEnvironmentEnsureCancelled,
   GitHubEnvironmentEnsureError,
   readEnsuredGitHubEnvironment,
+  selectedEnvironmentReader,
   type GitHubEnvironmentCommandResult,
   type GitHubEnvironmentReadResult
 } from "./github-environment.js";
@@ -102,6 +103,71 @@ describe("ensureGitHubEnvironment", () => {
         "/repos/octo/app/environments/Production%20West"
       ]
     ]);
+  });
+
+  it("checks Stop after repository reads and before environment creation", async () => {
+    let mutations = 0;
+
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) =>
+          apiPath === "/repos/octo/app" ?
+            readResult({ json: { full_name: "octo/app" } })
+          : readResult({ ok: false, status: 404 }),
+        beforeCreate: async () => false,
+        runGh: async () => {
+          mutations += 1;
+          return result();
+        }
+      })
+    ).rejects.toBeInstanceOf(GitHubEnvironmentEnsureCancelled);
+    expect(mutations).toBe(0);
+  });
+
+  // A journaled attempt reaches the create path to be reconciled, not rewritten.
+  // Stopping before that read would strand the provenance the Stop is about to
+  // make terminal, so the gate is never consulted for it.
+  it("reconciles a journaled attempt without consulting the Stop gate", async () => {
+    const operation = createOperation({ operationId: "op_environment" });
+    const mutation = prepareProviderMutation(operation, {
+      kind: "github_environment.put",
+      target: "octo/app:production"
+    });
+    settleProviderMutation(
+      operation,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The provider request ended without a response."
+    );
+    let stopChecks = 0;
+    let mutations = 0;
+
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) =>
+          apiPath === "/repos/octo/app" ?
+            readResult({ json: { full_name: "octo/app" } })
+          : readResult({ ok: false, status: 404 }),
+        beforeCreate: async () => {
+          stopChecks += 1;
+          return false;
+        },
+        runGh: async () => {
+          mutations += 1;
+          return result();
+        },
+        mutationRecovery: { operation, persist: async () => {} }
+      })
+    ).rejects.toBeInstanceOf(GitHubEnvironmentEnsureError);
+    expect(stopChecks).toBe(0);
+    expect(mutations).toBe(0);
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied"
+    });
   });
 
   // A PUT nobody saw the answer to recorded no id. What sits under the name

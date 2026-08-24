@@ -17,10 +17,22 @@ export interface VerificationRetryOperation {
   [key: string]: unknown;
 }
 
+export interface VerificationRetryStopBoundaryInput {
+  operation: VerificationRetryOperation;
+  boundary: string;
+  beforePersist(): void;
+}
+
 export interface VerificationRetryDependencies {
   createExecutor(login: string): Promise<SelectedGhExecutor>;
   registerExecutor(operationId: string, executor: SelectedGhExecutor): void;
   unregisterExecutor(operationId: string): void;
+  /**
+   * Honor a recorded Stop between the retry's external writes. This service owns
+   * no HTTP response, so the boundary is response-neutral: it returns whether
+   * the retry may continue and never writes a body.
+   */
+  stopBoundary(input: VerificationRetryStopBoundaryInput): Promise<boolean>;
   buildDispatchArgs(input: {
     workflowFile: string;
     targetRepo: string;
@@ -245,6 +257,21 @@ export async function runVerificationRetry(
     return;
   }
 
+  const stopBoundary = (boundary: string) =>
+    dependencies.stopBoundary({
+      operation,
+      boundary,
+      // The command is closed truthfully before the terminal state is saved, so
+      // a stopped retry is never left reading as still running.
+      beforePersist: () =>
+        dependencies.setCommandState(
+          operation,
+          commandId,
+          "finished",
+          "cancelled"
+        )
+    });
+
   const saved = { ...(operation.verification || {}) };
   let acquisitionDeadline = Number(saved.acquisitionDeadline);
   if (!Number.isFinite(acquisitionDeadline) || acquisitionDeadline <= 0) {
@@ -303,6 +330,10 @@ export async function runVerificationRetry(
 
   dependencies.registerExecutor(operation.operationId, executor);
   try {
+    // The account is in hand and nothing external has been written yet, so a
+    // Stop recorded while acquisition waited out a rate limit is honored before
+    // the dispatch checkpoint is journaled.
+    if (!(await stopBoundary("before-verification-retry-dispatch"))) return;
     const dispatchedAt = dependencies.now();
     const dispatchIdentity = {
       dispatchedAt,
@@ -328,6 +359,10 @@ export async function runVerificationRetry(
       { timeout: 30000 }
     );
     if (Number(dispatch.code) !== 0) {
+      // The attempt is over and its checkpoint is durable, so the Stop is
+      // honored before the failure path closes the operation.
+      if (!(await stopBoundary("after-verification-retry-dispatch-attempt")))
+        return;
       const detail =
         (dispatch.stderr || dispatch.stdout || "").trim() ||
         "The selected GitHub account request failed.";
@@ -373,6 +408,9 @@ export async function runVerificationRetry(
         retryCommandId: commandId
       };
     }
+    // The run identity is persisted, so a Stop honored here still tells the
+    // customer which run this retry started.
+    if (!(await stopBoundary("after-verification-retry-dispatch"))) return;
     await dependencies.monitor(operation.operationId);
     dependencies.setCommandState(
       operation,

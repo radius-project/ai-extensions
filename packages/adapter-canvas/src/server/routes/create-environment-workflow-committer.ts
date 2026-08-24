@@ -3,6 +3,7 @@ import {
   providerMutationId,
   providerMutationRecord,
   providerMutationsByKind,
+  shouldStop,
   settleProviderMutation
 } from "../../operations.js";
 import { needsWorkflowScope } from "./create-environment-gh-runner.js";
@@ -13,6 +14,7 @@ import type {
 } from "./create-environment-types.js";
 import {
   executeRecoverableMutation,
+  providerMutationWillWrite,
   ProviderMutationRecoveryError
 } from "../services/provider-mutation-recovery.js";
 import { parseBranchDeleteTarget } from "../services/recovered-branch-delete.js";
@@ -56,6 +58,7 @@ export interface WorkflowFileCommitterPorts {
       providerRecovery?: { state?: string };
     };
     persist(): Promise<void>;
+    beforeMutation?(kind: string, target: string): Promise<boolean>;
   };
   tempFile: WorkflowTempFilePort;
   errorMessage(error: unknown): string;
@@ -96,6 +99,8 @@ export function workflowContentDigest(contentB64: string): string {
     .update(Buffer.from(contentB64, "base64"))
     .digest("hex");
 }
+
+class WorkflowCommitCancelledError extends Error {}
 
 /**
  * The branch and base commit an interrupted attempt already journaled.
@@ -161,6 +166,7 @@ export function createWorkflowFileCommitter(
   // Once set, every subsequent workflow commit targets the PR branch instead of
   // the default branch.
   let prState: PullRequestBranchState | undefined;
+  let atomicFallbackWrite = false;
 
   const readBranchHead = async (
     branch: string
@@ -223,10 +229,27 @@ export function createWorkflowFileCommitter(
     const branch =
       recorded?.branch || `radius/setup-${target.envName}-workflows-${suffix}`;
     if (ports.mutationRecovery) {
+      const mutationTarget = `${target.targetRepo}\0${branch}\0${baseSha}`;
+      if (
+        providerMutationWillWrite(
+          ports.mutationRecovery.operation,
+          "github_branch.create",
+          mutationTarget
+        ) &&
+        ports.mutationRecovery.beforeMutation &&
+        !(await ports.mutationRecovery.beforeMutation(
+          "github_branch.create",
+          mutationTarget
+        ))
+      ) {
+        throw new WorkflowCommitCancelledError(
+          "Operation stopped before creating the setup branch."
+        );
+      }
       const creation = await executeRecoverableMutation({
         operation: ports.mutationRecovery.operation,
         kind: "github_branch.create",
-        target: `${target.targetRepo}\0${branch}\0${baseSha}`,
+        target: mutationTarget,
         providerIdempotencyKey: branch,
         persist: ports.mutationRecovery.persist,
         mutate: async () => {
@@ -409,6 +432,7 @@ export function createWorkflowFileCommitter(
       previousBlobKnown: boolean;
       commitSha: string | null;
       blobSha: string | null;
+      cancelled?: boolean;
     }
   > => {
     const refQ = branch ? "?ref=" + encodeURIComponent(branch) : "";
@@ -432,6 +456,28 @@ export function createWorkflowFileCommitter(
       recoveryOperation ?
         providerMutationRecord(recoveryOperation, mutationKind, mutationTarget)
       : null;
+    if (
+      mutationRecovery &&
+      !atomicFallbackWrite &&
+      providerMutationWillWrite(
+        mutationRecovery.operation,
+        mutationKind,
+        mutationTarget
+      ) &&
+      mutationRecovery.beforeMutation &&
+      !(await mutationRecovery.beforeMutation(mutationKind, mutationTarget))
+    ) {
+      return {
+        code: 1,
+        stdout: "",
+        stderr: "Operation stopped before writing the workflow.",
+        previousBlobSha: sha || null,
+        previousBlobKnown,
+        commitSha: null,
+        blobSha: null,
+        cancelled: true
+      };
+    }
     // A refused or hand-off write is not a write this attempt is reconciling —
     // it is one this attempt is about to make for the first time. Its recorded
     // intent describes a repository state that has since moved on, so only a
@@ -688,6 +734,21 @@ export function createWorkflowFileCommitter(
     contentB64: string,
     message: string
   ): Promise<WorkflowCommitOutcome> => {
+    if (
+      !prState &&
+      ports.mutationRecovery &&
+      shouldStop(ports.mutationRecovery.operation) &&
+      recordedSetupBranchCreate(
+        ports.mutationRecovery.operation,
+        target.targetRepo
+      )
+    ) {
+      // A restart must return to the exact recorded fallback branch before it
+      // considers another default-branch write. This lets the saved branch or
+      // workflow mutation reconcile and prevents Stop from deadlocking behind a
+      // fresh replay of the already-refused direct write.
+      prState = await beginPrFallback();
+    }
     if (prState) {
       const r = await putWorkflowContent(
         path,
@@ -695,18 +756,42 @@ export function createWorkflowFileCommitter(
         message,
         prState.branch
       );
+      if (r.cancelled) {
+        return { ok: false, cancelled: true, stderr: r.stderr, viaPr: true };
+      }
       return r.code === 0 ?
           succeeded(r, contentB64, true)
         : { ok: false, stderr: r.stderr, viaPr: true };
     }
     const direct = await putWorkflowContent(path, contentB64, message, "");
+    if (direct.cancelled) {
+      return {
+        ok: false,
+        cancelled: true,
+        stderr: direct.stderr,
+        viaPr: false
+      };
+    }
     if (direct.code === 0) return succeeded(direct, contentB64, false);
     if (isProtectedBranchFailure(direct.stderr)) {
       let fallback: PullRequestBranchState;
       try {
+        // Branch creation and its first workflow commit are one atomic fallback.
+        // Stopping between them would leave an untracked setup branch that no
+        // operation record can resume or remove.
         fallback = await beginPrFallback();
         prState = fallback;
+        atomicFallbackWrite = true;
       } catch (e) {
+        if (e instanceof WorkflowCommitCancelledError) {
+          return {
+            ok: false,
+            cancelled: true,
+            stderr: e.message,
+            viaPr: false
+          };
+        }
+        if (e instanceof ProviderMutationRecoveryError) throw e;
         return {
           ok: false,
           stderr: `${direct.stderr} (PR fallback failed: ${ports.errorMessage(
@@ -715,12 +800,20 @@ export function createWorkflowFileCommitter(
           viaPr: false
         };
       }
-      const r = await putWorkflowContent(
-        path,
-        contentB64,
-        message,
-        fallback.branch
-      );
+      let r: Awaited<ReturnType<typeof putWorkflowContent>>;
+      try {
+        r = await putWorkflowContent(
+          path,
+          contentB64,
+          message,
+          fallback.branch
+        );
+      } finally {
+        atomicFallbackWrite = false;
+      }
+      if (r.cancelled) {
+        return { ok: false, cancelled: true, stderr: r.stderr, viaPr: true };
+      }
       return r.code === 0 ?
           succeeded(r, contentB64, true)
         : { ok: false, stderr: r.stderr, viaPr: true };

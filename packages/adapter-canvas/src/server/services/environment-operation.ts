@@ -1,9 +1,12 @@
 import type { SelectedGhExecutor } from "../../gh.js";
+import { unresolvedProviderMutations } from "../../operations.js";
 import {
   ensureGitHubEnvironment,
+  GitHubEnvironmentEnsureCancelled,
   GitHubEnvironmentEnsureError,
   type EnsuredGitHubEnvironment
 } from "./github-environment.js";
+import { ProviderMutationRecoveryError } from "./provider-mutation-recovery.js";
 import type { GitHubEnvironmentReadResult } from "./github-environment.js";
 
 export interface EnvironmentOperationRecord {
@@ -151,6 +154,7 @@ export async function runEnvironmentOperationWorkflow(
   dependencies: EnvironmentOperationWorkflowDependencies
 ): Promise<{ shouldMonitor: boolean }> {
   if (
+    unresolvedProviderMutations(operation).length === 0 &&
     !(await dependencies.guardStopBoundary(
       operation,
       "before-github-environment"
@@ -163,6 +167,14 @@ export async function runEnvironmentOperationWorkflow(
     executor
   );
   if (accessMessage) {
+    if (
+      !(await dependencies.guardStopBoundary(
+        operation,
+        "before-setup-failure-cleanup"
+      ))
+    ) {
+      return { shouldMonitor: false };
+    }
     return failResolution(operation, executor, dependencies, {
       status: 403,
       message: accessMessage,
@@ -172,6 +184,14 @@ export async function runEnvironmentOperationWorkflow(
   const packageAccess =
     await dependencies.preflightGhcrPackageWriteAccess(executor);
   if (!packageAccess.ok) {
+    if (
+      !(await dependencies.guardStopBoundary(
+        operation,
+        "before-setup-failure-cleanup"
+      ))
+    ) {
+      return { shouldMonitor: false };
+    }
     return failResolution(operation, executor, dependencies, {
       status: packageAccess.status,
       message: packageAccess.error,
@@ -191,9 +211,35 @@ export async function runEnvironmentOperationWorkflow(
         operation,
         persist: dependencies.persistProviderMutation
       },
+      beforeCreate: () =>
+        dependencies.guardStopBoundary(
+          operation,
+          "before-github-environment-create"
+        ),
       now: dependencies.now
     });
   } catch (error) {
+    if (error instanceof GitHubEnvironmentEnsureCancelled) {
+      return { shouldMonitor: false };
+    }
+    if (
+      error instanceof GitHubEnvironmentEnsureError &&
+      error.createdCandidate
+    ) {
+      dependencies.recordGitHubEnvironment(operation, {
+        state: "created_candidate",
+        repo: error.createdCandidate.repo,
+        name: error.createdCandidate.name
+      });
+    }
+    if (
+      !(await dependencies.guardStopBoundary(
+        operation,
+        "after-github-environment-attempt"
+      ))
+    ) {
+      return { shouldMonitor: false };
+    }
     return failResolution(operation, executor, dependencies, error);
   }
 
@@ -255,6 +301,15 @@ export async function runEnvironmentOperationWorkflow(
       operationEnvironment: operation.environment,
       operationId: operation.operationId
     });
+    if (setupResult?.reconciling) {
+      throw new ProviderMutationRecoveryError(
+        String(
+          setupResult.message ||
+            "Azure setup is reconciling an uncertain provider mutation."
+        ),
+        "provider-mutation-outcome-unknown"
+      );
+    }
     if (setupResult?.inputRequired || operation.state === "input_required") {
       return { shouldMonitor: false };
     }
@@ -264,18 +319,30 @@ export async function runEnvironmentOperationWorkflow(
     return { shouldMonitor: false };
   }
   const environmentRequest = record(request.environment);
-  await dependencies.postInternal("/api/create-environment", {
-    ...environmentRequest,
-    repo: operation.repo,
-    environment: ensured.name,
-    operationEnvironment: operation.environment,
-    provider: operation.provider,
-    operationId: operation.operationId,
-    clientId:
-      (typeof setupResult?.clientId === "string" && setupResult.clientId) ||
-      (typeof environmentRequest.clientId === "string" &&
-        environmentRequest.clientId) ||
-      ""
-  });
+  const environmentResult = await dependencies.postInternal(
+    "/api/create-environment",
+    {
+      ...environmentRequest,
+      repo: operation.repo,
+      environment: ensured.name,
+      operationEnvironment: operation.environment,
+      provider: operation.provider,
+      operationId: operation.operationId,
+      clientId:
+        (typeof setupResult?.clientId === "string" && setupResult.clientId) ||
+        (typeof environmentRequest.clientId === "string" &&
+          environmentRequest.clientId) ||
+        ""
+    }
+  );
+  if (environmentResult?.reconciling) {
+    throw new ProviderMutationRecoveryError(
+      String(
+        environmentResult.message ||
+          "Environment setup is reconciling an uncertain provider mutation."
+      ),
+      "provider-mutation-outcome-unknown"
+    );
+  }
   return { shouldMonitor: true };
 }

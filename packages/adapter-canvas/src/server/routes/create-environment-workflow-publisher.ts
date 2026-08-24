@@ -5,6 +5,7 @@ import type {
   WorkflowCommitOutcome
 } from "./create-environment-types.js";
 import { cloudCredentialsComplete } from "../../deploy.js";
+import { ProviderMutationRecoveryError } from "../services/provider-mutation-recovery.js";
 
 // Seam 5 of the `POST /api/create-environment` slice: steps 2, 3, 4 and 4b —
 // writing the provider's configuration onto the GitHub environment, then
@@ -247,7 +248,7 @@ export interface WorkflowPublisherPorts {
       previousBlobKnown: boolean;
     }
   ): void;
-  deleteLegacyDeployWorkflow(repo: string): Promise<boolean>;
+  deleteLegacyDeployWorkflow(repo: string): Promise<boolean | "cancelled">;
   usingPullRequestBranch(): boolean;
   pullRequestBranch(): string | null;
   errorMessage(error: unknown): string;
@@ -299,9 +300,11 @@ export async function publishWorkflowFiles(
     verifyContent,
     "Add Radius verify-credentials workflow for environment " + envName
   );
+  if (verifyCommit.cancelled) return { outcome: "cancelled" };
 
   if (!verifyCommit.ok) {
     ports.pushStep("❌ Failed to commit verify-credentials workflow.");
+    if (!(await ports.gate())) return { outcome: "cancelled" };
     return {
       outcome: "refused",
       ...describeWorkflowCommitFailure(
@@ -338,9 +341,11 @@ export async function publishWorkflowFiles(
       deployContent,
       "Add Radius deploy workflow (" + fileName + ") for environment " + envName
     );
+    if (deployCommit.cancelled) return { outcome: "cancelled" };
 
     if (!deployCommit.ok) {
       ports.pushStep("❌ Failed to commit deploy workflow " + fileName + ".");
+      if (!(await ports.gate())) return { outcome: "cancelled" };
       return {
         outcome: "refused",
         ...describeWorkflowCommitFailure(
@@ -361,8 +366,16 @@ export async function publishWorkflowFiles(
   // Best-effort: remove the legacy monolithic deploy workflow so it does not
   // double-trigger alongside the new dispatcher. Skipped in PR-fallback mode
   // since we can't push to the default branch.
-  if (!ports.usingPullRequestBranch())
-    await ports.deleteLegacyDeployWorkflow(targetRepo);
+  if (!ports.usingPullRequestBranch()) {
+    try {
+      const legacyDelete = await ports.deleteLegacyDeployWorkflow(targetRepo);
+      if (legacyDelete === "cancelled") return { outcome: "cancelled" };
+    } catch (error) {
+      if (!(await ports.gate())) return { outcome: "cancelled" };
+      throw error;
+    }
+    if (!(await ports.gate())) return { outcome: "cancelled" };
+  }
   ports.pushStep("✅ Deploy workflows committed.");
 
   // Step 4b: Commit the application-delete workflows (dispatcher + Azure
@@ -384,6 +397,7 @@ export async function publishWorkflowFiles(
           ") for environment " +
           envName
       );
+      if (delCommit.cancelled) return { outcome: "cancelled" };
 
       if (!delCommit.ok) {
         ports.pushStep(
@@ -392,6 +406,7 @@ export async function publishWorkflowFiles(
             ": " +
             ((delCommit.stderr || "").trim() || "GitHub API request failed.")
         );
+        if (!(await ports.gate())) return { outcome: "cancelled" };
       }
       if (delCommit.ok) {
         ports.recordCommittedWorkflowFile(
@@ -403,6 +418,7 @@ export async function publishWorkflowFiles(
     }
     ports.pushStep("✅ Delete workflows committed.");
   } catch (delErr) {
+    if (delErr instanceof ProviderMutationRecoveryError) throw delErr;
     // Delete workflows are non-critical to environment creation, so surface the
     // failure but don't abort the whole flow.
     ports.pushStep(

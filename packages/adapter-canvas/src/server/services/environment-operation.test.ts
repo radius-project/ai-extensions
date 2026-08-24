@@ -151,6 +151,57 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(ghCalls).toBe(0);
   });
 
+  it("lets Stop win over cleanup after a failed preflight", async () => {
+    const op = operation();
+    let boundaries = 0;
+    const test = dependencies(op, {
+      guardStopBoundary: async (_target, boundary) => {
+        test.events.push(`stop:${boundary}`);
+        boundaries += 1;
+        return boundaries === 1;
+      },
+      preflightRepoAdmin: async () => "admin required"
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(
+        op,
+        successfulSelectedGhExecutor(),
+        test.dependencies
+      )
+    ).toEqual({ shouldMonitor: false });
+    expect(test.events).toContain("stop:before-setup-failure-cleanup");
+    expect(test.failures).toEqual([]);
+  });
+
+  it("lets Stop win over cleanup after a refused GHCR package preflight", async () => {
+    const op = operation();
+    let boundaries = 0;
+    const test = dependencies(op, {
+      guardStopBoundary: async (_target, boundary) => {
+        test.events.push(`stop:${boundary}`);
+        boundaries += 1;
+        return boundaries === 1;
+      },
+      preflightGhcrPackageWriteAccess: async () => ({
+        ok: false,
+        status: 403,
+        error: "GHCR package write access is missing.",
+        code: "ghcr-package-write-required"
+      })
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(
+        op,
+        successfulSelectedGhExecutor(),
+        test.dependencies
+      )
+    ).toEqual({ shouldMonitor: false });
+    expect(test.events).toContain("stop:before-setup-failure-cleanup");
+    expect(test.failures).toEqual([]);
+  });
+
   it("persists GitHub's canonical name before Azure and propagates it downstream", async () => {
     const op = operation();
     const test = dependencies(op);
@@ -289,6 +340,76 @@ describe("runEnvironmentOperationWorkflow", () => {
       repo: "octo/app",
       name: "production"
     });
+    expect(test.posts).toEqual([]);
+  });
+
+  it("starts no environment create after Stop and journals nothing", async () => {
+    const op = operation();
+    const ghCalls: string[][] = [];
+    const test = dependencies(op, {
+      guardStopBoundary: async (_target, boundary) => {
+        test.events.push(`stop:${boundary}`);
+        return boundary !== "before-github-environment-create";
+      }
+    });
+    const executor = successfulSelectedGhExecutor({
+      run: async (args) => {
+        ghCalls.push(args);
+        return command({ code: 1, stderr: "HTTP 404" });
+      }
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: false });
+
+    expect(test.events).toContain("stop:before-github-environment-create");
+    expect(ghCalls.some((args) => args.includes("PUT"))).toBe(false);
+    expect(test.failures).toEqual([]);
+    expect(test.posts).toEqual([]);
+    // Nothing was written, so nothing was journaled for a recovery to settle.
+    expect(
+      (
+        op as EnvironmentOperationRecord & {
+          providerRecovery: { mutations: unknown[] };
+        }
+      ).providerRecovery.mutations
+    ).toEqual([]);
+  });
+
+  it("records an uncertain create before honoring Stop after the PUT", async () => {
+    const op = operation();
+    let attemptedPut = false;
+    const test = dependencies(op, {
+      guardStopBoundary: async (_target, boundary) => {
+        test.events.push(`stop:${boundary}`);
+        return !(
+          attemptedPut && boundary === "after-github-environment-attempt"
+        );
+      }
+    });
+    const executor = successfulSelectedGhExecutor({
+      run: async (args) => {
+        if (args.includes("PUT")) {
+          attemptedPut = true;
+          return command({ stdout: "{}" });
+        }
+        return command({ code: 1, stderr: "HTTP 404" });
+      }
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: false });
+
+    expect(op.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "created_candidate",
+      origin: "unknown",
+      repo: "octo/app",
+      name: "production"
+    });
+    expect(test.events).toContain("stop:after-github-environment-attempt");
+    expect(test.failures).toEqual([]);
     expect(test.posts).toEqual([]);
   });
 
