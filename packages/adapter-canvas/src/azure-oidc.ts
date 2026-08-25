@@ -360,6 +360,38 @@ export function parseRadiusAppProvenanceTags(
 }
 
 /**
+ * Whether an App Registration's tags prove an earlier Radius setup for this
+ * exact repository and environment created it.
+ *
+ * Radius writes these tags itself when it creates an application, so a match is
+ * provenance rather than a heuristic. It answers two different questions in two
+ * places: whether an unowned application is an orphan of a previous setup, and
+ * why a reused application the customer remembers Radius creating is now being
+ * kept rather than removed.
+ */
+export function isRadiusProvenanceMatch(
+  radiusProvenance?: RadiusAppProvenanceInput
+): boolean {
+  const provenance = parseRadiusAppProvenanceTags(radiusProvenance?.tags || []);
+  if (!provenance.managed) return false;
+  const expectedRepo = String(radiusProvenance?.repo || "")
+    .trim()
+    .toLowerCase();
+  const expectedEnvironment = String(radiusProvenance?.environment || "")
+    .trim()
+    .toLowerCase();
+  const repoMatches =
+    !!provenance.repo &&
+    !!expectedRepo &&
+    provenance.repo.trim().toLowerCase() === expectedRepo;
+  const environmentMatches =
+    !!provenance.environment &&
+    !!expectedEnvironment &&
+    provenance.environment.trim().toLowerCase() === expectedEnvironment;
+  return repoMatches && environmentMatches;
+}
+
+/**
  * Pure ownership classification for the Radius-tagged-app reuse path.
  *
  * - Owned apps always reuse, regardless of any Radius tags.
@@ -377,23 +409,7 @@ export function decideRadiusAppOwnership({
 }): RadiusAppOwnershipDecision {
   if (ownedBySignedInUser) return { action: "reuse" };
 
-  const provenance = parseRadiusAppProvenanceTags(radiusProvenance?.tags || []);
-  const expectedRepo = String(radiusProvenance?.repo || "")
-    .trim()
-    .toLowerCase();
-  const expectedEnvironment = String(radiusProvenance?.environment || "")
-    .trim()
-    .toLowerCase();
-  const repoMatches =
-    !!provenance.repo &&
-    !!expectedRepo &&
-    provenance.repo.trim().toLowerCase() === expectedRepo;
-  const environmentMatches =
-    !!provenance.environment &&
-    !!expectedEnvironment &&
-    provenance.environment.trim().toLowerCase() === expectedEnvironment;
-
-  if (provenance.managed && repoMatches && environmentMatches) {
+  if (isRadiusProvenanceMatch(radiusProvenance)) {
     return {
       action: "error",
       code: "app-registration-radius-orphaned",

@@ -221,7 +221,7 @@ describe("application modeling journey", () => {
     });
   });
 
-  it("requires confirmation before regenerating a hand-edited model", async () => {
+  it("requires confirmation before regenerating a hand-edited stale model", async () => {
     const gh = githubForHead();
     const originText = await gh.getContent(
       contentsPath(REPO, ".radius/app.origin.json", HEAD_BRANCH)
@@ -232,12 +232,12 @@ describe("application modeling journey", () => {
       model: APP_BICEP,
       originText,
       headCommit: HEAD_COMMIT,
-      sourceChanged: false,
+      sourceChanged: true,
       generatorVersion: "1.4.0",
       hashAppBicep
     });
 
-    expect(freshness.status).toBe("edited");
+    expect(freshness.status).toBe("manually-edited");
     expect(freshness.stale).toBe(true);
     expect(freshness.requiresConfirmation).toBe(true);
   });

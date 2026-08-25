@@ -182,7 +182,12 @@ function setButtonState(
 }
 
 function safeDeleteRedirect(value: string): string {
-  if (value.startsWith("/?page=deploying")) return value;
+  if (
+    value.startsWith("/?page=deploying") ||
+    value.startsWith("/?page=deployed")
+  ) {
+    return value;
+  }
   return "/?page=deploying";
 }
 

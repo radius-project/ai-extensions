@@ -9,13 +9,17 @@ import {
   planCredentialVerification
 } from "../../../src/verification-plan.js";
 import {
+  guardStopBoundary,
   persistBestEffort,
   persistMutationCheckpoint
 } from "../../../src/server.js";
 import {
+  createSetupArtifactLedger,
+  promoteCreatedGitHubEnvironment,
   recordGitHubEnvironment,
   setCanonicalEnvironment
 } from "../../../src/operations.js";
+import type { SetupArtifactLedger } from "../../../src/operations.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
@@ -75,13 +79,24 @@ interface Script {
 interface Harness {
   baseUrl: string;
   journal: string[];
+  setJournalHook(hook: ((entry: string) => void) | null): void;
   ghCalls: string[];
   steps: string[];
-  operation: CreateEnvironmentOperation;
+  operation: CreateEnvironmentOperation & {
+    setupArtifacts: SetupArtifactLedger;
+  };
   state: CanvasState;
   finished: Array<{ state: string; options: Record<string, unknown> }>;
   commitStates: Record<string, unknown>[];
-  committedFiles: Array<{ path: string; branch: string | null; mode: string }>;
+  committedFiles: Array<{
+    path: string;
+    branch: string | null;
+    mode: string;
+    commitSha: string | null;
+    blobSha: string | null;
+    contentSha256: string | null;
+    previousBlobSha: string | null;
+  }>;
   failures: Array<Record<string, unknown>>;
   cleanupErrors: string[];
 }
@@ -95,6 +110,10 @@ const TEMP_BODY_PATH = "/tmp/create-environment-body.json";
 // helpers (`isValidRepoSlug`, `planCredentialVerification`,
 // `buildVerifyWorkflowDispatchArgs`) are
 // the real production functions, injected exactly as `server.ts` injects them.
+// sha256 of the exact workflow bytes the generators in this harness produce.
+const WORKFLOW_CONTENT_DIGEST =
+  "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7";
+
 const DEFAULT_GH_RULES: GhRule[] = [
   {
     match: /^api \/repos\/octo\/app\/environments\/dev$/,
@@ -106,7 +125,13 @@ const DEFAULT_GH_RULES: GhRule[] = [
   },
   {
     match: /^api --method PUT \/repos\/octo\/app\/environments\/dev$/,
-    result: { code: 0, stdout: '{"name":"dev"}' }
+    result: {
+      code: 0,
+      stdout: JSON.stringify({
+        name: "dev",
+        created_at: "2023-11-14T22:13:20.000Z"
+      })
+    }
   },
   { match: /^variable set /, result: { code: 0 } },
   {
@@ -115,7 +140,15 @@ const DEFAULT_GH_RULES: GhRule[] = [
   },
   {
     match: /^api --method PUT \/repos\/octo\/app\/contents\//,
-    result: { code: 0 }
+    // The real contents API answers a write with the commit it created and the
+    // blob it stored; the committer reads its provenance back out of this.
+    result: {
+      code: 0,
+      stdout: JSON.stringify({
+        content: { sha: "blob-sha" },
+        commit: { sha: "commit-sha" }
+      })
+    }
   },
   { match: /^workflow run /, result: { code: 0 } },
   {
@@ -131,6 +164,18 @@ const DEFAULT_GH_RULES: GhRule[] = [
 
 function start(script: Script = {}): Harness {
   const journal: string[] = [];
+  // Lets a test act at an exact point in the run — recording a stop while the
+  // request is mid-flight, which is the only way that race happens for real.
+  let journalHook: ((entry: string) => void) | null = null;
+  const appendJournal = journal.push.bind(journal);
+  // Defined non-enumerably so the journal still compares as a plain array.
+  Object.defineProperty(journal, "push", {
+    value: (...entries: string[]) => {
+      const length = appendJournal(...entries);
+      for (const entry of entries) journalHook?.(entry);
+      return length;
+    }
+  });
   const ghCalls: string[] = [];
   const steps: string[] = [];
   const state: CanvasState = {};
@@ -141,13 +186,20 @@ function start(script: Script = {}): Harness {
   const cleanupErrors: string[] = [];
   let persistCalls = 0;
 
-  const operation: CreateEnvironmentOperation = {
+  // `stages` and `steps` are present because the real stop guard closes the
+  // record through the production `finish`, which walks both.
+  const operation: CreateEnvironmentOperation & {
+    setupArtifacts: SetupArtifactLedger;
+  } = {
     operationId: "op-http",
     repo: "octo/app",
     environment: "dev",
     provider: "azure",
     currentStage: STAGE_CONFIGURE,
-    inputRequired: null
+    inputRequired: null,
+    stages: [{ id: STAGE_CONFIGURE, label: "Configure", state: "running" }],
+    steps: [],
+    setupArtifacts: createSetupArtifactLedger()
   };
   if (script.preparedEnvironment) {
     operation.environment = script.preparedEnvironment.requestedName;
@@ -155,12 +207,11 @@ function start(script: Script = {}): Harness {
       requestedEnvironment: script.preparedEnvironment.requestedName,
       canonicalEnvironment: script.preparedEnvironment.canonicalName
     };
-    operation.setupArtifacts = {
-      githubEnvironment: {
-        state: script.preparedEnvironment.state,
-        repo: "octo/app",
-        name: script.preparedEnvironment.canonicalName
-      }
+    operation.setupArtifacts.githubEnvironment = {
+      ...operation.setupArtifacts.githubEnvironment,
+      state: script.preparedEnvironment.state,
+      repo: "octo/app",
+      name: script.preparedEnvironment.canonicalName
     };
   }
 
@@ -209,6 +260,7 @@ function start(script: Script = {}): Harness {
         operation
       : null,
     isStale: () => false,
+    isTerminalState: (state) => state === "failed" || state === "cancelled",
     createOperation: (input) => {
       operation.repo = input.repo;
       operation.environment = input.environment;
@@ -307,6 +359,13 @@ function start(script: Script = {}): Harness {
       journal.push("persistBestEffort");
       return persistBestEffort(input);
     },
+    // Also the real helper: whether a stop is honored, and what the record and
+    // the response look like when it is, is production behavior this suite
+    // exercises over the socket rather than restates.
+    guardStopBoundary: (input) => {
+      journal.push(`stopBoundary:${input.boundary}`);
+      return guardStopBoundary(input);
+    },
     runAzCommand: () => {
       throw new Error("unscripted az call");
     },
@@ -367,7 +426,8 @@ function start(script: Script = {}): Harness {
     },
 
     // --- committer ports ---
-    getDefaultBranch: async () => script.defaultBranch ?? "main",
+    getDefaultBranch: async () =>
+      "defaultBranch" in script ? script.defaultBranch : "main",
     getBranchHeadSha: async () => {
       if (!("headSha" in script))
         throw new Error("unscripted getBranchHeadSha");
@@ -399,9 +459,20 @@ function start(script: Script = {}): Harness {
     setCanonicalEnvironment: (target, environment) => {
       setCanonicalEnvironment(target, environment);
     },
-    recordGitHubEnvironment: (target, patch) => {
-      recordGitHubEnvironment(target, patch);
+    // The real ledger writers, so the provenance this route records is the
+    // provenance a rollback would later read. A hand-written double could only
+    // restate the monotonic rule these two enforce.
+    recordGitHubEnvironment: (targetOperation, patch) => {
       journal.push(`recordGitHubEnvironment:${patch.state}`);
+      recordGitHubEnvironment(targetOperation, patch);
+    },
+    promoteCreatedGitHubEnvironment: (targetOperation, identity) => {
+      const promoted = promoteCreatedGitHubEnvironment(
+        targetOperation,
+        identity
+      );
+      journal.push(`promoteCreatedGitHubEnvironment:${String(promoted)}`);
+      return promoted;
     },
     envListCacheDelete: (repo) => {
       journal.push(`envListCacheDelete:${repo}`);
@@ -507,6 +578,9 @@ function start(script: Script = {}): Harness {
   return {
     baseUrl: "",
     journal,
+    setJournalHook: (hook) => {
+      journalHook = hook;
+    },
     ghCalls,
     steps,
     operation,
@@ -845,6 +919,26 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     );
   });
 
+  it("fails before workflow mutation when the default branch cannot be resolved", async () => {
+    const harness = start({ defaultBranch: null });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error:
+        "Could not determine the default branch for octo/app, so Radius did not commit workflow files with guessed rollback provenance.",
+      code: "default-branch-unavailable"
+    });
+    expect(harness.journal).toContain(
+      "finalizeSetupFailure:default-branch-unavailable"
+    );
+    expect(harness.ghCalls.some((call) => call.includes("/contents/"))).toBe(
+      false
+    );
+    expect(harness.committedFiles).toEqual([]);
+  });
+
   it("records a pre-existing environment as reused rather than created", async () => {
     const harness = start({
       gh: [
@@ -858,6 +952,99 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     await post({ repo: "octo/app" });
 
     expect(harness.journal).toContain("recordGitHubEnvironment:reused");
+    expect(harness.operation.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "reused",
+      origin: "pre_existing"
+    });
+    expect(harness.journal).not.toContain(
+      "promoteCreatedGitHubEnvironment:true"
+    );
+  });
+
+  it("checkpoints proven ownership before honoring a stop boundary", async () => {
+    const harness = start();
+
+    await post({ repo: "octo/app" });
+
+    // The proof is settled in memory first, then the mutation checkpoint saves
+    // that ownership before the stop boundary can return.
+    const recorded = harness.journal.indexOf(
+      "recordGitHubEnvironment:created_candidate"
+    );
+    const checkpoint = harness.journal.indexOf("checkpoint", recorded);
+    const promoted = harness.journal.indexOf(
+      "promoteCreatedGitHubEnvironment:true"
+    );
+    expect(recorded).toBeGreaterThan(-1);
+    expect(promoted).toBeGreaterThan(recorded);
+    expect(checkpoint).toBeGreaterThan(promoted);
+    expect(harness.operation.setupArtifacts.githubEnvironment).toEqual({
+      state: "created",
+      origin: "this_operation",
+      repo: "octo/app",
+      name: "dev"
+    });
+    expect(harness.steps).toContain(
+      '✅ GitHub environment "dev" created by this setup — Radius owns it and can remove it.'
+    );
+  });
+
+  it("keeps the environment unowned when GitHub says it predates this request", async () => {
+    const harness = start({
+      gh: [
+        {
+          match: /^api --method PUT \/repos\/octo\/app\/environments\/dev$/,
+          result: {
+            code: 0,
+            stdout: JSON.stringify({
+              name: "dev",
+              created_at: "2020-01-01T00:00:00.000Z",
+              updated_at: "2026-02-01T12:00:00.000Z"
+            })
+          }
+        }
+      ]
+    });
+
+    await post({ repo: "octo/app" });
+
+    expect(harness.operation.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "created_candidate",
+      origin: "unknown"
+    });
+    expect(harness.journal).not.toContain(
+      "promoteCreatedGitHubEnvironment:true"
+    );
+    expect(
+      harness.steps.some(
+        (step) =>
+          step.startsWith(
+            'ℹ️ Radius left GitHub environment "dev" outside its cleanup scope.'
+          ) && step.includes("2020-01-01T00:00:00.000Z")
+      )
+    ).toBe(true);
+  });
+
+  it("fails closed when promoted ownership cannot be checkpointed", async () => {
+    const harness = start({ persistRejectsAfter: 2 });
+
+    await post({ repo: "octo/app" });
+
+    const promoted = harness.journal.indexOf(
+      "promoteCreatedGitHubEnvironment:true"
+    );
+    expect(promoted).toBeGreaterThan(-1);
+    expect(harness.journal).toContain(
+      "diagnostic:operation-store-write-failed"
+    );
+    expect(harness.operation.setupArtifacts.githubEnvironment.state).toBe(
+      "created"
+    );
+    expect(
+      harness.journal.indexOf(
+        "finalizeSetupFailure:operation-persistence-failed"
+      )
+    ).toBeGreaterThan(promoted);
   });
 
   it("uses GitHub's canonical name for state, variables, workflows, and verification", async () => {
@@ -1033,6 +1220,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     });
     expect(harness.operation.setupArtifacts?.githubEnvironment).toEqual({
       state: "created_candidate",
+      origin: "unknown",
       repo: "octo/app",
       name: "dev"
     });
@@ -1150,21 +1338,39 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
 
     await post({ repo: "octo/app" });
 
+    // Every file carries the provenance a later rollback verifies against:
+    // the commit it created, the blob GitHub stored, the digest of the bytes
+    // Radius sent, and (here) no previous blob, because Radius created them.
     expect(harness.committedFiles).toEqual([
       {
         path: ".github/workflows/radius-verify-credentials.yml",
         branch: "main",
-        mode: "default_branch"
+        mode: "default_branch",
+        commitSha: "commit-sha",
+        blobSha: "blob-sha",
+        contentSha256: WORKFLOW_CONTENT_DIGEST,
+        previousBlobSha: null,
+        previousBlobKnown: true
       },
       {
         path: ".github/workflows/run-rad-commands.yml",
         branch: "main",
-        mode: "default_branch"
+        mode: "default_branch",
+        commitSha: "commit-sha",
+        blobSha: "blob-sha",
+        contentSha256: WORKFLOW_CONTENT_DIGEST,
+        previousBlobSha: null,
+        previousBlobKnown: true
       },
       {
         path: ".github/workflows/radius-delete.yml",
         branch: "main",
-        mode: "default_branch"
+        mode: "default_branch",
+        commitSha: "commit-sha",
+        blobSha: "blob-sha",
+        contentSha256: WORKFLOW_CONTENT_DIGEST,
+        previousBlobSha: null,
+        previousBlobKnown: true
       }
     ]);
     expect(harness.journal).toContain("deleteLegacyDeployWorkflow");
@@ -1474,5 +1680,120 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     expect(
       harness.journal.filter((entry) => entry === "checkpoint")
     ).toHaveLength(5);
+  });
+
+  it("passes every safe boundary in order when no stop is recorded", async () => {
+    const harness = start();
+
+    await post({ repo: "octo/app" });
+
+    expect(
+      harness.journal.filter((entry) => entry.startsWith("stopBoundary:"))
+    ).toEqual([
+      "stopBoundary:before-ghcr-bootstrap",
+      "stopBoundary:after-github-environment",
+      "stopBoundary:before-workflow-commit",
+      "stopBoundary:after-workflow-commit",
+      "stopBoundary:after-workflow-commit",
+      "stopBoundary:after-workflow-commit",
+      "stopBoundary:before-verification-dispatch",
+      "stopBoundary:after-verification-dispatch"
+    ]);
+  });
+
+  it("honors a recorded stop at the first boundary and touches GitHub no further", async () => {
+    const harness = start();
+    // Recorded while the request was in flight, exactly as the stop route
+    // records it: the executor observes it at its next safe boundary.
+    harness.operation.stopRequested = true;
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary: "before-ghcr-bootstrap",
+      operationId: "op-http"
+    });
+    expect(body.operation).toMatchObject({ terminalState: "cancelled" });
+    // Nothing after the boundary ran: no GHCR bootstrap, no environment PUT,
+    // no workflow commit, no verify dispatch.
+    expect(harness.ghCalls).toEqual([]);
+    expect(harness.journal).not.toContain("preflightGhcrPackageWriteAccess");
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+  });
+
+  // The remaining boundaries, each driven by recording the stop just as the run
+  // reaches it. The property under test is the same every time: the write that
+  // was already running completes, and nothing after the boundary starts.
+  it.each([
+    { boundary: "before-workflow-commit", committed: false, dispatched: false },
+    {
+      boundary: "before-verification-dispatch",
+      committed: true,
+      dispatched: false
+    },
+    {
+      boundary: "after-verification-dispatch",
+      committed: true,
+      dispatched: true
+    }
+  ])(
+    "honors a stop that arrives as the run reaches the $boundary boundary",
+    async ({ boundary, committed, dispatched }) => {
+      const harness = start();
+      harness.setJournalHook((entry) => {
+        if (entry === `stopBoundary:${boundary}`)
+          harness.operation.stopRequested = true;
+      });
+
+      const response = await post({ repo: "octo/app" });
+      const body = (await response.json()) as Record<string, unknown>;
+
+      expect(response.status).toBe(200);
+      expect(body).toMatchObject({
+        cancelled: true,
+        code: "operation-stopped",
+        boundary
+      });
+      expect(harness.committedFiles.length > 0).toBe(committed);
+      expect(harness.journal.includes("dispatchVerifyWorkflow")).toBe(
+        dispatched
+      );
+      // A stopped run never reports success.
+      expect(body.success).toBeUndefined();
+    }
+  );
+
+  it("stops after the environment exists rather than abandoning it mid-write", async () => {
+    const harness = start();
+    // The stop lands while the GitHub environment is being created, so the
+    // first boundary after that write is where it must be honored.
+    harness.setJournalHook((entry) => {
+      if (entry === "recordGitHubEnvironment:created_candidate") {
+        harness.operation.stopRequested = true;
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      code: "operation-stopped",
+      boundary: "after-github-environment"
+    });
+    // The environment write finished and was recorded before the stop.
+    expect(harness.ghCalls).toContain(
+      "api --method PUT /repos/octo/app/environments/dev"
+    );
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+    expect(harness.committedFiles).toEqual([]);
+    expect(harness.operation.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "created",
+      origin: "this_operation"
+    });
   });
 });

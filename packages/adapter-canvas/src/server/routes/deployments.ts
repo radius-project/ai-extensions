@@ -1,7 +1,10 @@
 import type { CanvasState } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
+import type { DeploymentAbandonmentService } from "../services/deployment-abandonment.js";
 import type { DeployRequestService } from "../services/deploy-request.js";
+import type { DeploymentRow } from "../services/deployment-resolver.js";
+import { shouldRetryWithKeyringCredential } from "../services/workflow-credential-fallback.js";
 import { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE } from "../../infra.js";
 
 // What the webview needs to decide whether to keep polling after a failed
@@ -15,14 +18,7 @@ export interface DeployHandoffSummary {
 }
 
 // One row of the deployments listing, as produced by `resolveEnvDeployment`.
-export interface DeploymentRow {
-  app: string;
-  environment: string;
-  provider: string;
-  status: string;
-  deploymentId: string;
-  runUrl: string;
-}
+export type { DeploymentRow } from "../services/deployment-resolver.js";
 
 export interface DeployListCacheEntry {
   at: number;
@@ -48,6 +44,9 @@ export interface CommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
+  // Set when the runner's timeout killed the child, so the request's outcome is
+  // unknown and no credential fallback may re-run it.
+  timedOut?: boolean;
 }
 
 export interface WorkflowSyncResult {
@@ -64,7 +63,7 @@ export interface TimerHandle {
 export interface DeploymentDispatchLease {
   repo: string;
   environment: string;
-  kind: "deploy" | "delete";
+  kind: "deploy" | "delete" | "abandon";
   expiresAt: number;
   attemptId?: string;
 }
@@ -78,6 +77,7 @@ export interface DeploymentsInstanceEntry {
 }
 
 export interface DeploymentsDependencies {
+  isValidRepoSlug(value: unknown): boolean;
   readInstanceEntry(instanceId: string): DeploymentsInstanceEntry | undefined;
   triggerDeployRepairHandoff(
     entry: DeploymentsInstanceEntry | undefined,
@@ -112,7 +112,11 @@ export interface DeploymentsDependencies {
   ): DeploymentDispatchLease | undefined;
   reserveDeploymentMutation(
     state: CanvasState,
-    reservation: { repo: string; environment: string; kind: "delete" }
+    reservation: {
+      repo: string;
+      environment: string;
+      kind: "delete";
+    }
   ): DeploymentDispatchLease | null;
   releaseDeploymentMutation(
     state: CanvasState,
@@ -147,6 +151,9 @@ export interface DeploymentsDependencies {
   // reading the body and writing the response lives behind this port, because
   // the deploy is a multi-stage runtime operation rather than an HTTP concern.
   deployRequest: DeployRequestService;
+  // GitHub-side cleanup is a separate use case from cloud deletion. The route
+  // only parses HTTP input and serializes this service's result.
+  abandonment: DeploymentAbandonmentService;
 }
 
 function errorMessage(error: unknown): string {
@@ -471,9 +478,14 @@ export async function handleDeleteDeployment(
     const repo = data.repo || "";
     const environment = data.environment || "";
     const application = data.application || "";
-    if (!repo || !environment || !application) {
+    if (
+      !repo ||
+      !environment ||
+      !application ||
+      !dependencies.isValidRepoSlug(repo)
+    ) {
       respond(400, {
-        error: "repo, environment, and application are required."
+        error: "A valid repo, environment, and application are required."
       });
       return;
     }
@@ -547,13 +559,22 @@ export async function handleDeleteDeployment(
     }
 
     // Dispatching a workflow requires the `workflow` scope, which an injected
-    // GH_TOKEN often lacks. Retry with it stripped so gh falls back to the
-    // keyring credential.
+    // GH_TOKEN often lacks. Retry with it stripped ONLY when that fallback is
+    // safe: the failure names the missing scope, and the dispatch did not time
+    // out (a timed-out dispatch may already have been accepted, and a retry
+    // would start a second delete run).
     const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
       const first = await dependencies.runGh(args);
       if (first.code === 0) return first;
       const env = dependencies.readProcessEnv();
-      if (!(env.GH_TOKEN || env.GITHUB_TOKEN)) return first;
+      const retryAllowed = shouldRetryWithKeyringCredential({
+        stderr: first.stderr,
+        timedOut: first.timedOut,
+        hasInjectedToken: Boolean(
+          env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim()
+        )
+      });
+      if (!retryAllowed) return first;
       const fallbackEnv = { ...env };
       delete fallbackEnv.GH_TOKEN;
       delete fallbackEnv.GITHUB_TOKEN;
@@ -630,6 +651,7 @@ export async function handleDeleteDeployment(
       if (delay > 0) await sleep(dependencies, delay);
       dispatch = await ghWorkflow(dispatchArgs);
       if (dispatch.code === 0) break;
+      if (dispatch.timedOut) break;
       // Only the not-found registration race self-resolves; any other failure
       // (scope, Actions disabled, …) won't, so stop retrying.
       if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
@@ -689,6 +711,25 @@ export async function handleDeleteDeployment(
   }
 }
 
+export async function handleAbandonDeployment(
+  context: CanvasRequestContext,
+  dependencies: DeploymentsDependencies
+): Promise<void> {
+  const body = await context.readTextBody();
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body || "{}");
+  } catch (error) {
+    context.json(400, { error: errorMessage(error) });
+    return;
+  }
+  const result = await dependencies.abandonment.abandon({
+    instanceId: context.instanceId,
+    payload
+  });
+  context.json(result.status, result.body);
+}
+
 // Starts a deploy. The adapter is deliberately thin: the body is read exactly
 // once, handed to the admission service, and its result is serialized verbatim.
 // Every refusal, reservation, attempt-identity and background-monitor concern
@@ -719,6 +760,8 @@ export function createDeploymentsRoutes(
     "POST /api/deploy-reset": (context) =>
       handleDeployReset(context, dependencies),
     "POST /api/delete-deployment": (context) =>
-      handleDeleteDeployment(context, dependencies)
+      handleDeleteDeployment(context, dependencies),
+    "POST /api/abandon-deployment": (context) =>
+      handleAbandonDeployment(context, dependencies)
   };
 }

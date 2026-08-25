@@ -27,6 +27,7 @@ export {
   APP_ORIGIN_REPO_PATH,
   APP_ORIGIN_ROOT_PATH,
   evaluateAppModelFreshness,
+  freshnessIdentity,
   normalizeAppBicep,
   parseAppOrigin,
   serializeAppOrigin,

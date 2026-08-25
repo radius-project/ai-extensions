@@ -562,6 +562,18 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         stdout: `success\thttps://github.com/${REPOSITORY}/actions/runs/1`
       },
       {
+        // The deployed-page resolver reads only the latest status when it
+        // already carries the run URL.
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/deployments/dep-1/statuses?per_page=1`,
+          "--jq",
+          '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "") + "\\t" + (.[0].description // "")'
+        ],
+        stdout: `success\thttps://github.com/${REPOSITORY}/actions/runs/1\t`
+      },
+      {
         tool: "gh",
         args: [
           "api",
@@ -611,6 +623,15 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         writeFiles: [
           { path: "$BICEP", content: "fake-bicep", executable: true }
         ]
+      },
+      {
+        // buildGraphViaRad derives the bicepconfig `extensions.radius` pin from
+        // the release of the binary that will run the compile, so the fake CLI
+        // must report one: an unmodeled command exits 127, which would leave the
+        // reference underivable and fail the compile closed.
+        tool: "rad",
+        args: ["version", "--cli", "--output", "json"],
+        stdout: JSON.stringify({ version: "v0.60.0", bicep: "0.41.2" })
       },
       {
         tool: "rad",

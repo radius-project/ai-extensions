@@ -325,13 +325,34 @@ function buildAwsCliLogin(): Remediation {
   };
 }
 
-function buildGithubCliLogin(): Remediation {
+function buildGithubCliLogin(
+  params: Readonly<Record<string, unknown>> = {}
+): Remediation {
+  // Scopes are booleans the caller opts into, never scope strings it supplies,
+  // so a caller can ask for package access but cannot name an arbitrary scope.
+  // Same rule as buildGithubAccountScopes.
+  const workflow = params.workflow === true || params.workflow === "true";
+  const packages = params.packages === true || params.packages === "true";
+  const scopes = [
+    ...(workflow ? ["workflow"] : []),
+    ...(packages ? ["read:packages", "write:packages"] : [])
+  ];
+  const login = ["gh", "auth", "login"];
+  if (scopes.length > 0) {
+    login.push("-h", "github.com");
+    for (const scope of scopes) {
+      login.push("-s", scope);
+    }
+  }
   return {
     id: "github-cli-login",
-    params: {},
+    params: {
+      ...(workflow ? { workflow: "true" } : {}),
+      ...(packages ? { packages: "true" } : {})
+    },
     title: "Sign in to GitHub CLI",
-    displayCommand: "gh auth login",
-    argv: [["gh", "auth", "login"]],
+    displayCommand: login.join(" "),
+    argv: [login],
     cwd: "anywhere",
     impact: "high",
     confirmTitle: "Sign in to GitHub CLI?",
@@ -563,7 +584,7 @@ export function buildRemediation(
     case "aws-cli-login":
       return { ok: true, remediation: buildAwsCliLogin() };
     case "github-cli-login":
-      return { ok: true, remediation: buildGithubCliLogin() };
+      return { ok: true, remediation: buildGithubCliLogin(values) };
     case "github-packages-scope":
       return buildGithubPackagesScope(values);
     case "github-workflow-scope":

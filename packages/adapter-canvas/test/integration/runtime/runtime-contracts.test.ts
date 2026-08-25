@@ -676,7 +676,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     const denied = await harness.extension.hooks.onPreToolUse(open);
     expect(denied).toMatchObject({
       permissionDecision: "deny",
-      permissionDecisionReason: expect.stringContaining("out of date")
+      permissionDecisionReason: expect.stringContaining("must be regenerated")
     });
     expect(denied?.additionalContext).toContain("radius_generate_app");
 

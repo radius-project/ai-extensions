@@ -81,6 +81,9 @@ function identityFor(login: string): GitHubIdentity {
     mismatch: login !== "",
     actingHasWorkflow: true,
     actingHasPackages: false,
+    packagesLogin: login,
+    packagesHasWrite: false,
+    packagesCredentialSource: "keyring",
     reason: `reason-${login}`,
     accounts: [
       {

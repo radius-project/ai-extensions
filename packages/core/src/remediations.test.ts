@@ -382,6 +382,29 @@ describe("github remediations", () => {
     expect(remediation.impact).toBe("high");
     expect(remediation.confirmBody).toContain("machine-wide");
   });
+
+  it("requests only the scopes the caller opted into", () => {
+    expect(build("github-cli-login", { packages: "true" }).displayCommand).toBe(
+      "gh auth login -h github.com -s read:packages -s write:packages"
+    );
+    expect(build("github-cli-login", { workflow: "true" }).displayCommand).toBe(
+      "gh auth login -h github.com -s workflow"
+    );
+    expect(
+      build("github-cli-login", { workflow: "true", packages: "true" })
+        .displayCommand
+    ).toBe(
+      "gh auth login -h github.com -s workflow -s read:packages -s write:packages"
+    );
+  });
+
+  it("ignores a scope flag that is not an opt-in", () => {
+    // Scopes are booleans, so a caller cannot smuggle a scope string through.
+    const remediation = build("github-cli-login", { packages: "admin:org" });
+
+    expect(remediation.displayCommand).toBe("gh auth login");
+    expect(remediation.params.packages).toBeUndefined();
+  });
 });
 
 describe("aws remediation", () => {

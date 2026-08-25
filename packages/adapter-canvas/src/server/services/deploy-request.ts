@@ -26,7 +26,7 @@ export interface DeployRequestInstanceEntry {
 export interface DeploymentReservation {
   repo: string;
   environment: string;
-  kind: "deploy" | "delete";
+  kind: "deploy" | "delete" | "abandon";
   expiresAt: number;
   attemptId?: string;
 }
