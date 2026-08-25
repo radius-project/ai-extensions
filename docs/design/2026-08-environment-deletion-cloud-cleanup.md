@@ -23,10 +23,10 @@ down the *half-finished* artifacts of a setup that never succeeded. It is a
 different job with different rules, but it does a lot of the *same low-level
 work* (delete a GitHub environment, delete a federated credential, treat "not
 found" as success, report progress through the same panel). To avoid writing
-that work twice, the delete flow's primitives are built to be shareable. The
-[Rollback compatibility](#rollback-compatibility) section explains exactly which
-pieces are shared, which must stay separate, and why — but the primary subject
-of this document is the delete implementation itself.
+that work twice, the delete flow's teardown primitives are built as shared,
+port-injected modules that rollback can bind to unchanged. That sharing is
+called out inline where each primitive is described; the subject of this
+document is the delete implementation itself.
 
 ## Terms and definitions
 
@@ -69,8 +69,8 @@ of this document is the delete implementation itself.
   can be shared by other environments or callers.
 - Report progress, retained artifacts, and warnings through the existing
   operation panel so the user sees exactly what happened.
-- Write the delete-side deletion primitives so the sibling rollback flow can
-  reuse them without copy-paste drift (see Rollback compatibility).
+- Write the delete-side deletion primitives as shared, port-injected modules so
+  the sibling rollback flow can reuse them without copy-paste drift.
 
 ### Non-goals
 
@@ -264,11 +264,9 @@ order, and policy, but calls the shared primitives to do the work.
 
 **Option 2.** The delete flow ships its GitHub-environment delete as a shared,
 port-injected primitive today, and the remaining primitives are extracted in
-dependency order as a follow-up. The full sharing story — what is already
-shared, what is extracted now, and what must stay separate — is in
-[Rollback compatibility](#rollback-compatibility). Keeping delete's teardown in
-shareable primitives is a design requirement of this PR, not an afterthought, so
-rollback binds to the same code instead of re-authoring it.
+dependency order as a follow-up. Keeping delete's teardown in shareable
+primitives is a design requirement of this PR, not an afterthought, so rollback
+binds to the same code instead of re-authoring it.
 
 ### API design (if applicable)
 
@@ -399,73 +397,6 @@ cloud or network access in pull-request tests.
 - **AWS not supported.** No AWS environment can be created, so no established
   AWS environment can reach the delete flow; the AWS cleanup branch is inert
   framework until AWS support lands.
-
-### Rollback compatibility
-
-Create-Environment rollback (proposed separately, and specified by the
-[durable Create Environment operation controls](./2026-08-environment-operation-controls.md)
-design) undoes a setup that never finished. It shares the delete flow's *primitive
-layer* but keeps its own *decision layer*. This section records exactly where the
-two overlap so the delete implementation stays easy to reuse and neither PR
-blocks the other.
-
-**Already shared today (do not re-implement):**
-
-- **Operation framework** — `operations.ts`: stages, steps,
-  `requireInput`/`resumeAfterInput`/`canResumeInput`, `finish*`,
-  `persistOperations`, restart recovery, `toClientView`, and the
-  `OPERATION_KIND_CREATE` / `OPERATION_KIND_DELETE` markers.
-- **The artifact ledger** — also in `operations.ts`: `SetupArtifactLedger`,
-  `recordCleanupState`, `projectCleanupSummary`. The create flow writes it
-  (`server/routes/create-environment.ts`); rollback reads it for provenance.
-- **Azure argv builders** — `azure-oidc.ts`: `buildAppDeleteArgs`,
-  `buildFederatedCredentialListArgs`, `buildFederatedCredentialDeleteArgs`,
-  `parseFederatedCredentials`, `selectMissingFederatedCredentials`, and friends.
-
-**Extracted by this PR so rollback reuses it:**
-
-- **GitHub-environment delete + env-list cache invalidation.** The 404-tolerant
-  `deleteGitHubEnvironmentIdempotent(repo, env, ports)` lives in the shared
-  `server/services/github-environment.ts` module with injected `runGh` and
-  `invalidateEnvListCache` ports. `server.ts` binds the delete flow's ports; the
-  rollback runner binds its own ports to the same primitive, so "how a 404
-  becomes `not_found`" and "when the env-list cache is invalidated" are identical
-  in both flows. Its exit-code check accepts both numeric `0` and string `"0"`
-  precisely so the rollback runner's result shape can bind to it unchanged.
-
-**Extracted as a follow-up (dependency order, each with tests):**
-
-1. **Cleanup-result vocabulary + stable identity** (`cleanup-identity.ts`),
-   routing delete's outcomes through `recordCleanupState` / `projectCleanupSummary`.
-2. **Idempotent federated-credential delete** — both flows call
-   `buildFederatedCredentialDeleteArgs` + `runAz` and treat `not_found` as
-   success; only the *source* of the identities differs (delete: the
-   per-environment pattern; rollback: ledger entries). Extract a shared "delete
-   these FIC identities" helper.
-3. **Shared `not_found` classifier**, folding in `delete-env-run-classifier.ts`.
-
-**Must stay separate (sharing it would be a safety bug):**
-
-- **Eligibility / entry point.** Rollback = an *unverified* attempt with complete
-  provenance (`canStartRollback`). Delete = an *established* environment plus live
-  discovery plus explicit confirmation. Sharing an eligibility shortcut would let
-  rollback's provenance assumptions leak into deletion.
-- **Deletion order.** Rollback deletes backward along the dependency chain
-  (workflows → GitHub env → roles → FIC → service principal → app). Delete runs
-  the Radius-environment workflow **first, while the FIC still exists**, then the
-  FIC, then the GitHub env, and never touches the app. These orders are
-  load-bearing and opposite on purpose.
-- **Roles + service principal.** Rollback deletes them (it created them); the
-  delete flow does not touch them.
-- **App-registration policy.** Rollback: provenance-gated auto-delete (only if the
-  attempt created it), including a confirm-time recheck. Delete: **never
-  touched**. The `az ad app delete` primitive and its recheck therefore belong to
-  a shared `azure-cleanup` service but are invoked only by the rollback decision
-  layer.
-
-**Coexistence.** Both the rollback PR and PR #398 touch `operations.ts`.
-Recommended sequence: land them independently, then rebase one onto the other and
-finish the remaining extraction as a follow-up, so neither PR is blocked.
 
 ## Monitoring and logging
 
