@@ -10,6 +10,7 @@ import type {
   ExecFileOptions,
   ExecFileOptionsWithStringEncoding
 } from "node:child_process";
+import { toGhCommandResult } from "./server/services/gh-command-result.js";
 
 export interface GhAccount {
   login: string;
@@ -94,6 +95,7 @@ export interface SelectedGhCommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
 }
 
 export type SelectedGhCredentialSource = "injected" | "keyring";
@@ -131,6 +133,7 @@ export interface ContentBytesTooLarge {
 export interface BranchRefResult {
   ok: boolean;
   stderr: string;
+  timedOut?: boolean;
 }
 
 export interface PullRequestResult {
@@ -138,6 +141,7 @@ export interface PullRequestResult {
   url?: string;
   number?: number;
   stderr?: string;
+  timedOut?: boolean;
 }
 
 export interface GhApiResult {
@@ -816,11 +820,7 @@ export async function createSelectedGhExecutor(
         args,
         execOptions,
         (error, stdout, stderr) => {
-          resolve({
-            code: error ? error.code || 1 : 0,
-            stdout,
-            stderr
-          });
+          resolve(toGhCommandResult(error, stdout, stderr));
         },
         redact
       );
@@ -996,7 +996,8 @@ export async function selectedCreateBranchRef(
   );
   return {
     ok: result.code === 0,
-    stderr: (result.stderr || result.stdout).trim()
+    stderr: (result.stderr || result.stdout).trim(),
+    timedOut: result.timedOut
   };
 }
 
@@ -1018,7 +1019,8 @@ export async function selectedCreatePullRequest(
   if (result.code !== 0) {
     return {
       ok: false,
-      stderr: (result.stderr || result.stdout).trim()
+      stderr: (result.stderr || result.stdout).trim(),
+      timedOut: result.timedOut
     };
   }
   try {
@@ -1555,6 +1557,11 @@ export function createBranchRef(
       (err, _stdout, stderr) => {
         resolve({
           ok: !err,
+          timedOut:
+            err ?
+              (err as { killed?: boolean; code?: string }).killed === true ||
+              (err as { code?: string }).code === "ETIMEDOUT"
+            : false,
           stderr: redactGhCredentials(
             ((stderr && stderr.trim()) || err?.message || "").trim()
           )
@@ -1590,6 +1597,9 @@ export function createPullRequestApi(
         if (err) {
           resolve({
             ok: false,
+            timedOut:
+              (err as { killed?: boolean; code?: string }).killed === true ||
+              (err as { code?: string }).code === "ETIMEDOUT",
             stderr: redactGhCredentials(
               ((stderr && stderr.trim()) || err.message || "").trim()
             )
