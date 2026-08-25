@@ -23,10 +23,6 @@ import type { GraphResource } from "../graph/model.js";
 import type { GraphController } from "../graph/surface.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";
-import {
-  GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
-  GRAPH_APP_BICEP_TIMEOUT_MS
-} from "../../graph-progress-contract.js";
 
 const ENTRY_KEY = "graph-page";
 export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
@@ -37,11 +33,6 @@ export const GRAPH_PROGRESS_MS = 800;
 // carries the diagnostic; this only explains the disabled control.
 export const GRAPH_PLAN_BLOCKED_TITLE =
   "Plan Deployment is unavailable until the application model compiles.";
-// How long the page waits for Copilot to author .radius/app.bicep before it
-// gives up. Nothing reports back when the modeling skill finishes or refuses —
-// the page only learns by asking again — so an unbounded retry would spin
-// forever on a repository the skill cannot model at all.
-export { GRAPH_APP_BICEP_TIMEOUT_MESSAGE, GRAPH_APP_BICEP_TIMEOUT_MS };
 
 interface GraphPageState {
   repo: string;
@@ -120,9 +111,6 @@ export function initializeGraphPage(
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
-  // When the current wait for Copilot to author .radius/app.bicep began, or
-  // null when the page is not waiting on one.
-  let appBicepWaitStartedAtMs: number | null = null;
   let renderedOptions: GraphOptions | null = null;
   // Whether the selected branch's model has compiled. It starts pending even
   // for a server-rendered graph, because that page immediately re-requests the
@@ -206,7 +194,6 @@ export function initializeGraphPage(
     requestAbort?.abort();
     requestAbort = null;
     requestActive = false;
-    appBicepWaitStartedAtMs = null;
     if (retry !== null) entry.cancel(retry);
     retry = null;
     stopProgress();
@@ -360,16 +347,10 @@ export function initializeGraphPage(
           return;
         }
         // The work continues off-page while Copilot authors the model, so the
-        // panel keeps running rather than being torn down and rebuilt.
+        // panel keeps running rather than being torn down and rebuilt. The
+        // server owns how long that wait may last and drops `needsAppBicep`
+        // when it expires, which lands the answer on the error path below.
         if (readBoolean(payload, "needsAppBicep")) {
-          const now = context.clock.now();
-          if (appBicepWaitStartedAtMs === null) appBicepWaitStartedAtMs = now;
-          if (now - appBicepWaitStartedAtMs >= GRAPH_APP_BICEP_TIMEOUT_MS) {
-            appBicepWaitStartedAtMs = null;
-            stopProgress();
-            showFailure(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
-            return;
-          }
           showStatus(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
@@ -381,7 +362,6 @@ export function initializeGraphPage(
           });
           return;
         }
-        appBicepWaitStartedAtMs = null;
         if (readBoolean(payload, "stale")) {
           showStatus(
             context,
@@ -406,7 +386,6 @@ export function initializeGraphPage(
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
-        appBicepWaitStartedAtMs = null;
         const message = "Failed to generate the application graph.";
         stopProgress();
         context.logger.error("Radius graph request failed.", error);
@@ -472,6 +451,13 @@ export function initializeGraphPage(
             "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.",
             "info"
           );
+          // A preloaded graph refresh can discover that the model disappeared
+          // just like the initial load can. Re-enter the ordinary retrying path
+          // so the page recovers when Copilot publishes the replacement model.
+          retry = entry.after(GRAPH_RETRY_MS, () => {
+            retry = null;
+            load({ continuing: true });
+          });
         } else {
           const error = readString(payload, "error");
           if (error) {

@@ -25,6 +25,10 @@ const sources = {
     new URL("./create-radius-extension.ts", import.meta.url),
     "utf8"
   ),
+  "app-model-handoff.ts": readFileSync(
+    new URL("./app-model-handoff.ts", import.meta.url),
+    "utf8"
+  ),
   "server.ts": readFileSync(new URL("../server.ts", import.meta.url), "utf8"),
   "server/routes/identity-auth.ts": readFileSync(
     new URL("../server/routes/identity-auth.ts", import.meta.url),
@@ -64,17 +68,14 @@ describe("issue #209: automated turns never render as user-authored messages", (
   });
 
   it("routes every handoff through a builder that pairs prompt with displayPrompt", () => {
-    expect(sources["create-radius-canvas.ts"]).toContain(
-      "sendToSession(appBicepHandoffMessage("
-    );
-    expect(sources["create-radius-canvas.ts"]).toContain(
-      "sendToSession(appModelUnverifiedMessage("
-    );
-    expect(sources["create-radius-canvas.ts"]).toContain(
-      "sendToSession(appModelRefreshMessage("
-    );
-    expect(sources["create-radius-extension.ts"]).toContain(
+    expect(sources["app-model-handoff.ts"]).toContain(
       "send(appBicepHandoffMessage("
+    );
+    expect(sources["app-model-handoff.ts"]).toContain(
+      "send(appModelUnverifiedMessage("
+    );
+    expect(sources["app-model-handoff.ts"]).toContain(
+      "send(appModelRefreshMessage("
     );
     expect(sources["create-radius-extension.ts"]).toContain(
       "deployRepairHandoffMessage("

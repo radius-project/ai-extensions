@@ -26,9 +26,9 @@ export const RADIUS_CANVAS_DISPLAY_NAME = "Radius";
 export const RADIUS_CANVAS_DESCRIPTION =
   "Application modeling and deployment: configure cloud credentials, generate app.bicep, visualize application graphs, view PR diffs, and create deployment environments.";
 
-// The 7 pages the canvas can render. Kept here (not just in hooks.ts's
-// GRAPH_PAGES) because the canvas's own inputSchema enum is the contract the
-// SDK/agent sees; hooks.ts separately owns which of these are graph-generating.
+// The 7 pages the canvas can render. The canvas's own inputSchema enum is the
+// contract the SDK/agent sees; which of these render a graph is decided by the
+// server's graph routes, which are the sole owner of the model-freshness turn.
 export const RADIUS_CANVAS_PAGES = deepFreeze([
   "credentials",
   "graph",

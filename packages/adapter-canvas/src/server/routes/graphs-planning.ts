@@ -11,12 +11,12 @@ import type {
   DeployProgress,
   WorkflowArtifact
 } from "../../deploy-artifacts.js";
-import { recordGraphBuildEvent } from "../../shared.js";
+import { expireGraphProgressWait } from "../../shared.js";
+import { evaluateAppBicepWait } from "../../graph-progress-contract.js";
 import type {
   GraphRepairAttempt,
   GraphRepairRequest
 } from "../../graph-model-repair.js";
-import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { GraphProgressRecord, GraphProgressView } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
@@ -128,20 +128,23 @@ export function handleProgress(
   const records = Object.values(state?.graphProgressRecords ?? {});
   for (const record of records) {
     if (
-      record.graphProgressActive &&
-      record.graphProgressAwaitingModel &&
-      typeof record.graphProgressDeadlineAtMs === "number" &&
-      dependencies.now() >= record.graphProgressDeadlineAtMs
+      !record.graphProgressActive ||
+      !record.graphProgressAwaitingModel ||
+      typeof record.graphProgressWaitStartedAtMs !== "number"
     ) {
-      recordGraphBuildEvent(record, {
-        stage: "creating_model",
-        state: "failed",
-        detail: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
-      });
-      record.graphProgressActive = false;
-      record.graphProgressAwaitingModel = false;
-      delete record.graphProgressDeadlineAtMs;
+      continue;
     }
+    // The same decision the graph workflow makes, over the same recorded
+    // evidence. This poller never probes for liveness itself: the workflow
+    // request the page is issuing alongside it records every observation, so
+    // reading the record keeps the two narrations from disagreeing.
+    const wait = evaluateAppBicepWait({
+      nowMs: dependencies.now(),
+      waitStartedAtMs: record.graphProgressWaitStartedAtMs,
+      lastActivityAtMs: record.graphProgressLastActivityAtMs ?? null
+    });
+    if (wait.status === "waiting") continue;
+    expireGraphProgressWait(record, wait.message);
   }
   const requestedView = url.searchParams.get("view");
   const record =
@@ -678,6 +681,10 @@ export async function handleLoadGraphStream(
 
     if (content) {
       sendProgress("Found existing app.bicep — parsing resources...");
+      // A model that exists can still no longer describe its source. The runtime
+      // classifies it and decides what, if anything, to say; the graph still
+      // streams either way.
+      dependencies.triggerAppBicepHandoff(entry, repo, branch);
     } else {
       const source = evaluateAppSource(
         await dependencies.listBranchPaths(entry, repo, branch)

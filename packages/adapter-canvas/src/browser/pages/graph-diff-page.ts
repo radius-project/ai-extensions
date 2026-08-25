@@ -19,6 +19,10 @@ const ENTRY_KEY = "graph-diff-page";
 export const GRAPH_DIFF_STATE_ID = "radius-graph-diff-state";
 export const DIFF_DEBOUNCE_MS = 500;
 export const DIFF_PROGRESS_MS = 800;
+// How long to wait before asking again while Copilot authors the model. The
+// server decides when the wait has run out and answers with an error instead of
+// `needsAppBicep`, which ends the loop.
+export const DIFF_RETRY_MS = 10_000;
 export const DIFF_PROGRESS_STEPS_ID = "diff-progress-steps";
 
 interface DiffState {
@@ -74,6 +78,12 @@ export function initializeGraphDiffPage(
   let controller: GraphController | null = null;
   let progress: ScopeTimer | null = null;
   let progressView: GraphProgressView | null = null;
+  let appBicepRetry: ScopeTimer | null = null;
+
+  const stopAppBicepRetry = (): void => {
+    if (appBicepRetry !== null) entry.cancel(appBicepRetry);
+    appBicepRetry = null;
+  };
   let modelingFailureVisible = Boolean(state.modelingError);
   const showModelingFailure = (message: string): void => {
     controller?.destroy();
@@ -124,6 +134,7 @@ export function initializeGraphDiffPage(
 
   const compare = (headElement: DomSelectElement): void => {
     pending = null;
+    stopAppBicepRetry();
     const base = baseSelect?.value ?? "";
     const head = headElement.value;
     const repo = repoInput?.value ?? state.repo;
@@ -180,6 +191,13 @@ export function initializeGraphDiffPage(
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.",
             "info"
           );
+          // Nothing announces the model's arrival, so the diff only learns by
+          // asking again. Without this the page reported the wait once and then
+          // sat there permanently, even after the model landed.
+          appBicepRetry = entry.after(DIFF_RETRY_MS, () => {
+            appBicepRetry = null;
+            compare(headElement);
+          });
         } else {
           const error = readString(payload, "error");
           if (error) {
@@ -219,6 +237,7 @@ export function initializeGraphDiffPage(
     generation++;
     requestAbort?.abort();
     requestAbort = null;
+    stopAppBicepRetry();
     stopProgress();
     if (pending !== null) entry.cancel(pending);
     pending = entry.after(DIFF_DEBOUNCE_MS, () => compare(headElement));

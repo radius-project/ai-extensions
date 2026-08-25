@@ -152,7 +152,16 @@ export interface GraphProgressRecord {
   graphProgressKey: string;
   graphProgressOwner: number;
   graphProgressAwaitingModel: boolean;
-  graphProgressDeadlineAtMs?: number;
+  // Accounting for the app.bicep wait, owned by the graph workflow that answers
+  // the request. `graphProgressLastActivityAtMs` stays absent until a modeling
+  // run is actually observed, because "never seen" and "seen a while ago" fail
+  // the wait with different explanations.
+  graphProgressWaitStartedAtMs?: number;
+  graphProgressLastActivityAtMs?: number;
+  // A terminal wait verdict retained for this exact graphProgressKey. The
+  // browser may already have one retry in flight when progress polling expires
+  // the wait; retaining the verdict prevents that request from restarting it.
+  graphProgressWaitExpiredMessage?: string;
 }
 
 // Append one event to the instance's build record.
@@ -187,6 +196,22 @@ export function recordGraphBuildEvent(
     return;
   }
   events.push({ sequence: events.length + 1, ...event });
+}
+
+export function expireGraphProgressWait(
+  record: GraphProgressRecord,
+  message: string
+): void {
+  recordGraphBuildEvent(record, {
+    stage: "creating_model",
+    state: "failed",
+    detail: message
+  });
+  record.graphProgressActive = false;
+  record.graphProgressAwaitingModel = false;
+  record.graphProgressWaitExpiredMessage = message;
+  delete record.graphProgressWaitStartedAtMs;
+  delete record.graphProgressLastActivityAtMs;
 }
 
 export interface CanvasState {

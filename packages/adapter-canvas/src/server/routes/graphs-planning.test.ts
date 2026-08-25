@@ -16,7 +16,13 @@ import type {
   DeployProgress,
   WorkflowArtifact
 } from "../../deploy-artifacts.js";
-import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
+import {
+  GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
+  GRAPH_APP_BICEP_MAX_WAIT_MESSAGE,
+  GRAPH_APP_BICEP_MAX_WAIT_MS,
+  GRAPH_APP_BICEP_STALLED_MESSAGE,
+  GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+} from "../../graph-progress-contract.js";
 import type {
   CanvasGraphResource,
   CanvasState,
@@ -632,12 +638,12 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(payload.elapsedMs).toBe(3_000);
   });
 
-  it("expires an abandoned app.bicep wait on the server clock", async () => {
+  it("expires an abandoned app.bicep wait when no modeling run was ever seen", async () => {
     const calls: Calls = { log: [] };
     const scriptedState = graphProgressState("graph", {
       graphProgressActive: true,
       graphProgressAwaitingModel: true,
-      graphProgressDeadlineAtMs: 60_000,
+      graphProgressWaitStartedAtMs: 1_000,
       graphProgressStartedAtMs: 1_000,
       graphBuildEvents: [
         {
@@ -649,7 +655,7 @@ describe("graphs-planning read routes (SU-09)", () => {
       ]
     });
     const { deps, state } = fakes(calls, {
-      nowMs: 60_000,
+      nowMs: 1_000 + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
       state: scriptedState
     });
 
@@ -662,14 +668,109 @@ describe("graphs-planning read routes (SU-09)", () => {
       false
     );
     expect(
-      state?.graphProgressRecords?.graph?.graphProgressDeadlineAtMs
+      state?.graphProgressRecords?.graph?.graphProgressWaitStartedAtMs
     ).toBeUndefined();
+    expect(
+      state?.graphProgressRecords?.graph?.graphProgressWaitExpiredMessage
+    ).toBe(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
     expect(
       state?.graphProgressRecords?.graph?.graphBuildEvents.at(-1)
     ).toMatchObject({
       stage: "creating_model",
       state: "failed",
       detail: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+    });
+  });
+
+  // The whole point of the liveness signal: a run that is demonstrably working
+  // keeps the wait open past the idle budget instead of being reported as a
+  // repository the skill cannot model.
+  it("keeps an app.bicep wait open while a modeling run is still being observed", async () => {
+    const calls: Calls = { log: [] };
+    const nowMs = 10_000 + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS * 3;
+    const scriptedState = graphProgressState("graph", {
+      graphProgressActive: true,
+      graphProgressAwaitingModel: true,
+      graphProgressWaitStartedAtMs: 10_000,
+      graphProgressLastActivityAtMs: nowMs - 1_000,
+      graphProgressStartedAtMs: 10_000,
+      graphBuildEvents: [
+        {
+          sequence: 1,
+          stage: "creating_model",
+          state: "running",
+          detail: "Copilot is creating the model."
+        }
+      ]
+    });
+    const { deps, state } = fakes(calls, { nowMs, state: scriptedState });
+
+    const payload = JSON.parse(
+      (await run("/api/progress", handleProgress, deps)).body
+    ) as Record<string, unknown>;
+
+    expect(payload.active).toBe(true);
+    expect(state?.graphProgressRecords?.graph?.graphProgressAwaitingModel).toBe(
+      true
+    );
+    expect(
+      state?.graphProgressRecords?.graph?.graphBuildEvents.at(-1)
+    ).toMatchObject({ state: "running" });
+  });
+
+  it("reports a stalled modeling run differently from one that never started", async () => {
+    const calls: Calls = { log: [] };
+    const scriptedState = graphProgressState("graph", {
+      graphProgressActive: true,
+      graphProgressAwaitingModel: true,
+      graphProgressWaitStartedAtMs: 1_000,
+      graphProgressLastActivityAtMs: 5_000,
+      graphProgressStartedAtMs: 1_000,
+      graphBuildEvents: []
+    });
+    const { deps, state } = fakes(calls, {
+      nowMs: 5_000 + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
+      state: scriptedState
+    });
+
+    await run("/api/progress", handleProgress, deps);
+
+    expect(
+      state?.graphProgressRecords?.graph?.graphBuildEvents.at(-1)
+    ).toMatchObject({
+      stage: "creating_model",
+      state: "failed",
+      detail: GRAPH_APP_BICEP_STALLED_MESSAGE
+    });
+    expect(
+      state?.graphProgressRecords?.graph?.graphProgressLastActivityAtMs
+    ).toBeUndefined();
+  });
+
+  // A run that keeps producing filesystem activity would renew the idle budget
+  // forever, so the ceiling is what ultimately bounds the wait.
+  it("expires a modeling run that never stops looking alive", async () => {
+    const calls: Calls = { log: [] };
+    const nowMs = 1_000 + GRAPH_APP_BICEP_MAX_WAIT_MS;
+    const scriptedState = graphProgressState("graph", {
+      graphProgressActive: true,
+      graphProgressAwaitingModel: true,
+      graphProgressWaitStartedAtMs: 1_000,
+      graphProgressLastActivityAtMs: nowMs,
+      graphProgressStartedAtMs: 1_000,
+      graphBuildEvents: []
+    });
+    const { deps, state } = fakes(calls, { nowMs, state: scriptedState });
+
+    await run("/api/progress", handleProgress, deps);
+
+    expect(state?.graphProgressRecords?.graph?.graphProgressActive).toBe(false);
+    expect(
+      state?.graphProgressRecords?.graph?.graphBuildEvents.at(-1)
+    ).toMatchObject({
+      stage: "creating_model",
+      state: "failed",
+      detail: GRAPH_APP_BICEP_MAX_WAIT_MESSAGE
     });
   });
 

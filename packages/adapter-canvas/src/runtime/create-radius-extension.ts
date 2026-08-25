@@ -15,10 +15,9 @@
 import { createRadiusCanvas } from "./create-radius-canvas.js";
 import { createRadiusTools } from "./create-radius-tools.js";
 import { createGraphContextHelpers } from "./graph-context.js";
+import { createAppModelHandoff } from "./app-model-handoff.js";
 import { RADIUS_SESSION_START_CONTEXT } from "./declarations.js";
 import {
-  evaluateAppBicepHook,
-  appBicepHandoffMessage,
   deployRepairHandoffMessage,
   deployFailureNoticeMessage
 } from "./hooks.js";
@@ -87,6 +86,31 @@ export function createRadiusExtension(
 ): RadiusExtension {
   const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
+
+  // Staleness signals already handed to the agent, so a refresh that does not
+  // clear the drift cannot re-prompt on every later render. Scoped to this
+  // extension instance rather than the module, and outliving any one canvas
+  // instance's state.
+  //
+  // Bounded because the key includes the commit the record names, so every
+  // regeneration produces a new one and the set would otherwise grow for as
+  // long as the process runs. Set preserves insertion order, so dropping the
+  // oldest evicts the least recently seen problem. Re-asking about a signal
+  // that fell out is harmless: the point is to stop a tight loop, not to
+  // remember forever.
+  const REFRESH_MEMO_LIMIT = 100;
+  const requestedRefreshes = new Set<string>();
+
+  function shouldRequestRefresh(key: string): boolean {
+    if (requestedRefreshes.has(key)) return false;
+    requestedRefreshes.add(key);
+    if (requestedRefreshes.size > REFRESH_MEMO_LIMIT) {
+      const oldest = requestedRefreshes.values().next().value;
+      if (oldest !== undefined) requestedRefreshes.delete(oldest);
+    }
+    return true;
+  }
+
   const pullRequestGraphDiffGuard = createPullRequestGraphDiffGuard({
     hasRadiusApplicationModel: (workspacePath) =>
       deps.workspace.hasRadiusApplicationModel(workspacePath),
@@ -124,10 +148,36 @@ export function createRadiusExtension(
   // Registered immediately (no session required yet): each callback only
   // reads deps.session.get() when the host actually invokes it, which is
   // always after attachSession() has run.
-  deps.hostCallbacks.setAppBicepHandoff(({ repo, branches, page }) =>
-    Promise.resolve(
-      deps.session.get().send(appBicepHandoffMessage(repo, page, branches))
-    )
+  //
+  // Every graph render reaches this callback through the HTTP routes, which is
+  // why it, and no hook or canvas-open fallback, decides whether the model needs
+  // authoring, refreshing, confirming, or only a note.
+  const handOffAppModel = createAppModelHandoff({
+    resolveContext: () => workspaceState(),
+    resolveStatus: (repo, branch, state) =>
+      resolveAppModelStatus(repo, branch, state),
+    evaluateSource: (repo, branch, state) =>
+      evaluateAppSourceForBranch(repo, branch, state),
+    send: (message) => {
+      try {
+        void Promise.resolve(deps.session.get().send(message)).catch(
+          () => undefined
+        );
+      } catch {
+        /* session.send unavailable → drop the handoff */
+      }
+    },
+    log: (message) => {
+      try {
+        deps.session.get().log?.(message);
+      } catch {
+        /* session.log unavailable → drop the notice */
+      }
+    },
+    shouldRequestRefresh
+  });
+  deps.hostCallbacks.setAppBicepHandoff(({ repo, branches, page, state }) =>
+    handOffAppModel({ repo, branches, page, state })
   );
   deps.hostCallbacks.setDeployRepairHandoff(
     ({ repo, branch, error, deployRunUrl, attemptId }) =>
@@ -389,59 +439,16 @@ export function createRadiusExtension(
     startKeepalive();
   }
 
-  // Staleness signals already handed to the agent, so a refresh that does not
-  // clear the drift cannot block every later graph open. Scoped to this
-  // extension instance rather than the module.
-  //
-  // Bounded because the key includes the commit the record names, so every
-  // regeneration produces a new one and the set would otherwise grow for as
-  // long as the process runs. Set preserves insertion order, so dropping the
-  // oldest evicts the least recently seen problem. Re-asking about a signal
-  // that fell out is harmless: the point is to stop a tight loop, not to
-  // remember forever.
-  const REFRESH_MEMO_LIMIT = 100;
-  const requestedRefreshes = new Set<string>();
-
   return {
     canvases: [createRadiusCanvas(deps)],
     tools: createRadiusTools(deps),
     hooks: {
-      // Guards the graph-generating tool calls: denies the call and instructs
-      // the agent to author + SAVE .radius/app.bicep via the radius-app-bicep
-      // skill first when no bicep exists. It fails open on any hook error.
-      onPreToolUse: async (input) => {
-        try {
-          const graphDecision = await evaluateAppBicepHook(
-            { toolName: input.toolName, toolArgs: input.toolArgs },
-            {
-              workspaceState,
-              defaultBranchForState: deps.workspace.defaultBranchForState,
-              appModelStatus: resolveAppModelStatus,
-              appSource: evaluateAppSourceForBranch,
-              shouldRequestRefresh: (key: string) => {
-                if (requestedRefreshes.has(key)) return false;
-                requestedRefreshes.add(key);
-                if (requestedRefreshes.size > REFRESH_MEMO_LIMIT) {
-                  const oldest = requestedRefreshes.values().next().value;
-                  if (oldest !== undefined) requestedRefreshes.delete(oldest);
-                }
-                return true;
-              }
-            }
-          );
-          if (graphDecision) {
-            pullRequestGraphDiffGuard.recordDeniedGraphDiff(
-              input,
-              graphDecision.permissionDecisionReason
-            );
-            return graphDecision;
-          }
-        } catch {
-          // Graph generation remains fail-open; the PR guard below owns its
-          // own fail-closed diagnostics once a Radius model is active.
-        }
-        return pullRequestGraphDiffGuard.onPreToolUse(input);
-      },
+      // Nothing here inspects the application model any more. Opening a graph
+      // page used to be denied until .radius/app.bicep existed, but every graph
+      // render already passes through the HTTP routes, which report the missing
+      // model in the page and drive the authoring turn themselves. Keeping the
+      // deny as well produced two authoring prompts for one open.
+      onPreToolUse: (input) => pullRequestGraphDiffGuard.onPreToolUse(input),
       onPostToolUse: (input) => pullRequestGraphDiffGuard.onPostToolUse(input),
       onPostToolUseFailure: (input) =>
         pullRequestGraphDiffGuard.onPostToolUseFailure(input),

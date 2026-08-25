@@ -244,6 +244,7 @@ const productionHandlers = {
         removeDirectory: () => {}
       }),
       triggerAppBicepHandoff: () => {},
+      observeModelingRun: () => Promise.resolve(null),
       triggerGraphRepairHandoff: () => ({
         attempt: 1,
         maxAttempts: 3,

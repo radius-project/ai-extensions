@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { IGNORED_SOURCE_DIRS } from "@radius-project/core";
+import { IGNORED_SOURCE_DIRS, isStagingDirName } from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 
 export interface CanvasSessionWorkspace {
@@ -371,6 +371,64 @@ function isLegacyRadiusAppModel(content: string): boolean {
       content
     )
   );
+}
+
+// The newest filesystem activity from a modeling run in the workspace checkout.
+//
+// A run creates `.radius/.staging-<runId>/` before it writes anything and
+// removes it when it finishes. A cancelled or crashed run can leave that
+// directory behind, so presence alone is not liveness: use the newest mtime from
+// the directory or one of its direct staged artifacts.
+//
+// Any read failure answers null. This decides whether to keep waiting, so an
+// unreadable `.radius/` must let the wait end rather than renew it forever.
+export async function modelingRunLastActivityAtMs(
+  workspacePath: string | null | undefined
+): Promise<number | null> {
+  if (!workspacePath) return null;
+  try {
+    const dir = safeWorkspacePath(workspacePath, ".radius");
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const stagingDirs = entries.filter(
+      (entry) => entry.isDirectory() && isStagingDirName(entry.name)
+    );
+    const activityTimes = await Promise.all(
+      stagingDirs.map(async (entry): Promise<number | null> => {
+        const stagingDir = path.join(dir, entry.name);
+        try {
+          const [stagingStat, stagedEntries] = await Promise.all([
+            fs.stat(stagingDir),
+            fs.readdir(stagingDir, { withFileTypes: true })
+          ]);
+          const stagedStats = await Promise.all(
+            stagedEntries
+              .filter((stagedEntry) => !stagedEntry.isSymbolicLink())
+              .map(async (stagedEntry) => {
+                try {
+                  return await fs.stat(path.join(stagingDir, stagedEntry.name));
+                } catch {
+                  return null;
+                }
+              })
+          );
+          return Math.max(
+            stagingStat.mtimeMs,
+            ...stagedStats.flatMap((stat) => (stat ? [stat.mtimeMs] : []))
+          );
+        } catch {
+          // The run may have published between listing `.radius/` and probing
+          // its staging directory. That completed run is no longer activity.
+          return null;
+        }
+      })
+    );
+    const observed = activityTimes.filter(
+      (activityAtMs): activityAtMs is number => activityAtMs !== null
+    );
+    return observed.length > 0 ? Math.max(...observed) : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function hasRadiusApplicationModel(

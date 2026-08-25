@@ -335,12 +335,28 @@ describe("P0-A Radius runtime registration contract", () => {
       baseBranch: "main",
       headBranch: "feature"
     };
-    const deniedDiff = await harness.extension.hooks.onPreToolUse({
-      toolName: "radius_generate_pr_diff_markdown",
+    // The graph-diff tool is deliberately not intercepted: it reads committed
+    // refs that an authoring handoff cannot change, so it runs and reports its
+    // own "no model on either branch" outcome instead of being denied.
+    await expect(
+      harness.extension.hooks.onPreToolUse({
+        toolName: "radius_generate_pr_diff_markdown",
+        toolArgs: diffArgs,
+        workingDirectory: "/worktrees/widgets"
+      })
+    ).resolves.toBeUndefined();
+
+    const diffTool = harness.extension.tools.find(
+      ({ name }) => name === "radius_generate_pr_diff_markdown"
+    );
+    if (!diffTool) throw new Error("PR graph diff tool was not registered");
+    const diffResult = await diffTool.handler(diffArgs);
+    await harness.extension.hooks.onPostToolUse({
+      toolName: diffTool.name,
       toolArgs: diffArgs,
+      toolResult: diffResult,
       workingDirectory: "/worktrees/widgets"
     });
-    expect(deniedDiff).toMatchObject({ permissionDecision: "deny" });
 
     const result = await harness.extension.hooks.onPreToolUse({
       toolName: "create_pull_request",
@@ -645,7 +661,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     );
   });
 
-  it("denies a graph open against a stale workspace model and allows it once refreshed", async () => {
+  it("reports a stale workspace model through the host handoff and stops once refreshed", async () => {
     const model =
       "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
     const recordedAt = "a".repeat(40);
@@ -665,31 +681,33 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       headCommits: { "workspace:/workspace": "b".repeat(40) },
       sourceChangedSince: true
     });
-    const open = {
-      toolName: "open_canvas",
-      toolArgs: {
-        canvasId: "radius",
-        input: { page: "graph", repo: "acme/widgets", branch: "main" }
-      }
+    const handoff = harness.capturedHostCallbacks.appBicepHandoff;
+    const request = {
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph"
     };
 
-    const denied = await harness.extension.hooks.onPreToolUse(open);
-    expect(denied).toMatchObject({
-      permissionDecision: "deny",
-      permissionDecisionReason: expect.stringContaining("out of date")
-    });
-    expect(denied?.additionalContext).toContain("radius_generate_app");
+    await handoff?.(request);
+
+    const sent = (harness.session.send as ReturnType<typeof vi.fn>).mock.calls
+      .map((call) => JSON.stringify(call[0]))
+      .join("\n");
+    expect(sent).toContain("no longer describes the current source");
+    expect(sent).toContain("radius_generate_app");
 
     // The skill regenerates and rewrites the origin record against the branch's
     // current commit, so the worktree now reports no source change beyond the
-    // app model itself.
+    // app model itself. No panel state is in play, so the silence can only come
+    // from the model being current.
     harness.deps.appModel.fetchWorkspaceFile = async () =>
       origin("b".repeat(40));
     harness.deps.appModel.workspaceSourceChangedSince = async () => false;
+    (harness.session.send as ReturnType<typeof vi.fn>).mockClear();
 
-    await expect(
-      harness.extension.hooks.onPreToolUse(open)
-    ).resolves.toBeUndefined();
+    await handoff?.(request);
+
+    expect(harness.session.send).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });
@@ -714,46 +732,48 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         skillVersion: "0.1.0-test",
         appBicepHash: hashAppBicep(model)
       });
-    const open = {
-      toolName: "open_canvas",
-      toolArgs: {
-        canvasId: "radius",
-        input: { page: "graph", repo: "acme/widgets", branch: "main" }
-      }
-    };
+    const handoff = harness.capturedHostCallbacks.appBicepHandoff;
+    const send = harness.session.send as ReturnType<typeof vi.fn>;
+    // No panel state, so only the extension-scoped memo can suppress anything.
+    const request = () => ({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph"
+    });
 
     // Every distinct problem is still reported, well past the memo's limit.
     for (const attempt of [1, 150, 300]) {
       commit = attempt;
-      const decision = await harness.extension.hooks.onPreToolUse(open);
-      expect(decision).toMatchObject({ permissionDecision: "deny" });
+      send.mockClear();
+      await handoff?.(request());
+      expect(send).toHaveBeenCalled();
     }
 
     // And the same problem twice running is still only reported once.
     commit = 999;
-    expect(await harness.extension.hooks.onPreToolUse(open)).toMatchObject({
-      permissionDecision: "deny"
-    });
-    expect(await harness.extension.hooks.onPreToolUse(open)).toBeUndefined();
+    send.mockClear();
+    await handoff?.(request());
+    expect(send).toHaveBeenCalled();
+    send.mockClear();
+    await handoff?.(request());
+    expect(send).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });
 
-  it("does not block a graph open on a stale model that lives on another branch", async () => {
+  it("stays silent about a stale model that lives on another branch", async () => {
     const harness = await createRuntimeSdkHarness({
       bicepByRepoBranch: { "remote:other/repo@release": "resource db {}" },
       headCommits: { "other/repo@release": "c".repeat(40) }
     });
 
-    await expect(
-      harness.extension.hooks.onPreToolUse({
-        toolName: "open_canvas",
-        toolArgs: {
-          canvasId: "radius",
-          input: { page: "graph", repo: "other/repo", branch: "release" }
-        }
-      })
-    ).resolves.toBeUndefined();
+    await harness.capturedHostCallbacks.appBicepHandoff?.({
+      repo: "other/repo",
+      branches: ["release"],
+      page: "graph"
+    });
+
+    expect(harness.session.send).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });
@@ -780,16 +800,14 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
 });
 
 // Exception 2.1: a repository with no Dockerfile has no containerized workload
-// to model, so both routes into modeling — the tool the agent calls and the hook
-// that auto-triggers it — have to refuse through the real composition, not just
-// in isolation.
+// to model, so both routes into modeling — the tool the agent calls and the host
+// handoff the graph routes fire — have to refuse through the real composition,
+// not just in isolation.
 describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
-  const OPEN_GRAPH = {
-    toolName: "open_canvas",
-    toolArgs: {
-      canvasId: "radius",
-      input: { page: "graph", repo: "acme/widgets", branch: "main" }
-    }
+  const GRAPH_HANDOFF = {
+    repo: "acme/widgets",
+    branches: ["main"],
+    page: "graph"
   };
 
   function generateApp(harness: { extension: RadiusExtension }) {
@@ -800,7 +818,18 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     return tool.handler({ repoPath: "/workspace" });
   }
 
-  it("withholds the authoring instructions and denies the graph on the workspace branch", async () => {
+  // Everything the handoff put in front of the agent for this request.
+  async function handOff(
+    harness: Awaited<ReturnType<typeof createRuntimeSdkHarness>>,
+    request: { repo: string; branches: string[]; page: string } = GRAPH_HANDOFF
+  ): Promise<string> {
+    const send = harness.session.send as ReturnType<typeof vi.fn>;
+    send.mockClear();
+    await harness.capturedHostCallbacks.appBicepHandoff?.(request);
+    return send.mock.calls.map((call) => JSON.stringify(call[0])).join("\n");
+  }
+
+  it("withholds the authoring instructions and stays silent on the workspace branch", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceTreeByRepoBranch: {
         "acme/widgets@main": ["src/index.ts", "package.json", "README.md"]
@@ -811,12 +840,9 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     expect(generated).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
     expect(harness.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
 
-    const denied = await harness.extension.hooks.onPreToolUse(OPEN_GRAPH);
-    expect(denied).toMatchObject({ permissionDecision: "deny" });
-    expect(denied?.additionalContext).toContain(
-      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
-    );
-    expect(denied?.additionalContext).not.toContain("radius_generate_app");
+    // Nothing to model, so the agent is never asked to model it. The page states
+    // the refusal itself rather than an authoring turn doing so.
+    expect(await handOff(harness)).toBe("");
 
     await harness.extension.shutdown("test");
   });
@@ -856,11 +882,10 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     // The manifest signal survives the re-read through listSourceTreeForBranch.
     expect(generated).toContain("`pnpm-workspace.yaml`");
 
-    // And the graph is not denied: this repository is modelable.
-    const decision = await harness.extension.hooks.onPreToolUse(OPEN_GRAPH);
-    expect(decision?.additionalContext).not.toContain(
-      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
-    );
+    // And the graph still asks for a model: this repository is modelable.
+    const handedOff = await handOff(harness);
+    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
 
     await harness.extension.shutdown("test");
   });
@@ -890,7 +915,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     await harness.extension.shutdown("test");
   });
 
-  it("denies a repository that is not the workspace's, skipping a vendored Dockerfile the tree listing does not prune", async () => {
+  it("stays silent for a repository that is not the workspace's, skipping a vendored Dockerfile the tree listing does not prune", async () => {
     const harness = await createRuntimeSdkHarness({
       remoteTreeByRepoBranch: {
         "other/service@feat": [
@@ -900,44 +925,32 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       }
     });
 
-    const denied = await harness.extension.hooks.onPreToolUse({
-      toolName: "open_canvas",
-      toolArgs: {
-        canvasId: "radius",
-        input: { page: "graph", repo: "other/service", branch: "feat" }
-      }
+    const handedOff = await handOff(harness, {
+      repo: "other/service",
+      branches: ["feat"],
+      page: "graph"
     });
 
-    expect(denied).toMatchObject({ permissionDecision: "deny" });
-    expect(denied?.additionalContext).toContain(
-      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
-    );
+    expect(handedOff).toBe("");
 
     await harness.extension.shutdown("test");
   });
 
-  // The canvas renders the workspace repository from its checked-out worktree
-  // regardless of the branch a caller names, so judging the named branch would
-  // deny on evidence from a branch the user will never see.
-  it("judges the workspace repository on its worktree, not a caller-named branch", async () => {
+  // The canvas renders the workspace repository from its checked-out worktree,
+  // so the branch the graph routes resolve is judged locally and no remote
+  // listing is consulted for it. (Which branch that is — the worktree's, never a
+  // caller-named one — is settled by the routes before they reach here.)
+  it("judges the workspace repository's branch from its worktree, never its remote", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceTreeByRepoBranch: {
         "acme/widgets@main": ["src/index.ts", "Dockerfile"]
       },
-      remoteTreeByRepoBranch: { "acme/widgets@legacy": ["src/index.ts"] }
+      remoteTreeByRepoBranch: { "acme/widgets@main": ["src/index.ts"] }
     });
 
-    const decision = await harness.extension.hooks.onPreToolUse({
-      toolName: "open_canvas",
-      toolArgs: {
-        canvasId: "radius",
-        input: { page: "graph", repo: "acme/widgets", branch: "legacy" }
-      }
-    });
+    const handedOff = await handOff(harness);
 
-    expect(decision?.additionalContext).not.toContain(
-      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
-    );
+    expect(handedOff).toContain("radius_generate_app");
     expect(harness.deps.github.treePaths).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
@@ -953,11 +966,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
     expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
 
-    const denied = await harness.extension.hooks.onPreToolUse(OPEN_GRAPH);
-    expect(denied?.additionalContext).not.toContain(
-      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
-    );
-    expect(denied?.additionalContext).toContain("radius_generate_app");
+    expect(await handOff(harness)).toContain("radius_generate_app");
 
     await harness.extension.shutdown("test");
   });

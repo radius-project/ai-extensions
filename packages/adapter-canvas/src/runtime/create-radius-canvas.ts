@@ -13,18 +13,10 @@ import {
   buildRadiusCanvasInputSchema
 } from "./declarations.js";
 import { record, optionalString, errorMessage } from "./util.js";
-import {
-  GRAPH_PAGES,
-  DEFAULT_CANVAS_PAGE,
-  appBicepHandoffMessage,
-  appModelRefreshMessage,
-  appModelStaleNotice,
-  appModelUnverifiedMessage
-} from "./hooks.js";
+import { DEFAULT_CANVAS_PAGE } from "./hooks.js";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
-import type { CanvasServerEntry } from "../server.js";
 import type { CanvasGraphResource, CanvasState } from "../shared.js";
 import {
   asGraphModelingFailure,
@@ -61,146 +53,8 @@ function isCurrentSourceRefToken(
 // over `deps` instead of module-level imports of server.ts/gh.ts/workspace.ts.
 export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
   const closeGenerations = new Map<string, number>();
-  const {
-    workspaceState,
-    fetchBicepForBranch,
-    evaluateAppSourceForBranch,
-    resolveAppModelStatus
-  } = createGraphContextHelpers(deps);
-
-  function sendToSession(message: {
-    prompt: string;
-    displayPrompt: string;
-  }): void {
-    try {
-      const session = deps.session.get();
-      Promise.resolve(session.send(message)).catch(() => {});
-    } catch {
-      /* session.send unavailable → ignore */
-    }
-  }
-
-  function logToSession(message: string): void {
-    try {
-      deps.session.get().log?.(message);
-    } catch {
-      /* session.log unavailable → ignore */
-    }
-  }
-
-  // When a graph canvas is opened, decide what the model on the target branch
-  // needs: authoring (none exists), a conversation about refreshing it (it
-  // exists but cannot be verified against current source), or just a note (it is
-  // stale on a branch modeling is not allowed to rewrite). A model that is stale
-  // AND safely refreshable never reaches here, because the pre-tool-use hook denies
-  // the open and has it regenerated first. Fire-and-forget, guarded so we act at
-  // most once per repo+branch combination.
-  async function maybeHandoffAppBicep(
-    entry: CanvasServerEntry,
-    page: string,
-    ctx: CanvasContext
-  ): Promise<void> {
-    try {
-      if (!GRAPH_PAGES.has(page)) return;
-      const state = entry.state;
-      const input = record(ctx.input);
-      const repo = state.contextRepo || optionalString(input.repo);
-      if (!repo) return;
-
-      let branches: Array<string | undefined>;
-      if (page === "graph-diff") {
-        branches = [
-          optionalString(input.baseBranch),
-          optionalString(input.headBranch)
-        ].filter(Boolean);
-        if (!branches.length) branches = [undefined];
-      } else {
-        branches = [optionalString(input.branch) || state.contextBranch];
-      }
-      branches = branches.map(
-        (b) => b || deps.workspace.defaultBranchForState(state)
-      );
-
-      // resolveAppModelStatus already absorbs every read failure into a
-      // "missing" classification, so a rejection here means the runtime itself
-      // is broken; the outer guard abandons the handoff rather than acting on a
-      // half-resolved picture.
-      const statuses = await Promise.all(
-        branches.map((branch) =>
-          resolveAppModelStatus(repo, branch as string, entry.state)
-        )
-      );
-
-      // Only send a message when there is something new to say. The key
-      // includes what is wrong, not just which repo and branch, so an app model
-      // that changes from stale to hand-edited between two opens is still
-      // reported the second time.
-      const key = [
-        repo,
-        branches.join(","),
-        ...statuses.map((status) => {
-          const origin = status.freshness.origin;
-          return [
-            status.branch,
-            status.freshness.status,
-            status.refreshable ? "local" : "remote",
-            origin?.sourceCommit ?? "",
-            origin?.skillVersion ?? ""
-          ].join("/");
-        })
-      ].join("::");
-      if (state.appBicepHandoffKey === key) return;
-      const present = statuses.filter(
-        (status) => status.freshness.status !== "missing"
-      );
-
-      if (!present.length) {
-        const source = await Promise.all(
-          branches.map((branch) =>
-            evaluateAppSourceForBranch(repo, branch as string, state)
-          )
-        );
-        // The app-modeling skill cannot author this repository. Do not consume
-        // the dedupe key: adding a Dockerfile later must make the next open
-        // eligible for the handoff.
-        if (source.every((evaluation) => evaluation.status === "none")) return;
-        if (state.appBicepHandoffKey === key) return;
-        state.appBicepHandoffKey = key;
-        sendToSession(appBicepHandoffMessage(repo, page, branches));
-        return;
-      }
-
-      state.appBicepHandoffKey = key;
-      const unverified = present.find(
-        (status) => status.refreshable && status.freshness.requiresConfirmation
-      );
-      if (unverified) {
-        sendToSession(appModelUnverifiedMessage(unverified));
-        return;
-      }
-
-      // Normally the pre-tool-use hook has already denied the open and had this
-      // refreshed, so nothing stale reaches here. It does reach here on the
-      // paths the hook never sees (a programmatic reload, or the user opening
-      // the panel directly), and leaving those silent would restore exactly the
-      // bug this change exists to fix, just through a different door.
-      const outdated = present.find(
-        (status) => status.refreshable && status.freshness.stale
-      );
-      if (outdated) {
-        sendToSession(appModelRefreshMessage(outdated));
-        return;
-      }
-
-      for (const status of present) {
-        if (!status.refreshable && status.freshness.stale) {
-          logToSession(appModelStaleNotice(status));
-        }
-      }
-    } catch {
-      /* never block canvas open on handoff failure */
-    }
-  }
+  const { workspaceState, fetchBicepForBranch } =
+    createGraphContextHelpers(deps);
 
   const declarationByName = new Map(
     RADIUS_ACTION_DECLARATIONS.map((decl) => [decl.name, decl])
@@ -507,13 +361,6 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
           }
         }
       }
-
-      await maybeHandoffAppBicep(entry, page, {
-        extensionId: ctx.extensionId,
-        canvasId: ctx.canvasId,
-        instanceId: ctx.instanceId,
-        input
-      });
 
       return { title: "Radius", url: entry.url };
     },

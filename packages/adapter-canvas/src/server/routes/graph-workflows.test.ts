@@ -25,6 +25,13 @@ import {
 } from "../../source-refs.js";
 import { defaultBranchForState } from "../../workspace.js";
 import {
+  GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
+  GRAPH_APP_BICEP_MAX_WAIT_MESSAGE,
+  GRAPH_APP_BICEP_MAX_WAIT_MS,
+  GRAPH_APP_BICEP_STALLED_MESSAGE,
+  GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+} from "../../graph-progress-contract.js";
+import {
   addGraphProgress,
   beginPlannedGraphRequest,
   canReuseModeledGraph,
@@ -36,6 +43,7 @@ import type {
   CanvasState,
   GraphBuildEvent
 } from "../../shared.js";
+import { expireGraphProgressWait } from "../../shared.js";
 
 // `record`, `optionalString` and `errorMessage` are module-private in
 // `server.ts`, so they are mirrored here verbatim rather than exported solely
@@ -86,6 +94,10 @@ interface PipelineScript {
   compileThrows?: Record<string, Error>;
   stageLogs?: Record<string, string>;
   compileLogs?: Record<string, string>;
+  // Newest activity from a modeling run. Read only while an answer is asking
+  // the page to keep waiting for the model.
+  modelingActivityAtMs?: number;
+  observeModelingRun?: () => Promise<number | null>;
   // Runs after the named stage, so a test can move the world on mid-request.
   afterStage?: () => void;
   afterCompile?: () => void;
@@ -106,6 +118,9 @@ interface Harness {
   }>;
   recipes: unknown[];
   plannedOutputs: unknown[];
+  // How many times an answer asked the workspace whether a modeling run is in
+  // flight. Kept out of `order` so it cannot perturb stage-ordering assertions.
+  modelingObservations: { count: number };
   // Everything the workflows sent to the diagnostics sink instead of the canvas.
   loggedErrors: string[];
   workflows: GraphPlanningWorkflows;
@@ -144,6 +159,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   // capture a start time is distinguishable from one that started at 0.
   let clockMs = 1_000;
   const order: string[] = [];
+  const modelingObservations = { count: 0 };
   const handoffs: HandoffCall[] = [];
   const recipePackCalls: string[] = [];
   const recipeResolutions: Harness["recipeResolutions"] = [];
@@ -229,6 +245,13 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     clearGraphRepairAttempt: () => {},
     listBranchPaths: (_entry, _repo, branch) =>
       Promise.resolve(harnessScript.branchPaths?.[branch] ?? []),
+    observeModelingRun: () => {
+      modelingObservations.count++;
+      return (
+        harnessScript.observeModelingRun?.() ??
+        Promise.resolve(harnessScript.modelingActivityAtMs ?? null)
+      );
+    },
     prepareSourceRefResources,
     setSourceRefResources,
     isCurrentSourceRefToken,
@@ -279,6 +302,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     recipeResolutions,
     recipes,
     plannedOutputs,
+    modelingObservations,
     loggedErrors,
     setEntryMissing(missing) {
       entryMissing = missing;
@@ -392,6 +416,21 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs).toHaveLength(1);
     });
 
+    it("reports a rendered model so drift is still noticed after it exists", async () => {
+      const harness = start({ selections: { main: selectionOf() } });
+
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(harness.handoffs).toEqual([
+        {
+          repo: "octo/app",
+          branches: "main",
+          page: "graph",
+          hasEntry: true
+        }
+      ]);
+    });
+
     it("hands off when the branch has a Dockerfile the skill can build from", async () => {
       const harness = start({
         selections: { main: selectionOf({ content: null }) },
@@ -400,6 +439,173 @@ describe("graph planning workflows", () => {
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
       expect(outcome.payload).toMatchObject({ needsAppBicep: true });
       expect(harness.handoffs).toHaveLength(1);
+    });
+
+    describe("the app.bicep wait", () => {
+      // The regression this replaced: a flat wall clock cut off a run that was
+      // still working and reported the repository as unmodelable.
+      it("keeps asking the page to wait while a modeling run stays alive", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) },
+          modelingActivityAtMs: 1_000
+        });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS * 4);
+        harness.script.modelingActivityAtMs =
+          1_000 + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS * 4;
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+        expect(outcome.payload.appBicepWaitExpired).toBeUndefined();
+        expect(harness.modelingObservations.count).toBe(2);
+      });
+
+      it("ends the wait when no modeling run is ever observed", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) }
+        });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS);
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        // `needsAppBicep` is dropped, which is what stops a page that only
+        // knows to retry while it is set.
+        expect(outcome.payload.needsAppBicep).toBeUndefined();
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+          appBicepWaitExpired: true,
+          repo: "octo/app",
+          branch: "main"
+        });
+        expect(messages(harness.state).at(-1)).toBe(
+          GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+        );
+        expect(
+          harness.state.graphProgressRecords?.graph?.graphProgressActive
+        ).toBe(false);
+      });
+
+      it("reports a run that started and then stopped as stalled", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) },
+          modelingActivityAtMs: 1_000
+        });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS);
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_STALLED_MESSAGE,
+          appBicepWaitExpired: true
+        });
+      });
+
+      it("does not let an abandoned prior run keep renewing the wait", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) },
+          modelingActivityAtMs: 999
+        });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS);
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_STALLED_MESSAGE,
+          appBicepWaitExpired: true
+        });
+      });
+
+      // A continuously active run can still wedge, so the hard ceiling remains
+      // the final bound.
+      it("ends a continuously active wait at the ceiling", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) },
+          modelingActivityAtMs: 1_000
+        });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        harness.advanceClock(GRAPH_APP_BICEP_MAX_WAIT_MS);
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_MAX_WAIT_MESSAGE,
+          appBicepWaitExpired: true
+        });
+      });
+
+      it("returns a retained expiry instead of restarting the wait", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) }
+        });
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        const record = harness.state.graphProgressRecords?.graph;
+        if (!record) throw new Error("expected graph progress record");
+        const generation = record?.graphProgressGeneration;
+        const startedAtMs = record?.graphProgressStartedAtMs;
+        expireGraphProgressWait(record, GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
+
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+          appBicepWaitExpired: true
+        });
+        expect(harness.state.graphProgressRecords?.graph).toMatchObject({
+          graphProgressGeneration: generation,
+          graphProgressStartedAtMs: startedAtMs,
+          graphProgressActive: false,
+          graphProgressWaitExpiredMessage: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+        });
+      });
+
+      it("honors an expiry recorded while the activity probe is in flight", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) }
+        });
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        let releaseObservation!: (value: number | null) => void;
+        let markObservationStarted!: () => void;
+        const observationStarted = new Promise<void>((resolve) => {
+          markObservationStarted = resolve;
+        });
+        harness.script.observeModelingRun = () => {
+          markObservationStarted();
+          return new Promise<number | null>((resolve) => {
+            releaseObservation = resolve;
+          });
+        };
+
+        const pending = harness.run("loadGraph", '{"repo":"octo/app"}');
+        await observationStarted;
+        const record = harness.state.graphProgressRecords?.graph;
+        if (!record) throw new Error("expected graph progress record");
+        expireGraphProgressWait(record, GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
+        releaseObservation(null);
+        const outcome = await pending;
+
+        expect(outcome.payload).toMatchObject({
+          error: GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+          appBicepWaitExpired: true
+        });
+        expect(record).toMatchObject({
+          graphProgressActive: false,
+          graphProgressWaitExpiredMessage: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+        });
+      });
+
+      // The probe reads the filesystem, so an answer that is not asking the
+      // page to wait must not pay for it.
+      it("only probes for a modeling run while an answer asks the page to wait", async () => {
+        const harness = start({ selections: { main: selectionOf() } });
+
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(harness.modelingObservations.count).toBe(0);
+      });
     });
 
     it("refuses instead of handing off when the branch has no Dockerfile", async () => {
@@ -890,8 +1096,24 @@ describe("graph planning workflows", () => {
         repo: "octo/app",
         branch: "main"
       });
-      // "graph", not "planned": the handoff key is derived from the page.
+      // "graph", not "planned": the prompt names the view the user is told to
+      // reopen, and both single-branch routes point at the graph.
       expect(harness.handoffs[0]?.page).toBe("graph");
+    });
+
+    it("reports a rendered plan's model so drift is still noticed after it exists", async () => {
+      const harness = start({ selections: { main: selectionOf() } });
+
+      await harness.run("planGraph", '{"repo":"octo/app"}');
+
+      expect(harness.handoffs).toEqual([
+        {
+          repo: "octo/app",
+          branches: "main",
+          page: "graph",
+          hasEntry: true
+        }
+      ]);
     });
 
     it("refuses the plan when the branch has no Dockerfile", async () => {
@@ -1364,8 +1586,42 @@ describe("graph planning workflows", () => {
       const outcome = await harness.run("diffBranches", diffBody);
 
       expect(outcome.status).toBe(200);
-      expect(harness.handoffs).toEqual([]);
+      // Reported for both branches: the runtime classifies each side and stays
+      // silent about the one the diff renders as an added application.
+      expect(harness.handoffs).toEqual([
+        {
+          repo: "octo/app",
+          branches: ["main", "feature/x"],
+          page: "graph-diff",
+          hasEntry: true
+        }
+      ]);
       expect(harness.state.diffResources).toHaveLength(1);
+    });
+
+    it("reports a rendered diff's models so drift on either branch is still noticed", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
+        },
+        staged: {
+          main: { dir: "", remote: false },
+          "feature/x": { dir: "", remote: false }
+        },
+        compiled: { main: [], "feature/x": [] }
+      });
+
+      await harness.run("diffBranches", diffBody);
+
+      expect(harness.handoffs).toEqual([
+        {
+          repo: "octo/app",
+          branches: ["main", "feature/x"],
+          page: "graph-diff",
+          hasEntry: true
+        }
+      ]);
     });
 
     it("compares two branches of an unnamed repo as an empty repo", async () => {

@@ -2,8 +2,11 @@ import {
   evaluateAppSource,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
-import { recordGraphBuildEvent } from "../../shared.js";
-import { GRAPH_APP_BICEP_TIMEOUT_MS } from "../../graph-progress-contract.js";
+import {
+  expireGraphProgressWait,
+  recordGraphBuildEvent
+} from "../../shared.js";
+import { evaluateAppBicepWait } from "../../graph-progress-contract.js";
 import {
   asGraphModelingFailure,
   GraphModelingFailure
@@ -141,6 +144,9 @@ export interface GraphWorkflowDependencies<
     baseResources: CanvasGraphResource[],
     headResources: CanvasGraphResource[]
   ): CanvasGraphResource[];
+  // Newest filesystem activity from a modeling run in this instance's
+  // workspace. Read only while a request is answering `needsAppBicep`.
+  observeModelingRun(state: CanvasState): Promise<number | null>;
   record(value: unknown): Record<string, unknown>;
   optionalString(value: unknown): string;
   errorMessage(error: unknown): string;
@@ -193,10 +199,12 @@ function beginGraphProgress(
   // a fresh record each time would reset the elapsed clock and discard the
   // stages already reported — exactly the reset a user sees when they leave the
   // page and come back.
+  const sameKey = existing?.graphProgressKey === key;
   const continuing =
-    existing?.graphProgressActive === true &&
-    existing.graphProgressAwaitingModel === true &&
-    existing.graphProgressKey === key;
+    sameKey &&
+    ((existing.graphProgressActive === true &&
+      existing.graphProgressAwaitingModel === true) ||
+      typeof existing.graphProgressWaitExpiredMessage === "string");
   const record: GraphProgressRecord =
     continuing && existing ? existing : (
       {
@@ -247,28 +255,69 @@ function endGraphProgress(
   if (!record) return;
   record.graphProgressActive = false;
   record.graphProgressAwaitingModel = false;
-  delete record.graphProgressDeadlineAtMs;
+  delete record.graphProgressWaitStartedAtMs;
+  delete record.graphProgressLastActivityAtMs;
+  delete record.graphProgressWaitExpiredMessage;
 }
 
 // Close the record for every outcome except the app.bicep handoff. That build
 // genuinely continues off-page while Copilot authors the model, so it stays in
 // flight and keeps narrating the wait to whichever page is looking.
+//
+// The wait is also decided here, because this is the one place every graph
+// route's `needsAppBicep` answer passes through. An expired wait is converted
+// into an ordinary error outcome: `needsAppBicep` is dropped, so a page that
+// only knows to retry while it is set stops retrying without needing its own
+// clock, and the pages that never retried still report the failure.
 function settleGraphProgress(
   state: CanvasState,
   handle: GraphProgressHandle | undefined,
   outcome: GraphWorkflowOutcome,
-  nowMs: number
+  nowMs: number,
+  modelingActivityAtMs: number | null
 ): GraphWorkflowOutcome {
   if (!handle || !isCurrentGraphProgress(state, handle)) return outcome;
   const record = graphProgressRecord(state, handle.view);
   if (!record) return outcome;
-  if (outcome.payload.needsAppBicep === true) {
-    record.graphProgressAwaitingModel = true;
-    record.graphProgressDeadlineAtMs ??= nowMs + GRAPH_APP_BICEP_TIMEOUT_MS;
-  } else {
+  if (outcome.payload.needsAppBicep !== true) {
     endGraphProgress(state, handle);
+    return outcome;
   }
-  return outcome;
+  const expiredMessage = record.graphProgressWaitExpiredMessage;
+  if (expiredMessage) {
+    expireGraphProgressWait(record, expiredMessage);
+    return appBicepWaitExpiredOutcome(outcome, expiredMessage);
+  }
+  record.graphProgressAwaitingModel = true;
+  record.graphProgressWaitStartedAtMs ??= nowMs;
+  if (modelingActivityAtMs !== null) {
+    const lastActivityAtMs = record.graphProgressLastActivityAtMs;
+    record.graphProgressLastActivityAtMs =
+      lastActivityAtMs === undefined ? modelingActivityAtMs : (
+        Math.max(lastActivityAtMs, modelingActivityAtMs)
+      );
+  }
+  const wait = evaluateAppBicepWait({
+    nowMs,
+    waitStartedAtMs: record.graphProgressWaitStartedAtMs,
+    lastActivityAtMs: record.graphProgressLastActivityAtMs ?? null
+  });
+  if (wait.status === "waiting") return outcome;
+  expireGraphProgressWait(record, wait.message);
+  return appBicepWaitExpiredOutcome(outcome, wait.message);
+}
+
+function appBicepWaitExpiredOutcome(
+  outcome: GraphWorkflowOutcome,
+  message: string
+): GraphWorkflowOutcome {
+  const payload: Record<string, unknown> = {
+    ...outcome.payload,
+    error: message,
+    appBicepWaitExpired: true
+  };
+  delete payload.needsAppBicep;
+  return { kind: outcome.kind, status: outcome.status, payload };
 }
 
 function appendGraphEvent(
@@ -352,15 +401,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     }
 
     const state = hooks.state();
-    if (state) {
-      settleGraphProgress(
-        state,
-        hooks.progressHandle(),
-        outcome,
-        dependencies.now()
-      );
-    }
-    return outcome;
+    if (!state) return outcome;
+    // Only an answer that asks the page to keep waiting needs the liveness
+    // probe, so the ordinary success and failure paths pay nothing for it.
+    const modelingActivityAtMs =
+      outcome.payload.needsAppBicep === true ?
+        await dependencies.observeModelingRun(state)
+      : null;
+    return settleGraphProgress(
+      state,
+      hooks.progressHandle(),
+      outcome,
+      dependencies.now(),
+      modelingActivityAtMs
+    );
   }
 
   async function compileResources(
@@ -429,9 +483,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         branch
       });
     }
-    // Both single-branch routes hand off as the "graph" page. plan-graph doing
-    // so is pre-existing and load-bearing: the handoff dedupe key derives from
-    // the page, so changing it here would re-trigger a handoff already made.
+    // Both single-branch routes hand off as the "graph" page. The runtime's
+    // dedupe key no longer derives from the page, but the page still names the
+    // view in the prompt, and the graph view is the one the user is told to
+    // reopen from either route.
     dependencies.triggerAppBicepHandoff(entry, repo, branch, "graph");
     return json(200, {
       error: GENERATING_APP_BICEP_MESSAGE,
@@ -518,6 +573,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           );
         }
         addEvent("checking_model", "succeeded", "Found the application model.");
+        // A model that exists can still no longer describe its source. The
+        // runtime classifies it and decides whether that is worth a refresh, the
+        // user's agreement, or only a note; the graph itself still renders.
+        dependencies.triggerAppBicepHandoff(entry, repo, branch, "graph");
       } else {
         addEvent(
           "checking_model",
@@ -763,6 +822,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         );
       }
       addEvent("checking_model", "succeeded", "Found the application model.");
+      // Same freshness reconcile as load-graph: the planned view renders from
+      // the same model, so a drift it can see must not go unreported merely
+      // because the user reached it from a different tab.
+      dependencies.triggerAppBicepHandoff(entry, repo, branch, "graph");
 
       const staged = await pipeline.stageArtifacts({
         entry,
@@ -1034,6 +1097,15 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "checking_model",
         "succeeded",
         "Found application model content to compare."
+      );
+      // Reported for both branches even when only one carries a model: the
+      // runtime classifies each side and stays silent about the missing one,
+      // which the diff renders as an added or removed application.
+      dependencies.triggerAppBicepHandoff(
+        entry,
+        repo,
+        [data.base, data.head],
+        "graph-diff"
       );
 
       // Ordering is load-bearing and matches legacy exactly: BOTH sides are
