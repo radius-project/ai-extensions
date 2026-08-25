@@ -394,10 +394,7 @@ describe("runWorkflowRollback", () => {
     });
 
     const outcome = await rollback(p, {
-      files: [
-        file({ previousBlobSha }),
-        file({ path: DEPLOY_PATH })
-      ]
+      files: [file({ previousBlobSha }), file({ path: DEPLOY_PATH })]
     });
 
     expect(outcome.blocked).toBe(true);
