@@ -118,6 +118,12 @@ async function failResolution(
   dependencies: EnvironmentOperationWorkflowDependencies,
   error: unknown
 ): Promise<{ shouldMonitor: false }> {
+  if (unresolvedProviderMutations(operation).length > 0) {
+    throw new ProviderMutationRecoveryError(
+      error instanceof Error ? error.message : String(error),
+      "provider-mutation-outcome-unknown"
+    );
+  }
   const ensureError =
     error instanceof GitHubEnvironmentEnsureError ? error : null;
   const failure = record(error);
@@ -230,6 +236,7 @@ export async function runEnvironmentOperationWorkflow(
     ) {
       dependencies.recordGitHubEnvironment(operation, {
         state: "created_candidate",
+        origin: "unknown",
         repo: error.createdCandidate.repo,
         name: error.createdCandidate.name
       });

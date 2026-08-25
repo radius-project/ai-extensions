@@ -3,6 +3,7 @@ import {
   createOperation,
   prepareProviderMutation,
   promoteCreatedGitHubEnvironment,
+  requestStop,
   settleProviderMutation,
   provenOwnedCleanupTargets,
   recordGitHubEnvironment,
@@ -207,6 +208,50 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(test.events).toContain("stop:before-setup-failure-cleanup");
     expect(test.failures).toEqual([]);
   });
+
+  it.each([
+    {
+      name: "repository-admin failure",
+      overrides: {
+        preflightRepoAdmin: async () => "admin required"
+      }
+    },
+    {
+      name: "GHCR package preflight failure",
+      overrides: {
+        preflightGhcrPackageWriteAccess: async () => ({
+          ok: false as const,
+          status: 403,
+          error: "GHCR package write access is missing.",
+          code: "ghcr-package-write-required"
+        })
+      }
+    }
+  ])(
+    "keeps reconciliation open when Stop meets a $name",
+    async ({ overrides }) => {
+      const op = operation();
+      requestStop(op);
+      prepareProviderMutation(op, {
+        kind: "github_environment.put",
+        target: "octo/app:production"
+      });
+      const test = dependencies(op, overrides);
+
+      await expect(
+        runEnvironmentOperationWorkflow(
+          op,
+          successfulSelectedGhExecutor(),
+          test.dependencies
+        )
+      ).rejects.toMatchObject({
+        code: "provider-mutation-outcome-unknown"
+      });
+
+      expect(op.state).toBe("running");
+      expect(test.failures).toEqual([]);
+    }
+  );
 
   it("persists GitHub's canonical name before Azure and propagates it downstream", async () => {
     const op = operation();
