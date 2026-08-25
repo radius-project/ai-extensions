@@ -47,22 +47,43 @@ export async function planCredentialVerification({
   resolveDefaultBranch: (repo: string) => Promise<string | null | undefined>;
 }): Promise<CredentialVerificationPlan> {
   if (!prState) {
+    // The dispatch runs against the default branch here, so the workflow that
+    // will validate the marker input is the copy on that branch. Assuming
+    // support would send `-f radius_operation` to a workflow that may not
+    // declare it, and GitHub answers that with a 422 the journal reads as a
+    // conclusive refusal — failing setup with a message about the dispatch
+    // rather than the template.
+    const directBranch = (await resolveDefaultBranch(targetRepo)) || "main";
+    const directWorkflow = await fetchFile(
+      targetRepo,
+      verifyWorkflowPath,
+      directBranch
+    );
     return {
       shouldDispatch: true,
       ref: "",
       defaultBranch: "",
       pullRequestUrl: "",
       skipReason: "",
-      supportsOperationMarker: true
+      supportsOperationMarker: hasVerificationOperationMarker(directWorkflow)
     };
   }
 
   const defaultBranch =
     (await resolveDefaultBranch(targetRepo)) || prState.base || "main";
-  const [verifyWorkflow, dispatcherWorkflow] = await Promise.all([
-    fetchFile(targetRepo, verifyWorkflowPath, defaultBranch),
-    fetchFile(targetRepo, dispatcherWorkflowPath, defaultBranch)
-  ]);
+  // `verifyExists` and `dispatcherChains` are questions about the default
+  // branch: whether the workflow has landed, and whether merging would chain a
+  // deploy off it. Marker support is a question about the ref the dispatch
+  // actually runs at, because GitHub validates `workflow_dispatch` inputs
+  // there — and that ref is the branch this request just committed to.
+  const [verifyWorkflow, dispatcherWorkflow, dispatchRefWorkflow] =
+    await Promise.all([
+      fetchFile(targetRepo, verifyWorkflowPath, defaultBranch),
+      fetchFile(targetRepo, dispatcherWorkflowPath, defaultBranch),
+      prState.branch && prState.branch !== defaultBranch ?
+        fetchFile(targetRepo, verifyWorkflowPath, prState.branch)
+      : Promise.resolve(null)
+    ]);
   const verifyExists = verifyWorkflow !== null && verifyWorkflow !== undefined;
   const dispatcherChains = hasWorkflowRunTrigger(dispatcherWorkflow);
 
@@ -81,7 +102,9 @@ export async function planCredentialVerification({
     dispatcherChains,
     pullRequestUrl: shouldDispatch ? "" : pullRequestUrl,
     skipReason,
-    supportsOperationMarker: hasVerificationOperationMarker(verifyWorkflow)
+    supportsOperationMarker: hasVerificationOperationMarker(
+      dispatchRefWorkflow ?? verifyWorkflow
+    )
   };
 }
 

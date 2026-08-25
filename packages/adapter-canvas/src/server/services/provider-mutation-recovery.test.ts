@@ -1008,3 +1008,40 @@ describe("a success code on a request that was cut short", () => {
     );
   });
 });
+
+describe("a target whose name collides with a rejection token", () => {
+  // The allowlist matches case-insensitively over text that usually quotes the
+  // resource. A resource the customer named `gone` must not supply the token
+  // that means "the provider refused this", because `not_applied` is the one
+  // verdict that authorizes reissuing the request.
+  const dnsFailure = (name: string) => ({
+    code: 1,
+    stdout: "",
+    stderr: `lookup api.github.com: no such host (https://api.github.com/repos/octo/app/environments/${name})`
+  });
+
+  it.each([["gone"], ["conflict"], ["forbidden"], ["not-found"]])(
+    "keeps an inconclusive failure unknown for a resource named %s",
+    (name) => {
+      expect(
+        classifyProviderMutationFailure(dnsFailure(name), `octo/app:${name}`)
+      ).toBe("outcome_unknown");
+    }
+  );
+
+  it("still reads a genuine provider refusal as conclusive", () => {
+    expect(
+      classifyProviderMutationFailure(
+        { code: 1, stdout: "", stderr: "HTTP 409: Conflict" },
+        "octo/app:dev"
+      )
+    ).toBe("not_applied");
+  });
+
+  it("without a target, the collision is what it always was", () => {
+    // Guards the fix itself: drop the masking and this returns not_applied.
+    expect(classifyProviderMutationFailure(dnsFailure("gone"))).toBe(
+      "not_applied"
+    );
+  });
+});

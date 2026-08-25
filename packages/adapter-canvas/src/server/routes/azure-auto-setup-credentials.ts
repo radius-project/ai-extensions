@@ -111,6 +111,28 @@ export function pickAksResourceGroup(
 }
 
 /**
+ * The federated credential's own object id, from the create response.
+ *
+ * `az ad app federated-credential create` answers with the object it made, so
+ * the id is settled with the mutation rather than read back afterwards. A
+ * follow-up read can fail for a moment of Graph replication lag, and a null id
+ * is terminal: a credential Radius cannot identify by id is one it will never
+ * delete automatically.
+ */
+export function federatedCredentialIdFrom(
+  stdout: string | undefined
+): string | null {
+  try {
+    const parsed: unknown = JSON.parse((stdout || "").trim() || "null");
+    if (!parsed || typeof parsed !== "object") return null;
+    const id = (parsed as { id?: unknown }).id;
+    return typeof id === "string" && id.trim() ? id.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The federated credential's own object id, or nothing.
  *
  * Nothing is a refusal rather than a gap: a credential Radius cannot identify
@@ -277,6 +299,7 @@ async function createFederatedCredentials({
               "@" + path
             ]),
           accept: (value) => value,
+          providerIdOf: (result) => federatedCredentialIdFrom(result.stdout),
           reconcile: async () => {
             const shown = await runAz([
               "ad",
@@ -397,19 +420,22 @@ async function createFederatedCredentials({
     }
     steps.push(`✅ Federated credential "${credential.name}" created`);
     if (created) {
-      // The credential's own object id, read back through the same identity
-      // that created it. A name is the customer's to reuse, so this is what a
-      // later delete has to match before it removes anything.
+      // The credential's own object id, taken from the write that created it
+      // and only read back when that write did not carry one. A name is the
+      // customer's to reuse, so this is what a later delete has to match
+      // before it removes anything, and one transient read must not lose it.
       dependencies.operations.recordCreatedFederatedCredential(
         workflow.operation,
         {
           name: credential.name,
           subject: credential.subject,
-          providerId: await readFederatedCredentialId(
-            runAz,
-            clientId,
-            credential.name
-          )
+          providerId:
+            providerMutationRecord(
+              workflow.operation,
+              "azure_federated_credential.create",
+              `${clientId}:${credential.name}`
+            )?.providerId ||
+            (await readFederatedCredentialId(runAz, clientId, credential.name))
         }
       );
       if (!(await checkpoint())) return false;

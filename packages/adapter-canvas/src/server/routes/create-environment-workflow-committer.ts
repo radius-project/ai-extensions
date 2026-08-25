@@ -248,9 +248,32 @@ export function createWorkflowFileCommitter(
         reconcile: async () => {
           const current = await readBranchHead(branch);
           if (current.state === "absent") {
+            // A bare 404 is what GitHub answers both for a ref that is gone and
+            // for one this token may not read, and `not_applied` is the verdict
+            // that licenses reissuing the create. So absence is proven from the
+            // ref listing the account can actually enumerate — the same proof
+            // the delete reconcile below and restart recovery both use, so no
+            // two paths reach different conclusions about the same branch.
+            const proof = await proveBranchAbsent({
+              repo: target.targetRepo,
+              branch,
+              ports: {
+                listBranchRefs: (page) =>
+                  ports.runGh(
+                    branchRefListingArgs(target.targetRepo, branch, page)
+                  ),
+                readBranchRef: () =>
+                  ports.runGh(branchRefReadArgs(target.targetRepo, branch))
+              }
+            });
+            if (proof.state !== "absent") {
+              throw new Error(
+                `The setup branch "${branch}" could not be proven absent after the interrupted create. ${proof.detail}`
+              );
+            }
             return {
               state: "not_applied" as const,
-              evidence: "GitHub confirmed the setup branch is absent."
+              evidence: `GitHub confirmed the setup branch is absent. ${proof.evidence}`
             };
           }
           if (current.sha !== baseSha) {

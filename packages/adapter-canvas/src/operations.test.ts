@@ -6648,3 +6648,46 @@ describe("reuse is explained in the customer's terms", () => {
     );
   });
 });
+
+describe("verdicts and quarantines the journal must not overwrite", () => {
+  it("keeps a legacy quarantine when a new mutation is journalled", () => {
+    // The quarantine is the customer's only account of what to review, and it
+    // cannot be re-armed once entries exist, so journalling must not clear it.
+    const op = createOperation({ operationId: "op_legacy" });
+    op.restoredSchemaVersion = 1;
+    expect(quarantineUnrecoverableLegacy(op)).toBe(true);
+    const guidance = legacyRecoveryQuarantine(op);
+    expect(guidance).toBeTruthy();
+
+    prepareProviderMutation(op, {
+      kind: "azure_application.create",
+      target: "octo/app:dev:radius"
+    });
+
+    expect(legacyRecoveryQuarantine(op)).toBe(guidance);
+    expect(op.providerRecovery.state).toBe("unrecoverable_legacy");
+  });
+
+  it("remembers the verdict a terminal record already reported", () => {
+    // Reopening is what lets the recovery scheduler, which skips ended records,
+    // reconcile the outstanding delete. The verdict the customer was shown is
+    // kept so the pass that follows cannot rewrite a cancellation.
+    const op = createOperation({ operationId: "op_cancelled" });
+    finish(op, "cancelled", {});
+    prepareProviderMutation(op, {
+      kind: "github_environment.cleanup_delete",
+      target: "octo/app:dev"
+    });
+    settleProviderMutation(
+      op,
+      op.providerRecovery.mutations[0].mutationId,
+      "outcome_unknown",
+      "lost"
+    );
+
+    reconcileRestoredOperation(op);
+
+    expect(op.recoveryState).toBe("provider_reconciliation_pending");
+    expect(op.reconciliationPriorOutcome).toMatchObject({ state: "cancelled" });
+  });
+});

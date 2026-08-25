@@ -42,10 +42,43 @@ describe("credential verification planning", () => {
     const plan = await planCredentialVerification({
       ...base,
       prState: null,
-      fetchFile: async () => null
+      fetchFile: async () =>
+        "on:\n  workflow_dispatch:\n    inputs:\n      radius_operation:\n        required: false\nrun-name: ${{ inputs.radius_operation }}\n"
     });
     expect(plan.shouldDispatch).toBe(true);
     expect(plan.ref).toBe("");
+    expect(plan.supportsOperationMarker).toBe(true);
+  });
+
+  it("claims no marker support on the direct path when the workflow cannot be read", async () => {
+    // Assuming support would send `-f radius_operation` to a workflow that may
+    // not declare it, and GitHub answers that with a 422 the journal reads as a
+    // conclusive refusal, failing setup for the wrong stated reason.
+    const plan = await planCredentialVerification({
+      ...base,
+      prState: null,
+      fetchFile: async () => null
+    });
+    expect(plan.shouldDispatch).toBe(true);
+    expect(plan.supportsOperationMarker).toBe(false);
+  });
+
+  it("reads marker support from the ref the dispatch runs at", async () => {
+    // The default branch still carries a pre-marker workflow on every
+    // customer's first upgrade; the branch this request just committed to is
+    // the one GitHub validates the dispatch inputs against.
+    const marked =
+      "on:\n  workflow_dispatch:\n    inputs:\n      radius_operation:\n        required: false\nrun-name: ${{ inputs.radius_operation }}\n";
+    const plan = await planCredentialVerification({
+      ...base,
+      prState: { branch: "radius/setup-dev", base: "main" },
+      fetchFile: async (_repo, path, ref) =>
+        path.includes("verify") ?
+          ref === "radius/setup-dev" ?
+            marked
+          : "on:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n"
+        : null
+    });
     expect(plan.supportsOperationMarker).toBe(true);
   });
 

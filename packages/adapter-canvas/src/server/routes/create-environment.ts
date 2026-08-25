@@ -14,7 +14,10 @@ import {
   type WorkflowScopeGhRunnerPorts
 } from "./create-environment-gh-runner.js";
 import { createWorkflowFileCommitter } from "./create-environment-workflow-committer.js";
-import { providerMutationRecord } from "../../operations.js";
+import {
+  providerMutationRecord,
+  unresolvedProviderMutations
+} from "../../operations.js";
 import {
   applyProviderConfiguration,
   publishWorkflowFiles
@@ -654,6 +657,25 @@ export async function handleCreateEnvironment(
         steps,
         ghError: published.ghError
       });
+      return;
+    }
+    // The delete-workflow commit is treated as non-critical and its failure is
+    // swallowed into a warning step, which is right for a commit that simply
+    // did not happen. A workflow write whose outcome is unknown is a different
+    // thing: it leaves a journal entry nothing later settles, and reporting
+    // success here would hand the customer a finished environment whose
+    // destructive gates are already blocked. Same refusal the credential path
+    // gives.
+    const unresolvedWorkflowWrites = unresolvedProviderMutations(
+      operation
+    ).filter((mutation) => mutation.kind === "github_workflow.put");
+    if (unresolvedWorkflowWrites.length > 0) {
+      await fail(
+        409,
+        "Provider reconciliation is still pending for a workflow file Radius wrote. Radius will not complete setup or start another provider mutation.",
+        "provider-reconciliation-pending",
+        { steps }
+      );
       return;
     }
 

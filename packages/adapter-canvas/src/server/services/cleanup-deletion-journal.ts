@@ -3,7 +3,10 @@ import {
   ProviderMutationRecoveryError,
   type ProviderMutationCommandResult
 } from "./provider-mutation-recovery.js";
-import { providerMutationRecord } from "../../operations.js";
+import {
+  providerMutationRecord,
+  UNKNOWN_CLEANUP_OUTCOME
+} from "../../operations.js";
 
 // Journaling the deletions a rollback issues, so a lost answer never becomes a
 // second delete.
@@ -57,8 +60,9 @@ export function isCleanupDeletionKind(kind: unknown): boolean {
   return typeof kind === "string" && kind.endsWith(".cleanup_delete");
 }
 
-const UNKNOWN_OUTCOME =
-  "Outcome unknown after provider timeout; Radius will not repeat this delete blindly.";
+// Re-exported from `operations.ts`, which owns it because a destructive gate
+// there matches on it. One definition, so no copy can drift out of the gate.
+const UNKNOWN_OUTCOME = UNKNOWN_CLEANUP_OUTCOME;
 
 /**
  * Issue one cleanup delete through the mutation journal.

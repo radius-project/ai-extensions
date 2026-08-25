@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
@@ -116,9 +117,26 @@ const TEMP_BODY_PATH = "/tmp/create-environment-body.json";
 // helpers (`isValidRepoSlug`, `planCredentialVerification`,
 // `buildVerifyWorkflowDispatchArgs`) are
 // the real production functions, injected exactly as `server.ts` injects them.
+const MARKED_VERIFY_WORKFLOW = [
+  "on:",
+  "  workflow_dispatch:",
+  "    inputs:",
+  "      environment:",
+  "        required: true",
+  "      radius_operation:",
+  "        required: false",
+  "run-name: Radius verify ${{ inputs.environment }} [${{ inputs.radius_operation }}]",
+  "jobs:"
+].join("\n");
+
 // sha256 of the exact workflow bytes the generators in this harness produce.
-const WORKFLOW_CONTENT_DIGEST =
-  "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7";
+// Derived rather than pinned, so changing a fixture cannot silently decouple
+// the recorded provenance digest from the bytes actually committed.
+const digestOf = (content: string): string =>
+  createHash("sha256").update(content, "utf8").digest("hex");
+const DEPLOY_WORKFLOW_BODY = "on: workflow_dispatch\njobs:\n";
+const WORKFLOW_CONTENT_DIGEST = digestOf(DEPLOY_WORKFLOW_BODY);
+const VERIFY_CONTENT_DIGEST = digestOf(MARKED_VERIFY_WORKFLOW);
 
 const DEFAULT_GH_RULES: GhRule[] = [
   {
@@ -554,7 +572,9 @@ function start(script: Script = {}): Harness {
     // --- workflow generation and commit ---
     generateVerifyWorkflow: async (environment) => {
       journal.push(`generateVerifyWorkflow:${environment}`);
-      return "on: workflow_dispatch\njobs:\n";
+      // Carries the operation marker production always injects, so the plan
+      // reads marker support from a file shaped like the real one.
+      return MARKED_VERIFY_WORKFLOW;
     },
     generateDeployWorkflow: async (environment) => {
       journal.push(`generateDeployWorkflow:${environment}`);
@@ -589,7 +609,21 @@ function start(script: Script = {}): Harness {
 
     // --- verification ---
     planCredentialVerification,
-    fetchFileFromRepo: async (_repo, path) => script.files?.[path] ?? null,
+    // The repository holds a workflow once this run has actually committed it
+    // to that branch, which is what verification planning reads back. Modelling
+    // that here keeps a protected default branch correctly empty while the
+    // direct-commit path sees the file it just wrote. Scripts override it.
+    fetchFileFromRepo: async (_repo, path, branch) =>
+      script.files?.[path] ??
+      ((
+        committedFiles.some(
+          (file) =>
+            `.github/workflows/${path.split("/").pop()}` === file.path &&
+            (!branch || file.branch === branch)
+        )
+      ) ?
+        MARKED_VERIFY_WORKFLOW
+      : null),
     buildVerifyWorkflowDispatchArgs,
     verifyWorkflowFile: "radius-verify-credentials.yml",
     stageVerify: STAGE_VERIFY,
@@ -1518,7 +1552,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
         mode: "default_branch",
         commitSha: "commit-sha",
         blobSha: "blob-sha",
-        contentSha256: WORKFLOW_CONTENT_DIGEST,
+        contentSha256: VERIFY_CONTENT_DIGEST,
         previousBlobSha: null,
         previousBlobKnown: true
       },

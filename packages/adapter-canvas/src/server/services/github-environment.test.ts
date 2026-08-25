@@ -752,3 +752,50 @@ describe("selectedEnvironmentReader", () => {
     ).resolves.toEqual({ code: 1, stdout: "", stderr: "no answer" });
   });
 });
+
+describe("a retry after the provider refused the first attempt", () => {
+  it("does not prove creation against the rejected attempt's clock", async () => {
+    // The rejected attempt wrote nothing and the engine restamps the retry, so
+    // dating the ownership proof from it would stretch the 120s falsifier to
+    // however long the customer waited before retrying. An environment that
+    // existed an hour earlier would fall inside that window, be promoted to
+    // "created by this setup", and be deleted by a later rollback.
+    const REJECTED_AT = Date.parse("2026-08-25T10:00:00.000Z");
+    const RETRY_AT = REJECTED_AT + 3 * 60 * 60 * 1000;
+    const operation = createOperation({ operationId: "op_retry" });
+    const rejected = prepareProviderMutation(operation, {
+      kind: "github_environment.put",
+      target: "octo/app:production"
+    });
+    rejected.preparedAt = new Date(REJECTED_AT).toISOString();
+    settleProviderMutation(
+      operation,
+      rejected.mutationId,
+      "not_applied",
+      "The provider rejected the request."
+    );
+
+    const ensured = await ensureGitHubEnvironment({
+      repo: "octo/app",
+      requestedName: "production",
+      readGitHubJson: async (apiPath) =>
+        apiPath === "/repos/octo/app" ?
+          readResult({ json: { full_name: "octo/app" } })
+        : readResult({ ok: false, status: 404, stderr: "Not Found" }),
+      runGh: async () =>
+        result({
+          stdout: JSON.stringify({
+            name: "production",
+            id: 4242,
+            // Created an hour before the retry — and long after the rejected
+            // attempt, but the falsifier must date from the retry.
+            created_at: new Date(REJECTED_AT + 60 * 60 * 1000).toISOString()
+          })
+        }),
+      now: () => RETRY_AT,
+      mutationRecovery: { operation, persist: async () => {} }
+    });
+
+    expect(ensured.creationProof?.proven).toBe(false);
+  });
+});

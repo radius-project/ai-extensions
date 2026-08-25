@@ -207,6 +207,20 @@ export async function ensureGitHubEnvironment(input: {
         mutationTarget
       )
     : null;
+  // A rejected attempt wrote nothing, so the next one is a first write and the
+  // engine restamps it. Proving creation against the rejected attempt's clock
+  // would widen the falsifier's window to however long the customer waited
+  // before retrying, and an environment that existed all along would fall
+  // inside it. Only an attempt still awaiting an answer dates the write being
+  // reconciled.
+  const reconcilableMutation =
+    (
+      pendingMutation?.status === "prepared" ||
+      pendingMutation?.status === "outcome_unknown" ||
+      pendingMutation?.status === "confirmed"
+    ) ?
+      pendingMutation
+    : null;
   if (lookup.ok) {
     const name = parseEnvironmentName(lookup.json);
     if (!name) {
@@ -284,8 +298,8 @@ export async function ensureGitHubEnvironment(input: {
   }
 
   const putStartedAtMs =
-    pendingMutation ?
-      Date.parse(pendingMutation.preparedAt)
+    reconcilableMutation ?
+      Date.parse(reconcilableMutation.preparedAt)
     : (input.now?.() ?? Date.now());
   const mutationArgs = ["api", "--method", "PUT", path];
   let created: GitHubEnvironmentCommandResult;

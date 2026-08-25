@@ -88,13 +88,14 @@ function requireRecoveryRollback(
  * rejection is allowed to say the provider refused the write.
  */
 export function providerMutationOutcomeUnknown(
-  result: ProviderMutationCommandResult
+  result: ProviderMutationCommandResult,
+  target?: string
 ): boolean {
   // A timeout, a kill, or a signal is never a success, whatever the exit code
   // says. Only an unambiguous zero is read as an answer.
   if (result.timedOut === true) return true;
   if (result.code === 0 || result.code === "0") return false;
-  return classifyProviderMutationFailure(result) !== "not_applied";
+  return classifyProviderMutationFailure(result, target) !== "not_applied";
 }
 
 export type ProviderMutationFailureVerdict = "not_applied" | "outcome_unknown";
@@ -108,8 +109,47 @@ export type ProviderMutationFailureVerdict = "not_applied" | "outcome_unknown";
  * could equally describe a request the provider accepted and then failed to
  * acknowledge.
  */
+/**
+ * The diagnostic with the target's own name taken out of it.
+ *
+ * The allowlist below matches case-insensitively, and a provider's error text
+ * usually quotes the resource it was about — often as a URL. A resource the
+ * customer named `gone`, `conflict`, or `forbidden` would otherwise supply the
+ * very token that means "the provider refused this", turning an inconclusive
+ * network failure into the one verdict that authorizes reissuing the request.
+ * The name is removed before the text is read as a status.
+ */
+function withoutTargetText(diagnostic: string, target?: string): string {
+  const raw = (target || "").trim();
+  if (!raw) return diagnostic;
+  const segments = new Set<string>([raw]);
+  for (const segment of raw.split(/[\0:/\\]/)) {
+    const trimmed = segment.trim();
+    // Two characters cannot carry a status word, and removing them would chew
+    // holes in text that has nothing to do with the target.
+    if (trimmed.length >= 3) {
+      segments.add(trimmed);
+      try {
+        segments.add(encodeURIComponent(trimmed));
+      } catch {
+        // A segment that cannot be encoded is matched in its raw form only.
+      }
+    }
+  }
+  let masked = diagnostic;
+  for (const segment of [...segments].sort((a, b) => b.length - a.length)) {
+    masked = masked.split(segment).join(" ");
+    const lowered = segment.toLowerCase();
+    const uppered = segment.toUpperCase();
+    if (lowered !== segment) masked = masked.split(lowered).join(" ");
+    if (uppered !== segment) masked = masked.split(uppered).join(" ");
+  }
+  return masked;
+}
+
 export function classifyProviderMutationFailure(
-  result: ProviderMutationCommandResult
+  result: ProviderMutationCommandResult,
+  target?: string
 ): ProviderMutationFailureVerdict {
   if (result.timedOut === true) return "outcome_unknown";
   // A signal name or a negative/128+ status is the process dying, not an answer.
@@ -124,9 +164,9 @@ export function classifyProviderMutationFailure(
   // Nothing came back to read, so nothing says the provider rejected anything.
   if (!diagnostic) return "outcome_unknown";
   if (INCONCLUSIVE_FAILURE.test(diagnostic)) return "outcome_unknown";
-  return CONCLUSIVE_REJECTION.test(diagnostic) ? "not_applied" : (
-      "outcome_unknown"
-    );
+  return CONCLUSIVE_REJECTION.test(withoutTargetText(diagnostic, target)) ?
+      "not_applied"
+    : "outcome_unknown";
 }
 
 // Answers that are compatible with the provider having accepted the write.
@@ -404,7 +444,7 @@ export async function executeRecoverableMutation<T>(input: {
     // Ambiguity is read before success. A command that timed out, was killed,
     // or died on a signal can still exit 0 on some runners, and accepting that
     // as an acknowledgement records a mutation nobody saw the provider answer.
-    if (providerMutationOutcomeUnknown(result)) {
+    if (providerMutationOutcomeUnknown(result, input.target)) {
       settleProviderMutation(
         input.operation,
         mutation.mutationId,

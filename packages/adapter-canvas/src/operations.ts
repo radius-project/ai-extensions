@@ -460,7 +460,14 @@ export function prepareProviderMutation(
     ...(intent ? { intent: structuredClone(intent) } : {}),
     evidence: null
   };
-  if (recovery.state !== "rollback_pending") {
+  if (
+    recovery.state !== "rollback_pending" &&
+    // A legacy quarantine says Radius cannot know what the old record started.
+    // Journalling a new mutation does not answer that question, and the
+    // quarantine cannot be re-armed once entries exist, so clearing it here
+    // would drop the customer's only account of what to review.
+    recovery.state !== "unrecoverable_legacy"
+  ) {
     recovery.state = "reconciling";
     recovery.guidance = null;
   }
@@ -3256,6 +3263,16 @@ export function unresolvedCleanupTargets(op: any): any[] {
     .filter((entry: any) => entry !== null);
 }
 
+/**
+ * The sentence a cleanup deletion writes when its outcome could not be settled.
+ *
+ * Defined here, at the lowest module that needs it, because a destructive gate
+ * keys on it: rewording a second copy elsewhere would silently open that gate.
+ * Every producer imports this rather than retyping it.
+ */
+export const UNKNOWN_CLEANUP_OUTCOME =
+  "Outcome unknown after provider timeout; Radius will not repeat this delete blindly.";
+
 export function canRetryCleanup(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
@@ -3278,9 +3295,7 @@ export function canRetryCleanup(op: any): any {
   const unknownDelete = ledger.cleanup.results.find(
     (entry) =>
       entry.outcome === "warning" &&
-      entry.detail?.includes(
-        "Outcome unknown after provider timeout; Radius will not repeat this delete blindly."
-      )
+      entry.detail?.includes(UNKNOWN_CLEANUP_OUTCOME)
   );
   if (unknownDelete) {
     return {
@@ -4724,6 +4739,14 @@ export function reconcileRestoredOperation(op: any): any {
   if (!op) return op;
   if (unresolvedProviderMutations(op).length > 0) {
     const rollbackPending = op.providerRecovery?.state === "rollback_pending";
+    // Reopened so the recovery scheduler, which skips ended records, can
+    // reconcile the outstanding mutation. The verdict this record already
+    // reported is remembered first: an exit-setup delete is only ever
+    // journalled on a terminal record, and finishing the reconciliation pass
+    // must not rewrite a cancellation the customer was already shown.
+    if (isTerminalState(op.state) && !op.reconciliationPriorOutcome) {
+      op.reconciliationPriorOutcome = { state: op.state, endedAt: op.endedAt };
+    }
     op.state = RUNNING_STATE;
     op.endedAt = null;
     op.executionActive = false;

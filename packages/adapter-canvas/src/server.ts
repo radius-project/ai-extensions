@@ -2906,7 +2906,8 @@ export {
  */
 async function proveEnvironmentAbsentAt(
   environmentApiPath: string,
-  run: (args: string[]) => Promise<CommandResult>
+  run: (args: string[]) => Promise<CommandResult>,
+  recordedProviderId?: string | null
 ): Promise<ResourceAbsenceProof> {
   const name = environmentNameFromApiPath(environmentApiPath);
   const listingPath = environmentsApiPath(environmentApiPath);
@@ -2920,6 +2921,7 @@ async function proveEnvironmentAbsentAt(
   return proveEnvironmentAbsent({
     repo: listingPath.replace(/^\/repos\//, "").replace(/\/environments$/, ""),
     name,
+    recordedProviderId,
     ports: {
       listEnvironments: (page) =>
         run(environmentListingArgs(listingPath, page)),
@@ -4034,7 +4036,8 @@ export async function cleanupGitHubEnvironmentArtifact(
           try {
             proof = await proveEnvironmentAbsentAt(
               environmentPath,
-              readEnvironment
+              readEnvironment,
+              recorded
             );
           } catch (error) {
             return {
@@ -4078,7 +4081,8 @@ export async function cleanupGitHubEnvironmentArtifact(
         try {
           const proof = await proveEnvironmentAbsentAt(
             environmentPath,
-            readEnvironment
+            readEnvironment,
+            optionalString(artifact.providerId)
           );
           if (proof.state === "absent") return "absent";
           return proof.state === "present" ? "present" : "unreadable";
@@ -5931,7 +5935,12 @@ function createInstanceRequestCoordinator(
     // A deletion still awaiting an answer is named before that happens, because
     // once the record is terminal nothing will reread it.
     quarantineUnsettledCleanupDeletions(op);
-    finish(op, "failed_partial", {
+    // A record that was already terminal when recovery reopened it keeps the
+    // verdict the customer was shown. Reconciliation names what it could not
+    // settle, but a cancellation does not become a failure because a delete it
+    // issued lost its answer.
+    const priorOutcome = op.reconciliationPriorOutcome;
+    finish(op, priorOutcome?.state || "failed_partial", {
       failure: {
         code:
           plan.state === "blocked" ?
@@ -5947,6 +5956,7 @@ function createInstanceRequestCoordinator(
         evidence: null
       }
     });
+    delete op.reconciliationPriorOutcome;
     await saveOperation(op);
   }
 

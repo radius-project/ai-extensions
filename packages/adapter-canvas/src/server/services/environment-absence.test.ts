@@ -211,3 +211,71 @@ describe("proving a GitHub environment absent", () => {
     });
   });
 });
+
+describe("an environment whose name was reused after the delete", () => {
+  const listing = (names: string[]) => ({
+    code: 0,
+    stdout: JSON.stringify({
+      total_count: names.length,
+      environments: names.map((name, index) => ({ name, id: 100 + index }))
+    }),
+    stderr: ""
+  });
+
+  it("reads a replacement under the same name as the targeted resource being gone", async () => {
+    // The delete landed, then the customer recreated `dev`. Reporting the
+    // replacement as "still present" would tell them to clean up a resource
+    // Radius never made, and would quarantine the operation permanently.
+    const proof = await proveEnvironmentAbsent({
+      repo: "octo/app",
+      name: "dev",
+      recordedProviderId: "100",
+      ports: {
+        listEnvironments: async () => listing(["dev"]),
+        readEnvironment: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ name: "dev", id: 999 }),
+          stderr: ""
+        })
+      }
+    });
+
+    expect(proof.state).toBe("absent");
+  });
+
+  it("still reports the targeted resource present when the id matches", async () => {
+    const proof = await proveEnvironmentAbsent({
+      repo: "octo/app",
+      name: "dev",
+      recordedProviderId: "100",
+      ports: {
+        listEnvironments: async () => listing(["dev"]),
+        readEnvironment: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ name: "dev", id: 100 }),
+          stderr: ""
+        })
+      }
+    });
+
+    expect(proof.state).toBe("present");
+  });
+
+  it("refuses to conclude anything when the live id cannot be read", async () => {
+    const proof = await proveEnvironmentAbsent({
+      repo: "octo/app",
+      name: "dev",
+      recordedProviderId: "100",
+      ports: {
+        listEnvironments: async () => listing(["dev"]),
+        readEnvironment: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ name: "dev" }),
+          stderr: ""
+        })
+      }
+    });
+
+    expect(proof.state).toBe("unknown");
+  });
+});
