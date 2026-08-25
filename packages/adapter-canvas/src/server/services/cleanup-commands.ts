@@ -77,6 +77,40 @@ export function isCleanupCommandKind(
 }
 
 /**
+ * The runner key each persisted command kind dispatches to.
+ *
+ * The record and the runner name the retry differently — the saved command is
+ * `retry_cleanup` and the pass that executes it is `cleanup_retry` — because
+ * one reads as a customer request and the other as a spec in this table. The
+ * control routes translate between them on the way in; recovery has to make the
+ * same translation on the way back, because a persisted kind handed straight to
+ * the executor selects no spec at all and the pass dies on an undefined
+ * selector rather than deleting anything or reporting why.
+ */
+const RUNNER_KIND_BY_COMMAND_KIND: Readonly<
+  Record<string, CleanupCommandKind>
+> = Object.freeze({
+  rollback: "rollback",
+  retry_cleanup: "cleanup_retry",
+  exit_setup: "exit_setup"
+});
+
+/** The runner key a persisted command kind runs under, or null if it is not a deletion. */
+export function cleanupRunnerKind(
+  commandKind: unknown
+): CleanupCommandKind | null {
+  // `hasOwn` rather than a plain lookup: a record read back from disk carries
+  // whatever string it was saved with, and `constructor` would otherwise
+  // resolve to something that is not a spec at all.
+  return (
+      typeof commandKind === "string" &&
+        Object.hasOwn(RUNNER_KIND_BY_COMMAND_KIND, commandKind)
+    ) ?
+      RUNNER_KIND_BY_COMMAND_KIND[commandKind]
+    : null;
+}
+
+/**
  * Whether a finished deletion pass changed what the environment picker shows.
  *
  * The picker reads a repo-scoped cached listing that a different request

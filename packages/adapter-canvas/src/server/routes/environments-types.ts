@@ -181,8 +181,13 @@ export interface EnvironmentsDependencies {
     workflowFile: string,
     sinceMs: number,
     knownId?: number | string | null,
-    executor?: SelectedGhExecutor
+    executor?: SelectedGhExecutor,
+    afterRunId?: number | string | null
   ): Promise<number | string | null>;
+  settleVerificationDispatchRecovery(
+    operation: unknown,
+    runId: number | string
+  ): void;
   getRunDetail(
     repo: string,
     runId: number | string,

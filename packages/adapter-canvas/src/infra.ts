@@ -23,6 +23,7 @@ import {
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
 } from "@radius-project/core";
+import { VERIFY_OPERATION_INPUT } from "./verification-run-identity.js";
 import type { DeployWorkflowOptions } from "@radius-project/core";
 import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "node:url";
@@ -229,10 +230,52 @@ export async function generateVerifyWorkflow(
     throw new Error(`No verify template for provider "${provider}".`);
   const upstream = await fetchRadiusTemplate(fileName);
   const workflow = configureVerifyGhcrProbe(
-    coreGenerateVerifyWorkflow(env, platform, upstream)
+    configureVerifyOperationMarker(
+      coreGenerateVerifyWorkflow(env, platform, upstream)
+    )
   );
   assertValidWorkflowYaml(workflow, `verify workflow "${fileName}"`);
   return workflow;
+}
+
+export function configureVerifyOperationMarker(workflow: string): string {
+  const lines = workflow.split("\n");
+  const onIndex = lines.findIndex((line) => /^on:\s*$/.test(line));
+  const dispatchIndex = lines.findIndex((line) =>
+    /^\s+workflow_dispatch:\s*$/.test(line)
+  );
+  const inputsIndex =
+    dispatchIndex < 0 ? -1 : (
+      lines.findIndex(
+        (line, index) => index > dispatchIndex && /^\s+inputs:\s*$/.test(line)
+      )
+    );
+  // Returning the workflow unchanged would ship a verify workflow that does not
+  // declare the marker input, while the dispatch still sends it and GitHub
+  // answers 422 — a refusal the journal reads as conclusive, failing setup with
+  // a message about the dispatch rather than about this template. The template
+  // is fetched at runtime, so its shape can move underneath us; say so here.
+  if (onIndex < 0 || inputsIndex < 0) {
+    throw new Error(
+      "The upstream verify workflow template no longer exposes an `on:` block with `workflow_dispatch.inputs`, so Radius cannot add the operation marker it uses to identify verification runs."
+    );
+  }
+  const inputsIndent = lines[inputsIndex].match(/^\s*/)?.[0] ?? "";
+  const fieldIndent = `${inputsIndent}  `;
+  lines.splice(
+    inputsIndex + 1,
+    0,
+    `${fieldIndent}${VERIFY_OPERATION_INPUT}:`,
+    `${fieldIndent}  description: Radius operation identity`,
+    `${fieldIndent}  required: false`,
+    `${fieldIndent}  type: string`
+  );
+  lines.splice(
+    onIndex,
+    0,
+    `run-name: Radius verify \${{ inputs.environment }} [\${{ inputs.${VERIFY_OPERATION_INPUT} }}]`
+  );
+  return lines.join("\n");
 }
 
 /**

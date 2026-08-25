@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  createOperation,
+  prepareProviderMutation,
+  settleProviderMutation
+} from "../../operations.js";
+import { ProviderMutationRecoveryError } from "./provider-mutation-recovery.js";
+import {
   deleteGitHubEnvironmentIdempotent,
   ensureGitHubEnvironment,
+  selectedEnvironmentReader,
   GitHubEnvironmentEnsureError,
   readEnsuredGitHubEnvironment,
   type GitHubEnvironmentCommandResult,
@@ -46,7 +53,11 @@ describe("ensureGitHubEnvironment", () => {
       }
     });
 
-    expect(ensured).toEqual({ name: "Production", state: "reused" });
+    expect(ensured).toEqual({
+      name: "Production",
+      state: "reused",
+      providerId: null
+    });
     expect(calls).toEqual(["/repos/octo/app/environments/production"]);
   });
 
@@ -56,7 +67,6 @@ describe("ensureGitHubEnvironment", () => {
     const ensured = await ensureGitHubEnvironment({
       repo: "octo/app",
       requestedName: "Production West",
-      now: () => 1_700_000_000_000,
       readGitHubJson: async (apiPath) => {
         reads.push(apiPath);
         return apiPath === "/repos/octo/app" ?
@@ -66,18 +76,20 @@ describe("ensureGitHubEnvironment", () => {
       runGh: async (args) => {
         mutations.push(args);
         return result({
-          stdout: JSON.stringify({ name: "Production West" })
+          stdout: JSON.stringify({
+            name: "Production West",
+            created_at: "2026-08-22T00:00:00.000Z"
+          })
         });
-      }
+      },
+      now: () => Date.parse("2026-08-22T00:00:00.000Z")
     });
 
     expect(ensured).toEqual({
       name: "Production West",
       state: "created_candidate",
-      creationEvidence: {
-        putResponseBody: JSON.stringify({ name: "Production West" }),
-        putStartedAtMs: 1_700_000_000_000
-      }
+      providerId: null,
+      creationProof: { proven: true, detail: null }
     });
     expect(reads).toEqual([
       "/repos/octo/app/environments/Production%20West",
@@ -91,6 +103,280 @@ describe("ensureGitHubEnvironment", () => {
         "/repos/octo/app/environments/Production%20West"
       ]
     ]);
+  });
+
+  // A PUT nobody saw the answer to recorded no id. What sits under the name
+  // afterwards may be what it made or what somebody made since, and a creation
+  // timestamp fits both — so the read is handed to a person, never adopted.
+  describe("an environment found after a PUT with no acknowledged id", () => {
+    async function interrupted(
+      rereadJson: Record<string, unknown>,
+      putStartedAt = "2026-08-22T00:00:00.000Z"
+    ) {
+      const operation = createOperation({ operationId: "op_environment" });
+      let environmentReads = 0;
+      let putCalls = 0;
+      const failure = await ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) => {
+          if (apiPath === "/repos/octo/app") {
+            return readResult({ json: { full_name: "octo/app" } });
+          }
+          environmentReads += 1;
+          return environmentReads === 1 ?
+              readResult({ ok: false, status: 404 })
+            : readResult({ json: rereadJson });
+        },
+        runGh: async () => {
+          putCalls += 1;
+          return result({ code: 1, timedOut: true });
+        },
+        mutationRecovery: { operation, persist: async () => {} },
+        now: () => Date.parse(putStartedAt)
+      }).catch((error: unknown) => error);
+      return { operation, failure, putCalls };
+    }
+
+    it("refuses to claim it, however well the timestamp fits", async () => {
+      const { operation, failure, putCalls } = await interrupted({
+        name: "production",
+        created_at: "2026-08-22T00:00:00.000Z"
+      });
+
+      expect(failure).toBeInstanceOf(ProviderMutationRecoveryError);
+      expect((failure as ProviderMutationRecoveryError).code).toBe(
+        "provider-mutation-manual-required"
+      );
+      expect((failure as Error).message).toContain(
+        "never recorded an id for the environment"
+      );
+      // The PUT is not retried and the environment is not adopted.
+      expect(putCalls).toBe(1);
+      expect(operation.providerRecovery).toMatchObject({
+        state: "manual_required",
+        mutations: [{ status: "manual_required", providerId: null }]
+      });
+    });
+
+    it("refuses a replacement created inside the tolerance window", async () => {
+      // The customer made their own environment under this name seconds after
+      // the interrupted request. Its creation time is indistinguishable.
+      const { operation, failure } = await interrupted({
+        id: 7654321,
+        name: "production",
+        created_at: "2026-08-22T00:00:30.000Z"
+      });
+
+      expect((failure as Error).message).toContain("id 7654321");
+      expect(operation.providerRecovery.mutations[0]).toMatchObject({
+        status: "manual_required",
+        providerId: null
+      });
+    });
+
+    it("still settles a reread that proves the environment absent", async () => {
+      const operation = createOperation({ operationId: "op_environment" });
+      let environmentReads = 0;
+
+      const failure = await ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) => {
+          if (apiPath === "/repos/octo/app") {
+            return readResult({ json: { full_name: "octo/app" } });
+          }
+          environmentReads += 1;
+          return readResult({ ok: false, status: 404 });
+        },
+        runGh: async () => result({ code: 1, timedOut: true }),
+        mutationRecovery: { operation, persist: async () => {} }
+      }).catch((error: unknown) => error);
+
+      // Absence is an answer, so the mutation resolves rather than hanging.
+      expect(failure).toBeInstanceOf(GitHubEnvironmentEnsureError);
+      expect(environmentReads).toBeGreaterThan(0);
+      expect(operation.providerRecovery.mutations[0]).toMatchObject({
+        status: "not_applied"
+      });
+    });
+  });
+
+  // A confirmed PUT means GitHub made the environment, but the name it is under
+  // can be deleted and recreated by anyone. Ownership after a restart is proven
+  // by the id that write recorded still answering for the name — a creation
+  // timestamp alone would also fit the replacement.
+  describe("a confirmed PUT found again after a restart", () => {
+    function confirmed(providerId: string | null) {
+      const operation = createOperation({ operationId: "op_environment" });
+      const mutation = prepareProviderMutation(operation, {
+        kind: "github_environment.put",
+        target: "octo/app:production"
+      });
+      mutation.preparedAt = "2026-08-22T00:00:00.000Z";
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "confirmed",
+        null,
+        providerId
+      );
+      return operation;
+    }
+
+    function restore(operation: object, json: Record<string, unknown>) {
+      return ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async () => readResult({ json }),
+        runGh: async () => {
+          throw new Error("confirmed PUT must not replay");
+        },
+        mutationRecovery: {
+          operation: operation as object & { operationId: string },
+          persist: async () => {}
+        }
+      });
+    }
+
+    it("proves ownership when the name still answers for the id it recorded", async () => {
+      await expect(
+        restore(confirmed("1234567"), {
+          id: 1234567,
+          name: "production",
+          created_at: "2026-08-22T00:00:00.000Z"
+        })
+      ).resolves.toEqual({
+        name: "production",
+        state: "created_candidate",
+        providerId: "1234567",
+        creationProof: { proven: true, detail: null }
+      });
+    });
+
+    it("proves nothing when the name was recreated under a new id", async () => {
+      // The customer deleted the environment and made another with the same
+      // name after the crash. Its creation timestamp fits the interrupted
+      // request just as well, so only the id can tell them apart.
+      await expect(
+        restore(confirmed("1234567"), {
+          id: 7654321,
+          name: "production",
+          created_at: "2026-08-22T00:00:01.000Z"
+        })
+      ).resolves.toEqual({
+        name: "production",
+        state: "created_candidate",
+        providerId: "7654321",
+        // Said out loud, so the customer is told a resource was left behind
+        // rather than finding it later with no explanation.
+        creationProof: {
+          proven: false,
+          detail: expect.stringContaining(
+            "not the 1234567 this request created"
+          )
+        }
+      });
+    });
+
+    it("proves nothing for a confirmed entry written before ids were recorded", async () => {
+      await expect(
+        restore(confirmed(null), {
+          id: 1234567,
+          name: "production",
+          created_at: "2026-08-22T00:00:00.000Z"
+        })
+      ).resolves.toEqual({
+        name: "production",
+        state: "created_candidate",
+        providerId: "1234567",
+        creationProof: {
+          proven: false,
+          detail: expect.stringContaining(
+            "before Radius captured GitHub's own id"
+          )
+        }
+      });
+    });
+
+    it("proves nothing when GitHub now reports no id for the name", async () => {
+      await expect(
+        restore(confirmed("1234567"), {
+          name: "production",
+          created_at: "2026-08-22T00:00:00.000Z"
+        })
+      ).resolves.toEqual({
+        name: "production",
+        state: "created_candidate",
+        providerId: null,
+        creationProof: {
+          proven: false,
+          detail: expect.stringContaining("reports id none")
+        }
+      });
+    });
+
+    it("records the id in the same write that confirms the mutation", async () => {
+      const operation = createOperation({ operationId: "op_environment" });
+      let persists = 0;
+
+      await ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) =>
+          apiPath === "/repos/octo/app" ?
+            readResult({ json: { full_name: "octo/app" } })
+          : readResult({ ok: false, status: 404, json: null }),
+        runGh: async () =>
+          result({
+            stdout: JSON.stringify({ id: 1234567, name: "production" })
+          }),
+        mutationRecovery: {
+          operation,
+          persist: async () => {
+            persists += 1;
+          }
+        }
+      });
+
+      const settled = operation.providerRecovery.mutations.find(
+        (entry: { kind: string }) => entry.kind === "github_environment.put"
+      );
+      // Status and id land together, so a crash cannot leave a confirmed
+      // mutation whose id was never written.
+      expect(settled).toMatchObject({
+        status: "confirmed",
+        providerId: "1234567"
+      });
+      expect(persists).toBeGreaterThan(0);
+    });
+  });
+
+  it("fails closed when a timed-out PUT leaves an environment without ownership proof", async () => {
+    const operation = createOperation({ operationId: "op_environment" });
+    let environmentReads = 0;
+
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async (apiPath) => {
+          if (apiPath === "/repos/octo/app") {
+            return readResult({ json: { full_name: "octo/app" } });
+          }
+          environmentReads += 1;
+          return environmentReads === 1 ?
+              readResult({ ok: false, status: 404 })
+            : readResult({ json: { name: "production" } });
+        },
+        runGh: async () => result({ code: 1, timedOut: true }),
+        mutationRecovery: { operation, persist: async () => {} }
+      })
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("will not retry or delete it")
+    });
+    expect(operation.providerRecovery.state).toBe("manual_required");
   });
 
   it("fails closed on lookup errors that are not an explicit HTTP 404", async () => {
@@ -179,8 +465,28 @@ describe("ensureGitHubEnvironment", () => {
         readEnsuredGitHubEnvironment(resolved, "octo/app", "Production")
       ).toEqual({
         name: "Production",
-        state: "created_candidate"
+        state: "created_candidate",
+        providerId: null
       });
+    });
+
+    it("reuses a persisted environment whose creation was proven", () => {
+      expect(
+        readEnsuredGitHubEnvironment(
+          {
+            ...resolved,
+            setupArtifacts: {
+              githubEnvironment: {
+                state: "created",
+                repo: "octo/app",
+                name: "Production"
+              }
+            }
+          },
+          "octo/app",
+          "Production"
+        )
+      ).toEqual({ name: "Production", state: "created", providerId: null });
     });
 
     it.each([
@@ -323,12 +629,18 @@ describe("ensureGitHubEnvironment", () => {
     expect(first).toEqual({
       name: "Production",
       state: "created_candidate",
-      creationEvidence: {
-        putResponseBody: JSON.stringify({ name: "Production" }),
-        putStartedAtMs: 1_700_000_000_000
+      providerId: null,
+      creationProof: {
+        proven: false,
+        detail:
+          "GitHub did not report when the environment was created, so Radius cannot prove this request created it."
       }
     });
-    expect(second).toEqual({ name: "Production", state: "reused" });
+    expect(second).toEqual({
+      name: "Production",
+      state: "reused",
+      providerId: null
+    });
     expect(putCalls).toBe(1);
   });
 
@@ -495,5 +807,113 @@ describe("deleteGitHubEnvironmentIdempotent", () => {
       detail: "Deleting the GitHub environment failed."
     });
     expect(invalidated).toEqual([]);
+  });
+});
+
+describe("selectedEnvironmentReader", () => {
+  it("reads through the executor it was built from, not ambient gh", async () => {
+    const seen: string[][] = [];
+    const read = selectedEnvironmentReader({
+      run: async (args) => {
+        seen.push(args);
+        return {
+          code: 0,
+          stdout: JSON.stringify({ id: 1234567, name: "dev" }),
+          stderr: ""
+        };
+      }
+    });
+
+    await expect(
+      read(["api", "/repos/octo/app/environments/dev"])
+    ).resolves.toEqual({
+      code: 0,
+      stdout: JSON.stringify({ id: 1234567, name: "dev" }),
+      stderr: ""
+    });
+    expect(seen).toEqual([["api", "/repos/octo/app/environments/dev"]]);
+  });
+
+  it.each([
+    [
+      "a refused read",
+      { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" },
+      { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" }
+    ],
+    [
+      "a missing resource reported with a string code",
+      { code: "1", stdout: "", stderr: "HTTP 404: Not Found" },
+      { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
+    ]
+  ])(
+    "keeps %s a failure rather than an empty answer",
+    async (_label, response, expected) => {
+      const read = selectedEnvironmentReader({
+        run: async () => response
+      });
+
+      // An empty, successful-looking result would read as "the environment is
+      // gone" and let a delete go out on a masked 404.
+      await expect(
+        read(["api", "/repos/octo/app/environments/dev"])
+      ).resolves.toEqual(expected);
+    }
+  );
+
+  it("treats an exit code it cannot parse as a failure", async () => {
+    const read = selectedEnvironmentReader({
+      run: async () => ({ code: undefined as never, stderr: "no answer" })
+    });
+
+    await expect(
+      read(["api", "/repos/octo/app/environments/dev"])
+    ).resolves.toEqual({ code: 1, stdout: "", stderr: "no answer" });
+  });
+});
+
+describe("a retry after the provider refused the first attempt", () => {
+  it("does not prove creation against the rejected attempt's clock", async () => {
+    // The rejected attempt wrote nothing and the engine restamps the retry, so
+    // dating the ownership proof from it would stretch the 120s falsifier to
+    // however long the customer waited before retrying. An environment that
+    // existed an hour earlier would fall inside that window, be promoted to
+    // "created by this setup", and be deleted by a later rollback.
+    const REJECTED_AT = Date.parse("2026-08-25T10:00:00.000Z");
+    const RETRY_AT = REJECTED_AT + 3 * 60 * 60 * 1000;
+    const operation = createOperation({ operationId: "op_retry" });
+    const rejected = prepareProviderMutation(operation, {
+      kind: "github_environment.put",
+      target: "octo/app:production"
+    });
+    rejected.preparedAt = new Date(REJECTED_AT).toISOString();
+    settleProviderMutation(
+      operation,
+      rejected.mutationId,
+      "not_applied",
+      "The provider rejected the request."
+    );
+
+    const ensured = await ensureGitHubEnvironment({
+      repo: "octo/app",
+      requestedName: "production",
+      readGitHubJson: async (apiPath) =>
+        apiPath === "/repos/octo/app" ?
+          readResult({ json: { full_name: "octo/app" } })
+        : readResult({ ok: false, status: 404, stderr: "Not Found" }),
+      runGh: async () =>
+        result({
+          stdout: JSON.stringify({
+            name: "production",
+            id: 4242,
+            // Created an hour before the retry — and long after the rejected
+            // attempt, but the falsifier must date from the retry.
+            created_at: new Date(REJECTED_AT + 60 * 60 * 1000).toISOString()
+          })
+        }),
+      now: () => RETRY_AT,
+      mutationRecovery: { operation, persist: async () => {} }
+    });
+    expect(ensured.creationProof?.proven).toBe(false);
+    expect(ensured.creationProof?.proven).toBe(false);
   });
 });

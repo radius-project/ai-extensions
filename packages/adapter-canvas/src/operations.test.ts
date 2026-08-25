@@ -58,10 +58,18 @@ import {
   canRetryDeletion,
   canRetryCleanup,
   canRetrySetup,
+  legacyRecoveryQuarantine,
+  quarantineUnrecoverableLegacy,
+  ambiguousProviderMutation,
   canRetryVerification,
   canStartRollback,
   classifyVerificationRetry,
   createOperationControl,
+  prepareProviderMutation,
+  settleProviderMutation,
+  unresolvedProviderMutations,
+  providerMutationRecord,
+  providerRecoveryManualGuidance,
   findActiveCommand,
   findCommand,
   getOperationControl,
@@ -107,6 +115,849 @@ import {
   STAGE_DELETE_GITHUB_ENV,
   STAGE_REVIEW_APP_REGISTRATION
 } from "./operations.js";
+
+describe("provider mutation recovery journal", () => {
+  it("survives persistence and reopens a terminal operation for reconciliation", () => {
+    const op = createOperation({
+      operationId: "op_recovery",
+      provider: "azure",
+      repo: "octo/app",
+      environment: "prod"
+    });
+    op.resumeRequest = { environment: { environment: "prod" } };
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_workflow.put",
+      target: "octo/app:main:.github/workflows/verify.yml"
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The request timed out."
+    );
+    finish(op, "failed_partial", {
+      failure: {
+        code: "provider-mutation-outcome-unknown",
+        message: "The request timed out."
+      }
+    });
+
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(op))
+    );
+
+    expect(restored).toMatchObject({
+      state: "running",
+      endedAt: null,
+      recoveryState: "provider_reconciliation_pending",
+      providerRecovery: { state: "reconciling" }
+    });
+    expect(unresolvedProviderMutations(restored)).toHaveLength(1);
+  });
+
+  describe("the id a confirmed mutation recorded", () => {
+    function settled(status: string, providerId: string | null) {
+      const op = createOperation({
+        operationId: "op_mutation_id",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_environment.put",
+        target: "octo/app:prod"
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        status as never,
+        null,
+        providerId
+      );
+      return op;
+    }
+
+    const entry = (op: any) => op.providerRecovery.mutations[0];
+
+    it("survives a save and reload", () => {
+      const restored = fromPersistedOperation(
+        toPersistedOperation(settled("confirmed", "1234567"))
+      );
+
+      expect(entry(restored).providerId).toBe("1234567");
+    });
+
+    it("reads a mutation written before ids existed as having none", () => {
+      const persisted = toPersistedOperation(
+        settled("confirmed", "1234567")
+      ) as any;
+      delete persisted.providerRecovery.mutations[0].providerId;
+
+      expect(entry(fromPersistedOperation(persisted)).providerId).toBeNull();
+    });
+
+    it("is cleared when a later settle says the mutation left nothing behind", () => {
+      const op = settled("confirmed", "1234567");
+
+      settleProviderMutation(
+        op,
+        entry(op).mutationId,
+        "not_applied",
+        "the provider rejected it"
+      );
+
+      // A stale id here would let a later pass match a resource this mutation
+      // never made.
+      expect(entry(op).providerId).toBeNull();
+    });
+
+    it("is kept when a confirmed settle carries no new id", () => {
+      const op = settled("confirmed", "1234567");
+
+      settleProviderMutation(op, entry(op).mutationId, "confirmed", "reread");
+
+      expect(entry(op).providerId).toBe("1234567");
+    });
+  });
+
+  describe("the provider's own id for a name the customer can reuse", () => {
+    function claimed() {
+      const op = createOperation({
+        operationId: "op_ids",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      recordAzureApp(op, { state: "created", appId: "app-1" });
+      recordGitHubEnvironment(op, {
+        state: "created",
+        repo: "octo/app",
+        name: "prod",
+        providerId: "1234"
+      });
+      recordCreatedFederatedCredential(op, {
+        name: "radius-prod",
+        subject: "repo:octo/app:environment:prod",
+        providerId: "fic-1"
+      });
+      return op;
+    }
+
+    it("carries both ids through a save and reload", () => {
+      const restored = fromPersistedOperation(toPersistedOperation(claimed()));
+
+      expect(restored.setupArtifacts.githubEnvironment.providerId).toBe("1234");
+      expect(restored.setupArtifacts.federatedCredentials[0].providerId).toBe(
+        "fic-1"
+      );
+    });
+
+    it("keys the deletion on the id, not on the reusable name", () => {
+      const op = claimed();
+
+      const identities = provenOwnedCleanupTargets(op).map(
+        (entry) => entry.identity
+      );
+
+      // A rollback that matched on repo+name alone would accept a
+      // same-named replacement as its own leftover.
+      expect(identities).toContain("1234|octo/app:prod");
+      expect(identities).toContain(
+        "fic-1|radius-prod@repo:octo/app:environment:prod"
+      );
+    });
+
+    it("reads a record written before the ids were captured as having none", () => {
+      const persisted = toPersistedOperation(claimed()) as any;
+      delete persisted.setupArtifacts.githubEnvironment.providerId;
+      delete persisted.setupArtifacts.federatedCredentials[0].providerId;
+
+      const restored = fromPersistedOperation(persisted);
+
+      // Null, never a guess: the cleanup gate refuses to delete on it.
+      expect(restored.setupArtifacts.githubEnvironment.providerId).toBeNull();
+      expect(
+        restored.setupArtifacts.federatedCredentials[0].providerId
+      ).toBeNull();
+      expect(
+        provenOwnedCleanupTargets(restored).map((entry) => entry.identity)
+      ).toEqual(
+        expect.arrayContaining([
+          "octo/app:prod",
+          "radius-prod@repo:octo/app:environment:prod"
+        ])
+      );
+    });
+
+    it.each([
+      ["a number the provider returned", 1234, "1234"],
+      ["a padded string", "  fic-1  ", "fic-1"],
+      ["an empty string", "   ", null],
+      ["a missing value", undefined, null],
+      ["a value that is not an identity", { id: 1 }, null]
+    ])("normalizes %s", (_label, value, expected) => {
+      const op = claimed();
+      const persisted = toPersistedOperation(op) as any;
+      persisted.setupArtifacts.githubEnvironment.providerId = value;
+
+      expect(
+        fromPersistedOperation(persisted).setupArtifacts.githubEnvironment
+          .providerId
+      ).toBe(expected);
+    });
+
+    it("fills in an id a later reconciliation learned", () => {
+      const op = claimed();
+      op.setupArtifacts.federatedCredentials[0].providerId = null;
+
+      recordCreatedFederatedCredential(op, {
+        name: "radius-prod",
+        subject: "repo:octo/app:environment:prod",
+        providerId: "fic-1"
+      });
+
+      expect(op.setupArtifacts.federatedCredentials).toHaveLength(1);
+      expect(op.setupArtifacts.federatedCredentials[0].providerId).toBe(
+        "fic-1"
+      );
+    });
+  });
+
+  describe("records written before the journal existed", () => {
+    function legacy(state: string, schemaVersion: number) {
+      const op = createOperation({
+        operationId: "op_legacy",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      op.resumeRequest = { environment: { environment: "prod" } };
+      recordAzureApp(op, {
+        state: "created",
+        appId: "app-1",
+        displayName: "radius-app"
+      });
+      if (state !== "running") {
+        finish(op, state, {
+          failure: { code: "operation-stalled", message: "lost contact" }
+        });
+      }
+      const persisted = toPersistedOperation(op);
+      persisted.schemaVersion = schemaVersion;
+      return fromPersistedOperation(persisted);
+    }
+
+    it.each([1, 2, 3, 4])(
+      "quarantines a nonterminal version %i record instead of guessing",
+      (schemaVersion) => {
+        const restored = reconcileRestoredOperation(
+          legacy("running", schemaVersion)
+        );
+
+        expect(restored).toMatchObject({
+          state: "failed_partial",
+          recoveryState: "manual_required",
+          executionActive: false,
+          providerRecovery: { state: "unrecoverable_legacy" },
+          failure: { code: "operation-legacy-unrecoverable" }
+        });
+        expect(restored.endedAt).toEqual(expect.any(String));
+        expect(legacyRecoveryQuarantine(restored)).toContain(
+          "did not journal the provider requests it had in flight"
+        );
+      }
+    );
+
+    it("blocks every forward and destructive action on a quarantined record", () => {
+      const restored = reconcileRestoredOperation(legacy("running", 4));
+
+      expect(canContinueSetup(restored)).toMatchObject({ ok: false });
+      expect(canRetrySetup(restored)).toMatchObject({ ok: false });
+      // The forward gate reads the quarantine through the same ambiguity check
+      // an unproven mutation uses, so neither path can walk past it.
+      expect(ambiguousProviderMutation(restored)).toContain(
+        "will neither continue the setup nor delete anything"
+      );
+      expect(canStartRollback(restored)).toMatchObject({
+        ok: false,
+        code: "rollback-legacy-unrecoverable"
+      });
+      expect(canRetryCleanup(restored)).toMatchObject({
+        ok: false,
+        code: "cleanup-retry-legacy-unrecoverable"
+      });
+      expect(canExitSetup(restored)).toMatchObject({
+        ok: false,
+        code: "exit-legacy-unrecoverable"
+      });
+    });
+
+    it("keeps the quarantine after a further save and reload", () => {
+      const restored = reconcileRestoredOperation(legacy("running", 3));
+      const reloaded = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(restored))
+      );
+
+      expect(reloaded.providerRecovery.state).toBe("unrecoverable_legacy");
+      expect(canStartRollback(reloaded)).toMatchObject({
+        ok: false,
+        code: "rollback-legacy-unrecoverable"
+      });
+    });
+
+    it("quarantines a pre-journal record waiting at an input prompt", () => {
+      const op = legacy("running", 4);
+      op.state = "input_required";
+      op.inputRequired = {
+        code: "azure-app-selection",
+        message: "Choose an identity.",
+        checkpoint: "azure-app-selection",
+        metadata: null,
+        requestedAt: new Date().toISOString()
+      };
+
+      const restored = reconcileRestoredOperation(op);
+
+      // The prompt is a forward step. Answering it would resume an attempt
+      // whose in-flight provider request left no trace at all.
+      expect(restored).toMatchObject({
+        state: "failed_partial",
+        recoveryState: "manual_required",
+        providerRecovery: { state: "unrecoverable_legacy" }
+      });
+      expect(
+        canResumeInput(restored, {
+          code: "azure-app-selection",
+          checkpoint: "azure-app-selection",
+          repo: "octo/app",
+          environment: "prod",
+          provider: "azure"
+        })
+      ).toBe(false);
+    });
+
+    it("refuses an input resume while a provider mutation is unproven", () => {
+      const op = createOperation({
+        operationId: "op_input",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      requireInput(op, {
+        code: "azure-app-selection",
+        message: "Choose an identity.",
+        checkpoint: "azure-app-selection"
+      });
+      const answer = {
+        code: "azure-app-selection",
+        checkpoint: "azure-app-selection",
+        repo: "octo/app",
+        environment: "prod",
+        provider: "azure"
+      };
+      expect(canResumeInput(op, answer)).toBe(true);
+
+      const mutation = prepareProviderMutation(op, {
+        kind: "azure_application.create",
+        target: "octo/app:prod:radius-deploy"
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "outcome_unknown",
+        "The create response was lost."
+      );
+
+      expect(canResumeInput(op, answer)).toBe(false);
+    });
+
+    it("quarantines a terminal legacy record without rewriting its verdict", () => {
+      const restored = reconcileRestoredOperation(legacy("failed_partial", 4));
+
+      // The customer was already told this attempt failed and why. The
+      // quarantine withdraws the commands, not the story.
+      expect(restored.state).toBe("failed_partial");
+      expect(restored.failure.code).toBe("operation-stalled");
+      expect(restored.providerRecovery.state).toBe("unrecoverable_legacy");
+      expect(legacyRecoveryQuarantine(restored)).toContain(
+        "will neither continue the setup nor delete anything on its guess"
+      );
+      expect(canStartRollback(restored)).toMatchObject({
+        ok: false,
+        code: "rollback-legacy-unrecoverable"
+      });
+      expect(canExitSetup(restored)).toMatchObject({
+        ok: false,
+        code: "exit-legacy-unrecoverable"
+      });
+      expect(canRetryCleanup(restored)).toMatchObject({
+        ok: false,
+        code: "cleanup-retry-legacy-unrecoverable"
+      });
+      expect(canRetrySetup(restored).ok).toBe(false);
+      expect(canContinueSetup(restored).ok).toBe(false);
+    });
+
+    it("does not quarantine a current-version record", () => {
+      const restored = reconcileRestoredOperation(
+        legacy("running", OPERATION_SCHEMA_VERSION)
+      );
+
+      expect(legacyRecoveryQuarantine(restored)).toBeNull();
+      expect(restored.providerRecovery.state).toBe("idle");
+    });
+
+    it.each([
+      ["no record at all", null],
+      ["a record with no restored version", { state: "running" }],
+      [
+        "a record whose restored version is unreadable",
+        { state: "running", restoredSchemaVersion: "old" }
+      ]
+    ])("quarantines nothing for %s", (_label, candidate) => {
+      expect(quarantineUnrecoverableLegacy(candidate)).toBe(false);
+    });
+
+    it("keeps the repository reserved while a delete outcome is unproven", () => {
+      const op = createOperation({
+        operationId: "op_branch",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_branch.delete",
+        target: "octo/app\u0000radius/setup-prod\u0000base"
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "outcome_unknown",
+        "The delete response was lost."
+      );
+      finish(op, "failed_partial", {
+        failure: {
+          code: "setup-branch-delete-unresolved",
+          message: "unreadable"
+        }
+      });
+
+      // Nothing in the ledger is removable, so only the open journal entry can
+      // hold the repository — and it must.
+      expect(canStartRollback(op).ok).toBe(false);
+      expect(hasUnfinishedCleanupAuthority(op)).toBe(true);
+
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "manual_required",
+        "Remove that exact branch yourself."
+      );
+
+      expect(hasUnfinishedCleanupAuthority(op)).toBe(false);
+    });
+
+    it("does not quarantine an old record that journaled its work", () => {
+      const op = createOperation({
+        operationId: "op_legacy",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_environment.put",
+        target: "octo/app:prod"
+      });
+      settleProviderMutation(op, mutation.mutationId, "confirmed", "matched");
+      const persisted = toPersistedOperation(op);
+      persisted.schemaVersion = 4;
+
+      const restored = reconcileRestoredOperation(
+        fromPersistedOperation(persisted)
+      );
+
+      expect(legacyRecoveryQuarantine(restored)).toBeNull();
+    });
+  });
+
+  it("blocks setup retry while a provider outcome is unknown", () => {
+    const op = createOperation({
+      operationId: "op_recovery",
+      provider: "azure",
+      repo: "octo/app",
+      environment: "prod"
+    });
+    op.resumeRequest = { environment: { environment: "prod" } };
+    prepareProviderMutation(op, {
+      kind: "azure_application.create",
+      target: "tenant:radius-prod"
+    });
+    finish(op, "failed_partial", {
+      failure: { code: "operation-interrupted", message: "interrupted" }
+    });
+
+    expect(canRetrySetup(op)).toMatchObject({
+      ok: false,
+      code: "setup-retry-provider-outcome-unknown"
+    });
+  });
+
+  it("retains exact manual guidance and never treats command IDs as provider keys", () => {
+    const op = createOperation({ operationId: "op_recovery" });
+    const mutation = prepareProviderMutation(op, {
+      kind: "azure_role_assignment.create",
+      target: "principal:scope:role",
+      providerIdempotencyKey: "role-assignment-guid"
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "manual_required",
+      "The provider identity did not match."
+    );
+
+    expect(
+      providerMutationRecord(
+        op,
+        "azure_role_assignment.create",
+        "principal:scope:role"
+      )
+    ).toMatchObject({
+      status: "manual_required",
+      providerIdempotencyKey: "role-assignment-guid",
+      evidence: "The provider identity did not match."
+    });
+    expect(toClientView(op).providerRecovery).toMatchObject({
+      state: "manual_required",
+      guidance: "The provider identity did not match."
+    });
+  });
+
+  it("does not let later prepare or settle calls clear rollback pending", () => {
+    const op = createOperation({ operationId: "op_recovery" });
+    const first = prepareProviderMutation(op, {
+      kind: "azure_application.create",
+      target: "octo/app:dev"
+    });
+    op.providerRecovery.state = "rollback_pending";
+
+    settleProviderMutation(op, first.mutationId, "confirmed", "adopted");
+    const second = prepareProviderMutation(op, {
+      kind: "azure_app_owner.add",
+      target: "app:user"
+    });
+
+    expect(op.providerRecovery.state).toBe("rollback_pending");
+    settleProviderMutation(
+      op,
+      second.mutationId,
+      "manual_required",
+      "The owner identity could not be proven."
+    );
+    expect(op.providerRecovery.state).toBe("rollback_pending");
+    expect(providerRecoveryManualGuidance(op)).toBe(
+      "The owner identity could not be proven."
+    );
+  });
+
+  it("preserves rollback admission when an uncertain branch deletion is restored", () => {
+    const op = createOperation({
+      operationId: "op_recovery",
+      provider: "azure",
+      repo: "octo/app",
+      environment: "prod"
+    });
+    beginRetryAttempt(op, "cleanup");
+    const rollback = acceptCommand(op, {
+      kind: "rollback",
+      attempt: 1,
+      target: "cleanup#branch"
+    });
+    setCommandState(op, rollback.command.commandId, "running");
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_branch.delete",
+      target: "octo/app:refs/heads/radius/setup:abc123"
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The delete response was lost."
+    );
+    op.providerRecovery.state = "rollback_pending";
+    finish(op, "failed_partial", {
+      failure: {
+        code: "provider-mutation-outcome-unknown",
+        message: "The delete response was lost."
+      }
+    });
+
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(op))
+    );
+
+    expect(restored).toMatchObject({
+      state: "running",
+      endedAt: null,
+      recoveryState: "provider_reconciliation_pending",
+      providerRecovery: { state: "rollback_pending" }
+    });
+    expect(latestCommand(restored)).toMatchObject({
+      commandId: rollback.command.commandId,
+      kind: "rollback",
+      state: "finished",
+      outcome: "failed_partial"
+    });
+    expect(unresolvedProviderMutations(restored)).toEqual([
+      expect.objectContaining({ kind: "github_branch.delete" })
+    ]);
+  });
+
+  describe("the destructive gate every removal command shares", () => {
+    function terminalWithLedger(operationId = "op_gate") {
+      const op = createOperation({
+        operationId,
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      recordAzureApp(op, {
+        state: "created",
+        origin: "this_operation",
+        appId: "app-1",
+        displayName: "radius-app"
+      });
+      finish(op, "failed_partial", {
+        failure: { code: "operation-interrupted", message: "interrupted" }
+      });
+      return op;
+    }
+
+    // A rollback that already ran and left something behind. This is the only
+    // shape a retry-rollback is offered for, and it is deliberately the shape
+    // where rollback itself would otherwise refuse for a different reason —
+    // so the refusal code proves the provider gate ran first.
+    function terminalWithCleanupWarning() {
+      const op = createOperation({
+        operationId: "op_gate_retry",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      recordAzureApp(op, {
+        state: "created",
+        origin: "this_operation",
+        appId: "app-1",
+        displayName: "radius-app"
+      });
+      recordCleanupState(op, {
+        state: "succeeded_with_warnings",
+        attempts: 1,
+        results: [
+          {
+            attempt: 1,
+            artifactType: "azure_app",
+            target: "radius-app (app-1)",
+            outcome: "warning",
+            detail: "Azure returned 429."
+          }
+        ]
+      });
+      finish(op, "failed_partial", {
+        failure: { code: "operation-interrupted", message: "interrupted" }
+      });
+      return op;
+    }
+
+    function terminalWithoutLedger() {
+      const op = createOperation({
+        operationId: "op_gate_empty",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      finish(op, "failed_partial", {
+        failure: { code: "operation-interrupted", message: "interrupted" }
+      });
+      return op;
+    }
+
+    it("offers all three removals while every mutation is accounted for", () => {
+      const op = terminalWithLedger();
+
+      expect(canStartRollback(op).ok).toBe(true);
+      expect(canExitSetup(op).ok).toBe(true);
+      expect(canRetryCleanup(terminalWithCleanupWarning()).ok).toBe(true);
+    });
+
+    it.each([
+      [
+        "an unproven mutation",
+        "outcome_unknown",
+        "Radius has not confirmed the outcome of azure_application.create"
+      ],
+      [
+        "a mutation only the customer can settle",
+        "manual_required",
+        "Two applications carry this operation's name."
+      ]
+    ])(
+      "refuses rollback, retry-rollback and exit for %s",
+      (_label, status, expected) => {
+        const op = terminalWithCleanupWarning();
+        const mutation = prepareProviderMutation(op, {
+          kind: "azure_application.create",
+          target: "octo/app:prod:radius-deploy"
+        });
+        settleProviderMutation(
+          op,
+          mutation.mutationId,
+          status,
+          status === "manual_required" ?
+            "Two applications carry this operation's name."
+          : null
+        );
+
+        expect(canStartRollback(op)).toMatchObject({
+          ok: false,
+          code: "rollback-provider-outcome-unknown",
+          detail: expect.stringContaining(expected)
+        });
+        expect(canRetryCleanup(op)).toMatchObject({
+          ok: false,
+          code: "cleanup-retry-provider-outcome-unknown",
+          detail: expect.stringContaining(expected)
+        });
+        expect(canExitSetup(op)).toMatchObject({
+          ok: false,
+          code: "exit-provider-outcome-unknown",
+          detail: expect.stringContaining(expected)
+        });
+      }
+    );
+
+    it("refuses exit when the very first mutation is unknown and nothing is in the ledger", () => {
+      const op = terminalWithoutLedger();
+      const mutation = prepareProviderMutation(op, {
+        kind: "azure_application.create",
+        target: "octo/app:prod:radius-deploy"
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "outcome_unknown",
+        "The create response was lost."
+      );
+
+      // An empty selection is exactly the shape an unjournaled resource
+      // produces, so "nothing is owned" must not read as permission to close
+      // the setup and stop reporting it.
+      expect(provenOwnedCleanupTargets(op)).toEqual([]);
+      expect(canExitSetup(op)).toMatchObject({
+        ok: false,
+        code: "exit-provider-outcome-unknown"
+      });
+      expect(canStartRollback(op)).toMatchObject({
+        ok: false,
+        code: "rollback-provider-outcome-unknown"
+      });
+      expect(
+        projectOperationActions(op).map((action) => action.kind)
+      ).not.toContain(EXIT_COMMAND_KIND);
+    });
+
+    it("refuses retry-rollback before consulting a ledger it does not have", () => {
+      const op = terminalWithoutLedger();
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_environment.put",
+        target: "octo/app:prod"
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "manual_required",
+        "GitHub did not prove who created that environment."
+      );
+
+      expect(canRetryCleanup(op)).toMatchObject({
+        ok: false,
+        code: "cleanup-retry-provider-outcome-unknown"
+      });
+    });
+
+    it("explains the refusal with the reconciliation's own sentence", () => {
+      const op = terminalWithLedger();
+      const mutation = prepareProviderMutation(op, {
+        kind: "azure_application.create",
+        target: "octo/app:prod:radius-deploy"
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "manual_required",
+        "Two applications carry this operation's name."
+      );
+
+      expect(projectActionGuidance(op)).toEqual(
+        expect.arrayContaining([
+          {
+            code: "rollback-provider-outcome-unknown",
+            message: expect.stringContaining(
+              "Two applications carry this operation's name."
+            )
+          }
+        ])
+      );
+    });
+
+    it("lets every removal back once the mutation is settled", () => {
+      const op = terminalWithCleanupWarning();
+      const mutation = prepareProviderMutation(op, {
+        kind: "azure_application.create",
+        target: "octo/app:prod:radius-deploy"
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "outcome_unknown",
+        "lost"
+      );
+      expect(canRetryCleanup(op).ok).toBe(false);
+
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "confirmed",
+        "The exact provider identity matched."
+      );
+
+      expect(canRetryCleanup(op).ok).toBe(true);
+      expect(canExitSetup(op).ok).toBe(true);
+    });
+
+    it("keeps a cleanup retry from reporting success while a journal entry is open", () => {
+      const op = terminalWithCleanupWarning();
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_environment.put",
+        target: "octo/app:prod"
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "outcome_unknown",
+        "The environment response was lost."
+      );
+
+      // The retry is refused, so no pass can record a clean outcome for a
+      // record that still owes an answer, and the repository stays reserved.
+      expect(canRetryCleanup(op).ok).toBe(false);
+      expect(hasUnfinishedCleanupAuthority(op)).toBe(true);
+      expect(
+        projectOperationActions(op).map((action) => action.kind)
+      ).not.toContain("retry_cleanup");
+    });
+  });
+});
 
 function newOp(overrides = {}) {
   return createOperation({
@@ -217,7 +1068,8 @@ describe("canonical environment identity", () => {
       state: "created_candidate",
       origin: "unknown",
       repo: "contoso/store",
-      name: "Production"
+      name: "Production",
+      providerId: null
     });
   });
 
@@ -239,7 +1091,8 @@ describe("canonical environment identity", () => {
       state: "reused",
       origin: "unknown",
       repo: "contoso/store",
-      name: "Staging"
+      name: "Staging",
+      providerId: null
     });
   });
 
@@ -261,7 +1114,8 @@ describe("canonical environment identity", () => {
       state: "reused",
       origin: "unknown",
       repo: "fabrikam/store",
-      name: "production"
+      name: "production",
+      providerId: null
     });
   });
 });
@@ -495,7 +1349,8 @@ describe("record shape", () => {
         state: "not_started",
         origin: "unknown",
         repo: null,
-        name: null
+        name: null,
+        providerId: null
       },
       commit: {
         mode: "not_started",
@@ -604,6 +1459,38 @@ describe("record shape", () => {
         results: []
       }
     });
+  });
+
+  it("upgrades a legacy role assignment entry with its deterministic provider id", () => {
+    const op = fromPersistedOperation({
+      ...toPersistedOperation(newOp()),
+      setupArtifacts: {
+        roleAssignments: [
+          {
+            role: "Contributor",
+            scope: "/subscriptions/sub/resourceGroups/rg",
+            principalObjectId: "sp-1"
+          }
+        ]
+      }
+    });
+
+    expect(op.setupArtifacts.roleAssignments[0].assignmentId).toBe(null);
+    recordCreatedRoleAssignment(op, {
+      assignmentId: "assignment-1",
+      role: "Contributor",
+      scope: "/subscriptions/sub/resourceGroups/rg",
+      principalObjectId: "sp-1"
+    });
+
+    expect(op.setupArtifacts.roleAssignments).toEqual([
+      {
+        assignmentId: "assignment-1",
+        role: "Contributor",
+        scope: "/subscriptions/sub/resourceGroups/rg",
+        principalObjectId: "sp-1"
+      }
+    ]);
   });
 
   it("marks the first committed workflow as the rollback boundary", () => {
@@ -3462,6 +4349,26 @@ describe("retry eligibility", () => {
     expect(unresolvedCleanupTargets(null)).toEqual([]);
   });
 
+  it("never repeats a cleanup mutation whose provider outcome is unknown", () => {
+    const op = newOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    warnedCleanup(op, [
+      {
+        artifactType: "azure_app",
+        target: "radius (app-1)",
+        outcome: "warning",
+        detail:
+          "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. The exact provider identity is still present."
+      }
+    ]);
+    finish(op, "failed_partial", { failure: { code: "x" } });
+
+    expect(canRetryCleanup(op)).toMatchObject({
+      ok: false,
+      code: "cleanup-retry-outcome-unknown"
+    });
+  });
+
   it("never offers cleanup retry when the committed workflows cannot be proven unchanged", () => {
     const op = newOp();
     recordAzureApp(op, { state: "created", appId: "app-1" });
@@ -3515,6 +4422,81 @@ describe("retry eligibility", () => {
       }
     ]);
     expect(canRetryCleanup(op)).toMatchObject({ ok: true });
+  });
+
+  it.each([
+    [
+      "a service principal keyed on the application alone",
+      (op) =>
+        recordServicePrincipal(op, {
+          state: "created",
+          appId: "app-1",
+          objectId: "sp-1"
+        }),
+      {
+        artifactType: "service_principal",
+        target: "app-1",
+        identity: "app-1"
+      },
+      "service_principal#sp-1|app-1"
+    ],
+    [
+      "a GitHub environment keyed on repo and name alone",
+      (op) =>
+        recordGitHubEnvironment(op, {
+          state: "created",
+          repo: "contoso/store",
+          name: "dev",
+          providerId: "1234567"
+        }),
+      {
+        artifactType: "github_environment",
+        target: "contoso/store:dev",
+        identity: "contoso/store:dev"
+      },
+      "github_environment#1234567|contoso/store:dev"
+    ]
+  ])(
+    "retries %s that an earlier version recorded before the provider id led",
+    (_name, record, result, expectedKey) => {
+      const op = newOp();
+      record(op);
+      warnedCleanup(op, [
+        {
+          ...result,
+          outcome: "warning",
+          detail: "The provider was unreachable."
+        }
+      ]);
+      finish(op, "failed_partial", { failure: { code: "setup-failed" } });
+
+      // Refusing the older identity would leave the artifact claimed by a
+      // record nothing can ever match, so it could never be removed.
+      expect(unresolvedCleanupTargets(op)).toMatchObject([
+        { artifactType: result.artifactType, key: expectedKey }
+      ]);
+    }
+  );
+
+  it("still refuses a recorded identity that names a different artifact", () => {
+    const op = newOp();
+    recordServicePrincipal(op, {
+      state: "created",
+      appId: "app-1",
+      objectId: "sp-1"
+    });
+    warnedCleanup(op, [
+      {
+        artifactType: "service_principal",
+        target: "app-2",
+        identity: "app-2",
+        outcome: "warning",
+        detail: "Entra was unreachable."
+      }
+    ]);
+    finish(op, "failed_partial", { failure: { code: "setup-failed" } });
+
+    expect(unresolvedCleanupTargets(op)).toEqual([]);
   });
 
   it("drops a workflow retry target the ledger no longer holds", () => {
@@ -4683,27 +5665,58 @@ describe("a closed operation never looks like work in progress", () => {
 });
 
 describe("an interrupted rollback still offers a way out", () => {
-  it("preserves an active cleanup across restart as an interrupted rollback", () => {
+  it.each([["rollback"], ["retry_cleanup"], ["exit_setup"]])(
+    "keeps an interrupted %s resumable instead of closing the record on it",
+    (kind) => {
+      const op = stoppedWithCreatedResources();
+      const rollback = canStartRollback(op);
+      beginRetryAttempt(op, "cleanup");
+      const accepted = acceptCommand(op, {
+        kind,
+        attempt: 1,
+        target: rollback.target
+      });
+      setCommandState(op, accepted.command.commandId, "running");
+      recordCleanupPass(op, "running", []);
+
+      const restored = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(op))
+      );
+
+      // Terminalizing here would hide the command from every scheduler — a
+      // terminal record owns no active command — and the pass that was
+      // removing resources would never be picked up again.
+      expect(restored.state).toBe("running");
+      expect(restored.endedAt).toBeNull();
+      expect(restored.executionActive).toBe(false);
+      expect(restored.recoveryState).toBe("provider_reconciliation_pending");
+      expect(restored.setupArtifacts.cleanup.state).toBe("running");
+      expect(findActiveCommand(restored)).toMatchObject({
+        kind,
+        commandId: accepted.command.commandId,
+        state: "running"
+      });
+    }
+  );
+
+  it("still closes a record whose cleanup command already finished", () => {
     const op = stoppedWithCreatedResources();
     const rollback = canStartRollback(op);
     beginRetryAttempt(op, "cleanup");
-    acceptCommand(op, {
+    const accepted = acceptCommand(op, {
       kind: "rollback",
       attempt: 1,
       target: rollback.target
     });
-    recordCleanupPass(op, "running", []);
+    setCommandState(op, accepted.command.commandId, "finished", "rolled-back");
 
     const restored = reconcileRestoredOperation(
       fromPersistedOperation(toPersistedOperation(op))
     );
 
+    // History, not work. Nothing is left to resume, so the record ends.
     expect(restored.state).toBe("failed_partial");
-    expect(restored.setupArtifacts.cleanup.state).toBe("running");
-    expect(canStartRollback(restored)).toMatchObject({ ok: true });
-    expect(
-      projectOperationActions(restored).map((entry) => entry.id)
-    ).toContain("rollback");
+    expect(findActiveCommand(restored)).toBeNull();
   });
 
   it("treats a cleanup left running on a closed record as unfinished, not done", () => {
@@ -5676,7 +6689,8 @@ describe("proving the GitHub environment this setup created", () => {
       state: "created",
       origin: "this_operation",
       repo: "contoso/store",
-      name: "dev"
+      name: "dev",
+      providerId: null
     });
   });
 
@@ -5766,7 +6780,8 @@ describe("proving the GitHub environment this setup created", () => {
       state: "created",
       origin: "this_operation",
       repo: "contoso/store",
-      name: "dev"
+      name: "dev",
+      providerId: null
     });
   });
 
@@ -5828,7 +6843,8 @@ describe("provenance survives an extension restart", () => {
       state: "created",
       origin: "this_operation",
       repo: "contoso/store",
-      name: "dev"
+      name: "dev",
+      providerId: null
     });
     expect(reloaded.setupArtifacts.azureApp).toMatchObject({
       state: "created",
@@ -6067,5 +7083,89 @@ describe("reuse is explained in the customer's terms", () => {
     expect(rollback.preview.keeps.map((entry) => entry.action)).not.toContain(
       ""
     );
+  });
+});
+
+describe("verdicts and quarantines the journal must not overwrite", () => {
+  it("keeps a legacy quarantine when a new mutation is journalled", () => {
+    // The quarantine is the customer's only account of what to review, and it
+    // cannot be re-armed once entries exist, so journalling must not clear it.
+    const op = createOperation({ operationId: "op_legacy" });
+    op.restoredSchemaVersion = 1;
+    expect(quarantineUnrecoverableLegacy(op)).toBe(true);
+    const guidance = legacyRecoveryQuarantine(op);
+    expect(guidance).toBeTruthy();
+
+    prepareProviderMutation(op, {
+      kind: "azure_application.create",
+      target: "octo/app:dev:radius"
+    });
+
+    expect(legacyRecoveryQuarantine(op)).toBe(guidance);
+    expect(op.providerRecovery.state).toBe("unrecoverable_legacy");
+  });
+
+  it("remembers the verdict a terminal record already reported", () => {
+    // Reopening is what lets the recovery scheduler, which skips ended records,
+    // reconcile the outstanding delete. The verdict the customer was shown is
+    // kept so the pass that follows cannot rewrite a cancellation.
+    const op = createOperation({ operationId: "op_cancelled" });
+    finish(op, "cancelled", {});
+    prepareProviderMutation(op, {
+      kind: "github_environment.cleanup_delete",
+      target: "octo/app:dev"
+    });
+    settleProviderMutation(
+      op,
+      op.providerRecovery.mutations[0].mutationId,
+      "outcome_unknown",
+      "lost"
+    );
+
+    reconcileRestoredOperation(op);
+
+    expect(op.recoveryState).toBe("provider_reconciliation_pending");
+    expect(op.reconciliationPriorOutcome).toMatchObject({ state: "cancelled" });
+  });
+});
+
+describe("a finished cleanup verdict across a later interruption", () => {
+  it("keeps succeeded_with_warnings when a continued setup is interrupted", () => {
+    // A warned rollback offers Continue setup beside Retry rollback. Taking
+    // Continue reopens the record, so a restart finds `continue_setup` as the
+    // latest command and no cleanup pass in flight. Writing `not_needed` there
+    // would make `canRetryCleanup` answer not-retryable and `canStartRollback`
+    // answer already-attempted while the App Registration is still listed as
+    // proven-owned: unremovable by either route.
+    const op = newOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    warnedCleanup(op, [
+      {
+        artifactType: "azure_app",
+        target: "app-1",
+        identity: "app-1",
+        outcome: "warning",
+        detail: "Entra was unreachable."
+      }
+    ]);
+    finish(op, "failed_partial", { failure: { code: "setup-failed" } });
+    acceptCommand(op, { kind: "continue_setup", attempt: 1 });
+    op.state = "running";
+    op.endedAt = null;
+
+    reconcileRestoredOperation(op);
+
+    expect(op.setupArtifacts.cleanup.state).toBe("succeeded_with_warnings");
+    expect(canRetryCleanup(op)).toMatchObject({ ok: true });
+  });
+
+  it("still marks an untouched cleanup not_needed", () => {
+    const op = newOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    op.state = "running";
+
+    reconcileRestoredOperation(op);
+
+    expect(op.setupArtifacts.cleanup.state).toBe("not_needed");
   });
 });
