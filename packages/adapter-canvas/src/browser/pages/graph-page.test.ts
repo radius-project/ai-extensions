@@ -473,6 +473,33 @@ describe("initializeGraphPage", () => {
     await flushPromises();
   });
 
+  it("does not let a late branch listing replace the latest dropdown selection", async () => {
+    const { browser, branch } = fixture({ loaded: false });
+    const branches = createDeferred<HttpResponse>();
+    const graph = createDeferred<HttpResponse>();
+    browser.net.handle("/api/discover-branches", () => branches.promise);
+    browser.net.handle("/api/load-graph", () => graph.promise);
+
+    initializeGraphPage(browser.context, globals());
+    branch.value = "release";
+    branch.dispatch("change");
+    branch.value = "hotfix";
+    branch.dispatch("change");
+    branches.resolve(
+      jsonResponse({
+        branches: [
+          { name: "main", sha: "aaaaaaa" },
+          { name: "release", sha: "bbbbbbb" }
+        ]
+      })
+    );
+    await flushPromises();
+
+    expect(branch.value).toBe("hotfix");
+    graph.resolve(jsonResponse({ resources: [{ id: "app/current" }] }));
+    await flushPromises();
+  });
+
   it("skips the automatic load when no branch is selected", async () => {
     const { browser, button } = fixture({ loaded: false, branchValue: "" });
     browser.net.handle("/api/discover-branches", () =>
