@@ -25,6 +25,7 @@ import {
   toClientView,
   EXIT_COMMAND_KIND,
   EXIT_COMMAND_OUTCOME,
+  OPERATION_KIND_DELETE,
   STAGE_VERIFY,
   type OperationAttemptKind,
   type OperationCommandKind,
@@ -326,6 +327,22 @@ async function resolveOperation(
   const operation = operationId ? dependencies.get(operationId) : null;
   if (!params || !operationId || !operation) {
     unknownOperation(context);
+    return null;
+  }
+  // These are setup (create) controls. A deletion runs its own fixed teardown
+  // with no stop, continue, retry, rollback, or exit boundary, so applying one
+  // here would either promise an action the delete runner cannot honor or, in
+  // the case of stop, record a cancellation the runner ignores and a restart
+  // then wrongly finalizes. Refuse them for delete ops rather than corrupt the
+  // record. Deletion is observed through the status route, which is unaffected.
+  if (operation.kind === OPERATION_KIND_DELETE) {
+    sendJson(context, 409, {
+      error:
+        "This operation is a deletion and is not controlled through setup controls.",
+      code: "operation-not-setup-controllable",
+      operationId,
+      operation: clientView(operation)
+    });
     return null;
   }
   return { operationId, operation, params };

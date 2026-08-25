@@ -3012,6 +3012,25 @@ describe("durable stop", () => {
     expect(restored.recoveryState).toBe("stopped");
     expect(restored.control.stop.boundary).toBe("restart_recovery");
   });
+
+  it("never cancels a delete operation through the restart stop boundary", () => {
+    // A delete op exposes no stop control, but a stop recorded against it (via a
+    // crafted request) must not be honored through the create-side cancel path
+    // on restart: that would strand a half-deleted environment because the
+    // delete recovery scheduler skips terminal records. The delete resume branch
+    // owns the restart instead, keeping the op live and recoverable.
+    const op = newDeleteOp();
+    for (const stage of op.stages) {
+      if (stage.id === op.currentStage) stage.state = "running";
+    }
+    requestStop(op);
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(op))
+    );
+    expect(restored.state).not.toBe("cancelled");
+    expect(isTerminalState(restored.state)).toBe(false);
+    expect(restored.recoveryState).toBe("interrupted");
+  });
 });
 
 describe("command identity and idempotency", () => {
@@ -3573,6 +3592,24 @@ describe("action projection", () => {
     expect(stop.description).toContain("before the next step");
     requestStop(op);
     expect(projectOperationActions(op)[0].pending).toBe(true);
+  });
+
+  it("offers no create-side controls for a delete operation", () => {
+    // A deletion runs a fixed teardown its runner cannot stop, continue, retry,
+    // roll back, or exit. Surfacing any of those controls would promise an
+    // action the runner ignores, so a live delete op offers none of them.
+    const running = newDeleteOp();
+    expect(projectOperationActions(running)).toEqual([]);
+    // Even a stop already recorded against the delete op (e.g. via a crafted
+    // request) must not resurface as a pending control.
+    requestStop(running);
+    expect(projectOperationActions(running)).toEqual([]);
+    // A terminal delete op likewise exposes no retry/rollback/exit surface.
+    const failed = newDeleteOp();
+    finish(failed, "failed_partial", {
+      failure: { code: "operation-stalled" }
+    });
+    expect(projectOperationActions(failed)).toEqual([]);
   });
 
   it("explains the immediate stop while a prompt is open", () => {

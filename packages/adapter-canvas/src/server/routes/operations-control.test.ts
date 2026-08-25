@@ -21,7 +21,9 @@ import { routeKey } from "../route-table.js";
 import {
   acceptCommand,
   beginRetryAttempt,
+  buildDeleteStages,
   canRetryCleanup,
+  createOperation,
   finish,
   finishSucceeded,
   onOperationTerminal,
@@ -34,6 +36,7 @@ import {
   setCommandState,
   stopAtBoundary,
   EXIT_COMMAND_KIND,
+  OPERATION_KIND_DELETE,
   STAGE_VERIFY
 } from "../../operations.js";
 import {
@@ -42,6 +45,7 @@ import {
   retryableSetup,
   reusedOnlyFailure,
   stoppedSetup,
+  FIXTURE_REPO,
   type OperationFixture
 } from "../../../test/support/server/operation-fixtures.js";
 import type { CanvasServerEntry } from "../types.js";
@@ -1157,6 +1161,34 @@ describe("contracts shared by every control route", () => {
         code: "unknown-operation"
       });
       expect(deps.journal.persistCalls).toBe(0);
+    }
+  );
+
+  it.each(routes)(
+    "refuses a delete operation on $name without mutating it",
+    async ({ path, handler }) => {
+      // A deletion is not a setup, so none of the setup controls apply. The
+      // route must refuse it outright — never record a stop, schedule a
+      // command, or persist — so the delete runner's fixed teardown is the only
+      // thing that ever acts on the record.
+      const deleteOp = createOperation({
+        provider: "azure",
+        repo: FIXTURE_REPO,
+        environment: "dev",
+        kind: OPERATION_KIND_DELETE,
+        stages: buildDeleteStages()
+      }) as OperationFixture;
+      const deps = dependencies({ get: () => deleteOp });
+      const out = await call(handler, path(deleteOp.operationId), deps);
+
+      expect(out.recording.status).toBe(409);
+      expect(out.payload()).toMatchObject({
+        code: "operation-not-setup-controllable"
+      });
+      expect(deps.journal.persistCalls).toBe(0);
+      expect(deps.journal.scheduled).toEqual([]);
+      expect(deleteOp.control.stop.requestedAt).toBeFalsy();
+      expect(deleteOp.state).not.toBe("cancelled");
     }
   );
 

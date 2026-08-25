@@ -3094,6 +3094,13 @@ export function projectOperationHeadline(op: any): any {
 
 export function projectOperationActions(op: any): any[] {
   if (!op) return [];
+  // A deletion runs a fixed, non-interruptible teardown: its runner honors no
+  // stop, continue, retry, rollback, or exit command. Offering any create-side
+  // control on a delete op would promise an action the runner cannot keep, and
+  // accepting one (a stop) would strand or, on restart, wrongly cancel the
+  // deletion. Delete progress and completion are driven by the delete-specific
+  // panel, so this control set is empty for delete ops.
+  if (op.kind === OPERATION_KIND_DELETE) return [];
   const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
   const control = op.control || createOperationControl();
   if (!isTerminalState(op.state)) {
@@ -4246,7 +4253,11 @@ export function reconcileRestoredOperation(op: any): any {
   }
   // A stop the customer already paid for outlives the process that was going to
   // honor it. Nothing is mid-flight after a restart, so the boundary is here.
-  if (shouldStop(op)) {
+  // Delete ops are excluded: they expose no stop control (see
+  // `projectOperationActions`) and their runner has no stop boundary, so a
+  // delete must never be terminalized through the create-side cancel path — it
+  // is resumed by the delete branch below instead.
+  if (op.kind !== OPERATION_KIND_DELETE && shouldStop(op)) {
     stopAtBoundary(op, "restart_recovery");
     op.recoveryState = "stopped";
     return op;
