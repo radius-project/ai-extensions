@@ -181,7 +181,7 @@ describe("github remediations", () => {
     const remediation = build("github-packages-scope", { login: "octo-cat" });
 
     expect(remediation.displayCommand).toBe(
-      "gh auth switch -h github.com -u octo-cat && " +
+      "gh auth switch -h github.com -u octo-cat\n" +
         "gh auth refresh -h github.com -s read:packages -s write:packages"
     );
     expect(remediation.argv).toEqual([
@@ -261,17 +261,17 @@ describe("github remediations", () => {
     [
       "workflow only",
       { login: "octocat", workflow: "true" },
-      "gh auth switch -h github.com -u octocat && gh auth refresh -h github.com -s workflow"
+      "gh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s workflow"
     ],
     [
       "packages only",
       { login: "octocat", packages: "true" },
-      "gh auth switch -h github.com -u octocat && gh auth refresh -h github.com -s read:packages -s write:packages"
+      "gh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s read:packages -s write:packages"
     ],
     [
       "both scopes",
       { login: "octocat", workflow: "true", packages: "true" },
-      "gh auth switch -h github.com -u octocat && gh auth refresh -h github.com -s workflow -s read:packages -s write:packages"
+      "gh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s workflow -s read:packages -s write:packages"
     ]
   ])("builds the account scope grant for %s", (_label, params, expected) => {
     const remediation = build("github-account-scopes", params);
@@ -281,6 +281,23 @@ describe("github remediations", () => {
     expect(remediation.confirmBody).toContain("machine-wide");
     expect(remediation.followUp).toContain("Re-check");
   });
+
+  it.each([
+    ["github-packages-scope", { login: "octocat" }],
+    ["github-account-scopes", { login: "octocat", packages: "true" }]
+  ] as const)(
+    "separates %s commands by line so Windows PowerShell can run them",
+    (id, params) => {
+      const remediation = build(id, params);
+
+      // Windows PowerShell 5.1 cannot parse `&&`, and the displayed text is
+      // what a user copies into their own shell.
+      expect(remediation.displayCommand).not.toContain("&&");
+      expect(remediation.displayCommand.split("\n")).toHaveLength(
+        remediation.argv.length
+      );
+    }
+  );
 
   it("switches the account before refreshing it, never as one shell string", () => {
     const remediation = build("github-account-scopes", {
@@ -692,6 +709,19 @@ describe("remediationSessionMessage", () => {
     expect(message.displayPrompt).toBe(
       "Committing the generated Radius files and pushing feature/login to GitHub."
     );
+  });
+
+  it("keeps the staging instruction out of a remediation that stages nothing", () => {
+    const message = remediationSessionMessage(
+      build("github-account-scopes", { login: "octocat", packages: "true" })
+    );
+
+    // A multi-command remediation, but no `git add`, so there are no "paths
+    // named above" for the instruction to refer to.
+    expect(message.prompt).toContain(
+      "Run these commands, in order, in this Copilot session:"
+    );
+    expect(message.prompt).not.toContain("Stage only the paths");
   });
 
   it("keeps a single-command remediation inline", () => {

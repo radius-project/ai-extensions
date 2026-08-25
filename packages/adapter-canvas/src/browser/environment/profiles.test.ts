@@ -569,6 +569,19 @@ describe("githubIdentityNote", () => {
     expect(note.specs[0].text).toContain("-s workflow");
   });
 
+  it("omits the command when the login is one the registry will not run", () => {
+    const note = githubIdentityNote({
+      ...base,
+      actingLogin: HOSTILE,
+      actingHasPackages: false
+    });
+    // No runnable command means no command text: the note says what to do
+    // rather than printing something that would not work if pasted.
+    expect(note.specs[0].text).not.toContain("-h github.com -u");
+    expect(note.specs[0].text).toContain("Grant the missing scopes");
+    expect(note.showRecheck).toBe(true);
+  });
+
   it("falls back to the muted acts-as note, rendering the login as a text node only", () => {
     const note = githubIdentityNote({ ...base, actingLogin: HOSTILE });
     expect(note.tone).toBe("muted");

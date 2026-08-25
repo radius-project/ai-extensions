@@ -210,6 +210,33 @@ function azureLoginArgv(tenantId: string): readonly string[] {
   return argv;
 }
 
+/**
+ * Render commands for display and for copying: one command per line.
+ *
+ * Deliberately not `&&`. The copied text is pasted into whatever shell the user
+ * happens to have, and `&&` is a parse error in Windows PowerShell 5.1 — still
+ * the `powershell.exe` on a stock Windows install — which did not gain `&&`
+ * until PowerShell 7. Separate lines run correctly in PowerShell, cmd.exe, bash,
+ * and zsh alike.
+ *
+ * Losing `&&` means a later command still runs after an earlier one fails. That
+ * is the safer direction here: every multi-command remediation this registry
+ * builds is idempotent and re-runnable, and the alternative is copy text that a
+ * whole class of users cannot run at all.
+ */
+function displayLines(commands: readonly (readonly string[])[]): string {
+  return commands
+    .map((argv) =>
+      argv
+        // A token containing a space (only ever a constant, never a validated
+        // parameter) is double-quoted. Double quotes are the one quoting form
+        // every target shell agrees on; single quotes are literal in cmd.exe.
+        .map((token) => (token.includes(" ") ? `"${token}"` : token))
+        .join(" ")
+    )
+    .join("\n");
+}
+
 function buildAzureCliLogin(
   params: Readonly<Record<string, unknown>>
 ): Remediation {
@@ -327,29 +354,30 @@ function buildGithubPackagesScope(
         "Granting package access needs the GitHub account login Radius detected."
     };
   }
+  // One source for both the argv that runs and the text that is displayed, so
+  // the command a user copies cannot drift from the command Run executes.
+  const commands = [
+    ["gh", "auth", "switch", "-h", "github.com", "-u", login],
+    [
+      "gh",
+      "auth",
+      "refresh",
+      "-h",
+      "github.com",
+      "-s",
+      "read:packages",
+      "-s",
+      "write:packages"
+    ]
+  ];
   return {
     ok: true,
     remediation: {
       id: "github-packages-scope",
       params: { login },
       title: "Grant GitHub Packages access",
-      displayCommand:
-        `gh auth switch -h github.com -u ${login} && ` +
-        "gh auth refresh -h github.com -s read:packages -s write:packages",
-      argv: [
-        ["gh", "auth", "switch", "-h", "github.com", "-u", login],
-        [
-          "gh",
-          "auth",
-          "refresh",
-          "-h",
-          "github.com",
-          "-s",
-          "read:packages",
-          "-s",
-          "write:packages"
-        ]
-      ],
+      displayCommand: displayLines(commands),
+      argv: commands,
       cwd: "anywhere",
       impact: "high",
       confirmTitle: `Grant package access to @${login}?`,
@@ -417,6 +445,8 @@ function buildGithubAccountScopes(
   for (const scope of scopes) {
     refresh.push("-s", scope);
   }
+  const switchTo = ["gh", "auth", "switch", "-h", "github.com", "-u", login];
+  const commands = [switchTo, refresh];
   const granted =
     workflow && packages ? "the workflow and package permissions"
     : workflow ? "the workflow permission"
@@ -431,12 +461,8 @@ function buildGithubAccountScopes(
         ...(packages ? { packages: "true" } : {})
       },
       title: "Grant the GitHub access Radius needs",
-      displayCommand:
-        `gh auth switch -h github.com -u ${login} && ` + refresh.join(" "),
-      argv: [
-        ["gh", "auth", "switch", "-h", "github.com", "-u", login],
-        refresh
-      ],
+      displayCommand: displayLines(commands),
+      argv: commands,
       cwd: "anywhere",
       impact: "high",
       confirmTitle: "Grant GitHub access?",
@@ -490,16 +516,7 @@ function buildGitPushBranch(
         paths.length > 0 ?
           "Commit the Radius model and push the branch"
         : "Push the branch to GitHub",
-      displayCommand: commands
-        .map((argv) =>
-          argv
-            // Only the commit message can contain a space, and it is a constant
-            // rather than a parameter. Quoting it keeps the copied line
-            // paste-able without composing a shell string for execution.
-            .map((token) => (token.includes(" ") ? `"${token}"` : token))
-            .join(" ")
-        )
-        .join("\n"),
+      displayCommand: displayLines(commands),
       argv: commands,
       cwd: "workspace",
       impact: "high",
@@ -678,7 +695,18 @@ export function remediationSessionMessage(
         "```console",
         remediation.displayCommand,
         "```",
-        "Stage only the paths named above; do not stage anything else in the working tree."
+        // Only a remediation that stages files can over-stage. Saying this for
+        // one that does not — a `gh auth` pair — hands the agent an instruction
+        // whose "paths named above" do not exist.
+        ...((
+          remediation.argv.some(
+            (argv) => argv[0] === "git" && argv[1] === "add"
+          )
+        ) ?
+          [
+            "Stage only the paths named above; do not stage anything else in the working tree."
+          ]
+        : [])
       ].join("\n")
     : `Run \`${remediation.displayCommand}\` in this Copilot session.`;
   const instructions =

@@ -308,7 +308,7 @@ describe("GitHub Packages identity parsing and rendering", () => {
     expect(view.commandVisible).toBe(true);
     expect(view.retryVisible).toBe(true);
     expect(view.remediation?.command).toBe(
-      "gh auth switch -h github.com -u octocat && gh auth refresh -h github.com -s read:packages -s write:packages"
+      "gh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s read:packages -s write:packages"
     );
   });
 

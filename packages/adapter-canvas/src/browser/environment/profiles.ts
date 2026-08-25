@@ -263,26 +263,28 @@ export function githubIdentityNote(
   }
   if (!identity.actingHasWorkflow || !identity.actingHasPackages) {
     const missNames: string[] = [];
-    const refreshScopes: string[] = [];
     if (!identity.actingHasWorkflow) {
       missNames.push("workflow");
-      refreshScopes.push("workflow");
     }
     if (!identity.actingHasPackages) {
       missNames.push("write:packages");
-      refreshScopes.push("read:packages");
-      refreshScopes.push("write:packages");
     }
-    const refreshScopeFlags = refreshScopes
-      .map((scope) => ` -s ${scope}`)
-      .join("");
-    const refreshCmd =
-      `gh auth switch -h github.com -u ${identity.actingLogin} && ` +
-      `gh auth refresh -h github.com${refreshScopeFlags}`;
+    // Built from the registry rather than hand-written here, so this note shows
+    // the same command the callout would run, quoted the same way, and stays
+    // paste-able in Windows PowerShell (which cannot parse `&&`).
+    const view = remediationView("github-account-scopes", {
+      login: identity.actingLogin,
+      ...(identity.actingHasWorkflow ? {} : { workflow: "true" }),
+      ...(identity.actingHasPackages ? {} : { packages: "true" })
+    });
+    const runLine =
+      view.runnable ?
+        ` Run:\n${view.command}\n`
+      : " Grant the missing scopes with GitHub CLI, ";
     return {
       specs: textNote(
         `The active account @${identity.actingLogin} is missing the ${missNames.join(" and ")} ` +
-          `scope${missNames.length > 1 ? "s" : ""} environment setup needs. Run "${refreshCmd}" or switch accounts. ` +
+          `scope${missNames.length > 1 ? "s" : ""} environment setup needs.${runLine}or switch accounts. ` +
           "Note: gh auth switch changes your active GitHub account machine-wide for every tool in this terminal until you switch back."
       ),
       tone: "warning",
