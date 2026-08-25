@@ -770,6 +770,23 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     expect(deps.journal.scheduled).toHaveLength(1);
   });
 
+  it("resolves a repeated deletion retry to the command already in flight", async () => {
+    const op = retryableDeletion();
+    const deps = dependencies({ get: () => op });
+    const path = controlPath(op, "retry/deletion");
+
+    const first = await call(handleRetryOperation, path, deps);
+    const second = await call(handleRetryOperation, path, deps);
+
+    expect(first.payload().duplicate).toBeUndefined();
+    expect(second.recording.status).toBe(202);
+    expect(second.payload()).toMatchObject({
+      duplicate: true,
+      commandId: first.payload().commandId
+    });
+    expect(deps.journal.scheduled).toHaveLength(1);
+  });
+
   it("closes a reopened operation no runner accepted", async () => {
     const op = retryableSetup();
     const persists: string[] = [];

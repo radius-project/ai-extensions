@@ -1947,6 +1947,19 @@ export function normalizeIdentityPart(value: any): string {
     .toLowerCase();
 }
 
+export function matchDeleteOperationEnvironment(
+  operation: any,
+  environment: any
+): any {
+  return (
+      operation?.kind === OPERATION_KIND_DELETE &&
+        normalizeIdentityPart(operation.environment) ===
+          normalizeIdentityPart(environment)
+    ) ?
+      operation
+    : null;
+}
+
 /** The stable key for one cleanup-capable artifact, or "" when unidentifiable. */
 /** A provider id as the ledger stores it: a non-empty string, or nothing. */
 export function optionalIdentityString(value: unknown): string | null {
@@ -4052,6 +4065,13 @@ export function projectOperationActions(op: any): any[] {
  */
 export function projectNextTransition(op: any): any {
   if (!op || isTerminalState(op.state)) return null;
+  const active = activeCommandKind(op);
+  if (op.kind === OPERATION_KIND_DELETE && active === "retry_deletion") {
+    return {
+      code: "retrying-deletion",
+      message: "Retrying the unfinished environment deletion steps…"
+    };
+  }
   if (op.kind === OPERATION_KIND_DELETE) {
     return {
       code: "deleting-environment",
@@ -4059,7 +4079,6 @@ export function projectNextTransition(op: any): any {
         "Deletion is running. If it fails, Retry deletion resumes from the unfinished stage."
     };
   }
-  const active = activeCommandKind(op);
   // Cleanup owns the record while it runs, and it is the one activity with no
   // action of its own — so it has to name itself or the panel would be silent.
   if (active === "rollback") {
@@ -4102,18 +4121,6 @@ export function projectNextTransition(op: any): any {
     return {
       code: "retrying-setup",
       message: `Retrying setup from ${setupStepLabel(op.resumeFrom)}…`
-    };
-  }
-  if (active === "retry_deletion") {
-    return {
-      code: "retrying-deletion",
-      message: "Retrying the unfinished environment deletion steps…"
-    };
-  }
-  if (op.kind === OPERATION_KIND_DELETE) {
-    return {
-      code: "deleting-environment",
-      message: "Radius is running the next environment deletion step."
     };
   }
   if (op.currentStage === STAGE_VERIFY && op.verification?.dispatchedAt) {

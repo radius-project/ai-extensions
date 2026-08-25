@@ -126,7 +126,7 @@ import {
   buildStages,
   buildDeleteStages,
   OPERATION_KIND_DELETE,
-  normalizeIdentityPart,
+  matchDeleteOperationEnvironment,
   enterStage,
   setStageState,
   hasWarnings,
@@ -1262,14 +1262,10 @@ const environmentsRoutes = createEnvironmentsRoutes({
   discoverEnvironmentTarget: (repo, environment) =>
     discoverEnvironmentTarget(repo, environment),
   activeDeleteOperation: (repo, environment) => {
-    const operation = operations.running(repo);
-    return (
-        operation?.kind === OPERATION_KIND_DELETE &&
-          normalizeIdentityPart(operation.environment) ===
-            normalizeIdentityPart(environment)
-      ) ?
-        operation
-      : null;
+    return matchDeleteOperationEnvironment(
+      operations.running(repo),
+      environment
+    );
   },
   createOperation,
   buildDeleteStages: (options) => buildDeleteStages(options),

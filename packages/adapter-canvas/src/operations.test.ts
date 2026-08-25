@@ -98,6 +98,7 @@ import {
   workflowRollbackCommitState,
   workflowRollbackTargets,
   canExitSetup,
+  matchDeleteOperationEnvironment,
   hasSurvivingCreatedArtifacts,
   isSetupExited,
   setupExitState,
@@ -2175,6 +2176,17 @@ describe("registry", () => {
       conflict: { operationId: first.operationId },
       reason: "operation-in-progress"
     });
+  });
+
+  it("matches active deletion environments without affecting setup operations", () => {
+    const deletion = newDeleteOp();
+    deletion.environment = "  Dev  ";
+    expect(matchDeleteOperationEnvironment(deletion, "dev")).toBe(deletion);
+    expect(matchDeleteOperationEnvironment(deletion, "prod")).toBeNull();
+    expect(
+      matchDeleteOperationEnvironment(newOp({ environment: "dev" }), "dev")
+    ).toBeNull();
+    expect(matchDeleteOperationEnvironment(null, "dev")).toBeNull();
   });
 
   it("allows a new operation once a successful previous operation is terminal", () => {
@@ -4682,6 +4694,25 @@ describe("action projection", () => {
         "Radius stopped at Delete Radius environment. Review the error, then retry deletion. Completed stages will be skipped."
     });
     expect(projectActionGuidance(failed)).toEqual([]);
+  });
+
+  it("projects an active deletion retry before generic deletion progress", () => {
+    const op = newDeleteOp();
+    op.control.commands.push({
+      kind: "retry_deletion",
+      commandId: `${op.operationId}:retry_deletion:1:${op.stages[0].id}`,
+      attempt: 1,
+      target: op.stages[0].id,
+      state: "accepted",
+      acceptedAt: op.startedAt,
+      completedAt: null,
+      outcome: null
+    });
+
+    expect(projectNextTransition(op)).toEqual({
+      code: "retrying-deletion",
+      message: "Retrying the unfinished environment deletion steps…"
+    });
   });
 
   it("resets only unfinished delete stages for a retry", () => {
