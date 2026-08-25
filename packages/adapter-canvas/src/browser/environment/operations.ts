@@ -701,6 +701,14 @@ export function parseOperationResponse(
   return raw ? parseOperationRecord(raw) : null;
 }
 
+function visibleOperationActions(
+  operation: OperationRecord | null
+): readonly OperationAction[] {
+  if (operation === null) return [];
+  if (operation.kind !== "delete") return operation.actions;
+  return operation.actions.filter((action) => action.kind === "retry_deletion");
+}
+
 /**
  * Validate an `error.operation` payload returned by a failed resume request.
  * Unlike {@link parseOperationResponse} the record is not wrapped in an
@@ -1485,10 +1493,11 @@ export function initializeEnvironmentOperations(
       dismissEl.textContent = acknowledged ? "OK" : "Dismiss";
       dismissEl.style.display = acknowledged ? "" : "none";
     }
+    const actions = visibleOperationActions(op);
     const bottomActions =
       op === null || acknowledged ?
         []
-      : op.actions.filter((action) => action.placement === "bottom");
+      : actions.filter((action) => action.placement === "bottom");
     if (bottomEl && op !== null) {
       for (const action of bottomActions) {
         bottomEl.appendChild(createCommandButton(action, op));
@@ -1505,7 +1514,7 @@ export function initializeEnvironmentOperations(
     const buttons = dom.byId(PROGRESS_IDS.commandButtons);
     const note = dom.byId(PROGRESS_IDS.commandNote);
     if (!container || !buttons || !note) return;
-    const actions = op?.actions ?? [];
+    const actions = visibleOperationActions(op);
     const rowActions = actions.filter(
       (action) => action.placement !== "bottom"
     );

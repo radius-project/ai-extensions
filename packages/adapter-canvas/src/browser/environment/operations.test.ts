@@ -1567,6 +1567,30 @@ describe("operation commands", () => {
     );
   });
 
+  it("never renders setup controls for a delete operation", () => {
+    const browser = setup();
+    renderActions(
+      browser,
+      [
+        STOP_ACTION,
+        {
+          id: "retry-deletion",
+          kind: "retry_deletion",
+          label: "Retry deletion",
+          description: "Retry unfinished deletion steps.",
+          path: "/api/operations/op-1/retry/deletion",
+          pending: false
+        },
+        EXIT_ACTION
+      ],
+      { kind: "delete" }
+    );
+
+    expect(buttons(browser)).toHaveLength(1);
+    expect(buttons(browser)[0].textContent).toBe("Retry deletion");
+    expect(bottomButtons(browser)).toHaveLength(0);
+  });
+
   it("keeps the retry in the command row and Exit setup below the details", () => {
     const browser = setup();
     renderActions(
