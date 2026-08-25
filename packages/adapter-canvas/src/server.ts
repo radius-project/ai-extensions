@@ -4234,6 +4234,8 @@ function createInstanceRequestCoordinator(
             recordGitHubEnvironment: (operation, patch) => {
               recordGitHubEnvironment(operation, patch);
             },
+            promoteCreatedGitHubEnvironment: (operation, identity) =>
+              promoteCreatedGitHubEnvironment(operation, identity),
             addLegacyStep: (operation, text) => {
               addLegacyStep(operation, text);
             },
@@ -4285,7 +4287,8 @@ function createInstanceRequestCoordinator(
               });
             },
             getOperation: (id) => operations.get(id),
-            postInternal
+            postInternal,
+            now: () => Date.now()
           });
         },
         30000
