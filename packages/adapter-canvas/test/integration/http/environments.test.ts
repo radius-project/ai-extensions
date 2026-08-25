@@ -4,10 +4,14 @@ import { createCanvasServer } from "../../../src/server/create-canvas-server.js"
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createEnvironmentsRoutes } from "../../../src/server/routes/environments.js";
 import { createEnvironmentListingCache } from "../../../src/server/services/environment-listing-cache.js";
+import { deleteGitHubEnvironmentIdempotent } from "../../../src/server/services/github-environment.js";
+import { runEnvironmentDeletion } from "../../../src/server/services/environment-deletion.js";
 import { cleanupGitHubEnvironmentArtifact } from "../../../src/server.js";
 import {
+  buildDeleteStages,
   createOperation,
-  recordGitHubEnvironment
+  recordGitHubEnvironment,
+  toClientView
 } from "../../../src/operations.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
@@ -77,6 +81,7 @@ interface Harness {
   /** The production listing cache this server was composed with. */
   cache: EnvironmentListingCache;
   commands: string[][];
+  baseUrl: string;
   setScript(script: CliScript): void;
   holdPath(path: string): HeldCall;
   invalidate(repo: string): void;
@@ -86,7 +91,10 @@ interface Harness {
   ): Promise<{ status: number; body: unknown }>;
 }
 
-async function start(initialScript: CliScript): Promise<Harness> {
+async function start(
+  initialScript: CliScript,
+  extraDependencies: Partial<EnvironmentsDependencies> = {}
+): Promise<Harness> {
   // The real cache the composition root owns, wired exactly as `src/server.ts`
   // wires it, so the eviction and generation behavior under test is production
   // behavior rather than a restatement of it.
@@ -141,7 +149,8 @@ async function start(initialScript: CliScript): Promise<Harness> {
     // A frozen clock keeps the TTL from expiring on its own, so a listing that
     // refreshes proves invalidation rather than the passage of time.
     now: () => 0,
-    kickoffWorkflowSync: () => {}
+    kickoffWorkflowSync: () => {},
+    ...extraDependencies
   };
   const routes = createTestRouteTable(
     createEnvironmentsRoutes(dependencies as EnvironmentsDependencies)
@@ -169,6 +178,7 @@ async function start(initialScript: CliScript): Promise<Harness> {
   return {
     cache,
     commands,
+    baseUrl: entry.baseUrl,
     setScript(next) {
       script = next;
     },
@@ -335,6 +345,118 @@ describe("environment listing cache after a rollback", () => {
       "DELETE",
       "/repos/octo/app/environments/dev"
     ]);
+    expect(names(after.body)).toEqual([]);
+  });
+});
+
+// The two cases above drive the shared stage-3 primitive directly. This one
+// drives the whole async delete route end to end over loopback HTTP: POST the
+// destructive route, take its 202, let the real background runner
+// (`runEnvironmentDeletion`) execute every stage — wired through the same
+// `scheduleEnvironmentOperation` seam `src/server.ts` uses — and confirm that
+// the runner's GitHub-environment stage invalidated the very cache the listing
+// route serves, so the picker stops offering the deleted environment. Only the
+// leaf CLI/identity ports are faked; the route, the operation model, the runner,
+// the shared delete primitive, and the cache are all production code.
+describe("the async delete route through its background runner", () => {
+  /** A deferred the test resolves once the scheduled runner has finished. */
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve = (): void => {};
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it("stops listing the environment once the runner tears it down", async () => {
+    const runnerFinished = deferred();
+    // The scheduler is invoked only during the POST, after `start` returns, so
+    // the deps can close over this ref and read the live harness by then.
+    let harness: Harness;
+
+    // Production binds the scheduler to `runEnvironmentDeletion`; bind the same
+    // runner here, with its GitHub-environment port pointed at the real shared
+    // primitive so stage 3 invalidates the real cache exactly as production does.
+    const deleteDeps: Partial<EnvironmentsDependencies> = {
+      discoverEnvironmentTarget: async () => ({
+        provider: "azure",
+        clientId: "app-xyz",
+        tenantId: "tenant-1",
+        repoId: 7
+      }),
+      createOperation: (input) =>
+        createOperation(input) as ReturnType<
+          NonNullable<EnvironmentsDependencies["createOperation"]>
+        >,
+      buildDeleteStages: (options) => buildDeleteStages(options),
+      startOperation: (op) => ({ ok: true as const, operation: op }),
+      toClientView: (op) => toClientView(op),
+      persistOperations: async () => {},
+      logError: () => {},
+      scheduleEnvironmentOperation: (_instanceId, op) => {
+        void runEnvironmentDeletion(op as never, {
+          deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          withCredentialProvenanceLock: (work) => work(),
+          runAz: async () => ({ code: 0, stdout: "[]", stderr: "" }),
+          readAzureIdentity: async () => ({
+            tenantId: "tenant-1",
+            applicationObjectId: "app-object-1"
+          }),
+          // No provenance proof, so the credential is retained and stage 3 is
+          // what removes cloud-visible state — the GitHub environment.
+          readCredentialProvenance: () => [],
+          removeCredentialProvenance: async () => {},
+          clearEnvironmentCredentialProvenance: async () => {},
+          deleteGitHubEnvironment: ({ repo, environment }) =>
+            deleteGitHubEnvironmentIdempotent(repo, environment, {
+              runGh: async (args) => {
+                harness.commands.push(["gh", ...args]);
+                return { code: 0 };
+              },
+              invalidateEnvListCache: (repo) => {
+                harness.invalidate(repo);
+              }
+            }),
+          persist: async () => {},
+          errorMessage: (error) =>
+            error instanceof Error ? error.message : String(error)
+        })
+          .catch(() => {})
+          .finally(() => runnerFinished.resolve());
+        return true;
+      }
+    };
+    harness = await start(listingScript("7\tdev"), deleteDeps);
+
+    // The environment is offered before the deletion runs.
+    expect(names((await harness.list()).body)).toEqual(["dev"]);
+
+    const response = await fetch(`${harness.baseUrl}/api/delete-environment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo: REPO, environment: "dev" })
+    });
+    const accepted = (await response.json()) as { operationId: string };
+
+    expect(response.status).toBe(202);
+    expect(response.headers.get("Location")).toBe(
+      `/api/operations/${accepted.operationId}`
+    );
+
+    // The route returned 202 before the background work ran; wait for the real
+    // runner to finish, then observe the listing the same cache now serves.
+    await runnerFinished.promise;
+    harness.setScript(listingScript(""));
+    const after = await harness.list();
+
+    expect(harness.commands).toContainEqual([
+      "gh",
+      "api",
+      "--method",
+      "DELETE",
+      "/repos/octo/app/environments/dev"
+    ]);
+    expect(after.status).toBe(200);
     expect(names(after.body)).toEqual([]);
   });
 });
