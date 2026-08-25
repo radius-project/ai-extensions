@@ -13,6 +13,14 @@ Connection projection is version-specific. Depending on the Radius/container sch
 
 Inspect the exact configured extension, registered resource schema, recipe output mapping, and Radius runtime before relying on any projection shape. Do not infer it from a different version's documentation.
 
+## Compatibility and gradual adoption
+
+Secret-backed `CONNECTION_*` projection is behavior of the Kubernetes Container Recipe. It requires compatible Radius control-plane support ([radius#12709](https://github.com/radius-project/radius/issues/12709)) and compatible Container Recipes ([resource-types-contrib#300](https://github.com/radius-project/resource-types-contrib/pull/300) or later). Verify the configured schema, Radius runtime, and exact Recipe contract before relying on it; mixed or older installations must not be assumed to support secret projection.
+
+If compatibility cannot be proven, preserve or use the existing schema-supported wiring: explicit `env`, `valueFrom.secretKeyRef`, `envFrom`, the application's native variable, or another contract the target installation supports. Do not emit a connection-only model that depends on unverified projection. Do not automatically rewrite an existing working `app.bicep`; migration to secret-backed connections requires explicit user intent.
+
+Azure Container Instances (ACI) behavior is unchanged. Do not recommend Kubernetes secret-backed connection projection for ACI.
+
 ## Decide wiring from source
 
 For every dependency:
