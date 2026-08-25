@@ -1,5 +1,4 @@
 import type {
-  SelectedGhCommandResult,
   SelectedGhCredentialSource,
   SelectedGhExecutor
 } from "../../../src/gh.js";
@@ -10,11 +9,11 @@ export function successfulSelectedGhExecutor(
     credentialSource?: SelectedGhCredentialSource;
     requiresKeyringSwitch?: boolean;
     scopes?: string[];
-    run?: (args: string[]) => Promise<SelectedGhCommandResult>;
+    run?: SelectedGhExecutor["run"];
   } = {}
 ): SelectedGhExecutor {
   const login = options.login || "octocat";
-  const run =
+  const run: SelectedGhExecutor["run"] =
     options.run ||
     (async () => ({
       code: 0,
@@ -23,9 +22,10 @@ export function successfulSelectedGhExecutor(
     }));
   const runOrThrow: SelectedGhExecutor["runOrThrow"] = async (
     args,
-    message
+    message,
+    commandOptions
   ) => {
-    const result = await run(args);
+    const result = await run(args, commandOptions);
     if (result.code !== 0) {
       const detail = (result.stderr || result.stdout).trim();
       throw new Error(detail ? `${message}: ${detail}` : message);

@@ -259,7 +259,8 @@ async function reconcileMutation<T>(
   operation: object,
   mutation: ProviderMutationRecord,
   reconcile: () => Promise<ProviderMutationReconciliation<T>>,
-  persist: () => Promise<void>
+  persist: () => Promise<void>,
+  rethrowReconciliationError?: (error: unknown) => boolean
 ): Promise<RecoverableMutationResult<T>> {
   // `settleProviderMutation` normalizes the whole recovery record, so the entry
   // it leaves behind is a different object from the one passed in here. The
@@ -278,6 +279,7 @@ async function reconcileMutation<T>(
   try {
     outcome = await reconcile();
   } catch (error) {
+    if (rethrowReconciliationError?.(error)) throw error;
     const detail = error instanceof Error ? error.message : String(error);
     const attempts = (Number(mutation.reconcileAttempts) || 0) + 1;
     if (attempts >= MAX_RECONCILE_ATTEMPTS) {
@@ -370,6 +372,7 @@ export async function executeRecoverableMutation<T>(input: {
    * record that looks fully reconciled with the resource still there.
    */
   rejectionGuidance?(result: ProviderMutationCommandResult): string;
+  rethrowReconciliationError?(error: unknown): boolean;
 }): Promise<RecoverableMutationResult<T>> {
   const mutationId = providerMutationId(
     input.operation.operationId,
@@ -446,7 +449,8 @@ export async function executeRecoverableMutation<T>(input: {
         input.operation,
         mutation,
         input.reconcile,
-        input.persist
+        input.persist,
+        input.rethrowReconciliationError
       );
     }
     // Ambiguity is read before success. A command that timed out, was killed,
@@ -467,7 +471,8 @@ export async function executeRecoverableMutation<T>(input: {
         input.operation,
         mutation,
         input.reconcile,
-        input.persist
+        input.persist,
+        input.rethrowReconciliationError
       );
     }
     if (result.code === 0 || result.code === "0") {
@@ -525,7 +530,8 @@ export async function executeRecoverableMutation<T>(input: {
       input.operation,
       mutation,
       input.reconcile,
-      input.persist
+      input.persist,
+      input.rethrowReconciliationError
     );
   }
   if (mutation.status === "manual_required") {
