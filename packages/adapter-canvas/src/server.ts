@@ -74,6 +74,7 @@ import type {
 } from "./gh.js";
 import {
   buildAppDeleteArgs,
+  buildFederatedCredentialDeleteArgs,
   isAzResourceNotFound,
   parseServedReposFromSubjects,
   isUuid,
@@ -292,6 +293,8 @@ import {
   isNotFoundResponse
 } from "./server/services/branch-absence.js";
 import {
+  buildGitHubEnvironmentDeleteArgs,
+  deleteGitHubEnvironmentIdempotent as deleteGitHubEnvironmentPrimitive,
   parseEnvironmentProviderId,
   selectedEnvironmentReader
 } from "./server/services/github-environment.js";
@@ -335,7 +338,6 @@ import {
   withCredentialProvenanceLock
 } from "./credential-provenance.js";
 import { classifyCompletedDeleteEnvRun } from "./server/services/delete-env-run-classifier.js";
-import { deleteGitHubEnvironmentIdempotent as deleteGitHubEnvironmentPrimitive } from "./server/services/github-environment.js";
 import type {
   RadiusEnvDeletionOutcome,
   GitHubEnvDeletionOutcome
@@ -3235,25 +3237,6 @@ function buildRoleAssignmentDeleteArgs({
   ];
 }
 
-function buildFederatedCredentialDeleteArgs({
-  appId,
-  name
-}: {
-  appId: string;
-  name: string;
-}): string[] {
-  return [
-    "ad",
-    "app",
-    "federated-credential",
-    "delete",
-    "--id",
-    appId,
-    "--federated-credential-id",
-    name
-  ];
-}
-
 function buildServicePrincipalDeleteArgs({ id }: { id: string }): string[] {
   return ["ad", "sp", "delete", "--id", id];
 }
@@ -3698,7 +3681,7 @@ export async function cleanupAzureSetupArtifacts(
         {
           args: buildFederatedCredentialDeleteArgs({
             appId: cleanupAppId,
-            name: String(credential.name || "")
+            credentialId: String(credential.name || "")
           }),
           readArgs: [
             "ad",
@@ -4207,7 +4190,7 @@ export async function cleanupGitHubEnvironmentArtifact(
   }
 
   const environmentPath = `/repos/${envRepo}/environments/${encodeURIComponent(envName)}`;
-  const deleteArgs = ["api", "--method", "DELETE", environmentPath];
+  const deleteArgs = buildGitHubEnvironmentDeleteArgs(envRepo, envName);
   let settled: CleanupDeletionOutcome;
   try {
     settled = await executeJournaledCleanupDeletion({

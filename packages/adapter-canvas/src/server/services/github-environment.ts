@@ -43,6 +43,18 @@ export interface GitHubEnvironmentDeletionPorts {
   invalidateEnvListCache(repo: string): void;
 }
 
+export function buildGitHubEnvironmentDeleteArgs(
+  repo: string,
+  environment: string
+): string[] {
+  return [
+    "api",
+    "--method",
+    "DELETE",
+    "/repos/" + repo + "/environments/" + encodeURIComponent(environment)
+  ];
+}
+
 // Delete the GitHub Environment. Idempotent: a 404 (already gone) is reported as
 // `not_found`, not a failure, so a re-run after a partial deletion converges.
 export async function deleteGitHubEnvironmentIdempotent(
@@ -50,12 +62,9 @@ export async function deleteGitHubEnvironmentIdempotent(
   environment: string,
   ports: GitHubEnvironmentDeletionPorts
 ): Promise<GitHubEnvDeletionOutcome> {
-  const result = await ports.runGh([
-    "api",
-    "--method",
-    "DELETE",
-    "/repos/" + repo + "/environments/" + encodeURIComponent(environment)
-  ]);
+  const result = await ports.runGh(
+    buildGitHubEnvironmentDeleteArgs(repo, environment)
+  );
   if (result.code === 0 || result.code === "0") {
     ports.invalidateEnvListCache(repo);
     return { outcome: "deleted" };

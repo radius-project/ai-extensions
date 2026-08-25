@@ -12,21 +12,9 @@ left cloud artifacts (the GitHub environment, the Azure federated credential
 used for OIDC) behind, so repeated create/delete cycles leaked credentials and
 eventually hit the per-app federated-credential limit.
 
-This document describes how **Delete Environment** (PR #398, this branch)
-cleans up an *established* environment: the stages it runs, the order it runs
-them in, why that order is load-bearing, how it stays idempotent and
-fail-closed, and why it deliberately leaves the Entra app registration in place
-and notifies the user instead of deleting it.
+This document describes how **Delete Environment** (PR #398, this branch) cleans up an *established* environment: the stages it runs, the order it runs them in, why that order is load-bearing, how it stays idempotent and fail-closed, and why it deliberately leaves the Entra app registration in place and notifies the user instead of deleting it.
 
-Radius has a second, sibling flow — **Create-Environment rollback** — that tears
-down the *half-finished* artifacts of a setup that never succeeded. It is a
-different job with different rules, but it does a lot of the *same low-level
-work* (delete a GitHub environment, delete a federated credential, treat "not
-found" as success, report progress through the same panel). To avoid writing
-that work twice, the delete flow's teardown primitives are built as shared,
-port-injected modules that rollback can bind to unchanged. That sharing is
-called out inline where each primitive is described; the subject of this
-document is the delete implementation itself.
+Radius has a second, sibling flow — **Create-Environment rollback** — that tears down the *half-finished* artifacts of a setup that never succeeded. It is a different job with different rules, but it does a lot of the *same low-level work* (delete a GitHub environment, delete a federated credential, treat "not found" as success, report progress through the same panel). To avoid writing that work twice, the flows share pure command builders and provider result classifiers while retaining separate safety and recovery adapters. That sharing is called out inline where each primitive is described; the subject of this document is the delete implementation itself.
 
 ## Terms and definitions
 
@@ -69,8 +57,7 @@ document is the delete implementation itself.
   can be shared by other environments or callers.
 - Report progress, retained artifacts, and warnings through the existing
   operation panel so the user sees exactly what happened.
-- Write the delete-side deletion primitives as shared, port-injected modules so
-  the sibling rollback flow can reuse them without copy-paste drift.
+- Share the lowest safe command and result-classification seams with rollback without merging the flows' authority, ordering, or recovery policy.
 
 ### Non-goals
 
@@ -79,10 +66,7 @@ document is the delete implementation itself.
   callers is not worth the risk. It is retained and the user is notified.
 - **Deleting role assignments or the service principal.** Those are governed by
   the broader established-environment identity model and are out of scope here.
-- **Depending on creation provenance.** Environments created before the artifact
-  ledger existed never recorded one, so deletion must keep working from live
-  discovery + user confirmation, not from a ledger. Consuming provenance *when
-  present* is an open question, not a goal.
+- **Depending on the setup artifact ledger.** Environments created before the ledger existed never recorded one, so deletion does not use it as authority. Credential deletion instead combines live discovery with its separate, immutable credential-consumer provenance and retains credentials when that proof is unavailable.
 - **Merging the delete and rollback flows.** They have different entry
   conditions and opposite credential ordering; sharing primitives is not the
   same as sharing the flow.
@@ -199,11 +183,7 @@ rollback's opposite order:
 
 #### App-registration policy
 
-The delete flow **never** removes the Entra app registration. It records a
-"left in place" step and, on a concluded deletion, surfaces an acknowledgement
-that the user can delete it themselves in Azure if it is unwanted. The
-registration may back other environments or callers, and stable identities are
-easy to mis-match by display name, so speculative deletion is out of scope.
+The delete flow **never** removes the Entra app registration. It records a "left in place" step and, on a concluded deletion, surfaces an acknowledgement with an inline Azure Portal link so the user can delete it if it is unwanted. The registration may back other environments or callers, and stable identities are easy to mis-match by display name, so speculative deletion is out of scope.
 
 #### Idempotency and fail-closed behavior
 
@@ -214,44 +194,17 @@ Radius environment delete), the flow fails closed: it stops before removing the
 credential and GitHub environment, surfaces the steps completed so far, and
 offers a retry, rather than deleting speculatively and stranding the user.
 
-#### How the primitives are shared (options)
+#### How deletion and rollback share teardown code
 
-The delete primitives could be kept private to the delete flow, or extracted so
-the sibling rollback flow reuses them. This is a real design choice because
-rollback is landing separately and does the same low-level teardown.
+Deletion and creation rollback share the lowest safe mutation seams while retaining different decision layers:
 
-##### Option 1: Keep delete's primitives private
+| Concern                     | Shared implementation                                                                                                   | Flow-specific policy                                                                                                                                                                                                                              |
+|-----------------------------|-------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Federated credential delete | `buildFederatedCredentialDeleteArgs` and `isAzResourceNotFound` in `azure-oidc.ts`                                      | Deletion requires immutable consumer provenance plus immediate live revalidation. Rollback requires proof that the setup attempt created the credential and wraps the mutation in its durable cleanup journal.                                    |
+| GitHub environment delete   | `buildGitHubEnvironmentDeleteArgs` in `github-environment.ts` and the same environment-list cache invalidation contract | Deletion uses the idempotent `deleteGitHubEnvironmentIdempotent` result classifier. Rollback retains exact-identity reads, outcome-unknown reconciliation, and durable mutation journaling before it classifies an artifact as deleted or absent. |
+| Command execution           | Injected argv-based `runAz` and selected `gh` executors                                                                 | Each orchestrator owns its operation steps, recovery state, warnings, and terminal status.                                                                                                                                                        |
 
-Each flow keeps its own copy of every primitive (GitHub-environment delete, FIC
-delete, not-found handling, progress reporting).
-
-- **Advantages:** zero coupling; each PR ships and evolves on its own.
-- **Disadvantages:** the same `gh api DELETE .../environments/{env}` and the same
-  idempotent FIC-delete logic get written twice and drift; two different
-  "cleanup result" vocabularies make the UI report "deleted / already gone /
-  left in place" inconsistently; a CLI phrasing fix must land in two places.
-
-##### Option 2: Extract the primitive layer, keep the decision layer separate
-
-Extract the deletion primitives (and, in a follow-up, the cleanup-result
-vocabulary) into shared services. Each flow keeps its own eligibility check,
-order, and policy, but calls the shared primitives to do the work.
-
-- **Advantages:** each primitive is written and tested once; one consistent
-  cleanup-result vocabulary; safety rules that live *in the primitive*
-  (idempotent `not_found`, stable identity matching, cache invalidation) are
-  guaranteed identical in both flows.
-- **Disadvantages:** needs a little coordination since both PRs touch
-  `operations.ts`; a shared service must be scoped so rollback's provenance
-  assumptions do **not** leak into deletion's discovery-based flow.
-
-##### Proposed option
-
-**Option 2.** The delete flow ships its GitHub-environment delete as a shared,
-port-injected primitive today, and the remaining primitives are extracted in
-dependency order as a follow-up. Keeping delete's teardown in shareable
-primitives is a design requirement of this PR, not an afterthought, so rollback
-binds to the same code instead of re-authoring it.
+The whole executors are deliberately not unified. A GitHub 404 is sufficient for deletion's idempotent convergence, but rollback must distinguish absence from a permission-masked read and reconcile a mutation whose outcome was not recorded. Likewise, deletion must remove the Radius environment before its credential, while rollback follows the reverse dependency order of artifacts created by setup. Sharing those policy layers would weaken both flows rather than reduce meaningful duplication.
 
 ### API design (if applicable)
 
@@ -274,26 +227,9 @@ UI- and I/O-agnostic.
 - `src/server/services/environment-deletion.ts` — the delete orchestrator:
   builds the delete stages, runs them in the fail-closed order above, and
   reports progress. Owns the delete-specific decision layer.
-- `src/server/services/github-environment.ts` — the shared cleanup primitive
-  module. `deleteGitHubEnvironmentIdempotent(repo, env, ports)` (404-tolerant)
-  lives here, co-located with the create-side `ensureGitHubEnvironment`
-  primitive. It takes injected `runGh` and `invalidateEnvListCache` ports;
-  `server.ts` binds its `gh` runner and `envListCache` to it. Sole owner of the
-  `GitHubEnvDeletionOutcome` type, which `environment-deletion.ts` re-exports for
-  its callers.
-- `src/server/services/delete-env-run-classifier.ts` — classifies a delete
-  workflow run outcome; the "az/gh not found ⇒ already gone" rule folds into the
-  shared classifier as it is extracted.
-- Azure argv builders in `src/azure-oidc.ts` (`buildFederatedCredentialDeleteArgs`,
-  `buildFederatedCredentialListArgs`, `parseFederatedCredentials`, and friends)
-  are pure functions the delete flow already uses; rollback imports them rather
-  than re-authoring `az` commands.
-
-Follow-up extraction (in dependency order, each with unit tests): a
-`cleanup-identity.ts` (stable IDs + cleanup-result vocabulary), an
-`azure-cleanup.ts` (idempotent FIC delete; rollback-only app delete), and a
-shared `not_found` classifier. Each flow keeps its stage inventory and order in
-its own orchestrator, not in the primitives.
+- `src/server/services/github-environment.ts` — the shared cleanup primitive module. `buildGitHubEnvironmentDeleteArgs(repo, env)` supplies the mutation argv to deletion and rollback. The 404-tolerant `deleteGitHubEnvironmentIdempotent(repo, env, ports)` is deletion's port-injected execution and result-classification layer. It takes injected `runGh` and `invalidateEnvListCache` ports; `server.ts` binds its `gh` runner and `envListCache` to it. Rollback shares the builder and cache contract but wraps execution in its stronger identity and mutation-journal rules.
+- `src/server/services/delete-env-run-classifier.ts` — classifies the committed delete-workflow run outcome. Azure and GitHub command outcomes remain classified by their shared provider-specific helpers.
+- Azure argv builders in `src/azure-oidc.ts` (`buildFederatedCredentialDeleteArgs`, `buildFederatedCredentialListArgs`, `parseFederatedCredentials`, and friends) are pure functions used by both deletion and rollback rather than re-authored `az` commands. Both flows also use `isAzResourceNotFound`; their surrounding safety proofs and durable recovery remain flow-owned.
 
 #### Shared adapter — packages/adapter-shared (if applicable)
 
@@ -315,8 +251,7 @@ entry (`minor`) documents the feature.
 
 ### Error handling
 
-- Every primitive is idempotent: a `not_found` result from `az`/`gh` is recorded
-  as convergence (already-gone), never a failure.
+- Deletion classifies a `not_found` result from `az`/`gh` as convergence (already-gone), never as a failure.
 - A primitive that genuinely fails records a `warning` and returns it; the
   orchestrator decides whether that warning is fatal. This preserves the
   fail-closed rule: if the Radius-environment delete cannot be confirmed, the
@@ -325,12 +260,7 @@ entry (`minor`) documents the feature.
 - If deletion stops partway, the progress panel reports **what was deleted
   before the failure** so the user knows the current state, plus a retry
   message. It does **not** claim the environment was fully torn down.
-- The app-registration reminder ("left in place — remove it in Azure yourself")
-  is surfaced only when the operation **concludes** — `succeeded` or
-  `succeeded_with_warnings` (the latter includes retained/shared-FIC cases). On
-  a hard fail-closed stop the panel shows completed steps plus a retry message
-  and does **not** show the reminder, because nothing was fully torn down and
-  the user has not reached the end of a deletion.
+- The app-registration reminder ("left in place — remove it in Azure") is surfaced only when the operation **concludes** — `succeeded` or `succeeded_with_warnings` (the latter includes retained/shared-FIC cases). On a hard fail-closed stop the panel shows completed steps plus a retry message and does **not** show the reminder, because nothing was fully torn down and the user has not reached the end of a deletion.
 - **AWS.** Because AWS environments cannot be created yet, the AWS cleanup path
   is framework only. If it is ever reached, it surfaces that AWS cleanup is not
   implemented instead of silently succeeding.
@@ -345,9 +275,7 @@ tests and each changed seam keeps its boundary tests:
   deleting paths), `environment-deletion.ts` (stage order, fail-closed stop when
   the Radius-environment delete is unconfirmed, app-registration left-in-place
   step), and `delete-env-run-classifier.ts` (not-found convergence).
-- **Boundary tests.** HTTP-integration coverage for the operation status the
-  browser reads during a delete, and the artifact (built-extension) suite stays
-  green after rebuilding `plugins/radius/dist`.
+- **Boundary tests.** HTTP-integration coverage for the operation status the browser reads during a delete; real-loopback coverage drives the accepted delete through the background runner and observes both shared command shapes, cache invalidation, and the refreshed environment listing. The rollback integration case separately proves its journaled adapter uses the shared GitHub delete argv and invalidates the same cache. The artifact (built-extension) suite stays green after rebuilding `plugins/radius/dist`.
 - **No coverage regression.** Changed production paths target 100% line/branch;
   the repo `coverage-baseline.json` floor must hold.
 

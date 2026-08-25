@@ -290,7 +290,7 @@ function environmentReader(stillThere: boolean) {
   };
 }
 
-describe("environment listing cache after a rollback", () => {
+describe("environment listing cache after environment cleanup", () => {
   it("serves a repeat listing from the cache within the TTL", async () => {
     const harness = await start(listingScript("7\tdev"));
 
@@ -380,10 +380,10 @@ describe("environment listing cache after a rollback", () => {
 
     expect(names((await harness.list()).body)).toEqual(["dev"]);
 
-    // The delete route now starts a background operation (issue #303), whose
-    // GitHub-environment stage runs the same shared idempotent primitive the
-    // rollback pass uses. Driving that primitive against the real cache proves
-    // the delete flow refreshes the picker exactly as rollback does.
+    // The delete route's GitHub-environment stage uses the idempotent primitive.
+    // Rollback retains its stronger identity and mutation-journal adapter, but
+    // both paths use the same argv builder and invalidate this cache on a
+    // confirmed deletion.
     const outcome = await deleteGitHubEnvironmentIdempotent(REPO, "dev", {
       runGh: async (args) => {
         harness.commands.push(["gh", ...args]);
@@ -408,8 +408,8 @@ describe("environment listing cache after a rollback", () => {
   });
 });
 
-// The two cases above drive the shared stage-3 primitive directly. This one
-// drives the whole async delete route end to end over loopback HTTP: POST the
+// The focused cases above drive the rollback adapter and delete primitive. This
+// one drives the whole async delete route end to end over loopback HTTP: POST the
 // destructive route, take its 202, let the real background runner
 // (`runEnvironmentDeletion`) execute every stage — wired through the same
 // `scheduleEnvironmentOperation` seam `src/server.ts` uses — and confirm that
@@ -429,13 +429,14 @@ describe("the async delete route through its background runner", () => {
 
   it("stops listing the environment once the runner tears it down", async () => {
     const runnerFinished = deferred();
+    const azCommands: string[][] = [];
     // The scheduler is invoked only during the POST, after `start` returns, so
     // the deps can close over this ref and read the live harness by then.
     let harness: Harness;
 
-    // Production binds the scheduler to `runEnvironmentDeletion`; bind the same
-    // runner here, with its GitHub-environment port pointed at the real shared
-    // primitive so stage 3 invalidates the real cache exactly as production does.
+    // Production binds the scheduler to `runEnvironmentDeletion`; bind that same
+    // runner here with the shared Azure argv builder and GitHub deletion
+    // primitive used by the composition root.
     const deleteDeps: Partial<EnvironmentsDependencies> = {
       discoverEnvironmentTarget: async () => ({
         provider: "azure",
@@ -456,14 +457,48 @@ describe("the async delete route through its background runner", () => {
         void runEnvironmentDeletion(op as never, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
           withCredentialProvenanceLock: (work) => work(),
-          runAz: async () => ({ code: 0, stdout: "[]", stderr: "" }),
+          runAz: async (args) => {
+            azCommands.push(args);
+            const credential = {
+              id: "credential-1",
+              name: "github-octo-app-dev-mutable",
+              issuer: "https://token.actions.githubusercontent.com",
+              subject: "repo:octo/app:environment:dev",
+              audiences: ["api://AzureADTokenExchange"]
+            };
+            return {
+              code: 0,
+              stdout:
+                args.includes("list") ? JSON.stringify([credential])
+                : args.includes("show") ? JSON.stringify(credential)
+                : "",
+              stderr: ""
+            };
+          },
           readAzureIdentity: async () => ({
             tenantId: "tenant-1",
             applicationObjectId: "app-object-1"
           }),
-          // No provenance proof, so the credential is retained and stage 3 is
-          // what removes cloud-visible state — the GitHub environment.
-          readCredentialProvenance: () => [],
+          readCredentialProvenance: () => [
+            {
+              schemaVersion: 2,
+              repo: "octo/app",
+              repoId: 7,
+              environment: "dev",
+              tenantId: "tenant-1",
+              clientId: "app-xyz",
+              applicationObjectId: "app-object-1",
+              credentialId: "credential-1",
+              name: "github-octo-app-dev-mutable",
+              subject: "repo:octo/app:environment:dev",
+              issuer: "https://token.actions.githubusercontent.com",
+              audiences: ["api://AzureADTokenExchange"],
+              subjectConfig: { useDefault: true },
+              origin: "created",
+              operationId: "setup-op",
+              recordedAt: "2026-08-22T00:00:00.000Z"
+            }
+          ],
           removeCredentialProvenance: async () => {},
           clearEnvironmentCredentialProvenance: async () => {},
           deleteGitHubEnvironment: ({ repo, environment }) =>
@@ -514,6 +549,16 @@ describe("the async delete route through its background runner", () => {
       "--method",
       "DELETE",
       "/repos/octo/app/environments/dev"
+    ]);
+    expect(azCommands).toContainEqual([
+      "ad",
+      "app",
+      "federated-credential",
+      "delete",
+      "--id",
+      "app-xyz",
+      "--federated-credential-id",
+      "credential-1"
     ]);
     expect(after.status).toBe(200);
     expect(names(after.body)).toEqual([]);
