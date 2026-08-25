@@ -2,7 +2,10 @@ import { escapeHtml, type CanvasState } from "../shared.js";
 import { browserScriptTag } from "../browser/scripts.js";
 import { pageShell } from "./shell.js";
 import { graphHeader, graphHeaderClose } from "./graph-header.js";
-import { DELETE_DEPLOYMENT_DIALOG_HTML } from "./fragments.js";
+import {
+  ABANDON_DEPLOYMENT_DIALOG_HTML,
+  DELETE_DEPLOYMENT_DIALOG_HTML
+} from "./fragments.js";
 import { inlineJson } from "./encoding.js";
 
 export function deployedGraphPage(state: CanvasState = {}): string {
@@ -37,6 +40,7 @@ ${graphHeader("deployed")}
     <div class="rad-select-wrap"><select id="deployed-env-select"><option value="">Loading…</option></select></div>
   </div>
   <button id="deployed-delete-btn" class="rad-btn rad-btn--danger-outline" style="margin:0;" disabled>Delete Deployment</button>
+  <button id="deployed-stop-tracking-btn" class="rad-btn rad-btn--secondary" style="display:none; margin:0;" disabled>Stop tracking deployment</button>
 </div>
 <div id="deployed-inline-status" style="display:none; margin:0 0 14px; padding:10px 12px; border-radius:8px; font-size:13px;"></div>
 <div class="rad-card" style="margin:0;">
@@ -51,6 +55,7 @@ ${graphHeader("deployed")}
   <div id="deployed-log-output" style="background:var(--rad-code-bg); color:var(--rad-code-text); border:1px solid var(--rad-stroke); font-family:var(--rad-mono); font-size:12px; padding:12px; border-radius:6px; max-height:280px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
 </div>
 ${DELETE_DEPLOYMENT_DIALOG_HTML}
+${ABANDON_DEPLOYMENT_DIALOG_HTML}
 <div id="deployed-deleting-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
   <div class="rad-card" style="max-width:520px; width:90%; margin:0; display:flex; align-items:center; gap:18px;">
     <div class="rad-spinner-lg" aria-hidden="true"></div>
@@ -70,7 +75,11 @@ ${DELETE_DEPLOYMENT_DIALOG_HTML}
         repo: targetRepo,
         branch: deployBranch,
         graphBranch: targetBranch,
-        provider
+        provider,
+        mutationNonce:
+          typeof state.browserMutationNonce === "string" ?
+            state.browserMutationNonce
+          : ""
       })
     )}</div>
 ${browserScriptTag("deployed-graph-page")}

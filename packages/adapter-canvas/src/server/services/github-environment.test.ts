@@ -55,6 +55,7 @@ describe("ensureGitHubEnvironment", () => {
     const ensured = await ensureGitHubEnvironment({
       repo: "octo/app",
       requestedName: "Production West",
+      now: () => 1_700_000_000_000,
       readGitHubJson: async (apiPath) => {
         reads.push(apiPath);
         return apiPath === "/repos/octo/app" ?
@@ -71,7 +72,11 @@ describe("ensureGitHubEnvironment", () => {
 
     expect(ensured).toEqual({
       name: "Production West",
-      state: "created_candidate"
+      state: "created_candidate",
+      creationEvidence: {
+        putResponseBody: JSON.stringify({ name: "Production West" }),
+        putStartedAtMs: 1_700_000_000_000
+      }
     });
     expect(reads).toEqual([
       "/repos/octo/app/environments/Production%20West",
@@ -219,21 +224,7 @@ describe("ensureGitHubEnvironment", () => {
       ],
       [{ ...resolved, setupArtifacts: {} }, "octo/app", "Production"],
       [resolved, "octo/other", "Production"],
-      [resolved, "octo/app", "production"],
-      [
-        {
-          ...resolved,
-          setupArtifacts: {
-            githubEnvironment: {
-              state: "created",
-              repo: "octo/app",
-              name: "Production"
-            }
-          }
-        },
-        "octo/app",
-        "Production"
-      ]
+      [resolved, "octo/app", "production"]
     ])(
       "does not trust a stale or incomplete persisted resolution",
       (operation, repo, environment) => {
@@ -318,7 +309,8 @@ describe("ensureGitHubEnvironment", () => {
       repo: "octo/app",
       requestedName: "production",
       readGitHubJson,
-      runGh
+      runGh,
+      now: () => 1_700_000_000_000
     });
     const second = await ensureGitHubEnvironment({
       repo: "octo/app",
@@ -329,7 +321,11 @@ describe("ensureGitHubEnvironment", () => {
 
     expect(first).toEqual({
       name: "Production",
-      state: "created_candidate"
+      state: "created_candidate",
+      creationEvidence: {
+        putResponseBody: JSON.stringify({ name: "Production" }),
+        putStartedAtMs: 1_700_000_000_000
+      }
     });
     expect(second).toEqual({ name: "Production", state: "reused" });
     expect(putCalls).toBe(1);

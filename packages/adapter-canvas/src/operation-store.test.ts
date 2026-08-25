@@ -91,4 +91,59 @@ describe("file operation store", () => {
       parseOperationsEnvelope({ schemaVersion: 2, operations: [] })
     ).toThrow(/schema/i);
   });
+
+  it("keeps the envelope at version 1 while operation records move to version 2", () => {
+    // The outer shape did not change, so a store written by issues #304 and
+    // #305 stays readable. Only the per-record schema advanced.
+    expect(PERSISTED_OPERATIONS_VERSION).toBe(1);
+    expect(
+      parseOperationsEnvelope({
+        schemaVersion: 1,
+        operations: [
+          { operationId: "op_1", schemaVersion: 1 },
+          { operationId: "op_2", schemaVersion: 2, control: { attempts: {} } }
+        ]
+      }).operations
+    ).toHaveLength(2);
+  });
+
+  it("persists a command record through the atomic replacement", async () => {
+    const filePath = await temporaryFile();
+    const store = createFileOperationStore({ filePath });
+    const envelope = {
+      schemaVersion: PERSISTED_OPERATIONS_VERSION as 1,
+      operations: [
+        {
+          operationId: "op_1",
+          schemaVersion: 2,
+          control: {
+            stop: {
+              requestedAt: "2026-01-01T00:00:00.000Z",
+              acknowledgedAt: null,
+              boundary: null
+            },
+            attempts: { setup: 2, verification: 1, cleanup: 0 },
+            commands: [
+              {
+                kind: "retry_setup",
+                commandId: "op_1:retry_setup:2:setup",
+                attempt: 2,
+                target: "setup",
+                state: "accepted",
+                acceptedAt: "2026-01-01T00:00:00.000Z",
+                completedAt: null,
+                outcome: null
+              }
+            ],
+            outcomes: []
+          }
+        }
+      ]
+    };
+
+    await store.save(envelope);
+
+    await expect(store.load()).resolves.toEqual(envelope);
+    expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
+  });
 });

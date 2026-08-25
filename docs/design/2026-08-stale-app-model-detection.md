@@ -53,17 +53,21 @@ The file is JSON because only code reads and writes it, so `JSON.parse` is enoug
 
 ### Checking the app model
 
-Five checks run in order. The first one that fails decides what happens.
+Four checks run in order, and the first one that fails decides what happens. A fifth question, whether the file was manually edited after we generated it, is asked last and only changes the answer when one of the four already failed.
 
-| Check                                 | If it fails                             |
-|---------------------------------------|-----------------------------------------|
-| Does an app model exist?              | `missing`, so the skill writes one      |
-| Does its origin record parse?         | `unrecorded`, so ask before overwriting |
-| Does the fingerprint match the file?  | `edited`, so ask before overwriting     |
-| Has source changed since it was made? | `source-changed`, so regenerate         |
-| Is the same skill installed?          | `generator-changed`, so regenerate      |
+| Check                                 | If it fails                                       |
+|---------------------------------------|---------------------------------------------------|
+| Does an app model exist?              | `missing`, so the skill writes one                |
+| Does its origin record parse?         | `unrecorded`, so regenerate if git can restore it |
+| Has source changed since it was made? | `source-changed`, so regenerate                   |
+| Is the same skill installed?          | `generator-changed`, so regenerate                |
+| Was it manually edited since?         | `manually-edited`, so ask before overwriting      |
 
-If all five pass, the app model is current and the view renders it.
+If all of them pass, the app model is current and the view renders it.
+
+A manual edit is checked against the others rather than on its own, because on its own it is not a reason to regenerate anything. If the source and the skill both still match, the app model describes the current source, and the only thing we cannot say about it is that we wrote it. Reporting that would ask the user to justify their own edit every time they open a graph, forever, because an edit is permanent and there is no way for them to accept it. The edit only starts to matter once something else already calls for a regeneration, which is the moment the overwrite would cost them work and their answer changes what we do.
+
+It is not what keeps a broken app model out of the view either. `rad app graph` compiles the app model to build the graph, so a manual edit that breaks the Bicep fails the build and puts the compiler's own error on the graph surface, which tells the user more than a warning from us would.
 
 `evaluateAppModelFreshness` in `packages/core/src/modeling/app-origin.ts` does the deciding and nothing else. It is handed the app model text, the origin record, and the answers above, and returns one of those results. Anything it cannot be told is skipped rather than counted as a failure.
 
@@ -73,15 +77,38 @@ It depends on whether we can safely regenerate it ourselves.
 
 The canvas can already render a graph for a branch other than the one the workspace is on. A PR diff compares two branches, and a graph can be opened against another repo or branch directly, both read from GitHub. So the check runs on those too, but a regeneration there would mean committing and pushing to someone else's branch, which modeling does not do.
 
-| Situation                                                  | What happens                                                                                                                        |
-|------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
-| Source or skill changed, on the branch the workspace is on | The graph waits. The skill regenerates the app model, then the view opens with a current one.                                       |
-| The app model was edited by hand, or has no origin record  | The view opens. The agent explains what would be lost and asks before regenerating, and offers to fix the problem in place instead. |
-| Any stale app model on another branch                      | The view opens with a note. Modeling only writes the local working tree, so there is nothing we can regenerate.                     |
+| Situation                                                                                                                  | What happens                                                                                                                        |
+|----------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| Source or skill changed, or there is no origin record and git can restore the app model, on the branch the workspace is on | The graph waits. The skill regenerates the app model, then the view opens with a current one.                                       |
+| Any of those, on an app model that was manually edited or that git cannot restore                                          | The view opens. The agent explains what would be lost and asks before regenerating, and offers to fix the problem in place instead. |
+| Any stale app model on another branch                                                                                      | The view opens with a note. Modeling only writes the local working tree, so there is nothing we can regenerate.                     |
 
 The second and third rows still open the view because the file on disk is the one that would be deployed, so showing it is the honest thing to do. Blocking those would also leave the user with nothing they can act on.
 
+An app model with no origin record is usually regenerated without asking. Nothing about a missing record shows a person ever touched it, and every app model written before records existed would otherwise prompt on its first graph open, which is the whole installed base.
+
+But a missing record is not proof that nobody wrote it either. Someone can author `.radius/app.bicep` by hand and never run the skill, and that app model never gets a record. So instead of guessing whether it was edited, which we cannot know, we ask git a question we can answer: could the user get this file back?
+
+Regeneration writes the working tree and never commits. So an app model that is committed and unmodified survives being overwritten. The user sees an ordinary uncommitted diff and can undo it with `git checkout --`. One that is untracked, or that already carries uncommitted changes, exists nowhere else, and replacing it is final.
+
+| The app model on disk    | What happens                                           |
+|--------------------------|--------------------------------------------------------|
+| Committed and unmodified | Regenerated without asking. Git still has the old one. |
+| Modified, or untracked   | The view opens and the agent asks first.               |
+| Git cannot say           | Treated as not recoverable, so the agent asks.         |
+
+`workspaceModelRecoverable` in `packages/adapter-canvas/src/workspace.ts` runs a single `git status --porcelain --ignored` for this, and only when there is no record to judge the app model by. `--ignored` matters: without it an app model that a gitignore rule matches prints nothing, exactly like a committed and unmodified one, so the file git has never seen would read as safe to replace. Once one is written it never runs again for that app model, so it costs a subprocess once rather than on every graph open.
+
 Two places in the code handle this. `evaluateAppBicepHook` holds the graph back when regenerating is safe. `maybeHandoffAppBicep` covers everything else, including openings the first one never sees, such as a reload after source links are attached, or the user simply clicking the panel open. Without it, those openings would quietly show a stale app model, which is the original problem in a different place.
+
+### Saying it once, without saying it once too often
+
+Both places report a problem once and then stay quiet until it changes, so opening the same graph repeatedly does not repeat the same message. That means each needs a key describing what it already said, and `freshnessIdentity` in `packages/core/src/modeling/app-origin.ts` builds the part of that key that describes the evidence.
+
+Getting it wrong in the other direction is worse than repeating a message. If two different situations share a key, the second one is never reported at all. Two things are easy to miss here:
+
+- An app model with no origin record has no record to identify it, so every one of them on a branch would look the same and swapping the file for a different one would go unnoticed. Its own fingerprint stands in for the record.
+- Whether an app model is safe to replace can change without the app model changing at all, by committing it or by adding a gitignore rule that matches it. So the key carries that too, and a verdict of "regenerate silently" is never mistaken for "ask first".
 
 ### Deciding whether source changed
 
@@ -99,17 +126,18 @@ That command only works on the branch the workspace has checked out. On any othe
 
 ### Error handling
 
-| If we cannot                                               | What happens                                                                             |
-|------------------------------------------------------------|------------------------------------------------------------------------------------------|
-| Read the app model                                         | Treated as if there is none, and the skill writes one                                    |
-| Read or parse the origin record                            | Treated as if it was never recorded, so the user is asked before anything is overwritten |
-| Work out the source commit, or the installed skill version | That check is skipped                                                                    |
+| If we cannot                                               | What happens                                          |
+|------------------------------------------------------------|-------------------------------------------------------|
+| Read the app model                                         | Treated as if there is none, and the skill writes one |
+| Read or parse the origin record                            | Treated as if it was never recorded                   |
+| Work out the source commit, or the installed skill version | That check is skipped                                 |
+| Tell whether the app model is committed                    | Treated as not recoverable, so the agent asks first   |
 
 The rule is the same in each case: a failed read never causes us to overwrite an app model. Regenerating replaces the user's file, so it should follow evidence.
 
 Writing is the exception. When the script cannot work out the source commit, it prints the reason and exits without writing anything, because a record naming a commit it never confirmed would be false. The app model itself is left alone.
 
-The skill is told to fix the cause and run the script again rather than write the record by hand. If that never happens, the app model simply has no record, so the next graph open treats it as unverified and asks before overwriting it.
+The skill is told to fix the cause and run the script again rather than write the record by hand. If that never happens, the app model simply has no record, so the next graph open regenerates it, or asks first when git cannot restore it.
 
 A graph is only ever held back once. If the app model is not regenerated, because the skill failed or the user said no, the next open renders whatever is there rather than holding the graph back again. Nobody is locked out of their own graph by a fix that did not happen. The same applies if any of this breaks outright: a failure while checking the app model is ignored and the view opens.
 

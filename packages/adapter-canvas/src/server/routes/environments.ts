@@ -163,6 +163,7 @@ export async function handleDeleteEnvironment(
     }
     if (active) {
       const deleting = active.status === "deleting";
+      const deleteFailed = active.status === "delete-failed";
       response.setHeader("Content-Type", "application/json");
       response.writeHead(409);
       response.end(
@@ -170,13 +171,20 @@ export async function handleDeleteEnvironment(
           error:
             deleting ?
               `Application "${active.app}" is still being deleted from environment "${envName}". Wait for that to finish before deleting the environment.`
+            : deleteFailed ?
+              `The previous teardown of application "${active.app}" from environment "${envName}" failed. Retry Delete or stop tracking the deployment before deleting the environment.`
             : `Application "${active.app}" is still deployed to environment "${envName}". Delete the application deployment first, then delete the environment.`,
           code: "app-deployed",
           app: active.app,
           environment: envName,
-          redirect: `/?page=deploying&app=${encodeURIComponent(
-            active.app
-          )}&env=${encodeURIComponent(envName)}`
+          redirect:
+            deleteFailed ?
+              `/?page=deployed&application=${encodeURIComponent(
+                active.app
+              )}&environment=${encodeURIComponent(envName)}`
+            : `/?page=deploying&app=${encodeURIComponent(
+                active.app
+              )}&env=${encodeURIComponent(envName)}`
         })
       );
       return;
@@ -256,6 +264,19 @@ export async function handleListEnvironments(
     respond(cached.payload);
     return;
   }
+
+  // The generation this listing is being assembled against. Anything that
+  // removes an environment — the delete route, or a rollback or exit that
+  // deletes the one this setup created — invalidates the repo's listing, and
+  // that invalidation must survive a listing that started before it. Caching
+  // such a payload would put the removed environment back in front of the
+  // customer for a whole TTL, which is exactly what a completed rollback
+  // promised it would not do.
+  const generation = dependencies.envListCacheGeneration(repo);
+  const cacheListing = (payload: unknown): void => {
+    if (dependencies.envListCacheGeneration(repo) !== generation) return;
+    dependencies.envListCacheSet(repo, { at: dependencies.now(), payload });
+  };
 
   const gh = (args: string[], timeout = 12000): Promise<string> =>
     new Promise<string>((resolve) => {
@@ -339,7 +360,7 @@ export async function handleListEnvironments(
     if (rows.length === 0) {
       const payload = { environments: [] };
       respond(payload);
-      dependencies.envListCacheSet(repo, { at: dependencies.now(), payload });
+      cacheListing(payload);
       return;
     }
 
@@ -474,10 +495,7 @@ export async function handleListEnvironments(
         environment !== null
     );
     respond({ environments: managedEnvironments });
-    dependencies.envListCacheSet(repo, {
-      at: dependencies.now(),
-      payload: { environments: managedEnvironments }
-    });
+    cacheListing({ environments: managedEnvironments });
     // Background self-heal: update any committed workflow files that have
     // drifted from the upstream Radius templates. Also target the session
     // worktree branch (when it's this repo's) so a worktree-consistent deploy
@@ -502,6 +520,21 @@ export async function handleListEnvironments(
 // tracked operation's repo/environment and carry a complete dispatch identity,
 // or the poll is rejected as expired. Every response is 200 with
 // `Cache-Control: no-store`; the state field carries the verdict.
+export function isAzureRbacVerificationFailure(
+  failedSteps: readonly { name?: string }[],
+  log: string,
+  noSubscriptionsHelp: string
+): boolean {
+  if (noSubscriptionsHelp !== "") return true;
+  const failedAtAzureAccess = failedSteps.some((step) =>
+    /verify.*(?:aks|azure).*access/i.test(String(step.name))
+  );
+  if (!failedAtAzureAccess) return false;
+  return /(?:AuthorizationFailed|\bForbidden\b|does not have authorization|not authorized|insufficient privileges|role assignment|cannot (?:get|list|create|update|patch|delete) resource)/i.test(
+    log
+  );
+}
+
 export async function handleVerifyStatus(
   context: CanvasRequestContext,
   dependencies: EnvironmentsDependencies
@@ -679,17 +712,28 @@ export async function handleVerifyStatus(
     // Distinct failure stages (OIDC enterprise-claim rejection vs. a successful
     // login with no visible subscription — issue #219), so at most one applies;
     // take the first match so the raw-error separator is never emitted twice.
-    const failureHelp =
-      dependencies.explainOidcEnterpriseClaim(azureLoginLog) ||
-      dependencies.explainNoSubscriptions(log);
+    const oidcHelp = dependencies.explainOidcEnterpriseClaim(azureLoginLog);
+    const noSubscriptionsHelp =
+      oidcHelp === "" ? dependencies.explainNoSubscriptions(log) : "";
+    const failureHelp = oidcHelp || noSubscriptionsHelp;
     if (failureHelp)
       errMsg = failureHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
     if (verifyOp && verifyOp.currentStage === dependencies.stageVerify) {
+      const failedAtAzureAccess = isAzureRbacVerificationFailure(
+        failed,
+        log || "",
+        noSubscriptionsHelp
+      );
       // Everything before verification succeeded and still exists, so this is
-      // partial rather than total failure.
+      // partial rather than total failure. Only a positively identified Azure
+      // access failure gets propagation copy; OIDC, workflow, and runner failures
+      // retain the generic verification classification.
       dependencies.finish(verifyOp, "failed_partial", {
         failure: {
-          code: "verify-run-failed",
+          code:
+            failedAtAzureAccess ?
+              "verify-run-rbac-failed"
+            : "verify-run-failed",
           stage: dependencies.stageVerify,
           message:
             "Credential verification failed. " +
