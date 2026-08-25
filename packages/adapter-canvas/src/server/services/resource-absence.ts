@@ -1,0 +1,218 @@
+// Proving a resource is gone rather than merely invisible.
+//
+// GitHub answers 404 for a resource that does not exist and for one the token
+// is not allowed to see, and it makes that decision per resource rather than
+// per repository. A token can read repository metadata and still be refused
+// refs, or refused the Actions environments API, so "the repository is
+// readable" says nothing about whether the 404 in front of us is an absence.
+//
+// The only answer that separates the two is a successful read in the same
+// permission family as the one that returned 404: if the account can list the
+// resources of that kind, a listing that does not contain the target is proof
+// the target is gone. Anything else — a refused listing, an unreadable body, a
+// page that may have been cut short — leaves the outcome unknown, and unknown
+// never authorizes a deletion or a claim that one succeeded.
+
+export interface ListingReadResult {
+  code: string | number;
+  stdout: string;
+  stderr: string;
+}
+
+/** One page of a listing, as its own parser understood it. */
+export interface ListingPage {
+  /** The identities on this page, in whatever form the caller compares. */
+  names: readonly string[];
+  /** Whether another page may still hold the target. */
+  hasMore: boolean;
+  /**
+   * The count GitHub says the whole listing holds, when it reports one. A
+   * listing that ends before reaching it was truncated somewhere, so its
+   * silence about the target is not evidence.
+   */
+  totalCount?: number | null;
+}
+
+export type ResourceAbsenceProof =
+  | { state: "absent"; evidence: string }
+  | { state: "present"; detail: string }
+  | { state: "unknown"; detail: string };
+
+/** How the exact resource endpoint answered the final confirming read. */
+export type ExactResourceRead = "absent" | "present" | "unreadable";
+
+// A listing that has not ended by here is either enormous or looping. Either
+// way Radius stops reading and refuses to conclude anything from what it saw.
+const MAX_LISTING_PAGES = 20;
+
+function readFailureDetail(result: ListingReadResult): string {
+  return (
+    (result.stderr || result.stdout || "").trim() || "the request was refused"
+  );
+}
+
+/**
+ * Decide whether a listing the account can actually read proves a target gone.
+ *
+ * The listing is read to its end before absence is reported. A page that came
+ * back full may have been followed by another holding the target, and a listing
+ * that stopped short of the count GitHub advertised was cut off, so neither is
+ * allowed to stand in for the whole set.
+ *
+ * Two more things can hide a target from an offset-paged listing that is
+ * otherwise complete. If the set changed size while Radius was walking it, an
+ * entry can slide from a page not yet read onto one already read, so a count
+ * that moves between pages ends the proof rather than the listing. And even a
+ * listing that never moved was assembled request by request, so absence is
+ * confirmed once more against the resource's own endpoint — the same read whose
+ * 404 started all of this, now backed by a listing that says the account could
+ * have seen the resource if it were there.
+ */
+export async function proveAbsentFromListing(input: {
+  target: string;
+  resource: string;
+  scope: string;
+  readPage(page: number): Promise<ListingReadResult>;
+  parsePage(stdout: string): ListingPage | null;
+  confirmExactAbsence(): Promise<ExactResourceRead>;
+  maxPages?: number;
+}): Promise<ResourceAbsenceProof> {
+  const limit = input.maxPages ?? MAX_LISTING_PAGES;
+  const masked = (detail: string): ResourceAbsenceProof => ({
+    state: "unknown",
+    detail:
+      `GitHub reported ${input.resource} "${input.target}" in ${input.scope} as absent, but the selected account could not read the ${input.resource} listing that would confirm it: ${detail}. ` +
+      "That answer may be masked access rather than a completed delete."
+  });
+  let seen = 0;
+  let advertised: number | null = null;
+  for (let page = 1; page <= limit; page++) {
+    let result: ListingReadResult;
+    try {
+      result = await input.readPage(page);
+    } catch (error) {
+      return masked(error instanceof Error ? error.message : String(error));
+    }
+    if (result.code !== 0 && result.code !== "0") {
+      return masked(readFailureDetail(result));
+    }
+    const parsed = input.parsePage(result.stdout);
+    if (!parsed) {
+      return masked("GitHub returned a listing Radius could not read");
+    }
+    if (parsed.names.includes(input.target)) {
+      return {
+        state: "present",
+        detail: `${input.resource} "${input.target}" is still present in ${input.scope}.`
+      };
+    }
+    const pageCount =
+      (
+        typeof parsed.totalCount === "number" &&
+        Number.isFinite(parsed.totalCount)
+      ) ?
+        parsed.totalCount
+      : null;
+    if (pageCount !== null) {
+      // An offset-paged listing that grew or shrank underneath the walk can slide
+      // an entry from an unread page onto one already read. The set Radius saw is
+      // then not the set that exists, so it proves nothing about the target.
+      if (advertised !== null && advertised !== pageCount) {
+        return masked(
+          `the listing changed from ${advertised} to ${pageCount} entries while Radius was reading it`
+        );
+      }
+      advertised = pageCount;
+    }
+    seen += parsed.names.length;
+    if (parsed.hasMore) continue;
+    if (advertised !== null && seen < advertised) {
+      return masked(`the listing ended after ${seen} of ${advertised} entries`);
+    }
+    let exact: ExactResourceRead;
+    try {
+      exact = await input.confirmExactAbsence();
+    } catch (error) {
+      return masked(
+        `the confirming read failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+    if (exact === "present") {
+      return {
+        state: "present",
+        detail: `${input.resource} "${input.target}" is still present in ${input.scope}.`
+      };
+    }
+    if (exact === "unreadable") {
+      return masked(
+        "the confirming read of the resource itself could not be completed"
+      );
+    }
+    return {
+      state: "absent",
+      evidence: `The selected account read every ${input.resource} in ${input.scope}, "${input.target}" is not among them, and its own endpoint still reports it gone.`
+    };
+  }
+  return masked(`the listing did not end within ${limit} pages`);
+}
+
+/** One page of `GET /repos/{repo}/git/matching-refs/...`, as full ref names. */
+export function parseRefListingPage(
+  stdout: string,
+  perPage: number
+): ListingPage | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const names: string[] = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") return null;
+    const ref = (entry as { ref?: unknown }).ref;
+    if (typeof ref !== "string" || !ref) return null;
+    names.push(ref);
+  }
+  return { names, hasMore: parsed.length >= perPage };
+}
+
+/** One page of `GET /repos/{repo}/environments`, as environment names. */
+export function parseEnvironmentListingPage(
+  stdout: string,
+  perPage: number
+): ListingPage | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const body = parsed as { environments?: unknown; total_count?: unknown };
+  if (!Array.isArray(body.environments)) return null;
+  const names: string[] = [];
+  for (const entry of body.environments) {
+    if (!entry || typeof entry !== "object") return null;
+    const name = (entry as { name?: unknown }).name;
+    if (typeof name !== "string" || !name) return null;
+    names.push(name);
+  }
+  // `Number(null)` is 0, which would read a listing that advertises no count as
+  // advertising zero — and a later page carrying a real count then looks like
+  // the set changed size mid-walk, ending an otherwise sound proof as unknown.
+  const totalCount =
+    typeof body.total_count === "number" && Number.isFinite(body.total_count) ?
+      body.total_count
+    : null;
+  return {
+    names,
+    hasMore: body.environments.length >= perPage,
+    totalCount
+  };
+}
