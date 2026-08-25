@@ -5148,7 +5148,7 @@ function createInstanceRequestCoordinator(
             preflightRepoAdmin: (repo, selectedExecutor) =>
               preflightRepoAdmin(repo, selectedExecutor),
             guardStopBoundary: (operation, boundary) =>
-              guardStopBoundary({
+              honorStopBoundary({
                 operation,
                 boundary,
                 persist: () => operations.persist(),

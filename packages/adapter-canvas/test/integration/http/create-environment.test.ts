@@ -2198,7 +2198,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     expect(body).toMatchObject({
       cancelled: true,
       code: "operation-stopped",
-      boundary: "before-ghcr-bootstrap",
+      boundary: "before-github-environment",
       operationId: "op-http"
     });
     expect(body.operation).toMatchObject({ terminalState: "cancelled" });
