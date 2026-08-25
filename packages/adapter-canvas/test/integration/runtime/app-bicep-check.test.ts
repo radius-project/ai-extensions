@@ -367,7 +367,12 @@ const interpolatedGitRef =
   "[format('git::https://github.com/example/app.git?ref={0}', parameters('gitRef'))]";
 
 function radiusResource<T extends object>(type: string, properties: T) {
-  return { type, properties: { properties } };
+  return {
+    type,
+    properties: {
+      properties: { codeReference: "src/resource.ts#L1", ...properties }
+    }
+  };
 }
 
 function imageResource(source: unknown) {
@@ -415,6 +420,74 @@ test("passes a warning-free Bicep compilation", () => {
 
   assert.equal(result.status, 0);
   assert.equal(result.stderr, "");
+});
+
+test("fails when a non-application Radius resource has no durable source reference", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: {
+      type: "Radius.Compute/containers@2025-08-01-preview",
+      properties: { properties: {} }
+    },
+    app: {
+      type: "Radius.Core/applications@2025-08-01-preview",
+      properties: { properties: {} }
+    }
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /source-code-reference/u);
+  assert.match(result.stderr, /web\.properties\.codeReference/u);
+  assert.doesNotMatch(result.stderr, /app\.properties\.codeReference/u);
+});
+
+test.each([
+  "https://github.com/acme/app/blob/main/src/app.ts",
+  "/src/app.ts",
+  "src\\app.ts",
+  "../src/app.ts",
+  "src/app.ts#L0",
+  "src/app.ts#not-a-line"
+])("fails for a non-repo-relative source reference: %s", (codeReference) => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+      codeReference
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /must be a repo-relative path/u);
+});
+
+test("checks source references inside local modules", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    module: localModuleResources({
+      queue: {
+        type: "Radius.Messaging/rabbitMQ@2025-08-01-preview",
+        properties: { properties: {} }
+      }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /module\.queue\.properties\.codeReference/u);
 });
 
 test("fails and surfaces a Bicep warning even when Bicep exits successfully", () => {
