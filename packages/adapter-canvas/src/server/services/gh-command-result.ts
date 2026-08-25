@@ -24,6 +24,17 @@ export interface GhCommandResult {
   timedOut?: boolean;
 }
 
+function failureCode(error: GhCommandExecError): string | number {
+  return (
+      error.code === null ||
+        error.code === undefined ||
+        error.code === 0 ||
+        error.code === "0"
+    ) ?
+      1
+    : error.code;
+}
+
 export function toGhCommandResult(
   error: GhCommandExecError | null | undefined,
   stdout: string | undefined,
@@ -33,7 +44,7 @@ export function toGhCommandResult(
   const out = stdout || "";
   const timedOut = commandTimedOut(error);
   return {
-    code: error ? error.code || 1 : 0,
+    code: error ? failureCode(error) : 0,
     stdout: options.trimStdout ? out.trim() : out,
     stderr: stderr || "",
     ...(timedOut ? { timedOut: true } : {})

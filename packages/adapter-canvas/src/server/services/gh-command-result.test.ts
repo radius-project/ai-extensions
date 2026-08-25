@@ -27,7 +27,8 @@ describe("toGhCommandResult", () => {
   it.each<[code: number | string | null | undefined, label: string]>([
     [null, "a signalled child"],
     [undefined, "an error with no code at all"],
-    [0, "an error that reports a zero code"]
+    [0, "an error that reports a numeric zero code"],
+    ["0", "an error that reports a string zero code"]
   ])("never reads %s (%s) as success", (code) => {
     expect(toGhCommandResult({ code }, "", "boom").code).toBe(1);
   });
