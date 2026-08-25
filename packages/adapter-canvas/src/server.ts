@@ -1455,17 +1455,6 @@ export function setEnvironmentOperationTestRunner(
   environmentOperationTestRunner = runner;
 }
 
-export function unmarkedVerificationRunGuidance(
-  candidateCount: number
-): string | null {
-  if (candidateCount <= 0) return null;
-  return (
-    "One or more verification runs appeared after Radius's saved retry baseline, " +
-    "but GitHub does not expose an operation-specific dispatch marker. Radius will " +
-    "not guess which run belongs to this operation or dispatch another run."
-  );
-}
-
 export async function resolveAcknowledgedVerificationRun(input: {
   operationMarker: string;
   pause(milliseconds: number): Promise<void>;
@@ -4571,7 +4560,10 @@ async function deleteLegacyDeployWorkflow(
     );
     const sha = lookup.code === 0 ? lookup.stdout.trim() : "";
     if (!sha) return false;
-    await executor.run(
+    // Answering `true` for a DELETE that failed would report a removal that did
+    // not happen, and the legacy workflow would keep double-triggering
+    // alongside the new dispatcher with nothing saying so.
+    const removed = await executor.run(
       [
         "api",
         "--method",
@@ -4584,7 +4576,7 @@ async function deleteLegacyDeployWorkflow(
       ],
       { timeout: 30000 }
     );
-    return true;
+    return removed.code === 0 || removed.code === "0";
   }
   return new Promise((resolve) => {
     cliExec(
@@ -4610,7 +4602,7 @@ async function deleteLegacyDeployWorkflow(
             "sha=" + sha
           ],
           { timeout: 30000 },
-          () => resolve(true)
+          (deleteErr) => resolve(!deleteErr)
         );
       }
     );

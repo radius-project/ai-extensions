@@ -727,6 +727,11 @@ export async function handleCreateEnvironment(
           },
           accept: (result) =>
             JSON.parse(result.stdout) as CreateEnvironmentPullRequestResult,
+          // GitHub's own number for the pull request, settled with the status.
+          // The reconcile below matches on head and base ref names, which a
+          // customer can recreate; the number cannot be.
+          providerIdOf: (_result, value) =>
+            typeof value?.number === "number" ? String(value.number) : null,
           reconcile: async () => {
             const listed = await runGh([
               "api",

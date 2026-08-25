@@ -1045,3 +1045,108 @@ describe("a target whose name collides with a rejection token", () => {
     );
   });
 });
+
+describe("the second attempt, across every settled status", () => {
+  // The defects this journal exists to prevent all live on the second attempt:
+  // retry after a rejection, restart after an interruption, delete then
+  // recreate. This drives one mutation twice from each settled status and
+  // asserts the only two that may reissue actually do, and no other does.
+  const secondAttempt = async (
+    status: "prepared" | "confirmed" | "not_applied" | "outcome_unknown"
+  ) => {
+    const operation = createOperation({ operationId: "op_second" });
+    const prepared = prepareProviderMutation(operation, {
+      kind: "azure_application.create",
+      target: "octo/app:dev"
+    });
+    settleProviderMutation(
+      operation,
+      prepared.mutationId,
+      status,
+      "seeded by the first attempt"
+    );
+    let mutated = 0;
+    let reconciled = 0;
+    const run = () =>
+      executeRecoverableMutation<string>({
+        operation,
+        kind: "azure_application.create",
+        target: "octo/app:dev",
+        persist: async () => {},
+        mutate: async () => {
+          mutated += 1;
+          return { code: 0, stdout: "app-1", stderr: "" };
+        },
+        accept: (result) => result.stdout,
+        reconcile: async () => {
+          reconciled += 1;
+          return {
+            state: "applied" as const,
+            value: "app-1",
+            evidence: "read back"
+          };
+        }
+      });
+    try {
+      await run();
+    } catch {
+      // A terminal status refuses, which is itself the assertion below.
+    }
+    return { mutated, reconciled };
+  };
+
+  it.each([
+    ["prepared", 0, 1],
+    ["outcome_unknown", 0, 1],
+    ["confirmed", 0, 1],
+    ["not_applied", 1, 0]
+  ] as const)(
+    "from %s, reissues %i time(s) and reconciles %i time(s)",
+    async (status, mutated, reconciled) => {
+      await expect(secondAttempt(status)).resolves.toEqual({
+        mutated,
+        reconciled
+      });
+    }
+  );
+
+  it("refuses outright once a mutation is manual_required", async () => {
+    const { mutated, reconciled } = await secondAttempt(
+      "prepared" as const
+    ).then(async () => {
+      const operation = createOperation({ operationId: "op_manual" });
+      const prepared = prepareProviderMutation(operation, {
+        kind: "azure_application.create",
+        target: "octo/app:dev"
+      });
+      settleProviderMutation(
+        operation,
+        prepared.mutationId,
+        "manual_required",
+        "a human has to look"
+      );
+      let mutated = 0;
+      let reconciled = 0;
+      await expect(
+        executeRecoverableMutation<string>({
+          operation,
+          kind: "azure_application.create",
+          target: "octo/app:dev",
+          persist: async () => {},
+          mutate: async () => {
+            mutated += 1;
+            return { code: 0, stdout: "app-1", stderr: "" };
+          },
+          accept: (result) => result.stdout,
+          reconcile: async () => {
+            reconciled += 1;
+            return { state: "not_applied" as const };
+          }
+        })
+      ).rejects.toThrow(/a human has to look/u);
+      return { mutated, reconciled };
+    });
+
+    expect({ mutated, reconciled }).toEqual({ mutated: 0, reconciled: 0 });
+  });
+});

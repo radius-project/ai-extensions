@@ -682,10 +682,14 @@ export async function resolveAzureAutoSetupApplication({
                 })
               );
               return isAppOwnerAlreadyAssignedError(result.stderr) ?
-                  { ...result, code: 0 }
+                  { ...result, code: 0, alreadyAssigned: true }
                 : result;
             },
             accept: (result) => result,
+            acceptedEvidence: (result) =>
+              (result as { alreadyAssigned?: boolean }).alreadyAssigned ?
+                "Entra reported the signed-in user was already an owner, so this operation added nothing."
+              : null,
             reconcile: async () => {
               const owners = await runAz(
                 buildAppOwnerListArgs({ appId: clientId })

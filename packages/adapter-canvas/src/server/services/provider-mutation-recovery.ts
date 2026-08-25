@@ -353,6 +353,14 @@ export async function executeRecoverableMutation<T>(input: {
    * after a restart.
    */
   providerIdOf?(result: ProviderMutationCommandResult, value: T): string | null;
+  /**
+   * What the journal should record for a write that ended well.
+   *
+   * A caller that treats a provider's "this already holds" as success must say
+   * so here: recording "the provider acknowledged the mutation" for a write it
+   * refused makes the audit trail describe something that never happened.
+   */
+  acceptedEvidence?(result: ProviderMutationCommandResult): string | null;
   reconcile(): Promise<ProviderMutationReconciliation<T>>;
   /**
    * Turn a conclusive provider rejection into a manual blocker in the same
@@ -468,7 +476,8 @@ export async function executeRecoverableMutation<T>(input: {
         input.operation,
         mutation.mutationId,
         "confirmed",
-        "The provider acknowledged the mutation.",
+        input.acceptedEvidence?.(result) ||
+          "The provider acknowledged the mutation.",
         input.providerIdOf?.(result, value) ?? null
       );
       await persistOrThrow(input.persist, "after the provider acknowledged it");

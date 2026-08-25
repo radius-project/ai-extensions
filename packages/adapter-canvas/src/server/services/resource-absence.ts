@@ -203,10 +203,16 @@ export function parseEnvironmentListingPage(
     if (typeof name !== "string" || !name) return null;
     names.push(name);
   }
-  const totalCount = Number(body.total_count);
+  // `Number(null)` is 0, which would read a listing that advertises no count as
+  // advertising zero — and a later page carrying a real count then looks like
+  // the set changed size mid-walk, ending an otherwise sound proof as unknown.
+  const totalCount =
+    typeof body.total_count === "number" && Number.isFinite(body.total_count) ?
+      body.total_count
+    : null;
   return {
     names,
     hasMore: body.environments.length >= perPage,
-    totalCount: Number.isFinite(totalCount) ? totalCount : null
+    totalCount
   };
 }
