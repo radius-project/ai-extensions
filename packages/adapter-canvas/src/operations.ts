@@ -4835,8 +4835,13 @@ export function reconcileRestoredOperation(op: any): any {
     classification: "user-fixable"
   };
   const ledger = getSetupArtifactLedger(op);
-  if (ledger) {
+  if (ledger && !hasAttemptedCleanup(op)) {
     // No pass was in flight, so nothing is left half-done for this record.
+    // A cleanup that already finished is a different thing: its verdict is
+    // what `canRetryCleanup` and `canStartRollback` read, so overwriting a
+    // `succeeded_with_warnings` here would refuse both while the artifacts it
+    // could not remove are still listed as proven-owned — unremovable, and
+    // with the repository lock released underneath them.
     ledger.cleanup.state = "not_needed";
   }
   for (const stage of op.stages || []) {

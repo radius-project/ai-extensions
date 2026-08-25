@@ -6691,3 +6691,44 @@ describe("verdicts and quarantines the journal must not overwrite", () => {
     expect(op.reconciliationPriorOutcome).toMatchObject({ state: "cancelled" });
   });
 });
+
+describe("a finished cleanup verdict across a later interruption", () => {
+  it("keeps succeeded_with_warnings when a continued setup is interrupted", () => {
+    // A warned rollback offers Continue setup beside Retry rollback. Taking
+    // Continue reopens the record, so a restart finds `continue_setup` as the
+    // latest command and no cleanup pass in flight. Writing `not_needed` there
+    // would make `canRetryCleanup` answer not-retryable and `canStartRollback`
+    // answer already-attempted while the App Registration is still listed as
+    // proven-owned: unremovable by either route.
+    const op = newOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    warnedCleanup(op, [
+      {
+        artifactType: "azure_app",
+        target: "app-1",
+        identity: "app-1",
+        outcome: "warning",
+        detail: "Entra was unreachable."
+      }
+    ]);
+    finish(op, "failed_partial", { failure: { code: "setup-failed" } });
+    acceptCommand(op, { kind: "continue_setup", attempt: 1 });
+    op.state = "running";
+    op.endedAt = null;
+
+    reconcileRestoredOperation(op);
+
+    expect(op.setupArtifacts.cleanup.state).toBe("succeeded_with_warnings");
+    expect(canRetryCleanup(op)).toMatchObject({ ok: true });
+  });
+
+  it("still marks an untouched cleanup not_needed", () => {
+    const op = newOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    op.state = "running";
+
+    reconcileRestoredOperation(op);
+
+    expect(op.setupArtifacts.cleanup.state).toBe("not_needed");
+  });
+});
