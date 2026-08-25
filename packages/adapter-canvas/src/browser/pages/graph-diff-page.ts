@@ -1,11 +1,13 @@
 import { requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
+import { clearGraphProgress, createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
-import { readArray, readBoolean, readString } from "../json.js";
+import { readArray, readBoolean, readNumber, readString } from "../json.js";
 import { populateApplications, populateDiffBranches } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
+import type { GraphProgressView } from "../graph/progress.js";
 import type {
   AbortHandle,
   BrowserContext,
@@ -16,12 +18,15 @@ import { readPageState } from "./state.js";
 const ENTRY_KEY = "graph-diff-page";
 export const GRAPH_DIFF_STATE_ID = "radius-graph-diff-state";
 export const DIFF_DEBOUNCE_MS = 500;
+export const DIFF_PROGRESS_MS = 800;
+export const DIFF_PROGRESS_STEPS_ID = "diff-progress-steps";
 
 interface DiffState {
   repo: string;
   base: string;
   head: string;
   resources: unknown[];
+  modelingError: string;
 }
 
 function parseState(context: BrowserContext): DiffState {
@@ -30,7 +35,8 @@ function parseState(context: BrowserContext): DiffState {
     repo: readString(state, "repo"),
     base: readString(state, "base") || "main",
     head: readString(state, "head"),
-    resources: readArray(state, "resources")
+    resources: readArray(state, "resources"),
+    modelingError: readString(state, "modelingError")
   };
 }
 
@@ -66,6 +72,55 @@ export function initializeGraphDiffPage(
   let pending: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
+  let progress: ScopeTimer | null = null;
+  let progressView: GraphProgressView | null = null;
+  let modelingFailureVisible = Boolean(state.modelingError);
+  const showModelingFailure = (message: string): void => {
+    controller?.destroy();
+    controller = null;
+    requireBrowserFunction(globalScope, "radiusSetGraphError")(
+      "graph-container",
+      message
+    );
+    const status = context.dom.byId("diff-status");
+    if (status) status.style.display = "none";
+    modelingFailureVisible = true;
+  };
+  if (state.modelingError) showModelingFailure(state.modelingError);
+
+  const stopProgress = (): void => {
+    if (progress !== null) entry.cancel(progress);
+    progress = null;
+    progressView?.stop();
+    progressView = null;
+    // The page states a terminal outcome in its own error surface, so a frozen
+    // panel left underneath would repeat it as a second box.
+    clearGraphProgress(context, DIFF_PROGRESS_STEPS_ID);
+  };
+
+  const pollProgress = (
+    requestGeneration: number,
+    view: GraphProgressView
+  ): void => {
+    void context.net
+      .fetch("/api/progress?view=diff")
+      .then((response) => response.json())
+      .then((payload) => {
+        if (!entry.active || requestGeneration !== generation) return;
+        const events = readArray(payload, "events");
+        if (events.length > 0) {
+          view.sync(
+            events,
+            readNumber(payload, "generation") ?? 0,
+            readNumber(payload, "elapsedMs")
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        if (!entry.active || requestGeneration !== generation) return;
+        context.logger.error("Radius graph diff progress failed.", error);
+      });
+  };
 
   const compare = (headElement: DomSelectElement): void => {
     pending = null;
@@ -73,9 +128,34 @@ export function initializeGraphDiffPage(
     const head = headElement.value;
     const repo = repoInput?.value ?? state.repo;
     if (!repo || !base || !head) return;
+    if (modelingFailureVisible) {
+      const graphContainer = context.dom.byId("graph-container");
+      if (graphContainer) graphContainer.innerHTML = "";
+      modelingFailureVisible = false;
+    }
     const requestGeneration = ++generation;
     requestAbort = context.net.createAbort();
     showStatus(context, `Comparing ${base} → ${head}…`, "info");
+    stopProgress();
+    const view = createGraphProgress(context, entry, {
+      hostId: DIFF_PROGRESS_STEPS_ID,
+      title: "Comparing application graphs",
+      initial: {
+        sequence: 0,
+        stage: "building_base_graph",
+        state: "running",
+        detail: `Comparing ${base} → ${head}…`
+      }
+    });
+    progressView = view;
+    // Poll once immediately rather than waiting a full interval. A build that is
+    // already in flight — one this page did not start, or one it started before
+    // the user navigated away — is adopted straight away instead of showing an
+    // empty panel reading 0:00 until the first tick.
+    pollProgress(requestGeneration, view);
+    progress = entry.every(DIFF_PROGRESS_MS, () =>
+      pollProgress(requestGeneration, view)
+    );
     void context.net
       .fetch("/api/diff-branches", {
         method: "POST",
@@ -86,7 +166,15 @@ export function initializeGraphDiffPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== generation) return;
-        if (readBoolean(payload, "needsAppBicep")) {
+        stopProgress();
+        if (readBoolean(payload, "appBicepUnsupported")) {
+          showStatus(
+            context,
+            readString(payload, "error") ||
+              "The Radius app-bicep skill cannot model this repository.",
+            "error"
+          );
+        } else if (readBoolean(payload, "needsAppBicep")) {
           showStatus(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.",
@@ -95,11 +183,15 @@ export function initializeGraphDiffPage(
         } else {
           const error = readString(payload, "error");
           if (error) {
-            showStatus(
-              context,
-              `Error computing diff: ${error}. Please ensure both branches exist and contain a valid .radius/app.bicep.`,
-              "error"
-            );
+            if (readBoolean(payload, "modelingFailed")) {
+              showModelingFailure(error);
+            } else {
+              showStatus(
+                context,
+                `Error computing diff: ${error}. Please ensure both branches exist and contain a valid .radius/app.bicep.`,
+                "error"
+              );
+            }
           } else if (readBoolean(payload, "reload")) {
             context.nav.reload();
           } else {
@@ -110,6 +202,7 @@ export function initializeGraphDiffPage(
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
+        stopProgress();
         context.logger.error("Radius graph diff request failed.", error);
         showStatus(
           context,
@@ -126,6 +219,7 @@ export function initializeGraphDiffPage(
     generation++;
     requestAbort?.abort();
     requestAbort = null;
+    stopProgress();
     if (pending !== null) entry.cancel(pending);
     pending = entry.after(DIFF_DEBOUNCE_MS, () => compare(headElement));
   };
@@ -143,11 +237,11 @@ export function initializeGraphDiffPage(
   void populateDiffBranches(context, state.repo, {
     preferBase: state.base,
     preferHead: state.head,
-    autoCompare: state.resources.length === 0,
+    autoCompare: state.resources.length === 0 && !state.modelingError,
     lifecycle: entry
   });
 
-  if (renderGraph) {
+  if (renderGraph && !state.modelingError) {
     controller = asGraphController(
       renderGraph("graph-container", state.resources, {
         diffMode: true,

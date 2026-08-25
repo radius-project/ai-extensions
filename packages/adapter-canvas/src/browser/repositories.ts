@@ -96,7 +96,10 @@ export type EnvironmentProviders = Record<string, unknown>;
 export interface PlanState {
   hasEnv: boolean;
   envsStale: boolean;
+  selectorsPending: boolean;
   deploymentsStale: boolean;
+  deploymentsPending: boolean;
+  planPending: boolean;
   requestFailed: boolean;
   environmentStatuses: Record<string, string>;
   deploymentStatuses: Record<string, string>;
@@ -106,7 +109,10 @@ export function createPlanState(): PlanState {
   return {
     hasEnv: false,
     envsStale: false,
+    selectorsPending: false,
     deploymentsStale: false,
+    deploymentsPending: false,
+    planPending: false,
     requestFailed: false,
     environmentStatuses: {},
     deploymentStatuses: {}
@@ -537,12 +543,13 @@ export interface PlannedSelectorOptions {
   environmentProviders: EnvironmentProviders;
   defaultBranch?: string;
   defaultEnvironment?: string;
+  onSelectorsReady?: () => void;
 }
 
 // Populate the Application / Branch / Environment selectors on the Planned
-// pane. The button and hint state is applied only after the application and
-// environment lists have both settled, so the hint can name the selection
-// instead of falling back to generic text.
+// pane. The button and hint state is applied only after all selector listings
+// have settled, so the hint can name the selection instead of falling back to
+// generic text.
 export function populatePlannedSelectors(
   context: BrowserContext,
   state: PlanState,
@@ -558,8 +565,10 @@ export function populatePlannedSelectors(
     if (appSelect) dom.setOptions(appSelect, empty);
     if (branchSelect) dom.setOptions(branchSelect, empty);
     if (envSelect) dom.setOptions(envSelect, empty);
+    state.selectorsPending = false;
     return Promise.resolve();
   }
+  state.selectorsPending = true;
 
   const appPromise =
     appSelect ?
@@ -649,6 +658,8 @@ export function populatePlannedSelectors(
         })
     : Promise.resolve();
 
+  let selectorsSettled = false;
+  if (appSelect && envSelect) state.deploymentsPending = true;
   const deploymentsPromise =
     appSelect && envSelect ?
       getJson(
@@ -672,16 +683,38 @@ export function populatePlannedSelectors(
         .catch(() => {
           state.deploymentsStale = true;
         })
+        .then(() => {
+          state.deploymentsPending = false;
+          if (selectorsSettled) {
+            applyPlanEnvState(
+              context,
+              state,
+              hasEnvironments,
+              environmentsUnavailable
+            );
+          }
+        })
     : Promise.resolve();
 
-  return Promise.all([
+  // Environment availability is settled as soon as the selectors themselves are
+  // usable. Waiting for the deployment listing too would leave `state.hasEnv`
+  // false while the page already accepts input, so a selection made in that
+  // window would be answered with "create an environment" for an application
+  // that has one.
+  const selectorsReady = Promise.all([
     appPromise,
     branchPromise,
-    envPromise,
-    deploymentsPromise
+    envPromise
   ]).then(() => {
+    selectorsSettled = true;
+    state.selectorsPending = false;
     applyPlanEnvState(context, state, hasEnvironments, environmentsUnavailable);
+    options.onSelectorsReady?.();
   });
+
+  return Promise.all([selectorsReady, deploymentsPromise]).then(
+    () => undefined
+  );
 }
 
 function readQueryParameter(search: string, name: string): string {
@@ -734,6 +767,14 @@ export function applyPlanEnvState(
         "title",
         "Environments could not be loaded. Try again before deploying."
       );
+    } else if (state.selectorsPending) {
+      button.dataset.mode = "deploy";
+      button.textContent = "Deploy Application";
+      button.disabled = true;
+      button.setAttribute(
+        "title",
+        "Application, branch, and environment selections are still loading."
+      );
     } else if (hasEnv) {
       button.dataset.mode = "deploy";
       button.textContent = "Deploy Application";
@@ -742,6 +783,8 @@ export function applyPlanEnvState(
       button.disabled =
         !(application && branch && environment) ||
         !environmentReady ||
+        state.deploymentsPending ||
+        state.planPending ||
         state.deploymentsStale ||
         deploymentBlocked;
       if (!application) {
@@ -760,6 +803,11 @@ export function applyPlanEnvState(
           "title",
           environmentNotReadyReason(environment, environmentStatus)
         );
+      } else if (state.deploymentsPending) {
+        button.setAttribute(
+          "title",
+          "Deployment states are still loading. Deployment is available once they arrive."
+        );
       } else if (state.deploymentsStale) {
         button.setAttribute(
           "title",
@@ -769,6 +817,11 @@ export function applyPlanEnvState(
         button.setAttribute(
           "title",
           `A deployment of application "${application}" to environment "${environment}" is already in progress. Wait for it to finish before deploying again.`
+        );
+      } else if (state.planPending) {
+        button.setAttribute(
+          "title",
+          "The deployment plan is still updating. Deployment is available once it finishes."
         );
       } else if (state.requestFailed) {
         button.disabled = true;
@@ -788,16 +841,23 @@ export function applyPlanEnvState(
     if (statesUnavailable) {
       hint.textContent =
         " Environments could not be loaded, so deployment planning is temporarily unavailable.";
+    } else if (state.selectorsPending) {
+      hint.textContent =
+        " Application, branch, and environment selections are still loading, so deployment planning is temporarily unavailable.";
     } else if (hasEnv) {
       const appName = application || "this application";
       const envName = environment || "the selected environment";
       hint.innerHTML =
         environment !== "" && !environmentAllowsDeploy(environmentStatus) ?
           ` The environment (<strong>${escapeBrowserHtml(envName)}</strong>) ${environmentNotReadyPhrase(environmentStatus)}, so it cannot be deployed to yet.`
+        : state.deploymentsPending ?
+          " Deployment states are still loading, so deployment is temporarily unavailable."
         : state.deploymentsStale ?
           " Deployment states could not be loaded, so deployment is temporarily unavailable."
         : deploymentBlocked ?
           ` A deployment of this application (<strong>${escapeBrowserHtml(appName)}</strong>) to the environment (<strong>${escapeBrowserHtml(envName)}</strong>) is already in progress. Watch its progress on the Deployments tab.`
+        : state.planPending ?
+          " The deployment plan is still updating, so deployment is temporarily unavailable."
         : ` To deploy this application (<strong>${escapeBrowserHtml(appName)}</strong>) to the environment (<strong>${escapeBrowserHtml(envName)}</strong>), click "Deploy Application".`;
     } else {
       hint.textContent =
@@ -975,6 +1035,13 @@ export function createDeployedState(): DeployedEnvState {
 
 export type DeployedMode = "create-env" | "deploy" | "delete";
 
+function setDeploymentStateUnavailableTitle(button: DomInputElement): void {
+  button.setAttribute(
+    "title",
+    "The current deployment state could not be loaded. Retrying…"
+  );
+}
+
 // Adapt the Deployed primary button to the user's actual setup: no environment
 // at all, an environment without a deployment, or an existing deployment. A
 // deployment listing that could not be read disables the destructive path
@@ -993,16 +1060,32 @@ export function applyDeployedEnvState(
   state.hasDeployment = hasDeployment;
   const dom = context.dom;
   const button = dom.inputById("deployed-delete-btn");
+  const stopTrackingButton = dom.inputById("deployed-stop-tracking-btn");
   const hint = dom.byId("deployed-subtitle-hint");
   const application = selectValue(dom.selectById("deployed-app-select"));
   const environment = selectValue(dom.selectById("deployed-env-select"));
   const pending = deploymentStatus === "pending";
   const deleting = deploymentStatus === "deleting";
+  const deleteFailed = deploymentStatus === "delete-failed";
   const mode: DeployedMode =
     environmentsUnavailable ? "deploy"
     : !hasEnv ? "create-env"
     : hasDeployment ? "delete"
     : "deploy";
+
+  if (stopTrackingButton) {
+    stopTrackingButton.textContent = "Stop tracking deployment";
+    stopTrackingButton.style.display = deleteFailed ? "" : "none";
+    stopTrackingButton.disabled =
+      !deleteFailed ||
+      !(application && environment) ||
+      statesUnavailable ||
+      environmentsUnavailable;
+    stopTrackingButton.removeAttribute("title");
+    if (statesUnavailable) {
+      setDeploymentStateUnavailableTitle(stopTrackingButton);
+    }
+  }
 
   if (button) {
     button.dataset.mode = mode;
@@ -1041,6 +1124,7 @@ export function applyDeployedEnvState(
       button.textContent =
         pending ? "Deploying…"
         : deleting ? "Deleting…"
+        : deleteFailed ? "Retry Delete"
         : "Delete Deployment";
       button.className = "rad-btn rad-btn--danger-outline";
       button.disabled =
@@ -1059,10 +1143,7 @@ export function applyDeployedEnvState(
           `This deployment is already being deleted from environment "${environment}". Wait for the delete to finish.`
         );
       } else if (statesUnavailable) {
-        button.setAttribute(
-          "title",
-          "The current deployment state could not be loaded. Retrying…"
-        );
+        setDeploymentStateUnavailableTitle(button);
       }
     }
   }
@@ -1081,6 +1162,8 @@ export function applyDeployedEnvState(
         !environmentAllowsDeploy(environmentCreationStatus) ?
           ` The environment (${envLabel}) ${environmentNotReadyPhrase(environmentCreationStatus)}, so this application cannot be deployed to it yet.`
         : ` To deploy this application (${appLabel}) to the environment (${envLabel}), click "Deploy Application".`;
+    } else if (deleteFailed) {
+      hint.innerHTML = ` The previous teardown of (${appLabel}) from (${envLabel}) failed. Retry Delete to clean up cloud resources, or stop tracking the deployment without deleting them.`;
     } else if (pending) {
       hint.innerHTML = ` The application (${appLabel}) is currently being deployed to the environment (${envLabel}). Watch its progress on the Deployments tab.`;
     } else if (deleting) {

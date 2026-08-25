@@ -5,7 +5,6 @@ import {
   GRAPH_CONTENT_ID,
   GRAPH_NAV_ID,
   GRAPH_PAGE_ATTRIBUTE,
-  GRAPH_PAGES,
   initializeGraphNavigation
 } from "./navigation.js";
 import {
@@ -27,9 +26,16 @@ function setup(options: { withContent?: boolean; withNav?: boolean } = {}) {
     if (options.withNav !== false) browser.document.add(nav);
   }
   let pageTeardowns = 0;
+  const claims: Array<"begin" | "end"> = [];
   const navigation = createGraphNavigation(browser.context, {
     teardownPage() {
       pageTeardowns++;
+    },
+    beginNavigation() {
+      claims.push("begin");
+    },
+    endNavigation() {
+      claims.push("end");
     }
   });
   return {
@@ -37,6 +43,7 @@ function setup(options: { withContent?: boolean; withNav?: boolean } = {}) {
     content,
     nav,
     navigation,
+    claims,
     get pageTeardowns() {
       return pageTeardowns;
     }
@@ -87,7 +94,7 @@ describe("graphPageUrl", () => {
 });
 
 describe("graph navigation", () => {
-  it("tears down the outgoing page, swaps content, focuses, and pushes once", async () => {
+  it("tears down the outgoing page, swaps content, preserves keyboard focus, and pushes once", async () => {
     const harness = setup();
     harness.browser.net.handle("/?page=planned", () => {
       // The outgoing page is torn down before the request goes out, so its
@@ -112,7 +119,7 @@ describe("graph navigation", () => {
     let prevented = 0;
 
     harness.navigation.navigateTo(
-      { preventDefault: () => prevented++ },
+      { detail: 0, preventDefault: () => prevented++ },
       "planned"
     );
     await flushPromises();
@@ -124,6 +131,28 @@ describe("graph navigation", () => {
     expect(harness.browser.nav.pushed).toEqual(["?page=planned"]);
     expect(harness.browser.nav.assigned).toEqual([]);
     expect(liveActive.focusCount).toBe(1);
+  });
+
+  it("does not transfer focus after pointer navigation", async () => {
+    const harness = setup();
+    harness.browser.net.handle("/?page=planned", () =>
+      textResponse("<html>planned</html>")
+    );
+    harness.browser.nav.parsed = () =>
+      parsedPage("<div>new content</div>", "<a>planned</a>", "planned");
+    const liveActive = createFakeElement("live-active", "a");
+    harness.browser.document.addSelector(
+      `#${GRAPH_NAV_ID} [${GRAPH_PAGE_ATTRIBUTE}="planned"]`,
+      liveActive
+    );
+
+    harness.navigation.navigateTo(
+      { detail: 1, preventDefault() {} },
+      "planned"
+    );
+    await flushPromises();
+
+    expect(liveActive.focusCount).toBe(0);
   });
 
   it("re-executes incoming inline scripts and leaves an absent nav alone", async () => {
@@ -173,6 +202,48 @@ describe("graph navigation", () => {
     expect(harness.browser.nav.assigned).toEqual(["?page=planned"]);
     expect(harness.browser.net.calls).toEqual([]);
     expect(harness.pageTeardowns).toBe(0);
+  });
+
+  it.each([
+    [
+      "a completed swap",
+      async (harness: ReturnType<typeof setup>) => {
+        harness.browser.net.handle("/?page=planned", () =>
+          textResponse("<html>planned</html>")
+        );
+        harness.browser.nav.parsed = () =>
+          parsedPage("<div>planned</div>", null);
+        harness.navigation.navigateTo(null, "planned");
+        await flushPromises();
+      }
+    ],
+    [
+      "a failed swap",
+      async (harness: ReturnType<typeof setup>) => {
+        harness.browser.net.handle("/?page=planned", () =>
+          Promise.reject(new Error("offline"))
+        );
+        harness.navigation.navigateTo(null, "planned");
+        await flushPromises();
+      }
+    ],
+    [
+      "cancellation",
+      async (harness: ReturnType<typeof setup>) => {
+        harness.browser.net.handle(
+          "/?page=planned",
+          () => createDeferred<HttpResponse>().promise
+        );
+        harness.navigation.navigateTo(null, "planned");
+        harness.navigation.cancelPendingWork();
+      }
+    ]
+  ])("releases its navigation claim after %s", async (_label, run) => {
+    const harness = setup();
+
+    await run(harness);
+
+    expect(harness.claims.at(-1)).toBe("end");
   });
 
   it.each([
@@ -336,47 +407,7 @@ describe("navigation bindings", () => {
     expect(harness.browser.net.calls).toHaveLength(1);
   });
 
-  it("loads popstate without creating another history entry", async () => {
-    const harness = setup();
-    initializeGraphNavigation(harness.browser.context, harness.navigation);
-    harness.browser.nav.search =
-      "?page=deployed&repo=octo%2Fapp&environment=dev";
-    harness.browser.net.handle(
-      "/?page=deployed&repo=octo%2Fapp&environment=dev",
-      () => textResponse("<html/>")
-    );
-    harness.browser.nav.parsed = () => parsedPage("<div>deployed</div>", null);
-
-    harness.browser.page.dispatch("popstate");
-    await flushPromises();
-
-    expect(harness.content.innerHTML).toContain("deployed");
-    expect(harness.browser.nav.pushed).toEqual([]);
-  });
-
-  it("defaults popstate to modeled and ignores pages it does not own", async () => {
-    const harness = setup();
-    initializeGraphNavigation(harness.browser.context, harness.navigation);
-    harness.browser.net.handle("/?page=graph", () => textResponse("<html/>"));
-    harness.browser.nav.parsed = () => parsedPage("<div>graph</div>", null);
-
-    harness.browser.nav.search = "";
-    harness.browser.page.dispatch("popstate");
-    await flushPromises();
-    harness.browser.nav.search = "?page=environment";
-    harness.browser.page.dispatch("popstate");
-    harness.browser.nav.search = "?page";
-    harness.browser.page.dispatch("popstate");
-    harness.browser.nav.search = "page=environment";
-    harness.browser.page.dispatch("popstate");
-    harness.browser.nav.search = "?repo=octo%2Fapp&page=environment";
-    harness.browser.page.dispatch("popstate");
-
-    expect(harness.browser.net.calls).toHaveLength(1);
-    expect(GRAPH_PAGES).toEqual(["graph", "planned", "graph-diff", "deployed"]);
-  });
-
-  it("binds once and tears down document and page listeners", () => {
+  it("binds once and tears down the document listener", () => {
     const harness = setup();
     const teardown = initializeGraphNavigation(
       harness.browser.context,
@@ -385,10 +416,9 @@ describe("navigation bindings", () => {
     initializeGraphNavigation(harness.browser.context, harness.navigation);
 
     expect(harness.browser.document.listenerCount("click")).toBe(1);
-    expect(harness.browser.page.listenerCount("popstate")).toBe(1);
+    expect(harness.browser.page.listenerCount()).toBe(0);
 
     teardown();
     expect(harness.browser.document.listenerCount()).toBe(0);
-    expect(harness.browser.page.listenerCount()).toBe(0);
   });
 });

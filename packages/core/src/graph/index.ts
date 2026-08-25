@@ -1,18 +1,14 @@
-// graph/ — pure application-graph logic: utilities for normalizing rad CLI
-// output, the app-graph.json → canvas converter, and the shared diff algorithm.
+// graph/ — pure application-graph logic: the app-graph.json → canvas converter,
+// the shared diff algorithm, the visualization filter, and the deployed-status
+// projection. Normalization helpers stay module-internal in ./model.js.
 
-export {
-  addInboundConnections,
-  MODELED_GRAPH_DEFAULTS,
-  buildResourceID,
-  stripAPIVersion
-} from "./model.js";
 export { applicationGraphToResources } from "./appgraph.js";
 export { computeGraphDiff } from "./diff.js";
 export { filterGraphVisualizationResources } from "./visualization.js";
 export {
   deployStatusKeys,
   lookupDeployStatus,
+  mergeDeployedGraphMetadata,
   projectDeployedGraph
 } from "./deployed.js";
 export type { DeployStatus } from "./deployed.js";

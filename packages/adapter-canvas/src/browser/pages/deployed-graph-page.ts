@@ -1,5 +1,6 @@
 import { optionalBrowserFunction, requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
+import { createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";
@@ -21,6 +22,7 @@ import {
 } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
+import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
@@ -28,6 +30,7 @@ import { readPageState } from "./state.js";
 const ENTRY_KEY = "deployed-graph-page";
 export const DEPLOYED_GRAPH_STATE_ID = "radius-deployed-graph-state";
 export const DEPLOYED_GRAPH_POLL_MS = 15_000;
+export const DEPLOYED_PROGRESS_STEPS_ID = "deployed-progress-steps";
 export const DEPLOYED_STATE_POLL_MS = 4_000;
 export const DEPLOYED_LOG_POLL_MS = 1_500;
 export const DEPLOYED_STATE_POLL_LIMIT = 45;
@@ -37,6 +40,7 @@ interface DeployedPageState {
   branch: string;
   graphBranch: string;
   provider: string;
+  mutationNonce: string;
 }
 
 interface DeploymentState {
@@ -73,7 +77,8 @@ function parseState(context: BrowserContext): DeployedPageState {
     repo: readString(state, "repo"),
     branch: readString(state, "branch") || "main",
     graphBranch: readString(state, "graphBranch") || "main",
-    provider: readString(state, "provider") || "azure"
+    provider: readString(state, "provider") || "azure",
+    mutationNonce: readString(state, "mutationNonce")
   };
 }
 
@@ -118,6 +123,9 @@ export function initializeDeployedGraphPage(
   const appSelect = context.dom.selectById("deployed-app-select");
   const envSelect = context.dom.selectById("deployed-env-select");
   const action = context.dom.inputById("deployed-delete-btn");
+  const stopTrackingAction = context.dom.inputById(
+    "deployed-stop-tracking-btn"
+  );
   const status = context.dom.byId("deployed-status");
   const label = context.dom.byId("deployed-graph-label");
   const note = context.dom.byId("deployed-mode-note");
@@ -145,10 +153,27 @@ export function initializeDeployedGraphPage(
   let graphGeneration = 0;
   let logTotal = 0;
   let lastMode = "";
+  let modeledGraphPending = false;
   let controller: GraphController | null = null;
   let renderedBranch = "";
+  let renderedMode = "";
   let resumeGraphOnVisible = false;
   let graphRequestInFlight = false;
+  let progressView: GraphProgressView | null = null;
+
+  const stopProgress = (): void => {
+    progressView?.stop();
+    progressView = null;
+    const host = context.dom.byId(DEPLOYED_PROGRESS_STEPS_ID);
+    if (host) host.replaceChildren();
+  };
+
+  // Leave the panel on screen showing which stage failed, rather than clearing
+  // it and leaving only the status banner to explain the outcome.
+  const failProgress = (detail: string): void => {
+    progressView?.fail(detail);
+    progressView = null;
+  };
 
   const selectedApplication = (): string => appSelect?.value ?? "";
   const selectedEnvironment = (): string => envSelect?.value ?? "";
@@ -239,6 +264,7 @@ export function initializeDeployedGraphPage(
     controller?.destroy();
     controller = null;
     renderedBranch = "";
+    renderedMode = "";
     const container = context.dom.byId("graph-container");
     if (container) {
       container.innerHTML = "";
@@ -294,7 +320,7 @@ export function initializeDeployedGraphPage(
   const scheduleGraphPoll = (): void => {
     stopGraphPolling();
     if (
-      lastMode !== "live" ||
+      (lastMode !== "live" && !modeledGraphPending) ||
       context.dom.document.visibilityState === "hidden"
     ) {
       return;
@@ -312,6 +338,21 @@ export function initializeDeployedGraphPage(
       status.style.display = "";
       status.textContent = "Loading deployed application graph…";
     }
+    // Only the first load makes the user wait. Background refreshes of an
+    // already-rendered graph must not flash a progress panel over it.
+    if (!controller) {
+      stopProgress();
+      progressView = createGraphProgress(context, entry, {
+        hostId: DEPLOYED_PROGRESS_STEPS_ID,
+        title: "Loading the deployed graph",
+        initial: {
+          sequence: 0,
+          stage: "loading_deployment",
+          state: "running",
+          detail: "Reading the resources deployed to this environment."
+        }
+      });
+    }
     graphAbort?.abort();
     graphAbort = context.net.createAbort();
     const requestGeneration = ++graphGeneration;
@@ -328,6 +369,21 @@ export function initializeDeployedGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== graphGeneration) return;
+        stopProgress();
+        const loadError = readString(payload, "error");
+        if (loadError) {
+          modeledGraphPending = isRecord(payload) && payload.retry === true;
+          if (!controller && status) {
+            status.style.display = "";
+            status.className = "status error";
+            status.textContent = loadError;
+          } else {
+            setModeNote(loadError);
+          }
+          scheduleGraphPoll();
+          return;
+        }
+        modeledGraphPending = false;
         const resources = parseGraphResources(readArray(payload, "resources"));
         lastMode = readString(payload, "mode") || "greyed";
         if (resources.length === 0) {
@@ -336,7 +392,11 @@ export function initializeDeployedGraphPage(
         } else {
           if (status) status.style.display = "none";
           const branch = readString(payload, "branch") || page.graphBranch;
-          if (controller && renderedBranch === branch) {
+          if (
+            controller &&
+            renderedBranch === branch &&
+            renderedMode === lastMode
+          ) {
             controller = controller.update(resources) ?? controller;
           } else {
             controller?.destroy();
@@ -344,11 +404,12 @@ export function initializeDeployedGraphPage(
               renderGraph("graph-container", resources, {
                 repoUrl: githubRepositoryUrl(page.repo),
                 branch,
-                showLegend: true,
+                showLegend: lastMode !== "greyed",
                 deployMode: true
               })
             );
             renderedBranch = branch;
+            renderedMode = lastMode;
           }
           setModeNote(
             describeMode(
@@ -364,11 +425,17 @@ export function initializeDeployedGraphPage(
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== graphGeneration) return;
         context.logger.error("Radius deployed graph request failed.", error);
+        const message = "The deployed application graph could not be loaded.";
+        // Report the failure once: in the status banner when there is one, and
+        // otherwise on the panel, which is the only surface a rendered graph
+        // leaves available.
         if (!controller && status) {
+          stopProgress();
           status.style.display = "";
           status.className = "status error";
-          status.textContent =
-            "The deployed application graph could not be loaded.";
+          status.textContent = message;
+        } else {
+          failProgress(message);
         }
         scheduleGraphPoll();
       })
@@ -607,6 +674,68 @@ export function initializeDeployedGraphPage(
       });
   };
 
+  const runAbandon = (application: string, environment: string): void => {
+    // This callback is reachable only from the stop-tracking control registered
+    // below, so the control exists whenever the callback can run.
+    /* v8 ignore next */
+    if (stopTrackingAction) {
+      stopTrackingAction.disabled = true;
+      stopTrackingAction.textContent = "Stopping tracking…";
+    }
+    void context.net
+      .fetch("/api/abandon-deployment", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": page.mutationNonce
+        },
+        body: JSON.stringify({
+          repo: page.repo,
+          environment,
+          application
+        })
+      })
+      .then((response) =>
+        response.json().then((payload) => ({ response, payload }))
+      )
+      .then(({ response, payload }) => {
+        if (!entry.active) return;
+        if (!response.ok || readString(payload, "outcome") !== "abandoned") {
+          setInline(
+            context,
+            "error",
+            response.status === 403 ?
+              "This Radius Canvas page is out of date. Reload it and try again."
+            : readString(payload, "error") ||
+                "Could not stop tracking the deployment."
+          );
+          refreshControls();
+          return;
+        }
+        deployments.delete(deploymentKey(application, environment));
+        setInline(
+          context,
+          "info",
+          "Stopped tracking this deployment. Cloud resources were not deleted and may still exist."
+        );
+        refreshControls();
+        loadGraph();
+      })
+      .catch((error: unknown) => {
+        if (!entry.active) return;
+        context.logger.error(
+          "Radius deployment tracking could not be stopped.",
+          error
+        );
+        setInline(
+          context,
+          "error",
+          "Could not stop tracking the deployment. Please try again."
+        );
+        refreshControls();
+      });
+  };
+
   const createDialog = optionalBrowserFunction(
     globalScope,
     "radiusCreateDeleteDeploymentDialog"
@@ -615,7 +744,22 @@ export function initializeDeployedGraphPage(
     createDialog ?
       asDeleteDialog(createDialog({ onConfirm: runDelete }))
     : null;
+  const abandonDialog =
+    createDialog ?
+      asDeleteDialog(
+        createDialog({
+          modalId: "deploy-abandon-modal",
+          bodyId: "deploy-abandon-body",
+          appId: "deploy-abandon-app",
+          envId: "deploy-abandon-env",
+          closeId: "deploy-abandon-close",
+          variant: "abandon",
+          onConfirm: runAbandon
+        })
+      )
+    : null;
   if (dialog?.teardown) entry.onTeardown(dialog.teardown);
+  if (abandonDialog?.teardown) entry.onTeardown(abandonDialog.teardown);
 
   if (appSelect) {
     entry.on(appSelect, "change", () => {
@@ -649,10 +793,23 @@ export function initializeDeployedGraphPage(
       }
     });
   }
+  if (stopTrackingAction) {
+    entry.on(stopTrackingAction, "click", () => {
+      if (
+        abandonDialog &&
+        selectedStatus() === "delete-failed" &&
+        selectedApplication() &&
+        selectedEnvironment()
+      ) {
+        abandonDialog.open(selectedApplication(), selectedEnvironment());
+      }
+    });
+  }
   entry.on(context.dom.document, "visibilitychange", () => {
     if (context.dom.document.visibilityState === "hidden") {
       stopGraphPolling();
-      resumeGraphOnVisible = graphRequestInFlight || lastMode === "live";
+      resumeGraphOnVisible =
+        graphRequestInFlight || lastMode === "live" || modeledGraphPending;
       graphGeneration++;
       graphAbort?.abort();
       graphAbort = null;

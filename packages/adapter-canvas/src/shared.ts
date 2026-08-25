@@ -118,6 +118,77 @@ export interface CanvasDeployResult {
   workflow?: string;
 }
 
+export type GraphBuildStage =
+  | "checking_model"
+  | "creating_model"
+  | "building_graph"
+  | "building_base_graph"
+  | "building_head_graph"
+  | "resolving_recipes"
+  | "loading_deployment"
+  | "comparing_graphs"
+  | "rendering_graph";
+
+export type GraphBuildEventState = "running" | "succeeded" | "failed";
+
+export interface GraphBuildEvent {
+  sequence: number;
+  stage: GraphBuildStage;
+  state: GraphBuildEventState;
+  detail: string;
+}
+
+// Which graph view a build belongs to. The record is view-scoped so a returning
+// page only adopts progress that describes the graph it is showing, and so the
+// nav chip can link back to the page doing the work.
+export type GraphProgressView = "graph" | "planned" | "diff";
+
+export interface GraphProgressRecord {
+  graphBuildEvents: GraphBuildEvent[];
+  graphProgressGeneration: number;
+  graphProgressStartedAtMs: number;
+  graphProgressActive: boolean;
+  graphProgressView: GraphProgressView;
+  graphProgressKey: string;
+  graphProgressOwner: number;
+  graphProgressAwaitingModel: boolean;
+  graphProgressDeadlineAtMs?: number;
+}
+
+// Append one event to the instance's build record.
+//
+// A build that waits for Copilot to author .radius/app.bicep re-issues its
+// request every few seconds, and each attempt replays the stages it already
+// reported. Two rules keep that replay out of the record.
+//
+// A stage never walks backwards: a `running` event for a stage that already
+// settled would flip it from done back to running, which reads as a stuck build
+// rather than a wait.
+//
+// A stage never repeats itself verbatim: an event identical to that stage's
+// most recent one says nothing the record does not already show, and appending
+// it would grow a duplicate tail on the checklist with every poll. A repeat
+// that carries new detail is real narration and is kept.
+export function recordGraphBuildEvent(
+  state: { graphBuildEvents?: GraphBuildEvent[] },
+  event: Omit<GraphBuildEvent, "sequence">
+): void {
+  if (!state.graphBuildEvents) state.graphBuildEvents = [];
+  const events = state.graphBuildEvents;
+  const forStage = events.filter((recorded) => recorded.stage === event.stage);
+  const settled = forStage.some((recorded) => recorded.state !== "running");
+  if (settled && event.state === "running") return;
+  const latest = forStage[forStage.length - 1];
+  if (
+    latest &&
+    latest.state === event.state &&
+    latest.detail === event.detail
+  ) {
+    return;
+  }
+  events.push({ sequence: events.length + 1, ...event });
+}
+
 export interface CanvasState {
   [key: string]: unknown;
   graphResources?: CanvasGraphResource[] | null;
@@ -125,6 +196,11 @@ export interface CanvasState {
   graphBranch?: string;
   graphFromWorkspace?: boolean;
   graphLoaded?: boolean;
+  // Each graph page owns an independent record. Navigating to Planned or Diff
+  // must not erase a modeled-graph build that is waiting for app.bicep.
+  graphProgressRecords?: Partial<
+    Record<GraphProgressView, GraphProgressRecord>
+  >;
   plannedRepo?: string;
   plannedProvider?: string;
   plannedResources?: CanvasGraphResource[] | null;
@@ -138,6 +214,7 @@ export interface CanvasState {
   diffHead?: string;
   diffTargetRepo?: string;
   diffError?: string;
+  diffModelingFailed?: boolean;
   branches?: string[];
   branchShas?: Record<string, string>;
   contextRepo?: string;
@@ -160,7 +237,7 @@ export interface CanvasState {
   deploymentMutation?: {
     repo: string;
     environment: string;
-    kind: "deploy" | "delete";
+    kind: "deploy" | "delete" | "abandon";
     expiresAt: number;
     attemptId?: string;
   };
@@ -178,6 +255,15 @@ export interface CanvasState {
   graphBuildGeneration?: number;
   progressMessages?: string[];
   appBicepHandoffKey?: string;
+  graphRepairAttempts?: Partial<
+    Record<
+      GraphProgressView,
+      {
+        contextKey: string;
+        attempts: number;
+      }
+    >
+  >;
   deployEnvName?: string;
   deployAppName?: string;
   deployDispatchedAt?: number;

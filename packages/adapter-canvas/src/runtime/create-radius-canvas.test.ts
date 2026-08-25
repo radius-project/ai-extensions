@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { APP_ORIGIN_REPO_PATH, serializeAppOrigin } from "@radius-project/core";
+import { RadProcessError } from "@radius-project/adapter-shared";
 import { hashAppBicep } from "../app-bicep-hash.js";
 import { createRadiusCanvas } from "./create-radius-canvas.js";
 import {
@@ -7,6 +8,7 @@ import {
   createFakeSession
 } from "../../test/support/runtime/fakes.js";
 import type { CanvasGraphResource } from "../shared.js";
+import { GRAPH_MODELING_FAILURE_MESSAGE } from "../graph-progress-contract.js";
 
 interface CanvasContext {
   extensionId: string;
@@ -442,14 +444,20 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
   });
 
   it("records a graph-diff failure for the current comparison", async () => {
-    const { canvas, deps } = setup({
+    const { canvas, deps, sessionHolder } = setup({
       bicepByRepoBranch: {
         "remote:acme/widgets@main": "resource db {}",
         "remote:acme/widgets@feat": "resource db {}"
       }
     });
     (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new Error("graph compilation failed")
+      new Error("rad app graph failed", {
+        cause: new RadProcessError(
+          "rad exited with code 1",
+          "BCP035: invalid model",
+          ""
+        )
+      })
     );
 
     await canvas.open(
@@ -462,16 +470,113 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     );
 
     expect(deps.servers.get("radius-panel")!.state.diffError).toBe(
-      "graph compilation failed"
+      GRAPH_MODELING_FAILURE_MESSAGE
+    );
+    expect(deps.logError).toHaveBeenCalledWith(
+      "[radius graph] modeling failed for acme/widgets@main...feat: BCP035: invalid model"
+    );
+    expect(deps.servers.get("radius-panel")!.state.diffModelingFailed).toBe(
+      true
+    );
+    const sent = vi.mocked(sessionHolder.get().send).mock.calls[0]?.[0] as {
+      prompt: string;
+      displayPrompt: string;
+    };
+    expect(sent.prompt).toContain("BCP035: invalid model");
+    expect(sent.prompt).toContain("attempt 1 of 3");
+    expect(sent.displayPrompt).not.toContain("BCP035");
+  });
+
+  it("preserves the compile failure when the Agent handoff cannot be delivered", async () => {
+    const { canvas, deps, sessionHolder } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "resource db {}",
+        "remote:acme/widgets@feat": "resource db {}"
+      }
+    });
+    vi.mocked(sessionHolder.get().send).mockRejectedValue(
+      new Error("session unavailable")
+    );
+    vi.mocked(deps.rad.buildGraphViaRad).mockRejectedValue(
+      new Error("rad app graph failed", {
+        cause: new RadProcessError(
+          "rad exited with code 1",
+          "BCP035: invalid model",
+          ""
+        )
+      })
+    );
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "feat"
+      })
+    );
+
+    expect(deps.servers.get("radius-panel")!.state.diffError).toBe(
+      GRAPH_MODELING_FAILURE_MESSAGE
+    );
+    expect(deps.logError).toHaveBeenCalledWith(
+      expect.stringContaining("session unavailable")
     );
   });
 
+  it("preserves a graph-diff toolchain failure without Bicep diagnostics", async () => {
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "resource db {}",
+        "remote:acme/widgets@feat": "resource db {}"
+      }
+    });
+    (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new RadProcessError(
+        "managed Bicep download failed",
+        "",
+        "connection refused"
+      )
+    );
+    const entry = await deps.getOrCreateServer("radius-panel", "graph-diff");
+    entry.state.diffModelingFailed = true;
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "feat"
+      })
+    );
+
+    expect(deps.servers.get("radius-panel")!.state.diffError).toBe(
+      "managed Bicep download failed"
+    );
+    expect(deps.logError).not.toHaveBeenCalled();
+    expect(entry.state.diffModelingFailed).toBeUndefined();
+  });
+
   it("only records a diff error for the CURRENT diff request (stale responses are ignored)", async () => {
-    const { canvas, deps } = setup();
+    const { canvas, deps, sessionHolder } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "resource db {}",
+        "remote:acme/widgets@feat": "resource db {}",
+        "remote:acme/widgets@other": "resource db {}"
+      }
+    });
     // First compare fails...
     (
       deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>
-    ).mockRejectedValueOnce(new Error("boom"));
+    ).mockRejectedValueOnce(
+      new Error("rad app graph failed", {
+        cause: new RadProcessError(
+          "rad exited with code 1",
+          "BCP035: stale invalid model",
+          ""
+        )
+      })
+    );
     const firstOpen = canvas.open(
       ctx("radius-panel", {
         page: "graph-diff",
@@ -496,6 +601,7 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     await firstOpen;
     // The stale failure must not have clobbered the current (successful) state.
     expect(deps.servers.get("radius-panel")!.state.diffError).toBeUndefined();
+    expect(sessionHolder.get().send).not.toHaveBeenCalled();
   });
 
   it("does not let a late graph result mutate the same instance after deferred close and reopen", async () => {
@@ -622,6 +728,136 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     ).resolves.toMatchObject({ title: "Radius" });
 
     expect(session.send).toHaveBeenCalledOnce();
+  });
+
+  it("stays silent when the branch has no Dockerfile for the skill to build from", async () => {
+    const remoteTreeByRepoBranch: Record<string, string[]> = {
+      "other/repo@main": ["README.md", "src/index.ts"]
+    };
+    const { canvas, deps, servers } = setup({
+      remoteTreeByRepoBranch
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "main"
+      })
+    );
+
+    // The skill would refuse this repository outright and say so only in the
+    // conversation, so handing off would leave the view waiting forever.
+    expect(session.send).not.toHaveBeenCalled();
+    expect(
+      servers.get("radius-panel")?.state.appBicepHandoffKey
+    ).toBeUndefined();
+
+    remoteTreeByRepoBranch["other/repo@main"] = ["Dockerfile"];
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledOnce();
+  });
+
+  it("hands off when the branch has a Dockerfile", async () => {
+    const { canvas, deps } = setup({
+      remoteTreeByRepoBranch: {
+        "other/repo@main": ["README.md", "services/api/Dockerfile"]
+      }
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands off a diff when only one branch would be refused", async () => {
+    const { canvas, deps } = setup({
+      remoteTreeByRepoBranch: {
+        "other/repo@main": ["README.md"],
+        "other/repo@feature": ["Dockerfile"]
+      }
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "other/repo",
+        baseBranch: "main",
+        headBranch: "feature"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands off when the branch tree cannot be read", async () => {
+    const { canvas, deps } = setup();
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "main"
+      })
+    );
+
+    // An unreadable tree resolves empty, which is not evidence of absence.
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands off when listing the branch tree throws", async () => {
+    const { canvas, deps } = setup();
+    const session = deps.session.get();
+    (deps.github.treePaths as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("tree unavailable")
+    );
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "other/repo",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays silent for the workspace branch when the worktree has no Dockerfile", async () => {
+    const { canvas, deps } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["README.md", "src/index.ts"]
+      }
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).not.toHaveBeenCalled();
+    expect(deps.github.treePaths).not.toHaveBeenCalled();
   });
 
   it("never blocks or fails canvas open when session.send throws", async () => {

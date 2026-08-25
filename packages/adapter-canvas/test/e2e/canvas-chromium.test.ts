@@ -97,6 +97,75 @@ function bodyFor(canvas: CanvasHarness, pathName: string): unknown {
   )?.body;
 }
 
+async function routeDeployedPage(
+  page: Page,
+  deploymentStatus: () => string,
+  abandon?: (body: unknown, nonce: string) => void
+): Promise<void> {
+  await page.route("**/api/list-applications**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ applications: [{ name: "radius-app" }] })
+    });
+  });
+  await page.route("**/api/list-environments**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        environments: [
+          {
+            name: "fixture-environment",
+            provider: "azure",
+            status: "success"
+          }
+        ]
+      })
+    });
+  });
+  await page.route("**/api/list-deployments**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        deployments: [
+          {
+            app: "radius-app",
+            environment: "fixture-environment",
+            status: deploymentStatus()
+          }
+        ]
+      })
+    });
+  });
+  await page.route("**/api/deployed-graph**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ resources: [], mode: "greyed" })
+    });
+  });
+  await page.route("**/api/deploy-status**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ status: "pending", logTotal: 0 })
+    });
+  });
+  await page.route("**/api/abandon-deployment", async (route) => {
+    abandon?.(
+      route.request().postDataJSON(),
+      route.request().headers()["x-radius-mutation-nonce"] ?? ""
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ outcome: "abandoned" })
+    });
+  });
+}
+
 // Environment creation is a two-step wizard: step 1 picks the cloud credential
 // profile, step 2 holds the environment name and the GitHub identity block.
 // Step 2 is hidden until a profile is chosen, so any journey that asserts on
@@ -193,6 +262,179 @@ test.describe("Radius Canvas in Chromium", () => {
       "demo-cluster",
       "db"
     ]);
+  });
+
+  test("keeps the document canvas dark while navigating between top-level panes", async ({
+    page,
+    canvas
+  }) => {
+    await gotoCanvas(page, canvas, "graph");
+    await page.evaluate(`
+      document.documentElement.style.setProperty("--color-scheme", "dark");
+      document.documentElement.style.setProperty(
+        "--background-color-default",
+        "#0d1117"
+      );
+      document.documentElement.style.setProperty(
+        "--text-color-default",
+        "#e6edf3"
+      );
+    `);
+    let documentNavigations = 0;
+    page.on("request", (request) => {
+      if (request.isNavigationRequest()) documentNavigations += 1;
+    });
+    let environmentRequests = 0;
+    let releaseEnvironment = (): void => undefined;
+    const environmentGate = new Promise<void>((resolve) => {
+      releaseEnvironment = resolve;
+    });
+    const environmentRoute = /\/\?page=environment$/;
+    await page.route(environmentRoute, async (route) => {
+      environmentRequests += 1;
+      await environmentGate;
+      if (route.request().failure() === null) await route.continue();
+    });
+
+    try {
+      await page.evaluate(`
+        document.querySelector('a[href="/?page=environment"]').click();
+      `);
+      await expect.poll(() => environmentRequests).toBe(1);
+      // The outgoing pane stays mounted while the request is in flight, so the
+      // webview never unloads and exposes the host surface.
+      await expect(page.locator("#radius-main-content")).toHaveAttribute(
+        "aria-busy",
+        "true"
+      );
+      await expect(page.locator("#graph-page-content")).toBeVisible();
+      await expect(page.locator("#env-subtabs")).toHaveCount(0);
+      await page.evaluate(`
+        document.querySelector('a[href="/?page=deploying"]').click();
+      `);
+      await expect(page).toHaveURL(/page=deploying/);
+      await expect(page.locator("#deploy-table-body")).toBeVisible();
+    } finally {
+      releaseEnvironment();
+    }
+    await page.unroute(environmentRoute);
+
+    const panes = [
+      ["environment", "Environments"],
+      ["deploying", "Deployments"],
+      ["graph", "Applications"]
+    ] as const;
+
+    for (const [canvasPage, linkName] of panes) {
+      await page.getByRole("link", { name: linkName }).click();
+      await expect(page).toHaveURL(new RegExp(`page=${canvasPage}`));
+      await expect(page.locator("html")).toHaveCSS(
+        "background-color",
+        "rgb(13, 17, 23)"
+      );
+      await expect(page.locator("body")).toHaveCSS(
+        "background-color",
+        "rgb(13, 17, 23)"
+      );
+    }
+    const backPanes = [
+      ["deploying", "#deploy-table-body"],
+      ["environment", "#env-subtabs"],
+      ["deploying", "#deploy-table-body"],
+      ["graph", "#graph-page-content"]
+    ] as const;
+    for (const [canvasPage, selector] of backPanes) {
+      await page.goBack();
+      await expect(page).toHaveURL(new RegExp(`page=${canvasPage}`));
+      await expect(page.locator(selector)).toBeVisible();
+      await expect(page.locator("html")).toHaveCSS(
+        "background-color",
+        "rgb(13, 17, 23)"
+      );
+    }
+    expect(documentNavigations).toBe(0);
+  });
+
+  test("swaps sub-tabs in place and preserves keyboard-only graph focus", async ({
+    page,
+    canvas
+  }) => {
+    await gotoCanvas(page, canvas, "graph");
+    let documentNavigations = 0;
+    page.on("request", (request) => {
+      if (request.isNavigationRequest()) documentNavigations += 1;
+    });
+
+    await page.getByRole("link", { name: "Environments" }).first().click();
+    await expect(page.locator("#env-subtabs")).toBeVisible();
+    await expect(page).toHaveTitle(/Environments/);
+
+    const subtabs = page.locator("#env-subtabs");
+    await subtabs.getByRole("link", { name: "Credentials" }).click();
+    await expect(page).toHaveURL(/page=credentials/);
+    await expect(page.locator("#cred-table-body")).toBeVisible();
+    await expect(subtabs.locator("a.rad-subtab--active")).toHaveText(
+      "Credentials"
+    );
+    await expect(page.locator("#graph-page-content")).toHaveCount(0);
+
+    await page.getByRole("link", { name: "Applications" }).click();
+    await expect(page.locator("#graph-nav")).toBeVisible();
+
+    // Graph sub-tabs carry data-radius-graph-page and stay owned by the graph
+    // navigator, so pane navigation must not also handle the click.
+    const planned = page.locator(
+      '#graph-nav a[data-radius-graph-page="planned"]'
+    );
+    await planned.click();
+    await expect(page).toHaveURL(/page=planned/);
+    await expect(page.locator("#graph-page-content")).toBeVisible();
+    await expect(page.locator("#graph-nav a.rad-subtab--active")).toHaveText(
+      "Planned"
+    );
+    await expect(planned).not.toBeFocused();
+
+    const modeled = page.locator(
+      '#graph-nav a[data-radius-graph-page="graph"]'
+    );
+    await modeled.focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/page=graph/);
+    await expect(modeled).toBeFocused();
+
+    expect(documentNavigations).toBe(0);
+  });
+
+  test("ignores a click on the pane already on screen", async ({
+    page,
+    canvas
+  }) => {
+    await gotoCanvas(page, canvas, "graph");
+    let documentNavigations = 0;
+    page.on("request", (request) => {
+      if (request.isNavigationRequest()) documentNavigations += 1;
+    });
+
+    await page.getByRole("link", { name: "Environments" }).first().click();
+    await expect(page.locator("#env-subtabs")).toBeVisible();
+    const paneRequests = () =>
+      canvas.requests.filter((request) => request.path.includes("environment"))
+        .length;
+    const before = paneRequests();
+
+    await page.getByRole("link", { name: "Environments" }).first().click();
+    await expect(page).toHaveURL(/page=environment/);
+    await expect(page.locator("#radius-main-content")).not.toHaveAttribute(
+      "aria-busy",
+      "true"
+    );
+    expect(paneRequests()).toBe(before);
+
+    // The skipped click pushed no history entry, so Back lands on the graph.
+    await page.goBack();
+    await expect(page).toHaveURL(/page=graph/);
+    await expect(page.locator("#graph-page-content")).toBeVisible();
+    expect(documentNavigations).toBe(0);
   });
 
   test("opens node details from the card by keyboard and returns focus when the panel closes", async ({
@@ -838,6 +1080,96 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect
       .poll(() => bodyFor(canvas, "/api/delete-deployment"))
       .toMatchObject({ environment: "fixture-environment" });
+  });
+
+  test("offers stop tracking only after teardown fails in Chromium @safety", async ({
+    page,
+    canvas
+  }) => {
+    let status = "success";
+    await routeDeployedPage(page, () => status);
+    await gotoCanvas(page, canvas, "deployed");
+
+    await expect(
+      page.getByRole("button", { name: "Delete Deployment" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop tracking deployment" })
+    ).toHaveCount(0);
+
+    status = "failed";
+    await page.reload();
+    await expect(
+      page.getByRole("button", { name: "Delete Deployment" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop tracking deployment" })
+    ).toHaveCount(0);
+
+    status = "delete-failed";
+    await page.reload();
+    await expect(
+      page.getByRole("button", { name: "Retry Delete" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop tracking deployment" })
+    ).toBeVisible();
+  });
+
+  test("confirms stop-tracking recovery by keyboard and sends the failed teardown identity @safety", async ({
+    page,
+    canvas
+  }) => {
+    const requests: Array<{ body: unknown; nonce: string }> = [];
+    await routeDeployedPage(
+      page,
+      () => "delete-failed",
+      (body, nonce) => {
+        requests.push({ body, nonce });
+      }
+    );
+    await gotoCanvas(page, canvas, "deployed");
+
+    const action = page.getByRole("button", {
+      name: "Stop tracking deployment"
+    });
+    await action.focus();
+    await page.keyboard.press("Enter");
+
+    const dialog = page.getByRole("dialog", {
+      name: "Stop Tracking Deployment"
+    });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("does not delete cloud resources");
+    const intent = page.getByRole("button", {
+      name: "I want to stop tracking this deployment"
+    });
+    await expect(intent).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toContainText(
+      "Resources created before the deployment failed may remain"
+    );
+    await page.keyboard.press("Enter");
+
+    const input = page.locator("#del-confirm-input");
+    await expect(input).toBeFocused();
+    await expectNoWcagViolations(page);
+    await page.keyboard.type("radius-app/fixture-environment");
+    await page.keyboard.press("Enter");
+
+    await expect.poll(() => requests).toHaveLength(1);
+    expect(requests[0].body).toEqual({
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      application: "radius-app"
+    });
+    expect(requests[0].nonce).not.toBe("");
+    await expect(page.locator("#deployed-inline-status")).toContainText(
+      "Cloud resources were not deleted"
+    );
+    await expect(page.locator("#deployed-delete-btn")).toHaveText(
+      "Deploy Application"
+    );
   });
 
   test("reveals the environment form by keyboard and returns focus to the reveal control", async ({

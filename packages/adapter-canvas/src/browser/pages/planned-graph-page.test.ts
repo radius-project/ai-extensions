@@ -5,9 +5,15 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import {
+  graphProgressElapsed,
+  graphProgressStages
+} from "../../../test/support/browser/graph-progress.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import {
@@ -70,10 +76,12 @@ function fixture(options: FixtureOptions = {}) {
   const environmentSelect = createFakeSelect("planned-env");
   environmentSelect.value = environment;
   const button = createFakeInput("plan-btn");
+  const hint = createFakeElement("planned-subtitle-hint");
   const status = createFakeElement("plan-status");
   const container = createFakeElement("graph-container");
   const wrapper = createFakeElement("graph-container-wrapper");
-  const elements = [state];
+  const progressHost = createFakeElement("progress-steps");
+  const elements = [state, hint, progressHost];
   if (withContainer) elements.push(container);
   if (withApp) elements.push(app);
   if (withBranch) elements.push(branch);
@@ -111,6 +119,10 @@ function fixture(options: FixtureOptions = {}) {
     () => jsonResponse(deploymentsPayload)
   );
   browser.net.handle("/api/deploy", () => jsonResponse({}));
+  // The page polls progress as soon as it starts a plan, so every scenario
+  // reaches this route whether or not it is what the scenario is about. A test
+  // that cares overrides it.
+  browser.net.handle("/api/progress?view=planned", () => jsonResponse({}));
 
   return {
     browser,
@@ -118,9 +130,11 @@ function fixture(options: FixtureOptions = {}) {
     branch,
     environment: environmentSelect,
     button,
+    hint,
     status,
     container,
-    wrapper
+    wrapper,
+    progressHost
   };
 }
 
@@ -137,6 +151,34 @@ describe("initializePlannedGraphPage", () => {
     const browser = createFakeBrowser();
     const teardown = initializePlannedGraphPage(browser.context, globals());
     expect(teardown).toBe(NOOP_TEARDOWN);
+  });
+
+  it("renders model compilation failures only on the graph and disables deployment", async () => {
+    const { browser, button, status, branch } = fixture();
+    const setError = vi.fn();
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({
+        error: "Your application model couldn't be compiled.",
+        modelingFailed: true
+      })
+    );
+
+    initializePlannedGraphPage(browser.context, {
+      radiusRenderGraph: vi.fn(),
+      radiusSetGraphLoading: vi.fn(),
+      radiusSetGraphError: setError
+    });
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "Your application model couldn't be compiled."
+    );
+    expect(status.style.display).toBe("none");
+    expect(button.disabled).toBe(true);
+    expect(branch.listenerCount("change")).toBe(1);
   });
 
   it("renders persisted resources and binds idempotently", async () => {
@@ -386,11 +428,86 @@ describe("initializePlannedGraphPage", () => {
     expect(container.innerHTML).toBe("");
   });
 
-  it("polls progress and ignores a late progress message", async () => {
+  it("plans a deployment for a selection made while the deployment listing is still in flight", async () => {
+    const { browser, branch, status, container } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    const deployments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      `${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`,
+      () => deployments.promise
+    );
+    browser.net.handle("/api/plan-graph", () => jsonResponse({ reload: true }));
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    const planCalls = browser.net.calls.filter(
+      (call) => call.url === "/api/plan-graph"
+    );
+    expect(planCalls.at(-1)?.init?.body).toContain('"branch":"another"');
+    expect(status.textContent).not.toBe(
+      "Create an environment to preview the planned deployment for this application."
+    );
+    expect(container.innerHTML).not.toContain("Create an environment");
+
+    deployments.resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+  });
+
+  it("defers a selection made while environments are loading and plans it once selectors are ready", async () => {
+    const { browser, branch, button, status, container } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    const environments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      "/api/list-environments?repo=octo%2Fapp",
+      () => environments.promise
+    );
+    browser.net.handle("/api/plan-graph", () => jsonResponse({ reload: true }));
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(
+      browser.net.calls.filter((call) => call.url === "/api/plan-graph")
+    ).toHaveLength(0);
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "selections are still loading"
+    );
+    expect(status.textContent).not.toContain("Create an environment");
+    expect(container.innerHTML).not.toContain("Create an environment");
+
+    environments.resolve(
+      jsonResponse({
+        environments: [{ name: "dev", provider: "azure", status: "success" }]
+      })
+    );
+    await flushPromises();
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    const planCalls = browser.net.calls.filter(
+      (call) => call.url === "/api/plan-graph"
+    );
+    expect(planCalls).toHaveLength(1);
+    expect(planCalls[0]?.init?.body).toContain('"branch":"another"');
+  });
+
+  it("polls progress immediately and then per interval, ignoring a late message", async () => {
     const { browser, status } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () =>
+    browser.net.handle("/api/progress?view=planned", () =>
       jsonResponse({ messages: ["Drafting .radius/app.bicep"] })
     );
     initializePlannedGraphPage(browser.context, globals());
@@ -398,11 +515,19 @@ describe("initializePlannedGraphPage", () => {
     browser.clock.tick(0);
     await flushPromises();
 
+    // A plan already in flight is adopted without waiting out an interval.
+    expect(
+      browser.net.calls.filter(
+        (call) => call.url === "/api/progress?view=planned"
+      )
+    ).toHaveLength(1);
     browser.clock.tick(PLAN_PROGRESS_MS);
     await flushPromises();
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/progress")
-    ).toHaveLength(1);
+      browser.net.calls.filter(
+        (call) => call.url === "/api/progress?view=planned"
+      )
+    ).toHaveLength(2);
     expect(status.textContent).toBe("Drafting .radius/app.bicep");
 
     plan.resolve(jsonResponse({ reload: true }));
@@ -414,7 +539,9 @@ describe("initializePlannedGraphPage", () => {
     const { browser, status } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => jsonResponse({ messages: [] }));
+    browser.net.handle("/api/progress?view=planned", () =>
+      jsonResponse({ messages: [] })
+    );
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -432,7 +559,7 @@ describe("initializePlannedGraphPage", () => {
     const plan = createDeferred<HttpResponse>();
     const progress = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => progress.promise);
+    browser.net.handle("/api/progress?view=planned", () => progress.promise);
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -451,7 +578,7 @@ describe("initializePlannedGraphPage", () => {
     const { browser } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () =>
+    browser.net.handle("/api/progress?view=planned", () =>
       Promise.reject(new Error("progress unavailable"))
     );
     initializePlannedGraphPage(browser.context, globals());
@@ -474,7 +601,7 @@ describe("initializePlannedGraphPage", () => {
     const plan = createDeferred<HttpResponse>();
     const progress = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => progress.promise);
+    browser.net.handle("/api/progress?view=planned", () => progress.promise);
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -643,6 +770,72 @@ describe("initializePlannedGraphPage", () => {
     expect(button.disabled).toBe(true);
   });
 
+  it("keeps deployment closed when deployment states resolve during the plan debounce", async () => {
+    const { browser, button, branch, hint } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    const deployments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      `${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`,
+      () => deployments.promise
+    );
+    browser.net.handle("/api/plan-graph", () => jsonResponse({ reload: true }));
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    deployments.resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "deployment plan is still updating"
+    );
+    expect(hint.innerHTML).toContain(
+      "deployment plan is still updating, so deployment is temporarily unavailable"
+    );
+
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+    expect(button.disabled).toBe(false);
+  });
+
+  it("keeps deployment closed when deployment states resolve during an active plan", async () => {
+    const { browser, button, branch, hint } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    const deployments = createDeferred<HttpResponse>();
+    const plan = createDeferred<HttpResponse>();
+    browser.net.handle(
+      `${DEPLOYMENTS_PATH}?repo=octo%2Fapp&fresh=1`,
+      () => deployments.promise
+    );
+    browser.net.handle("/api/plan-graph", () => plan.promise);
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    branch.value = "another";
+    branch.dispatch("change");
+    browser.clock.tick(0);
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    deployments.resolve(jsonResponse({ deployments: [] }));
+    await flushPromises();
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "deployment plan is still updating"
+    );
+    expect(hint.innerHTML).toContain(
+      "deployment plan is still updating, so deployment is temporarily unavailable"
+    );
+
+    plan.resolve(jsonResponse({ reload: true }));
+    await flushPromises();
+    expect(button.disabled).toBe(false);
+  });
+
   it("abandons a queued plan when the page is torn down before it drains", async () => {
     const { browser, branch } = fixture();
     let calls = 0;
@@ -691,7 +884,9 @@ describe("initializePlannedGraphPage", () => {
     const { browser } = fixture();
     const plan = createDeferred<HttpResponse>();
     browser.net.handle("/api/plan-graph", () => plan.promise);
-    browser.net.handle("/api/progress", () => jsonResponse({ messages: [] }));
+    browser.net.handle("/api/progress?view=planned", () =>
+      jsonResponse({ messages: [] })
+    );
     const teardown = initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);
@@ -785,5 +980,135 @@ describe("initializePlannedGraphPage", () => {
     await flushPromises();
 
     expect(browser.clock.pending).toBe(0);
+  });
+  describe("graph build progress", () => {
+    const stageText = graphProgressStages;
+
+    it("renders typed planning stages instead of prose", async () => {
+      const { browser, progressHost } = fixture();
+      const plan = createDeferred<HttpResponse>();
+      browser.net.handle("/api/plan-graph", () => plan.promise);
+      browser.net.handle("/api/progress?view=planned", () =>
+        jsonResponse({
+          generation: 3,
+          events: [
+            {
+              sequence: 1,
+              stage: "building_graph",
+              state: "succeeded",
+              detail: "Built a graph with 4 resource(s)."
+            },
+            {
+              sequence: 2,
+              stage: "resolving_recipes",
+              state: "running",
+              detail: "Resolving recipes for dev."
+            }
+          ]
+        })
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      browser.clock.tick(PLAN_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_graph}:succeeded`,
+        `${GRAPH_STAGE_LABELS.resolving_recipes}:running`
+      ]);
+      expect(graphProgressElapsed(progressHost)).toMatch(/^\d+:\d{2}$/);
+      expect(fakeText(progressHost)).not.toMatch(/%/);
+    });
+
+    it("shows a starting stage before the first poll returns", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/plan-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:running`
+      ]);
+    });
+    it.each([
+      ["the plan errors", { error: "invalid app.bicep" }],
+      ["the plan response is incomplete", {}]
+    ])("clears the panel when %s", async (_name, body) => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle("/api/plan-graph", () => jsonResponse(body));
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      // The failure is stated once, in the status surface. A panel left behind
+      // would repeat it and keep claiming the plan is running.
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("clears the panel when the request throws", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle("/api/plan-graph", () =>
+        Promise.reject(new Error("offline"))
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("clears the panel while Copilot authors the model", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle("/api/plan-graph", () =>
+        jsonResponse({ needsAppBicep: true })
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([]);
+    });
+  });
+  describe("planned graph progress defaults", () => {
+    it("accepts typed events from a payload that omits the generation", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/plan-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress?view=planned", () =>
+        jsonResponse({
+          events: [
+            {
+              sequence: 5,
+              stage: "resolving_recipes",
+              state: "running",
+              detail: "Resolving recipes."
+            }
+          ]
+        })
+      );
+      initializePlannedGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+      browser.clock.tick(PLAN_PROGRESS_MS);
+      await flushPromises();
+
+      expect(graphProgressStages(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.resolving_recipes}:running`
+      ]);
+    });
   });
 });

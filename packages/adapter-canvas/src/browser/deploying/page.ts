@@ -160,7 +160,8 @@ export function deploymentStatusMarkup(status: string): string {
     success: "Success",
     failed: "Failed",
     pending: "Pending",
-    deleting: "Deleting…"
+    deleting: "Deleting…",
+    "delete-failed": "Delete failed"
   };
   return labels[status] ?? labels.pending;
 }

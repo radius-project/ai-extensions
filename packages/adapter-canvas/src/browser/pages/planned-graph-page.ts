@@ -1,8 +1,9 @@
 import { requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
+import { clearGraphProgress, createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
-import { readArray, readBoolean, readString } from "../json.js";
+import { readArray, readBoolean, readNumber, readString } from "../json.js";
 import {
   applyPlanEnvState,
   createPlanScheduler,
@@ -12,6 +13,7 @@ import {
 } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
+import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
@@ -84,10 +86,36 @@ export function initializePlannedGraphPage(
   let progress: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
+  let progressView: GraphProgressView | null = null;
+  let selectionQueuedWhileLoading = false;
+  const showModelingFailure = (message: string): void => {
+    controller?.destroy();
+    controller = null;
+    const wrapper = context.dom.byId("graph-container-wrapper");
+    if (wrapper) wrapper.innerHTML = '<div id="graph-container"></div>';
+    requireBrowserFunction(globalScope, "radiusSetGraphError")(
+      "graph-container",
+      message
+    );
+    const statusElement = context.dom.byId("plan-status");
+    if (statusElement) statusElement.style.display = "none";
+    if (button) {
+      button.disabled = true;
+      button.setAttribute(
+        "title",
+        "Deploy Application is unavailable until the application model compiles."
+      );
+    }
+  };
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
     progress = null;
+    progressView?.stop();
+    progressView = null;
+    // The page states a terminal outcome in its own status surface, so a frozen
+    // panel left underneath would repeat it as a second box.
+    clearGraphProgress(context);
   };
 
   const run = (isCurrent: () => boolean): Promise<void> => {
@@ -139,12 +167,31 @@ export function initializePlannedGraphPage(
     stopProgress();
     const abort = context.net.createAbort();
     requestAbort = abort;
-    progress = entry.every(PLAN_PROGRESS_MS, () => {
+    const view = createGraphProgress(context, entry, {
+      title: "Planning the deployment",
+      initial: {
+        sequence: 0,
+        stage: "checking_model",
+        state: "running",
+        detail: `Preparing the planned deployment for ${selectedEnvironment}…`
+      }
+    });
+    progressView = view;
+    const pollProgress = (): void => {
       void context.net
-        .fetch("/api/progress")
+        .fetch("/api/progress?view=planned")
         .then((response) => response.json())
         .then((payload) => {
           if (!current()) return;
+          const events = readArray(payload, "events");
+          if (events.length > 0) {
+            view.sync(
+              events,
+              readNumber(payload, "generation") ?? 0,
+              readNumber(payload, "elapsedMs")
+            );
+            return;
+          }
           const messages = readArray(payload, "messages").filter(
             (message): message is string => typeof message === "string"
           );
@@ -155,7 +202,13 @@ export function initializePlannedGraphPage(
           if (!current()) return;
           context.logger.error("Radius planned graph progress failed.", error);
         });
-    });
+    };
+    progress = entry.every(PLAN_PROGRESS_MS, pollProgress);
+    // Poll once immediately rather than waiting a full interval. A build that is
+    // already in flight — one this page did not start, or one it started before
+    // the user navigated away — is adopted straight away instead of showing an
+    // empty panel reading 0:00 until the first tick.
+    pollProgress();
     return context.net
       .fetch("/api/plan-graph", {
         method: "POST",
@@ -185,6 +238,10 @@ export function initializePlannedGraphPage(
           return;
         }
         const error = readString(payload, "error");
+        if (readBoolean(payload, "modelingFailed") && error) {
+          showModelingFailure(error);
+          return;
+        }
         status(
           context,
           error ?
@@ -217,6 +274,7 @@ export function initializePlannedGraphPage(
     run,
     () => {
       if (entry.active) {
+        plan.planPending = false;
         applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
       }
     },
@@ -227,14 +285,18 @@ export function initializePlannedGraphPage(
   // deploy does not exist yet, and the request may still fail.
   const queue = (immediate = false): void => {
     plan.requestFailed = false;
-    if (button && button.dataset.mode === "deploy") button.disabled = true;
+    plan.planPending = true;
+    applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
+    if (plan.selectorsPending) {
+      selectionQueuedWhileLoading = true;
+      return;
+    }
     schedule(immediate);
   };
 
   for (const selector of [app, branch, environment]) {
     if (!selector) continue;
     entry.on(selector, "change", () => {
-      applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
       queue();
     });
   }
@@ -270,7 +332,12 @@ export function initializePlannedGraphPage(
     repo: page.repo,
     environmentProviders: providers,
     defaultBranch: page.branch,
-    defaultEnvironment: page.environment
+    defaultEnvironment: page.environment,
+    onSelectorsReady: () => {
+      if (!entry.active || !selectionQueuedWhileLoading) return;
+      selectionQueuedWhileLoading = false;
+      schedule();
+    }
   }).then(() => {
     if (!entry.active) return;
     if (page.resources.length === 0) queue(true);

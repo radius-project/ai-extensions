@@ -5,13 +5,23 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import {
+  graphProgressElapsed,
+  graphProgressStages
+} from "../../../test/support/browser/graph-progress.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
+import { formatElapsed } from "../progress-format.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import {
+  GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+  GRAPH_APP_BICEP_TIMEOUT_MS,
   GRAPH_PAGE_STATE_ID,
+  GRAPH_PLAN_BLOCKED_TITLE,
   GRAPH_PROGRESS_MS,
   GRAPH_RETRY_MS,
   GRAPH_STALE_RETRY_MS,
@@ -55,7 +65,10 @@ function fixture(options: FixtureOptions = {}) {
   const button = createFakeInput("deploy-app-btn");
   const container = createFakeElement("graph-container");
   const wrapper = createFakeElement("graph-container-wrapper");
-  const elements = [state, app, container];
+  // The real loading surface mounts this host; the fake render globals do not,
+  // so the fixture provides it for the shared progress panel to render into.
+  const progressHost = createFakeElement("progress-steps");
+  const elements = [state, app, container, progressHost];
   if (withBranchSelect) elements.push(branch);
   if (withButton) elements.push(button);
   if (withWrapper) elements.push(wrapper);
@@ -79,7 +92,21 @@ function fixture(options: FixtureOptions = {}) {
     `/api/list-environments?repo=${encodeURIComponent(repo)}`,
     () => jsonResponse({ environments: [] })
   );
-  return { browser, state, app, branch, button, container, wrapper, status };
+  // The page polls progress as soon as it starts a build, so every scenario
+  // reaches this route whether or not it is what the scenario is about. A test
+  // that cares overrides it.
+  browser.net.handle("/api/progress?view=graph", () => jsonResponse({}));
+  return {
+    browser,
+    state,
+    app,
+    branch,
+    button,
+    container,
+    wrapper,
+    status,
+    progressHost
+  };
 }
 
 function globals(overrides: Record<string, unknown> = {}) {
@@ -164,22 +191,136 @@ describe("initializeGraphPage", () => {
     expect(branch.listenerCount()).toBe(0);
   });
 
-  it("polls progress once per interval and ignores a late response", async () => {
+  it("disables Plan Deployment while a loaded graph is being refreshed", async () => {
+    const { browser, button } = fixture({ loaded: true });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    browser.net.handle(
+      "/api/load-graph",
+      () => createDeferred<HttpResponse>().promise
+    );
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("plan");
+    expect(button.disabled).toBe(true);
+  });
+
+  it("enables Plan Deployment when the environment listing settles after the refresh", async () => {
+    const { browser, button } = fixture({ loaded: true });
+    const environments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      "/api/list-environments?repo=octo%2Fapp",
+      () => environments.promise
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/web" }] })
+    );
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    // The listing is what assigns the button its "plan" mode, so a graph that
+    // compiled before it arrives must still leave the button usable.
+    environments.resolve(
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("plan");
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("title")).toBeNull();
+  });
+
+  it("leaves Plan Deployment disabled when the model failed before the environment listing settles", async () => {
+    const { browser, button } = fixture({ loaded: true });
+    const environments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      "/api/list-environments?repo=octo%2Fapp",
+      () => environments.promise
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        error: "Your application model couldn't be compiled.",
+        modelingFailed: true
+      })
+    );
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: vi.fn() })
+    );
+    await flushPromises();
+
+    environments.resolve(
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("plan");
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toBe(GRAPH_PLAN_BLOCKED_TITLE);
+  });
+
+  it("does not re-enable a button owned by the create-environment mode", async () => {
+    const { browser, button } = fixture({ loaded: true });
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/web" }] })
+    );
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("create-env");
+    expect(button.disabled).toBe(false);
+  });
+
+  it("falls back to the rendered branch when the page has no branch selector", async () => {
+    const { browser, button } = fixture({
+      loaded: true,
+      withBranchSelect: false
+    });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/web" }] })
+    );
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("plan");
+    expect(button.disabled).toBe(false);
+  });
+
+  it("polls progress immediately and then once per interval, ignoring a late response", async () => {
     const { browser } = fixture({ loaded: false });
     browser.net.supportsAbort = false;
     const load = createDeferred<HttpResponse>();
     browser.net.handle("/api/load-graph", () => load.promise);
-    browser.net.handle("/api/progress", () =>
+    browser.net.handle("/api/progress?view=graph", () =>
       jsonResponse({ messages: ["Drafting .radius/app.bicep"] })
     );
     const teardown = initializeGraphPage(browser.context, globals());
     await flushPromises();
 
+    // A build already in flight is adopted without waiting out an interval, so
+    // a user returning to this page does not watch an empty panel first.
+    expect(
+      browser.net.calls.filter(
+        (call) => call.url === "/api/progress?view=graph"
+      )
+    ).toHaveLength(1);
     browser.clock.tick(GRAPH_PROGRESS_MS);
     await flushPromises();
     expect(
-      browser.net.calls.filter((call) => call.url === "/api/progress")
-    ).toHaveLength(1);
+      browser.net.calls.filter(
+        (call) => call.url === "/api/progress?view=graph"
+      )
+    ).toHaveLength(2);
     teardown();
     load.resolve(jsonResponse({ reload: true }));
     await flushPromises();
@@ -188,18 +329,114 @@ describe("initializeGraphPage", () => {
   });
 
   it("keeps external error detail out of user-visible failures", async () => {
+    const setError = vi.fn();
     const { browser, status } = fixture({ loaded: false });
     browser.net.handle("/api/load-graph", () =>
       Promise.reject(new Error("credential-like detail"))
     );
-    initializeGraphPage(browser.context, globals());
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
     await flushPromises();
 
-    expect(status?.textContent).toBe(
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
       "Failed to generate the application graph."
     );
-    expect(status?.textContent).not.toContain("credential-like");
+    expect(setError.mock.calls[0]?.[1]).not.toContain("credential-like");
+    // Reported once: the strip above the surface is cleared rather than
+    // repeating the same error in a second box.
+    expect(status?.textContent).toBe("");
     expect(browser.logger.errors.length).toBeGreaterThan(0);
+  });
+
+  it("reports a failure once instead of in both error surfaces", async () => {
+    const setError = vi.fn();
+    const { browser, status } = fixture({ loaded: false });
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ error: "app.bicep is invalid" })
+    );
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
+    await flushPromises();
+
+    // The strip sits directly above the graph surface, so leaving the message
+    // in both renders the same error twice.
+    expect(setError).toHaveBeenCalledTimes(1);
+    expect(status?.textContent).toBe("");
+    expect(status?.style.display).toBe("none");
+  });
+
+  it("disables planning when the selected model does not compile", async () => {
+    const setError = vi.fn();
+    const { browser, button, branch } = fixture({ loaded: false });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        error: "Your application model couldn't be compiled.",
+        modelingFailed: true
+      })
+    );
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
+    await flushPromises();
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toContain(
+      "until the application model"
+    );
+    expect(branch.listenerCount("change")).toBe(1);
+  });
+
+  it("still offers environment creation when the model does not compile", async () => {
+    // Creating an environment is a prerequisite the model cannot invalidate, so
+    // a compile failure must not strand a repository with no environment.
+    const { browser, button } = fixture({ loaded: false });
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        error: "Your application model couldn't be compiled.",
+        modelingFailed: true
+      })
+    );
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: vi.fn() })
+    );
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("create-env");
+    expect(button.disabled).toBe(false);
+  });
+
+  it("keeps Plan Deployment disabled while a changed branch is compiling", async () => {
+    const { browser, branch, button } = fixture({ loaded: true });
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/web" }] })
+    );
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(button.dataset.mode).toBe("plan");
+
+    browser.net.handle(
+      "/api/load-graph",
+      () => createDeferred<HttpResponse>().promise
+    );
+    branch.value = "another";
+    branch.dispatch("change");
+
+    expect(button.disabled).toBe(true);
   });
 
   it("silently skips the status update when no status element exists", async () => {
@@ -431,7 +668,7 @@ describe("initializeGraphPage", () => {
       "graph-container",
       "app.bicep is invalid"
     );
-    expect(status?.textContent).toBe("Error: app.bicep is invalid");
+    expect(status?.textContent).toBe("");
   });
 
   it("regenerates the graph for a newly selected branch and reloads", async () => {
@@ -493,36 +730,50 @@ describe("initializeGraphPage", () => {
   });
 
   it("surfaces a regenerate error message returned by the server", async () => {
+    const setError = vi.fn();
     const { browser, branch, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
       jsonResponse({ error: "cannot regenerate" })
     );
-    initializeGraphPage(browser.context, globals());
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
     await flushPromises();
 
     branch.value = "another";
     branch.dispatch("change");
     await flushPromises();
 
-    expect(status?.textContent).toBe("Error: cannot regenerate");
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "cannot regenerate"
+    );
+    expect(status?.textContent).toBe("");
   });
 
-  it("keeps regenerate error detail out of user-visible failures", async () => {
+  it("keeps request error detail out of user-visible failures", async () => {
+    const setError = vi.fn();
     const { browser, branch, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
       Promise.reject(new Error("secret-shaped detail"))
     );
-    initializeGraphPage(browser.context, globals());
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
     await flushPromises();
 
     branch.value = "another";
     branch.dispatch("change");
     await flushPromises();
 
-    expect(status?.textContent).toBe(
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
       "Failed to generate the application graph."
     );
-    expect(status?.textContent).not.toContain("secret-shaped");
+    expect(setError.mock.calls[0]?.[1]).not.toContain("secret-shaped");
+    expect(status?.textContent).toBe("");
     expect(browser.logger.errors.length).toBeGreaterThan(0);
   });
 
@@ -687,6 +938,25 @@ describe("initializeGraphPage", () => {
     browser.net.handle("/api/load-graph", () =>
       jsonResponse({ needsAppBicep: true })
     );
+    browser.net.handle("/api/progress?view=graph", () =>
+      jsonResponse({
+        generation: 1,
+        events: [
+          {
+            sequence: 1,
+            stage: "checking_model",
+            state: "succeeded",
+            detail: "No application model exists yet."
+          },
+          {
+            sequence: 2,
+            stage: "creating_model",
+            state: "running",
+            detail: "Copilot is creating the application model."
+          }
+        ]
+      })
+    );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
@@ -754,15 +1024,22 @@ describe("initializeGraphPage", () => {
   it("ignores a stale progress response superseded by a branch change", async () => {
     const { browser, branch, status } = fixture({ loaded: false });
     const load = createDeferred<HttpResponse>();
-    const progress = createDeferred<HttpResponse>();
+    const stale = createDeferred<HttpResponse>();
+    let polls = 0;
     browser.net.handle("/api/load-graph", () => load.promise);
-    browser.net.handle("/api/progress", () => progress.promise);
+    // Only the first poll is the stale one. Later polls belong to the request
+    // the branch change started and never settle, so the assertion can only be
+    // satisfied by the guard rejecting the superseded response.
+    browser.net.handle("/api/progress?view=graph", () => {
+      polls++;
+      return polls === 1 ? stale.promise : new Promise<HttpResponse>(() => {});
+    });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
-    browser.clock.tick(GRAPH_PROGRESS_MS);
     branch.dispatch("change");
-    progress.resolve(jsonResponse({ messages: ["late message"] }));
+    await flushPromises();
+    stale.resolve(jsonResponse({ messages: ["late message"] }));
     await flushPromises();
 
     expect(status?.textContent).not.toBe("late message");
@@ -772,7 +1049,7 @@ describe("initializeGraphPage", () => {
     const { browser } = fixture({ loaded: false });
     const load = createDeferred<HttpResponse>();
     browser.net.handle("/api/load-graph", () => load.promise);
-    browser.net.handle("/api/progress", () =>
+    browser.net.handle("/api/progress?view=graph", () =>
       Promise.reject(new Error("progress unavailable"))
     );
     initializeGraphPage(browser.context, globals());
@@ -805,7 +1082,9 @@ describe("initializeGraphPage", () => {
     const { browser, status } = fixture({ loaded: false });
     const load = createDeferred<HttpResponse>();
     browser.net.handle("/api/load-graph", () => load.promise);
-    browser.net.handle("/api/progress", () => jsonResponse({ messages: [] }));
+    browser.net.handle("/api/progress?view=graph", () =>
+      jsonResponse({ messages: [] })
+    );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
     if (status) status.textContent = "unchanged";
@@ -964,17 +1243,355 @@ describe("initializeGraphPage", () => {
   it("ignores a stale progress failure superseded by a branch change", async () => {
     const { browser, branch } = fixture({ loaded: false });
     const load = createDeferred<HttpResponse>();
-    const progress = createDeferred<HttpResponse>();
+    const stale = createDeferred<HttpResponse>();
+    let polls = 0;
     browser.net.handle("/api/load-graph", () => load.promise);
-    browser.net.handle("/api/progress", () => progress.promise);
+    // Only the first poll fails, and it belongs to the superseded request; the
+    // polls the branch change starts never settle.
+    browser.net.handle("/api/progress?view=graph", () => {
+      polls++;
+      return polls === 1 ? stale.promise : new Promise<HttpResponse>(() => {});
+    });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
-    browser.clock.tick(GRAPH_PROGRESS_MS);
     branch.dispatch("change");
-    progress.reject(new Error("stale progress failure"));
+    await flushPromises();
+    stale.reject(new Error("stale progress failure"));
     await flushPromises();
 
     expect(browser.logger.errors).toHaveLength(0);
+  });
+
+  describe("graph build progress", () => {
+    const stageText = graphProgressStages;
+
+    it("renders typed build stages instead of prose", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      const load = createDeferred<HttpResponse>();
+      browser.net.handle("/api/load-graph", () => load.promise);
+      browser.net.handle("/api/progress?view=graph", () =>
+        jsonResponse({
+          generation: 1,
+          events: [
+            {
+              sequence: 1,
+              stage: "checking_model",
+              state: "succeeded",
+              detail: "Found .radius/app.bicep."
+            },
+            {
+              sequence: 2,
+              stage: "building_graph",
+              state: "running",
+              detail: "Compiling the application model."
+            }
+          ]
+        })
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      browser.clock.tick(GRAPH_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:succeeded`,
+        `${GRAPH_STAGE_LABELS.building_graph}:running`
+      ]);
+      expect(graphProgressElapsed(progressHost)).toMatch(/^\d+:\d{2}$/);
+      expect(fakeText(progressHost)).not.toMatch(/%/);
+    });
+
+    it("shows a starting stage before the first poll returns", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      browser.net.handle(
+        "/api/load-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:running`
+      ]);
+    });
+
+    it("clears the panel once the request settles", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      browser.net.handle("/api/load-graph", () => jsonResponse({}));
+      browser.net.handle("/api/progress?view=graph", () =>
+        jsonResponse({ events: [] })
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      const before = fakeText(progressHost);
+      browser.clock.tick(GRAPH_PROGRESS_MS * 4);
+      await flushPromises();
+
+      // The request already resolved, so the frozen panel never advances.
+      expect(fakeText(progressHost)).toBe(before);
+    });
+
+    it("reports branch regeneration through the same panel", async () => {
+      const { browser, branch, progressHost } = fixture({ loaded: true });
+      browser.net.handle(
+        "/api/load-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress?view=graph", () =>
+        jsonResponse({
+          generation: 1,
+          events: [
+            {
+              sequence: 1,
+              stage: "building_graph",
+              state: "running",
+              detail: "Compiling for release."
+            }
+          ]
+        })
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      branch.value = "release";
+      branch.dispatch("change");
+      await flushPromises();
+      browser.clock.tick(GRAPH_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_graph}:running`
+      ]);
+    });
+
+    it("keeps one panel and one clock running across an app.bicep retry", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      browser.net.handle("/api/load-graph", () =>
+        jsonResponse({ needsAppBicep: true })
+      );
+      browser.net.handle("/api/progress?view=graph", () =>
+        jsonResponse({
+          generation: 1,
+          events: [
+            {
+              sequence: 1,
+              stage: "checking_model",
+              state: "succeeded",
+              detail: "No application model exists yet."
+            },
+            {
+              sequence: 2,
+              stage: "creating_model",
+              state: "running",
+              detail: "Copilot is creating the application model."
+            }
+          ]
+        })
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:succeeded`,
+        `${GRAPH_STAGE_LABELS.creating_model}:running`
+      ]);
+
+      browser.clock.tick(GRAPH_RETRY_MS);
+      await flushPromises();
+
+      // The retry reuses the running panel, so the clock reflects the whole
+      // wait rather than restarting at zero on every poll.
+      expect(graphProgressElapsed(progressHost)).toBe(
+        formatElapsed(GRAPH_RETRY_MS)
+      );
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:succeeded`,
+        `${GRAPH_STAGE_LABELS.creating_model}:running`
+      ]);
+    });
+
+    it("gives up on the app.bicep wait once it exceeds the timeout", async () => {
+      const setError = vi.fn();
+      const { browser, progressHost, status } = fixture({ loaded: false });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        return jsonResponse({ needsAppBicep: true });
+      });
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      // Nothing reports back when the modeling skill refuses a repository it
+      // cannot model, so the wait has to end on its own instead of polling for
+      // a file that will never arrive.
+      const attempts = Math.ceil(GRAPH_APP_BICEP_TIMEOUT_MS / GRAPH_RETRY_MS);
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        browser.clock.tick(GRAPH_RETRY_MS);
+        await flushPromises();
+      }
+      const settled = calls;
+      browser.clock.tick(GRAPH_RETRY_MS * 5);
+      await flushPromises();
+
+      expect(calls).toBe(settled);
+      expect(setError).toHaveBeenCalledWith(
+        "graph-container",
+        GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+      );
+      expect(status?.textContent).toBe("");
+      // The failure belongs on the graph surface alone; a frozen panel left
+      // underneath would state it a second time.
+      expect(graphProgressStages(progressHost)).toEqual([]);
+    });
+
+    it("stops immediately when the server says the skill cannot model the repo", async () => {
+      const setError = vi.fn();
+      const { browser, status } = fixture({ loaded: false });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        return jsonResponse({
+          error: "octo/app has no Dockerfile on main.",
+          appBicepUnsupported: true
+        });
+      });
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      browser.clock.tick(GRAPH_RETRY_MS * 5);
+      await flushPromises();
+
+      expect(calls).toBe(1);
+      expect(setError).toHaveBeenCalledWith(
+        "graph-container",
+        "octo/app has no Dockerfile on main."
+      );
+      expect(status?.textContent).toBe("");
+    });
+
+    it.each([
+      [
+        "the skill refuses the repository",
+        {
+          error: "octo/app has no Dockerfile on main.",
+          appBicepUnsupported: true
+        }
+      ],
+      ["the build errors", { error: "invalid app.bicep" }]
+    ])("clears the panel when %s", async (_name, body) => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      const setError = vi.fn();
+      browser.net.handle("/api/load-graph", () => jsonResponse(body));
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      // The failure is stated once, on the graph surface. A panel left behind
+      // would either repeat it or claim the build is still running.
+      expect(setError).toHaveBeenCalledTimes(1);
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("clears the panel when the request throws", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      const setError = vi.fn();
+      browser.net.handle("/api/load-graph", () =>
+        Promise.reject(new Error("offline"))
+      );
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      expect(setError).toHaveBeenCalledTimes(1);
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("surfaces a regeneration failure on the graph surface", async () => {
+      const { browser, branch, status } = fixture({ loaded: true });
+      const setError = vi.fn();
+      browser.net.handle("/api/load-graph", () =>
+        jsonResponse({ error: "branch missing" })
+      );
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      branch.value = "release";
+      branch.dispatch("change");
+      await flushPromises();
+
+      expect(setError).toHaveBeenCalledWith(
+        "graph-container",
+        "branch missing"
+      );
+      expect(status?.textContent).toBe("");
+    });
+  });
+  describe("graph build progress defaults", () => {
+    const stageText = graphProgressStages;
+
+    it("accepts typed events from a payload that omits the generation", async () => {
+      const { browser, progressHost } = fixture({ loaded: false });
+      browser.net.handle(
+        "/api/load-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress?view=graph", () =>
+        jsonResponse({
+          events: [
+            {
+              sequence: 3,
+              stage: "building_graph",
+              state: "running",
+              detail: "Compiling the application model."
+            }
+          ]
+        })
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+      browser.clock.tick(GRAPH_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_graph}:running`
+      ]);
+    });
+
+    it("regenerates for a branch when the page has no graph wrapper", async () => {
+      const { browser, branch, progressHost } = fixture({
+        loaded: true,
+        withWrapper: false
+      });
+      browser.net.handle(
+        "/api/load-graph",
+        () => createDeferred<HttpResponse>().promise
+      );
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      branch.value = "other";
+      branch.dispatch("change");
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.checking_model}:running`
+      ]);
+    });
   });
 });

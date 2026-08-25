@@ -5,9 +5,15 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import {
+  graphProgressElapsed,
+  graphProgressStages
+} from "../../../test/support/browser/graph-progress.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import {
@@ -79,11 +85,13 @@ function fixture(options: FixtureOptions = {}) {
     repo,
     branch: branchField,
     graphBranch: graphBranchField,
-    provider: providerField
+    provider: providerField,
+    mutationNonce: "nonce-1"
   });
   const appSelect = createFakeSelect("deployed-app-select");
   const envSelect = createFakeSelect("deployed-env-select");
   const action = createFakeInput("deployed-delete-btn");
+  const stopTrackingAction = createFakeInput("deployed-stop-tracking-btn");
   const status = createFakeElement("deployed-status");
   const label = createFakeElement("deployed-graph-label");
   const note = createFakeElement("deployed-mode-note");
@@ -95,9 +103,12 @@ function fixture(options: FixtureOptions = {}) {
   const modalText = createFakeElement("deployed-deleting-text");
 
   const elements = [state];
+  const progressHost = createFakeElement("deployed-progress-steps");
+  elements.push(progressHost);
   if (withAppSelect) elements.push(appSelect);
   if (withEnvSelect) elements.push(envSelect);
   if (withAction) elements.push(action);
+  if (withAction) elements.push(stopTrackingAction);
   if (withStatus) elements.push(status);
   if (withLabel) elements.push(label);
   if (withNote) elements.push(note);
@@ -152,6 +163,7 @@ function fixture(options: FixtureOptions = {}) {
     appSelect,
     envSelect,
     action,
+    stopTrackingAction,
     status,
     label,
     note,
@@ -160,7 +172,8 @@ function fixture(options: FixtureOptions = {}) {
     logOutput,
     container,
     modal,
-    modalText
+    modalText,
+    progressHost
   };
 }
 
@@ -243,6 +256,67 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.clock.pending).toBe(0);
   });
 
+  it("does not show a deploying legend for a never-deployed graph", async () => {
+    const { browser } = fixture();
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          resources: [{ id: "app/web", deployStatus: "pending" }],
+          mode: "greyed",
+          branch: "feature"
+        })
+    );
+    const render = vi.fn();
+
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    expect(render).toHaveBeenCalledWith(
+      "graph-container",
+      expect.any(Array),
+      expect.objectContaining({ deployMode: true, showLegend: false })
+    );
+  });
+
+  it("remounts when a live graph becomes terminal so legend settings follow the mode", async () => {
+    const { browser } = fixture();
+    let mode = "live";
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          resources: [{ id: "app/web", deployStatus: "success" }],
+          mode,
+          branch: "feature"
+        })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () =>
+      jsonResponse({ status: "complete", logsNew: [], logTotal: 0 })
+    );
+    const update = vi.fn();
+    const destroy = vi.fn();
+    const render = vi.fn(() => ({ update, destroy }));
+
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+    expect(render).toHaveBeenCalledTimes(1);
+
+    mode = "terminal";
+    browser.clock.tick(DEPLOYED_GRAPH_POLL_MS);
+    await flushPromises();
+
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(update).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledTimes(2);
+  });
+
   it("polls only a live graph and pauses while hidden", async () => {
     const { browser } = fixture();
     const url =
@@ -313,7 +387,7 @@ describe("initializeDeployedGraphPage", () => {
     );
     await flushPromises();
 
-    expect(createDialog).toHaveBeenCalledTimes(1);
+    expect(createDialog).toHaveBeenCalledTimes(2);
     expect(action.dataset.mode).toBe("delete");
     appSelect.value = "app";
     envSelect.value = "dev";
@@ -321,7 +395,7 @@ describe("initializeDeployedGraphPage", () => {
 
     expect(opens).toEqual([["app", "dev"]]);
     teardown();
-    expect(dialogTeardown).toHaveBeenCalledTimes(1);
+    expect(dialogTeardown).toHaveBeenCalledTimes(2);
   });
 
   it("ignores an invalid delete dialog factory result", async () => {
@@ -549,6 +623,51 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.logger.errors.length).toBeGreaterThan(0);
   });
 
+  it("shows a modeled workflow error returned by the graph route", async () => {
+    const { browser, status } = fixture();
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse(
+          { error: "Application model compilation failed." },
+          false,
+          400
+        )
+    );
+
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(status.className).toBe("status error");
+    expect(status.textContent).toBe("Application model compilation failed.");
+  });
+
+  it("retries while application model generation is pending", async () => {
+    const { browser } = fixture();
+    let calls = 0;
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => {
+        calls++;
+        return calls === 1 ?
+            jsonResponse({
+              error: "Copilot is generating .radius/app.bicep.",
+              retry: true
+            })
+          : jsonResponse({ resources: [], mode: "greyed" });
+      }
+    );
+
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(calls).toBe(1);
+
+    browser.clock.tick(DEPLOYED_GRAPH_POLL_MS);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+  });
+
   it("keeps a rendered graph on screen when a later refresh fails", async () => {
     const { browser, appSelect, status } = fixture();
     const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
@@ -578,6 +697,40 @@ describe("initializeDeployedGraphPage", () => {
     await flushPromises();
 
     expect(status.className).not.toBe("status error");
+  });
+
+  it("keeps a rendered graph and reports a later modeled workflow error", async () => {
+    const { browser, appSelect, note, status } = fixture();
+    const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
+    let call = 0;
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => {
+        call++;
+        return call === 1 ?
+            jsonResponse({
+              resources: [{ id: "app/web" }],
+              mode: "terminal",
+              branch: "feature"
+            })
+          : jsonResponse(
+              { error: "Application model compilation failed." },
+              false,
+              400
+            );
+      }
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: () => controller })
+    );
+    await flushPromises();
+
+    appSelect.dispatch("change");
+    await flushPromises();
+
+    expect(status.className).not.toBe("status error");
+    expect(note.textContent).toBe("Application model compilation failed.");
   });
 
   it("ignores a stale graph response superseded by another selection", async () => {
@@ -1514,6 +1667,231 @@ describe("initializeDeployedGraphPage", () => {
     expect(modal.style.display).toBe("none");
   });
 
+  it("keeps cloud teardown available after a failed redeploy", async () => {
+    const { browser, action, stopTrackingAction, appSelect, envSelect } =
+      fixture({
+        deployments: [{ app: "app", environment: "dev", status: "failed" }]
+      });
+    const { createDialog, confirm, wasOpened } = createConfirmingDialog();
+    browser.net.handle("/api/delete-deployment", () => jsonResponse({}));
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    expect(action.textContent).toBe("Delete Deployment");
+    expect(stopTrackingAction.style.display).toBe("none");
+    stopTrackingAction.dispatch("click");
+    expect(wasOpened()).toBe(false);
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(
+      browser.net.calls.some((call) => call.url === "/api/delete-deployment")
+    ).toBe(true);
+    expect(browser.nav.assigned).toEqual(["/?page=deploying"]);
+  });
+
+  it("offers stop tracking only after a failed teardown and sends its identity", async () => {
+    const {
+      browser,
+      action,
+      stopTrackingAction,
+      appSelect,
+      envSelect,
+      inlineStatus
+    } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm, wasOpened } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse({ outcome: "abandoned" })
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    expect(action.dataset.mode).toBe("delete");
+    expect(action.textContent).toBe("Retry Delete");
+    expect(stopTrackingAction.textContent).toBe("Stop tracking deployment");
+    expect(stopTrackingAction.style.display).toBe("");
+    expect(createDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variant: "abandon",
+        modalId: "deploy-abandon-modal"
+      })
+    );
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    stopTrackingAction.dispatch("click");
+    expect(wasOpened()).toBe(true);
+    confirm();
+    expect(stopTrackingAction.textContent).toBe("Stopping tracking…");
+    await flushPromises();
+
+    const request = browser.net.calls.find(
+      (call) => call.url === "/api/abandon-deployment"
+    );
+    expect(request?.init).toEqual({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Radius-Mutation-Nonce": "nonce-1"
+      },
+      body: JSON.stringify({
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      })
+    });
+    expect(inlineStatus.textContent).toContain(
+      "Cloud resources were not deleted"
+    );
+    expect(inlineStatus.textContent).toContain("may still exist");
+    expect(action.dataset.mode).toBe("deploy");
+    expect(browser.nav.assigned).toEqual([]);
+  });
+
+  it("surfaces a stop-tracking refusal from the server", async () => {
+    const { browser, action, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse({ error: "not failed" }, false, 409)
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    stopTrackingAction.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe("not failed");
+    expect(action.dataset.mode).toBe("delete");
+    expect(stopTrackingAction.disabled).toBe(false);
+  });
+
+  it("uses a generic abandonment refusal when the server omits an error", async () => {
+    const { browser, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse({}, false, 500)
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    stopTrackingAction.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe(
+      "Could not stop tracking the deployment."
+    );
+  });
+
+  it("turns a stale mutation nonce refusal into a reload instruction", async () => {
+    const { browser, action, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse(
+        { error: "This browser mutation request is not trusted." },
+        false,
+        403
+      )
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    stopTrackingAction.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe(
+      "This Radius Canvas page is out of date. Reload it and try again."
+    );
+    expect(action.dataset.mode).toBe("delete");
+    expect(stopTrackingAction.disabled).toBe(false);
+  });
+
+  it("surfaces a transport-safe abandonment failure and restores the action", async () => {
+    const { browser, action, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      Promise.reject(new Error("secret-shaped detail"))
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    stopTrackingAction.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe(
+      "Could not stop tracking the deployment. Please try again."
+    );
+    expect(inlineStatus.textContent).not.toContain("secret-shaped");
+    expect(action.dataset.mode).toBe("delete");
+    expect(stopTrackingAction.disabled).toBe(false);
+    expect(browser.logger.errors).toHaveLength(1);
+  });
+
+  it.each(["success", "failure"] as const)(
+    "ignores a stale abandonment %s after teardown",
+    async (outcome) => {
+      const { browser, stopTrackingAction, inlineStatus } = fixture({
+        deployments: [
+          { app: "app", environment: "dev", status: "delete-failed" }
+        ]
+      });
+      const { createDialog, confirm } = createConfirmingDialog();
+      const request = createDeferred<HttpResponse>();
+      browser.net.handle("/api/abandon-deployment", () => request.promise);
+      const teardown = initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+
+      stopTrackingAction.dispatch("click");
+      confirm();
+      teardown();
+      if (outcome === "success") {
+        request.resolve(jsonResponse({ outcome: "abandoned" }));
+      } else {
+        request.reject(new Error("stale"));
+      }
+      await flushPromises();
+
+      expect(inlineStatus.textContent).toBe("");
+      expect(browser.logger.errors).toHaveLength(0);
+    }
+  );
+
   it("surfaces a delete failure returned by the server", async () => {
     const { browser, action, appSelect, envSelect, inlineStatus } = fixture();
     const { createDialog, confirm } = createConfirmingDialog();
@@ -2118,5 +2496,69 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.net.calls.filter((call) => call.url === url).length).toBe(
       before + 1
     );
+  });
+  describe("graph build progress", () => {
+    const stageText = graphProgressStages;
+
+    it("shows the loading stage while the first request is in flight", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => createDeferred<HttpResponse>().promise
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.loading_deployment}:running`
+      ]);
+      expect(graphProgressElapsed(progressHost)).toMatch(/^\d+:\d{2}$/);
+      expect(fakeText(progressHost)).not.toMatch(/%/);
+    });
+
+    it("clears the panel once the deployed graph arrives", async () => {
+      const { browser, progressHost } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => jsonResponse({ resources: [{ id: "app/web" }], mode: "greyed" })
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([]);
+      expect(fakeText(progressHost)).toBe("");
+    });
+
+    it("reports the failure once in the status banner, clearing the panel", async () => {
+      const { browser, progressHost, status } = fixture();
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => Promise.reject(new Error("graph service down"))
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(status.textContent).toBe(
+        "The deployed application graph could not be loaded."
+      );
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("states the failure on the panel when there is no status banner", async () => {
+      const { browser, progressHost } = fixture({ withStatus: false });
+      browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => Promise.reject(new Error("graph service down"))
+      );
+      initializeDeployedGraphPage(browser.context, globals());
+      await flushPromises();
+
+      // The panel is the only surface left, so it carries the failure rather
+      // than being cleared and leaving the outcome unreported.
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.loading_deployment}:failed`
+      ]);
+      expect(fakeText(progressHost)).not.toContain("graph service down");
+    });
   });
 });

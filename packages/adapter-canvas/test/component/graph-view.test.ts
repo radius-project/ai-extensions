@@ -20,6 +20,7 @@ import {
   realGraphVendor
 } from "./support/real-vendor.js";
 import type { GraphNodeData } from "../../src/browser/graph/build.js";
+import type { GraphResource } from "../../src/browser/graph/model.js";
 import type { MountedGraph } from "../../src/browser/graph/view.js";
 import type { DomElement } from "../../src/browser/ports.js";
 
@@ -53,17 +54,29 @@ afterEach(() => {
   for (const dispose of disposers.splice(0).reverse()) dispose();
 });
 
-function mount(options: { localSource?: boolean } = {}): Mounted {
+function mount(
+  options: {
+    localSource?: boolean;
+    deployMode?: boolean;
+    resources?: GraphResource[];
+  } = {}
+): Mounted {
   const settings = resolveGraphSettings({
     localSource: options.localSource ?? true,
+    deployMode: options.deployMode,
     branch: "feature-branch"
   });
-  const built = buildGraph(settings, RESOURCES);
+  const built = buildGraph(settings, options.resources ?? RESOURCES);
   const vendor = realGraphVendor();
   layoutGraph(vendor.dagre, built.nodes, built.edges);
 
   const { host, dispose } = createGraphHost();
-  const recorded: Recorded = { local: [], toggled: [], opened: [], reloads: 0 };
+  const recorded: Recorded = {
+    local: [],
+    toggled: [],
+    opened: [],
+    reloads: 0
+  };
   const graph = mountGraph({
     vendor,
     clock: realClock(),
@@ -110,6 +123,51 @@ describe("graph view in a real browser", () => {
     // cannot make: React Flow only paints once it has measured its container.
     expect(web.getBoundingClientRect().width).toBeGreaterThan(0);
     expect(db.getBoundingClientRect().height).toBeGreaterThan(0);
+  });
+
+  it("renders the deployed parent with its representative concrete root type", async () => {
+    const { recorded } = mount({
+      deployMode: true,
+      resources: [
+        {
+          id: "mysql",
+          name: "mysql",
+          type: "Radius.Data/mySqlDatabases",
+          deployStatus: "success",
+          outputResources: [
+            { id: "lock", type: "Microsoft.Authorization/locks" },
+            {
+              id: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/server",
+              type: "Microsoft.DBforMySQL/flexibleServers",
+              portalUrl: "https://portal.azure.com/#@tenant/resource/server"
+            },
+            {
+              id: "database",
+              type: "Microsoft.DBforMySQL/flexibleServers/databases"
+            }
+          ]
+        }
+      ]
+    });
+
+    const mysql = await card("mysql");
+    expect(
+      within(mysql).getByTitle("Microsoft.DBforMySQL/flexibleServers")
+    ).toBeTruthy();
+    expect(mysql.getAttribute("data-node-id")).toBe("mysql");
+
+    const portal = mysql.querySelector("a.rad-node__portal");
+    if (!(portal instanceof HTMLAnchorElement)) {
+      throw new Error("deployed node has no native portal link");
+    }
+    expect(portal.getAttribute("aria-label")).toBe(
+      "Open mysql in Azure Portal"
+    );
+    expect(portal.getAttribute("href")).toBe(
+      "https://portal.azure.com/#@tenant/resource/server"
+    );
+    expect(portal.getAttribute("target")).toBe("_blank");
+    expect(recorded.opened).toEqual([]);
   });
 
   it("places connected nodes on separate rows using the real dagre layout", async () => {

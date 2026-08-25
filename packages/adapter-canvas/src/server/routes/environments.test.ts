@@ -470,6 +470,40 @@ describe("environments — delete-environment refusal ladder", () => {
     expect(recording.body).toContain("is still being deleted from environment");
   });
 
+  it("rung 3: routes a failed teardown to its recovery controls", async () => {
+    const active: EnvironmentActiveDeployment = {
+      app: "store",
+      environment: "dev",
+      provider: "azure",
+      status: "delete-failed",
+      deploymentId: "1",
+      runUrl: "u"
+    };
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        readInstanceEntry: () => entryWith({ graphBranch: "gb" }),
+        resolveRepoAppName: () => Promise.resolve("store"),
+        resolveEnvDeployment: () => Promise.resolve(active)
+      })
+    );
+
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body)).toEqual({
+      error:
+        'The previous teardown of application "store" from environment "dev" failed. Retry Delete or stop tracking the deployment before deleting the environment.',
+      code: "app-deployed",
+      app: "store",
+      environment: "dev",
+      redirect: "/?page=deployed&application=store&environment=dev"
+    });
+  });
+
   it("rung 4: 500 when the DELETE command fails", async () => {
     const runCommand = vi.fn(() => Promise.reject(new Error("boom")));
     const { recording, ctx } = context(

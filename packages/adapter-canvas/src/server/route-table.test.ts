@@ -85,6 +85,7 @@ const productionHandlers = {
     repoMatchesWorkspace: () => false
   }),
   ...createDeploymentsRoutes({
+    isValidRepoSlug: () => true,
     readInstanceEntry: () => undefined,
     triggerDeployRepairHandoff: () => false,
     triggerDeployFailureNotice: () => false,
@@ -117,6 +118,13 @@ const productionHandlers = {
       deploy: () => {
         throw new Error(
           "unexpected deploy dispatch from the route-table suite"
+        );
+      }
+    },
+    abandonment: {
+      abandon: () => {
+        throw new Error(
+          "unexpected deployment abandonment from the route-table suite"
         );
       }
     }
@@ -180,22 +188,33 @@ const productionHandlers = {
       graph: () => Promise.resolve({ graph: null, status: "missing" }),
       progress: () => Promise.resolve(null)
     }),
+    loadModeledGraph: () => Promise.resolve({ status: 200 }),
     buildDeployStatusMap: () => new Map(),
     buildDeployMessageMap: () => new Map(),
     deployStatusKeys: () => [],
+    mergeDeployedGraphMetadata: (modeled) => modeled,
     projectDeployedGraph: () => [],
     canvasGraphResources: () => [],
     applyDeployMessages: () => {},
-    record: () => ({}),
+    settleDeployStatuses: () => {},
     errorMessage: (error) => String(error),
-    repoMatchesWorkspace: () => false
+    repoMatchesWorkspace: () => false,
+    now: () => 0
   }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
     defaultBranchForState: () => "main",
     prepareSourceRef: () => ({ token: "" }),
     commitSourceRef: () => true,
+    isCurrentSourceRef: () => true,
     triggerAppBicepHandoff: () => {},
+    triggerGraphRepairHandoff: () => ({
+      attempt: 1,
+      maxAttempts: 3,
+      repairing: true,
+      repairExhausted: false
+    }),
+    clearGraphRepairAttempt: () => {},
     fetchBicepSelection: () =>
       Promise.resolve({
         content: null,
@@ -203,12 +222,14 @@ const productionHandlers = {
         branch: "main",
         bicepPath: ""
       }),
+    listBranchPaths: () => Promise.resolve([]),
     workspaceGraphJsonPath: () => "",
     radArtifactsDirForSelection: () =>
       Promise.resolve({ dir: "", remote: false }),
     buildGraphViaRad: () => Promise.resolve([]),
     canvasGraphResources: () => [],
-    errorMessage: (error) => String(error)
+    errorMessage: (error) => String(error),
+    logError: () => {}
   }),
   ...createGraphsPlanningWritesRoutes({
     workflows: createGraphPlanningWorkflows({
@@ -231,6 +252,14 @@ const productionHandlers = {
         removeDirectory: () => {}
       }),
       triggerAppBicepHandoff: () => {},
+      triggerGraphRepairHandoff: () => ({
+        attempt: 1,
+        maxAttempts: 3,
+        repairing: true,
+        repairExhausted: false
+      }),
+      clearGraphRepairAttempt: () => {},
+      listBranchPaths: () => Promise.resolve([]),
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,
       isCurrentSourceRefToken: () => false,
@@ -244,7 +273,9 @@ const productionHandlers = {
       computeGraphDiff: () => [],
       record: () => ({}),
       optionalString: () => "",
-      errorMessage: (error) => String(error)
+      errorMessage: (error) => String(error),
+      logError: () => {},
+      now: () => 0
     })
   }),
   ...createEnvironmentsRoutes({
@@ -387,6 +418,7 @@ describe("server route ownership boundary", () => {
     ).toEqual([
       "POST /api/github-account",
       "POST /api/operations",
+      "POST /api/abandon-deployment",
       "POST /api/operations/:operationId/resume/:code",
       "POST /api/operations/:operationId/abandon"
     ]);

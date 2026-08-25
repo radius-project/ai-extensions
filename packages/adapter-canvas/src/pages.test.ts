@@ -520,7 +520,12 @@ describe("compiled graph page network contracts", () => {
     ],
     [
       "graph-diff-page",
-      ["/api/discover-branches", "/api/list-applications", "/api/diff-branches"]
+      [
+        "/api/discover-branches",
+        "/api/list-applications",
+        "/api/progress",
+        "/api/diff-branches"
+      ]
     ],
     [
       "deployed-graph-page",
@@ -531,7 +536,8 @@ describe("compiled graph page network contracts", () => {
         "/api/deploy-status",
         "/api/list-applications",
         "/api/list-environments",
-        "/api/delete-deployment"
+        "/api/delete-deployment",
+        "/api/abandon-deployment"
       ]
     ]
   ] as const)(

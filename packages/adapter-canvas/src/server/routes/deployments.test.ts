@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
   createDeploymentsRoutes,
+  handleAbandonDeployment,
   handleDeleteDeployment,
   handleDeploy,
   handleDeployReset,
@@ -74,6 +75,7 @@ function dependencies(
   overrides: Partial<DeploymentsDependencies> = {}
 ): DeploymentsDependencies {
   return {
+    isValidRepoSlug: (value) => value === "octo/todolist",
     readInstanceEntry: () => {
       throw new Error("readInstanceEntry not stubbed");
     },
@@ -142,6 +144,11 @@ function dependencies(
     deployRequest: {
       deploy: () => {
         throw new Error("deployRequest.deploy not stubbed");
+      }
+    },
+    abandonment: {
+      abandon: () => {
+        throw new Error("abandonment.abandon not stubbed");
       }
     },
     ...overrides
@@ -217,7 +224,7 @@ const JSON_HEADERS = {
 };
 
 describe("deployments routes (SU-06)", () => {
-  it("declares exactly the six routes it owns", () => {
+  it("declares exactly the seven routes it owns", () => {
     const routes = createDeploymentsRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
       "GET /api/deploy-status",
@@ -225,7 +232,8 @@ describe("deployments routes (SU-06)", () => {
       "GET /api/list-deployments",
       "POST /api/deploy",
       "POST /api/deploy-reset",
-      "POST /api/delete-deployment"
+      "POST /api/delete-deployment",
+      "POST /api/abandon-deployment"
     ]);
   });
 
@@ -246,6 +254,16 @@ describe("deployments routes (SU-06)", () => {
         resetDeploymentViewState: () => {},
         deployRequest: {
           deploy: () => Promise.resolve({ status: 200, body: { ok: true } })
+        },
+        abandonment: {
+          abandon: () =>
+            Promise.resolve({
+              status: 400,
+              body: {
+                error:
+                  "A valid repo, environment, and application are required to abandon deployment tracking."
+              }
+            })
         }
       })
     );
@@ -283,7 +301,14 @@ describe("deployments routes (SU-06)", () => {
     const remove = context("POST", "/api/delete-deployment", "{}");
     await routes["POST /api/delete-deployment"](remove.context);
     expect(JSON.parse(remove.recording.body)).toEqual({
-      error: "repo, environment, and application are required."
+      error: "A valid repo, environment, and application are required."
+    });
+
+    const abandon = context("POST", "/api/abandon-deployment", "{}");
+    await routes["POST /api/abandon-deployment"](abandon.context);
+    expect(JSON.parse(abandon.recording.body)).toEqual({
+      error:
+        "A valid repo, environment, and application are required to abandon deployment tracking."
     });
   });
 
@@ -1215,7 +1240,7 @@ describe("deployments routes (SU-06)", () => {
       return context("POST", "/api/delete-deployment", body);
     }
 
-    it("refuses a request missing any of repo, environment or application", async () => {
+    it("refuses a request missing or malformed repo, environment or application", async () => {
       for (const body of [
         // An absent body is not a parse error: it means "{}", which then fails
         // the required-fields check rather than the JSON check.
@@ -1225,7 +1250,8 @@ describe("deployments routes (SU-06)", () => {
         '{"repo":"octo/todolist","environment":"dev"}',
         '{"environment":"dev","application":"todolist"}',
         // Present but empty is the same refusal: the handler coerces with `||`.
-        '{"repo":"","environment":"dev","application":"todolist"}'
+        '{"repo":"","environment":"dev","application":"todolist"}',
+        '{"repo":"invalid","environment":"dev","application":"todolist"}'
       ]) {
         const { recording, context: ctx } = deleteContext(body);
         await handleDeleteDeployment(
@@ -1238,7 +1264,7 @@ describe("deployments routes (SU-06)", () => {
         );
         expect(recording.status).toBe(400);
         expect(JSON.parse(recording.body)).toEqual({
-          error: "repo, environment, and application are required."
+          error: "A valid repo, environment, and application are required."
         });
       }
     });
@@ -1814,6 +1840,97 @@ describe("deployments routes (SU-06)", () => {
       expect(released).toEqual([LEASE]);
       fire();
       expect(released).toEqual([LEASE]);
+    });
+  });
+
+  describe("POST /api/abandon-deployment", () => {
+    it("rejects malformed JSON without acquiring a lease", async () => {
+      const { recording, context: ctx } = context(
+        "POST",
+        "/api/abandon-deployment",
+        "{"
+      );
+      await handleAbandonDeployment(
+        ctx,
+        dependencies({
+          abandonment: {
+            abandon: () => {
+              throw new Error("must not delegate malformed input");
+            }
+          }
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toHaveProperty("error");
+    });
+
+    it("delegates parsed input and serializes the service result", async () => {
+      const calls: unknown[] = [];
+      const { recording, context: ctx } = context(
+        "POST",
+        "/api/abandon-deployment",
+        '{"repo":"octo/todolist","environment":"dev","application":"todolist"}'
+      );
+      await handleAbandonDeployment(
+        ctx,
+        dependencies({
+          abandonment: {
+            abandon: (input) => {
+              calls.push(input);
+              return Promise.resolve({
+                status: 200,
+                body: { outcome: "abandoned" }
+              });
+            }
+          }
+        })
+      );
+
+      expect(calls).toEqual([
+        {
+          instanceId: "panel-a",
+          payload: {
+            repo: "octo/todolist",
+            environment: "dev",
+            application: "todolist"
+          }
+        }
+      ]);
+      expect(recording.status).toBe(200);
+      expect(JSON.parse(recording.body)).toEqual({
+        outcome: "abandoned"
+      });
+    });
+
+    it("delegates an empty body as an empty request object", async () => {
+      const calls: unknown[] = [];
+      const { recording, context: ctx } = context(
+        "POST",
+        "/api/abandon-deployment"
+      );
+      await handleAbandonDeployment(
+        ctx,
+        dependencies({
+          abandonment: {
+            abandon: (input) => {
+              calls.push(input);
+              return Promise.resolve({
+                status: 400,
+                body: { error: "missing identity" }
+              });
+            }
+          }
+        })
+      );
+
+      expect(calls).toEqual([
+        {
+          instanceId: "panel-a",
+          payload: {}
+        }
+      ]);
+      expect(recording.status).toBe(400);
     });
   });
 });

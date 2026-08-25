@@ -13,6 +13,7 @@ import {
   isLiveSlotArtifactName,
   MAX_ARTIFACT_CANDIDATES,
   normalizeProvisioningState,
+  parseDeployGraphArtifact,
   parseDeployProgressArtifact,
   resolveResourceStatus,
   sanitizeArtifactSegment,
@@ -212,6 +213,71 @@ describe("parseDeployProgressArtifact", () => {
     expect(parsed?.resources).toHaveLength(1);
   });
 
+  describe("parseDeployGraphArtifact", () => {
+    const graph = {
+      resources: [
+        {
+          id: "mysql",
+          outputResources: [
+            {
+              id: "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/mysql",
+              portalUrl:
+                "https://portal.azure.com/#@tenant/resource/subscriptions/sub/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/mysql"
+            }
+          ]
+        }
+      ]
+    };
+
+    it("preserves a producer graph beneath Rad build progress output", () => {
+      expect(
+        parseDeployGraphArtifact(
+          `Compiling .radius/app.bicep\nBuilding {model}...\n${JSON.stringify(graph)}\nDone in 4.2s\n`
+        )
+      ).toEqual(graph);
+    });
+
+    it("ignores structured log records before and after the graph document", () => {
+      const graphWithBraces = {
+        ...graph,
+        resources: [
+          { ...graph.resources[0], message: "created {successfully}" }
+        ]
+      };
+      expect(
+        parseDeployGraphArtifact(
+          `${JSON.stringify({ level: "info" })}\n${JSON.stringify(graphWithBraces)}\n${JSON.stringify({ level: "done" })}\n`
+        )
+      ).toEqual(graphWithBraces);
+    });
+
+    it("ignores non-resource array log records before the graph document", () => {
+      expect(
+        parseDeployGraphArtifact(
+          `${JSON.stringify(["starting build"])}\n${JSON.stringify(graph)}\n`
+        )
+      ).toEqual(graph);
+    });
+
+    it("accepts exact object and array documents", () => {
+      expect(parseDeployGraphArtifact(JSON.stringify(graph))).toEqual(graph);
+      expect(parseDeployGraphArtifact('[{"id":"one"}]')).toEqual([
+        { id: "one" }
+      ]);
+    });
+
+    it("rejects empty, scalar, and malformed content", () => {
+      expect(parseDeployGraphArtifact()).toBeNull();
+      expect(parseDeployGraphArtifact("")).toBeNull();
+      expect(parseDeployGraphArtifact("progress\n42")).toBeNull();
+      expect(parseDeployGraphArtifact("progress\n{broken")).toBeNull();
+      expect(
+        parseDeployGraphArtifact('{"level":"info"}\n{"message":"done"}')
+      ).toBeNull();
+      expect(parseDeployGraphArtifact('["starting build"]')).toBeNull();
+    });
+  });
+
   it("rejects an unknown schemaVersion rather than guessing", () => {
     expect(
       parseDeployProgressArtifact(progressPayload({ schemaVersion: 2 }))
@@ -262,6 +328,24 @@ describe("parseDeployProgressArtifact", () => {
       })
     );
     expect(parsed?.resources[0].status).toBeUndefined();
+  });
+
+  it("accepts optional exact output resource ids and drops malformed entries", () => {
+    const parsed = parseDeployProgressArtifact(
+      progressPayload({
+        resources: [
+          {
+            name: "api",
+            type: "Radius.Compute/containers",
+            outputResourceIds: [" deployment ", "", "  ", 42, "service"]
+          }
+        ] as any
+      })
+    );
+    expect(parsed?.resources[0].outputResourceIds).toEqual([
+      "deployment",
+      "service"
+    ]);
   });
 
   it("rejects a payload without a finite positive-integer sequence", () => {
@@ -444,6 +528,50 @@ describe("buildDeployStatusMap", () => {
     expect(map.get("id-a")).toBe("success");
     expect(map.get("id-b")).toBe("failed");
     expect(map.get("dup")).toBe("success");
+  });
+
+  it("reserves modeled ids before adding shared output aliases", () => {
+    const progress = parseDeployProgressArtifact(
+      progressPayload({
+        resources: [
+          {
+            id: "id-a",
+            name: "a",
+            type: "A",
+            outputResourceIds: ["id-b"],
+            status: "failed",
+            message: "alias failure"
+          },
+          {
+            id: "id-b",
+            name: "b",
+            type: "B",
+            status: "success",
+            message: "direct success"
+          }
+        ]
+      })
+    );
+    expect(buildDeployStatusMap(progress).get("id-b")).toBe("success");
+    expect(buildDeployMessageMap(progress).get("id-b")).toBe("direct success");
+  });
+
+  it("does not attach an alias message to a direct id with no message", () => {
+    const progress = parseDeployProgressArtifact(
+      progressPayload({
+        resources: [
+          {
+            id: "id-a",
+            name: "a",
+            type: "A",
+            outputResourceIds: ["id-b"],
+            message: "alias failure"
+          },
+          { id: "id-b", name: "b", type: "B", message: "" }
+        ]
+      })
+    );
+    expect(buildDeployMessageMap(progress).get("id-b")).toBeUndefined();
   });
 
   it("returns an empty map for a null payload", () => {
@@ -720,6 +848,53 @@ describe("the producer's real payload", () => {
     expect(projected.every((r) => r.outputResources.length === 0)).toBe(true);
   });
 
+  it("indexes status and messages by exact output resource ids", () => {
+    const progress = parseDeployProgressArtifact(
+      progressPayload({
+        resources: [
+          {
+            id: "parent",
+            name: "api",
+            type: "Radius.Compute/containers",
+            outputResourceIds: ["apps/deployments/api", "core/services/api"],
+            status: "success",
+            message: "deployed"
+          }
+        ]
+      })
+    );
+    expect(buildDeployStatusMap(progress)).toEqual(
+      new Map([
+        ["parent", "success"],
+        ["apps/deployments/api", "success"],
+        ["core/services/api", "success"],
+        ["api|radius.compute/containers", "success"],
+        ["api", "success"]
+      ])
+    );
+    expect(buildDeployMessageMap(progress).get("apps/deployments/api")).toBe(
+      "deployed"
+    );
+    const resources = [
+      {
+        id: "locally-synthesized-parent",
+        name: "different-local-name",
+        type: "Radius.Compute/containers",
+        outputResources: [{ id: "apps/deployments/api" }],
+        deployStatus: "in_progress" as const
+      }
+    ];
+    expect(
+      applyDeployStatusToResources(resources, buildDeployStatusMap(progress))
+    ).toEqual([
+      {
+        name: "different-local-name",
+        from: "in_progress",
+        to: "success"
+      }
+    ]);
+  });
+
   it("confirms identity against the artifact name for this run", () => {
     // Artifact name for this run: radius-deploy-status-dev-todolist
     expect(
@@ -784,6 +959,40 @@ describe("createDeployStatusReader", () => {
     expect(progress?.application).toBe("todolist");
     const { graph } = await reader.graph();
     expect(graph).toEqual({ resources: [{ name: "frontend" }] });
+  });
+
+  it("reads portal metadata when Rad prefixes graph JSON with build progress", async () => {
+    const portalUrl =
+      "https://portal.azure.com/#@tenant/resource/subscriptions/sub/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/mysql";
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist")
+      ],
+      downloadArtifact: async () => ({
+        ...okFiles(),
+        [DEPLOY_STATUS_FILES.graph]:
+          "Compiling .radius/app.bicep\nBuilding .radius/app.bicep...\n" +
+          JSON.stringify({
+            resources: [
+              {
+                id: "mysql",
+                outputResources: [{ id: "/subscriptions/sub/mysql", portalUrl }]
+              }
+            ]
+          }) +
+          '\n{"level":"info","message":"complete"}\n'
+      })
+    });
+
+    expect((await reader.graph()).graph).toEqual({
+      resources: [
+        {
+          id: "mysql",
+          outputResources: [{ id: "/subscriptions/sub/mysql", portalUrl }]
+        }
+      ]
+    });
   });
 
   it("surfaces the control-plane log when the artifact carries one", async () => {

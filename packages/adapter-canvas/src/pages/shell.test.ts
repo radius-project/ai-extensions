@@ -4,7 +4,15 @@ import {
   browserScript,
   browserStyle
 } from "../browser/scripts.js";
+import { CRITICAL_SHELL_STYLE_CSS } from "./shell-styles.js";
 import { pageShell } from "./shell.js";
+import type { BrowserEntryName } from "../browser/scripts.js";
+
+// One entry name is a prefix of another ("graph" and "graph-chip"), so anything
+// locating or counting an entry has to match the whole marker line.
+function entryMarkerLine(name: BrowserEntryName): string {
+  return `\n${browserEntryMarker(name)}\n`;
+}
 
 describe("pageShell", () => {
   it("wraps body content in an HTML document with the title", () => {
@@ -63,6 +71,15 @@ describe("pageShell", () => {
     );
   });
 
+  it("loads critical document paint before graph styles", () => {
+    const html = pageShell("My Title", "<p>hello</p>");
+    const criticalStyles = html.indexOf(CRITICAL_SHELL_STYLE_CSS);
+    const graphStyles = html.indexOf(browserStyle("graph"));
+
+    expect(criticalStyles).toBeGreaterThan(-1);
+    expect(criticalStyles).toBeLessThan(graphStyles);
+  });
+
   it("keeps React Flow chrome transparent over the themed graph surface", () => {
     const html = pageShell("My Title", '<div id="graph-container"></div>');
     const flowStyles = html.match(
@@ -80,7 +97,7 @@ describe("pageShell", () => {
       html.indexOf("--rad-brand: #da4c2a;")
     );
     expect(html.indexOf(reactFlowStyle)).toBeLessThan(
-      html.indexOf(browserEntryMarker("graph"))
+      html.indexOf(entryMarkerLine("graph"))
     );
   });
 
@@ -104,6 +121,12 @@ describe("pageShell", () => {
     expect(typeStyles).toContain("width: 100%");
     expect(typeStyles).toContain("overflow: hidden");
     expect(typeStyles).toContain("white-space: nowrap");
+  });
+
+  it("shows a pointer over a deployed node portal link", () => {
+    const html = pageShell("My Title", "<p>hello</p>");
+    const portalStyles = html.match(/\.rad-node__portal\s*\{([^}]*)\}/)?.[1];
+    expect(portalStyles).toContain("cursor: pointer");
   });
 
   it("derives graph line colours from text/background, not host border tokens", () => {
@@ -185,6 +208,46 @@ describe("operation status chip in the top navigation", () => {
     expect(shell).toMatch(
       /prefers-reduced-motion[\s\S]*rad-opchip--running \.rad-opchip__dot \{ animation: none; \}/
     );
+    expect(shell).toMatch(
+      /prefers-reduced-motion[\s\S]*\.rad-graph-progress__spinner, \.env-progress__spinner \{ animation: none; \}/
+    );
+  });
+});
+
+describe("the graph build chip in the shell", () => {
+  const shell = pageShell("Environments", "<div></div>", "environments");
+
+  it("ships on every page, hidden until a build has something to report", () => {
+    // A graph build outlives the page that started it, so the chip has to be
+    // reachable from wherever the user wandered off to.
+    const html = pageShell("Applications", "<div></div>", "applications");
+    expect(html).toContain('id="rad-graphchip"');
+    expect(html).toContain('id="rad-graphchip-label"');
+    expect(html).toMatch(
+      /<a class="rad-opchip" id="rad-graphchip" href="\/\?page=graph" hidden/
+    );
+  });
+
+  it("announces itself politely and never acts on its own", () => {
+    expect(shell).toMatch(/id="rad-graphchip"[^>]*aria-live="polite"/);
+    expect(shell).toContain(
+      'class="rad-opchip__dot" id="rad-graphchip-dot" aria-hidden="true"'
+    );
+    expect(shell).not.toContain('rad-graphchip" onclick');
+  });
+
+  it("carries the poller that fills it in", () => {
+    expect(shell).toContain("/api/progress");
+    expect(shell).toContain(entryMarkerLine("graph-chip"));
+    expect(shell.split(browserScript("graph-chip"))).toHaveLength(2);
+  });
+
+  it("shares one row with the operation chip so both can show at once", () => {
+    expect(shell).toMatch(
+      /<span class="rad-topnav__chips">[\s\S]*id="rad-graphchip"[\s\S]*id="rad-opchip"[\s\S]*<\/span><\/nav>/
+    );
+    // The row, not either chip, is what pushes the pair to the end of the nav.
+    expect(shell).toMatch(/\.rad-topnav__chips \{[^}]*margin-left: ?auto/);
   });
 });
 
@@ -199,8 +262,8 @@ describe("pageShell document structure", () => {
     expect(html).toContain('<meta charset="utf-8" />');
     const order = [
       "<title>",
-      '<nav class="rad-topnav">',
-      '<div class="main-content">',
+      '<nav class="rad-topnav" id="radius-topnav">',
+      '<div class="main-content" id="radius-main-content">',
       '<p id="body">hello</p>',
       'id="rad-feedback"',
       'id="radius-reconnect-overlay"'
@@ -220,6 +283,13 @@ describe("pageShell document structure", () => {
   it("injects the shared delete dialog entry exactly once", () => {
     expect(html).toContain(browserEntryMarker("delete-dialog"));
     expect(html.split(browserScript("delete-dialog"))).toHaveLength(2);
+  });
+
+  it("renders stable shell regions and initializes pane navigation exactly once", () => {
+    expect(html.split('id="radius-topnav"')).toHaveLength(2);
+    expect(html.split('id="radius-main-content"')).toHaveLength(2);
+    expect(html.split(browserEntryMarker("pane-navigation"))).toHaveLength(2);
+    expect(html.split(browserScript("pane-navigation"))).toHaveLength(2);
   });
 
   it.each([
@@ -274,10 +344,14 @@ describe("pageShell document structure", () => {
   });
 
   it("ships the shared client scripts before the page body that calls them", () => {
-    const graph = html.indexOf(browserEntryMarker("graph"));
-    const deleteDialog = html.indexOf(browserEntryMarker("delete-dialog"));
-    const body = html.indexOf('<div class="main-content">');
-    expect(graph).toBeGreaterThan(-1);
+    const paneNavigation = html.indexOf(entryMarkerLine("pane-navigation"));
+    const graph = html.indexOf(entryMarkerLine("graph"));
+    const deleteDialog = html.indexOf(entryMarkerLine("delete-dialog"));
+    const body = html.indexOf(
+      '<div class="main-content" id="radius-main-content">'
+    );
+    expect(paneNavigation).toBeGreaterThan(-1);
+    expect(graph).toBeGreaterThan(paneNavigation);
     expect(deleteDialog).toBeGreaterThan(graph);
     expect(body).toBeGreaterThan(deleteDialog);
   });
@@ -303,10 +377,10 @@ describe("pageShell document structure", () => {
   it.each(["graph"] as const)(
     "injects the compiled %s entry inline exactly once",
     (name) => {
-      const marker = browserEntryMarker(name);
+      const marker = entryMarkerLine(name);
       expect(html.split(marker).length - 1).toBe(1);
       expect(html.indexOf(marker)).toBeLessThan(
-        html.indexOf('<div class="main-content">')
+        html.indexOf('<div class="main-content" id="radius-main-content">')
       );
     }
   );

@@ -5,13 +5,21 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import {
+  graphProgressElapsed,
+  graphProgressStages
+} from "../../../test/support/browser/graph-progress.js";
+import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import {
   DIFF_DEBOUNCE_MS,
+  DIFF_PROGRESS_MS,
+  DIFF_PROGRESS_STEPS_ID,
   GRAPH_DIFF_STATE_ID,
   initializeGraphDiffPage
 } from "./graph-diff-page.js";
@@ -25,6 +33,7 @@ interface FixtureOptions {
   withRepoInput?: boolean;
   withBaseSelect?: boolean;
   withHeadSelect?: boolean;
+  modelingError?: string;
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -36,11 +45,18 @@ function fixture(options: FixtureOptions = {}) {
     withStatus = true,
     withRepoInput = true,
     withBaseSelect = true,
-    withHeadSelect = true
+    withHeadSelect = true,
+    modelingError = ""
   } = options;
   const browser = createFakeBrowser();
   const state = createFakeElement(GRAPH_DIFF_STATE_ID);
-  state.textContent = JSON.stringify({ repo, base, head, resources });
+  state.textContent = JSON.stringify({
+    repo,
+    base,
+    head,
+    resources,
+    modelingError
+  });
   const repoInput = createFakeInput("diff-repo-select", repo);
   const app = createFakeSelect("diff-app");
   const baseSelect = createFakeSelect("base-branch");
@@ -48,7 +64,9 @@ function fixture(options: FixtureOptions = {}) {
   const headSelect = createFakeSelect("head-branch");
   headSelect.value = head;
   const status = createFakeElement("diff-status");
-  const elements = [state, app];
+  const progressHost = createFakeElement(DIFF_PROGRESS_STEPS_ID);
+  const graphContainer = createFakeElement("graph-container");
+  const elements = [state, app, progressHost, graphContainer];
   if (withRepoInput) elements.push(repoInput);
   if (withBaseSelect) elements.push(baseSelect);
   if (withHeadSelect) elements.push(headSelect);
@@ -68,6 +86,10 @@ function fixture(options: FixtureOptions = {}) {
       workspaceBranch: "feature"
     })
   );
+  // The page polls progress as soon as it starts a comparison, so every
+  // scenario reaches this route whether or not it is what the scenario is
+  // about. A test that cares overrides it.
+  browser.net.handle("/api/progress?view=diff", () => jsonResponse({}));
 
   return {
     browser,
@@ -75,7 +97,9 @@ function fixture(options: FixtureOptions = {}) {
     app,
     base: baseSelect,
     head: headSelect,
-    status
+    status,
+    progressHost,
+    graphContainer
   };
 }
 
@@ -151,6 +175,7 @@ describe("initializeGraphDiffPage", () => {
     initializeGraphDiffPage(browser.context, {
       radiusRenderGraph: vi.fn()
     });
+
     await flushPromises();
 
     head.dispatch("change");
@@ -160,6 +185,61 @@ describe("initializeGraphDiffPage", () => {
     expect(status.className).toBe("status error");
     expect(status.textContent).not.toContain("secret-shaped");
     expect(browser.logger.errors).toHaveLength(1);
+  });
+
+  it("renders a compile failure only on the graph surface", async () => {
+    const { browser, head, status } = fixture({
+      resources: [{ id: "existing" }]
+    });
+    const setError = vi.fn();
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({
+        error: "Your application model couldn't be compiled.",
+        modelingFailed: true
+      })
+    );
+    initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn(),
+      radiusSetGraphError: setError
+    });
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "Your application model couldn't be compiled."
+    );
+    expect(status.style.display).toBe("none");
+    expect(head.listenerCount("change")).toBe(1);
+  });
+
+  it("shows a preloaded compile failure without immediately retrying", async () => {
+    const { browser, status, graphContainer, head } = fixture({
+      modelingError: "Your application model couldn't be compiled."
+    });
+    const setError = vi.fn();
+
+    initializeGraphDiffPage(browser.context, {
+      radiusSetGraphError: setError
+    });
+    await flushPromises();
+
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "Your application model couldn't be compiled."
+    );
+    expect(status.style.display).toBe("none");
+    expect(
+      browser.net.calls.some((call) => call.url === "/api/diff-branches")
+    ).toBe(false);
+
+    graphContainer.innerHTML = "stale compile failure";
+    browser.net.handle("/api/diff-branches", () => jsonResponse({}));
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    expect(graphContainer.innerHTML).toBe("");
   });
 
   it("hides status silently when no status element exists", async () => {
@@ -287,6 +367,41 @@ describe("initializeGraphDiffPage", () => {
     );
   });
 
+  it("shows the refusal verbatim when the skill cannot model the repo", async () => {
+    const { browser, head, status } = fixture();
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({
+        error: "octo/app has no Dockerfile on feature/x.",
+        appBicepUnsupported: true
+      })
+    );
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(status.textContent).toBe("octo/app has no Dockerfile on feature/x.");
+  });
+
+  it("falls back to a generic refusal message without an error string", async () => {
+    const { browser, head, status } = fixture();
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({ appBicepUnsupported: true })
+    );
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(status.textContent).toBe(
+      "The Radius app-bicep skill cannot model this repository."
+    );
+  });
+
   it("surfaces a diff computation error", async () => {
     const { browser, head, status } = fixture();
     browser.net.handle("/api/diff-branches", () =>
@@ -379,5 +494,336 @@ describe("initializeGraphDiffPage", () => {
     first.resolve(jsonResponse({ reload: true }));
     await flushPromises();
     expect(browser.nav.reloads).toBe(0);
+  });
+  describe("graph build progress", () => {
+    const stageText = graphProgressStages;
+
+    it("renders typed comparison stages while the diff runs", async () => {
+      const { browser, head, progressHost } = fixture();
+      browser.net.handle(
+        "/api/diff-branches",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress?view=diff", () =>
+        jsonResponse({
+          generation: 2,
+          events: [
+            {
+              sequence: 1,
+              stage: "building_base_graph",
+              state: "succeeded",
+              detail: "Built the base graph."
+            },
+            {
+              sequence: 2,
+              stage: "comparing_graphs",
+              state: "running",
+              detail: "Comparing main to feature."
+            }
+          ]
+        })
+      );
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_base_graph}:succeeded`,
+        `${GRAPH_STAGE_LABELS.comparing_graphs}:running`
+      ]);
+      expect(graphProgressElapsed(progressHost)).toMatch(/^\d+:\d{2}$/);
+      expect(fakeText(progressHost)).not.toMatch(/%/);
+    });
+
+    it("keeps the panel steady until typed events arrive", async () => {
+      const { browser, head, progressHost } = fixture();
+      browser.net.handle(
+        "/api/diff-branches",
+        () => createDeferred<HttpResponse>().promise
+      );
+      const payloads: Array<Record<string, unknown>> = [
+        { events: [] },
+        {
+          events: [
+            {
+              sequence: 2,
+              stage: "comparing_graphs",
+              state: "running",
+              detail: "Comparing the two graphs."
+            }
+          ]
+        }
+      ];
+      browser.net.handle("/api/progress?view=diff", () =>
+        jsonResponse(payloads.shift() ?? { events: [] })
+      );
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+
+      // The comparison polls immediately, and that first reply carries no typed
+      // stages, so the panel still shows only the stage it opened with.
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_base_graph}:running`
+      ]);
+
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.comparing_graphs}:running`
+      ]);
+    });
+    it.each([
+      [
+        "the skill refuses the repository",
+        {
+          error: "octo/app has no Dockerfile on feature/x.",
+          appBicepUnsupported: true
+        }
+      ],
+      ["the comparison errors", { error: "invalid app.bicep" }]
+    ])("clears the panel when %s", async (_name, body) => {
+      const { browser, head, progressHost, status } = fixture();
+      browser.net.handle("/api/diff-branches", () => jsonResponse(body));
+      browser.net.handle("/api/progress?view=diff", () =>
+        jsonResponse({ events: [] })
+      );
+      initializeGraphDiffPage(browser.context, {
+        radiusRenderGraph: vi.fn()
+      });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+
+      // The failure is stated once, in the status banner. A panel left behind
+      // would repeat it and keep claiming the comparison is running.
+      expect(status.textContent).not.toBe("");
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("clears the panel when the request throws", async () => {
+      const { browser, head, progressHost, status } = fixture();
+      browser.net.handle("/api/diff-branches", () =>
+        Promise.reject(new Error("offline"))
+      );
+      browser.net.handle("/api/progress?view=diff", () =>
+        jsonResponse({ events: [] })
+      );
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+
+      expect(status.textContent).toContain("Failed to compute diff");
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("clears the panel while Copilot authors the model", async () => {
+      const { browser, head, progressHost } = fixture();
+      browser.net.handle("/api/diff-branches", () =>
+        jsonResponse({ needsAppBicep: true })
+      );
+      browser.net.handle("/api/progress?view=diff", () =>
+        jsonResponse({ events: [] })
+      );
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([]);
+    });
+
+    it("stops polling progress once the diff settles", async () => {
+      const { browser, head } = fixture();
+      browser.net.handle("/api/diff-branches", () => jsonResponse({}));
+      browser.net.handle("/api/progress?view=diff", () =>
+        jsonResponse({ events: [] })
+      );
+      const teardown = initializeGraphDiffPage(browser.context, {
+        radiusRenderGraph: vi.fn()
+      });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      const polls = browser.net.calls.filter(
+        (call) => call.url === "/api/progress?view=diff"
+      ).length;
+
+      browser.clock.tick(DIFF_PROGRESS_MS * 5);
+      await flushPromises();
+
+      expect(
+        browser.net.calls.filter(
+          (call) => call.url === "/api/progress?view=diff"
+        )
+      ).toHaveLength(polls);
+      teardown();
+      expect(browser.clock.pending).toBe(0);
+    });
+
+    it("logs a failing progress request without breaking the diff", async () => {
+      const { browser, head } = fixture();
+      browser.net.handle(
+        "/api/diff-branches",
+        () => createDeferred<HttpResponse>().promise
+      );
+      browser.net.handle("/api/progress?view=diff", () =>
+        Promise.reject(new Error("progress unavailable"))
+      );
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+      await flushPromises();
+
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+
+      expect(
+        browser.logger.errors.some(
+          (entry) => entry.message === "Radius graph diff progress failed."
+        )
+      ).toBe(true);
+    });
+  });
+  describe("graph build progress guards", () => {
+    const stageText = graphProgressStages;
+
+    const startCompare = async (progress: Promise<HttpResponse>) => {
+      const { browser, head, progressHost } = fixture();
+      browser.net.handle(
+        "/api/diff-branches",
+        () => createDeferred<HttpResponse>().promise
+      );
+      // Only the first poll gets the scripted promise. Later polls belong to
+      // whatever comparison supersedes this one and never settle, so a guard
+      // test can only pass by actually rejecting the superseded reply.
+      let polls = 0;
+      browser.net.handle("/api/progress?view=diff", () => {
+        polls++;
+        return polls === 1 ? progress : new Promise<HttpResponse>(() => {});
+      });
+      const teardown = initializeGraphDiffPage(browser.context, {
+        radiusRenderGraph: vi.fn()
+      });
+      await flushPromises();
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      return { browser, head, progressHost, teardown };
+    };
+
+    it("ignores a progress reply that belongs to a superseded comparison", async () => {
+      const progress = createDeferred<HttpResponse>();
+      const { browser, head, progressHost } = await startCompare(
+        progress.promise
+      );
+
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      progress.resolve(
+        jsonResponse({
+          generation: 9,
+          events: [
+            {
+              sequence: 4,
+              stage: "comparing_graphs",
+              state: "running",
+              detail: "Stale reply."
+            }
+          ]
+        })
+      );
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual([
+        `${GRAPH_STAGE_LABELS.building_base_graph}:running`
+      ]);
+    });
+
+    it("stays silent when a superseded progress request fails", async () => {
+      const progress = createDeferred<HttpResponse>();
+      const { browser, head } = await startCompare(progress.promise);
+
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+      progress.reject(new Error("stale progress"));
+      await flushPromises();
+
+      expect(
+        browser.logger.errors.some(
+          (entry) => entry.message === "Radius graph diff progress failed."
+        )
+      ).toBe(false);
+    });
+
+    it("ignores a progress reply that lands after teardown", async () => {
+      const progress = createDeferred<HttpResponse>();
+      const { browser, progressHost, teardown } = await startCompare(
+        progress.promise
+      );
+
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+      const before = stageText(progressHost);
+      teardown();
+      progress.resolve(
+        jsonResponse({
+          generation: 3,
+          events: [
+            {
+              sequence: 2,
+              stage: "comparing_graphs",
+              state: "running",
+              detail: "After teardown."
+            }
+          ]
+        })
+      );
+      await flushPromises();
+
+      expect(stageText(progressHost)).toEqual(before);
+    });
+
+    it("stays silent when a progress request fails after teardown", async () => {
+      const progress = createDeferred<HttpResponse>();
+      const { browser, teardown } = await startCompare(progress.promise);
+
+      browser.clock.tick(DIFF_PROGRESS_MS);
+      await flushPromises();
+      teardown();
+      progress.reject(new Error("torn down"));
+      await flushPromises();
+
+      expect(
+        browser.logger.errors.some(
+          (entry) => entry.message === "Radius graph diff progress failed."
+        )
+      ).toBe(false);
+    });
   });
 });
