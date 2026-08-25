@@ -297,6 +297,13 @@ export async function runWorkflowRollback(
         );
         continue;
       }
+      if (entry.state === "already_restored") {
+        accumulated.steps.push(
+          `ℹ️ Workflow "${file.path}" on "${file.branch}" already contains the version Radius replaced.`
+        );
+        accumulated.results.push(result(input.attempt, file, "restored", null));
+        continue;
+      }
       const detail = `Radius left "${file.path}" in place because another workflow file from this setup could not be verified.`;
       accumulated.warnings.push(detail);
       accumulated.results.push(result(input.attempt, file, "warning", detail));
@@ -440,6 +447,13 @@ async function revertFiles(
     if (entry.state === "already_absent") {
       steps.push(`ℹ️ Workflow "${file.path}" is already gone from "${ref}".`);
       results.push(result(input.attempt, file, "not_found", null));
+      continue;
+    }
+    if (entry.state === "already_restored") {
+      steps.push(
+        `ℹ️ Workflow "${file.path}" on "${ref}" already contains the version Radius replaced.`
+      );
+      results.push(result(input.attempt, file, "restored", null));
       continue;
     }
     const previous = file.previousBlobSha;

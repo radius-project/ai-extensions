@@ -92,6 +92,16 @@ describe("verifyWorkflowProvenance", () => {
     expect(verdict.files[0]?.state).toBe("already_absent");
   });
 
+  it("treats the previous blob as an already completed restore", async () => {
+    const previousBlobSha = "e".repeat(40);
+    const verdict = await verifyOne(present({ blobSha: previousBlobSha }), {
+      previousBlobSha
+    });
+
+    expect(verdict.blocked).toBe(false);
+    expect(verdict.files[0]?.state).toBe("already_restored");
+  });
+
   it("blocks a file whose blob changed since Radius committed it", async () => {
     const verdict = await verifyOne(present({ blobSha: "e".repeat(40) }));
 

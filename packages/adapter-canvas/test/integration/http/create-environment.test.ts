@@ -426,7 +426,8 @@ function start(script: Script = {}): Harness {
     },
 
     // --- committer ports ---
-    getDefaultBranch: async () => script.defaultBranch ?? "main",
+    getDefaultBranch: async () =>
+      "defaultBranch" in script ? script.defaultBranch : "main",
     getBranchHeadSha: async () => {
       if (!("headSha" in script))
         throw new Error("unscripted getBranchHeadSha");
@@ -916,6 +917,26 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(harness.journal).toContain(
       "recordGitHubEnvironment:created_candidate"
     );
+  });
+
+  it("fails before workflow mutation when the default branch cannot be resolved", async () => {
+    const harness = start({ defaultBranch: null });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error:
+        "Could not determine the default branch for octo/app, so Radius did not commit workflow files with guessed rollback provenance.",
+      code: "default-branch-unavailable"
+    });
+    expect(harness.journal).toContain(
+      "finalizeSetupFailure:default-branch-unavailable"
+    );
+    expect(harness.ghCalls.some((call) => call.includes("/contents/"))).toBe(
+      false
+    );
+    expect(harness.committedFiles).toEqual([]);
   });
 
   it("records a pre-existing environment as reused rather than created", async () => {

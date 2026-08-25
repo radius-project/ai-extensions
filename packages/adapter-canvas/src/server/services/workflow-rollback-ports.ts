@@ -233,9 +233,12 @@ export function createWorkflowRollbackPorts(
     if (isMergedPullRequestBody(body)) {
       return { status: "merged", number };
     }
+    if (body?.state === "open" || body?.state === "closed") {
+      return { status: body.state, number };
+    }
     return {
-      status: body?.state === "closed" ? "closed" : "open",
-      number
+      status: "unknown",
+      detail: "GitHub returned an unrecognized setup pull request state."
     };
   };
 

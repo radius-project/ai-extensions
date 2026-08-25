@@ -1778,6 +1778,40 @@ describe("deployments routes (SU-06)", () => {
       expect(delays.slice(0, 3)).toEqual([3000, 2000, 5000]);
     });
 
+    it("does not retry a timed-out 404 from the workflow registration race", async () => {
+      const { recording, context: ctx } = deleteContext();
+      const delays: number[] = [];
+      let calls = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          ensureWorkflowsCurrent: () =>
+            Promise.resolve({
+              created: [".github/workflows/delete-application.yml"],
+              failed: []
+            }),
+          setTimer: (callback, ms) => {
+            delays.push(ms);
+            callback();
+            return {};
+          },
+          runGh: () => {
+            calls += 1;
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: "HTTP 404: Not Found",
+              timedOut: true
+            });
+          }
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(calls).toBe(1);
+      expect(delays.filter((delay) => delay < 30_000)).toEqual([3000]);
+    });
+
     it("stops retrying a failure that is not the registration race", async () => {
       const { recording, context: ctx } = deleteContext();
       let calls = 0;

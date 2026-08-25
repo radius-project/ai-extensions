@@ -913,16 +913,39 @@ export function handleRetryOperation(
 export function createOperationsControlRoutes(
   dependencies: OperationsControlDependencies
 ): RouteHandlerRegistry {
+  const operationMutations = new Map<string, Promise<void>>();
+  const runSerialized = (
+    context: CanvasRequestContext,
+    route: string,
+    handler: (
+      context: CanvasRequestContext,
+      dependencies: OperationsControlDependencies
+    ) => Promise<void>
+  ): Promise<void> => {
+    const rawOperationId =
+      templatePathParameters(route, context.url.pathname)?.operationId ?? "";
+    const operationId = decodeSegment(rawOperationId) ?? rawOperationId;
+    const previous = operationMutations.get(operationId) ?? Promise.resolve();
+    const current = previous
+      .catch(() => {})
+      .then(() => handler(context, dependencies));
+    operationMutations.set(operationId, current);
+    return current.finally(() => {
+      if (operationMutations.get(operationId) === current) {
+        operationMutations.delete(operationId);
+      }
+    });
+  };
   return {
     [`POST ${STOP_OPERATION_ROUTE}`]: (context) =>
-      handleStopOperation(context, dependencies),
+      runSerialized(context, STOP_OPERATION_ROUTE, handleStopOperation),
     [`POST ${CONTINUE_OPERATION_ROUTE}`]: (context) =>
-      handleContinueOperation(context, dependencies),
+      runSerialized(context, CONTINUE_OPERATION_ROUTE, handleContinueOperation),
     [`POST ${ROLLBACK_OPERATION_ROUTE}`]: (context) =>
-      handleRollbackOperation(context, dependencies),
+      runSerialized(context, ROLLBACK_OPERATION_ROUTE, handleRollbackOperation),
     [`POST ${EXIT_OPERATION_ROUTE}`]: (context) =>
-      handleExitOperation(context, dependencies),
+      runSerialized(context, EXIT_OPERATION_ROUTE, handleExitOperation),
     [`POST ${RETRY_OPERATION_ROUTE}`]: (context) =>
-      handleRetryOperation(context, dependencies)
+      runSerialized(context, RETRY_OPERATION_ROUTE, handleRetryOperation)
   };
 }

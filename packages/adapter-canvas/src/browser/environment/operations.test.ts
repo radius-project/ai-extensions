@@ -3890,7 +3890,7 @@ describe("resume flow", () => {
     browser.net.handle(operationsUrl(), () =>
       jsonResponse(op({ environment: "prod" }))
     );
-    controller?.trackProgress("prod", "azure");
+    controller?.resumeProgress();
     await flushPromises();
     const timeoutsBeforeSettle = browser.clock.timeouts;
 
@@ -4452,6 +4452,69 @@ describe("teardown", () => {
     // A new instance can now claim the same entry key.
     const revived = controllerFor(browser);
     expect(revived).not.toBeNull();
+  });
+
+  it("ignores a command failure that arrives after teardown", async () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(STOP_ACTION.path, () => pending.promise);
+    controller?.renderProgress(record({ actions: [STOP_ACTION] }));
+    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    await flushPromises();
+    browser.els[PROGRESS_IDS.commandError].textContent = "marker";
+
+    controller?.teardown();
+    pending.reject(new Error("connection closed"));
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("marker");
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+  });
+
+  it("ignores an old command success after tracking rebinds to another operation", async () => {
+    const browser = setup();
+    const { controller, harness } = controllerWithHarness(browser);
+    const oldCommand = createDeferred<HttpResponse>();
+    browser.net.handle(STOP_ACTION.path, () => oldCommand.promise);
+    controller?.renderProgress(record({ actions: [STOP_ACTION] }));
+    browser.els[PROGRESS_IDS.commandButtons].children[0].dispatch("click");
+    await flushPromises();
+
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(
+        op({
+          operationId: "op-2",
+          environment: "prod",
+          state: "failed",
+          terminalState: "failed",
+          summary: "New operation failed"
+        })
+      )
+    );
+    controller?.resumeProgress();
+    await flushPromises();
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
+      "New operation failed"
+    );
+
+    oldCommand.resolve(
+      jsonResponse(
+        op({
+          operationId: "op-1",
+          environment: "dev",
+          state: "cancelled",
+          terminalState: "cancelled",
+          summary: "Old setup stopped"
+        })
+      )
+    );
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
+      "New operation failed"
+    );
+    expect(harness.reloadCount).toBe(0);
   });
 });
 

@@ -339,6 +339,11 @@ describe("reading the setup pull request", () => {
     [
       "the response has no number",
       { stdout: JSON.stringify({ state: "open" }) }
+    ],
+    ["the response has no state", { stdout: JSON.stringify({ number: 7 }) }],
+    [
+      "the response has an unrecognized state",
+      { stdout: JSON.stringify({ number: 7, state: "draft" }) }
     ]
   ])("reports %s as unknown", async (_label, result) => {
     const { ports } = harness({ [PULL_PATH]: result });

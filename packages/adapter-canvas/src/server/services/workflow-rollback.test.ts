@@ -354,6 +354,69 @@ describe("runWorkflowRollback", () => {
     expect(outcome.results[0]?.outcome).toBe("restored");
   });
 
+  it("converges without another write when a previous restore response was lost", async () => {
+    const previousBlobSha = "old-blob";
+    const { ports: p, journal } = ports({
+      files: {
+        [`main:${VERIFY_PATH}`]: {
+          ...unchanged,
+          blobSha: previousBlobSha
+        }
+      }
+    });
+
+    const outcome = await rollback(p, {
+      files: [file({ previousBlobSha })]
+    });
+
+    expect(outcome.blocked).toBe(false);
+    expect(journal.restored).toEqual([]);
+    expect(journal.deleted).toEqual([]);
+    expect(outcome.results[0]).toMatchObject({
+      outcome: "restored",
+      detail: null
+    });
+  });
+
+  it("records an already-restored file even when another workflow blocks cleanup", async () => {
+    const previousBlobSha = "old-blob";
+    const { ports: p, journal } = ports({
+      files: {
+        [`main:${VERIFY_PATH}`]: {
+          ...unchanged,
+          blobSha: previousBlobSha
+        },
+        [`main:${DEPLOY_PATH}`]: {
+          ...unchanged,
+          blobSha: "e".repeat(40)
+        }
+      }
+    });
+
+    const outcome = await rollback(p, {
+      files: [
+        file({ previousBlobSha }),
+        file({ path: DEPLOY_PATH })
+      ]
+    });
+
+    expect(outcome.blocked).toBe(true);
+    expect(journal.restored).toEqual([]);
+    expect(journal.deleted).toEqual([]);
+    expect(outcome.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: `${VERIFY_PATH} on main`,
+          outcome: "restored"
+        }),
+        expect.objectContaining({
+          target: `${DEPLOY_PATH} on main`,
+          outcome: "skipped"
+        })
+      ])
+    );
+  });
+
   it("blocks before file reads when the selected account cannot read the repository", async () => {
     const { ports: p, journal } = ports({
       repositoryError: "HTTP 404: Not Found"

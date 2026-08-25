@@ -377,18 +377,23 @@ describe("the protected-branch pull-request fallback", () => {
     });
   });
 
-  it("falls back to main when the repository reports no default branch", async () => {
+  it("refuses PR fallback when the repository reports no default branch", async () => {
     const h = harness({
-      runGh: [{ code: 1 }, { code: 1 }],
-      runGhWorkflow: [{ code: 1, stderr: "protected branch" }, { code: 0 }],
-      defaultBranch: null,
-      headSha: "sha-1",
-      createBranch: { ok: true, stderr: "" }
+      runGh: [{ code: 1 }],
+      runGhWorkflow: [{ code: 1, stderr: "protected branch" }],
+      defaultBranch: null
     });
     const committer = createWorkflowFileCommitter(h.ports, target);
 
-    await committer.commitWorkflowFileSmart("p", CONTENT, "m");
-    expect(committer.pullRequestState()?.base).toBe("main");
+    await expect(
+      committer.commitWorkflowFileSmart("p", CONTENT, "m")
+    ).resolves.toEqual({
+      ok: false,
+      stderr:
+        "protected branch (PR fallback failed: could not resolve the repository default branch)",
+      viaPr: false
+    });
+    expect(committer.pullRequestState()).toBeUndefined();
   });
 
   it("reports the branch commit failure when the fallback commit is refused too", async () => {

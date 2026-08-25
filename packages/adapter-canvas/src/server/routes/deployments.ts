@@ -648,6 +648,7 @@ export async function handleDeleteDeployment(
       if (delay > 0) await sleep(dependencies, delay);
       dispatch = await ghWorkflow(dispatchArgs);
       if (dispatch.code === 0) break;
+      if (dispatch.timedOut) break;
       // Only the not-found registration race self-resolves; any other failure
       // (scope, Actions disabled, …) won't, so stop retrying.
       if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;

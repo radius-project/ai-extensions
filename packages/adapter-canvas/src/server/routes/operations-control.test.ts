@@ -224,6 +224,94 @@ describe("the route registry", () => {
 
     expect(out.payload().code).toBe(code);
   });
+
+  it("waits for the first command to persist before acknowledging its duplicate", async () => {
+    const op = stoppedSetup();
+    let releasePersist: (() => void) | undefined;
+    let markPersisting: (() => void) | undefined;
+    const persisting = new Promise<void>((resolve) => {
+      markPersisting = resolve;
+    });
+    const persistence = new Promise<void>((resolve) => {
+      releasePersist = resolve;
+    });
+    const deps = dependencies({
+      get: () => op,
+      persistOperations: () => {
+        markPersisting?.();
+        return persistence;
+      }
+    });
+    const registry = createOperationsControlRoutes(deps);
+    const path = controlPath(op, "rollback");
+    const first = recorder();
+    const firstRequest = registry[`POST ${ROLLBACK_OPERATION_ROUTE}`](
+      postContext(path, first.response)
+    );
+    await persisting;
+
+    const duplicate = recorder();
+    const duplicateRequest = registry[`POST ${ROLLBACK_OPERATION_ROUTE}`](
+      postContext(path, duplicate.response)
+    );
+    await Promise.resolve();
+
+    expect(duplicate.recording.status).toBe(0);
+    releasePersist?.();
+    await Promise.all([firstRequest, duplicateRequest]);
+    expect(first.recording.status).toBe(202);
+    expect(duplicate.recording.status).toBe(202);
+    expect(duplicate.payload()).toMatchObject({
+      duplicate: true,
+      commandId: first.payload().commandId
+    });
+    expect(deps.journal.scheduled).toHaveLength(1);
+  });
+
+  it("does not acknowledge a concurrent duplicate when persistence fails", async () => {
+    const op = stoppedSetup();
+    let rejectPersist: ((error: Error) => void) | undefined;
+    let markPersisting: (() => void) | undefined;
+    let persistCalls = 0;
+    const persisting = new Promise<void>((resolve) => {
+      markPersisting = resolve;
+    });
+    const firstPersistence = new Promise<void>((_resolve, reject) => {
+      rejectPersist = reject;
+    });
+    const deps = dependencies({
+      get: () => op,
+      persistOperations: () => {
+        persistCalls += 1;
+        if (persistCalls === 1) {
+          markPersisting?.();
+          return firstPersistence;
+        }
+        return Promise.reject(new Error("disk still unavailable"));
+      }
+    });
+    const registry = createOperationsControlRoutes(deps);
+    const path = controlPath(op, "rollback");
+    const first = recorder();
+    const firstRequest = registry[`POST ${ROLLBACK_OPERATION_ROUTE}`](
+      postContext(path, first.response)
+    );
+    await persisting;
+
+    const duplicate = recorder();
+    const duplicateRequest = registry[`POST ${ROLLBACK_OPERATION_ROUTE}`](
+      postContext(path, duplicate.response)
+    );
+    await Promise.resolve();
+    expect(duplicate.recording.status).toBe(0);
+
+    rejectPersist?.(new Error("disk unavailable"));
+    await Promise.all([firstRequest, duplicateRequest]);
+    expect(first.recording.status).toBe(500);
+    expect(duplicate.recording.status).toBe(500);
+    expect(deps.journal.scheduled).toEqual([]);
+    expect(op.control.commands).toEqual([]);
+  });
 });
 
 describe("POST /api/operations/{id}/stop", () => {

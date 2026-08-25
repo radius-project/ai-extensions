@@ -487,9 +487,19 @@ export async function handleCreateEnvironment(
     }
     if (!(await checkpoint("after-github-environment"))) return;
 
-    const defaultBranch =
-      (await dependencies.getDefaultBranch(targetRepo, selectedExecutor)) ||
-      "main";
+    const defaultBranch = await dependencies.getDefaultBranch(
+      targetRepo,
+      selectedExecutor
+    );
+    if (!defaultBranch) {
+      await fail(
+        400,
+        `Could not determine the default branch for ${targetRepo}, so Radius did not commit workflow files with guessed rollback provenance.`,
+        "default-branch-unavailable",
+        { steps }
+      );
+      return;
+    }
     const stateRegistry = dependencies.stateRegistryForEnvironment(
       targetRepo,
       envName

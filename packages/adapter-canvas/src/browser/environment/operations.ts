@@ -1343,6 +1343,9 @@ export function initializeEnvironmentOperations(
 
   function sendCommand(action: OperationAction, op: OperationRecord): void {
     if (commandInFlight) return;
+    const commandSession = session;
+    const commandIsActive = (): boolean =>
+      scope.active && commandSession === session;
     setCommandError("");
     setCommandBusy(true);
     setCommandStatus(commandStatusText(action));
@@ -1361,6 +1364,7 @@ export function initializeEnvironmentOperations(
           .then((payload) => ({ ok: response.ok, payload }))
       )
       .then((result) => {
+        if (!commandIsActive()) return;
         setCommandBusy(false);
         const updated = parseOperationResponse(result.payload);
         if (!result.ok) {
@@ -1396,6 +1400,7 @@ export function initializeEnvironmentOperations(
         pollOperation(op.operationId);
       })
       .catch(() => {
+        if (!commandIsActive()) return;
         setCommandBusy(false);
         setCommandStatus("");
         setCommandError(COMMAND_UNREACHABLE_MESSAGE);
@@ -1776,6 +1781,7 @@ export function initializeEnvironmentOperations(
     stopProgress();
     session += 1;
     const mySession = session;
+    setCommandBusy(false);
     let startedAtMs = context.clock.now();
     let observedOperation = false;
     let operationId = "";
@@ -2043,6 +2049,7 @@ export function initializeEnvironmentOperations(
     if (!repo) return;
     session += 1;
     const mySession = session;
+    setCommandBusy(false);
     void fetchTracked(operationsByRepoUrl(repo))
       .then((response) => response.json())
       .then((payload) => {

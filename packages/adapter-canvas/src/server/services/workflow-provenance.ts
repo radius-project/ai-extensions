@@ -56,17 +56,20 @@ export interface WorkflowProvenancePorts {
  * One file's verdict, carrying the record it was reached from so a caller never
  * has to re-associate a parallel array with its inputs.
  *
- * `unchanged` is safe to revert and `already_absent` means the goal is already
- * met, so neither carries a reason. `changed` (someone edited or replaced the
- * file) and `unverifiable` (GitHub could not be read, or the record cannot
- * prove what it wrote) always carry one, because a caller that refuses has to
- * say why. That is a type rule rather than a convention, so no refusal can
- * reach a customer without its sentence.
+ * `unchanged` is safe to revert; `already_absent` and `already_restored` mean
+ * the goal is already met, so none carries a reason. `changed` (someone edited
+ * or replaced the file) and `unverifiable` (GitHub could not be read, or the
+ * record cannot prove what it wrote) always carry one, because a caller that
+ * refuses has to say why. That is a type rule rather than a convention, so no
+ * refusal can reach a customer without its sentence.
  */
 export type WorkflowFileVerdict<
   T extends WorkflowProvenanceRecord = WorkflowProvenanceRecord
 > = { record: T } & (
-  | { state: "unchanged" | "already_absent"; detail: null }
+  | {
+      state: "unchanged" | "already_absent" | "already_restored";
+      detail: null;
+    }
   | { state: "changed" | "unverifiable"; detail: string }
 );
 
@@ -143,6 +146,13 @@ async function verifyOne<T extends WorkflowProvenanceRecord>(
   }
   if (current.status === "absent") {
     return { ...base, state: "already_absent", detail: null };
+  }
+  if (
+    file.previousBlobSha &&
+    current.blobSha &&
+    current.blobSha === file.previousBlobSha
+  ) {
+    return { ...base, state: "already_restored", detail: null };
   }
   if (file.blobSha && current.blobSha && current.blobSha !== file.blobSha) {
     return {

@@ -117,7 +117,9 @@ export function createWorkflowFileCommitter(
 
   const beginPrFallback = async (): Promise<PullRequestBranchState> => {
     if (prState) return prState;
-    const base = (await ports.getDefaultBranch(target.targetRepo)) || "main";
+    const base = await ports.getDefaultBranch(target.targetRepo);
+    if (!base)
+      throw new Error("could not resolve the repository default branch");
     const baseSha = await ports.getBranchHeadSha(target.targetRepo, base);
     if (!baseSha)
       throw new Error(`could not resolve head of base branch "${base}"`);
