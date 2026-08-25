@@ -14,6 +14,7 @@ import {
   type WorkflowScopeGhRunnerPorts
 } from "./create-environment-gh-runner.js";
 import { createWorkflowFileCommitter } from "./create-environment-workflow-committer.js";
+import { providerMutationRecord } from "../../operations.js";
 import {
   applyProviderConfiguration,
   publishWorkflowFiles
@@ -921,14 +922,54 @@ export async function handleCreateEnvironment(
       const verificationActionsUrl =
         `https://github.com/${targetRepo}/actions/workflows/` +
         encodeURIComponent(dependencies.verifyWorkflowFile);
+      const dispatchMutationKind = "github_workflow.dispatch";
+      const dispatchMutationTarget = `${targetRepo}:${dependencies.verifyWorkflowFile}:${verificationRef}:${envName}`;
+      // A dispatch still awaiting an answer already sent its identity. Re-deriving
+      // one here would move it: `gh run list --limit 1` on a resumed pass returns
+      // the interrupted dispatch's own run, so a fresh baseline excludes the very
+      // run being looked for, and a fresh `dispatchedAt` excludes it again. A
+      // refused attempt is not reconcilable and contributes nothing.
+      const dispatchedMutation = providerMutationRecord(
+        operation,
+        dispatchMutationKind,
+        dispatchMutationTarget
+      );
+      const dispatchIntent =
+        (
+          dispatchedMutation?.status === "prepared" ||
+          dispatchedMutation?.status === "outcome_unknown" ||
+          dispatchedMutation?.status === "confirmed"
+        ) ?
+          dispatchedMutation.intent
+        : undefined;
+      const identityDispatchedAt =
+        typeof dispatchIntent?.dispatchedAt === "number" ?
+          dispatchIntent.dispatchedAt
+        : dispatchedAt;
+      const identityBaselineRunId =
+        typeof dispatchIntent?.baselineRunId === "number" ?
+          dispatchIntent.baselineRunId
+        : dispatchIntent?.baselineRunId === null ? null
+        : baselineRunId;
+      const identityRef =
+        typeof dispatchIntent?.ref === "string" ?
+          dispatchIntent.ref
+        : verificationRef;
+      const identityMarker =
+        typeof dispatchIntent?.operationMarker === "string" ?
+          dispatchIntent.operationMarker
+        : operationMarker;
+      // Written from the identity that was actually sent, so a recovered pass
+      // never overwrites the markers `recovered-verification-run` reads with
+      // freshly derived ones that can no longer find the run.
       operation.verification = {
-        dispatchedAt,
+        dispatchedAt: identityDispatchedAt,
         workflow: dependencies.verifyWorkflowFile,
-        ref: verificationRef,
+        ref: identityRef,
         environment: envName,
         event: "workflow_dispatch",
-        operationMarker: operationMarker || null,
-        baselineRunId,
+        operationMarker: identityMarker || null,
+        baselineRunId: identityBaselineRunId,
         runId: null,
         runUrl: null
       };
@@ -960,18 +1001,18 @@ export async function handleCreateEnvironment(
         } catch {
           throw new Error("GitHub returned an unreadable workflow run list.");
         }
-        if (!operationMarker) {
+        if (!identityMarker) {
           return {
             state: "manual_required",
             guidance: `The installed verification workflow does not expose Radius's operation marker. Check the accepted run in ${verificationActionsUrl}; Radius will not guess which run belongs to this operation or dispatch another one.`
           };
         }
         const exact = findExactVerificationRun(parsed, {
-          baselineRunId,
-          dispatchedAt,
-          ref: verificationRef,
+          baselineRunId: identityBaselineRunId,
+          dispatchedAt: identityDispatchedAt,
+          ref: identityRef,
           environment: envName,
-          operationMarker
+          operationMarker: identityMarker
         });
         if (exact.state === "applied") {
           return {
@@ -988,7 +1029,11 @@ export async function handleCreateEnvironment(
           };
         }
         if (
-          hasPostDispatchVerificationRuns(parsed, baselineRunId, dispatchedAt)
+          hasPostDispatchVerificationRuns(
+            parsed,
+            identityBaselineRunId,
+            identityDispatchedAt
+          )
         ) {
           return {
             state: "manual_required",
@@ -1003,11 +1048,19 @@ export async function handleCreateEnvironment(
       };
       const dispatch = await executeRecoverableMutation({
         operation,
-        kind: "github_workflow.dispatch",
-        target: `${targetRepo}:${dependencies.verifyWorkflowFile}:${verificationRef}:${envName}`,
-        // The marker travels with the intent, so a recovery reads the identity
-        // this dispatch sent rather than re-deriving one that may have changed.
-        providerIdempotencyKey: operationMarker || null,
+        kind: dispatchMutationKind,
+        target: dispatchMutationTarget,
+        // The identity this dispatch sends is journalled with it, so a recovery
+        // reads back the baseline and time it actually used instead of deriving
+        // ones that can no longer match the run it created.
+        intent: {
+          dispatchedAt: identityDispatchedAt,
+          baselineRunId: identityBaselineRunId,
+          ref: identityRef,
+          environment: envName,
+          operationMarker: identityMarker || null
+        },
+        providerIdempotencyKey: identityMarker || null,
         persist: () => dependencies.persistOperations(),
         mutate: () =>
           runGhWorkflow(

@@ -518,6 +518,13 @@ export async function resolveAzureAutoSetupApplication({
               }).filter((arg): arg is string => typeof arg === "string")
             ),
           accept: (result) => result.stdout.trim(),
+          // `az ad app create --query appId` answers with the id itself, so the
+          // acknowledgement carries the identity. Settling it here writes it in
+          // the same durable record as `confirmed`, which closes the window
+          // where a crash before `recordAzureApp` would leave a created
+          // application with no identity for a later pass to match.
+          providerIdOf: (_result, appId) =>
+            typeof appId === "string" && appId.trim() ? appId.trim() : null,
           reconcile: async () => {
             const lookup = await runAz([
               "ad",
@@ -556,6 +563,15 @@ export async function resolveAzureAutoSetupApplication({
               ) ?
                 operation.setupArtifacts.azureApp.appId
               : "";
+            // The id the acknowledgement itself carried, settled with the
+            // status rather than by the later ledger write. It is the only
+            // identity that exists when the process died between the two.
+            const journaledAppId =
+              providerMutationRecord(
+                operation,
+                applicationMutationKind,
+                applicationMutationTarget
+              )?.providerId || "";
             const operationTag = buildRadiusAppProvenanceTags({
               operationId: operation.operationId
             }).find((tag) => tag.includes(operation.operationId));
@@ -564,7 +580,8 @@ export async function resolveAzureAutoSetupApplication({
                 candidate.displayName === appName &&
                 typeof candidate.appId === "string" &&
                 candidate.appId &&
-                (candidate.appId === recordedAppId ||
+                ((journaledAppId && candidate.appId === journaledAppId) ||
+                  (recordedAppId && candidate.appId === recordedAppId) ||
                   (operationTag &&
                     Array.isArray(candidate.tags) &&
                     candidate.tags.includes(operationTag)))

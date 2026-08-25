@@ -261,6 +261,25 @@ describe("issuing one cleanup deletion through the journal", () => {
       expect(unresolvedProviderMutations(test.operation)).toEqual([]);
     });
 
+    it("settles without a delete when the gate proves the resource already gone", async () => {
+      // The only path that reports a removal with no journal entry at all, so
+      // the ledger moves on evidence gathered entirely by the gate. Issuing a
+      // delete here would address a name whose next owner Radius has no claim
+      // on.
+      const test = harness({
+        confirmRecordedIdentity: async () => ({ decision: "absent" as const }),
+        runDelete: async () => {
+          throw new Error("a resource proven absent must not be deleted");
+        }
+      });
+
+      const settled = await test.run();
+
+      expect(settled).toEqual({ outcome: "not_found", detail: null });
+      expect(test.deletes).toEqual([]);
+      expect(test.operation.providerRecovery.mutations).toEqual([]);
+    });
+
     it("gates again when the provider rejected the delete outright", async () => {
       // A rejected delete left the resource in place and nothing to reconcile,
       // so the next pass reissues one — and that delete is a first delete.
@@ -320,15 +339,16 @@ describe("issuing one cleanup deletion through the journal", () => {
       CleanupJournalPersistenceError
     );
 
-    // The durable record still says `prepared`, which reconciles on the next
-    // pass rather than issuing the delete a second time.
+    // The settle that failed to reach disk left the durable record on its
+    // pre-settle status, which reconciles on the next pass rather than issuing
+    // the delete a second time. The in-memory record below has already moved on.
     expect(test.deletes).toEqual([1]);
     expect(test.operation.providerRecovery.mutations[0].status).toBe(
       "confirmed"
     );
   });
 
-  it("propagates a failure that is not the journal's own", async () => {
+  it("journals a thrown provider call as unknown rather than propagating it", async () => {
     const test = harness({
       runDelete: async () => {
         throw new Error("the CLI is not installed");
@@ -377,7 +397,7 @@ describe("edges the deletion journal still has to describe", () => {
     expect(settled).toEqual({ outcome: "not_found", detail: null });
   });
 
-  it("lets a failure that is not the journal's own reach the caller", async () => {
+  it("never consults the absence classifier when the delete itself succeeded", async () => {
     const operation = createOperation({ operationId: "op_cleanup" });
 
     await expect(

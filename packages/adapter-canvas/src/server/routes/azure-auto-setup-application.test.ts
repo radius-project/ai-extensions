@@ -1112,7 +1112,7 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     );
   });
 
-  it("adopts a restarted application by a provider id recorded before response loss", async () => {
+  it("adopts a restarted application by the ledger artifact it recorded", async () => {
     let createCalls = 0;
     let test: Harness;
     test = harness({
@@ -1167,6 +1167,78 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     await expect(
       resolveAzureAutoSetupApplication(test.input)
     ).resolves.toBeNull();
+    expect(createCalls).toBe(0);
+    expect(
+      (
+        operation as AzureAutoSetupOperation & {
+          providerRecovery: { state: string };
+        }
+      ).providerRecovery.state
+    ).toBe("rollback_pending");
+  });
+
+  it("adopts a restarted application by the provider id settled with the acknowledgement", async () => {
+    // The window the journal exists to close: the create was acknowledged and
+    // settled, then the process died before `recordAzureApp` wrote the ledger
+    // artifact. No artifact, no tags — the settled provider id is the only
+    // identity that exists, so the reconcile has to match on it or orphan a
+    // real App Registration.
+    let createCalls = 0;
+    let test: Harness;
+    test = harness({
+      checkpoint: async () =>
+        (
+          test.input.workflow.operation as AzureAutoSetupOperation & {
+            providerRecovery?: { state?: string };
+          }
+        ).providerRecovery?.state !== "rollback_pending",
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({
+            stdout: JSON.stringify([
+              {
+                appId: APP_ID,
+                displayName: "radius-deploy-octo-app",
+                tags: []
+              }
+            ])
+          });
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app create ")) {
+          createCalls += 1;
+          return command();
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+    const operation = test.input.workflow
+      .operation as AzureAutoSetupOperation & {
+      recoveryState?: string;
+    };
+    operation.recoveryState = "provider_reconciliation_pending";
+    const mutation = prepareProviderMutation(operation, {
+      kind: "azure_application.create",
+      target: "octo/app:dev:radius-deploy-octo-app"
+    });
+    settleProviderMutation(
+      operation,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The provider request ended without a response.",
+      APP_ID
+    );
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toBeNull();
+    // Adopted, not recreated and not handed off.
     expect(createCalls).toBe(0);
     expect(
       (

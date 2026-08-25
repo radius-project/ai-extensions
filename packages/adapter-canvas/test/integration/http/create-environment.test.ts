@@ -15,9 +15,11 @@ import {
 } from "../../../src/server.js";
 import {
   createSetupArtifactLedger,
+  prepareProviderMutation,
   promoteCreatedGitHubEnvironment,
   recordGitHubEnvironment,
-  setCanonicalEnvironment
+  setCanonicalEnvironment,
+  settleProviderMutation
 } from "../../../src/operations.js";
 import type { SetupArtifactLedger } from "../../../src/operations.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
@@ -1660,6 +1662,84 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
         }
       ).providerRecovery
     ).toMatchObject({ state: "manual_required" });
+  });
+
+  it("adopts the run an interrupted dispatch created, using the identity it journalled", async () => {
+    // The restart this layer exists for. A dispatch landed, its answer was lost,
+    // and the entry carries the identity that dispatch actually sent. On resume
+    // `run list --limit 1` now returns the interrupted dispatch's own run, so a
+    // baseline re-derived here would be that run's id and would exclude the one
+    // run being looked for. The journalled identity is what makes it findable.
+    const markedVerifyWorkflow = [
+      "on:",
+      "  workflow_dispatch:",
+      "    inputs:",
+      "      environment:",
+      "        required: true",
+      "      radius_operation:",
+      "        required: false",
+      "run-name: Radius verify ${{ inputs.environment }} [${{ inputs.radius_operation }}]",
+      "jobs:"
+    ].join("\n");
+    const interruptedRun = {
+      databaseId: 4242,
+      createdAt: new Date(1700000000000 + 1000).toISOString(),
+      event: "workflow_dispatch",
+      headBranch: "main",
+      displayTitle: "Radius verify dev [op-http]"
+    };
+    const visible = { code: 0, stdout: JSON.stringify([interruptedRun]) };
+    const harness = start({
+      files: {
+        ".github/workflows/radius-verify-credentials.yml": markedVerifyWorkflow
+      },
+      gh: [
+        {
+          match: /^workflow run /,
+          result: { code: 1, stderr: "a redispatch must not happen" }
+        }
+      ],
+      runListResults: [visible, visible, visible, visible]
+    });
+    const operation = harness.operation as CreateEnvironmentOperation & {
+      providerRecovery?: {
+        mutations?: Array<{ kind: string; status: string }>;
+      };
+    };
+    const pending = prepareProviderMutation(operation, {
+      kind: "github_workflow.dispatch",
+      target: "octo/app:radius-verify-credentials.yml:main:dev",
+      providerIdempotencyKey: "op-http",
+      intent: {
+        dispatchedAt: 1700000000000,
+        baselineRunId: null,
+        ref: "main",
+        environment: "dev",
+        operationMarker: "op-http"
+      }
+    });
+    settleProviderMutation(
+      operation,
+      pending.mutationId,
+      "outcome_unknown",
+      "The provider request ended without a response."
+    );
+
+    await post({ repo: "octo/app", environment: "dev" });
+
+    // Adopted from the journalled identity, and never dispatched again.
+    expect(
+      operation.providerRecovery?.mutations?.find(
+        (entry) => entry.kind === "github_workflow.dispatch"
+      )
+    ).toMatchObject({ status: "confirmed" });
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+    ).toEqual([]);
+    expect(harness.operation.verification).toMatchObject({
+      runId: "4242",
+      operationMarker: "op-http"
+    });
   });
 
   it("fails 400 with the workflow-scope hint when the verify workflow cannot be committed", async () => {
