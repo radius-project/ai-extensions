@@ -111,6 +111,7 @@ function deps(
     cliExec: unset("cliExec") as never,
     envListCacheGet: unset("envListCacheGet") as never,
     envListCacheSet: unset("envListCacheSet") as never,
+    envListCacheGeneration: unset("envListCacheGeneration") as never,
     envListCacheDelete: unset("envListCacheDelete") as never,
     envListTtlMs: 15000,
     kickoffWorkflowSync: unset("kickoffWorkflowSync") as never,
@@ -626,6 +627,7 @@ describe("environments — list-environments", () => {
         now,
         envListCacheGet: () => ({ at: 0, payload: { environments: [] } }),
         envListCacheSet,
+        envListCacheGeneration: () => 0,
         cliExec: cliFake(script),
         envListTtlMs: 15000
       })
@@ -652,6 +654,7 @@ describe("environments — list-environments", () => {
       deps({
         now: () => 0,
         envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
         cliExec: cliFake(script)
       })
     );
@@ -691,6 +694,7 @@ describe("environments — list-environments", () => {
       deps({
         now: () => 5,
         envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
         envListCacheSet,
         cliExec: cliFake(script),
         readInstanceEntry: () => entry,
@@ -739,6 +743,7 @@ describe("environments — list-environments", () => {
       ctx,
       deps({
         envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
         envListCacheSet: vi.fn(),
         now: () => 0,
         cliExec: cliFake(script),
@@ -787,6 +792,7 @@ describe("environments — list-environments", () => {
         deps({
           now: () => 0,
           envListCacheGet: () => undefined,
+          envListCacheGeneration: () => 0,
           envListCacheSet: vi.fn(),
           cliExec: cliFake(script),
           readInstanceEntry: () => undefined,
@@ -819,6 +825,7 @@ describe("environments — list-environments", () => {
       deps({
         now: () => 0,
         envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
         envListCacheSet: vi.fn(),
         cliExec: cliFake(script),
         readInstanceEntry: () => undefined,
@@ -856,12 +863,109 @@ describe("environments — list-environments", () => {
       deps({
         now: () => 0,
         envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
         cliExec
       })
     );
     expect(JSON.parse(recording.body)).toEqual({
       environments: [],
       error: "spawn failed"
+    });
+  });
+
+  // A listing is assembled from many `gh` calls, so a rollback that deletes the
+  // GitHub environment can land while one is still running. The listing still
+  // answers with what it read, but it must not write that reading into the
+  // cache it no longer describes — otherwise the picker keeps serving the
+  // rolled-back environment, still Pending, for a whole TTL.
+  describe("a listing invalidated while it was being assembled", () => {
+    const managedScript: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "42\tin_progress\t" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout: "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+      [ENV_PATH.statuses("o/r", "100")]: {
+        stdout: "https://github.com/o/r/actions/runs/42"
+      }
+    };
+
+    it("answers with what it read but refuses to cache it", async () => {
+      const envListCacheSet = vi.fn();
+      const generations = [0, 1];
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+      await handleListEnvironments(
+        ctx,
+        deps({
+          now: () => 0,
+          envListCacheGet: () => undefined,
+          envListCacheSet,
+          // Read once when the listing starts and once before it caches: the
+          // second read is the invalidation the deleting pass performed.
+          envListCacheGeneration: () => generations.shift() ?? 1,
+          cliExec: cliFake(managedScript),
+          readInstanceEntry: () => undefined,
+          repoMatchesWorkspace: () => false,
+          kickoffWorkflowSync: vi.fn()
+        })
+      );
+      const parsed = JSON.parse(recording.body);
+      expect(parsed.environments).toMatchObject([
+        { name: "dev", status: "pending" }
+      ]);
+      expect(envListCacheSet).not.toHaveBeenCalled();
+    });
+
+    it("refuses to cache an empty listing invalidated meanwhile", async () => {
+      const envListCacheSet = vi.fn();
+      const generations = [3, 4];
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+      await handleListEnvironments(
+        ctx,
+        deps({
+          now: () => 0,
+          envListCacheGet: () => undefined,
+          envListCacheSet,
+          envListCacheGeneration: () => generations.shift() ?? 4,
+          cliExec: cliFake({
+            [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+            [ENV_PATH.names("o/r")]: { stdout: "" }
+          })
+        })
+      );
+      expect(JSON.parse(recording.body)).toEqual({ environments: [] });
+      expect(envListCacheSet).not.toHaveBeenCalled();
+    });
+
+    it("caches normally when the generation is unchanged", async () => {
+      const envListCacheSet = vi.fn();
+      const { ctx } = context("GET", "/api/list-environments?repo=o/r");
+      await handleListEnvironments(
+        ctx,
+        deps({
+          now: () => 11,
+          envListCacheGet: () => undefined,
+          envListCacheSet,
+          envListCacheGeneration: () => 9,
+          cliExec: cliFake(managedScript),
+          readInstanceEntry: () => undefined,
+          repoMatchesWorkspace: () => false,
+          kickoffWorkflowSync: vi.fn()
+        })
+      );
+      expect(envListCacheSet).toHaveBeenCalledWith("o/r", {
+        at: 11,
+        payload: {
+          environments: [expect.objectContaining({ name: "dev" })]
+        }
+      });
     });
   });
 });
@@ -1192,11 +1296,124 @@ describe("environments — verify-status", () => {
       })
     );
     expect(finish).toHaveBeenCalledOnce();
+    expect(finish).toHaveBeenCalledWith(
+      op,
+      "failed_partial",
+      expect.objectContaining({
+        failure: expect.objectContaining({ code: "verify-run-failed" })
+      })
+    );
     const parsed = JSON.parse(recording.body);
     expect(parsed.state).toBe("failed");
     expect(parsed.error).toContain("OIDC help");
     expect(parsed.error).toContain("Failed step: Verify.");
     expect(parsed.error).toContain("boom");
+  });
+
+  it.each([
+    [
+      "a missing Azure subscription",
+      "Azure Login (OIDC)",
+      "The identity cannot see a subscription.",
+      "No subscriptions found"
+    ],
+    [
+      "the AKS access verification step with an authorization refusal",
+      "Verify AKS Access",
+      "",
+      "Error from server (Forbidden): service account cannot get resource pods"
+    ]
+  ])(
+    "classifies %s as an RBAC verification failure",
+    async (_label, stepName, rbacHelp, runLog) => {
+      const finish = vi.fn();
+      const { ctx } = context(
+        "GET",
+        "/api/verify-status?repo=o/r&operationId=op1"
+      );
+      const op = {
+        repo: "o/r",
+        environment: "dev",
+        currentStage: "verify",
+        verification: { dispatchedAt: 1, runId: 9 }
+      };
+
+      await handleVerifyStatus(
+        ctx,
+        deps({
+          readInstanceEntry: () => undefined,
+          getOperation: () => op,
+          hasCompleteVerificationIdentity: () => true,
+          getRunDetail: () =>
+            Promise.resolve(
+              detail({
+                conclusion: "failure",
+                steps: [{ name: stepName, conclusion: "failure" }]
+              })
+            ),
+          fetchRunLog: () => Promise.resolve(runLog),
+          extractErrorLines: () => [],
+          extractGitHubActionsStepLog: () => "No subscriptions found",
+          explainOidcEnterpriseClaim: () => "",
+          explainNoSubscriptions: () => rbacHelp,
+          finish,
+          persistBestEffort: () => Promise.resolve(true)
+        })
+      );
+
+      expect(finish).toHaveBeenCalledWith(
+        op,
+        "failed_partial",
+        expect.objectContaining({
+          failure: expect.objectContaining({ code: "verify-run-rbac-failed" })
+        })
+      );
+    }
+  );
+
+  it("does not call a runner failure in the AKS access step RBAC propagation", async () => {
+    const finish = vi.fn();
+    const { ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&operationId=op1"
+    );
+    const op = {
+      repo: "o/r",
+      environment: "dev",
+      currentStage: "verify",
+      verification: { dispatchedAt: 1, runId: 9 }
+    };
+
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => op,
+        hasCompleteVerificationIdentity: () => true,
+        getRunDetail: () =>
+          Promise.resolve(
+            detail({
+              conclusion: "failure",
+              steps: [{ name: "Verify AKS Access", conclusion: "failure" }]
+            })
+          ),
+        fetchRunLog: () => Promise.resolve(null),
+        extractErrorLines: () => [],
+        extractGitHubActionsStepLog: () => "",
+        explainOidcEnterpriseClaim: () => "",
+        explainNoSubscriptions: () => "",
+        finish,
+        persistBestEffort: () => Promise.resolve(true)
+      })
+    );
+
+    expect(finish).toHaveBeenCalledWith(
+      op,
+      "failed_partial",
+      expect.objectContaining({
+        failure: expect.objectContaining({ code: "verify-run-failed" })
+      })
+    );
   });
 
   it("maps a thrown collaborator to an unknown state", async () => {
@@ -1277,6 +1494,7 @@ describe("environments — real loopback", () => {
     };
     const container = createControlledEnvironmentServer({
       envListCacheGet: () => undefined,
+      envListCacheGeneration: () => 0,
       envListCacheSet: vi.fn(),
       now: () => 0,
       cliExec: cliFake(script),
@@ -1317,6 +1535,7 @@ describe("environments — real loopback", () => {
     };
     const container = createControlledEnvironmentServer({
       envListCacheGet: () => undefined,
+      envListCacheGeneration: () => 0,
       envListCacheSet: vi.fn(),
       now: () => 0,
       cliExec: cliFake(script),
@@ -1360,6 +1579,7 @@ describe("environments — real loopback", () => {
     };
     const container = createControlledEnvironmentServer({
       envListCacheGet: () => undefined,
+      envListCacheGeneration: () => 0,
       envListCacheSet: vi.fn(),
       now: () => 0,
       cliExec: cliFake(script),

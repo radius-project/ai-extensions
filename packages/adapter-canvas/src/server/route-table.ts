@@ -212,6 +212,52 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "template",
     "none",
     "operations-status"
+  ),
+  // Cooperative controls in the same family: a durable stop request, the two
+  // first-choice commands after a stop, and the three retries. All carry the
+  // operation id mid-path, so they are template routes like the two above, and
+  // all stay method-disjoint from the family's `GET /api/operations/` prefix
+  // read.
+  declare(
+    "POST",
+    "/api/operations/:operationId/stop",
+    "template",
+    "json",
+    "operations-status"
+  ),
+  // Continue and rollback are separate typed routes rather than a mode on the
+  // retry route: they have opposite intent, opposite eligibility, and only one
+  // of them may ever run for a given saved record.
+  declare(
+    "POST",
+    "/api/operations/:operationId/continue",
+    "template",
+    "json",
+    "operations-status"
+  ),
+  declare(
+    "POST",
+    "/api/operations/:operationId/rollback",
+    "template",
+    "json",
+    "operations-status"
+  ),
+  // Leaving a setup behind is its own command, not a rollback with different
+  // copy: it closes the record the panel is reporting, and it removes the
+  // disposable artifacts this attempt created only as a consequence of that.
+  declare(
+    "POST",
+    "/api/operations/:operationId/exit",
+    "template",
+    "json",
+    "operations-status"
+  ),
+  declare(
+    "POST",
+    "/api/operations/:operationId/retry/:retryKind",
+    "template",
+    "json",
+    "operations-status"
   )
 ];
 
@@ -262,6 +308,36 @@ function methodsOverlap(a: RouteMethod, b: RouteMethod): boolean {
   return a === "ANY" || b === "ANY" || a === b;
 }
 
+function templatesOverlap(a: string, b: string): boolean {
+  const left = a.split("/");
+  const right = b.split("/");
+  if (left.length !== right.length) return false;
+  return left.every(
+    (segment, index) =>
+      segment.startsWith(":") ||
+      right[index].startsWith(":") ||
+      segment === right[index]
+  );
+}
+
+function templateRouteOverlap(
+  earlier: ServerRoute,
+  later: ServerRoute
+): boolean {
+  if (!methodsOverlap(earlier.method, later.method)) return false;
+  if (earlier.match === "template" && later.match === "exact") {
+    return templatePathParameters(earlier.path, later.path) !== undefined;
+  }
+  if (earlier.match === "exact" && later.match === "template") {
+    return templatePathParameters(later.path, earlier.path) !== undefined;
+  }
+  return (
+    earlier.match === "template" &&
+    later.match === "template" &&
+    templatesOverlap(earlier.path, later.path)
+  );
+}
+
 export function assertRouteTable(routes: readonly ServerRoute[]): void {
   const seen = new Set<string>();
   // `matchRoute` takes the first declaration that matches, mirroring the legacy
@@ -269,22 +345,38 @@ export function assertRouteTable(routes: readonly ServerRoute[]): void {
   // covers its path on an overlapping method, so reject the ordering at
   // construction instead of ranking exact over prefix at dispatch time.
   const precedingPrefixes: ServerRoute[] = [];
+  // Templates shadow by shape rather than by prefix: they match a fixed segment
+  // count. Reject an overlap in either declaration order: an exact route before
+  // a template still splits one concrete path away from the template's owner,
+  // and two overlapping templates make the later owner unreachable.
+  const precedingRoutes: ServerRoute[] = [];
   for (const route of routes) {
     const key = routeKey(route);
     if (seen.has(key)) throw new Error(`Duplicate server route: ${key}`);
     seen.add(key);
-    const shadow = precedingPrefixes.find(
+    const prefixShadow = precedingPrefixes.find(
       (prefix) =>
         methodsOverlap(prefix.method, route.method) &&
         route.path.startsWith(prefix.path)
     );
-    if (shadow) {
+    if (prefixShadow) {
       throw new Error(
-        `Server route ${key} is unreachable behind earlier prefix route ${routeKey(shadow)}`
+        `Server route ${key} is unreachable behind earlier prefix route ${routeKey(prefixShadow)}`
+      );
+    }
+    const templateOverlap = precedingRoutes.find((earlier) =>
+      templateRouteOverlap(earlier, route)
+    );
+    if (templateOverlap) {
+      throw new Error(
+        `Server route ${key} overlaps earlier template route ${routeKey(templateOverlap)}`
       );
     }
     if (route.match === "prefix") precedingPrefixes.push(route);
-    if (route.match === "template") compileRouteTemplate(route.path);
+    if (route.match === "template") {
+      compileRouteTemplate(route.path);
+    }
+    precedingRoutes.push(route);
     if (route.method === "POST" && route.mutationPolicy === "none") {
       throw new Error(`POST server route has no mutation policy: ${key}`);
     }
