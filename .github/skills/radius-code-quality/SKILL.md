@@ -18,7 +18,7 @@ The two Radius Canvas design documents are the authority for phase-specific migr
 
 Read the relevant sections before changing a seam they define. Never guess at a requirement identifier, phase status, route owner, page state, or test level, and prefer the documents over this summary if they disagree. If the documents are not yet on the current branch, read them from the branch that introduces them or through the GitHub contents API.
 
-Both documents track their own delivery status; consult the plan's phase table rather than assuming a phase is complete. Phases 0 and 1 are complete, so the compatibility records, coverage baseline, extracted runtime factories, and the runtime-integration and built-extension suites already exist. Later phases are not yet delivered, so do not assume their suites or extracted modules are available.
+Both documents track their own delivery status; consult the plan's phase table rather than assuming a phase is complete. Phases 0 through 7 are complete.
 
 ## Required workflow
 
