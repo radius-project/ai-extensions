@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createOperation,
+  promoteCreatedGitHubEnvironment,
   recordGitHubEnvironment,
   setCanonicalEnvironment
 } from "../../operations.js";
@@ -32,6 +33,8 @@ function operation(): EnvironmentOperationRecord {
   op.resumeRequest = structuredClone(op.request);
   return op;
 }
+
+const NOW = Date.parse("2026-08-25T01:06:05.000Z");
 
 function dependencies(
   op: EnvironmentOperationRecord,
@@ -91,6 +94,11 @@ function dependencies(
         events.push(`record:${patch.state}:${patch.name}`);
         recordGitHubEnvironment(target, patch);
       },
+      promoteCreatedGitHubEnvironment: (target, identity) => {
+        const promoted = promoteCreatedGitHubEnvironment(target, identity);
+        events.push(`promote:${String(promoted)}`);
+        return promoted;
+      },
       addLegacyStep: (_target, text) => {
         events.push(`step:${text}`);
       },
@@ -109,6 +117,7 @@ function dependencies(
             { clientId: "client-1" }
           : { success: true };
       },
+      now: () => NOW,
       ...overrides
     }
   };
@@ -181,7 +190,10 @@ describe("runEnvironmentOperationWorkflow", () => {
           putCalls += 1;
           canonicalName = "Production";
           return command({
-            stdout: JSON.stringify({ name: canonicalName })
+            stdout: JSON.stringify({
+              name: canonicalName,
+              created_at: new Date(NOW).toISOString()
+            })
           });
         }
         return canonicalName ?
@@ -200,10 +212,50 @@ describe("runEnvironmentOperationWorkflow", () => {
 
     expect(putCalls).toBe(1);
     expect(op.setupArtifacts.githubEnvironment).toMatchObject({
-      state: "created_candidate",
+      state: "created",
+      origin: "this_operation",
       repo: "octo/app",
       name: "Production"
     });
+    expect(test.events).toContain("promote:true");
+    expect(test.events.indexOf("promote:true")).toBeLessThan(
+      test.events.indexOf("persist")
+    );
+  });
+
+  it("keeps a newly observed environment outside cleanup when GitHub says it predates setup", async () => {
+    const op = operation();
+    op.provider = "aws";
+    op.request = {
+      needsAzureCredentials: false,
+      environment: { environment: "production" }
+    };
+    const executor = successfulSelectedGhExecutor({
+      run: async (args) =>
+        args.includes("PUT") ?
+          command({
+            stdout: JSON.stringify({
+              name: "Production",
+              created_at: "2020-01-01T00:00:00.000Z"
+            })
+          })
+        : command({ code: 1, stderr: "HTTP 404" })
+    });
+    const test = dependencies(op);
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: true });
+
+    expect(op.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "created_candidate",
+      origin: "unknown",
+      repo: "octo/app",
+      name: "Production"
+    });
+    expect(test.events).toContain(
+      'step:ℹ️ Radius left GitHub environment "Production" outside its cleanup scope. GitHub reports the environment was created at 2020-01-01T00:00:00.000Z, before this setup wrote to it, so Radius did not create it.'
+    );
   });
 
   it("does not touch Azure when GitHub environment lookup fails", async () => {

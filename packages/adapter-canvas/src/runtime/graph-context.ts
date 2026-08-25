@@ -210,6 +210,18 @@ export function createGraphContextHelpers(
           .catch(() => undefined)
       : undefined;
 
+    // Only asked when there is no record to judge the model by, which is the one
+    // case where we would replace a file without being able to say we wrote it.
+    // Once a record exists this never runs again for that model, so the cost is
+    // a one-time migration cost rather than a per-open one. Off the workspace
+    // branch nothing is regenerated at all, so the answer would go unused.
+    const modelRecoverable =
+      fromWorkspace && !recordedCommit ?
+        await deps.appModel
+          .workspaceModelRecoverable(state.workspacePath)
+          .catch(() => undefined)
+      : undefined;
+
     return {
       repo,
       branch,
@@ -219,6 +231,7 @@ export function createGraphContextHelpers(
         originText,
         headCommit,
         sourceChanged,
+        modelRecoverable,
         generatorVersion: deps.appModel.generatorVersion(),
         hashAppBicep
       })

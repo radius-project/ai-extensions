@@ -6,8 +6,10 @@ import https from "node:https";
 import { IncomingMessage } from "node:http";
 import { Socket } from "node:net";
 import {
-  RADIUS_BICEP_CONFIG,
-  RADIUS_BICEP_CONFIG_JSON,
+  RADIUS_EXTENSION_REGISTRY,
+  RADIUS_BICEP_EXPERIMENTAL_FEATURES,
+  radiusExtensionRefForVersion,
+  resolveRadiusExtensionRef,
   MODELED_APP_GRAPH_FLAGS,
   MANAGED_RAD_PATH,
   MANAGED_BICEP_PATH,
@@ -258,26 +260,135 @@ describe("managed Bicep", () => {
   });
 });
 
-describe("RADIUS_BICEP_CONFIG", () => {
-  it("enables the Bicep extensibility experimental feature", () => {
-    expect(RADIUS_BICEP_CONFIG.experimentalFeaturesEnabled.extensibility).toBe(
-      true
-    );
-  });
-
-  it("registers the radius extension from the ACR biceptypes registry", () => {
+describe("RADIUS_EXTENSION_REGISTRY", () => {
+  it("names the ACR repository publishing the Radius Bicep extension", () => {
     // This is what lets `rad app graph` resolve `extension radius` + `Radius.*`
     // types offline; a wrong value surfaces as BCP204 at compile time.
-    expect(RADIUS_BICEP_CONFIG.extensions.radius).toBe(
-      "br:biceptypes.azurecr.io/radius:latest"
+    expect(RADIUS_EXTENSION_REGISTRY).toBe("br:biceptypes.azurecr.io/radius");
+  });
+
+  it("carries no tag of its own so a reference is never built untagged", () => {
+    expect(RADIUS_EXTENSION_REGISTRY.split("/").pop()).not.toContain(":");
+  });
+});
+
+describe("RADIUS_BICEP_EXPERIMENTAL_FEATURES", () => {
+  it("enables the Bicep extensibility experimental feature", () => {
+    expect(RADIUS_BICEP_EXPERIMENTAL_FEATURES.extensibility).toBe(true);
+  });
+
+  it("is frozen so a compile cannot mutate the shared defaults", () => {
+    expect(Object.isFrozen(RADIUS_BICEP_EXPERIMENTAL_FEATURES)).toBe(true);
+  });
+});
+
+describe("radiusExtensionRefForVersion", () => {
+  it.each([
+    ["v0.60.0", "br:biceptypes.azurecr.io/radius:0.60"],
+    ["0.60.0", "br:biceptypes.azurecr.io/radius:0.60"],
+    ["v0.59.2", "br:biceptypes.azurecr.io/radius:0.59"],
+    ["v1.2.3", "br:biceptypes.azurecr.io/radius:1.2"],
+    ["v10.20.30", "br:biceptypes.azurecr.io/radius:10.20"]
+  ])("maps rad %s to the matching release-channel tag %s", (version, ref) => {
+    expect(radiusExtensionRefForVersion(version)).toBe(ref);
+  });
+
+  it("pins a release-channel tag for a binary that self-reports a prerelease", () => {
+    // Released binaries have been observed self-reporting an rc string, and
+    // compareVersions treats a prerelease as its core version so such a binary
+    // is never upgraded past it. The channel, not the suffix, identifies the
+    // types it compiles against.
+    expect(radiusExtensionRefForVersion("v0.60.0-rc1")).toBe(
+      "br:biceptypes.azurecr.io/radius:0.60"
+    );
+    expect(radiusExtensionRefForVersion("v0.60.0-rc1-1-gdeadbee")).toBe(
+      "br:biceptypes.azurecr.io/radius:0.60"
     );
   });
 
-  it("exposes the config as pretty-printed JSON that round-trips", () => {
-    expect(RADIUS_BICEP_CONFIG_JSON).toBe(
-      JSON.stringify(RADIUS_BICEP_CONFIG, null, 2)
+  it("ignores a build suffix", () => {
+    expect(radiusExtensionRefForVersion("0.60.0+build.7")).toBe(
+      "br:biceptypes.azurecr.io/radius:0.60"
     );
-    expect(JSON.parse(RADIUS_BICEP_CONFIG_JSON)).toEqual(RADIUS_BICEP_CONFIG);
+  });
+
+  it.each(["latest", "edge"])(
+    "never derives the mutable %s tag, which floats off the installed release",
+    (version) => {
+      // Regression guard for issue #487: `latest` was observed publishing an
+      // artifact older than the installed release, so a model compiled against
+      // it silently lost schema properties. `edge` is years stale.
+      expect(radiusExtensionRefForVersion(version)).toBeNull();
+    }
+  );
+
+  it.each([
+    ["an empty string", ""],
+    ["null", null],
+    ["undefined", undefined],
+    ["a non-numeric version", "vX.Y.Z"],
+    ["a partial version", "0.60"]
+  ])("returns null for %s rather than guessing a tag", (_label, version) => {
+    expect(radiusExtensionRefForVersion(version)).toBeNull();
+  });
+});
+
+describe("resolveRadiusExtensionRef", () => {
+  it("derives the reference from the binary that will run the compile", async () => {
+    const readVersion = vi.fn().mockResolvedValue("v0.60.0-rc1");
+    await expect(
+      resolveRadiusExtensionRef({ radPath: "/bin/rad", readVersion })
+    ).resolves.toBe("br:biceptypes.azurecr.io/radius:0.60");
+    expect(readVersion).toHaveBeenCalledWith("/bin/rad");
+  });
+
+  it("returns null and logs when no rad binary can be located", async () => {
+    const log = vi.fn();
+    const readVersion = vi.fn();
+    await expect(
+      resolveRadiusExtensionRef({
+        log,
+        locateRadBinary: () => null,
+        readVersion
+      })
+    ).resolves.toBeNull();
+    expect(readVersion).not.toHaveBeenCalled();
+    expect(log.mock.calls[0][0]).toContain("Could not locate a rad binary");
+  });
+
+  it("locates a binary itself when the caller does not supply one", async () => {
+    await expect(
+      resolveRadiusExtensionRef({
+        locateRadBinary: () => "/located/rad",
+        readVersion: async (binary) =>
+          binary === "/located/rad" ? "v0.59.0" : null
+      })
+    ).resolves.toBe("br:biceptypes.azurecr.io/radius:0.59");
+  });
+
+  it("returns null and reports the version when it cannot be mapped", async () => {
+    const log = vi.fn();
+    await expect(
+      resolveRadiusExtensionRef({
+        log,
+        radPath: "/bin/rad",
+        readVersion: async () => "not-a-version"
+      })
+    ).resolves.toBeNull();
+    expect(log.mock.calls[0][0]).toContain('it reported "not-a-version"');
+  });
+
+  it("returns null without a version fragment when the read yields nothing", async () => {
+    const log = vi.fn();
+    await expect(
+      resolveRadiusExtensionRef({
+        log,
+        radPath: "/bin/rad",
+        readVersion: async () => null
+      })
+    ).resolves.toBeNull();
+    expect(log.mock.calls[0][0]).toContain("/bin/rad");
+    expect(log.mock.calls[0][0]).not.toContain("it reported");
   });
 });
 
@@ -492,6 +603,64 @@ describe("resolveRadForGraph", () => {
 
     fs.rmSync(tmp, { recursive: true, force: true });
   });
+
+  // Forces the load-time-warm-up interleaving: a stale managed binary is on
+  // disk, a fire-and-forget ensureRadBinary() (as extension.ts issues at load)
+  // is reconciling it, and a graph build resolves in that window. The warm-up
+  // publishes the upgrade by renaming it over the same managed path, so
+  // resolving without waiting hands back a path whose contents change
+  // underneath the caller. POSIX-only: the fake binaries are shebang scripts.
+  const itPosix = process.platform === "win32" ? it.skip : it;
+  itPosix(
+    "waits for an in-flight warm-up so the release read is the release that runs",
+    async () => {
+      delete process.env.RADIUS_RAD_BINARY;
+      delete process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+      vi.resetModules();
+      const mod = await import("./rad.js");
+
+      const fakeRad = (version: string) =>
+        `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ version: ${JSON.stringify(version)} }));\n`;
+
+      // The stale binary the extension starts with.
+      fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_RAD_PATH, fakeRad("v0.59.0"));
+      fs.chmodSync(MANAGED_RAD_PATH, 0o755);
+
+      const tag = "v0.60.0";
+      const asset = mod.releaseAsset();
+      const calls: string[] = [];
+      mockHttpsGet(
+        {
+          [RELEASES_API]: {
+            body: JSON.stringify({
+              tag_name: tag,
+              assets: [{ name: asset, digest: "" }]
+            })
+          },
+          [`https://github.com/radius-project/radius/releases/download/${tag}/${asset}`]:
+            { body: fakeRad("v0.60.0") }
+        },
+        calls
+      );
+
+      // Started but deliberately not awaited, exactly as the extension does.
+      const warmUp = mod.ensureRadBinary();
+      const resolved = await mod.resolveRadForGraph();
+      const releaseRead = await mod.radBinaryVersion(resolved);
+      await warmUp;
+      const releaseThatRuns = await mod.radBinaryVersion(resolved);
+
+      // Resolving mid-warm-up must not observe the superseded release: without
+      // the wait this reads v0.59.0 and then executes v0.60.0, pinning
+      // bicepconfig to a different schema than the compile actually uses.
+      expect(releaseRead).toBe("v0.60.0");
+      expect(releaseThatRuns).toBe(releaseRead);
+      expect(mod.radiusExtensionRefForVersion(releaseRead)).toBe(
+        "br:biceptypes.azurecr.io/radius:0.60"
+      );
+    }
+  );
 });
 
 describe("buildGraphViaRad", () => {
@@ -633,17 +802,18 @@ describe("writeBicepCompileConfig", () => {
     );
   }
 
-  it("writes only the base Radius config when no workspace artifacts dir is given", () => {
-    const returned = writeBicepCompileConfig(dir, "");
+  // The reference resolveRadiusExtensionRef derives from the installed binary.
+  const DERIVED = "br:biceptypes.azurecr.io/radius:0.60";
+
+  it("writes the derived Radius extension when no workspace artifacts dir is given", () => {
+    const returned = writeBicepCompileConfig(dir, "", undefined, DERIVED);
     const cfg = readConfig();
-    expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
+    expect(cfg.extensions.radius).toBe(DERIVED);
     expect(Object.keys(cfg.extensions)).toEqual(["radius"]);
     expect(cfg.experimentalFeaturesEnabled.extensibility).toBe(true);
     // The effective config is returned so callers can report the selected
     // extension even with the default no-op logger.
-    expect(returned.extensions.radius).toBe(
-      RADIUS_BICEP_CONFIG.extensions.radius
-    );
+    expect(returned.extensions.radius).toBe(DERIVED);
   });
 
   it("returns the effective config carrying the repository's pinned radius extension", () => {
@@ -737,9 +907,9 @@ describe("writeBicepCompileConfig", () => {
     expect(cfg.formatting).toEqual({ indentKind: "space", indentSize: 2 });
   });
 
-  it("backfills a resolvable radius alias when the repository config omits it", () => {
-    // A repo config might declare only a custom extension; the base radius alias
-    // must be added so `extension radius` still resolves during compilation.
+  it("backfills the derived radius alias when the repository config omits it", () => {
+    // A repo config might declare only a custom extension; the radius alias must
+    // be added so `extension radius` still resolves during compilation.
     fs.writeFileSync(
       path.join(ws, "bicepconfig.json"),
       JSON.stringify({
@@ -749,10 +919,10 @@ describe("writeBicepCompileConfig", () => {
     );
     fs.writeFileSync(path.join(ws, "custom-types.tgz"), "TGZBYTES");
 
-    writeBicepCompileConfig(dir, ws);
+    writeBicepCompileConfig(dir, ws, undefined, DERIVED);
 
     const cfg = readConfig();
-    expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
+    expect(cfg.extensions.radius).toBe(DERIVED);
     expect(cfg.extensions.customTypes).toBe("./custom-types.tgz");
     expect(fs.readFileSync(path.join(dir, "custom-types.tgz"), "utf8")).toBe(
       "TGZBYTES"
@@ -798,12 +968,16 @@ describe("writeBicepCompileConfig", () => {
     expect(fs.existsSync(path.join(dir, "secret.tgz"))).toBe(false);
   });
 
-  it("falls back to the base config when the workspace bicepconfig.json is unreadable", () => {
+  it("falls back to the derived extension when the workspace bicepconfig.json is unreadable", () => {
     fs.writeFileSync(path.join(ws, "bicepconfig.json"), "{ not valid json");
-    writeBicepCompileConfig(dir, ws);
+    const log = vi.fn();
+    writeBicepCompileConfig(dir, ws, log, DERIVED);
     const cfg = readConfig();
-    expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
+    expect(cfg.extensions.radius).toBe(DERIVED);
     expect(cfg.experimentalFeaturesEnabled.extensibility).toBe(true);
+    expect(log.mock.calls[0][0]).toContain(
+      "could not read repository bicepconfig.json"
+    );
   });
 
   it("recovers a resolvable config when array-valued sections make the repo config malformed", () => {
@@ -818,10 +992,160 @@ describe("writeBicepCompileConfig", () => {
         extensions: []
       })
     );
-    writeBicepCompileConfig(dir, ws);
+    writeBicepCompileConfig(dir, ws, undefined, DERIVED);
     const cfg = readConfig();
     expect(cfg.experimentalFeaturesEnabled.extensibility).toBe(true);
-    expect(cfg.extensions.radius).toBe(RADIUS_BICEP_CONFIG.extensions.radius);
+    expect(cfg.extensions.radius).toBe(DERIVED);
+  });
+
+  it("treats a non-object repository config as absent", () => {
+    fs.writeFileSync(path.join(ws, "bicepconfig.json"), JSON.stringify([1, 2]));
+    writeBicepCompileConfig(dir, ws, undefined, DERIVED);
+    expect(readConfig().extensions.radius).toBe(DERIVED);
+  });
+
+  it("honors an explicit repository pin of the mutable latest tag", () => {
+    // Only *inventing* a floating tag is forbidden. A repository that
+    // deliberately tracks an edge/development release still owns that choice.
+    fs.writeFileSync(
+      path.join(ws, "bicepconfig.json"),
+      JSON.stringify({
+        extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
+      })
+    );
+    writeBicepCompileConfig(dir, ws, undefined, DERIVED);
+    expect(readConfig().extensions.radius).toBe(
+      "br:biceptypes.azurecr.io/radius:latest"
+    );
+  });
+
+  it("trims surrounding whitespace from a repository pin", () => {
+    fs.writeFileSync(
+      path.join(ws, "bicepconfig.json"),
+      JSON.stringify({
+        extensions: { radius: "  br:biceptypes.azurecr.io/radius:0.48  " }
+      })
+    );
+    writeBicepCompileConfig(dir, ws, undefined, DERIVED);
+    expect(readConfig().extensions.radius).toBe(
+      "br:biceptypes.azurecr.io/radius:0.48"
+    );
+  });
+
+  it.each([
+    ["an empty", ""],
+    ["a whitespace-only", "   "]
+  ])(
+    "treats %s repository pin as no pin and uses the derived reference",
+    (_label, pinned) => {
+      // Written through verbatim this would emit an unresolvable
+      // `extensions.radius` (BCP204) and be handed to the artifact copier as if
+      // it were a local path.
+      fs.writeFileSync(
+        path.join(ws, "bicepconfig.json"),
+        JSON.stringify({ extensions: { radius: pinned } })
+      );
+      const log = vi.fn();
+      writeBicepCompileConfig(dir, ws, log, DERIVED);
+      expect(readConfig().extensions.radius).toBe(DERIVED);
+      expect(log.mock.calls.map(([m]) => m).join("\n")).not.toContain(
+        "extension artifact"
+      );
+    }
+  );
+
+  it("fails closed on a blank repository pin when nothing can be derived", () => {
+    fs.writeFileSync(
+      path.join(ws, "bicepconfig.json"),
+      JSON.stringify({ extensions: { radius: "   " } })
+    );
+    expect(() => writeBicepCompileConfig(dir, ws, undefined, "")).toThrow(
+      /does not pin extensions\.radius/
+    );
+  });
+
+  it("preserves a blank extension alias without resolving it as an artifact", () => {
+    // `path.resolve(root, "")` is the workspace directory itself, so copying it
+    // fails with EISDIR and logs a warning naming no artifact at all.
+    fs.writeFileSync(
+      path.join(ws, "bicepconfig.json"),
+      JSON.stringify({ extensions: { radius: DERIVED, customTypes: "" } })
+    );
+    const log = vi.fn();
+    writeBicepCompileConfig(dir, ws, log, DERIVED);
+    expect(readConfig().extensions.customTypes).toBe("");
+    expect(log.mock.calls.map(([m]) => m).join("\n")).not.toContain(
+      "extension artifact"
+    );
+  });
+
+  describe("fail-closed when no extension reference can be established", () => {
+    // Regression guard for issue #487: substituting a floating tag compiles the
+    // model against a contract it does not target, so the compile must not run.
+    it("throws instead of guessing when there is no repository config", () => {
+      expect(() => writeBicepCompileConfig(dir, "", undefined, "")).toThrow(
+        /Cannot determine which Radius Bicep extension to compile with/
+      );
+    });
+
+    it("throws when the repository config omits extensions.radius", () => {
+      fs.writeFileSync(
+        path.join(ws, "bicepconfig.json"),
+        JSON.stringify({ extensions: { customTypes: "./custom-types.tgz" } })
+      );
+      expect(() => writeBicepCompileConfig(dir, ws, undefined, "")).toThrow(
+        /does not pin extensions\.radius/
+      );
+    });
+
+    it("names the malformed config rather than reporting it as missing", () => {
+      // A user whose config is invalid JSON must not be told the file is absent
+      // and sent to create a pin they already have. The parse detail only
+      // reaches `log`, which defaults to a no-op, so it belongs in the error.
+      fs.writeFileSync(path.join(ws, "bicepconfig.json"), "{ not valid json");
+      expect(() => writeBicepCompileConfig(dir, ws, undefined, "")).toThrow(
+        /the repository bicepconfig\.json could not be read/
+      );
+      expect(() => writeBicepCompileConfig(dir, ws, undefined, "")).not.toThrow(
+        /no applicable repository bicepconfig\.json was found/
+      );
+    });
+
+    it("names a non-object config root as unreadable", () => {
+      fs.writeFileSync(
+        path.join(ws, "bicepconfig.json"),
+        JSON.stringify([1, 2])
+      );
+      expect(() => writeBicepCompileConfig(dir, ws, undefined, "")).toThrow(
+        /its root is not a JSON object/
+      );
+    });
+
+    it("treats a whitespace-only reference as absent", () => {
+      expect(() => writeBicepCompileConfig(dir, "", undefined, "   ")).toThrow(
+        /Cannot determine which Radius Bicep extension/
+      );
+    });
+
+    it("names an actionable remedy and writes no config file", () => {
+      expect(() => writeBicepCompileConfig(dir, "", undefined, "")).toThrow(
+        /Pin it by setting "extensions\.radius" in \.radius\/bicepconfig\.json/
+      );
+      expect(fs.existsSync(path.join(dir, "bicepconfig.json"))).toBe(false);
+    });
+
+    it("does not assert a cause it cannot know for the missing reference", () => {
+      // The throw also fires when a version was readable but mapped to no
+      // release channel, so claiming the binary could not be read would send
+      // the user after the wrong problem. The specific cause is logged by
+      // resolveRadiusExtensionRef instead.
+      expect(() => writeBicepCompileConfig(dir, "", undefined, "")).toThrow(
+        /no reference could be derived from the rad release/
+      );
+      expect(() => writeBicepCompileConfig(dir, "", undefined, "")).not.toThrow(
+        /the release of the managed rad binary could not be read/
+      );
+    });
   });
 });
 

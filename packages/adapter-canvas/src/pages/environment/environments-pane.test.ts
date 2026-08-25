@@ -129,6 +129,72 @@ describe("environmentsPaneMarkup", () => {
     );
   });
 
+  it("renders an accessible operation command region with stable ids", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain('id="env-progress-commands"');
+    expect(html).toContain('role="group"');
+    expect(html).toContain('aria-label="Environment setup controls"');
+    expect(html).toContain('id="env-progress-command-buttons"');
+    expect(html).toContain(
+      '<div id="env-progress-command-status" class="env-progress__command-status" role="status" aria-live="polite"></div>'
+    );
+    expect(html).toContain(
+      '<div id="env-progress-command-error" class="env-progress__command-error" role="alert"></div>'
+    );
+  });
+
+  it("renders the five partial-state groups as separate named blocks", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    for (const id of [
+      "env-progress-state-created",
+      "env-progress-state-retained",
+      "env-progress-state-reused",
+      "env-progress-state-cleaned",
+      "env-progress-state-manual"
+    ]) {
+      expect(html).toContain(`id="${id}"`);
+      expect(html).toContain(`id="${id}-block"`);
+    }
+    expect(html).toContain("Reused — not created by this attempt");
+    expect(html).toContain("Needs an action from you");
+  });
+
+  it("closes the progress panel from a bottom row below the details", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    // The bottom row is the last thing in the panel, under "Show details". It
+    // holds the server-projected way out — rendered into the empty container —
+    // and the acknowledgement an already-settled outcome closes on.
+    expect(html.indexOf('id="env-progress-details"')).toBeLessThan(
+      html.indexOf('id="env-progress-actions"')
+    );
+    expect(html.indexOf('id="env-progress-actions"')).toBeLessThan(
+      html.indexOf('id="env-progress-bottom-buttons"')
+    );
+    expect(html.indexOf('id="env-progress-bottom-buttons"')).toBeLessThan(
+      html.indexOf('id="env-progress-dismiss"')
+    );
+    const actions = html.slice(
+      html.indexOf('id="env-progress-actions"'),
+      html.indexOf('id="env-rollback-modal"')
+    );
+    expect(actions).toContain(
+      '<div id="env-progress-bottom-buttons" class="env-progress__bottom-buttons"></div>'
+    );
+    expect(actions).toContain(
+      'aria-label="Dismiss completed environment setup progress"'
+    );
+    // Only the acknowledgement is static: every other control in this row is
+    // whatever the operation record projected.
+    expect(actions.match(/<button/g) ?? []).toHaveLength(1);
+    expect(actions).not.toContain("<a ");
+  });
+
+  it("never offers planned-graph navigation from the progress panel", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).not.toContain('id="env-progress-resume"');
+    expect(html).not.toContain("View planned graph");
+  });
+
   it("splits creation into a credentials step followed by an environment step", () => {
     const html = environmentsPaneMarkup(baseOptions);
     expect(html).toContain('id="env-wizard-steps"');
@@ -234,5 +300,76 @@ describe("environmentsPaneMarkup", () => {
     expect(html).toContain(
       "These are the two ends of that trust, not a choice between them: the cloud credentials are the profile you selected, shown here to confirm."
     );
+  });
+});
+
+describe("environmentsPaneMarkup — stop, continue and rollback", () => {
+  const html = environmentsPaneMarkup(baseOptions);
+
+  it("gives the stopped and rollback states their own heading line", () => {
+    expect(html).toContain(
+      '<div id="env-progress-headline-note" class="env-progress__headline-note" style="display:none;"></div>'
+    );
+    expect(html).toContain('id="env-progress-failure-title"');
+  });
+
+  it("renders a guidance list for a path Radius cannot offer", () => {
+    expect(html).toContain(
+      '<ul id="env-progress-command-guidance" class="env-progress__command-guidance" style="display:none;"></ul>'
+    );
+  });
+
+  it("declares the rollback confirmation as an accessible modal dialog", () => {
+    expect(html).toContain(
+      '<div id="env-rollback-modal" role="dialog" aria-modal="true" aria-labelledby="env-rollback-title" aria-describedby="env-rollback-intro"'
+    );
+    expect(html).toContain(
+      '<div id="env-rollback-title" class="env-rollback__title" tabindex="-1">Roll back resources created by this setup?</div>'
+    );
+    // Hidden until the customer asks for it, so nothing destructive is one
+    // stray click away.
+    const dialog = html.slice(html.indexOf('id="env-rollback-modal"'));
+    expect(dialog.slice(0, 260)).toContain("display:none;");
+  });
+
+  it("names the destructive confirmation and the safe way out", () => {
+    expect(html).toContain(
+      '<button type="button" id="env-rollback-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Keep resources</button>'
+    );
+    expect(html).toContain(
+      '<button type="button" id="env-rollback-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Roll back resources</button>'
+    );
+    // Cancel comes first in the DOM, so the destructive control is never the
+    // first thing a keyboard user lands on after the title.
+    expect(html.indexOf('id="env-rollback-cancel"')).toBeLessThan(
+      html.indexOf('id="env-rollback-confirm"')
+    );
+  });
+
+  it("carries a named block for each preview group the server projects", () => {
+    for (const id of [
+      "env-rollback-remove",
+      "env-rollback-keep",
+      "env-rollback-manual"
+    ]) {
+      expect(html).toContain(`id="${id}"`);
+      expect(html).toContain(`id="${id}-block"`);
+    }
+    expect(html).toContain("Radius will remove");
+    expect(html).toContain("Radius will keep");
+  });
+
+  it("keeps the inventory inside the collapsed details disclosure", () => {
+    expect(html.indexOf('id="env-progress-state"')).toBeGreaterThan(
+      html.indexOf('id="env-progress-details"')
+    );
+    expect(html.indexOf('id="env-progress-state"')).toBeLessThan(
+      html.indexOf("</details>")
+    );
+  });
+
+  it("describes rollback-eligible resources in customer terms", () => {
+    expect(html).toContain("Created by Radius and available to roll back");
+    expect(html).not.toContain("Retained for a retry");
   });
 });

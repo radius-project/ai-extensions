@@ -236,7 +236,16 @@ export interface WorkflowPublisherPorts {
   ): Promise<WorkflowCommitOutcome>;
   recordCommittedWorkflowFile(
     operation: CreateEnvironmentOperation,
-    entry: { path: string; branch: string | null; mode: string }
+    entry: {
+      path: string;
+      branch: string | null;
+      mode: string;
+      commitSha: string | null;
+      blobSha: string | null;
+      contentSha256: string | null;
+      previousBlobSha: string | null;
+      previousBlobKnown: boolean;
+    }
   ): void;
   deleteLegacyDeployWorkflow(repo: string): Promise<boolean>;
   usingPullRequestBranch(): boolean;
@@ -265,10 +274,19 @@ export async function publishWorkflowFiles(
   target: WorkflowPublisherTarget
 ): Promise<WorkflowPublishResult> {
   const { operation, targetRepo, envName, provider, defaultBranch } = target;
+  // Every field a rollback needs to prove this exact write, recorded with the
+  // file rather than derived later: the branch it landed on, the commit it
+  // created, the blob it produced, the digest of the bytes Radius sent, and the
+  // blob the path held before.
   const commitRecord = (path: string, commit: WorkflowCommitOutcome) => ({
     path,
     branch: commit.viaPr ? ports.pullRequestBranch() : defaultBranch,
-    mode: commit.viaPr ? "pull_request" : "default_branch"
+    mode: commit.viaPr ? "pull_request" : "default_branch",
+    commitSha: commit.commitSha ?? null,
+    blobSha: commit.blobSha ?? null,
+    contentSha256: commit.contentSha256 ?? null,
+    previousBlobSha: commit.previousBlobSha ?? null,
+    previousBlobKnown: commit.previousBlobKnown === true
   });
 
   // Step 3: Commit the verify-credentials workflow

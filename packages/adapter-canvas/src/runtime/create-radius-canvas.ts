@@ -21,6 +21,7 @@ import {
   appModelStaleNotice,
   appModelUnverifiedMessage
 } from "./hooks.js";
+import { freshnessIdentity } from "@radius-project/core";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
@@ -134,20 +135,20 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
       // Only send a message when there is something new to say. The key
       // includes what is wrong, not just which repo and branch, so an app model
       // that changes from stale to hand-edited between two opens is still
-      // reported the second time.
+      // reported the second time. freshnessIdentity carries the rest of the
+      // evidence, so a verdict that turns from "regenerate silently" into "ask
+      // first" is not mistaken for the one already reported.
       const key = [
         repo,
         branches.join(","),
-        ...statuses.map((status) => {
-          const origin = status.freshness.origin;
-          return [
+        ...statuses.map((status) =>
+          [
             status.branch,
             status.freshness.status,
             status.refreshable ? "local" : "remote",
-            origin?.sourceCommit ?? "",
-            origin?.skillVersion ?? ""
-          ].join("/");
-        })
+            freshnessIdentity(status.freshness)
+          ].join("/")
+        )
       ].join("::");
       if (state.appBicepHandoffKey === key) return;
       const present = statuses.filter(

@@ -897,7 +897,135 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     ).resolves.toMatchObject({ title: "Radius" });
   });
 
-  it("asks the user before regenerating a workspace model it cannot verify", async () => {
+  it("asks the user before regenerating a hand-edited stale workspace model", async () => {
+    const model = "resource db {}";
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": `${model}\n// edit` },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
+          serializeAppOrigin({
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: "a".repeat(40),
+            skillVersion: "0.1.0-test",
+            appBicepHash: hashAppBicep(model)
+          })
+      },
+      headCommits: { "workspace:/workspace": "b".repeat(40) },
+      sourceChangedSince: true
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledTimes(1);
+    const message = (session.send as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as { prompt: string; displayPrompt: string };
+    expect(message.prompt).toContain("edited after it was generated");
+    expect(message.prompt).toContain("would be lost");
+    expect(message.displayPrompt).toContain("acme/widgets");
+  });
+
+  // A missing record says nothing about who wrote the model, so the question
+  // that decides the overwrite is whether git can give it back. An untracked or
+  // already modified file exists nowhere else, so replacing it is theirs to
+  // approve even though nothing proves they edited it.
+  it("asks before replacing a model with no record that git cannot restore", async () => {
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" },
+      modelRecoverable: false
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).toHaveBeenCalledTimes(1);
+    const message = (session.send as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as { prompt: string };
+    expect(message.prompt).toContain("exists nowhere else");
+    expect(message.prompt).toContain("would be lost");
+  });
+
+  // `unrecorded` has two outcomes now, and only one of them is safe. The dedupe
+  // key has to carry which one it was, or a model that starts committed and
+  // clean caches the silent verdict and keeps it after the file stops being
+  // recoverable, which is the overwrite the guard exists to prevent.
+  it("asks when a recoverable model with no record becomes unrecoverable", async () => {
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" }
+    });
+    const session = deps.session.get();
+    const open = () =>
+      canvas.open(
+        ctx("radius-panel", {
+          page: "graph",
+          repo: "acme/widgets",
+          branch: "main"
+        })
+      );
+
+    await open();
+    expect(session.send).toHaveBeenCalledTimes(1);
+    expect(
+      (session.send as ReturnType<typeof vi.fn>).mock.calls[0][0].prompt
+    ).not.toContain("would be lost");
+
+    // The user edits the model, or a gitignore rule starts matching it.
+    deps.appModel.workspaceModelRecoverable = (async () => false) as never;
+
+    await open();
+    expect(session.send).toHaveBeenCalledTimes(2);
+    expect(
+      (session.send as ReturnType<typeof vi.fn>).mock.calls[1][0].prompt
+    ).toContain("would be lost");
+  });
+
+  // A hand edit is permanent and the user cannot accept it, so raising it while
+  // the model is otherwise current would ask the same question every session.
+  it("says nothing about a hand edit that needs no regeneration", async () => {
+    const model = "resource db {}";
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": `${model}\n// edit` },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
+          serializeAppOrigin({
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: "a".repeat(40),
+            skillVersion: "0.1.0-test",
+            appBicepHash: hashAppBicep(model)
+          })
+      },
+      headCommits: { "workspace:/workspace": "a".repeat(40) },
+      sourceChangedSince: false
+    });
+    const session = deps.session.get();
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: "main"
+      })
+    );
+
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
+  // Every model written before origin records existed has no record, so asking
+  // about them would put a question in front of the entire installed base for
+  // something no one edited. These are refreshed like any other stale model.
+  it("does not ask about a workspace model that has no origin record", async () => {
     const { canvas, deps } = setup({
       bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" }
     });
@@ -913,10 +1041,9 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
 
     expect(session.send).toHaveBeenCalledTimes(1);
     const message = (session.send as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as { prompt: string; displayPrompt: string };
-    expect(message.prompt).toContain("could not be verified");
-    expect(message.prompt).toContain("would be lost");
-    expect(message.displayPrompt).toContain("acme/widgets");
+      .calls[0][0] as { prompt: string };
+    expect(message.prompt).toContain("needs to be regenerated");
+    expect(message.prompt).not.toContain("would be lost");
   });
 
   // The pre-tool-use hook denies an agent-driven open before the canvas ever
@@ -951,9 +1078,11 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(session.send).toHaveBeenCalledTimes(1);
     const message = (session.send as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as { prompt: string; displayPrompt: string };
-    expect(message.prompt).toContain("no longer describes the current source");
+    expect(message.prompt).toContain("needs to be regenerated");
     expect(message.prompt).toContain("radius_generate_app");
-    expect(message.displayPrompt).toContain("Refreshing the application model");
+    expect(message.displayPrompt).toContain(
+      "Regenerating the application model"
+    );
   });
 
   it("only notes drift on a branch the skill is not allowed to rewrite", async () => {
@@ -1121,7 +1250,7 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(session.send).toHaveBeenCalledTimes(1);
     expect(
       (session.send as ReturnType<typeof vi.fn>).mock.calls[0][0].prompt
-    ).toContain("no longer describes the current source");
+    ).toContain("needs to be regenerated");
 
     // The user edits the model by hand between opens.
     deps.workspace.fetchWorkspaceBicep = (async () =>
@@ -1131,7 +1260,7 @@ describe("RU-16: missing app.bicep handoff on open()", () => {
     expect(session.send).toHaveBeenCalledTimes(2);
     expect(
       (session.send as ReturnType<typeof vi.fn>).mock.calls[1][0].prompt
-    ).toContain("could not be verified");
+    ).toContain("edited after it was generated");
   });
 
   it("stays quiet when the same problem is seen again", async () => {

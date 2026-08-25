@@ -32,7 +32,8 @@ function executor(
     },
     packageCredentials: () => ({
       username: login,
-      token: "synthetic-package-credential"
+      token: "synthetic-package-credential",
+      source: "keyring"
     }),
     redact: (value) => value,
     errorMessage: (error) =>
