@@ -1,66 +1,15 @@
-// Bundled radius-app-bicep skill content.
-//
-// The extension can be installed on its own (as a Copilot canvas extension)
-// without the sibling `plugins/radius/skills/` being present on disk. When that
-// happens the agent never sees the authoritative `radius-app-bicep` skill, and
-// tools like `radius_generate_app` have to fall back to a hand-maintained
-// summary that inevitably drifts from the real schema rules.
-//
-// To keep a single source of truth, the build (packages/adapter-canvas/build.mjs) loads
-// these Markdown files as text and inlines them here, so the extension always
-// ships the exact skill content it points the agent at — no separate skills
-// install required.
-//
-// Source of truth: plugins/radius/skills/radius-app-bicep/, plus the one
-// cross-skill reference it links to
-// (plugins/radius/skills/radius-app-graph/references/source-code-references.md).
+// Compact bootstrap for the radius-app-bicep skill packaged beside the Canvas.
 
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveGeneratorVersion } from "./generator-version.js";
-import skillMd from "../../../plugins/radius/skills/radius-app-bicep/SKILL.md";
-import runtimeContract from "../../../plugins/radius/skills/radius-app-bicep/references/runtime-contract.md";
-import componentCatalog from "../../../plugins/radius/skills/radius-app-bicep/references/component-catalog.md";
-import architecturePatterns from "../../../plugins/radius/skills/radius-app-bicep/references/architecture-patterns.md";
-import connectionConventions from "../../../plugins/radius/skills/radius-app-bicep/references/connection-conventions.md";
-import secretsHandling from "../../../plugins/radius/skills/radius-app-bicep/references/secrets-handling.md";
-import bicepStructureRules from "../../../plugins/radius/skills/radius-app-bicep/references/bicep-structure-rules.md";
-import namingConventions from "../../../plugins/radius/skills/radius-app-bicep/references/naming-conventions.md";
-// Cross-skill reference: SKILL.md links the app-graph skill's source-code
-// discovery methodology, so the standalone bundle must inline it too.
-import sourceCodeReferences from "../../../plugins/radius/skills/radius-app-graph/references/source-code-references.md";
-import customResourceTypes from "../../../plugins/radius/skills/radius-app-bicep/references/custom-resource-types.md";
-import todoListAppExample from "../../../plugins/radius/skills/radius-app-bicep/references/todo-list-app-example.md";
-
-// Ordered to match the paths referenced from SKILL.md so the inlined content
-// reads the same way the progressive-disclosure skill would.
-const REFERENCES = [
-  ["references/runtime-contract.md", runtimeContract],
-  ["references/component-catalog.md", componentCatalog],
-  ["references/architecture-patterns.md", architecturePatterns],
-  ["references/connection-conventions.md", connectionConventions],
-  ["references/secrets-handling.md", secretsHandling],
-  ["references/bicep-structure-rules.md", bicepStructureRules],
-  ["references/naming-conventions.md", namingConventions],
-  // Keyed by the exact path SKILL.md links (a sibling skill), so the agent can
-  // correlate the in-text link with the appended section.
-  [
-    "../radius-app-graph/references/source-code-references.md",
-    sourceCodeReferences
-  ],
-  ["references/custom-resource-types.md", customResourceTypes],
-  ["references/todo-list-app-example.md", todoListAppExample]
-];
 
 // The repo path is caller-controlled and embedded in agent instructions, so
 // reduce it to a single, inert, length-bounded token.
 function sanitizeRepoPath(repoPath: unknown): string {
   const FALLBACK = "the current workspace";
   if (typeof repoPath !== "string") return FALLBACK;
-  // Collapse any whitespace (including newlines/tabs) to single spaces, drop
-  // control characters and backticks so the value can't break out of the
-  // surrounding prose or open a code fence, then bound the length.
   const cleaned = repoPath
     .replace(/[\u0000-\u001F\u007F]+/g, " ")
     .replace(/`/g, "")
@@ -73,50 +22,22 @@ function sanitizeRepoPath(repoPath: unknown): string {
 function bundledSkillBase(): string {
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
   const installed = path.join(moduleDir, "skills", "radius-app-bicep");
-  if (existsSync(path.join(installed, "scripts", "validate-bicep.mjs"))) {
-    return installed;
-  }
+  if (existsSync(path.join(installed, "SKILL.md"))) return installed;
+
   const source = path.resolve(
     moduleDir,
     "../../../plugins/radius/skills/radius-app-bicep"
   );
-  if (existsSync(path.join(source, "scripts", "validate-bicep.mjs"))) {
-    return source;
-  }
-  return installed;
+  return existsSync(path.join(source, "SKILL.md")) ? source : installed;
 }
 
-// Returns the full skill and every referenced file as one standalone prompt.
 export function radiusAppBicepSkill(repoPath?: string): string {
-  const target = sanitizeRepoPath(repoPath);
-  const skillBase = bundledSkillBase();
-  // The origin record records which generator produced the model, so the
-  // skill has to write the version of the bundle it is actually running from.
-  // Resolving it here (rather than in the skill text) keeps a released bundle
-  // and an edge bundle from both claiming the version baked into Markdown.
-  const skillVersion = resolveGeneratorVersion();
-  const intro =
-    `# radius-app-bicep skill (bundled with the Radius extension)\n\n` +
-    `Model the repository at ${target} by following the skill below. This is ` +
-    `the authoritative skill content — its SKILL.md and all reference files ` +
-    `are inlined here so nothing is lost when the extension is installed on ` +
-    `its own. The referenced files (radius-app-bicep's own \`references/*.md\`, ` +
-    `plus the app-graph \`source-code-references.md\` it links to) are appended ` +
-    `after SKILL.md under matching \`--- Reference: ... ---\` headers instead of ` +
-    `being opened separately.\n\n` +
-    `Do not stop at "looks correct": the skill requires running its bundled ` +
-    `Bicep checker against the generated \`.radius/app.bicep\` and closing every ` +
-    `validation-checklist item before reporting success.\n`;
-
-  const resolve = (text: string): string =>
-    text
-      .replaceAll("<loaded-skill-base>", skillBase)
-      .replaceAll("<loaded-skill-version>", skillVersion);
-
-  const instructions = resolve(skillMd.trim());
-  const refs = REFERENCES.map(([name, body]) => {
-    return `\n\n--- Reference: ${name} ---\n\n${resolve(body.trim())}`;
-  }).join("");
-
-  return `${intro}\n---\n\n${instructions}${refs}\n`;
+  return JSON.stringify({
+    skill: "radius-app-bicep",
+    repoPath: sanitizeRepoPath(repoPath),
+    skillBase: bundledSkillBase(),
+    skillVersion: resolveGeneratorVersion(),
+    instruction:
+      "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase and skillVersion for its placeholders."
+  });
 }

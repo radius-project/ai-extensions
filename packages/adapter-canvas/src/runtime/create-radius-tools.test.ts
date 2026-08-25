@@ -34,7 +34,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-// RU-07: radius_generate_app analysis/bundled content/standalone fallback.
+// RU-07: radius_generate_app analysis and compact skill bootstrap.
 describe("RU-07: radius_generate_app", () => {
   it("delegates to the injected skill with the given repoPath", async () => {
     const { tools, deps } = setup();

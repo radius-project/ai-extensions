@@ -149,16 +149,14 @@ describe("P0-C built Radius extension artifact", () => {
         expect.stringMatching(
           /packages\/adapter-canvas\/src\/browser\/scripts\.ts$/
         ),
-        expect.stringMatching(/packages\/adapter-canvas\/src\/skill\.ts$/),
-        expect.stringMatching(/skills\/radius-app-bicep\/SKILL\.md$/),
-        expect.stringMatching(
-          /skills\/radius-app-bicep\/references\/custom-resource-types\.md$/
-        ),
-        expect.stringMatching(
-          /skills\/radius-app-graph\/references\/source-code-references\.md$/
-        )
+        expect.stringMatching(/packages\/adapter-canvas\/src\/skill\.ts$/)
       ])
     );
+    expect(
+      normalizedSources.some(
+        (source) => source.includes("/skills/") && source.endsWith(".md")
+      )
+    ).toBe(false);
     expect(
       normalizedSources.some(
         (source) =>
