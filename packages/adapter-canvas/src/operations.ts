@@ -811,6 +811,25 @@ export function isTerminalState(state: any): boolean {
   return TERMINAL_STATES.includes(state);
 }
 
+export function canDismissOperation(op: any): boolean {
+  if (!op || !isTerminalState(op.state)) return false;
+  if (projectOperationActions(op).length > 0) return false;
+  if (op.state === "succeeded" || op.state === "succeeded_with_warnings") {
+    return true;
+  }
+  return (
+    op.state === "cancelled" &&
+    projectOperationHeadline(op).code === "rollback-complete"
+  );
+}
+
+export function dismissOperation(op: any): any {
+  if (!canDismissOperation(op)) return op;
+  op.dismissedAt = nowIso();
+  op.lastActivityAt = op.dismissedAt;
+  return op;
+}
+
 // Stage ids are provider-neutral. What happens inside a stage is not, which is
 // exactly why steps are data supplied by the route rather than an interface
 // radius-core would have to model for a flow it does not execute.
@@ -4541,6 +4560,7 @@ export function beginRetryAttempt(op: any, kind: OperationAttemptKind): number {
   op.endedAt = null;
   op.failure = null;
   op.terminal = null;
+  op.dismissedAt = null;
   op.recoveryState = null;
   if (op.journey) op.journey.notifiedAt = null;
   op.lastActivityAt = nowIso();
@@ -4555,6 +4575,7 @@ export function rollbackRetryAttempt(op: any, snapshot: any): any {
   op.endedAt = snapshot.endedAt;
   op.failure = snapshot.failure;
   op.terminal = snapshot.terminal;
+  op.dismissedAt = snapshot.dismissedAt;
   op.recoveryState = snapshot.recoveryState;
   op.stopRequested = snapshot.stopRequested;
   op.stages = structuredClone(snapshot.stages);
@@ -4583,6 +4604,7 @@ export function snapshotRetryState(op: any): any {
     endedAt: op.endedAt,
     failure: op.failure ? structuredClone(op.failure) : null,
     terminal: op.terminal ? structuredClone(op.terminal) : null,
+    dismissedAt: op.dismissedAt ?? null,
     recoveryState: op.recoveryState ?? null,
     stopRequested: Boolean(op.stopRequested),
     stages: structuredClone(op.stages || []),
@@ -4878,6 +4900,7 @@ const PERSISTED_OPERATION_KEYS = new Set([
   "setupArtifacts",
   "journey",
   "terminal",
+  "dismissedAt",
   "failure",
   "inputRequired",
   "resumeRequest",
@@ -5177,6 +5200,7 @@ export function createRegistry({
 } = {}): any {
   /** @type {Map<string, object>} */
   const byId = new Map();
+  let persistQueue = Promise.resolve();
 
   function prune() {
     const now = clock();
@@ -5257,7 +5281,10 @@ export function createRegistry({
       return restored;
     },
     async persist() {
-      await store.save(snapshot());
+      const envelope = snapshot();
+      const pending = persistQueue.then(() => store.save(envelope));
+      persistQueue = pending.catch(() => {});
+      await pending;
     },
     report(diagnostic) {
       store.report?.(diagnostic);
@@ -5333,7 +5360,8 @@ export function createRegistry({
     },
     /**
      * The record a returning user should be shown for a repo: whatever is
-     * running, else the most recent terminal record they have not yet seen.
+     * running, else the most recent terminal record unless they dismissed it.
+     * Older history must not reappear after the newest record is dismissed.
      */
     latest(repo) {
       const repositoryIdentity = normalizeIdentityPart(repo);
@@ -5349,7 +5377,7 @@ export function createRegistry({
         )
           best = op;
       }
-      return best;
+      return best?.dismissedAt ? null : best;
     },
     /**
      * The record to show a caller that has no repo in hand.
@@ -5372,7 +5400,7 @@ export function createRegistry({
         )
           best = op;
       }
-      return best;
+      return best?.dismissedAt ? null : best;
     },
     get(operationId) {
       const op = byId.get(operationId) || null;

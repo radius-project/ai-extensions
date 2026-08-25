@@ -829,7 +829,8 @@ function isSuccessfulSetup(op: OperationRecord | null): boolean {
   return (
     op !== null &&
     (op.terminalState === "succeeded" ||
-      op.terminalState === "succeeded_with_warnings")
+      op.terminalState === "succeeded_with_warnings") &&
+    op.actions.length === 0
   );
 }
 
@@ -879,6 +880,10 @@ function operationsByRepoUrl(repo: string): string {
 
 function operationUrl(operationId: string): string {
   return `${OPERATIONS_PATH}/${encodeURIComponent(operationId)}`;
+}
+
+function dismissUrl(operationId: string): string {
+  return `${operationUrl(operationId)}/dismiss`;
 }
 
 function resumeUrl(operationId: string, code: string): string {
@@ -940,6 +945,8 @@ export function initializeEnvironmentOperations(
   // (superseded by a newer track/resume call, or by teardown) is discarded
   // instead of overwriting state that belongs to a newer operation.
   let session = 0;
+  let displayedOperationId = "";
+  let dismissInFlight = false;
 
   function abortInFlight(): void {
     activeAbort?.abort();
@@ -1627,6 +1634,7 @@ export function initializeEnvironmentOperations(
     // history, but the customer closed it, and a poll or a page reload that put
     // the panel back would undo the one thing Exit setup promised.
     if (op === null || isExitedSetup(op)) {
+      displayedOperationId = "";
       panel.style.display = "none";
       setPanelActive(false);
       renderFailureCard(null);
@@ -1635,6 +1643,7 @@ export function initializeEnvironmentOperations(
       renderHeadline(null);
       return;
     }
+    displayedOperationId = op.operationId;
     panel.style.display = "";
     setPanelActive(op.terminalState === null);
     const done =
@@ -2120,7 +2129,41 @@ export function initializeEnvironmentOperations(
   const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
   if (dismissEl) {
     scope.on(dismissEl, "click", () => {
-      hideProgress();
+      const operationId = displayedOperationId;
+      if (operationId === "" || dismissInFlight) return;
+      const dismissSession = session;
+      dismissInFlight = true;
+      void fetchTracked(dismissUrl(operationId), {
+        method: "POST",
+        headers: {
+          "X-Radius-Mutation-Nonce": options.mutationNonce || ""
+        }
+      })
+        .then((response) => {
+          dismissInFlight = false;
+          if (
+            !scope.active ||
+            session !== dismissSession ||
+            displayedOperationId !== operationId
+          ) {
+            return;
+          }
+          if (!response.ok) throw new Error("Operation dismissal failed.");
+          hideProgress();
+        })
+        .catch(() => {
+          dismissInFlight = false;
+          if (
+            !scope.active ||
+            session !== dismissSession ||
+            displayedOperationId !== operationId
+          ) {
+            return;
+          }
+          setCommandError(
+            "Radius could not save this dismissal. Try dismissing it again."
+          );
+        });
     });
   }
 

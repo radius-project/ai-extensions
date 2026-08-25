@@ -18,6 +18,7 @@ import {
   enterStage,
   finish,
   finishSucceeded,
+  dismissOperation,
   hasWarnings,
   hasUnfinishedCleanupAuthority,
   isTerminalState,
@@ -55,6 +56,7 @@ import {
   beginRetryAttempt,
   buildCommandId,
   canContinueSetup,
+  canDismissOperation,
   canRetryDeletion,
   canRetryCleanup,
   canRetrySetup,
@@ -2556,6 +2558,60 @@ describe("registry", () => {
     expect(reg.running("contoso/store")).toBeNull();
   });
 
+  it("keeps a dismissed terminal record in history without redisplaying it", () => {
+    const reg = createRegistry({
+      clock: () => new Date("2026-08-25T21:00:00.000Z").getTime()
+    });
+    const older = newOp();
+    older.operationId = "older-operation";
+    older.startedAt = "2026-08-25T20:50:00.000Z";
+    older.lastActivityAt = older.startedAt;
+    reg.start(older);
+    finishSucceeded(older);
+    older.endedAt = "2026-08-25T20:51:00.000Z";
+    const op = newDeleteOp();
+    reg.start(op);
+    for (const stage of op.stages) stage.state = "succeeded";
+    finishSucceeded(op);
+    op.endedAt = "2026-08-25T20:55:00.000Z";
+
+    dismissOperation(op);
+
+    expect(reg.latest(op.repo)).toBeNull();
+    expect(reg.latestAny()).toBeNull();
+    expect(reg.get(op.operationId)).toBe(op);
+    expect(reg.get(older.operationId)).toBe(older);
+    expect(fromPersistedOperation(toPersistedOperation(op)).dismissedAt).toBe(
+      op.dismissedAt
+    );
+  });
+
+  it("does not dismiss a terminal deletion that still offers retry", () => {
+    const op = newDeleteOp();
+    op.stages[0].state = "succeeded";
+    op.stages[1].state = "warning";
+    finish(op, "succeeded_with_warnings");
+
+    expect(canDismissOperation(op)).toBe(false);
+    dismissOperation(op);
+    expect(op.dismissedAt).toBeUndefined();
+  });
+
+  it("redisplays a dismissed operation when retry reopens it", () => {
+    const op = newDeleteOp();
+    finish(op, "failed_partial", {
+      failure: { code: "credential-delete-failed" }
+    });
+    dismissOperation(op);
+    const retrySnapshot = snapshotRetryState(op);
+
+    beginRetryAttempt(op, "deletion");
+    expect(op.dismissedAt).toBeNull();
+
+    rollbackRetryAttempt(op, retrySnapshot);
+    expect(op.dismissedAt).toBe(retrySnapshot.dismissedAt);
+  });
+
   it("prefers the running operation over an older finished one", () => {
     const reg = createRegistry();
     const done = newOp();
@@ -2599,6 +2655,40 @@ describe("registry", () => {
       operationId: op.operationId,
       recoveryState: "waiting_input"
     });
+  });
+
+  it("serializes saves so a newer dismissal cannot be overwritten", async () => {
+    const saved: any[] = [];
+    const releases: Array<() => void> = [];
+    const store = {
+      load: () => Promise.resolve(null),
+      save(envelope: any) {
+        saved.push(envelope);
+        return new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+      }
+    };
+    const reg = createRegistry({ store });
+    const op = newOp();
+    reg.put(op);
+    finishSucceeded(op);
+
+    const terminalSave = reg.persist();
+    await Promise.resolve();
+    dismissOperation(op);
+    const dismissalSave = reg.persist();
+
+    expect(saved).toHaveLength(1);
+    releases.shift()?.();
+    await terminalSave;
+    await Promise.resolve();
+    expect(saved).toHaveLength(2);
+    releases.shift()?.();
+    await dismissalSave;
+
+    expect(saved[0].operations[0].dismissedAt).toBeUndefined();
+    expect(saved[1].operations[0].dismissedAt).toBe(op.dismissedAt);
   });
 
   it("hydrates a mid-stage delete operation as resumable through the store", async () => {
