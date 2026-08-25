@@ -90,33 +90,30 @@ describe("canonical Canvas visual runner", () => {
     expect(
       dockerPrerequisiteError({ status: 0, stdout: "29.7.2|windows" })
     ).toContain("Switch Docker Desktop to Linux containers");
-    expect(
-      dockerPrerequisiteError({ status: 0, stdout: "29.7.2" })
-    ).toContain("did not report its container engine type");
+    expect(dockerPrerequisiteError({ status: 0, stdout: "29.7.2" })).toContain(
+      "did not report its container engine type"
+    );
     expect(
       dockerPrerequisiteError({ status: 0, stdout: "29.7.2|linux" })
     ).toBeNull();
   });
 
-  it(
-    "keeps the canonical image aligned with the locked Playwright version",
-    () => {
-      const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
-      const lockfile = readFileSync(`${repoRoot}/pnpm-lock.yaml`, "utf8");
-      const dockerfile = readFileSync(
-        `${repoRoot}/packages/adapter-canvas/test/visual/Dockerfile`,
-        "utf8"
-      );
-      const lockedVersions = new Set(
-        [
-          ...lockfile.matchAll(/^  '@playwright\/test@([^']+)':$/gm)
-        ].map((match) => match[1])
-      );
-      const imageVersion = dockerfile.match(
-        /mcr\.microsoft\.com\/playwright:v([^-]+)-/
-      )?.[1];
+  it("keeps the canonical image aligned with the locked Playwright version", () => {
+    const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
+    const lockfile = readFileSync(`${repoRoot}/pnpm-lock.yaml`, "utf8");
+    const dockerfile = readFileSync(
+      `${repoRoot}/packages/adapter-canvas/test/visual/Dockerfile`,
+      "utf8"
+    );
+    const lockedVersions = new Set(
+      [...lockfile.matchAll(/^  '@playwright\/test@([^']+)':$/gm)].map(
+        (match) => match[1]
+      )
+    );
+    const imageVersion = dockerfile.match(
+      /mcr\.microsoft\.com\/playwright:v([^-]+)-/
+    )?.[1];
 
-      expect([...lockedVersions]).toEqual([imageVersion]);
-    }
-  );
+    expect([...lockedVersions]).toEqual([imageVersion]);
+  });
 });
