@@ -10,6 +10,7 @@ import {
   decideRadiusAppOwnership,
   isAppOwnerAlreadyAssignedError,
   isAzResourceNotFound,
+  isRadiusProvenanceMatch,
   isServiceManagementReferenceError,
   isUuid,
   missingRequiredAppTags,
@@ -166,6 +167,25 @@ export async function resolveAzureAutoSetupApplication({
     };
   };
 
+  // Which "reused" the customer is looking at. An App Registration Radius
+  // tagged for this repository and environment was created by an earlier Radius
+  // setup, and saying so is the difference between "Radius will keep this
+  // because it was reused" reading as an explanation and reading as a bug to
+  // someone who watched Create Environment make it.
+  const classifyReuseOrigin = async (
+    appId: string,
+    knownTags?: unknown[]
+  ): Promise<"pre_existing" | "radius_earlier_setup"> => {
+    const provenance =
+      knownTags ?
+        { tags: knownTags, repo: oidc.fullName, environment }
+      : await readRadiusProvenance(appId);
+    if (!provenance) return "pre_existing";
+    return isRadiusProvenanceMatch(provenance) ?
+        "radius_earlier_setup"
+      : "pre_existing";
+  };
+
   let clientId = "";
   const rollbackCreatedAppAndFail = (
     error: string,
@@ -250,6 +270,7 @@ export async function resolveAzureAutoSetupApplication({
       );
       operations.recordAzureApp(operation, {
         state: "reused",
+        origin: await classifyReuseOrigin(clientId),
         appId: clientId,
         displayName: null
       });
@@ -320,6 +341,7 @@ export async function resolveAzureAutoSetupApplication({
       steps.push(`✅ Using the selected App Registration: ${clientId}`);
       operations.recordAzureApp(operation, {
         state: "reused",
+        origin: await classifyReuseOrigin(clientId),
         appId: clientId,
         displayName: null
       });
@@ -437,9 +459,25 @@ export async function resolveAzureAutoSetupApplication({
       }
       if (selection.action === "reuse") {
         clientId = selection.appId || "";
+        // The list query already projected this application's tags, so its
+        // Radius provenance is decided without a second `az` round trip. An
+        // application with no tags returns none, which is the empty array
+        // rather than "unknown".
+        const reusedMatch = ownedMatches.find(
+          (candidate: { appId?: string; tags?: unknown }) =>
+            candidate && candidate.appId === clientId
+        );
         steps.push(`✅ Reusing existing App Registration: ${clientId}`);
         operations.recordAzureApp(operation, {
           state: "reused",
+          origin: await classifyReuseOrigin(
+            clientId,
+            reusedMatch ?
+              Array.isArray(reusedMatch.tags) ?
+                reusedMatch.tags
+              : []
+            : undefined
+          ),
           appId: clientId,
           displayName: appName
         });
@@ -483,6 +521,7 @@ export async function resolveAzureAutoSetupApplication({
         steps.push(`✅ Entra app registration created: ${clientId}`);
         operations.recordAzureApp(operation, {
           state: "created",
+          origin: "this_operation",
           appId: clientId,
           displayName: appName,
           serviceManagementReference: serviceManagementReference || null

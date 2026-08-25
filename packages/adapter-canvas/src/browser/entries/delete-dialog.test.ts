@@ -134,6 +134,25 @@ describe("delete dialog browser entry", () => {
     expect(elements.get("modal")?.style.display).toBe("none");
   });
 
+  it("forwards the abandonment variant to a separate confirmation state", () => {
+    const browser = createFakeBrowserScope();
+    const { body } = dialogMarkup(browser);
+    installDeleteDialogEntry(browser.scope);
+    const dialog = asDialog(
+      requireBrowserFunction(
+        browser.scope,
+        DELETE_DIALOG_FACTORY_GLOBAL
+      )({
+        variant: "abandon"
+      })
+    );
+
+    dialog.open("store", "prod");
+    expect(fakeText(body)).toContain("does not delete cloud resources");
+    fakeById(body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+    expect(fakeText(body)).toContain("may remain");
+  });
+
   it("ignores malformed option fields and non-callable handlers", () => {
     const browser = createFakeBrowserScope();
     const { modal, body } = dialogMarkup(browser);

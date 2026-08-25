@@ -72,7 +72,11 @@ export interface GitHubEnvironmentReadResult {
 
 export interface EnsuredGitHubEnvironment {
   name: string;
-  state: "created_candidate" | "reused";
+  state: "created" | "created_candidate" | "reused";
+  creationEvidence?: {
+    putResponseBody: string;
+    putStartedAtMs: number;
+  };
 }
 
 export interface GitHubEnvironmentCreatedCandidate {
@@ -156,7 +160,9 @@ export function readEnsuredGitHubEnvironment(
     environment !== canonical ||
     artifact?.repo !== repo ||
     artifact.name !== canonical ||
-    (artifact.state !== "created_candidate" && artifact.state !== "reused")
+    (artifact.state !== "created" &&
+      artifact.state !== "created_candidate" &&
+      artifact.state !== "reused")
   ) {
     return null;
   }
@@ -168,6 +174,7 @@ export async function ensureGitHubEnvironment(input: {
   requestedName: string;
   readGitHubJson(apiPath: string): Promise<GitHubEnvironmentReadResult>;
   runGh(args: string[]): Promise<GitHubEnvironmentCommandResult>;
+  now?: () => number;
 }): Promise<EnsuredGitHubEnvironment> {
   const path =
     `/repos/${input.repo}/environments/` +
@@ -202,6 +209,7 @@ export async function ensureGitHubEnvironment(input: {
     );
   }
 
+  const putStartedAtMs = input.now?.() ?? Date.now();
   const created = await input.runGh(["api", "--method", "PUT", path]);
   if (!succeeded(created)) {
     const detail = responseDetail(created) || "The GitHub API request failed.";
@@ -222,5 +230,12 @@ export async function ensureGitHubEnvironment(input: {
       createdCandidate
     );
   }
-  return { name, state: "created_candidate" };
+  return {
+    name,
+    state: "created_candidate",
+    creationEvidence: {
+      putResponseBody: created.stdout,
+      putStartedAtMs
+    }
+  };
 }

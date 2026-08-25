@@ -285,6 +285,11 @@ export interface AppModelDependencies {
     workspacePath: string | null | undefined,
     sinceCommit: string
   ): Promise<boolean | undefined>;
+  // Whether the workspace app model is committed and unmodified, so an
+  // overwrite could be undone from git. undefined when git cannot answer.
+  workspaceModelRecoverable(
+    workspacePath: string | null | undefined
+  ): Promise<boolean | undefined>;
   // Head commit of a branch on GitHub. "" when it cannot be resolved.
   branchHeadCommit(repo: string, branch: string): Promise<string>;
   // Repo-relative file read from the local worktree, when the selection is it.

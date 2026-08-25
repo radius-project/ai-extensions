@@ -67,6 +67,7 @@ function harness(options: {
   const failures: Record<string, unknown>[] = [];
   const calls: string[] = [];
   const ficEntries: Array<Record<string, unknown>> = [];
+  const recorded: Record<string, unknown>[] = [];
   const operation: AzureAutoSetupOperation = {
     operationId: "op-credentials",
     repo: "octo/app",
@@ -80,12 +81,15 @@ function harness(options: {
       (async () => ({
         ok: true,
         state: "reused",
+        origin: "pre_existing",
         objectId: OBJECT_ID
       })),
     operations: {
       withCredentialProvenanceLock: async (work) => work(),
-      recordServicePrincipal: (_operation, patch) =>
-        calls.push(`sp:${String(patch.state || patch.objectId)}`),
+      recordServicePrincipal: (_operation, patch) => {
+        recorded.push(patch);
+        calls.push(`sp:${String(patch.state || patch.objectId)}`);
+      },
       recordCreatedFederatedCredential: (_operation, credential) => {
         calls.push(`fic:${credential.name}`);
         ficEntries.push(credential as Record<string, unknown>);
@@ -169,7 +173,7 @@ function harness(options: {
     clusterResourceGroup: "rg-aks",
     clusterName: "aks-radius"
   };
-  return { calls, failures, ficEntries, input, workflow };
+  return { calls, failures, ficEntries, recorded, input, workflow };
 }
 
 describe("Azure auto-setup credentials and roles service (SU-08)", () => {
@@ -229,6 +233,77 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     };
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
     expect(lockHeld).toBe(false);
+  });
+
+  it("records where the Service Principal came from, not just that it exists", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        throw new Error(`unexpected az call: ${args.join(" ")}`);
+      },
+      checkpoint: async () => false
+    });
+    await configureAzureAutoSetupCredentials(test.input);
+    expect(test.recorded).toEqual([
+      {
+        state: "reused",
+        origin: "pre_existing",
+        appId: APP_ID,
+        objectId: OBJECT_ID
+      }
+    ]);
+  });
+
+  it("carries an unprovable Service Principal into the ledger and the narration", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        throw new Error(`unexpected az call: ${args.join(" ")}`);
+      },
+      ensureServicePrincipal: async () => ({
+        ok: true,
+        state: "created_candidate",
+        origin: "unknown",
+        objectId: OBJECT_ID
+      }),
+      checkpoint: async () => false
+    });
+
+    await configureAzureAutoSetupCredentials(test.input);
+
+    expect(test.recorded).toEqual([
+      {
+        state: "created_candidate",
+        origin: "unknown",
+        appId: APP_ID,
+        objectId: OBJECT_ID
+      }
+    ]);
+    expect(test.workflow.steps).toContain(
+      "\u2139\ufe0f The Service Principal was absent before this step and present after it, but the create command did not report success, so Radius cannot prove it created it and will not remove it during a rollback."
+    );
+  });
+
+  it("says nothing about provenance when the Service Principal was simply created", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        throw new Error(`unexpected az call: ${args.join(" ")}`);
+      },
+      ensureServicePrincipal: async () => ({
+        ok: true,
+        state: "created",
+        origin: "this_operation",
+        objectId: null
+      }),
+      checkpoint: async () => false
+    });
+
+    await configureAzureAutoSetupCredentials(test.input);
+
+    expect(test.recorded).toEqual([
+      { state: "created", origin: "this_operation", appId: APP_ID }
+    ]);
+    expect(
+      test.workflow.steps.filter((step) => step.startsWith("\u2139\ufe0f"))
+    ).toEqual([]);
   });
 
   it("fails loud on a federated credential name collision", async () => {
@@ -397,6 +472,7 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
       ensureServicePrincipal: async () => ({
         ok: true,
         state: "created",
+        origin: "this_operation",
         objectId: null
       }),
       runAz: async (args) => {
@@ -570,6 +646,7 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
       ensureServicePrincipal: async () => ({
         ok: true,
         state: "created",
+        origin: "this_operation",
         objectId: null
       }),
       runAz: async (args) => {
@@ -606,6 +683,7 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
       ensureServicePrincipal: async () => ({
         ok: true,
         state: "created",
+        origin: "this_operation",
         objectId: null
       }),
       runAz: async (args) => {

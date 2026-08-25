@@ -216,6 +216,7 @@ async function successfulSetup(createApp: boolean) {
     ensureServicePrincipal: async () => ({
       ok: true,
       state: "reused",
+      origin: "pre_existing",
       objectId: OBJECT_ID
     }),
     persistMutationCheckpoint: async (input) => {

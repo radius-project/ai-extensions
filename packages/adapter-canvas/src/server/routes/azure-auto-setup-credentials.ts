@@ -465,8 +465,14 @@ export async function configureAzureAutoSetupCredentials({
     return false;
   }
   steps.push("✅ Service Principal ready");
+  if (servicePrincipal.state === "created_candidate") {
+    steps.push(
+      "ℹ️ The Service Principal was absent before this step and present after it, but the create command did not report success, so Radius cannot prove it created it and will not remove it during a rollback."
+    );
+  }
   dependencies.operations.recordServicePrincipal(operation, {
     state: servicePrincipal.state,
+    origin: servicePrincipal.origin,
     appId: clientId,
     ...(servicePrincipal.objectId ?
       { objectId: servicePrincipal.objectId }

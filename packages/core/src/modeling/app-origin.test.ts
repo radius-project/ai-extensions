@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   APP_ORIGIN_REPO_PATH,
   evaluateAppModelFreshness,
+  freshnessIdentity,
   normalizeAppBicep,
   parseAppOrigin,
   serializeAppOrigin,
@@ -132,6 +133,55 @@ describe("serializeAppOrigin", () => {
   });
 });
 
+describe("freshnessIdentity", () => {
+  const base = {
+    status: "unrecorded" as const,
+    stale: true,
+    requiresConfirmation: false,
+    reason: "r",
+    appBicepHash: "sha256:one",
+    origin: null
+  };
+
+  // Two verdicts that call for different actions must never share a key, or the
+  // second one is silently treated as already reported.
+  it("separates an unrecorded model that is safe to replace from one that is not", () => {
+    expect(freshnessIdentity(base)).not.toBe(
+      freshnessIdentity({ ...base, requiresConfirmation: true })
+    );
+  });
+
+  it("separates two different unrecorded models", () => {
+    expect(freshnessIdentity(base)).not.toBe(
+      freshnessIdentity({ ...base, appBicepHash: "sha256:two" })
+    );
+  });
+
+  it("is stable for the same verdict about the same model", () => {
+    expect(freshnessIdentity(base)).toBe(freshnessIdentity({ ...base }));
+  });
+
+  // A recorded model is identified by its record, so its own bytes add nothing.
+  // Leaving them out keeps a regeneration that reproduces identical content from
+  // reading as new evidence.
+  it("ignores the fingerprint when a record supplies the identity", () => {
+    const recorded = {
+      ...base,
+      status: "source-changed" as const,
+      origin: {
+        generatedAt: "2026-08-11T05:32:32.000Z",
+        sourceCommit: "a".repeat(40),
+        skillVersion: "0.1.0-test",
+        appBicepHash: "sha256:recorded"
+      }
+    };
+
+    expect(freshnessIdentity(recorded)).toBe(
+      freshnessIdentity({ ...recorded, appBicepHash: "sha256:different" })
+    );
+  });
+});
+
 describe("evaluateAppModelFreshness", () => {
   const current = {
     headCommit: "a".repeat(40),
@@ -172,39 +222,94 @@ describe("evaluateAppModelFreshness", () => {
     expect(result.origin).toEqual(origin());
   });
 
-  it("requires confirmation for a model with no origin", () => {
+  it("regenerates without confirmation a recoverable model with no origin", () => {
     const result = evaluateAppModelFreshness({
       ...current,
       model: MODEL,
-      originText: null
+      originText: null,
+      modelRecoverable: true
+    });
+
+    expect(result.status).toBe("unrecorded");
+    expect(result.stale).toBe(true);
+    expect(result.requiresConfirmation).toBe(false);
+    expect(result.reason).toContain(APP_ORIGIN_REPO_PATH);
+  });
+
+  // Without a record we cannot tell whether anyone edited the model, so the
+  // question that decides the overwrite is whether git can give it back.
+  it("requires confirmation for a model with no origin git cannot restore", () => {
+    const result = evaluateAppModelFreshness({
+      ...current,
+      model: MODEL,
+      originText: null,
+      modelRecoverable: false
     });
 
     expect(result.status).toBe("unrecorded");
     expect(result.stale).toBe(true);
     expect(result.requiresConfirmation).toBe(true);
-    expect(result.reason).toContain(APP_ORIGIN_REPO_PATH);
+    expect(result.reason).toContain("exists nowhere else");
   });
 
-  it("requires confirmation for a model with an unparseable origin", () => {
-    expect(
-      evaluateAppModelFreshness({
-        ...current,
-        model: MODEL,
-        originText: "{ not json"
-      }).status
-    ).toBe("unrecorded");
+  // Both cases ask, but they are not the same fact. Reporting the file as
+  // untracked when git was simply unreachable claims something we never
+  // established.
+  it("does not claim a model is untracked when git could not answer", () => {
+    const result = evaluateAppModelFreshness({
+      ...current,
+      model: MODEL,
+      originText: null,
+      modelRecoverable: undefined
+    });
+
+    expect(result.status).toBe("unrecorded");
+    expect(result.requiresConfirmation).toBe(true);
+    expect(result.reason).toContain("Git could not say");
+    expect(result.reason).not.toContain("is untracked");
   });
 
-  it("requires confirmation when the model was edited after generation", () => {
+  it("regenerates without confirmation a model with an unparseable origin", () => {
+    const result = evaluateAppModelFreshness({
+      ...current,
+      model: MODEL,
+      originText: "{ not json",
+      modelRecoverable: true
+    });
+
+    expect(result.status).toBe("unrecorded");
+    expect(result.requiresConfirmation).toBe(false);
+  });
+
+  // An edit on its own is not a reason to regenerate. The source and the
+  // generator still match, so the model describes the current source, and
+  // reporting it would ask the user to justify their own edit on every open.
+  it("leaves a hand edit alone when nothing else calls for a regeneration", () => {
     const result = evaluateAppModelFreshness({
       ...current,
       model: `${MODEL}// hand edit\n`,
       originText: serializeAppOrigin(origin())
     });
 
-    expect(result.status).toBe("edited");
+    expect(result.status).toBe("up-to-date");
+    expect(result.stale).toBe(false);
+    expect(result.requiresConfirmation).toBe(false);
+    expect(result.reason).toContain("edited after it was generated");
+  });
+
+  it("requires confirmation when a hand-edited model also needs regenerating", () => {
+    const result = evaluateAppModelFreshness({
+      ...current,
+      sourceChanged: true,
+      model: `${MODEL}// hand edit\n`,
+      originText: serializeAppOrigin(origin())
+    });
+
+    expect(result.status).toBe("manually-edited");
     expect(result.stale).toBe(true);
     expect(result.requiresConfirmation).toBe(true);
+    expect(result.reason).toContain("the source has changed");
+    expect(result.reason).toContain("would discard those edits");
   });
 
   it("does not call a line-ending-only difference an edit", () => {
@@ -321,7 +426,7 @@ describe("evaluateAppModelFreshness", () => {
         model: `${MODEL}// hand edit\n`,
         originText: serializeAppOrigin(origin())
       }).status
-    ).toBe("edited");
+    ).toBe("manually-edited");
   });
 
   it.each([

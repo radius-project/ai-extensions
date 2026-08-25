@@ -982,6 +982,91 @@ describe("initializeEnvironmentPage", () => {
     expect(requests).toBe(1);
   });
 
+  it("releases the create latch after a control command reaches terminal", async () => {
+    const page = fixture();
+    for (const id of [
+      PROGRESS_IDS.commands,
+      PROGRESS_IDS.commandButtons,
+      PROGRESS_IDS.commandNote,
+      PROGRESS_IDS.commandGuidance,
+      PROGRESS_IDS.commandStatus,
+      PROGRESS_IDS.commandError,
+      PROGRESS_IDS.title,
+      PROGRESS_IDS.activity
+    ]) {
+      const element = createFakeElement(id);
+      page.elements[id] = element;
+      page.browser.document.add(element);
+    }
+    let createRequests = 0;
+    let created = false;
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          operation:
+            created ?
+              {
+                operationId: "op-1",
+                environment: "dev",
+                provider: "azure",
+                state: "running",
+                terminalState: null,
+                summary: "Creating dev…",
+                startedAt: "2026-08-20T00:00:00.000Z",
+                actions: [
+                  {
+                    id: "stop",
+                    kind: "stop",
+                    label: "Stop setup",
+                    path: "/api/operations/op-1/stop",
+                    description: "Stop at the next safe boundary."
+                  }
+                ]
+              }
+            : null
+        })
+    );
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, () => {
+      createRequests += 1;
+      created = true;
+      return jsonResponse({ operationId: `op-${createRequests}` }, true, 202);
+    });
+    page.browser.net.handle("/api/operations/op-1/stop", () =>
+      jsonResponse({
+        operation: {
+          operationId: "op-1",
+          environment: "dev",
+          provider: "azure",
+          state: "cancelled",
+          terminalState: "cancelled",
+          summary: "Setup stopped",
+          startedAt: "2026-08-20T00:00:00.000Z",
+          endedAt: "2026-08-20T00:00:01.000Z"
+        }
+      })
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+    await flushPromises();
+    const stop = page.elements[PROGRESS_IDS.commandButtons].children[0];
+    expect(stop?.id).toBe("env-progress-command-stop");
+
+    stop?.dispatch("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(pageInput(page, "deploy-btn").disabled).toBe(false);
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+    expect(createRequests).toBe(2);
+  });
+
   it.each([
     [
       "HTTP failure",
@@ -1066,6 +1151,92 @@ describe("initializeEnvironmentPage", () => {
     expect(page.elements["deploy-btn"].textContent).toBe("Create Environment");
     expect(pageInput(page, "deploy-btn").disabled).toBe(false);
     expect(page.elements[PROGRESS_IDS.panel].style.display).not.toBe("none");
+  });
+
+  it("focuses the previous cleanup operation and releases the create latch", async () => {
+    const page = fixture();
+    for (const id of [
+      PROGRESS_IDS.commands,
+      PROGRESS_IDS.commandButtons,
+      PROGRESS_IDS.commandNote,
+      PROGRESS_IDS.commandGuidance,
+      PROGRESS_IDS.commandStatus,
+      PROGRESS_IDS.commandError,
+      PROGRESS_IDS.title,
+      PROGRESS_IDS.activity
+    ]) {
+      const element = createFakeElement(id);
+      page.elements[id] = element;
+      page.browser.document.add(element);
+    }
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    let createRequests = 0;
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, () => {
+      createRequests += 1;
+      return jsonResponse(
+        {
+          error:
+            "An earlier setup must finish rollback first. Then create a new environment for contoso/store.",
+          code: "previous-cleanup-required",
+          operationId: "op-cleanup"
+        },
+        false,
+        409
+      );
+    });
+    page.browser.net.handle("/api/operations/op-cleanup", () =>
+      jsonResponse({
+        operation: {
+          operationId: "op-cleanup",
+          environment: "old-dev",
+          provider: "azure",
+          state: "failed_partial",
+          terminalState: "failed_partial",
+          summary: "Earlier setup needs rollback",
+          failure: { message: "Setup stopped before cleanup." },
+          cleanup: {
+            state: "not_started",
+            created: [{ target: "radius-deploy (app-1)" }],
+            manualActionRequired: []
+          },
+          actions: [
+            {
+              id: "rollback",
+              kind: "rollback",
+              label: "Roll back resources",
+              description:
+                "Finish rollback before creating another environment.",
+              path: "/api/operations/op-cleanup/rollback",
+              pending: false,
+              tone: "danger",
+              placement: "row",
+              requiresConfirmation: false
+            }
+          ],
+          startedAt: "2026-08-22T10:00:00.000Z",
+          endedAt: "2026-08-22T10:01:00.000Z"
+        }
+      })
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(page.elements[PROGRESS_IDS.panel].style.display).not.toBe("none");
+    expect(page.elements[PROGRESS_IDS.panel].focusCount).toBe(2);
+    expect(page.elements[PROGRESS_IDS.commandButtons].children[0]?.id).toBe(
+      "env-progress-command-rollback"
+    );
+    expect(pageInput(page, "deploy-btn").disabled).toBe(false);
+    expect(page.elements["deploy-btn"].textContent).toBe("Create Environment");
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+    expect(createRequests).toBe(2);
   });
 
   it("supersedes a resumed poll before rendering a recorded create failure", async () => {

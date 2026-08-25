@@ -12,6 +12,7 @@ import {
 import { createLivenessSourceRoutes } from "./routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./routes/deployments.js";
 import { createOperationsStatusRoutes } from "./routes/operations-status.js";
+import { createOperationsControlRoutes } from "./routes/operations-control.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./routes/azure-discovery.js";
 import { createAzureAutoSetupRoutes } from "./routes/azure-auto-setup.js";
@@ -49,6 +50,7 @@ const productionHandlers = {
       isUuid: () => false,
       buildStages: () => [],
       createOperation: () => ({ operationId: "", currentStage: null }),
+      startConflict: () => null,
       claimSelectionHandle: () => ({
         ok: true,
         login: "octocat",
@@ -79,12 +81,24 @@ const productionHandlers = {
       inputRequiredState: "input_required"
     }
   ),
+  // Construction-only, like the create-environment routes below: this suite
+  // asserts table shape and ownership, and the control behavior is covered by
+  // routes/operations-control.test.ts and the HTTP integration suite.
+  ...createOperationsControlRoutes({
+    get: () => null,
+    acquireForRetry: () => ({ ok: true }),
+    persistOperations: () => Promise.resolve(),
+    isPullRequestMerged: () => Promise.resolve(false),
+    schedule: () => true,
+    invalidateEnvironmentListing: () => {}
+  }),
   ...createRepositoriesRoutes({
     cliExec: () => {},
     readInstanceState: () => undefined,
     repoMatchesWorkspace: () => false
   }),
   ...createDeploymentsRoutes({
+    isValidRepoSlug: () => true,
     readInstanceEntry: () => undefined,
     triggerDeployRepairHandoff: () => false,
     triggerDeployFailureNotice: () => false,
@@ -119,6 +133,13 @@ const productionHandlers = {
           "unexpected deploy dispatch from the route-table suite"
         );
       }
+    },
+    abandonment: {
+      abandon: () => {
+        throw new Error(
+          "unexpected deployment abandonment from the route-table suite"
+        );
+      }
     }
   }),
   ...createAzureDiscoveryRoutes({
@@ -139,6 +160,9 @@ const productionHandlers = {
         mismatch: false,
         actingHasWorkflow: false,
         actingHasPackages: false,
+        packagesLogin: "",
+        packagesHasWrite: false,
+        packagesCredentialSource: "unavailable",
         reason: "",
         accounts: []
       }),
@@ -300,6 +324,7 @@ const productionHandlers = {
     envListCacheGet: () => undefined,
     envListCacheSet: () => {},
     envListCacheDelete: () => {},
+    envListCacheGeneration: () => 0,
     envListTtlMs: 0,
     kickoffWorkflowSync: () => {},
     now: () => 0,
@@ -350,6 +375,8 @@ const productionHandlers = {
       Promise.resolve({ status: 500, body: { error: "", code: "" } }),
     persistMutationCheckpoint: () => Promise.resolve(true),
     persistBestEffort: () => Promise.resolve(true),
+    isTerminalState: () => false,
+    guardStopBoundary: () => Promise.resolve(true),
     runAzCommand: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
     preflightRepoAdmin: () => Promise.resolve(""),
     preflightGhcrPackageWriteAccess: () =>
@@ -364,6 +391,7 @@ const productionHandlers = {
     tempFile: { write: () => "", remove: () => {} },
     setCanonicalEnvironment: () => {},
     recordGitHubEnvironment: () => {},
+    promoteCreatedGitHubEnvironment: () => false,
     envListCacheDelete: () => {},
     ociStateBackend: "oci",
     defaultStateArchive: "latest",
@@ -426,8 +454,14 @@ describe("server route ownership boundary", () => {
     ).toEqual([
       "POST /api/github-account",
       "POST /api/operations",
+      "POST /api/abandon-deployment",
       "POST /api/operations/:operationId/resume/:code",
-      "POST /api/operations/:operationId/abandon"
+      "POST /api/operations/:operationId/abandon",
+      "POST /api/operations/:operationId/stop",
+      "POST /api/operations/:operationId/continue",
+      "POST /api/operations/:operationId/rollback",
+      "POST /api/operations/:operationId/exit",
+      "POST /api/operations/:operationId/retry/:retryKind"
     ]);
     expect(() => assertRouteTable(table)).not.toThrow();
   });
@@ -651,5 +685,45 @@ describe("server route ownership boundary", () => {
         prefix
       ])
     ).not.toThrow();
+  });
+
+  it.each([
+    ["template first", false],
+    ["exact first", true]
+  ])(
+    "rejects an exact path that overlaps a template with %s",
+    (_label, exactFirst) => {
+      const template = table.find(
+        (route) =>
+          route.path === "/api/operations/:operationId/stop" &&
+          route.method === "POST"
+      ) as ServerRoute;
+      const exact = {
+        ...template,
+        path: "/api/operations/op-1/stop",
+        match: "exact"
+      } as ServerRoute;
+      const routes = exactFirst ? [exact, template] : [template, exact];
+
+      expect(() => assertRouteTable(routes)).toThrow(
+        /overlaps earlier template route/
+      );
+    }
+  );
+
+  it("rejects two template shapes that can claim the same request", () => {
+    const first = table.find(
+      (route) =>
+        route.path === "/api/operations/:operationId/stop" &&
+        route.method === "POST"
+    ) as ServerRoute;
+    const second = {
+      ...first,
+      path: "/api/operations/:operationId/:command"
+    } as ServerRoute;
+
+    expect(() => assertRouteTable([first, second])).toThrow(
+      /overlaps earlier template route/
+    );
   });
 });

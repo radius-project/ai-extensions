@@ -182,11 +182,15 @@ ${confirmDialogMarkup()}
 /* Progress panel — inline, non-blocking, and deliberately not a progress bar. */
 #env-progress-panel { margin:0 0 16px; padding:14px 16px; border:1px solid var(--rad-stroke); border-radius:10px; background:var(--rad-surface); box-shadow:0 1px 2px var(--rad-shadow); }
 .env-progress__head { display:flex; align-items:flex-start; gap:12px; }
-.env-progress__spinner { flex:0 0 auto; width:22px; height:22px; margin-top:1px; border-radius:50%; background:conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite; }
+/* Motion belongs to work in progress only: the spinner animates while the
+   operation is still running and settles the moment it reaches any terminal
+   state, including a completed rollback. */
+.env-progress__spinner { flex:0 0 auto; width:22px; height:22px; margin-top:1px; border-radius:50%; background:var(--rad-stroke); }
+.env-progress--active .env-progress__spinner { background:conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite; }
 .env-progress--done .env-progress__spinner { animation:none; background:var(--rad-success-solid, var(--rad-info)); }
 .env-progress--failed .env-progress__spinner { animation:none; background:var(--rad-danger); }
 /* State is never carried by motion or color alone. */
-@media (prefers-reduced-motion: reduce) { .env-progress__spinner { animation:none; } }
+@media (prefers-reduced-motion: reduce) { .env-progress--active .env-progress__spinner { animation:none; } }
 .env-progress__headtext { flex:1 1 auto; min-width:0; }
 .env-progress__title { font-size:14px; font-weight:600; color:var(--rad-text); line-height:1.4; }
 .env-progress__activity { font-size:12px; color:var(--rad-text-tertiary); margin-top:2px; line-height:1.4; }
@@ -202,6 +206,7 @@ ${confirmDialogMarkup()}
 .env-progress__failure-label { font-size:12px; font-weight:600; color:var(--rad-text); margin-bottom:4px; }
 .env-progress__failure-block { display:flex; flex-direction:column; gap:4px; }
 .env-progress__failure-list { margin:0; padding-left:18px; font-size:12px; color:var(--rad-text); line-height:1.5; }
+.env-progress__state { margin-top:10px; padding:10px 12px; border-radius:8px; background:var(--rad-bg-subtle); border:1px solid var(--rad-stroke); display:flex; flex-direction:column; gap:8px; }
 .env-progress__details { margin-top:12px; }
 .env-progress__details > summary { font-size:12px; color:var(--rad-text-tertiary); cursor:pointer; }
 .env-progress__steps { list-style:none; margin:8px 0 0; padding:0; display:flex; flex-direction:column; gap:4px; max-height:220px; overflow:auto; }
@@ -209,6 +214,24 @@ ${confirmDialogMarkup()}
 .env-progress__step--warning { color:var(--rad-text); }
 .env-progress__step--failed { color:var(--rad-danger); }
 .env-progress__actions { display:flex; gap:8px; margin-top:12px; }
+.env-progress__bottom-buttons { display:flex; gap:8px; flex-wrap:wrap; }
+.env-progress__commands { display:flex; flex-direction:column; gap:6px; margin-top:12px; }
+.env-progress__command-buttons { display:flex; gap:8px; flex-wrap:wrap; }
+.env-progress__command-note { font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; }
+.env-progress__command-guidance { margin:0; padding-left:18px; font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; }
+.env-progress__command-status { font-size:12px; color:var(--rad-text); line-height:1.5; }
+.env-progress__command-error { font-size:12px; color:var(--rad-danger); line-height:1.5; }
+/* The stopped and rollback states get their own heading line: a stop is neither
+   a success nor a failure, and a rollback that left something behind is not a
+   failed setup. */
+.env-progress__headline-note { font-size:12px; color:var(--rad-text-tertiary); margin-top:4px; line-height:1.5; }
+.env-progress--active.env-progress--cleaning .env-progress__spinner { background:conic-gradient(var(--rad-danger) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); }
+/* Rollback confirmation dialog. Destructive cloud deletions are confirmed
+   against the server's own preview before anything is sent. */
+.env-rollback__panel { background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:520px; width:92%; max-height:80vh; overflow:auto; display:flex; flex-direction:column; gap:10px; }
+.env-rollback__title { font-size:15px; font-weight:600; line-height:1.4; color:var(--rad-text); }
+.env-rollback__intro { font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; }
+.env-rollback__buttons { display:flex; justify-content:flex-end; gap:8px; margin-top:6px; }
 /* Credentials success banner (green outline, Figma "Successfully created credential profile"). */
 .rad-cred-banner { display:flex; align-items:center; gap:8px; padding:12px 14px; margin:0 0 16px; border-radius:8px; background:color-mix(in srgb, var(--rad-primary) 8%, transparent); border:1px solid var(--rad-primary); }
 .rad-cred-banner__check { flex:0 0 auto; color:var(--rad-primary); font-weight:700; }

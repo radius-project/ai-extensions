@@ -69,8 +69,11 @@ describe("environmentPage", () => {
       "env-progress-stages",
       "env-progress-steps",
       "env-progress-failure",
-      "env-progress-resume",
       "env-progress-dismiss",
+      "env-progress-bottom-buttons",
+      "env-progress-state",
+      "env-progress-commands",
+      "env-progress-command-buttons",
       "env-smr-modal",
       "env-appselect-modal",
       "env-profile-button",
@@ -214,5 +217,61 @@ describe("environmentPage deployment result", () => {
     });
     expect(html).not.toContain("<script>alert(1)</script>");
     expectSafeInlineScripts(html);
+  });
+});
+
+describe("environmentPage — stop, continue and rollback styling", () => {
+  const html = () => environmentPage({ contextRepo: "octo/app" });
+
+  it("styles the rollback dialog and its destructive control from theme tokens", () => {
+    const markup = html();
+    expect(markup).toContain(
+      ".env-rollback__panel { background:var(--rad-surface)"
+    );
+    expect(markup).toContain(".env-rollback__title {");
+    expect(markup).toContain(".env-rollback__buttons {");
+    expect(markup).toContain('class="rad-btn rad-btn--danger"');
+    for (const literal of ["#fff;", "rgba(0,0,0"]) {
+      const panelStyles = markup.slice(
+        markup.indexOf(".env-rollback__panel"),
+        markup.indexOf(".env-rollback__buttons")
+      );
+      expect(panelStyles).not.toContain(literal);
+    }
+  });
+
+  it("distinguishes a running rollback from a running setup without colour alone", () => {
+    const markup = html();
+    expect(markup).toContain(
+      ".env-progress--active.env-progress--cleaning .env-progress__spinner"
+    );
+    expect(markup).toContain(".env-progress__headline-note {");
+    expect(markup).toContain(".env-progress__command-guidance {");
+  });
+
+  it("animates the progress spinner only while an operation is still working", () => {
+    const markup = html();
+    // The base rule carries no animation, so a panel that reached any terminal
+    // state — including a completed rollback — settles instead of spinning on.
+    const activeRule = markup.indexOf(
+      ".env-progress--active .env-progress__spinner {"
+    );
+    const base = markup.slice(
+      markup.lastIndexOf(".env-progress__spinner {", activeRule),
+      activeRule
+    );
+    expect(base).not.toContain("animation:spin");
+    expect(markup).toContain(
+      ".env-progress--active .env-progress__spinner { background:conic-gradient(var(--rad-info) 0turn 0.75turn, var(--rad-stroke) 0.75turn 1turn); animation:spin 1s linear infinite; }"
+    );
+    expect(markup).toContain(
+      "@media (prefers-reduced-motion: reduce) { .env-progress--active .env-progress__spinner { animation:none; } }"
+    );
+  });
+
+  it("keeps the whole rollback confirmation inside one parseable script page", () => {
+    expectSafeInlineScripts(
+      environmentPage({ contextRepo: HOSTILE_STATE, envName: HOSTILE_STATE })
+    );
   });
 });

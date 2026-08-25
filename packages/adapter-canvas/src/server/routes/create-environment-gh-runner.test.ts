@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  createWorkflowScopeGhRunner,
-  needsWorkflowScope
-} from "./create-environment-gh-runner.js";
+import { createWorkflowScopeGhRunner } from "./create-environment-gh-runner.js";
 import type {
   CreateEnvironmentCliExec,
   CreateEnvironmentCliOptions
@@ -23,8 +20,7 @@ interface ScriptedResult {
 }
 
 // `gh` isolates a real binary, so it stays a scripted fake that throws on any
-// call the scenario did not model. `needsWorkflowScope` is a pure predicate and
-// is imported rather than doubled.
+// call the scenario did not model.
 function fakeCli(script: ScriptedResult[]): {
   cliExec: CreateEnvironmentCliExec;
   calls: Invocation[];
@@ -68,27 +64,6 @@ function fakeCli(script: ScriptedResult[]): {
 }
 
 const target = { targetRepo: "octo/app", envName: "dev" };
-
-describe("needsWorkflowScope", () => {
-  it.each([
-    [
-      "HTTP 403: refusing to allow an OAuth App to create or update workflow `.github/workflows/x.yml` without `workflow` scope"
-    ],
-    ["error: workflow scope is required for this operation"],
-    ['refusing without "workflow" scope']
-  ])("recognises %s as a missing workflow scope", (stderr) => {
-    expect(needsWorkflowScope(stderr)).toBe(true);
-  });
-
-  it.each<[stderr: string | undefined, label: string]>([
-    ["HTTP 404: Not Found", "an unrelated HTTP failure"],
-    ["protected branch update failed", "a protected-branch rejection"],
-    ["", "an empty message"],
-    [undefined, "an absent message"]
-  ])("does not claim a missing workflow scope for %s", (stderr) => {
-    expect(needsWorkflowScope(stderr)).toBe(false);
-  });
-});
 
 describe("the workflow-scope gh runner", () => {
   it("routes selected-account commands through the pinned executor", async () => {

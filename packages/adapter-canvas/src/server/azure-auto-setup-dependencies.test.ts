@@ -71,6 +71,7 @@ describe("Azure auto-setup dependency composition", () => {
     const ensureServicePrincipal = vi.fn(async () => ({
       ok: true as const,
       state: "reused" as const,
+      origin: "pre_existing" as const,
       objectId: null
     }));
     const finalizeSetupFailure = vi.fn(async () => ({

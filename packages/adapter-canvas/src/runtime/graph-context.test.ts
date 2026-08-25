@@ -289,8 +289,45 @@ describe("resolveAppModelStatus", () => {
     );
   });
 
-  it("reports a model with no origin record as requiring confirmation", async () => {
+  it("reports a model with no origin record as refreshable without confirmation", async () => {
     const { resolveAppModelStatus } = helpers({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
+      headCommits: { "workspace:/workspace": COMMIT }
+    });
+
+    const status = await resolveAppModelStatus(
+      "acme/widgets",
+      "main",
+      WORKSPACE_STATE
+    );
+
+    expect(status.freshness.status).toBe("unrecorded");
+    expect(status.freshness.requiresConfirmation).toBe(false);
+  });
+
+  it("reports a hand-edited stale model as requiring confirmation", async () => {
+    const { resolveAppModelStatus } = helpers({
+      sourceChangedSince: true,
+      bicepByRepoBranch: { "workspace:acme/widgets@main": `${MODEL}\n// edit` },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: origin()
+      },
+      headCommits: { "workspace:/workspace": COMMIT }
+    });
+
+    const status = await resolveAppModelStatus(
+      "acme/widgets",
+      "main",
+      WORKSPACE_STATE
+    );
+
+    expect(status.freshness.status).toBe("manually-edited");
+    expect(status.freshness.requiresConfirmation).toBe(true);
+  });
+
+  it("requires confirmation for a model with no record git cannot restore", async () => {
+    const { resolveAppModelStatus } = helpers({
+      modelRecoverable: false,
       bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
       headCommits: { "workspace:/workspace": COMMIT }
     });
@@ -305,8 +342,47 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.requiresConfirmation).toBe(true);
   });
 
-  it("reports a hand-edited model as requiring confirmation", async () => {
+  // A git failure must not read as "safe to replace". The model could be
+  // untracked and we simply could not see it, so the user is asked instead.
+  it("asks for confirmation when the recoverability check throws", async () => {
+    const { resolveAppModelStatus, deps } = helpers({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
+      headCommits: { "workspace:/workspace": COMMIT }
+    });
+    deps.appModel.workspaceModelRecoverable = async () => {
+      throw new Error("git exploded");
+    };
+
+    const status = await resolveAppModelStatus(
+      "acme/widgets",
+      "main",
+      WORKSPACE_STATE
+    );
+
+    expect(status.freshness.status).toBe("unrecorded");
+    expect(status.freshness.requiresConfirmation).toBe(true);
+    expect(status.freshness.reason).toContain("Git could not say");
+  });
+
+  // Asking git costs a subprocess, so it is only worth it when the answer can
+  // change what we do: on the workspace branch, with no record to judge by.
+  it("does not ask git about recoverability once a record exists", async () => {
+    const { resolveAppModelStatus, deps } = helpers({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: origin()
+      },
+      headCommits: { "workspace:/workspace": COMMIT }
+    });
+
+    await resolveAppModelStatus("acme/widgets", "main", WORKSPACE_STATE);
+
+    expect(deps.appModel.workspaceModelRecoverable).not.toHaveBeenCalled();
+  });
+
+  it("stays quiet about a hand edit when nothing else needs regenerating", async () => {
     const { resolveAppModelStatus } = helpers({
+      sourceChangedSince: false,
       bicepByRepoBranch: { "workspace:acme/widgets@main": `${MODEL}\n// edit` },
       filesByRepoBranch: {
         [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: origin()
@@ -320,8 +396,8 @@ describe("resolveAppModelStatus", () => {
       WORKSPACE_STATE
     );
 
-    expect(status.freshness.status).toBe("edited");
-    expect(status.freshness.requiresConfirmation).toBe(true);
+    expect(status.freshness.stale).toBe(false);
+    expect(status.freshness.requiresConfirmation).toBe(false);
   });
 
   it("fails open when the origin record cannot be read", async () => {

@@ -46,6 +46,7 @@ import {
   toSafeRepoRelPath,
   workspaceFileExists,
   workspaceHeadCommit,
+  workspaceModelRecoverable,
   workspaceSourceChangedSince
 } from "./workspace.js";
 import { radArtifactsDirForSelection } from "./remote-rad-artifacts.js";
@@ -190,6 +191,7 @@ const dependencies: RadiusExtensionDependencies = {
   appModel: {
     generatorVersion: createGeneratorVersionReader(),
     workspaceHeadCommit,
+    workspaceModelRecoverable,
     workspaceSourceChangedSince,
     branchHeadCommit: (repo, branch) => getBranchHeadSha(repo, branch),
     fetchWorkspaceFile,

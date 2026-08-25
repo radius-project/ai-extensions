@@ -149,6 +149,19 @@ export interface EnvironmentsDependencies {
   envListCacheGet(repo: string): { at: number; payload: unknown } | undefined;
   envListCacheSet(repo: string, entry: { at: number; payload: unknown }): void;
   envListCacheDelete(repo: string): void;
+  /**
+   * How many times this repository's listing has been invalidated.
+   *
+   * A listing is assembled from many `gh` calls, so a rollback that deletes the
+   * GitHub environment while one is in flight would otherwise have its
+   * invalidation overwritten the moment that listing finished — the picker
+   * would keep serving the removed environment, under the status its last
+   * verify run left behind, until the TTL expired. The counter lets the route
+   * refuse to cache a payload that describes state the deleter has already
+   * changed. It only ever increases, and it is never used to decide what a
+   * response says: an in-flight listing still answers with what it read.
+   */
+  envListCacheGeneration(repo: string): number;
   envListTtlMs: number;
   kickoffWorkflowSync(
     repo: string,

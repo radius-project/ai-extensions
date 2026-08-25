@@ -23,6 +23,7 @@ import {
   parseAppTags,
   parseRadiusAppProvenanceTags,
   decideRadiusAppOwnership,
+  isRadiusProvenanceMatch,
   parseDirectoryObjectIds,
   discoverStatusText,
   decideAppSelection,
@@ -1454,6 +1455,65 @@ describe("Radius provenance ownership decisions", () => {
     expect(r.reason).toContain("current signed-in user is not listed");
     expect(r.reason).toContain("orphaned");
     expect(r.reason).toContain("manual");
+  });
+
+  // The same predicate also answers "why is this reused application being
+  // kept", so it is pinned directly rather than only through the orphan path.
+  it.each([
+    [
+      "the repository and environment both match",
+      [
+        "radius-managed",
+        "radius-repo:octo-org/octo-repo",
+        "radius-environment:dev"
+      ],
+      true
+    ],
+    [
+      "the tags name a different environment",
+      [
+        "radius-managed",
+        "radius-repo:octo-org/octo-repo",
+        "radius-environment:prod"
+      ],
+      false
+    ],
+    [
+      "the tags name a different repository",
+      [
+        "radius-managed",
+        "radius-repo:octo-org/other",
+        "radius-environment:dev"
+      ],
+      false
+    ],
+    [
+      "the managed marker is missing",
+      ["radius-repo:octo-org/octo-repo", "radius-environment:dev"],
+      false
+    ],
+    ["there are no tags at all", [], false]
+  ])("reports Radius provenance as %s -> %s", (_label, tags, expected) => {
+    expect(
+      isRadiusProvenanceMatch({
+        tags,
+        repo: "octo-org/octo-repo",
+        environment: "dev"
+      })
+    ).toBe(expected);
+  });
+
+  it("claims no provenance without an expected repository and environment", () => {
+    expect(
+      isRadiusProvenanceMatch({
+        tags: [
+          "radius-managed",
+          "radius-repo:octo-org/octo-repo",
+          "radius-environment:dev"
+        ]
+      })
+    ).toBe(false);
+    expect(isRadiusProvenanceMatch()).toBe(false);
   });
 });
 

@@ -348,9 +348,16 @@ export async function handleAzureAutoSetup(
       const started = dependencies.operations.start(operation);
       if (!started.ok) {
         operation = null;
+        const previousCleanup = started.reason === "previous-cleanup-required";
         respond(context, 409, {
-          error: `Setup is already running for ${targetRepo}.`,
-          code: "operation-in-progress",
+          error:
+            previousCleanup ?
+              `An earlier setup for ${targetRepo} must finish rollback before a new setup can start.`
+            : `Setup is already running for ${targetRepo}.`,
+          code:
+            previousCleanup ?
+              "previous-cleanup-required"
+            : "operation-in-progress",
           operationId: started.conflict.operationId
         });
         return;

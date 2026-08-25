@@ -1679,8 +1679,10 @@ describe("deployed pane state", () => {
   function deployedPage() {
     const browser = createFakeBrowser();
     const button = createFakeInput("deployed-delete-btn");
+    const stopTrackingButton = createFakeInput("deployed-stop-tracking-btn");
     const hint = createFakeElement("deployed-subtitle-hint");
     browser.document.add(button);
+    browser.document.add(stopTrackingButton);
     browser.document.add(hint);
     const created = selects(browser, [
       "deployed-app-select",
@@ -1688,7 +1690,7 @@ describe("deployed pane state", () => {
     ]);
     created["deployed-app-select"].value = "store";
     created["deployed-env-select"].value = "dev";
-    return { browser, button, hint, created };
+    return { browser, button, stopTrackingButton, hint, created };
   }
 
   it("offers environment creation regardless of an unreadable deployment listing", () => {
@@ -1804,6 +1806,66 @@ describe("deployed pane state", () => {
     expect(button.className).toBe("rad-btn rad-btn--danger-outline");
     expect(button.disabled).toBe(false);
     expect(hint.innerHTML).toContain("Delete Deployment");
+  });
+
+  it("keeps Delete as the only action after a failed deployment", () => {
+    const { browser, button, stopTrackingButton, hint } = deployedPage();
+
+    const mode = applyDeployedEnvState(
+      browser.context,
+      createDeployedState(),
+      true,
+      true,
+      "failed",
+      false
+    );
+
+    expect(mode).toBe("delete");
+    expect(button.textContent).toBe("Delete Deployment");
+    expect(button.className).toBe("rad-btn rad-btn--danger-outline");
+    expect(button.disabled).toBe(false);
+    expect(stopTrackingButton.style.display).toBe("none");
+    expect(hint.innerHTML).toContain("Delete Deployment");
+  });
+
+  it("offers stop tracking only after teardown fails", () => {
+    const { browser, button, stopTrackingButton, hint } = deployedPage();
+
+    const mode = applyDeployedEnvState(
+      browser.context,
+      createDeployedState(),
+      true,
+      true,
+      "delete-failed",
+      false
+    );
+
+    expect(mode).toBe("delete");
+    expect(button.textContent).toBe("Retry Delete");
+    expect(button.disabled).toBe(false);
+    expect(stopTrackingButton.style.display).toBe("");
+    expect(stopTrackingButton.disabled).toBe(false);
+    expect(hint.innerHTML).toContain("previous teardown");
+    expect(hint.innerHTML).toContain("stop tracking");
+  });
+
+  it("fails teardown recovery closed when the deployment listing is unavailable", () => {
+    const { browser, button, stopTrackingButton } = deployedPage();
+
+    applyDeployedEnvState(
+      browser.context,
+      createDeployedState(),
+      true,
+      true,
+      "delete-failed",
+      true
+    );
+
+    expect(button.disabled).toBe(true);
+    expect(stopTrackingButton.disabled).toBe(true);
+    expect(stopTrackingButton.getAttribute("title")).toContain(
+      "could not be loaded"
+    );
   });
 
   it("blocks deletion when the deployment state cannot be read", () => {

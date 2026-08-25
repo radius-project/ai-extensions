@@ -2,7 +2,7 @@
 
 - **Author**: Ryan Waite (@ryanwaite)
 - **Date**: 2026-08
-- **Status**: Implemented in phases. The operation record, persistence and restart reconciliation, inline panel, ambient chip, timeline announcement, PR-path terminal state, and server-owned `POST /api/operations` start contract are implemented. Cooperative stop remains modeled but unwired.
+- **Status**: Implemented in phases. The operation record, persistence and restart reconciliation, inline panel, ambient chip, timeline announcement, PR-path terminal state, and server-owned `POST /api/operations` start contract are implemented. Cooperative stop and the setup, verification, and cleanup retries are now wired end to end.
 
 ## Overview
 
@@ -21,6 +21,8 @@ Today, environment creation is tied to the page that started it. The page sends 
 The design changes two parts of that arrangement, and draft PR #244 prototypes both. It replaces the blocking modal with an inline panel and records setup as an `OperationRecord` that the page polls through `/api/operations`. It also changes the host keepalive condition from “the canvas was recently active or a deploy is running” to “the canvas was recently active, a deploy is running, or `setupInFlight()` reports a live setup operation.” Setup itself still runs inside the same two browser requests. The prototype therefore makes the process lifetime aware of setup and lets another page rediscover its progress, but it does not yet detach the cloud work from the browser request that started it.
 
 The background-start API makes the final ownership change. The server accepts one request, registers and persists the operation, returns `202 Accepted` with an operation ID and status URL, and schedules setup after the response has ended. The user can close the canvas entirely, which stops `/api/ping` and removes recent page activity from the keepalive decision. While the server task is executing, `setupInFlight()` keeps the host channel active. An operation paused in `input_required` retains the repository lock and persisted prompt but does not hold the extension process alive indefinitely.
+
+A terminal operation also retains the repository lock while it has proven-owned artifacts that its first **Rollback** or **Retry rollback** can still remove. A new Create Environment request receives `409 previous-cleanup-required` with the earlier operation ID, and the browser renders that operation's existing rollback controls and manual guidance instead of creating another operation. Reused resources and ambiguous or non-deletable candidates do not hold this lock. The lock and persisted operation store are scoped to one hydrated Copilot App session; separate Copilot sessions do not coordinate cleanup authority, and cross-session locking is outside this design.
 
 Prototype status in draft PR #244: the operation record, inline panel, status chip, completion entry, and pull-request outcome are working there. Detached background execution, cooperative stop, live updates for every individual cloud action, and Copilot diagnosis are still future work. [Findings from draft PR #244](#findings-from-draft-pr-244) records what building and testing the prototype changed.
 
@@ -557,22 +559,80 @@ The collision is reachable because the agent's `create_environment` tool can cal
 
 The prototype in draft PR #244 gives each setup an operation ID and permits one running setup per repository. The first setup request returns the ID, and the second request must present it along with the same repository, environment, provider, and expected stage. An unrelated caller receives `409 Conflict` instead of adopting or overwriting the running operation. Records remain in memory, so an extension restart still loses them.
 
+The implemented durable registry keeps that admission rule within one hydrated Copilot App Session. A live operation owns execution admission, while a terminal operation retains cleanup admission only when its ledger still gives that same operation a safe first rollback or retry-rollback target. A different Create Environment request then receives `409 previous-cleanup-required` with the blocking operation ID, and the browser reopens that record instead of registering another operation. Reused resources and ambiguous candidates never retain admission because the earlier operation cannot delete them. Blocking terminal records are exempt from age and count pruning until cleanup records every removable target as deleted or not found; normal retention applies again after that durable resolution. This does not coordinate separate Copilot App Sessions or introduce a cross-session repository lock.
+
 #### Record the target and acting identity before permission checks
 
 Today, the repository-admin check can fail before the server records the requested repository, environment, cloud target, and acting GitHub account. The response then contains little more than a 403 message. The prototype in draft PR #244 records those safe fields first, so the operation can explain which account lacked permission for which repository and environment.
 
 ### Stop and cancellation
 
-The product must not terminate a cloud command halfway through or promise automatic rollback. It can stop safely between commands. Cleanup is bounded to the current operation only: before the commit point, Radius rolls back Azure artifacts from the current attempt, retains committed workflow files as reusable artifacts, and leaves a GitHub Environment in place when GitHub's API cannot prove this request created it; after the commit point, it keeps the committed workflows and GHCR package and only reports the later verification failure. It never reclaims an unowned app just because Radius tagged it. A cooperative stop limits further changes and then reports what exists.
+The product must not terminate a cloud command halfway through or promise automatic rollback. It can stop safely between commands. Cleanup is bounded to the current operation only, and it is bounded by what the record can prove. Before the workflow commit point, Radius rolls back the Azure artifacts the current attempt created and leaves a GitHub Environment in place when GitHub's API cannot prove this request created it. After the commit point, the completion boundary is a **successful credential verification**: until it passes, the environment is an unfinished attempt the customer may abandon, so a rollback additionally reverts the workflow files this operation committed — but only after proving every one of them is still byte-for-byte the artifact Radius wrote. It never reclaims an unowned app just because Radius tagged it. A cooperative stop limits further changes and then reports what exists.
 
 What ships:
 
 - **Leave running** — collapse the panel or navigate away without cancelling. Depends on the keepalive fix.
 - **Stop after the current action** — cooperative cancellation checked between mutations, never mid-call.
 - **A partial-state summary** — what exists, what did not happen, what to clean up.
-- **Current-operation rollback** — on a fatal failure before verification dispatch or PR handoff, delete only Azure artifacts that the ledger proves this attempt created. Retain pre-existing resources, committed workflow files, the GHCR package, and any GitHub Environment whose creator cannot be proven atomically.
+- **Current-operation rollback** — delete only artifacts the ledger proves this attempt created. Before the commit point that is the Azure and GitHub resources; after it, and while verification has not yet succeeded, it also includes the committed workflow files, each verified against the commit, blob, and content digest saved at write time. Retain pre-existing resources, the GHCR package, and any GitHub Environment whose creator cannot be proven atomically.
 
 Idempotent re-run is _recovery_, not _control_, and it is not a substitute for one. Much of the operation is already idempotent — it detects and reuses an existing App Registration and skips existing federated credentials — which is what makes the panel's retry button viable.
+
+#### Stopping is not rolling back
+
+Stopping and undoing are two decisions, and collapsing them into one control is what made **Stop setup** confusing: it ends the attempt, and the terminal screen then emphasised **Retry setup** while the customer was looking for a way to remove what had just been created.
+
+They are now separate steps with separate words:
+
+| Term                            | Meaning                                                                                                        |
+|---------------------------------|----------------------------------------------------------------------------------------------------------------|
+| **Stop setup**                  | Stop creating or changing more resources after the current safe boundary.                                      |
+| **Continue setup**              | Resume a stopped operation from the first unfinished safe step, reusing the retained ledger.                   |
+| **Retry setup**                 | Repeat a continuation attempt that started and then failed. Never the first forward action after a stop.       |
+| **Roll back created resources** | Remove the resources this operation proved it created, before it committed any workflow file.                  |
+| **Roll back environment setup** | The same command after the commit point: revert the committed workflow files, then remove what they depend on. |
+| **Retry rollback**              | Repeat cleanup for the proven-owned resources a previous rollback could not delete.                            |
+| **Delete Environment**          | Remove a _verified_ environment. A finished environment is never rolled back through its setup record.         |
+
+A stopped record therefore projects both paths, forward first, and neither is a default:
+
+1. **Continue setup** — `POST /api/operations/{operationId}/continue`, tone `primary`, no confirmation, carrying the resume step and the resources a continuation will reuse.
+2. **Roll back created resources** — `POST /api/operations/{operationId}/rollback`, tone `danger`, `requiresConfirmation: true`, carrying the server's own preview of what it will remove, what it will keep, and what still needs the customer.
+
+When only one path is safe, the panel says why the other is not: Radius created nothing it can prove it owns, it cannot prove the committed workflow files are unchanged, credential verification already succeeded, or ownership of a remaining resource cannot be proven. When neither is safe, the manual action stands alone and the repository lock is released.
+
+The first rollback selects **every** present proven-owned artifact and deletes in reverse dependency order — committed workflow files, GitHub environment, Azure role assignments, federated credentials, Service Principal, App Registration — recording each result before the next deletion starts. **Retry rollback** selects only the unresolved warning targets from the latest attempt and preserves the earlier results in the summary. Reused resources, `created_candidate` resources, and anything identified only by name are never deletion targets. A confirmed rollback is one cooperative server-owned command: cleanup has no pause control, so the panel offers no **Stop setup** while it runs.
+
+Retry rollback is also the reconciliation action after a customer deletes a target manually. A confirmed absence records `not_found`, removes that target from the operation's cleanup authority, and allows the next Create Environment request once no removable target remains; there is no separate recheck command.
+
+##### Reverting committed workflow files
+
+Workflow files are the only rollback target that lives in the customer's repository, so they come first and they gate everything after them. Removing the GitHub environment or the cloud identity while an installed workflow still references them leaves the repository with a job that fails at Azure Login instead of one that is simply gone.
+
+The ledger therefore saves, at the moment of each write: the branch, the commit the write created, the blob SHA GitHub returned, the sha256 of the exact bytes Radius sent, and the blob the path held beforehand. A record written before those fields existed loads with them set to `null`, which refuses a post-commit rollback rather than acting on an assumption.
+
+A confirmed post-commit rollback then:
+
+1. Resolves where each file is now. A file committed to a setup branch that has since merged is looked for on the base branch, because a git blob id is content-addressed and still identifies it there.
+2. Verifies every file against both saved identities. Anything changed, unreadable, or unprovable stops the whole pass before a single write.
+3. Removes what it verified. An unmerged setup branch is closed and deleted whole — only while its head is still the commit Radius left. Otherwise each file is reverted through a new explicit commit: restored to the blob it replaced, or deleted when Radius created it.
+4. Only then continues to the GitHub environment and the Azure resources, in reverse dependency order.
+
+If any file changed, provenance is incomplete, the branch head moved, or ownership is ambiguous, the rollback fails closed: nothing is removed, the record ends as `failed_partial` with `setup-rollback-blocked`, and the panel names the files to review by hand. A file that is already absent is not a failure — there is nothing left to revert. A read that failed is recorded as a retryable warning; a file that genuinely changed is recorded as a manual action, because repeating it would produce the same refusal.
+
+Once credential verification has succeeded, the environment is finished setup and the rollback is withdrawn (`rollback-environment-verified`). Removing it is the ordinary **Delete Environment** action.
+
+Rollback removes environment setup artifacts. It never deploys an application, and deployment stays a separate action the customer starts.
+
+#### What the page shows once a rollback starts
+
+The landing's **Environment setup failed** banner describes the outcome the customer is rolling back, so it comes down the moment the server accepts a rollback or a rollback retry, and it stays down for both terminal shapes: a completed rollback (`cancelled` with `rollback-complete`) and one that finished with items still present (`failed_partial` with `rollback-incomplete`). A refused command leaves the banner up, because nothing was removed. An ordinary setup failure still raises it.
+
+The environment listing follows the same rule. The picker's listing is repo-scoped and cached with a short TTL on the server, so a browser reload alone would redisplay a rolled-back environment under the status its last verify run left behind. The deleting pass therefore invalidates that repo's cached listing as soon as it proves the GitHub environment is gone — the same invalidation the **Delete Environment** route performs — and the browser reloads the table when the rollback is accepted and again when it ends. A rollback that could not remove the environment invalidates nothing, because the listing that still shows it is correct.
+
+Invalidation alone is not enough, because a listing is assembled from many `gh` calls and the browser asks for one the moment the rollback is accepted — while the setup's verify run is still incomplete, so the row reads **Pending**. That listing is still in flight when the rollback deletes the environment underneath it, and it would otherwise write what it read back into the cache the deletion had just emptied, handing the customer the rolled-back environment for a further TTL exactly as the panel reports the rollback is done. So eviction is not a delete: every invalidation also advances the repository's listing generation, the listing route reads that generation when it starts, and it refuses to cache a payload whose repository was invalidated meanwhile. The in-flight response still reports what it actually read — it is never rewritten after the fact — but it does not become the cached answer, so the next request re-lists.
+
+A cleanup command that removed the environment also invalidates the listing when it finishes, before the operation record turns terminal. That ordering is what the browser depends on: it reloads the table the moment it sees the terminal record, and the reload therefore cannot be answered from a listing assembled before the removal. The panel's **OK** on a completed rollback is an acknowledgement and nothing more — it hides the panel and asks the picker for nothing, because the refresh already happened. A stopped or failed setup keeps its rows, its resource inventory and its **Exit setup** control, because those resources are still there.
 
 ### API design
 
@@ -613,7 +673,19 @@ Returns the latest non-stale operation for a repository. This route is implement
 
 #### `POST /api/operations/{operationId}/stop` — cooperative stop
 
-Sets a stop flag. The server checks the flag between cloud or GitHub commands, finishes the current command, and then records `cancelled`. This route is not implemented.
+Records the stop request durably before answering, so a canvas reload cannot lose it. The server checks the request between cloud or GitHub commands, finishes the command already running, records what it changed, and then records `cancelled`. An operation parked on a prompt has nothing in flight and cancels immediately: `200` with the closed record. Anything else answers `202` and reports the stop as pending until the executor reaches its next safe boundary. A finished operation answers `409 operation-already-terminal`. This route is implemented.
+
+#### `POST /api/operations/{operationId}/continue` — continue a stopped setup
+
+The first forward action after a deliberate stop. It continues from the first step the artifact ledger does not already prove finished, reusing the retained resources, and is refused when the saved environment input is gone (`409 setup-continue-request-missing`), when ownership of a recorded artifact cannot be proven (`409 setup-continue-ownership-ambiguous`), when the record is not waiting at a stop Radius can continue from (`409 setup-continue-not-available`), or when a completed rollback already removed what the attempt created (`409 setup-continue-rolled-back`). A repeated request resolves to the continuation already in flight. This route is implemented.
+
+#### `POST /api/operations/{operationId}/rollback` — remove what this attempt created
+
+Removes every present, proven-owned artifact after the customer confirms in the browser. Answers `202` once the command is saved and the repository lock is held, `404` for an unknown operation, and `409` when the operation is still running (`operation-active`), already passed credential verification (`rollback-environment-verified`), cannot prove what it committed (`rollback-provenance-incomplete`), has no proven-owned resources (`rollback-nothing-owned`), already ran a cleanup attempt (`rollback-already-attempted`), or another operation owns the repository (`operation-in-progress`). A duplicate request returns the accepted command instead of deleting twice. A persistence failure restores the terminal stopped state and reports that no cleanup began; a scheduling failure restores the same decision with `503 operation-command-unscheduled` rather than leaving the record running. The command identity is derived from the operation id, the command kind, the cleanup attempt, and a digest of the exact artifact set, so a reload or an extension restart rebuilds the same command. Confirmation is not authorisation: the deletion set is re-derived from the saved ledger server-side. This route is implemented.
+
+#### `POST /api/operations/{operationId}/retry/{setup|verification|cleanup}` — retry
+
+Reopens a closed operation for one allowed continuation, decided from the saved record alone. A **setup** retry repeats a continuation that started and then failed, or resumes an interrupted setup, from the first step the artifact ledger does not already prove finished, and is refused when ownership of a recorded artifact cannot be proven. A **verification** retry repeats the exact workflow identity Radius saved; when the record is waiting on a setup pull request it is refused with `409 verification-retry-pull-request-open` until that pull request has merged. A **cleanup** retry — projected to the customer as **Retry rollback** — deletes only the resources Radius proved it created and could not remove on the previous attempt. Each accepted retry records a derived command id first, so a double click, a lost response, or a reload all resolve to the same command. These routes are implemented.
 
 #### `GET /api/verify-status` — keyed by operation
 
@@ -763,9 +835,7 @@ Multi-cloud rules:
 
 **Not implemented:**
 
-- `POST /api/operations` and server-owned background execution.
 - Operation-keyed `/api/verify-status`; it still uses canvas-instance verification fields.
-- Cooperative stop.
 - A bare-page redirect to the running environment operation.
 
 **Implemented in the page renderers and the browser modules under `src/browser/`:**
@@ -844,7 +914,9 @@ No new runtime dependency or packaging format. The new modules are included in t
 - Reused apps, service principals, federated credentials, role assignments, and pre-existing GitHub Environments are never deleted by rollback.
 - Cleanup continues after not-found and individual cleanup failures, preserves the original setup error, and renders cleanup warnings separately.
 - A pre-PUT GitHub Environment `404` records only a created candidate. Because GitHub's idempotent `PUT` cannot prove which actor created the environment, rollback retains it and provides manual cleanup guidance.
-- Successful verification dispatch and PR-path `action_required` commit the ledger. A later failed verification run retains resources and preserves its Actions URL.
+- Successful verification dispatch and PR-path `action_required` commit the ledger. A later failed verification run preserves its Actions URL and offers **Retry verification** beside **Roll back environment setup**, because verification has not yet succeeded.
+- A post-commit rollback reverts only workflow files whose saved commit, blob, and content digests still match GitHub. A changed file, an unreadable read, a moved setup-branch head, missing provenance, or ambiguous ownership stops the pass before any cloud resource is deleted.
+- Once verification has succeeded the setup record no longer offers a rollback; the environment is removed with **Delete Environment**.
 - Enterprise-claim diagnosis reads only the **Azure Login (OIDC)** step. Advisory workflow text that mentions `AADSTS7002381` cannot manufacture that diagnosis for an unrelated failure.
 - A first verification run that reports `No subscriptions found` can succeed unchanged after the new role assignments propagate. The retained run URL provides the rerun path.
 - Serialized browser helpers keep explicit client-side variable names after server-bundle minification.
@@ -928,8 +1000,8 @@ Setup creates identities and grants roles. Its data can appear in the panel, ses
 | **Record**       | Operation IDs, in-memory registry, stale-record policy, context capture, explicit outcomes, read routes                     | Built                             |
 | **Panel**        | Inline progress panel, retained failure context, pull-request `action_required`, verification activity                      | Built                             |
 | **Return**       | Cross-page status chip, branch-aware planned-graph link, best-effort timeline entry                                         | Built                             |
-| **Background**   | `POST /api/operations`, server-owned execution, operation-keyed verification, persistence                                   | Not built                         |
-| **Control**      | Cooperative stop, partial-state summary, in-panel input questions                                                           | Not built                         |
+| **Background**   | `POST /api/operations`, server-owned execution, operation-keyed verification, persistence                                   | Built                             |
+| **Control**      | Cooperative stop, partial-state summary, in-panel input questions                                                           | Built                             |
 | **Diagnosis**    | User-initiated **Ask Copilot** explanation for unfamiliar failures with fenced evidence and propose-only constraints        | Not built                         |
 | **Conversation** | Optional kickoff orientation, sparse phase-boundary narration, input escalation, PR handoff, and optional success close-out | Not built                         |
 

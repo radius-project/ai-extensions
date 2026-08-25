@@ -3,13 +3,22 @@ import { describe, expect, it } from "vitest";
 import {
   CONCURRENT_EDIT_MESSAGE,
   CUSTOM_TYPE_STAGED_FILES,
+  REPAIR_ATTEMPT_BUDGET,
+  REPAIR_COMPILE_LIMIT,
+  REPEATED_FAILURE_MESSAGE,
   REQUIRED_STAGED_FILES,
   STAGING_DIR_PREFIX,
   STAGING_IGNORE_PATTERN,
   STAGING_RUN_RECORD,
+  evaluateRepairAttempt,
   evaluateStagedRun,
+  fingerprintCompilerOutput,
+  isRepeatedFailure,
   isStagingDirName,
+  nextRepairState,
+  parseRepairState,
   publishableFiles,
+  repairBudgetSpentMessage,
   requiredStagedFiles,
   sanitizeRunId,
   stagingDirName
@@ -318,7 +327,10 @@ describe("evaluateStagedRun", () => {
       record: {
         baseline: { "app.bicep": "sha256:a", "bicepconfig.json": "sha256:b" }
       },
-      currentHashes: { "app.bicep": "sha256:x", "bicepconfig.json": "sha256:y" }
+      currentHashes: {
+        "app.bicep": "sha256:x",
+        "bicepconfig.json": "sha256:y"
+      }
     });
     expect(result.reason).toContain(".radius/app.bicep");
     expect(result.reason).toContain(".radius/bicepconfig.json");
@@ -338,5 +350,222 @@ describe("evaluateStagedRun", () => {
       currentHashes: { "app.bicep": "sha256:b" }
     });
     expect(result.status).toBe("incomplete");
+  });
+});
+
+describe("parseRepairState", () => {
+  it("reads a recorded state", () => {
+    expect(parseRepairState({ attempts: 2, fingerprint: "abc" })).toEqual({
+      attempts: 2,
+      fingerprint: "abc"
+    });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["null", null],
+    ["an array", []],
+    ["a string", "2"],
+    ["an object with no fields", {}]
+  ])("reads %s as no attempts yet", (_name, value) => {
+    expect(parseRepairState(value)).toEqual({ attempts: 0, fingerprint: null });
+  });
+
+  it.each([
+    ["a negative count", -1],
+    ["zero", 0],
+    ["a fractional count", 1.5],
+    ["a numeric string", "2"],
+    ["NaN", Number.NaN]
+  ])("ignores %s", (_name, attempts) => {
+    expect(parseRepairState({ attempts }).attempts).toBe(0);
+  });
+
+  // A fingerprint describes what the previous attempt failed with, so an
+  // unusable count leaves it describing nothing. Keeping it would report the
+  // run's first compile as a repeat and tell the agent to change a fix it has
+  // not made yet.
+  it.each([
+    ["a negative count", -1],
+    ["zero", 0],
+    ["a fractional count", 1.5],
+    ["a numeric string", "2"],
+    ["NaN", Number.NaN],
+    ["a missing count", undefined]
+  ])("drops the fingerprint alongside %s", (_name, attempts) => {
+    expect(parseRepairState({ attempts, fingerprint: "abc" })).toEqual({
+      attempts: 0,
+      fingerprint: null
+    });
+  });
+
+  it("does not call the first compile a repeat after a malformed record", () => {
+    const state = parseRepairState({ attempts: "many", fingerprint: "abc" });
+
+    expect(isRepeatedFailure(state, "abc")).toBe(false);
+  });
+
+  it.each([
+    ["an empty fingerprint", ""],
+    ["a blank fingerprint", "   "],
+    ["a non-string fingerprint", 7]
+  ])("ignores %s", (_name, fingerprint) => {
+    expect(parseRepairState({ attempts: 1, fingerprint }).fingerprint).toBe(
+      null
+    );
+  });
+
+  it("trims a recorded fingerprint", () => {
+    expect(
+      parseRepairState({ attempts: 1, fingerprint: " abc " }).fingerprint
+    ).toBe("abc");
+  });
+});
+
+describe("evaluateRepairAttempt", () => {
+  it.each([0, 1, REPAIR_COMPILE_LIMIT - 1])(
+    "allows a compile after %i attempts",
+    (attempts) => {
+      const decision = evaluateRepairAttempt({ attempts, fingerprint: null });
+      expect(decision).toMatchObject({
+        verdict: "allowed",
+        allowed: true,
+        attempt: attempts + 1,
+        reason: ""
+      });
+    }
+  );
+
+  it("refuses the compile after the budget is spent", () => {
+    const decision = evaluateRepairAttempt({
+      attempts: REPAIR_COMPILE_LIMIT,
+      fingerprint: "abc"
+    });
+    expect(decision.verdict).toBe("exhausted");
+    expect(decision.allowed).toBe(false);
+    expect(decision.attempt).toBe(REPAIR_COMPILE_LIMIT + 1);
+    expect(decision.reason).toContain(String(REPAIR_ATTEMPT_BUDGET));
+    expect(decision.reason).toContain("no application definition was written");
+  });
+
+  it("stays refused beyond the budget", () => {
+    expect(
+      evaluateRepairAttempt({
+        attempts: REPAIR_COMPILE_LIMIT + 5,
+        fingerprint: null
+      }).allowed
+    ).toBe(false);
+  });
+
+  it("is the budget the deploy-failure repair loop uses", () => {
+    expect(REPAIR_ATTEMPT_BUDGET).toBe(5);
+  });
+
+  // The budget counts repairs, so a run gets one more compile than that: the
+  // first compile is what reveals the problem rather than an attempt to fix it.
+  it("allows one compile beyond the repair budget", () => {
+    expect(REPAIR_COMPILE_LIMIT).toBe(REPAIR_ATTEMPT_BUDGET + 1);
+    expect(
+      evaluateRepairAttempt({
+        attempts: REPAIR_ATTEMPT_BUDGET,
+        fingerprint: null
+      }).allowed
+    ).toBe(true);
+  });
+});
+
+describe("nextRepairState", () => {
+  it("counts the attempt and keeps the failure fingerprint", () => {
+    expect(nextRepairState({ attempts: 1, fingerprint: "old" }, "new")).toEqual(
+      {
+        attempts: 2,
+        fingerprint: "new"
+      }
+    );
+  });
+
+  it("clears the fingerprint when the compile passed", () => {
+    expect(nextRepairState({ attempts: 2, fingerprint: "old" }, null)).toEqual({
+      attempts: 3,
+      fingerprint: null
+    });
+  });
+});
+
+describe("isRepeatedFailure", () => {
+  it("reports a failure identical to the previous one", () => {
+    expect(isRepeatedFailure({ attempts: 1, fingerprint: "abc" }, "abc")).toBe(
+      true
+    );
+  });
+
+  it("does not report a changed failure", () => {
+    expect(isRepeatedFailure({ attempts: 1, fingerprint: "abc" }, "xyz")).toBe(
+      false
+    );
+  });
+
+  it("does not report the first failure of a run", () => {
+    expect(isRepeatedFailure({ attempts: 0, fingerprint: null }, "abc")).toBe(
+      false
+    );
+  });
+
+  it("does not report a passing compile", () => {
+    expect(isRepeatedFailure({ attempts: 1, fingerprint: null }, null)).toBe(
+      false
+    );
+  });
+});
+
+describe("fingerprintCompilerOutput", () => {
+  it("ignores line and column numbers that shifted", () => {
+    expect(
+      fingerprintCompilerOutput("/repo/app.bicep:12:5: error BCP057: missing")
+    ).toBe(
+      fingerprintCompilerOutput("/repo/app.bicep:40:9: error BCP057: missing")
+    );
+  });
+
+  it("ignores a prose line reference", () => {
+    expect(fingerprintCompilerOutput("line 12: error BCP057: missing")).toBe(
+      fingerprintCompilerOutput("line 90: error BCP057: missing")
+    );
+  });
+
+  it("ignores diagnostic ordering and whitespace", () => {
+    expect(fingerprintCompilerOutput("b: error one\na:  error   two\n")).toBe(
+      fingerprintCompilerOutput("a: error two\r\nb: error one")
+    );
+  });
+
+  it("distinguishes a different failure", () => {
+    expect(
+      fingerprintCompilerOutput("app.bicep:1:1: error BCP057: a")
+    ).not.toBe(fingerprintCompilerOutput("app.bicep:1:1: error BCP062: b"));
+  });
+
+  it.each([
+    ["empty output", ""],
+    ["blank lines only", "\n\n   \n"],
+    ["non-string output", null]
+  ])("fingerprints %s as empty", (_name, output) => {
+    expect(fingerprintCompilerOutput(output)).toBe("");
+  });
+
+  it("collapses a diagnostic repeated within one run", () => {
+    expect(fingerprintCompilerOutput("a: error one\na: error one")).toBe(
+      fingerprintCompilerOutput("a: error one")
+    );
+  });
+});
+
+describe("repair messages", () => {
+  it("states how many compiles were spent", () => {
+    expect(repairBudgetSpentMessage(5)).toContain("compiled 5 times");
+  });
+
+  it("tells the agent to make a materially different fix", () => {
+    expect(REPEATED_FAILURE_MESSAGE).toContain("materially different fix");
   });
 });

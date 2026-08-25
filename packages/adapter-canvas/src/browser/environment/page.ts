@@ -78,11 +78,18 @@ function optimisticOperation(
       state: "",
       rollbackBeforeCommit: undefined,
       retry: { startsCleanly: false, guidance: "" },
-      removed: [],
-      retained: [],
-      warnings: []
+      warnings: [],
+      created: [],
+      retainedArtifacts: [],
+      reused: [],
+      cleaned: [],
+      manualActionRequired: []
     },
-    journey: null,
+    actions: [],
+    guidance: [],
+    headline: null,
+    activeCommandKind: "",
+    nextTransition: null,
     verification: null,
     inputRequired: null,
     startedAt: new Date(now).toISOString(),
@@ -315,6 +322,11 @@ export function initializeEnvironmentPage(
   }
   environments = initializedEnvironments;
 
+  const restoreCreateButton = (): void => {
+    creating = false;
+    environments.resetSubmitButton();
+  };
+
   const initializedOperations = initializeEnvironmentOperations(context, {
     repo: state.repo,
     mutationNonce: state.mutationNonce,
@@ -324,7 +336,10 @@ export function initializeEnvironmentPage(
       showSetupWarnings: environments.showWarnings,
       showError: environments.showError,
       reloadEnvironmentsTable: environments.loadEnvironmentTable,
-      resetSubmitButton: environments.resetSubmitButton,
+      // The page owns the `creating` latch. Every terminal path, including one
+      // reached after Stop, Retry, Rollback, or Exit, must release it before the
+      // user can start another setup without reloading the page.
+      resetSubmitButton: restoreCreateButton,
       onDeleteTerminal: handleDeleteTerminal,
       promptServiceManagementReference:
         discovery.promptServiceManagementReference,
@@ -347,11 +362,6 @@ export function initializeEnvironmentPage(
     formStatus.className = "status error";
     formStatus.textContent = message;
     formStatus.style.display = "block";
-  };
-
-  const restoreCreateButton = (): void => {
-    creating = false;
-    environments.resetSubmitButton();
   };
 
   const failCreate = (message: string): void => {
