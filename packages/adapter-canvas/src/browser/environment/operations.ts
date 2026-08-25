@@ -2109,7 +2109,15 @@ export function initializeEnvironmentOperations(
       .then((payload) => {
         if (!scope.active || mySession !== session) return;
         const op = parseOperationResponse(payload);
-        if (!op) return;
+        // The server is the authority on what this repo should show. When it
+        // reports nothing — no operation, or one the user has dismissed — the
+        // panel must reflect that, even if a leftover render left it on screen.
+        // Returning early here is what let a dismissed delete reappear when the
+        // user navigated away and came back to a panel still marked visible.
+        if (!op) {
+          renderProgress(null);
+          return;
+        }
         // A closed record is rebuilt too: its stop, retry, and partial-state
         // controls come from the saved operation, so a reload after a failure
         // still offers the same actions.

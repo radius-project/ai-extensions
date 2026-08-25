@@ -4930,6 +4930,24 @@ describe("exiting a setup", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
   });
 
+  it("hides a leftover-visible panel when the server has nothing to show", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ operation: null })
+    );
+    const { controller } = controllerWithHarness(browser);
+    // A dismissed operation leaves the panel marked visible from an earlier
+    // render; resuming must reconcile to the server's "nothing here" answer
+    // instead of leaving the stale box on screen.
+    browser.els[PROGRESS_IDS.panel].style.display = "";
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
+  });
+
   it("keeps a terminal action instead of replacing it with acknowledgement", () => {
     const browser = setup();
     const { controller } = controllerWithHarness(browser);
