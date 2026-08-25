@@ -625,6 +625,15 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         ]
       },
       {
+        // buildGraphViaRad derives the bicepconfig `extensions.radius` pin from
+        // the release of the binary that will run the compile, so the fake CLI
+        // must report one: an unmodeled command exits 127, which would leave the
+        // reference underivable and fail the compile closed.
+        tool: "rad",
+        args: ["version", "--cli", "--output", "json"],
+        stdout: JSON.stringify({ version: "v0.60.0", bicep: "0.41.2" })
+      },
+      {
         tool: "rad",
         argsPrefix: ["app", "graph"],
         writeFiles: [{ path: "app-graph.json", content: appGraphJson() }]
