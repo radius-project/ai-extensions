@@ -264,6 +264,8 @@ export interface DeployRunnerDependencies {
 
 export interface ProcessDependencies {
   existsSync(path: string): boolean;
+  readFile(path: string, encoding: BufferEncoding): Promise<string>;
+  writeFile(path: string, content: string): Promise<void>;
   execFile(
     cmd: string,
     args: string[],

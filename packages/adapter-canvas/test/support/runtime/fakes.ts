@@ -317,6 +317,15 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     },
     process: {
       existsSync: vi.fn(() => true),
+      readFile: vi.fn(async () =>
+        JSON.stringify({
+          experimentalFeaturesEnabled: { extensibility: true },
+          extensions: {
+            radius: "br:biceptypes.azurecr.io/radius:0.60"
+          }
+        })
+      ),
+      writeFile: vi.fn(async () => undefined),
       execFile: vi.fn(async () => ({ stdout: "", stderr: "" }))
     },
     deploy: {

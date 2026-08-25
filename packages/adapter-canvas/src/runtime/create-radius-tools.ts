@@ -2,6 +2,7 @@
 // plus a RadiusExtensionDependencies dependency object. Same shape as
 // createRadiusCanvas: pure construction, no I/O until a handler is invoked.
 
+import path from "node:path";
 import { RADIUS_TOOL_DECLARATIONS } from "./declarations.js";
 import {
   ambiguousAppSourceBrief,
@@ -19,6 +20,39 @@ import type { DeployToolArgs } from "../deploy-tools.js";
 
 interface ToolArgs {
   [key: string]: unknown;
+}
+
+function customTypesConfig(
+  source: string,
+  configPath: string,
+  extensionPath: string
+): string {
+  const config = JSON.parse(source) as unknown;
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    throw new Error(`Bicep configuration at ${configPath} must be an object.`);
+  }
+  const existing = (config as Record<string, unknown>).extensions;
+  if (
+    existing !== undefined &&
+    (!existing || typeof existing !== "object" || Array.isArray(existing))
+  ) {
+    throw new Error(`"extensions" in ${configPath} must be an object.`);
+  }
+  const relative = path
+    .relative(path.dirname(configPath), extensionPath)
+    .replaceAll(path.sep, "/");
+  const reference = relative.startsWith(".") ? relative : `./${relative}`;
+  return `${JSON.stringify(
+    {
+      ...config,
+      extensions: {
+        ...(existing as Record<string, unknown> | undefined),
+        customTypes: reference
+      }
+    },
+    null,
+    2
+  )}\n`;
 }
 
 export function createRadiusTools(deps: RadiusExtensionDependencies) {
@@ -220,15 +254,29 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
             args.targetPath,
             `.radius/${stagingPrefix}custom-types.tgz`
           );
+          const configPath = deps.publishTargets.resolveRadiusArtifactTarget(
+            workspacePath,
+            undefined,
+            `.radius/${stagingPrefix}bicepconfig.json`
+          );
           if (!deps.process.existsSync(fromFile)) {
             return `Resource-type manifest not found at ${fromFile}. Author it first (see the radius-app-bicep custom-resource-types reference), then re-run this tool.`;
           }
+          if (!deps.process.existsSync(configPath)) {
+            return `Bicep configuration not found at ${configPath}. Resolve the predefined Radius types for this modeling run first, then re-run this tool.`;
+          }
+          const config = customTypesConfig(
+            await deps.process.readFile(configPath, "utf8"),
+            configPath,
+            target
+          );
           await deps.rad.runRadBicepPublishExtension({
             fromFile,
             target,
             log: logToSession
           });
-          return `Published custom-type extension to ${target}. Reference it from .radius/bicepconfig.json and recompile the app graph through the Radius canvas.`;
+          await deps.process.writeFile(configPath, config);
+          return `Published custom-type extension to ${target} and updated ${configPath}. Recompile the app graph through the Radius canvas.`;
         } catch (err) {
           return `⚠️ Could not publish the custom-type extension: ${errorMessage(err)}`;
         }

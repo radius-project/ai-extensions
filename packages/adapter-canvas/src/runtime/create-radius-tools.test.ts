@@ -567,7 +567,7 @@ describe("RU-09: radius_publish_custom_type_extension", () => {
     expect(deps.rad.runRadBicepPublishExtension).not.toHaveBeenCalled();
   });
 
-  it("defaults manifestPath/targetPath and publishes via the injected rad dependency", async () => {
+  it("publishes with default paths and maintains the local extension alias", async () => {
     const { tools, deps } = setup();
     const result = await findTool(
       tools,
@@ -584,7 +584,39 @@ describe("RU-09: radius_publish_custom_type_extension", () => {
       deps.publishTargets.resolveRadiusArtifactTarget
     ).toHaveBeenCalledWith("/workspace", undefined, ".radius/custom-types.tgz");
     expect(deps.rad.runRadBicepPublishExtension).toHaveBeenCalledOnce();
+    expect(deps.process.writeFile).toHaveBeenCalledWith(
+      "/workspace/.radius/bicepconfig.json",
+      expect.stringContaining('"customTypes": "./custom-types.tgz"')
+    );
+    const writtenConfig = JSON.parse(
+      (deps.process.writeFile as ReturnType<typeof vi.fn>).mock.calls[0][1]
+    );
+    expect(writtenConfig.extensions.radius).toBe(
+      "br:biceptypes.azurecr.io/radius:0.60"
+    );
     expect(result).toContain("Published custom-type extension to");
+  });
+
+  it("requires a valid configuration before publishing", async () => {
+    const { tools, deps } = setup();
+    (deps.process.existsSync as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+    const result = await findTool(
+      tools,
+      "radius_publish_custom_type_extension"
+    ).handler({});
+    expect(result).toContain("Bicep configuration not found");
+    expect(deps.rad.runRadBicepPublishExtension).not.toHaveBeenCalled();
+
+    (deps.process.existsSync as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (deps.process.readFile as ReturnType<typeof vi.fn>).mockResolvedValue("{");
+    const malformed = await findTool(
+      tools,
+      "radius_publish_custom_type_extension"
+    ).handler({});
+    expect(malformed).toContain("Could not publish the custom-type extension");
+    expect(deps.rad.runRadBicepPublishExtension).not.toHaveBeenCalled();
   });
 
   it("confines paths under the workspace .radius directory (propagates a confinement error)", async () => {
@@ -628,6 +660,10 @@ describe("RU-09: radius_publish_custom_type_extension", () => {
       undefined,
       ".radius/.staging-run-42/custom-types.tgz"
     );
+    expect(deps.process.writeFile).toHaveBeenCalledWith(
+      "/workspace/.radius/.staging-run-42/bicepconfig.json",
+      expect.stringContaining('"customTypes": "./custom-types.tgz"')
+    );
   });
 
   it("rejects a staging directory that is not a staging directory", async () => {
@@ -651,6 +687,7 @@ describe("RU-09: radius_publish_custom_type_extension", () => {
     ).handler({});
     expect(result).toContain("Could not publish the custom-type extension");
     expect(result).toContain("rad bicep publish-extension failed");
+    expect(deps.process.writeFile).not.toHaveBeenCalled();
   });
 });
 

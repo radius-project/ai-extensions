@@ -17,6 +17,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, statSync, watch as fsWatch } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import os from "node:os";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
@@ -175,6 +176,8 @@ const dependencies: RadiusExtensionDependencies = {
   },
   process: {
     existsSync,
+    readFile,
+    writeFile,
     execFile: (cmd, args, options) => execFileAsync(cmd, args, options)
   },
   deploy: {
