@@ -321,7 +321,7 @@ export function createGraphSurface(
       clock: context.clock,
       host,
       settings,
-      deps: { openLocalSource, openDetails, toggleDetails },
+      deps: { openExternal, openLocalSource, openDetails, toggleDetails },
       reload: () => context.nav.reload(),
       nodes: built.nodes,
       edges: built.edges

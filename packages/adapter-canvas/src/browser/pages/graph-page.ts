@@ -353,12 +353,6 @@ export function initializeGraphPage(
           hasLoadedGraph = true;
           return;
         }
-        if (readBoolean(payload, "reload")) {
-          stopProgress();
-          showStatus(context, "Application graph ready.", "info");
-          context.nav.reload();
-          return;
-        }
         // The work continues off-page while Copilot authors the model, so the
         // panel keeps running rather than being torn down and rebuilt.
         if (readBoolean(payload, "needsAppBicep")) {
@@ -402,6 +396,10 @@ export function initializeGraphPage(
             syncPrimaryButton();
           }
           showFailure(error);
+        } else {
+          showFailure(
+            "The application graph response did not include any resources."
+          );
         }
       })
       .catch((error: unknown) => {
@@ -486,6 +484,10 @@ export function initializeGraphPage(
                 "error"
               );
             }
+          } else {
+            showFailure(
+              "The application graph response did not include any resources."
+            );
           }
         }
       })
@@ -503,12 +505,13 @@ export function initializeGraphPage(
       });
   }
   void populateApplications(context, page.repo, "graph-app");
+  const branchListingGeneration = generation;
   void populateBranches(
     context,
     ["graph-branch"],
     page.repo,
     [page.branch],
-    () => entry.active
+    () => entry.active && generation === branchListingGeneration
   )
     .then(() => {
       if (!entry.active || hasLoadedGraph || !branchSelect?.value) return;

@@ -1,0 +1,12 @@
+.git
+.pnpm-store
+coverage
+node_modules
+packages/*/coverage
+packages/*/node_modules
+packages/*/playwright-report
+packages/*/playwright-visual-report
+packages/*/test-results
+plugins/*/dist
+plugins/*/node_modules
+

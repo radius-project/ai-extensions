@@ -225,7 +225,7 @@ Two runs of this skill over the same source, with the same generator version and
 
 ## Source-code reference metadata (`codeReference`)
 
-Each resource (except `applications`) may carry an optional `codeReference` in its `properties` — a repo-relative path, optionally with a `#L<line>` anchor, pointing at where that resource is defined/initialized in the source. It is metadata only: `rad app graph` preserves it and the application-graph canvas turns it into a clickable deep link on the node. It does not affect deployment.
+Each generated resource (except `applications`) must carry a `codeReference` in its `properties` — a repo-relative path, optionally with a `#L<line>` anchor, pointing at where that resource is defined/initialized in the source. It is metadata only: `rad app graph` preserves it and the application-graph canvas turns it into a clickable deep link on the node. It does not affect deployment.
 
 Populate it for every non-application resource you can locate, because the developer is not hand-adding it:
 
@@ -241,7 +241,7 @@ resource database 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
 }
 ```
 
-To find the definition/initialization site for each resource, follow the discovery methodology in the app-graph skill's [source-code-references.md](../radius-app-graph/references/source-code-references.md) (category detection, filename/init patterns, skip rules, line pinpointing, output format). Point at the real initialization site — for a container, the service `Dockerfile` or entrypoint. Leave it out rather than link a test/mock or a file you cannot confirm. On built-in types `codeReference` is a framework-owned optional base property (defined in Radius's base resource schema and inherited by every built-in type), so it is schema-valid but exempt from the per-type ledger's schema-proof requirement; omit it if in doubt.
+To find the definition/initialization site for each resource, follow the discovery methodology in the app-graph skill's [source-code-references.md](../radius-app-graph/references/source-code-references.md) (category detection, filename/init patterns, skip rules, line pinpointing, output format). Point at the real initialization site — for a container, the service `Dockerfile` or entrypoint. If a credible source location cannot be established for a planned resource, stop and report that modeling is incomplete rather than publishing a model with an ephemeral or missing graph link. On built-in types `codeReference` is a framework-owned optional base property (defined in Radius's base resource schema and inherited by every built-in type), so it is schema-valid but exempt from the per-type ledger's schema-proof requirement.
 
 Custom types do not get it for free. A `Radius.Resources/*` type generated from `custom-types.yaml` compiles to a closed object built from that manifest, so it accepts `codeReference` only when its own schema declares the property — which [custom-resource-types.md](references/custom-resource-types.md) now requires for every generated type. Before authoring `codeReference` on a custom-type resource, confirm the type's schema declares it (add it and republish `custom-types.tgz` if it does not); otherwise omit it, or compilation fails with `BCP037: The property "codeReference" is not allowed`.
 
@@ -401,6 +401,7 @@ Before returning the Bicep, verify:
 - [ ] Every dependency has a complete client tuple: subresource name, endpoint/FQDN transformation, port, protocol/version, TLS mode, auth mechanism/identity, secret source, and final client syntax. Provider modules, SKUs, regions, and firewall configuration remain outside `app.bicep`.
 - [ ] Runtime parser coercion and unset behavior, TLS, authentication, bootstrap, listener configuration, ingress evidence, and primary-feature readiness are proven. Required model aliases, storage backends, database clients, and messaging inputs/outputs reference only mandatory selected resources; a health endpoint, login screen, or idle/placeholder process is insufficient.
 - [ ] No required binding or dependency was deleted to satisfy stale mutable extension metadata or obtain a clean compile.
+- [ ] Every generated non-application resource stores a verified repo-relative `properties.codeReference` in `app.bicep`; no graph-only source-reference update is treated as completion.
 - [ ] Perform the static consistency pass in [runtime-contract.md](references/runtime-contract.md); no unresolved runtime caveat remains.
 - [ ] The generated Bicep contains no explanatory comments. `.radius/bicepconfig.json` resolves the `radius` extension for `app.bicep`: created or updated in place (a parent `bicepconfig.json` is used only as input, never modified).
 - [ ] The output follows the [deterministic output](#deterministic-output) rules, so regenerating from unchanged source would produce the identical file.
