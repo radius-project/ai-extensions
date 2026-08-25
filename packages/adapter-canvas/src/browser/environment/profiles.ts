@@ -55,8 +55,7 @@ export const GITHUB_IDENTITY_IDS = {
   note: "env-gh-identity-note",
   recheck: "env-gh-recheck",
   details: "env-gh-technical-details",
-  repair: "env-gh-repair",
-  fix: "env-gh-fix-access"
+  repair: "env-gh-repair"
 } as const;
 
 export type CredentialProvider = "azure" | "aws";
@@ -473,9 +472,7 @@ export function initializeCredentialProfilesPanel(
   const noteEl = context.dom.byId(GITHUB_IDENTITY_IDS.note);
   const recheckBtn = context.dom.inputById(GITHUB_IDENTITY_IDS.recheck);
   const detailsEl = context.dom.byId(GITHUB_IDENTITY_IDS.details);
-  const detailsPanel = context.dom.byId("env-gh-details-panel");
   const repairEl = context.dom.byId(GITHUB_IDENTITY_IDS.repair);
-  const fixAccessBtn = context.dom.byId(GITHUB_IDENTITY_IDS.fix);
 
   let repairAction: CommandActionHandle | null = null;
   const mountRepairAction = (
@@ -692,9 +689,6 @@ export function initializeCredentialProfilesPanel(
       recheckBtn.disabled = checking;
       recheckBtn.textContent = checking ? "Checking…" : "Re-check";
     }
-    if (fixAccessBtn) {
-      fixAccessBtn.style.display = githubReadiness?.repair ? "" : "none";
-    }
     if (repairEl) {
       const remediation = githubReadiness?.repairRemediation ?? null;
       // A runnable scope gap becomes a callout with Copy and Run. Everything
@@ -881,11 +875,6 @@ export function initializeCredentialProfilesPanel(
   if (recheckBtn) {
     scope.on(recheckBtn, "click", () => {
       if (selectedGithubLogin) void checkGitHubAccount(selectedGithubLogin);
-    });
-  }
-  if (fixAccessBtn) {
-    scope.on(fixAccessBtn, "click", () => {
-      if (detailsPanel) Reflect.set(detailsPanel, "open", true);
     });
   }
   scope.on(context.dom.document, "visibilitychange", () => {

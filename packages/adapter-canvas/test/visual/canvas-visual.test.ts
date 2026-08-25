@@ -636,5 +636,42 @@ test.describe("Radius Canvas visual baselines", () => {
 
       await screenshot(page, `vi-08-run-command-callout-${theme}.png`);
     });
+
+    test(`VI-09 wizard github access callout in ${theme}`, async ({
+      page,
+      canvas
+    }) => {
+      test.setTimeout(45_000);
+      await seed(canvas, { activeSubtab: "environments" });
+      // The wizard reports its own readiness, so dropping the scopes here is
+      // what turns its GitHub access warning from prose into a callout. No
+      // other baseline covers this surface, which is how it shipped as plain
+      // text after the rest of the run-command work landed.
+      await canvas.setGitHubKeyringScopes(["repo"]);
+      await gotoVisual(page, canvas, "environment", theme);
+      await page.getByRole("button", { name: "New Environment" }).click();
+      await page.locator("#env-profile-button").click();
+      await page
+        .locator("#env-profile-menu")
+        .getByRole("option", { name: new RegExp(PROFILE_NAME) })
+        .click();
+      await page.locator("#env-step1-next").click();
+      await expect(page.locator("#env-step-details")).toBeVisible();
+
+      const repair = page.locator("#env-gh-repair");
+      await expect(repair).toBeVisible({ timeout: 15_000 });
+      await repair.scrollIntoViewIfNeeded();
+
+      // The command must be an actionable callout rather than a paragraph
+      // with the command buried in it.
+      await expect(repair).toContainText("gh auth switch");
+      await expect(repair).not.toContainText("In the terminal, run");
+      await expect(
+        repair.getByRole("button", { name: COMMAND_RUN_LABEL })
+      ).toBeVisible();
+      await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
+
+      await screenshot(page, `vi-09-wizard-github-callout-${theme}.png`);
+    });
   }
 });

@@ -48,10 +48,14 @@ describe("environmentsPaneMarkup", () => {
   it("renders one visible section when the environments sub-tab is active", () => {
     const html = environmentsPaneMarkup(baseOptions);
     expect(html).toContain('<section id="pane-environments" style="">');
-    expect(html).toContain(
-      'id="env-gh-fix-access" class="rad-btn rad-btn--ghost"'
-    );
-    expect(html).toContain(">Show how to fix</button>");
+    // The GitHub repair block must sit outside the technical-details
+    // disclosure, otherwise the fix is only visible to a user who thinks to
+    // expand it.
+    const repairAt = html.indexOf('id="env-gh-repair"');
+    const detailsAt = html.indexOf('id="env-gh-details-panel"');
+    expect(repairAt).toBeGreaterThan(-1);
+    expect(repairAt).toBeLessThan(detailsAt);
+    expect(html).not.toContain("env-gh-fix-access");
     expect(html.trimEnd().endsWith("</section>")).toBe(true);
   });
 

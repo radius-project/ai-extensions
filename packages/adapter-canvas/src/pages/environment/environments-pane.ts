@@ -214,14 +214,13 @@ export function environmentsPaneMarkup(
             </div>
             <div class="rad-field__help" id="env-gh-account-note" style="margin-top:6px;">Used to create GitHub Environment.</div>
             <div id="env-gh-identity-note" role="status" style="margin-top:8px; font-size:13px; display:none;"></div>
+            <div id="env-gh-repair" style="display:none; margin-top:8px; overflow-wrap:anywhere;"></div>
             <div style="display:flex; gap:8px; margin-top:6px;">
-              <button type="button" id="env-gh-fix-access" class="rad-btn rad-btn--ghost" style="display:none; font-size:12px; padding:2px 10px;">Show how to fix</button>
               <button type="button" id="env-gh-recheck" class="rad-btn rad-btn--ghost" style="display:none; font-size:12px; padding:2px 10px;">Re-check</button>
             </div>
             <details id="env-gh-details-panel" style="margin-top:8px; font-size:12px;">
               <summary>View technical details</summary>
               <div id="env-gh-technical-details" style="margin-top:6px; line-height:1.5;"></div>
-              <div id="env-gh-repair" style="display:none; margin-top:6px; overflow-wrap:anywhere;"></div>
             </details>
           </div>
         </div>

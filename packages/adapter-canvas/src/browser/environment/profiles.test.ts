@@ -73,7 +73,6 @@ interface ProfilesPage {
   recheckBtn: ReturnType<typeof createFakeInput>;
   detailsEl: ReturnType<typeof createFakeElement>;
   repairEl: ReturnType<typeof createFakeElement>;
-  fixAccessBtn: ReturnType<typeof createFakeElement>;
 }
 
 function renderProfilesPage(
@@ -128,7 +127,6 @@ function renderProfilesPage(
   const detailsPanel = createFakeElement("env-gh-details-panel");
   const detailsEl = createFakeElement(GITHUB_IDENTITY_IDS.details);
   const repairEl = createFakeElement(GITHUB_IDENTITY_IDS.repair);
-  const fixAccessBtn = createFakeElement(GITHUB_IDENTITY_IDS.fix);
 
   for (const element of [
     button,
@@ -156,8 +154,7 @@ function renderProfilesPage(
     recheckBtn,
     detailsPanel,
     detailsEl,
-    repairEl,
-    fixAccessBtn
+    repairEl
   ]) {
     if (options.omit?.includes(element.id)) continue;
     browser.document.add(element);
@@ -189,8 +186,7 @@ function renderProfilesPage(
     noteEl,
     recheckBtn,
     detailsEl,
-    repairEl,
-    fixAccessBtn
+    repairEl
   };
 }
 function makeDeps(overrides: Partial<CredentialProfilesPanelDeps> = {}): {
@@ -1141,15 +1137,13 @@ describe("github identity loading and rendering", () => {
     const optionsEl = createFakeElement(PROFILE_MENU_IDS.options);
     const hiddenInput = createFakeInput(PROFILE_MENU_IDS.select);
     const fieldEl = createFakeElement(GITHUB_IDENTITY_IDS.field);
-    const fixAccess = createFakeElement(GITHUB_IDENTITY_IDS.fix);
     for (const element of [
       button,
       menu,
       valueEl,
       optionsEl,
       hiddenInput,
-      fieldEl,
-      fixAccess
+      fieldEl
     ]) {
       browser.document.add(element);
     }
@@ -1170,7 +1164,6 @@ describe("github identity loading and rendering", () => {
     await expect(handle?.loadGithubIdentity(true)).resolves.toBeUndefined();
     expect(fieldEl.style.display).toBe("");
     expect(() => handle?.invalidateReadiness()).not.toThrow();
-    expect(() => fixAccess.dispatch("click")).not.toThrow();
   });
 
   it("hides the field without a recheck button to toggle when identity has an error", async () => {
@@ -2012,7 +2005,7 @@ describe("switching a github account", () => {
     expect(fakeText(page.noteEl)).toBe("Could not check GitHub access.");
   });
 
-  it("opens technical details from Show how to fix", async () => {
+  it("shows the repair without needing the technical details opened", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps();
     page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
@@ -2024,11 +2017,10 @@ describe("switching a github account", () => {
     const handle = setupWithAccounts(page, deps);
     await handle?.loadGithubIdentity();
 
-    page.fixAccessBtn.dispatch("click");
-
-    const detailsPanel = page.browser.context.dom.byId("env-gh-details-panel");
-    if (!detailsPanel) throw new Error("details panel missing");
-    expect(Reflect.get(detailsPanel, "open")).toBe(true);
+    // The fix used to live inside a collapsed "View technical details"
+    // disclosure, so it stayed invisible until the user went looking for it.
+    expect(page.repairEl.style.display).toBe("");
+    expect(fakeText(page.repairEl)).toBe("Run a safe repair command.");
   });
 });
 
