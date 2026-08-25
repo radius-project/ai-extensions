@@ -16,7 +16,8 @@ import {
   fetchWorkspaceTree,
   isWorkspacePath,
   workspaceHeadCommit,
-  workspaceSourceChangedSince
+  workspaceSourceChangedSince,
+  workspaceModelRecoverable
 } from "./workspace.js";
 
 // The SDK sets session.workspacePath to the per-session STATE directory
@@ -641,5 +642,109 @@ describe("isWorkspacePath", () => {
 
   it("accepts either separator, since the value arrives as agent-authored text", () => {
     expect(isWorkspacePath("/workspace", "\\workspace\\services")).toBe(true);
+  });
+});
+
+// Decides whether replacing a model with no origin record can destroy anything.
+// Regeneration writes the working tree only, so a committed, unmodified model
+// survives the overwrite as an undoable diff, while an untracked or already
+// modified one exists nowhere else.
+describe("workspaceModelRecoverable", () => {
+  async function repo(): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-recover-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir });
+    git("init", "--quiet", "--initial-branch", "main");
+    git("config", "user.email", "radius@example.invalid");
+    git("config", "user.name", "Radius Test");
+    await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+    return dir;
+  }
+
+  const write = (dir: string, body: string) =>
+    fs.writeFile(path.join(dir, ".radius", "app.bicep"), body);
+
+  const commitAll = (dir: string) => {
+    execFileSync("git", ["add", "."], { cwd: dir });
+    execFileSync("git", ["commit", "--quiet", "-m", "model"], { cwd: dir });
+  };
+
+  it("is true for a committed, unmodified model", async () => {
+    const dir = await repo();
+    try {
+      await write(dir, "resource db {}\n");
+      commitAll(dir);
+
+      expect(await workspaceModelRecoverable(dir)).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is false for a model with uncommitted changes", async () => {
+    const dir = await repo();
+    try {
+      await write(dir, "resource db {}\n");
+      commitAll(dir);
+      await write(dir, "resource db {}\n// hand edit\n");
+
+      expect(await workspaceModelRecoverable(dir)).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Without --ignored an ignored model prints nothing, which is what a tracked,
+  // clean file prints, so the file git has never seen would read as safe to
+  // replace. That is the silent overwrite this whole check exists to prevent.
+  it("is false for a model hidden by gitignore", async () => {
+    const dir = await repo();
+    try {
+      await write(dir, "resource db {}\n");
+      await fs.writeFile(path.join(dir, ".gitignore"), ".radius/\n");
+      execFileSync("git", ["add", ".gitignore"], { cwd: dir });
+      execFileSync("git", ["commit", "--quiet", "-m", "ignore"], { cwd: dir });
+
+      expect(await workspaceModelRecoverable(dir)).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The mirror of the case above: once the model is committed it is no longer
+  // ignored, so --ignored must not manufacture a prompt for a recoverable file.
+  it("is true for a committed model inside an ignored directory", async () => {
+    const dir = await repo();
+    try {
+      await write(dir, "resource db {}\n");
+      await fs.writeFile(path.join(dir, ".gitignore"), ".radius/\n");
+      execFileSync("git", ["add", ".gitignore"], { cwd: dir });
+      execFileSync("git", ["add", "-f", ".radius/app.bicep"], { cwd: dir });
+      execFileSync("git", ["commit", "--quiet", "-m", "model"], { cwd: dir });
+
+      expect(await workspaceModelRecoverable(dir)).toBe(true);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is false for a model git has never seen", async () => {
+    const dir = await repo();
+    try {
+      await write(dir, "resource db {}\n");
+
+      expect(await workspaceModelRecoverable(dir)).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is undefined when there is no workspace or no git", async () => {
+    expect(await workspaceModelRecoverable(null)).toBeUndefined();
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-nogit-"));
+    try {
+      expect(await workspaceModelRecoverable(dir)).toBeUndefined();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });
