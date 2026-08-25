@@ -107,7 +107,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read # @changesets/changelog-github resolves each entry's PR
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -175,24 +174,29 @@ jobs:
       #          in .changeset/config.json) with an `edge` prerelease tag, e.g.
       #          0.1.0-edge-20260807014054. That sorts below the release it
       #          precedes and above anything already shipped. This rewrites
-      #          plugins/radius/package.json in the CI workspace only — nothing
-      #          is committed. An ephemeral patch changeset makes documentation-
-      #          only pushes snapshot the next patch when no package changeset is
-      #          pending; an existing minor or major changeset still takes precedence.
+      #          plugins/radius/package.json and .changeset/config.json in the
+      #          CI workspace only — nothing is committed. An ephemeral patch
+      #          changeset makes documentation-only pushes snapshot the next
+      #          patch when no package changeset is pending; an existing minor
+      #          or major changeset still takes precedence.
       # release: `changeset version` already committed the version to main, so
       #          ship it verbatim. The release workflow tags it after checks.
       - name: Resolve version
         id: version
         env:
           CHANNEL: ${{ inputs.channel || 'edge' }}
-          # `changelog: @changesets/changelog-github` turns every entry into a
-          # GraphQL lookup, and it reads the token from the environment only.
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "$CHANNEL" = "release" ]; then
             version="$(node scripts/version.mjs)"
           elif [ "$CHANNEL" = "edge" ]; then
+            # Only the version is read back, so drop the changelog generator:
+            # @changesets/changelog-github costs one GitHub GraphQL lookup per
+            # pending changeset and fails the publish whenever that call does.
+            config="$(mktemp)"
+            jq '.changelog = false' .changeset/config.json >"$config"
+            mv "$config" .changeset/config.json
+
             pnpm exec changeset add --patch radius \
               --message 'Publish the current commit to the rolling edge channel.'
             pnpm exec changeset version --snapshot edge
