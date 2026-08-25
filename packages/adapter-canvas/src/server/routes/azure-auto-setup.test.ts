@@ -122,6 +122,7 @@ function orchestrationHarness(
   };
   const events: string[] = [];
   const failures: AzureAutoSetupFailureInput[] = [];
+  const writtenCredentialFiles: string[] = [];
   const runAz =
     options.runAz ??
     (async (args: string[]): Promise<AzureAutoSetupCommandResult> => {
@@ -170,6 +171,17 @@ function orchestrationHarness(
       }
       if (line.includes("federated-credential create")) {
         return { code: 0, stdout: "", stderr: "" };
+      }
+      // Our credential setup re-reads the just-created federated credential to
+      // verify and record its provenance. Echo the written credential document
+      // so the live identity matches the required subject/issuer/audiences.
+      if (line.includes("federated-credential show")) {
+        const contents = JSON.parse(writtenCredentialFiles.at(-1) || "{}");
+        return {
+          code: 0,
+          stdout: JSON.stringify({ id: "fic-created", ...contents }),
+          stderr: ""
+        };
       }
       if (line.startsWith("role assignment create ")) {
         return { code: 1, stdout: "", stderr: "already exists" };
@@ -234,7 +246,9 @@ function orchestrationHarness(
     },
     tempFile: {
       createPath: () => "C:\\temp\\fic.json",
-      write: () => {},
+      write: (_path: string, contents: string) => {
+        writtenCredentialFiles.push(contents);
+      },
       remove: () => {}
     },
     ensureServicePrincipal:

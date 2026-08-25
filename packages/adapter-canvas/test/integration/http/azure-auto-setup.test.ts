@@ -148,6 +148,12 @@ async function successfulSetup(createApp: boolean) {
         stderr: ""
       };
     }
+    if (line.startsWith(`ad app show --id ${APP_ID} --query tags`)) {
+      // Reuse-origin classification reads the existing app's Radius provenance
+      // tags. A plainly reused app carries none, so it classifies as
+      // pre-existing and the success contract is unchanged.
+      return { code: 0, stdout: "[]", stderr: "" };
+    }
     if (line.includes("federated-credential list")) {
       return { code: 0, stdout: "[]", stderr: "" };
     }
