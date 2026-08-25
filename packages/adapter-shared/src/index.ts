@@ -7,8 +7,10 @@
 // code.
 
 export {
-  RADIUS_BICEP_CONFIG,
-  RADIUS_BICEP_CONFIG_JSON,
+  RADIUS_EXTENSION_REGISTRY,
+  RADIUS_BICEP_EXPERIMENTAL_FEATURES,
+  radiusExtensionRefForVersion,
+  resolveRadiusExtensionRef,
   MANAGED_RAD_BIN,
   MANAGED_RAD_PATH,
   resolveExistingRadBinary,
@@ -29,6 +31,7 @@ export type {
   ExpectedDigest,
   BicepCompileConfig,
   RunRadAppGraphOptions,
+  ResolveRadiusExtensionRefOptions,
   BuildGraphViaRadOptions,
   RunRadBicepPublishExtensionOptions,
   RunRadBicepPublishOptions

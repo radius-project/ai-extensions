@@ -138,6 +138,9 @@ function createDependencies(
       commit() {},
       release() {}
     }),
+    startConflict: () => {
+      throw new Error("startConflict not stubbed");
+    },
     isValidRepoSlug: () => {
       throw new Error("isValidRepoSlug not stubbed");
     },
@@ -257,6 +260,7 @@ function happyPathCreate(
       return [{ id: "authorize" }];
     },
     createOperation: () => op,
+    startConflict: () => null,
     startOperation: (started) => {
       capture.started.push(started);
       return { ok: true, operation: started };
@@ -972,6 +976,51 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     });
     expect(capture.persistCalls).toBe(0);
     expect(capture.scheduled).toEqual([]);
+  });
+
+  it("answers a distinct 409 when an earlier operation must finish rollback", async () => {
+    const capture = emptyCapture();
+    const release = vi.fn();
+    const claim = vi.fn(() => ({
+      ok: true as const,
+      login: "octocat",
+      credentialSource: "keyring" as const,
+      commit() {},
+      release
+    }));
+    const create = vi.fn(() => newOperationRecord());
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        roleArn: "arn",
+        accountId: "a",
+        region: "r",
+        cluster: "c"
+      }),
+      happyPathCreate(capture, newOperationRecord(), {
+        claimSelectionHandle: claim,
+        createOperation: create,
+        startConflict: () => ({
+          ok: false,
+          reason: "previous-cleanup-required",
+          conflict: { operationId: "op-cleanup" }
+        })
+      })
+    );
+
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body)).toEqual({
+      error:
+        "An earlier setup for octo/app must finish rollback before a new setup can start.",
+      code: "previous-cleanup-required",
+      operationId: "op-cleanup"
+    });
+    expect(capture.persistCalls).toBe(0);
+    expect(capture.scheduled).toEqual([]);
+    expect(claim).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
   });
 
   it("finishes the record failed and answers 500 when persistence fails, without scheduling", async () => {
