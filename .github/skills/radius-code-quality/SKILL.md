@@ -139,7 +139,7 @@ Test priority is independent of implementation phase. **P0** layers are required
 | Stable visual behavior                                                           | A reviewed visual baseline, only when the changed state is in the selected visual set                                                                                                                               |
 | Real host installation, discovery, or panel lifecycle                            | Real-host qualification; loopback HTTP and emulated contracts must never be reported as host coverage                                                                                                               |
 
-All phases are complete except Phase 8, which is real-host testing that is a scheduled and release gate that never blocks a pull request. 
+Consult the test plan for current delivery status; Phase 8 (real-host testing) is a scheduled release gate and never blocks a pull request.
 
 Match the evidence to the kind of change:
 
