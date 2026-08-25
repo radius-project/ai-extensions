@@ -123,6 +123,9 @@ export function initializeDeployedGraphPage(
   const appSelect = context.dom.selectById("deployed-app-select");
   const envSelect = context.dom.selectById("deployed-env-select");
   const action = context.dom.inputById("deployed-delete-btn");
+  const stopTrackingAction = context.dom.inputById(
+    "deployed-stop-tracking-btn"
+  );
   const status = context.dom.byId("deployed-status");
   const label = context.dom.byId("deployed-graph-label");
   const note = context.dom.byId("deployed-mode-note");
@@ -672,11 +675,12 @@ export function initializeDeployedGraphPage(
   };
 
   const runAbandon = (application: string, environment: string): void => {
-    // The callback is registered only when this same action control exists.
+    // This callback is reachable only from the stop-tracking control registered
+    // below, so the control exists whenever the callback can run.
     /* v8 ignore next */
-    if (action) {
-      action.disabled = true;
-      action.textContent = "Abandoning…";
+    if (stopTrackingAction) {
+      stopTrackingAction.disabled = true;
+      stopTrackingAction.textContent = "Stopping tracking…";
     }
     void context.net
       .fetch("/api/abandon-deployment", {
@@ -703,7 +707,7 @@ export function initializeDeployedGraphPage(
             response.status === 403 ?
               "This Radius Canvas page is out of date. Reload it and try again."
             : readString(payload, "error") ||
-                "Could not abandon deployment tracking."
+                "Could not stop tracking the deployment."
           );
           refreshControls();
           return;
@@ -712,7 +716,7 @@ export function initializeDeployedGraphPage(
         setInline(
           context,
           "info",
-          "Deployment tracking was abandoned. Cloud resources were not deleted; resources created before the failure may remain."
+          "Stopped tracking this deployment. Cloud resources were not deleted and may still exist."
         );
         refreshControls();
         loadGraph();
@@ -720,13 +724,13 @@ export function initializeDeployedGraphPage(
       .catch((error: unknown) => {
         if (!entry.active) return;
         context.logger.error(
-          "Radius deployment tracking could not be abandoned.",
+          "Radius deployment tracking could not be stopped.",
           error
         );
         setInline(
           context,
           "error",
-          "Could not abandon deployment tracking. Please try again."
+          "Could not stop tracking the deployment. Please try again."
         );
         refreshControls();
       });
@@ -784,15 +788,20 @@ export function initializeDeployedGraphPage(
           page.provider,
           () => entry.active
         );
-      } else if (
-        mode === "abandon" &&
+      } else if (dialog && selectedApplication() && selectedEnvironment()) {
+        dialog.open(selectedApplication(), selectedEnvironment());
+      }
+    });
+  }
+  if (stopTrackingAction) {
+    entry.on(stopTrackingAction, "click", () => {
+      if (
         abandonDialog &&
+        selectedStatus() === "delete-failed" &&
         selectedApplication() &&
         selectedEnvironment()
       ) {
         abandonDialog.open(selectedApplication(), selectedEnvironment());
-      } else if (dialog && selectedApplication() && selectedEnvironment()) {
-        dialog.open(selectedApplication(), selectedEnvironment());
       }
     });
   }

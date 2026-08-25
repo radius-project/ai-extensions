@@ -80,14 +80,14 @@ export function deleteDialogIntentSpecs(
       {
         tag: "p",
         className: "rad-ddlg__text",
-        text: "Abandoning this failed deployment stops Radius Canvas and GitHub from tracking it. It does not delete cloud resources."
+        text: "Stopping tracking removes this failed teardown from Radius Canvas and GitHub. It does not delete cloud resources."
       },
       {
         tag: "button",
         id: DELETE_DIALOG_STEP1_BUTTON_ID,
         className: "rad-ddlg__btn",
         attrs: { type: "button" },
-        text: "I want to abandon this failed deployment"
+        text: "I want to stop tracking this deployment"
       }
     ];
   }
@@ -227,7 +227,7 @@ export function deleteDialogConfirmSpecs(
       attrs: { type: "button" },
       text:
         variant === "abandon" ?
-          "Abandon failed deployment"
+          "Stop tracking deployment"
         : "Delete this deployment"
     }
   ];

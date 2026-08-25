@@ -91,6 +91,7 @@ function fixture(options: FixtureOptions = {}) {
   const appSelect = createFakeSelect("deployed-app-select");
   const envSelect = createFakeSelect("deployed-env-select");
   const action = createFakeInput("deployed-delete-btn");
+  const stopTrackingAction = createFakeInput("deployed-stop-tracking-btn");
   const status = createFakeElement("deployed-status");
   const label = createFakeElement("deployed-graph-label");
   const note = createFakeElement("deployed-mode-note");
@@ -107,6 +108,7 @@ function fixture(options: FixtureOptions = {}) {
   if (withAppSelect) elements.push(appSelect);
   if (withEnvSelect) elements.push(envSelect);
   if (withAction) elements.push(action);
+  if (withAction) elements.push(stopTrackingAction);
   if (withStatus) elements.push(status);
   if (withLabel) elements.push(label);
   if (withNote) elements.push(note);
@@ -161,6 +163,7 @@ function fixture(options: FixtureOptions = {}) {
     appSelect,
     envSelect,
     action,
+    stopTrackingAction,
     status,
     label,
     note,
@@ -1664,9 +1667,45 @@ describe("initializeDeployedGraphPage", () => {
     expect(modal.style.display).toBe("none");
   });
 
-  it("offers a separate abandonment dialog only for a failed deployment and sends its identity", async () => {
-    const { browser, action, appSelect, envSelect, inlineStatus } = fixture({
-      deployments: [{ app: "app", environment: "dev", status: "failed" }]
+  it("keeps cloud teardown available after a failed redeploy", async () => {
+    const { browser, action, stopTrackingAction, appSelect, envSelect } =
+      fixture({
+        deployments: [{ app: "app", environment: "dev", status: "failed" }]
+      });
+    const { createDialog, confirm, wasOpened } = createConfirmingDialog();
+    browser.net.handle("/api/delete-deployment", () => jsonResponse({}));
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    expect(action.textContent).toBe("Delete Deployment");
+    expect(stopTrackingAction.style.display).toBe("none");
+    stopTrackingAction.dispatch("click");
+    expect(wasOpened()).toBe(false);
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(
+      browser.net.calls.some((call) => call.url === "/api/delete-deployment")
+    ).toBe(true);
+    expect(browser.nav.assigned).toEqual(["/?page=deploying"]);
+  });
+
+  it("offers stop tracking only after a failed teardown and sends its identity", async () => {
+    const {
+      browser,
+      action,
+      stopTrackingAction,
+      appSelect,
+      envSelect,
+      inlineStatus
+    } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
     });
     const { createDialog, confirm, wasOpened } = createConfirmingDialog();
     browser.net.handle("/api/abandon-deployment", () =>
@@ -1678,8 +1717,10 @@ describe("initializeDeployedGraphPage", () => {
     );
     await flushPromises();
 
-    expect(action.dataset.mode).toBe("abandon");
-    expect(action.textContent).toBe("Abandon failed deployment");
+    expect(action.dataset.mode).toBe("delete");
+    expect(action.textContent).toBe("Retry Delete");
+    expect(stopTrackingAction.textContent).toBe("Stop tracking deployment");
+    expect(stopTrackingAction.style.display).toBe("");
     expect(createDialog).toHaveBeenCalledWith(
       expect.objectContaining({
         variant: "abandon",
@@ -1688,10 +1729,10 @@ describe("initializeDeployedGraphPage", () => {
     );
     appSelect.value = "app";
     envSelect.value = "dev";
-    action.dispatch("click");
+    stopTrackingAction.dispatch("click");
     expect(wasOpened()).toBe(true);
     confirm();
-    expect(action.textContent).toBe("Abandoning…");
+    expect(stopTrackingAction.textContent).toBe("Stopping tracking…");
     await flushPromises();
 
     const request = browser.net.calls.find(
@@ -1712,14 +1753,14 @@ describe("initializeDeployedGraphPage", () => {
     expect(inlineStatus.textContent).toContain(
       "Cloud resources were not deleted"
     );
-    expect(inlineStatus.textContent).toContain("may remain");
+    expect(inlineStatus.textContent).toContain("may still exist");
     expect(action.dataset.mode).toBe("deploy");
     expect(browser.nav.assigned).toEqual([]);
   });
 
-  it("surfaces an abandonment refusal from the server", async () => {
-    const { browser, action, inlineStatus } = fixture({
-      deployments: [{ app: "app", environment: "dev", status: "failed" }]
+  it("surfaces a stop-tracking refusal from the server", async () => {
+    const { browser, action, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
     });
     const { createDialog, confirm } = createConfirmingDialog();
     browser.net.handle("/api/abandon-deployment", () =>
@@ -1731,18 +1772,18 @@ describe("initializeDeployedGraphPage", () => {
     );
     await flushPromises();
 
-    action.dispatch("click");
+    stopTrackingAction.dispatch("click");
     confirm();
     await flushPromises();
 
     expect(inlineStatus.textContent).toBe("not failed");
-    expect(action.dataset.mode).toBe("abandon");
-    expect(action.disabled).toBe(false);
+    expect(action.dataset.mode).toBe("delete");
+    expect(stopTrackingAction.disabled).toBe(false);
   });
 
   it("uses a generic abandonment refusal when the server omits an error", async () => {
-    const { browser, action, inlineStatus } = fixture({
-      deployments: [{ app: "app", environment: "dev", status: "failed" }]
+    const { browser, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
     });
     const { createDialog, confirm } = createConfirmingDialog();
     browser.net.handle("/api/abandon-deployment", () =>
@@ -1754,18 +1795,18 @@ describe("initializeDeployedGraphPage", () => {
     );
     await flushPromises();
 
-    action.dispatch("click");
+    stopTrackingAction.dispatch("click");
     confirm();
     await flushPromises();
 
     expect(inlineStatus.textContent).toBe(
-      "Could not abandon deployment tracking."
+      "Could not stop tracking the deployment."
     );
   });
 
   it("turns a stale mutation nonce refusal into a reload instruction", async () => {
-    const { browser, action, inlineStatus } = fixture({
-      deployments: [{ app: "app", environment: "dev", status: "failed" }]
+    const { browser, action, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
     });
     const { createDialog, confirm } = createConfirmingDialog();
     browser.net.handle("/api/abandon-deployment", () =>
@@ -1781,20 +1822,20 @@ describe("initializeDeployedGraphPage", () => {
     );
     await flushPromises();
 
-    action.dispatch("click");
+    stopTrackingAction.dispatch("click");
     confirm();
     await flushPromises();
 
     expect(inlineStatus.textContent).toBe(
       "This Radius Canvas page is out of date. Reload it and try again."
     );
-    expect(action.dataset.mode).toBe("abandon");
-    expect(action.disabled).toBe(false);
+    expect(action.dataset.mode).toBe("delete");
+    expect(stopTrackingAction.disabled).toBe(false);
   });
 
   it("surfaces a transport-safe abandonment failure and restores the action", async () => {
-    const { browser, action, inlineStatus } = fixture({
-      deployments: [{ app: "app", environment: "dev", status: "failed" }]
+    const { browser, action, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
     });
     const { createDialog, confirm } = createConfirmingDialog();
     browser.net.handle("/api/abandon-deployment", () =>
@@ -1806,24 +1847,26 @@ describe("initializeDeployedGraphPage", () => {
     );
     await flushPromises();
 
-    action.dispatch("click");
+    stopTrackingAction.dispatch("click");
     confirm();
     await flushPromises();
 
     expect(inlineStatus.textContent).toBe(
-      "Could not abandon deployment tracking. Please try again."
+      "Could not stop tracking the deployment. Please try again."
     );
     expect(inlineStatus.textContent).not.toContain("secret-shaped");
-    expect(action.dataset.mode).toBe("abandon");
-    expect(action.disabled).toBe(false);
+    expect(action.dataset.mode).toBe("delete");
+    expect(stopTrackingAction.disabled).toBe(false);
     expect(browser.logger.errors).toHaveLength(1);
   });
 
   it.each(["success", "failure"] as const)(
     "ignores a stale abandonment %s after teardown",
     async (outcome) => {
-      const { browser, action, inlineStatus } = fixture({
-        deployments: [{ app: "app", environment: "dev", status: "failed" }]
+      const { browser, stopTrackingAction, inlineStatus } = fixture({
+        deployments: [
+          { app: "app", environment: "dev", status: "delete-failed" }
+        ]
       });
       const { createDialog, confirm } = createConfirmingDialog();
       const request = createDeferred<HttpResponse>();
@@ -1834,7 +1877,7 @@ describe("initializeDeployedGraphPage", () => {
       );
       await flushPromises();
 
-      action.dispatch("click");
+      stopTrackingAction.dispatch("click");
       confirm();
       teardown();
       if (outcome === "success") {

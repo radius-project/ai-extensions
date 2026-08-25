@@ -111,7 +111,7 @@ describe("delete dialog step specs", () => {
     );
   });
 
-  it("builds a distinct abandonment warning and confirmation state", () => {
+  it("builds a distinct stop-tracking warning and confirmation state", () => {
     const intent = deleteDialogIntentSpecs("abandon");
     const effects = deleteDialogEffectsSpecs(
       { app: "store", environment: "prod" },
@@ -123,7 +123,7 @@ describe("delete dialog step specs", () => {
     );
 
     expect(intent[0].text).toContain("does not delete cloud resources");
-    expect(intent[1].text).toBe("I want to abandon this failed deployment");
+    expect(intent[1].text).toBe("I want to stop tracking this deployment");
     expect(effects[0].children?.[1].text).toContain(
       "Resources created before the deployment failed may remain"
     );
@@ -137,7 +137,7 @@ describe("delete dialog step specs", () => {
       " without changing any cloud resources."
     ]);
     expect(confirm[0].text).toContain('"store/prod"');
-    expect(confirm[2].text).toBe("Abandon failed deployment");
+    expect(confirm[2].text).toBe("Stop tracking deployment");
   });
 });
 

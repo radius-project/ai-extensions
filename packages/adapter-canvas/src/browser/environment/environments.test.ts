@@ -978,6 +978,36 @@ describe("environment deletion", () => {
     expect(page.browser.nav.assigned).toEqual(["/?page=deploying&env=dev"]);
   });
 
+  it("keeps a failed-teardown recovery redirect", async () => {
+    const { page, rows } = await readyDelete();
+    page.confirmDialog.show
+      .mockReset()
+      .mockImplementationOnce((options: EnvironmentConfirmOptions) =>
+        options.onConfirm()
+      )
+      .mockImplementation(() => {});
+    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
+      jsonResponse(
+        {
+          code: "app-deployed",
+          error: "The previous teardown failed.",
+          redirect: "/?page=deployed&application=app&environment=dev"
+        },
+        false,
+        409
+      )
+    );
+
+    rows.remove.dispatch("click");
+    await flushPromises();
+    const conflict = page.confirmDialog.show.mock.calls[1][0];
+    expect(conflict.message).toContain("The previous teardown failed.");
+    conflict.onConfirm();
+    expect(page.browser.nav.assigned).toEqual([
+      "/?page=deployed&application=app&environment=dev"
+    ]);
+  });
+
   it("restores the row and reports a request failure", async () => {
     const { page, rows } = await readyDelete();
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>

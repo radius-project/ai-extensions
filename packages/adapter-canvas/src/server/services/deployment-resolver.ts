@@ -170,19 +170,16 @@ export async function resolveEnvironmentDeployment(
     if (record.workflow === "delete" && record.runConclusion === "success") {
       return null;
     }
-    if (
-      record.workflow === "delete" &&
-      record.runConclusion &&
-      record.runConclusion !== "success"
-    ) {
-      return "skip";
-    }
     return {
       app: resolvedAppName,
       environment,
       provider,
       status:
-        record.workflow === "delete" ? "deleting" : resolveDeployStatus(record),
+        record.workflow === "delete" ?
+          record.runConclusion ?
+            "delete-failed"
+          : "deleting"
+        : resolveDeployStatus(record),
       deploymentId: record.id,
       runUrl: record.runUrl
     };

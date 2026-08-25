@@ -147,7 +147,7 @@ export function createDeploymentAbandonmentService(
           status: 400,
           body: {
             error:
-              "A valid repo, environment, and application are required to abandon deployment tracking."
+              "A valid repo, environment, and application are required to stop tracking a deployment."
           }
         };
       }
@@ -168,7 +168,7 @@ export function createDeploymentAbandonmentService(
         return {
           status: 409,
           body: {
-            error: `${conflict} is already in progress. Wait for it to finish before abandoning deployment tracking.`
+            error: `${conflict} is already in progress. Wait for it to finish before stopping deployment tracking.`
           }
         };
       }
@@ -211,7 +211,9 @@ export function createDeploymentAbandonmentService(
         if (!current || !current.deploymentId) {
           return {
             status: 409,
-            body: { error: "No failed deployment is available to abandon." }
+            body: {
+              error: "No failed teardown is available to stop tracking."
+            }
           };
         }
         if (dependencies.deploymentStatusBlocksMutation(current.status)) {
@@ -220,15 +222,17 @@ export function createDeploymentAbandonmentService(
             body: {
               error:
                 current.status === "deleting" ?
-                  "This deployment is being deleted and cannot be abandoned."
-                : "This application is still being deployed. Wait for it to finish before abandoning deployment tracking."
+                  "This deployment is being deleted and cannot be removed from tracking."
+                : "This application is still being deployed. Wait for it to finish before stopping deployment tracking."
             }
           };
         }
-        if (current.status !== "failed") {
+        if (current.status !== "delete-failed") {
           return {
             status: 409,
-            body: { error: "Only a failed deployment can be abandoned." }
+            body: {
+              error: "Only a failed teardown can be removed from tracking."
+            }
           };
         }
 
@@ -253,8 +257,8 @@ export function createDeploymentAbandonmentService(
             body: {
               error:
                 isGitHubScopeFailure(error) ?
-                  "Could not abandon deployment tracking on GitHub because the active GitHub token lacks permission to update deployments. Run `gh auth refresh -h github.com -s repo` in a terminal, then retry. Cloud resources were not changed."
-                : "Could not abandon deployment tracking on GitHub. Cloud resources were not changed."
+                  "Could not stop tracking the deployment on GitHub because the active GitHub token lacks permission to update deployments. Run `gh auth refresh -h github.com -s repo` in a terminal, then retry. Cloud resources were not changed."
+                : "Could not stop tracking the deployment on GitHub. Cloud resources were not changed."
             }
           };
         }

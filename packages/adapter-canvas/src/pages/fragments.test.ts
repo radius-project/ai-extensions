@@ -30,6 +30,9 @@ describe("DELETE_DEPLOYMENT_DIALOG_HTML", () => {
       expect(ABANDON_DEPLOYMENT_DIALOG_HTML).toContain(
         'aria-labelledby="deploy-abandon-title"'
       );
+      expect(ABANDON_DEPLOYMENT_DIALOG_HTML).toContain(
+        '<span class="rad-ddlg__title" id="deploy-abandon-title">Stop Tracking Deployment</span>'
+      );
       for (const id of [
         "deploy-abandon-title",
         "deploy-abandon-close",

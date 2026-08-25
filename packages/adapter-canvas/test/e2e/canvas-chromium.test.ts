@@ -1082,7 +1082,7 @@ test.describe("Radius Canvas in Chromium", () => {
       .toMatchObject({ environment: "fixture-environment" });
   });
 
-  test("shows abandonment only for failed deployments in Chromium @safety", async ({
+  test("offers stop tracking only after teardown fails in Chromium @safety", async ({
     page,
     canvas
   }) => {
@@ -1094,27 +1094,36 @@ test.describe("Radius Canvas in Chromium", () => {
       page.getByRole("button", { name: "Delete Deployment" })
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Abandon failed deployment" })
+      page.getByRole("button", { name: "Stop tracking deployment" })
     ).toHaveCount(0);
 
     status = "failed";
     await page.reload();
     await expect(
-      page.getByRole("button", { name: "Abandon failed deployment" })
+      page.getByRole("button", { name: "Delete Deployment" })
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Delete Deployment" })
+      page.getByRole("button", { name: "Stop tracking deployment" })
     ).toHaveCount(0);
+
+    status = "delete-failed";
+    await page.reload();
+    await expect(
+      page.getByRole("button", { name: "Retry Delete" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop tracking deployment" })
+    ).toBeVisible();
   });
 
-  test("confirms abandonment warning by keyboard and sends the failed deployment identity @safety", async ({
+  test("confirms stop-tracking recovery by keyboard and sends the failed teardown identity @safety", async ({
     page,
     canvas
   }) => {
     const requests: Array<{ body: unknown; nonce: string }> = [];
     await routeDeployedPage(
       page,
-      () => "failed",
+      () => "delete-failed",
       (body, nonce) => {
         requests.push({ body, nonce });
       }
@@ -1122,18 +1131,18 @@ test.describe("Radius Canvas in Chromium", () => {
     await gotoCanvas(page, canvas, "deployed");
 
     const action = page.getByRole("button", {
-      name: "Abandon failed deployment"
+      name: "Stop tracking deployment"
     });
     await action.focus();
     await page.keyboard.press("Enter");
 
     const dialog = page.getByRole("dialog", {
-      name: "Abandon Failed Deployment"
+      name: "Stop Tracking Deployment"
     });
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText("does not delete cloud resources");
     const intent = page.getByRole("button", {
-      name: "I want to abandon this failed deployment"
+      name: "I want to stop tracking this deployment"
     });
     await expect(intent).toBeFocused();
     await page.keyboard.press("Enter");

@@ -123,6 +123,30 @@ describe("resolveEnvironmentDeployment", () => {
     ]);
   });
 
+  it("keeps a failed redeploy current when an older successful deployment exists", async () => {
+    const harness = resolver(["20", "10"], {
+      "20": {
+        state: "failure",
+        logUrl: "https://github.com/octo/app/actions/runs/200",
+        runPath: `.github/workflows/${DEPLOY_WORKFLOW}`,
+        runStatus: "completed",
+        runConclusion: "failure"
+      },
+      "10": {
+        state: "success",
+        logUrl: "https://github.com/octo/app/actions/runs/100",
+        runPath: `.github/workflows/${DEPLOY_WORKFLOW}`,
+        runStatus: "completed",
+        runConclusion: "success"
+      }
+    });
+
+    await expect(harness.resolve()).resolves.toMatchObject({
+      deploymentId: "20",
+      status: "failed"
+    });
+  });
+
   it("does not treat a generic inactive deploy status as a Canvas tombstone", async () => {
     const harness = resolver(["20", "10"], {
       "20": {
@@ -153,7 +177,7 @@ describe("resolveEnvironmentDeployment", () => {
     ]);
   });
 
-  it("skips a generic inactive failed delete and reveals the preceding failed deploy", async () => {
+  it("surfaces a generic inactive failed delete as a recovery state", async () => {
     const harness = resolver(["30", "20"], {
       "30": {
         state: "inactive",
@@ -172,8 +196,8 @@ describe("resolveEnvironmentDeployment", () => {
     });
 
     await expect(harness.resolve()).resolves.toMatchObject({
-      deploymentId: "20",
-      status: "failed"
+      deploymentId: "30",
+      status: "delete-failed"
     });
   });
 
@@ -297,7 +321,7 @@ describe("resolveEnvironmentDeployment", () => {
     });
   });
 
-  it("skips a failed delete but treats a successful delete as decisive", async () => {
+  it("surfaces a failed delete but treats a successful delete as decisive", async () => {
     const failedDelete = resolver(["30", "20"], {
       "30": {
         state: "failure",
@@ -315,7 +339,8 @@ describe("resolveEnvironmentDeployment", () => {
       }
     });
     await expect(failedDelete.resolve()).resolves.toMatchObject({
-      deploymentId: "20"
+      deploymentId: "30",
+      status: "delete-failed"
     });
 
     const successfulDelete = resolver(["40", "20"], {

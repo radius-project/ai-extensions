@@ -1033,7 +1033,7 @@ export function createDeployedState(): DeployedEnvState {
   return { hasEnv: false, hasDeployment: false };
 }
 
-export type DeployedMode = "create-env" | "deploy" | "delete" | "abandon";
+export type DeployedMode = "create-env" | "deploy" | "delete";
 
 function setDeploymentStateUnavailableTitle(button: DomInputElement): void {
   button.setAttribute(
@@ -1060,17 +1060,32 @@ export function applyDeployedEnvState(
   state.hasDeployment = hasDeployment;
   const dom = context.dom;
   const button = dom.inputById("deployed-delete-btn");
+  const stopTrackingButton = dom.inputById("deployed-stop-tracking-btn");
   const hint = dom.byId("deployed-subtitle-hint");
   const application = selectValue(dom.selectById("deployed-app-select"));
   const environment = selectValue(dom.selectById("deployed-env-select"));
   const pending = deploymentStatus === "pending";
   const deleting = deploymentStatus === "deleting";
+  const deleteFailed = deploymentStatus === "delete-failed";
   const mode: DeployedMode =
     environmentsUnavailable ? "deploy"
     : !hasEnv ? "create-env"
-    : hasDeployment && deploymentStatus === "failed" ? "abandon"
     : hasDeployment ? "delete"
     : "deploy";
+
+  if (stopTrackingButton) {
+    stopTrackingButton.textContent = "Stop tracking deployment";
+    stopTrackingButton.style.display = deleteFailed ? "" : "none";
+    stopTrackingButton.disabled =
+      !deleteFailed ||
+      !(application && environment) ||
+      statesUnavailable ||
+      environmentsUnavailable;
+    stopTrackingButton.removeAttribute("title");
+    if (statesUnavailable) {
+      setDeploymentStateUnavailableTitle(stopTrackingButton);
+    }
+  }
 
   if (button) {
     button.dataset.mode = mode;
@@ -1105,10 +1120,11 @@ export function applyDeployedEnvState(
           environmentNotReadyReason(environment, environmentCreationStatus)
         );
       }
-    } else if (mode === "delete") {
+    } else {
       button.textContent =
         pending ? "Deploying…"
         : deleting ? "Deleting…"
+        : deleteFailed ? "Retry Delete"
         : "Delete Deployment";
       button.className = "rad-btn rad-btn--danger-outline";
       button.disabled =
@@ -1129,13 +1145,6 @@ export function applyDeployedEnvState(
       } else if (statesUnavailable) {
         setDeploymentStateUnavailableTitle(button);
       }
-    } else {
-      button.textContent = "Abandon failed deployment";
-      button.className = "rad-btn rad-btn--danger-outline";
-      button.disabled = !(application && environment) || statesUnavailable;
-      if (statesUnavailable) {
-        setDeploymentStateUnavailableTitle(button);
-      }
     }
   }
 
@@ -1153,8 +1162,8 @@ export function applyDeployedEnvState(
         !environmentAllowsDeploy(environmentCreationStatus) ?
           ` The environment (${envLabel}) ${environmentNotReadyPhrase(environmentCreationStatus)}, so this application cannot be deployed to it yet.`
         : ` To deploy this application (${appLabel}) to the environment (${envLabel}), click "Deploy Application".`;
-    } else if (mode === "abandon") {
-      hint.innerHTML = ` The deployment of (${appLabel}) to (${envLabel}) failed. You can stop tracking it, but cloud resources will not be deleted and resources created before the failure may remain.`;
+    } else if (deleteFailed) {
+      hint.innerHTML = ` The previous teardown of (${appLabel}) from (${envLabel}) failed. Retry Delete to clean up cloud resources, or stop tracking the deployment without deleting them.`;
     } else if (pending) {
       hint.innerHTML = ` The application (${appLabel}) is currently being deployed to the environment (${envLabel}). Watch its progress on the Deployments tab.`;
     } else if (deleting) {

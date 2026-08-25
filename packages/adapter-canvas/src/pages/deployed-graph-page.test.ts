@@ -13,6 +13,7 @@ describe("deployedGraphPage", () => {
     });
     expect(html).toContain('id="deployed-app-select"');
     expect(html).toContain('id="deployed-env-select"');
+    expect(html).toContain('id="deployed-stop-tracking-btn"');
     expect(html).toContain('id="deploy-delete-modal"');
     expect(html).toContain('id="deploy-abandon-modal"');
     expect(html).toContain('id="deployed-deleting-modal"');
@@ -41,7 +42,7 @@ describe("deployedGraphPage", () => {
     });
   });
 
-  it("serializes the browser mutation nonce for abandonment", () => {
+  it("serializes the browser mutation nonce for stop-tracking recovery", () => {
     const html = deployedGraphPage({
       contextRepo: "octo/app",
       browserMutationNonce: "nonce-1"

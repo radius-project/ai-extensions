@@ -384,9 +384,9 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     });
   });
 
-  it("abandons failed deployment tracking without synchronizing or dispatching a workflow", async () => {
+  it("stops tracking a failed teardown without synchronizing or dispatching a workflow", async () => {
     const harness = start();
-    harness.setDeploymentStatus("failed");
+    harness.setDeploymentStatus("delete-failed");
     harness.cache.set("octo/todo", { at: Date.now(), payload: {} });
     const entry = await container!.getOrCreate("panel-a");
 
@@ -446,7 +446,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     );
     expect(successful.status).toBe(409);
     expect(await successful.json()).toEqual({
-      error: "Only a failed deployment can be abandoned."
+      error: "Only a failed teardown can be removed from tracking."
     });
     expect(harness.workflowSyncs).toEqual([]);
     expect(harness.dispatches).toEqual([]);
@@ -522,7 +522,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.state.deploymentMutation).toBeUndefined();
   });
 
-  it("abandons the failed deploy behind GitHub's generic inactive failed-delete status", async () => {
+  it("stops tracking a failed delete without falling back to the older deployment", async () => {
     const harness = start();
     harness.setDeploymentResolver((repo, environment, application) =>
       resolveEnvironmentDeployment(repo, environment, application, {
@@ -577,7 +577,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       expect.arrayContaining([
         "--method",
         "POST",
-        "/repos/octo/todo/deployments/failed-deploy/statuses"
+        "/repos/octo/todo/deployments/failed-delete/statuses"
       ])
     );
     expect(harness.workflowSyncs).toEqual([]);

@@ -36,7 +36,7 @@ export const DELETE_DEPLOYMENT_DIALOG_HTML = deploymentDialogHtml(
 export const ABANDON_DEPLOYMENT_DIALOG_HTML = deploymentDialogHtml(
   "abandon",
   '<div id="deploy-abandon-modal"',
-  "Abandon Failed Deployment"
+  "Stop Tracking Deployment"
 );
 
 // Shared by both render paths of the Diff pane (empty selection and rendered

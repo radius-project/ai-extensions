@@ -40,6 +40,7 @@ ${graphHeader("deployed")}
     <div class="rad-select-wrap"><select id="deployed-env-select"><option value="">Loading…</option></select></div>
   </div>
   <button id="deployed-delete-btn" class="rad-btn rad-btn--danger-outline" style="margin:0;" disabled>Delete Deployment</button>
+  <button id="deployed-stop-tracking-btn" class="rad-btn rad-btn--secondary" style="display:none; margin:0;" disabled>Stop tracking deployment</button>
 </div>
 <div id="deployed-inline-status" style="display:none; margin:0 0 14px; padding:10px 12px; border-radius:8px; font-size:13px;"></div>
 <div class="rad-card" style="margin:0;">

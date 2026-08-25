@@ -41,7 +41,7 @@ function dependencies(
     releaseDeploymentMutation: () => {},
     deploymentStatusBlocksMutation: (status) =>
       status === "pending" || status === "in_progress" || status === "deleting",
-    resolveEnvDeployment: () => Promise.resolve(row("failed")),
+    resolveEnvDeployment: () => Promise.resolve(row("delete-failed")),
     ghOrThrow: () => Promise.resolve(""),
     invalidateDeployListCache: () => {},
     ...overrides
@@ -85,7 +85,7 @@ describe("createDeploymentAbandonmentService", () => {
       status: 400,
       body: {
         error:
-          "A valid repo, environment, and application are required to abandon deployment tracking."
+          "A valid repo, environment, and application are required to stop tracking a deployment."
       }
     });
     expect(readInstanceState).not.toHaveBeenCalled();
@@ -145,7 +145,7 @@ describe("createDeploymentAbandonmentService", () => {
       expect(result).toEqual({
         status: 409,
         body: {
-          error: `${description} is already in progress. Wait for it to finish before abandoning deployment tracking.`
+          error: `${description} is already in progress. Wait for it to finish before stopping deployment tracking.`
         }
       });
       expect(reserveDeploymentMutation).not.toHaveBeenCalled();
@@ -210,19 +210,20 @@ describe("createDeploymentAbandonmentService", () => {
   });
 
   it.each([
-    [null, "No failed deployment is available to abandon."],
-    [row("success"), "Only a failed deployment can be abandoned."],
+    [null, "No failed teardown is available to stop tracking."],
+    [row("success"), "Only a failed teardown can be removed from tracking."],
+    [row("failed"), "Only a failed teardown can be removed from tracking."],
     [
       row("pending"),
-      "This application is still being deployed. Wait for it to finish before abandoning deployment tracking."
+      "This application is still being deployed. Wait for it to finish before stopping deployment tracking."
     ],
     [
       row("deleting"),
-      "This deployment is being deleted and cannot be abandoned."
+      "This deployment is being deleted and cannot be removed from tracking."
     ],
     [
       { ...row("failed"), deploymentId: "" },
-      "No failed deployment is available to abandon."
+      "No failed teardown is available to stop tracking."
     ]
   ] as const)(
     "refuses an ineligible resolved state and releases its lease",
@@ -242,7 +243,7 @@ describe("createDeploymentAbandonmentService", () => {
     }
   );
 
-  it("marks the failed deployment inactive, evicts cache, and releases the lease", async () => {
+  it("marks the failed teardown inactive, evicts cache, and releases the lease", async () => {
     const ghOrThrow = vi.fn<(args: string[]) => Promise<string>>(() =>
       Promise.resolve("")
     );
@@ -259,6 +260,7 @@ describe("createDeploymentAbandonmentService", () => {
       status: 200,
       body: { outcome: "abandoned" }
     });
+
     expect(ghOrThrow).toHaveBeenCalledWith([
       "api",
       "--method",
@@ -334,7 +336,7 @@ describe("createDeploymentAbandonmentService", () => {
     await expect(
       abandon({
         resolveEnvDeployment: () =>
-          Promise.resolve({ ...row("failed"), runUrl: "" }),
+          Promise.resolve({ ...row("delete-failed"), runUrl: "" }),
         ghOrThrow
       })
     ).resolves.toMatchObject({ status: 200 });
@@ -357,7 +359,7 @@ describe("createDeploymentAbandonmentService", () => {
       status: 502,
       body: {
         error:
-          "Could not abandon deployment tracking on GitHub. Cloud resources were not changed."
+          "Could not stop tracking the deployment on GitHub. Cloud resources were not changed."
       }
     });
     expect(invalidateDeployListCache).not.toHaveBeenCalled();
@@ -380,7 +382,7 @@ describe("createDeploymentAbandonmentService", () => {
       status: 502,
       body: {
         error:
-          "Could not abandon deployment tracking on GitHub because the active GitHub token lacks permission to update deployments. Run `gh auth refresh -h github.com -s repo` in a terminal, then retry. Cloud resources were not changed."
+          "Could not stop tracking the deployment on GitHub because the active GitHub token lacks permission to update deployments. Run `gh auth refresh -h github.com -s repo` in a terminal, then retry. Cloud resources were not changed."
       }
     });
   });
