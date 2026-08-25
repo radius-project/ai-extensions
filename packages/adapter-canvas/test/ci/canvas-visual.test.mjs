@@ -73,9 +73,7 @@ describe("canonical Canvas visual runner", () => {
     });
 
     expect(args).toContain("--secret");
-    expect(args).toContain(
-      "id=npmrc,src=C:\\Users\\developer\\.npmrc"
-    );
+    expect(args).toContain("id=npmrc,src=C:\\Users\\developer\\.npmrc");
     expect(args.at(-1)).toBe("C:\\src\\ai-extensions");
   });
 
