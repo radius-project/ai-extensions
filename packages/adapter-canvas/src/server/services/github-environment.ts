@@ -343,6 +343,7 @@ export async function ensureGitHubEnvironment(input: {
         kind: mutationKind,
         target: mutationTarget,
         persist: input.mutationRecovery.persist,
+        beforeMutation: input.beforeCreate,
         mutate: () => input.runGh(mutationArgs),
         accept: (result) => result,
         providerIdOf: (result) => parseCommandEnvironmentProviderId(result),
@@ -384,6 +385,9 @@ export async function ensureGitHubEnvironment(input: {
           };
         }
       });
+    if (recovered.state === "cancelled") {
+      throw new GitHubEnvironmentEnsureCancelled();
+    }
     if (recovered.state === "not_applied") {
       const detail =
         recovered.result ?

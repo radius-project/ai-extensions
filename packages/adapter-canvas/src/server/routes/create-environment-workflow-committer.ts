@@ -3,7 +3,6 @@ import {
   providerMutationId,
   providerMutationRecord,
   providerMutationsByKind,
-  shouldStop,
   settleProviderMutation
 } from "../../operations.js";
 import { needsWorkflowScope } from "./create-environment-gh-runner.js";
@@ -232,6 +231,26 @@ export function createWorkflowFileCommitter(
       recorded?.branch || `radius/setup-${target.envName}-workflows-${suffix}`;
     if (ports.mutationRecovery) {
       const mutationTarget = `${target.targetRepo}\0${branch}\0${baseSha}`;
+      const recordedCreate = providerMutationRecord(
+        ports.mutationRecovery.operation,
+        "github_branch.create",
+        mutationTarget
+      );
+      const recoveringWorkflowOnRecordedBranch =
+        recordedCreate?.status === "confirmed" &&
+        providerMutationsByKind(
+          ports.mutationRecovery.operation,
+          "github_workflow.put"
+        ).some(
+          (mutation) =>
+            (mutation.status === "prepared" ||
+              mutation.status === "outcome_unknown") &&
+            mutation.intent?.branch === branch
+        );
+      if (recoveringWorkflowOnRecordedBranch) {
+        prState = { branch, base };
+        return prState;
+      }
       if (
         providerMutationWillWrite(
           ports.mutationRecovery.operation,
@@ -254,6 +273,11 @@ export function createWorkflowFileCommitter(
         target: mutationTarget,
         providerIdempotencyKey: branch,
         persist: ports.mutationRecovery.persist,
+        beforeMutation: () =>
+          ports.mutationRecovery?.beforeMutation?.(
+            "github_branch.create",
+            mutationTarget
+          ) ?? Promise.resolve(true),
         mutate: async () => {
           const result = await ports.createBranchRef(
             target.targetRepo,
@@ -315,6 +339,11 @@ export function createWorkflowFileCommitter(
           };
         }
       });
+      if (creation.state === "cancelled") {
+        throw new WorkflowCommitCancelledError(
+          "Operation stopped before creating the setup branch."
+        );
+      }
       if (creation.state === "not_applied") {
         throw new Error(`could not create branch "${branch}"`);
       }
@@ -556,6 +585,7 @@ export function createWorkflowFileCommitter(
       tmp
     ];
     let r: CreateEnvironmentCommandResult;
+    let cancelled = false;
     try {
       if (mutationRecovery) {
         const mutation =
@@ -572,6 +602,14 @@ export function createWorkflowFileCommitter(
               operationMarker
             },
             persist: mutationRecovery.persist,
+            beforeMutation:
+              atomicFallbackWrite ? undefined : (
+                () =>
+                  mutationRecovery.beforeMutation?.(
+                    mutationKind,
+                    mutationTarget
+                  ) ?? Promise.resolve(true)
+              ),
             mutate: () => ports.runGhWorkflow(args),
             accept: (result) => result,
             reconcile: async () => {
@@ -714,14 +752,23 @@ export function createWorkflowFileCommitter(
               };
             }
           });
-        r =
-          mutation.state === "applied" ?
-            mutation.value
-          : mutation.result || {
-              code: 1,
-              stdout: "",
-              stderr: "GitHub confirmed the workflow write was not applied."
-            };
+        if (mutation.state === "cancelled") {
+          cancelled = true;
+          r = {
+            code: 1,
+            stdout: "",
+            stderr: "Operation stopped before writing the workflow."
+          };
+        } else {
+          r =
+            mutation.state === "applied" ?
+              mutation.value
+            : mutation.result || {
+                code: 1,
+                stdout: "",
+                stderr: "GitHub confirmed the workflow write was not applied."
+              };
+        }
       } else {
         r = await ports.runGhWorkflow(args);
       }
@@ -732,6 +779,7 @@ export function createWorkflowFileCommitter(
       ...r,
       previousBlobSha: intendedPreviousBlobSha,
       previousBlobKnown: intendedPreviousBlobKnown,
+      ...(cancelled ? { cancelled: true } : {}),
       ...readWorkflowCommitProvenance(r.stdout)
     };
   };
@@ -762,7 +810,6 @@ export function createWorkflowFileCommitter(
     if (
       !prState &&
       ports.mutationRecovery &&
-      shouldStop(ports.mutationRecovery.operation) &&
       recordedSetupBranchCreate(
         ports.mutationRecovery.operation,
         target.targetRepo
@@ -770,8 +817,7 @@ export function createWorkflowFileCommitter(
     ) {
       // A restart must return to the exact recorded fallback branch before it
       // considers another default-branch write. This lets the saved branch or
-      // workflow mutation reconcile and prevents Stop from deadlocking behind a
-      // fresh replay of the already-refused direct write.
+      // workflow mutation reconcile without issuing unrelated forward work.
       prState = await beginPrFallback();
     }
     if (prState) {

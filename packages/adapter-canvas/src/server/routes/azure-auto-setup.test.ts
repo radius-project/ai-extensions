@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildRadiusAppProvenanceTags } from "../../azure-oidc.js";
+import { createOperation, prepareProviderMutation } from "../../operations.js";
 import { createRequestContext } from "../request-context.js";
 import { ENTRA_APP_RETENTION_NOTICE } from "./azure-auto-setup-application.js";
 import {
@@ -100,11 +101,13 @@ function orchestrationHarness(
     isStale?: (operation: AzureAutoSetupOperation) => boolean;
     identity?: AzureAutoSetupDependencies["external"]["getGitHubIdentity"];
     repoAccess?: string;
+    preflightRepoAdmin?: AzureAutoSetupDependencies["external"]["preflightRepoAdmin"];
     packageAccess?: Awaited<
       ReturnType<
         AzureAutoSetupDependencies["external"]["preflightGhcrPackageWriteAccess"]
       >
     >;
+    preflightGhcrPackageWriteAccess?: AzureAutoSetupDependencies["external"]["preflightGhcrPackageWriteAccess"];
     runGitHubJson?: AzureAutoSetupDependencies["external"]["runGitHubJson"];
     runAz?: AzureAutoSetupDependencies["external"]["runAz"];
     ensureServicePrincipal?: AzureAutoSetupDependencies["ensureServicePrincipal"];
@@ -196,9 +199,11 @@ function orchestrationHarness(
         (async () => {
           return null;
         }),
-      preflightRepoAdmin: async () => options.repoAccess ?? "",
-      preflightGhcrPackageWriteAccess: async () =>
-        options.packageAccess ?? { ok: true },
+      preflightRepoAdmin:
+        options.preflightRepoAdmin ?? (async () => options.repoAccess ?? ""),
+      preflightGhcrPackageWriteAccess:
+        options.preflightGhcrPackageWriteAccess ??
+        (async () => options.packageAccess ?? { ok: true }),
       runGitHubJson:
         options.runGitHubJson ??
         (async (path) => {
@@ -402,6 +407,44 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
     expect(await response.json()).toMatchObject({
       code: "operation-continuation-mismatch"
     });
+  });
+
+  it("skips unrelated write preflights while reconciling a provider mutation", async () => {
+    const operation = createOperation({
+      operationId: "op-reconcile",
+      provider: "azure",
+      repo: "octo/app",
+      environment: "dev"
+    }) as AzureAutoSetupOperation;
+    operation.currentStage = "authorize_identity";
+    prepareProviderMutation(operation, {
+      kind: "azure_application.create",
+      target: "octo/app:dev"
+    });
+    const preflightRepoAdmin = vi.fn(async () => {
+      throw new Error("repository preflight must not run");
+    });
+    const preflightGhcrPackageWriteAccess = vi.fn(async () => {
+      throw new Error("GHCR preflight must not run");
+    });
+    const harness = orchestrationHarness({
+      operation,
+      getOperation: () => operation,
+      preflightRepoAdmin,
+      preflightGhcrPackageWriteAccess,
+      runAz: async () => {
+        throw new Error("recovery path reached");
+      }
+    });
+
+    const response = await invoke(
+      JSON.stringify({ ...VALID_SETUP, operationId: operation.operationId }),
+      harness.dependencies
+    );
+
+    expect(response.status).toBe(400);
+    expect(preflightRepoAdmin).not.toHaveBeenCalled();
+    expect(preflightGhcrPackageWriteAccess).not.toHaveBeenCalled();
   });
 
   it("reports the conflicting operation without persisting a new record", async () => {

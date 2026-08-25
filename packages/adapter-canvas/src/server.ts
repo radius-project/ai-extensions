@@ -278,7 +278,9 @@ import { createDeployDispatchService } from "./server/services/deploy-dispatch.j
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import {
   executeRecoverableMutation,
-  providerMutationWillWrite
+  ProviderMutationRecoveryError,
+  providerMutationWillWrite,
+  recordProviderReconciliationFailure
 } from "./server/services/provider-mutation-recovery.js";
 import {
   pendingBranchDelete,
@@ -3161,22 +3163,16 @@ export async function ensureServicePrincipal(
         objectId: before.objectId
       };
     }
-    // prepared or outcome_unknown: the create was issued and never answered.
-    // It is not replayed, and it is not claimed either.
-    return {
-      ok: true,
-      state: "created_candidate",
-      origin: "unknown",
-      objectId: before.objectId
-    };
+    // A prepared or outcome-unknown create is settled through the journal below.
+    // Its provider read records the exact object id before any later write runs.
   }
-  if (before.ok) {
+  if (before.ok && !before.objectId) {
     return {
       ok: false,
       stderr: "The Service Principal lookup returned an empty object id."
     };
   }
-  if (!isAzResourceNotFound(before.stderr)) {
+  if (!before.ok && !isAzResourceNotFound(before.stderr)) {
     return {
       ok: false,
       stderr:
@@ -3253,6 +3249,7 @@ export async function ensureServicePrincipal(
     target: clientId,
     providerIdempotencyKey: clientId,
     persist: mutationRecovery.persist,
+    beforeMutation: beforeCreate,
     mutate: runCreate,
     accept: (result) => createdObjectId(result) || "",
     // Settled with the confirmed status, so a crash between Entra's answer and
@@ -3272,7 +3269,8 @@ export async function ensureServicePrincipal(
           state: "applied",
           value: after.objectId,
           evidence:
-            "The Service Principal for this operation's exact application client id exists after the interrupted create."
+            "The Service Principal for this operation's exact application client id exists after the interrupted create.",
+          providerId: after.objectId
         };
       }
       if (after.ok) {
@@ -5250,6 +5248,19 @@ function createInstanceRequestCoordinator(
       await saveOperation(op);
       if (!setup.value.shouldMonitor) return;
       await monitorVerification(operationId);
+    } catch (error) {
+      if (!(error instanceof ProviderMutationRecoveryError)) {
+        const unresolved = unresolvedProviderMutations(op)[0];
+        if (unresolved) {
+          await recordProviderReconciliationFailure(
+            op,
+            unresolved,
+            () => operations.persist(),
+            error
+          );
+        }
+      }
+      throw error;
     } finally {
       if (executorRegistered) {
         selectedGitHubExecutorsByOperation.delete(operationId);

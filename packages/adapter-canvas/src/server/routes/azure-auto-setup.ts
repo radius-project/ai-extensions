@@ -9,6 +9,7 @@ import {
 import type { ResolveOidcSubjectResult } from "../../azure-oidc.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
+import { unresolvedProviderMutations } from "../../operations.js";
 import {
   ENTRA_APP_RETENTION_NOTICE,
   resolveAzureAutoSetupApplication
@@ -448,26 +449,30 @@ export async function handleAzureAutoSetup(
       // Identity narration is advisory and never blocks setup.
     }
 
-    const accessMessage = await dependencies.external.preflightRepoAdmin(
-      targetRepo,
-      selectedExecutor
-    );
-    if (accessMessage) {
-      await fail(403, accessMessage, "repo-admin-required");
-      return;
-    }
-    const packageAccess =
-      await dependencies.external.preflightGhcrPackageWriteAccess(
+    const reconcilingProviderMutation =
+      unresolvedProviderMutations(operation).length > 0;
+    if (!reconcilingProviderMutation) {
+      const accessMessage = await dependencies.external.preflightRepoAdmin(
+        targetRepo,
         selectedExecutor
       );
-    if (!packageAccess.ok) {
-      await fail(
-        packageAccess.status,
-        packageAccess.error,
-        packageAccess.code,
-        { steps }
-      );
-      return;
+      if (accessMessage) {
+        await fail(403, accessMessage, "repo-admin-required");
+        return;
+      }
+      const packageAccess =
+        await dependencies.external.preflightGhcrPackageWriteAccess(
+          selectedExecutor
+        );
+      if (!packageAccess.ok) {
+        await fail(
+          packageAccess.status,
+          packageAccess.error,
+          packageAccess.code,
+          { steps }
+        );
+        return;
+      }
     }
     runAzReady = true;
 

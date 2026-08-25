@@ -648,6 +648,8 @@ export async function runVerificationRetry(
         target: mutationTarget,
         providerIdempotencyKey: operationMarker || null,
         persist: dependencies.persistJournal,
+        beforeMutation: () =>
+          stopBoundary("before-verification-retry-dispatch-attempt"),
         mutate: () => {
           providerRequestStarted = true;
           return executor.run(
@@ -754,6 +756,7 @@ export async function runVerificationRetry(
       return;
     }
 
+    if (dispatch.state === "cancelled") return;
     if (dispatch.state === "not_applied") {
       const rejected = dispatch.result;
       const authorizationError =

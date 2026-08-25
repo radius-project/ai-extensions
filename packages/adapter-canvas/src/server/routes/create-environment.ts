@@ -377,53 +377,58 @@ export async function handleCreateEnvironment(
         throw error;
       }
     };
+    const reconcilingProviderMutation =
+      unresolvedProviderMutations(operation).length > 0;
 
     if (!(await stopBoundary("before-github-environment"))) return;
 
     // Preflight repo access + admin BEFORE any GitHub mutation. Reachable
     // directly when credentials already exist and azure-auto-setup is skipped,
     // so guarding here too is required.
-    const accessMsg = await dependencies.preflightRepoAdmin(
-      targetRepo,
-      selectedExecutor
-    );
-    if (accessMsg) {
-      if (!(await stopBoundary("before-setup-failure-cleanup"))) return;
-      const failure = await dependencies.finalizeSetupFailure(operation, {
-        status: 403,
-        error: accessMsg,
-        code: "repo-admin-required",
-        stage: dependencies.stageConfigureEnvironment,
-        classification: "needs-someone-else",
-        steps,
-        runAz:
-          provider === "azure" ?
-            (args: string[]) => dependencies.runAzCommand(args)
-          : null,
-        runDeleteEnvironment: deleteGitHubEnvironmentRunner,
-        readEnvironment: readGitHubEnvironmentRunner
-      });
-      respond(failure.status, failure.body);
-      return;
-    }
+    let packageCredentials: unknown;
+    if (!reconcilingProviderMutation) {
+      const accessMsg = await dependencies.preflightRepoAdmin(
+        targetRepo,
+        selectedExecutor
+      );
+      if (accessMsg) {
+        if (!(await stopBoundary("before-setup-failure-cleanup"))) return;
+        const failure = await dependencies.finalizeSetupFailure(operation, {
+          status: 403,
+          error: accessMsg,
+          code: "repo-admin-required",
+          stage: dependencies.stageConfigureEnvironment,
+          classification: "needs-someone-else",
+          steps,
+          runAz:
+            provider === "azure" ?
+              (args: string[]) => dependencies.runAzCommand(args)
+            : null,
+          runDeleteEnvironment: deleteGitHubEnvironmentRunner,
+          readEnvironment: readGitHubEnvironmentRunner
+        });
+        respond(failure.status, failure.body);
+        return;
+      }
 
-    if (!(await stopBoundary("before-ghcr-bootstrap"))) return;
-    const ghcrPreflight =
-      await dependencies.preflightGhcrPackageWriteAccess(selectedExecutor);
-    if (!ghcrPreflight.ok) {
-      if (!(await stopBoundary("before-setup-failure-cleanup"))) return;
-      const failure = await dependencies.finalizeSetupFailure(operation, {
-        status: 403,
-        error: ghcrPreflight.error,
-        code: ghcrPreflight.code,
-        steps,
-        runDeleteEnvironment: deleteGitHubEnvironmentRunner,
-        readEnvironment: readGitHubEnvironmentRunner
-      });
-      respond(failure.status, failure.body);
-      return;
+      if (!(await stopBoundary("before-ghcr-bootstrap"))) return;
+      const ghcrPreflight =
+        await dependencies.preflightGhcrPackageWriteAccess(selectedExecutor);
+      if (!ghcrPreflight.ok) {
+        if (!(await stopBoundary("before-setup-failure-cleanup"))) return;
+        const failure = await dependencies.finalizeSetupFailure(operation, {
+          status: 403,
+          error: ghcrPreflight.error,
+          code: ghcrPreflight.code,
+          steps,
+          runDeleteEnvironment: deleteGitHubEnvironmentRunner,
+          readEnvironment: readGitHubEnvironmentRunner
+        });
+        respond(failure.status, failure.body);
+        return;
+      }
+      packageCredentials = ghcrPreflight.credentials;
     }
-    const packageCredentials = ghcrPreflight.credentials;
 
     let ensuredEnvironment = readEnsuredGitHubEnvironment(
       operation,
@@ -568,27 +573,29 @@ export async function handleCreateEnvironment(
       envName
     );
 
-    steps.push(
-      'Creating private GHCR state package "' + stateRegistry + '"...'
-    );
-    if (!(await stopBoundary("before-ghcr-state-package"))) return;
-    // Bootstrap is one atomic boundary: the manifest push, visibility check, and
-    // repository linkage must finish together before the package is usable.
-    const statePackageAttempt = await runMutationAttempt(
-      "after-ghcr-state-package-attempt",
-      () =>
-        dependencies.bootstrapGHCRStatePackage({
-          targetRepository: targetRepo,
-          registry: stateRegistry,
-          credentials: packageCredentials
-        })
-    );
-    if (!statePackageAttempt.completed) return;
-    const statePackage = statePackageAttempt.value;
-    steps.push(
-      `✅ GHCR state package is ${statePackage.visibility} and linked to ${targetRepo}.`
-    );
-    if (!(await checkpoint("after-ghcr-state-package"))) return;
+    if (!reconcilingProviderMutation) {
+      steps.push(
+        'Creating private GHCR state package "' + stateRegistry + '"...'
+      );
+      if (!(await stopBoundary("before-ghcr-state-package"))) return;
+      // Bootstrap is one atomic boundary: the manifest push, visibility check,
+      // and repository linkage must finish together before the package is usable.
+      const statePackageAttempt = await runMutationAttempt(
+        "after-ghcr-state-package-attempt",
+        () =>
+          dependencies.bootstrapGHCRStatePackage({
+            targetRepository: targetRepo,
+            registry: stateRegistry,
+            credentials: packageCredentials
+          })
+      );
+      if (!statePackageAttempt.completed) return;
+      const statePackage = statePackageAttempt.value;
+      steps.push(
+        `✅ GHCR state package is ${statePackage.visibility} and linked to ${targetRepo}.`
+      );
+      if (!(await checkpoint("after-ghcr-state-package"))) return;
+    }
 
     const committer = createWorkflowFileCommitter(
       {
@@ -629,77 +636,83 @@ export async function handleCreateEnvironment(
     const prBranch = (): string | null =>
       committer.pullRequestState()?.branch || null;
 
-    // Tag the environment as Radius-managed so the listing can filter out
-    // environments created outside this extension.
-    if (!(await stopBoundary("before-radius-managed-variable"))) return;
-    const managedVariable = await runMutationAttempt(
-      "after-radius-managed-variable-attempt",
-      () => setEnvironmentVariable("RADIUS_MANAGED", "true")
-    );
-    if (!managedVariable.completed) return;
-    // A new environment invalidates the cached listing for this repo.
-    dependencies.envListCacheDelete(targetRepo);
-    if (!(await checkpoint("after-radius-managed-variable"))) return;
-
-    steps.push('Configuring Radius state package "' + stateRegistry + '"...');
-    if (!(await stopBoundary("before-state-package-configuration"))) return;
-    // These values form one backend contract. Stopping between them would leave
-    // a backend selected without the registry or archive needed to read it.
-    const stateConfiguration = await runMutationAttempt(
-      "after-state-package-configuration-attempt",
-      async () => {
-        await setEnvironmentVariable(
-          "RADIUS_STATE_BACKEND",
-          dependencies.ociStateBackend
-        );
-        await setEnvironmentVariable("RADIUS_STATE_REGISTRY", stateRegistry);
-        await setEnvironmentVariable(
-          "RADIUS_STATE_ARCHIVE",
-          dependencies.defaultStateArchive
-        );
-      }
-    );
-    if (!stateConfiguration.completed) return;
-    steps.push(
-      `✅ Radius state package configured with archive tag "${dependencies.defaultStateArchive}".`
-    );
-    if (!(await checkpoint("after-state-package-configuration"))) return;
-
-    // Record the credential profile this environment was created from so the
-    // Environments listing can show it in the Credentials column.
-    if (data.profileName) {
-      if (!(await stopBoundary("before-credential-profile-variable"))) return;
-      const profileVariable = await runMutationAttempt(
-        "after-credential-profile-variable-attempt",
-        () =>
-          setEnvironmentVariable("RADIUS_CREDENTIAL_PROFILE", data.profileName)
+    let credentialsComplete = true;
+    let missingCredNote = "";
+    if (!reconcilingProviderMutation) {
+      // Tag the environment as Radius-managed so the listing can filter out
+      // environments created outside this extension.
+      if (!(await stopBoundary("before-radius-managed-variable"))) return;
+      const managedVariable = await runMutationAttempt(
+        "after-radius-managed-variable-attempt",
+        () => setEnvironmentVariable("RADIUS_MANAGED", "true")
       );
-      if (!profileVariable.completed) return;
-      if (!(await checkpoint("after-credential-profile-variable"))) return;
-    }
+      if (!managedVariable.completed) return;
+      // A new environment invalidates the cached listing for this repo.
+      dependencies.envListCacheDelete(targetRepo);
+      if (!(await checkpoint("after-radius-managed-variable"))) return;
 
-    // Step 2: Set environment variables and secrets based on provider
-    if (!(await stopBoundary("before-provider-configuration"))) return;
-    // Provider identity fields are a coherent login contract. Exposing a Stop
-    // between individual values would preserve a credential set that cannot
-    // identify one principal, tenant, and subscription together.
-    const providerConfiguration = await runMutationAttempt(
-      "after-provider-configuration-attempt",
-      () =>
-        applyProviderConfiguration(provider, data, {
-          azureCredential: () => dependencies.azureCredential(),
-          awsCredential: () => dependencies.awsCredential(),
-          optionalString: (value) => dependencies.optionalString(value),
-          setEnvironmentVariable,
-          pushStep: (message) => {
-            steps.push(message);
-          }
-        })
-    );
-    if (!providerConfiguration.completed) return;
-    const { credentialsComplete, missingCredNote } =
-      providerConfiguration.value;
-    if (!(await checkpoint("after-provider-configuration"))) return;
+      steps.push('Configuring Radius state package "' + stateRegistry + '"...');
+      if (!(await stopBoundary("before-state-package-configuration"))) return;
+      // These values form one backend contract. Stopping between them would leave
+      // a backend selected without the registry or archive needed to read it.
+      const stateConfiguration = await runMutationAttempt(
+        "after-state-package-configuration-attempt",
+        async () => {
+          await setEnvironmentVariable(
+            "RADIUS_STATE_BACKEND",
+            dependencies.ociStateBackend
+          );
+          await setEnvironmentVariable("RADIUS_STATE_REGISTRY", stateRegistry);
+          await setEnvironmentVariable(
+            "RADIUS_STATE_ARCHIVE",
+            dependencies.defaultStateArchive
+          );
+        }
+      );
+      if (!stateConfiguration.completed) return;
+      steps.push(
+        `✅ Radius state package configured with archive tag "${dependencies.defaultStateArchive}".`
+      );
+      if (!(await checkpoint("after-state-package-configuration"))) return;
+
+      // Record the credential profile this environment was created from so the
+      // Environments listing can show it in the Credentials column.
+      if (data.profileName) {
+        if (!(await stopBoundary("before-credential-profile-variable"))) return;
+        const profileVariable = await runMutationAttempt(
+          "after-credential-profile-variable-attempt",
+          () =>
+            setEnvironmentVariable(
+              "RADIUS_CREDENTIAL_PROFILE",
+              data.profileName
+            )
+        );
+        if (!profileVariable.completed) return;
+        if (!(await checkpoint("after-credential-profile-variable"))) return;
+      }
+
+      // Step 2: Set environment variables and secrets based on provider
+      if (!(await stopBoundary("before-provider-configuration"))) return;
+      // Provider identity fields are a coherent login contract. Exposing a Stop
+      // between individual values would preserve a credential set that cannot
+      // identify one principal, tenant, and subscription together.
+      const providerConfiguration = await runMutationAttempt(
+        "after-provider-configuration-attempt",
+        () =>
+          applyProviderConfiguration(provider, data, {
+            azureCredential: () => dependencies.azureCredential(),
+            awsCredential: () => dependencies.awsCredential(),
+            optionalString: (value) => dependencies.optionalString(value),
+            setEnvironmentVariable,
+            pushStep: (message) => {
+              steps.push(message);
+            }
+          })
+      );
+      if (!providerConfiguration.completed) return;
+      ({ credentialsComplete, missingCredNote } = providerConfiguration.value);
+      if (!(await checkpoint("after-provider-configuration"))) return;
+    }
     // When verification is deliberately not dispatched (incomplete cloud
     // credentials, or workflows that only exist on a PR branch), this holds the
     // reason so the response can signal the client to skip polling
@@ -727,9 +740,13 @@ export async function handleCreateEnvironment(
         recordCommittedWorkflowFile: (op, entry) =>
           dependencies.recordCommittedWorkflowFile(op, entry),
         deleteLegacyDeployWorkflow: (repo) =>
-          dependencies.deleteLegacyDeployWorkflow(repo, selectedExecutor, () =>
-            stopBoundary("before-legacy-workflow-delete")
-          ),
+          reconcilingProviderMutation ?
+            Promise.resolve(true)
+          : dependencies.deleteLegacyDeployWorkflow(
+              repo,
+              selectedExecutor,
+              () => stopBoundary("before-legacy-workflow-delete")
+            ),
         usingPullRequestBranch: () => Boolean(committer.pullRequestState()),
         pullRequestBranch: prBranch,
         errorMessage: (error) => dependencies.errorMessage(error),
@@ -814,6 +831,7 @@ export async function handleCreateEnvironment(
             target: prMutationTarget,
             providerIdempotencyKey: prState.branch,
             persist: () => dependencies.persistOperations(),
+            beforeMutation: () => stopBoundary("before-workflow-pull-request"),
             mutate: async () => {
               const result = await dependencies.createPullRequestApi(
                 targetRepo,
@@ -917,6 +935,7 @@ export async function handleCreateEnvironment(
       );
       if (!prAttempt.completed) return;
       const prMutation = prAttempt.value;
+      if (prMutation.state === "cancelled") return;
       const pr: CreateEnvironmentPullRequestResult =
         prMutation.state === "applied" ?
           prMutation.value
@@ -1227,6 +1246,8 @@ export async function handleCreateEnvironment(
         },
         providerIdempotencyKey: identityMarker || null,
         persist: () => dependencies.persistOperations(),
+        beforeMutation: () =>
+          stopBoundary("before-verification-dispatch-attempt:1"),
         mutate: () =>
           runGhWorkflow(
             dependencies.buildVerifyWorkflowDispatchArgs({
@@ -1255,6 +1276,7 @@ export async function handleCreateEnvironment(
           );
         }
       });
+      if (dispatch.state === "cancelled") return;
       const dispatchResult =
         dispatch.state === "applied" ?
           { code: 0, stdout: "", stderr: "" }

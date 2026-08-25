@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createOperation,
   prepareProviderMutation,
+  requestStop,
   settleProviderMutation
 } from "../../operations.js";
 import {
@@ -54,6 +55,42 @@ describe("provider mutation recovery", () => {
       recovered: false
     });
     expect(events).toEqual(["persist:prepared", "mutate", "persist:confirmed"]);
+  });
+
+  it("does not start a mutation when Stop arrives while its journal is saved", async () => {
+    const operation = createOperation({ operationId: "op_test" });
+    const events: string[] = [];
+    const mutate = vi.fn(async () => command());
+
+    const result = await executeRecoverableMutation({
+      operation,
+      kind: "github_environment.put",
+      target: "octo/app:prod",
+      persist: async () => {
+        const mutation = operation.providerRecovery.mutations[0];
+        events.push(`persist:${mutation?.status}`);
+        if (mutation?.status === "prepared") requestStop(operation);
+      },
+      beforeMutation: async () => {
+        events.push(
+          `boundary:${operation.providerRecovery.mutations[0]?.status}`
+        );
+        return false;
+      },
+      mutate,
+      accept: (value) => value,
+      reconcile: async () => {
+        throw new Error("a mutation that did not start is never reconciled");
+      }
+    });
+
+    expect(result).toEqual({ state: "cancelled" });
+    expect(mutate).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      "persist:prepared",
+      "persist:not_applied",
+      "boundary:not_applied"
+    ]);
   });
 
   it("does not repeat a prepared mutation after restart and adopts provider state", async () => {

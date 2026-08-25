@@ -5,6 +5,7 @@ import {
   providerMutationRecord,
   requestStop,
   settleProviderMutation,
+  shouldStop,
   unresolvedProviderMutations,
   type ProviderMutationRecord
 } from "../../operations.js";
@@ -32,7 +33,8 @@ export type ProviderMutationReconciliation<T> =
 
 export type RecoverableMutationResult<T> =
   | { state: "applied"; value: T; recovered: boolean }
-  | { state: "not_applied"; result?: ProviderMutationCommandResult };
+  | { state: "not_applied"; result?: ProviderMutationCommandResult }
+  | { state: "cancelled" };
 
 export class ProviderMutationRecoveryError extends Error {
   readonly code: string;
@@ -281,36 +283,12 @@ async function reconcileMutation<T>(
     outcome = await reconcile();
   } catch (error) {
     if (rethrowReconciliationError?.(error)) throw error;
-    const detail = error instanceof Error ? error.message : String(error);
-    const attempts = (Number(mutation.reconcileAttempts) || 0) + 1;
-    if (attempts >= MAX_RECONCILE_ATTEMPTS) {
-      const guidance =
-        `Radius could not read provider state for ${mutation.kind} on ${mutation.target} after ${attempts} attempts, most recently: ${detail}. ` +
-        "It will not repeat that request or delete anything on a guess. Review that resource yourself, remove it if it is unwanted, then start a new setup.";
-      settleProviderMutation(
-        operation,
-        mutation.mutationId,
-        "manual_required",
-        guidance
-      );
-      recordAttempts(attempts);
-      await persistOrThrow(persist, "after reconciliation was abandoned");
-      throw new ProviderMutationRecoveryError(
-        guidance,
-        "provider-mutation-manual-required"
-      );
-    }
-    settleProviderMutation(
+    return recordProviderReconciliationFailure(
       operation,
-      mutation.mutationId,
-      "outcome_unknown",
-      `Provider state could not be read: ${detail}`
-    );
-    recordAttempts(attempts);
-    await persistOrThrow(persist, "after reconciliation failed");
-    throw new ProviderMutationRecoveryError(
-      `Radius could not confirm the outcome of ${mutation.kind} for ${mutation.target}. It will not retry that mutation until provider state can be read safely.`,
-      "provider-mutation-outcome-unknown"
+      mutation,
+      persist,
+      error,
+      recordAttempts
     );
   }
   if (outcome.state === "manual_required") {
@@ -340,6 +318,58 @@ async function reconcileMutation<T>(
     : { state: "not_applied" };
 }
 
+export async function recordProviderReconciliationFailure(
+  operation: object,
+  mutation: ProviderMutationRecord,
+  persist: () => Promise<void>,
+  error: unknown,
+  recordAttempts?: (attempts: number) => void
+): Promise<never> {
+  const detail = error instanceof Error ? error.message : String(error);
+  const attempts = (Number(mutation.reconcileAttempts) || 0) + 1;
+  const saveAttempts =
+    recordAttempts ??
+    ((value: number) => {
+      const live = (
+        operation as {
+          providerRecovery?: { mutations?: ProviderMutationRecord[] };
+        }
+      ).providerRecovery?.mutations?.find(
+        (entry) => entry.mutationId === mutation.mutationId
+      );
+      if (live) live.reconcileAttempts = value;
+    });
+  if (attempts >= MAX_RECONCILE_ATTEMPTS) {
+    const guidance =
+      `Radius could not read provider state for ${mutation.kind} on ${mutation.target} after ${attempts} attempts, most recently: ${detail}. ` +
+      "It will not repeat that request or delete anything on a guess. Review that resource yourself, remove it if it is unwanted, then start a new setup.";
+    settleProviderMutation(
+      operation,
+      mutation.mutationId,
+      "manual_required",
+      guidance
+    );
+    saveAttempts(attempts);
+    await persistOrThrow(persist, "after reconciliation was abandoned");
+    throw new ProviderMutationRecoveryError(
+      guidance,
+      "provider-mutation-manual-required"
+    );
+  }
+  settleProviderMutation(
+    operation,
+    mutation.mutationId,
+    "outcome_unknown",
+    `Provider state could not be read: ${detail}`
+  );
+  saveAttempts(attempts);
+  await persistOrThrow(persist, "after reconciliation failed");
+  throw new ProviderMutationRecoveryError(
+    `Radius could not confirm the outcome of ${mutation.kind} for ${mutation.target}. It will not retry that mutation until provider state can be read safely.`,
+    "provider-mutation-outcome-unknown"
+  );
+}
+
 /**
  * Whether the next `executeRecoverableMutation` for this entry would issue a
  * forward provider write rather than reread state it already journaled.
@@ -366,6 +396,7 @@ export async function executeRecoverableMutation<T>(input: {
   providerIdempotencyKey?: string | null;
   intent?: Record<string, string | number | boolean | null> | null;
   persist(): Promise<void>;
+  beforeMutation?(): Promise<boolean>;
   mutate(): Promise<ProviderMutationCommandResult>;
   accept(result: ProviderMutationCommandResult): T;
   /**
@@ -456,6 +487,20 @@ export async function executeRecoverableMutation<T>(input: {
       else delete mutation.intent;
     }
     await persistOrThrow(input.persist, "before the provider request");
+    if (input.beforeMutation && shouldStop(input.operation)) {
+      settleProviderMutation(
+        input.operation,
+        mutation.mutationId,
+        "not_applied",
+        "Radius stopped before sending the provider request."
+      );
+      await persistOrThrow(
+        input.persist,
+        "after Stop prevented the provider request"
+      );
+      await input.beforeMutation();
+      return { state: "cancelled" };
+    }
     let result: ProviderMutationCommandResult;
     try {
       result = await input.mutate();

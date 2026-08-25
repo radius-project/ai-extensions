@@ -533,6 +533,7 @@ export async function resolveAzureAutoSetupApplication({
           kind: applicationMutationKind,
           target: applicationMutationTarget,
           persist: () => operations.persist(),
+          beforeMutation: () => stopBoundary("before-app-registration-create"),
           mutate: () =>
             runAz(
               buildAppCreateArgs({
@@ -639,6 +640,7 @@ export async function resolveAzureAutoSetupApplication({
             };
           }
         });
+        if (createResult.state === "cancelled") return null;
         if (createResult.state === "not_applied") {
           const rejected = createResult.result;
           if (!(await stopBoundary("after-app-registration-create-attempt")))
@@ -709,6 +711,8 @@ export async function resolveAzureAutoSetupApplication({
             target: ownerMutationTarget,
             providerIdempotencyKey: ownerMutationTarget,
             persist: operations.persist,
+            beforeMutation: () =>
+              stopBoundary("before-app-registration-owner-add"),
             mutate: async () => {
               const result = await runAz(
                 buildAppOwnerAddArgs({
@@ -751,6 +755,7 @@ export async function resolveAzureAutoSetupApplication({
                   };
             }
           });
+        if (ownerMutation.state === "cancelled") return null;
         const ownerAdd =
           ownerMutation.state === "applied" ?
             ownerMutation.value
@@ -828,6 +833,8 @@ export async function resolveAzureAutoSetupApplication({
             target: tagMutationTarget,
             providerIdempotencyKey: clientId,
             persist: operations.persist,
+            beforeMutation: () =>
+              stopBoundary("before-app-registration-tag-update"),
             mutate: () =>
               runAz(
                 buildAppTagPatchArgs({ appId: clientId, tags: provenanceTags })
@@ -866,6 +873,7 @@ export async function resolveAzureAutoSetupApplication({
                   };
             }
           });
+        if (tagMutation.state === "cancelled") return null;
         const tagPatch =
           tagMutation.state === "applied" ?
             tagMutation.value

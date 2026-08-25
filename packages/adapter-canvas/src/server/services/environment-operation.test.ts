@@ -252,6 +252,239 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(test.events).not.toContain("preflight-ghcr");
   });
 
+  it("bounds failures before an outstanding environment write can reconcile", async () => {
+    const op = operation();
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_environment.put",
+      target: "octo/app:production"
+    });
+    const test = dependencies(op);
+    const executor = successfulSelectedGhExecutor({
+      run: async () => command({ code: 1, stderr: "HTTP 500: unavailable" })
+    });
+
+    await expect(
+      runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown"
+    });
+
+    expect(
+      unresolvedProviderMutations(op).find(
+        (entry) => entry.mutationId === mutation.mutationId
+      )
+    ).toMatchObject({
+      status: "outcome_unknown",
+      reconcileAttempts: 1,
+      evidence:
+        'Provider state could not be read: Could not resolve GitHub environment "production". HTTP 500: unavailable'
+    });
+    expect(test.events).toContain("persist-provider-mutation");
+  });
+
+  it("does not double-count a failure recorded by environment reconciliation", async () => {
+    const op = operation();
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_environment.put",
+      target: "octo/app:production"
+    });
+    let environmentReads = 0;
+    const test = dependencies(op, {
+      readGitHubJson: async (apiPath) => {
+        if (apiPath === "/repos/octo/app/environments/production") {
+          environmentReads += 1;
+          return environmentReads === 1 ?
+              {
+                ok: true,
+                status: 200,
+                json: { id: 1234567, name: "production" },
+                stderr: ""
+              }
+            : {
+                ok: false,
+                status: 500,
+                json: null,
+                stderr: "HTTP 500: unavailable"
+              };
+        }
+        throw new Error(`Unexpected GitHub read: ${apiPath}`);
+      }
+    });
+
+    await expect(
+      runEnvironmentOperationWorkflow(
+        op,
+        successfulSelectedGhExecutor(),
+        test.dependencies
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown"
+    });
+
+    expect(
+      unresolvedProviderMutations(op).find(
+        (entry) => entry.mutationId === mutation.mutationId
+      )
+    ).toMatchObject({
+      status: "outcome_unknown",
+      reconcileAttempts: 1,
+      evidence: "Provider state could not be read: HTTP 500: unavailable"
+    });
+    expect(
+      test.events.filter((entry) => entry === "persist-provider-mutation")
+    ).toHaveLength(1);
+  });
+
+  it("reuses the durable environment while downstream recovery is pending", async () => {
+    const op = operation();
+    requestStop(op);
+    setCanonicalEnvironment(op, "Production");
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      origin: "pre_existing",
+      repo: "octo/app",
+      name: "Production",
+      providerId: "environment-1"
+    });
+    prepareProviderMutation(op, {
+      kind: "azure_application.create",
+      target: "octo/app:production"
+    });
+    const test = dependencies(op, {
+      preflightRepoAdmin: async () => {
+        throw new Error("repository preflight must not run during recovery");
+      },
+      preflightGhcrPackageWriteAccess: async () => {
+        throw new Error("GHCR preflight must not run during recovery");
+      },
+      readGitHubJson: async () => {
+        throw new Error("the durable environment must not be reread");
+      },
+      postInternal: async (pathname, data) => {
+        test.posts.push({ pathname, data: data as Record<string, unknown> });
+        return {
+          reconciling: true,
+          message: "The application create is still being reconciled."
+        };
+      }
+    });
+
+    await expect(
+      runEnvironmentOperationWorkflow(
+        op,
+        successfulSelectedGhExecutor(),
+        test.dependencies
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown"
+    });
+
+    expect(test.posts.map(({ pathname }) => pathname)).toEqual([
+      "/api/azure-auto-setup"
+    ]);
+    expect(test.events).not.toContain("preflight-admin");
+    expect(test.events).not.toContain("preflight-ghcr");
+  });
+
+  it("routes downstream recovery directly to the outstanding mutation owner", async () => {
+    const op = operation();
+    requestStop(op);
+    setCanonicalEnvironment(op, "Production");
+    op.context = { ...(op.context || {}), clientId: "durable-client-id" };
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      origin: "pre_existing",
+      repo: "octo/app",
+      name: "Production",
+      providerId: "environment-1"
+    });
+    prepareProviderMutation(op, {
+      kind: "github_workflow.put",
+      target: "octo/app:main:.github/workflows/radius-deploy.yml"
+    });
+    const test = dependencies(op, {
+      preflightRepoAdmin: async () => {
+        throw new Error("repository preflight must not run during recovery");
+      },
+      preflightGhcrPackageWriteAccess: async () => {
+        throw new Error("GHCR preflight must not run during recovery");
+      },
+      readGitHubJson: async () => {
+        throw new Error("the durable environment must not be reread");
+      },
+      postInternal: async (pathname, data) => {
+        test.posts.push({ pathname, data: data as Record<string, unknown> });
+        return {
+          reconciling: true,
+          message: "The workflow write is still being reconciled."
+        };
+      }
+    });
+
+    await expect(
+      runEnvironmentOperationWorkflow(
+        op,
+        successfulSelectedGhExecutor(),
+        test.dependencies
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown"
+    });
+
+    expect(test.posts).toEqual([
+      {
+        pathname: "/api/create-environment",
+        data: expect.objectContaining({
+          clientId: "durable-client-id",
+          environment: "Production",
+          operationId: op.operationId
+        })
+      }
+    ]);
+  });
+
+  it("bounds failures that occur before the mutation owner can reconcile", async () => {
+    const op = operation();
+    setCanonicalEnvironment(op, "Production");
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      origin: "pre_existing",
+      repo: "octo/app",
+      name: "Production",
+      providerId: "environment-1"
+    });
+    const mutation = prepareProviderMutation(op, {
+      kind: "azure_application.create",
+      target: "octo/app:production"
+    });
+    const test = dependencies(op, {
+      postInternal: async () => {
+        throw new Error("Azure account state is unavailable");
+      }
+    });
+
+    await expect(
+      runEnvironmentOperationWorkflow(
+        op,
+        successfulSelectedGhExecutor(),
+        test.dependencies
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown"
+    });
+
+    expect(
+      unresolvedProviderMutations(op).find(
+        (entry) => entry.mutationId === mutation.mutationId
+      )
+    ).toMatchObject({
+      status: "outcome_unknown",
+      reconcileAttempts: 1,
+      evidence:
+        "Provider state could not be read: Azure account state is unavailable"
+    });
+  });
+
   it("persists GitHub's canonical name before Azure and propagates it downstream", async () => {
     const op = operation();
     const test = dependencies(op);

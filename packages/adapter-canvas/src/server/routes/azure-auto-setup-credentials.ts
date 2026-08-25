@@ -302,6 +302,10 @@ async function createFederatedCredentials({
           kind: "azure_federated_credential.create",
           target: credentialTarget,
           persist: dependencies.operations.persist,
+          beforeMutation: () =>
+            stopBoundary(
+              `before-federated-credential-create:${credential.name}`
+            ),
           mutate: () =>
             runAz([
               "ad",
@@ -382,6 +386,7 @@ async function createFederatedCredentials({
             };
           }
         });
+      if (mutation.state === "cancelled") return false;
       result =
         mutation.state === "applied" ?
           mutation.value
@@ -548,6 +553,10 @@ async function assignRole(
         target: mutationTarget,
         providerIdempotencyKey: input.assignmentId || null,
         persist,
+        beforeMutation: () =>
+          stopBoundary(
+            `before-role-assignment:${input.role}:attempt-${attemptNumber}`
+          ),
         mutate: () => runAz(buildRoleAssignmentArgs(input)),
         accept: (value) => value,
         reconcile: async () => {
@@ -633,6 +642,9 @@ async function assignRole(
           };
         }
       });
+    if (mutation.state === "cancelled") {
+      return { ok: false, stopped: true, created: false, stderr: "" };
+    }
     last =
       mutation.state === "applied" ?
         mutation.value

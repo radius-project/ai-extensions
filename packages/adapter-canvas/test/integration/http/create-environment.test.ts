@@ -2006,6 +2006,19 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(harness.journal).toContain("createPullRequestApi");
     expect((harness.operation as { endedAt?: unknown }).endedAt).toBeFalsy();
     expect(harness.failures).toEqual([]);
+
+    harness.journal.length = 0;
+    harness.ghCalls.length = 0;
+    const recoveryResponse = await post({ repo: "octo/app" });
+
+    expect(recoveryResponse.status).toBe(202);
+    expect(harness.journal).not.toContain("preflightRepoAdmin");
+    expect(harness.journal).not.toContain("preflightGhcrPackageWriteAccess");
+    expect(harness.journal).not.toContain("bootstrapGHCRStatePackage");
+    expect(harness.journal).not.toContain("deleteLegacyDeployWorkflow");
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("variable set "))
+    ).toBe(false);
   });
 
   it("skips deleting the legacy deploy workflow while commits go through a pull request", async () => {
