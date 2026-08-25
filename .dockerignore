@@ -9,4 +9,3 @@ packages/*/playwright-visual-report
 packages/*/test-results
 plugins/*/dist
 plugins/*/node_modules
-
