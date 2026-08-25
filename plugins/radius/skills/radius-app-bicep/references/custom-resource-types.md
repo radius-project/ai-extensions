@@ -1,6 +1,6 @@
 # Custom resource types (generated on demand)
 
-Use this when the application genuinely needs a backing service that has NO matching type in the predefined allow-list in [Resource Type Resolution](../SKILL.md#resource-type-resolution). Instead of forcing an ill-fitting predefined type or stopping, generate a custom resource type so the application can still be modeled and deployed.
+Use this when the application genuinely needs an Azure-provisionable backing service and the JIT lookup in [Resource Type Resolution](../SKILL.md#resource-type-resolution) returns no matching predefined type. Instead of forcing an ill-fitting predefined type or stopping, generate a custom resource type so the application can still be modeled and deployed.
 
 Custom types are generated automatically as part of modeling. Do not ask the user whether to generate one; decide from the source's actual dependency. The initial scope is backing services that Radius can provision on **Azure**. If the required service is not provisionable on Azure, do NOT invent a type: report the unsupported dependency and stop for that resource.
 
@@ -13,7 +13,7 @@ Author every artifact from the templates below: copy the skeleton and fill only 
 Generate a custom type only when ALL of these hold:
 
 - The application requires a backing service (for example a specific Azure service) to function.
-- No type in the predefined allow-list fits that need. Do not stretch a predefined type to cover a different service.
+- No predefined type returned by the JIT lookup fits that need. Do not stretch a predefined type to cover a different service.
 - The service is provisionable on Azure.
 
 A predefined type that fits the service but exposes a credential in a shape the client cannot consume is NOT a reason to generate a custom type. Redefining a service Radius already models, to obtain a different secret shape, forks the contract and hides the gap. Report it instead, per [Credential shape](secrets-handling.md#credential-shape).
@@ -83,15 +83,15 @@ Rules:
 
 ### 2. Publish the extension locally: call `radius_publish_custom_type_extension`
 
-Compile the manifest into a local Bicep extension co-located with `app.bicep` by calling the `radius_publish_custom_type_extension` tool (never invoke `rad` directly). Pass `stagingDir` with the run's staging directory so it reads `custom-types.yaml` from there and writes `custom-types.tgz` beside it; pass `manifestPath` / `targetPath` only if you used different names.
+Compile the manifest into a local Bicep extension co-located with `app.bicep` by calling the `radius_publish_custom_type_extension` tool (never invoke `rad` directly). Pass the printed staging directory's `.staging-<runId>` basename as `stagingDir` so the tool reads `custom-types.yaml` from there and writes `custom-types.tgz` beside it; pass `manifestPath` / `targetPath` only if you used different names.
 
 Re-run this tool after ANY edit to `custom-types.yaml` — the compiled `custom-types.tgz` is what `app.bicep` validates against, so a schema change (for example adding `codeReference` to a type that predates that rule) has no effect until the extension is republished.
 
 `--target` is a local file path here (not an OCI reference), so the extension ships alongside `app.bicep` and needs no registry. The tool runs the extension-managed `rad` binary internally.
 
-### 3. Wire the extension into the staged `bicepconfig.json`
+### 3. Declare the published extension
 
-Add an alias for the local extension tgz next to the existing `radius` alias, for example an entry that points `customTypes` at `./custom-types.tgz`. Keep the `radius` extension. In `app.bicep`, declare `extension customTypes` in addition to `extension radius`.
+The publication tool adds the `customTypes` alias for `./custom-types.tgz` to the staged `bicepconfig.json`. Do not edit the config yourself. In `app.bicep`, declare `extension customTypes` in addition to `extension radius`.
 
 ### 4. Provide a recipe
 

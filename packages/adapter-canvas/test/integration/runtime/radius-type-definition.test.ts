@@ -23,6 +23,7 @@ const script = path.join(
   "scripts",
   "show-radius-type.mjs"
 );
+const skillRoot = path.dirname(path.dirname(script));
 const fixtureRoot = path.join(
   root,
   "packages",
@@ -1724,5 +1725,47 @@ describe("staged Bicep configuration", () => {
     );
     await resolver.writeStagedBicepConfig(staging, identity.extension);
     expect(fs.existsSync(path.join(staging, "bicepconfig.json"))).toBe(true);
+  });
+});
+
+describe("modeling skill JIT guidance", () => {
+  const skill = fs.readFileSync(path.join(skillRoot, "SKILL.md"), "utf8");
+  const catalog = fs.readFileSync(
+    path.join(skillRoot, "references", "component-catalog.md"),
+    "utf8"
+  );
+
+  it("requires the resolver for predefined types without direct rad use", () => {
+    expect(skill).toContain(
+      "run `show-radius-type.mjs` once with every distinct predefined type"
+    );
+    expect(skill).toContain("Never invoke `rad` or `rad.exe` directly");
+    expect(skill).toContain(
+      "that script performs the supported read-only managed-CLI identity query internally"
+    );
+  });
+
+  it("treats the catalog as candidate mapping rather than availability", () => {
+    expect(catalog).toContain("candidate Radius resource types");
+    expect(catalog).toContain(
+      "A row proposes a type; it does not prove that the managed Radius release contains it."
+    );
+    expect(skill).not.toContain(
+      "Use the `radius-project/resource-types-contrib` repository for discovery"
+    );
+  });
+
+  it("uses no secondary predefined schema source and still compiles before promotion", () => {
+    expect(skill).toContain(
+      "do not fetch contrib schemas, defaults, Recipe packs, OCI metadata, or another release as fallback"
+    );
+    const compile = skill.indexOf(
+      'node "<loaded-skill-base>/scripts/validate-bicep.mjs" <staging-dir>/app.bicep'
+    );
+    const promote = skill.indexOf(
+      'node "<loaded-skill-base>/scripts/promote-app-model.mjs" --staging'
+    );
+    expect(compile).toBeGreaterThan(-1);
+    expect(promote).toBeGreaterThan(compile);
   });
 });

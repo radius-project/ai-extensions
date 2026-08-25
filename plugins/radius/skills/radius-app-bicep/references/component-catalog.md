@@ -1,6 +1,6 @@
 # Component Catalog
 
-Maps common application components to Radius resource types, with detection cues from source code (client libraries across npm / PyPI / NuGet / RubyGems, plus manifest and connection-string hints). Use this to turn the selected deployment profile and its pinned source support into types to emit. Always verify the type against the exact configured extension, registered schema, and Environment recipe.
+Maps common application components to candidate Radius resource types, with detection cues from source code (client libraries across npm / PyPI / NuGet / RubyGems, plus manifest and connection-string hints). A row proposes a type; it does not prove that the managed Radius release contains it. Pass every selected candidate to the JIT resolver before authoring.
 
 Match by **wire protocol, not only a library or type name**: MariaDB clients can map to MySQL, Valkey to Redis, and DocumentDB / Cosmos DB's Mongo API to MongoDB only when protocol versions and authentication modes are compatible. A concrete recipe may back an abstract messaging type with Event Hubs, Service Bus, or another managed service; verify that the application client supports the actual endpoint, TLS, and authentication contract.
 
@@ -20,7 +20,7 @@ Match by **wire protocol, not only a library or type name**: MariaDB clients can
 | External-client ingress             | explicit request; declared Ingress or Gateway API resource; external DNS or load balancer; follow the route authoring rule in [app.bicep Structure](../SKILL.md#appbicep-structure-mandatory-order) | `Radius.Compute/routes`            |
 | Persistent volume                   | source writes durable data; compose volume; writable path and access mode                                                                                                                           | `Radius.Compute/persistentVolumes` |
 
-## Backing services (Radius type available)
+## Backing services (candidate Radius types)
 
 | Component                                                                  | Detection cues (npm / PyPI / NuGet / Gems)                                                                                                        | Radius type                       | Patterns                                     |
 |----------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------|----------------------------------------------|

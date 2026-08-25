@@ -4,14 +4,14 @@
 
 A `Radius.Compute/containers` connection declares a generic Radius relationship to another resource. It can project resource properties into the workload, but it does **not** translate them into arbitrary names or formats expected by an application.
 
-Connection projection is version-specific. Depending on the Radius/container schema and recipe, a connection may provide:
+Connection projection is version-specific. Depending on the Radius/container contract, a connection may provide:
 
 - a `CONNECTION_<NAME>_PROPERTIES` JSON value;
 - individual `CONNECTION_<NAME>_<PROPERTY>` values;
 - relationship metadata; and/or
 - no sensitive outputs.
 
-Inspect the exact configured extension, registered resource schema, recipe output mapping, and Radius runtime before relying on any projection shape. Do not infer it from a different version's documentation.
+Use only readable output paths in the returned JIT definitions. Do not infer a projection shape from descriptions or another version; target-specific Recipe population is checked during deployment readiness.
 
 ## Decide wiring from source
 
@@ -19,7 +19,7 @@ For every dependency:
 
 1. Inspect source, entrypoint, compose, and configuration files for the exact values the workload reads.
 2. Record the selected profile's required names, casing, defaults, types, literal values, URL/config syntax, endpoint transformations, and secret handling.
-3. Inspect the exact resource outputs and connection projection supplied by the target schema and recipe.
+3. Inspect the exact readable resource outputs returned by the JIT resolver and do not guess connection projection.
 4. Prove the full client tuple: subresource, complete endpoint, port, protocol/version, TLS, auth mechanism, secret, and final source-supported format. Include the credential's **shape**: an aggregate URL and discrete host/port/password fields are different contracts, and a client accepts only the one it parses (see [Credential shape](secrets-handling.md#credential-shape)).
 5. Select the wiring for each app-native value:
    - explicit `env.value` from a verified nonsecret output or literal, or from a developer-supplied `@secure()` parameter (Radius encrypts and injects it);
@@ -78,12 +78,12 @@ A `connections` entry to another container is for relationship metadata/projecti
 env: {
   // peer resource is `resource orderingApi 'Radius.Compute/containers@...' = { name: 'ordering-api', properties: { containers: { ordering: {...} } } }`
   ORDERING_URL: {
-    value: 'http://${orderingApi.properties.hosts['ordering']}:8080'
+    value: 'http://${orderingApi.properties.hosts.ordering}:8080'
   }
 }
 ```
 
-- Host is an entry of the peer's `properties.hosts` output, addressed with **indexed access** (e.g. `orderingApi.properties.hosts['ordering']`, where `ordering` is the peer's key in its own `containers` map), never a literal built from the resource `name` or `<resource-name>-<containerKey>`. Use indexed (`['...']`) rather than dot access so keys containing hyphens or other non-identifier characters resolve. The containers recipe populates `hosts` with each port-exposing container's actual Service FQDN, so this reference is stable, predictable, and creates a deploy-time dependency edge.
+- Host is an entry of the peer's `properties.hosts` output, never a literal built from the resource `name` or `<resource-name>-<containerKey>`. For a known key that is a valid Bicep identifier, use dot access (`orderingApi.properties.hosts.ordering`). Use indexed access only for a dynamic or invalid-identifier key (`orderingApi.properties.hosts['order-api']`). Do not suppress `prefer-unquoted-property-names` for a known identifier. The containers recipe populates `hosts` with each port-exposing container's actual Service FQDN, so this reference is stable and creates a deploy-time dependency edge.
 - `hosts` is read-only — reference it, never set it. It has one entry per port-exposing container, so a multi-container peer publishes all of its Service hosts.
 - Do not create a dependency cycle: because each `hosts` reference adds a deploy-time dependency edge, two containers that both reference each other's `hosts` form a circular dependency that fails to deploy. Break it by resolving one direction through `hosts` and the other via the peer's Service DNS name as a plain string literal (`<peer-resource-name>-<containerKey>.<namespace>`). This cycle break is the deliberate exception to the no-literal rule above. Report the cycle rather than emitting mutual references or adding a route for internal traffic.
 - Port is the peer container's published `containerPort` number from source.

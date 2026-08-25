@@ -1,25 +1,26 @@
 # Secrets and Credentials
 
-Secret behavior is part of the exact resource type, extension, recipe, and container contract. Do not copy a secret path or key from another type or version.
+Secret behavior is type- and version-specific. Do not copy a secret path or key from another type or version.
 
 ## Resolve the contract first
 
 For every secret, inspect:
 
-1. the exact registered resource schema for sensitive input properties, secret references, read-only outputs, and key names;
-2. the configured recipe's parameters and output mapping;
-3. the exact `Radius.Security/secrets` and `Radius.Compute/containers` schemas for authored-secret and `secretKeyRef` support; and
-4. the application source for the final native variable/configuration name and required format.
+1. the returned JIT definitions for sensitive inputs, secret references, readable outputs, and key names;
+2. the application source for the final native variable/configuration name and required format; and
+3. when a target Environment is selected, deployment-readiness evidence that its Recipe populates each consumed output.
 
 Preserve any explicit profile requirement that a Recipe-generated managed secret reach a particular native key through `secretKeyRef`. Binding it under a helper name does not satisfy a workload that reads the required key directly. A developer-supplied credential remains a direct `@secure()` `env.value` binding.
 
 Never hardcode passwords, tokens, keys, or credential-bearing URLs. Use a `@secure()` parameter for developer-supplied Bicep inputs. Radius carries a `@secure()` parameter to a sensitive resource property and, when the parameter is assigned to a container `env.value`, injects it into the container without materializing it into plain state.
 
+Apply `sensitive: true` recursively and mechanically. Every expression assigned at such a JIT schema node must originate from a `@secure()` parameter, regardless of the property's name or perceived meaning. This also applies beneath `additionalProperties`; for example, both `data.username.value` and `data.password.value` are sensitive when the schema marks every `data.*.value` node sensitive.
+
 ## Developer-supplied secret inputs
 
-Follow the exact resource schema:
+Follow the returned resource definition:
 
-- If it defines an `x-radius-sensitive` property such as `password`, set that property from a `@secure()` parameter.
+- If it marks a property `sensitive: true`, set that property from a `@secure()` parameter.
 - If it defines a secret reference such as `secretName`, author the supported secret resource and reference it exactly as the schema requires.
 - If it defines no credential input, do not invent one.
 
@@ -184,7 +185,7 @@ Do not return the definition as deployable with the dependency unwired, silently
 - No authored secret `data.value` references a recipe resource output or guessed convenience property.
 - No authored secret `data.value` interpolates an aggregate credential-bearing URL/config.
 - No secret is hardcoded, assumed URL-safe, or assumed to appear in generic connection variables.
-- A developer-supplied `@secure()` value reaches the app through a schema-sensitive property or by direct assignment to `env.value`. `secretKeyRef` is reserved for a Recipe-generated managed secret through the owner's read-only `<resource>.properties.secrets.name`. Author a secret only for genuine application secrets/config files delivered through a schema-supported mount or for a type whose schema requires `secretName`, never to wrap a Recipe output.
+- Every expression assigned at a `sensitive: true` JIT node originates from a `@secure()` parameter, including nested `additionalProperties` values. A developer-supplied `@secure()` value reaches the app through a schema-sensitive property or by direct assignment to `env.value`. `secretKeyRef` is reserved for a Recipe-generated managed secret through the owner's read-only `<resource>.properties.secrets.name`. Author a secret only for genuine application secrets/config files delivered through a schema-supported mount or for a type whose schema requires `secretName`, never to wrap a Recipe output.
 - Runtime composition preserves dependency order, escaping, encoding, and image entrypoint behavior.
 - The credential shape the exact contract exposes matches the shape the pinned client parses, or the mismatch is reported. Address outputs stand alone only where the exact target Recipe is proven to provision no credential and the reply says so. No undeclared discrete property or secret key is invented, and no runtime split is assumed for an image with no shell.
 - A final credential-bearing URL/config is bound from a matching managed secret or safely composed at runtime; it is never reconstructed in Bicep or an authored secret.

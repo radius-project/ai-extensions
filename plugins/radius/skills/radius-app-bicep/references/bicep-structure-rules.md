@@ -1,16 +1,16 @@
 # Bicep Structure Rules
 
-These rules apply to all generated `app.bicep` files. Resolve property names and types from the exact extension configured by the target repository and the matching registered schema/recipe contract. This file covers structural patterns only.
+These rules apply to all generated `app.bicep` files. Resolve every predefined type, API version, property, and access mode from the batch JIT response. This file covers structural patterns only.
 
 ## General
 
 - `extension radius` is the only extension line and comes first (it provides every Radius type; no per-namespace or per-type extensions)
 - `param environment string` always declared
 - A `@secure()` parameter is declared for each developer-supplied secret
-- Exactly ONE `Radius.Core/applications@2025-08-01-preview` resource
-- The `@<apiVersion>` shown in the examples below (e.g. `2025-08-01-preview`) is illustrative — use the API version from each type's schema
+- Exactly ONE `Radius.Core/applications` resource using its returned API version
+- The `@<apiVersion>` shown in the examples below (e.g. `2025-08-01-preview`) is illustrative — replace it with the version returned for that type
 - All output files go in `.radius/` directory
-- Compile with an extension compatible with the exact target Environment schema and Recipe contract; stale mutable metadata never overrides deployment-required wiring
+- Compile with the `radius.extension` returned by the JIT response
 - Emit every exact type, workload role, native key/value, secret binding, and relationship required by the selected compatible deployment profile
 
 ## Radius.Compute/containers structure
@@ -166,6 +166,7 @@ target registry is unauthenticated.
 
 ```bicep
 @description('Username for the OCI registry the containerImages recipe pushes to (the GitHub actor for ghcr.io).')
+@secure()
 param registryUsername string
 
 @description('Password/token for the OCI registry the containerImages recipe pushes to (a GitHub token with write:packages for ghcr.io).')
@@ -216,7 +217,7 @@ Registry-credentials rules:
 - Author the registry Secret only when the push registry requires authentication. For an unauthenticated registry, omit the Secret, the `registryUsername`/`registryPassword` params, and the `dependsOn` — the recipe pack registers the recipe with an empty `containerImagesRegistrySecretName` in that case
 - WHEN the Secret is authored, its resource name MUST be exactly `radius-ghcr-registry-creds` — it is not free-form. It is the fixed `containerImagesRegistrySecretName` the recipe pack registers the recipe with; any other name means the recipe can't find the push credentials
 - Author it with the two keys `username` and `password` (lowercase, exactly these keys — the recipe reads them by name)
-- Populate the keys from a plain `param registryUsername string` and an `@secure() param registryPassword string`. Do NOT hardcode the credentials
+- Populate both keys from `@secure()` parameters. The recursive JIT schema marks every `Radius.Security/secrets.data.*.value` sensitive, including the value stored under the `username` key. Do NOT hardcode the credentials
 - Add `dependsOn: [registryCreds]` on the `containerImages` resource so the Secret exists on the target cluster before the build/push runs
 - Do NOT set a registry on the `containerImages` resource — the push registry (`ghcr.io/<owner>/<repo>`) is an operator concern supplied by the recipe pack's `containerImagesRegistry` parameter, not the app definition
 - `registryUsername`/`registryPassword` are supplied by the deploy workflow from the runner identity (`github.actor` / `GITHUB_TOKEN`); they are workflow-managed parameters, so the extension never surfaces them in the deploy UI or auto-generates values for them. Declare them but do not give them defaults
@@ -241,7 +242,7 @@ resource mysqlDb 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
 Rules:
 
 - Credentials follow whatever the type's schema defines (do not assume by engine):
-  - schema has `username` + `password`: set them on the resource (`password` from a `@secure() param`, marked `x-radius-sensitive`)
+  - schema has `username` + `password`: set them on the resource, sourcing every property marked `sensitive: true` from a `@secure()` parameter
   - schema has `secretName`: create a `Radius.Security/secrets` and reference it (see below)
   - schema has neither: do not invent credentials; inspect the recipe outputs and application auth requirements
 - Symbolic name is engine/instance-derived (`mysqlDb`), NOT fixed — so multiple data stores never collide

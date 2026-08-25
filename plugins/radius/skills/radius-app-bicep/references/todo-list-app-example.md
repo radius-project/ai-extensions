@@ -28,7 +28,7 @@ The requested profile runs the application with MySQL instead of its default SQL
 ## Modeling decisions
 
 1. The explicit MySQL profile selects the optional source-supported MySQL path; do not fall back to SQLite merely because it is the application default.
-2. Resolve the MySQL type, API version, credential inputs, and `host` output against the exact target schema and Recipe.
+2. Run one JIT resolver call for `Radius.Core/applications`, `Radius.Compute/containerImages`, `Radius.Compute/containers`, and `Radius.Data/mySqlDatabases`; use the returned API versions, writable credential inputs, and readable `host` output. The resolver writes the matching extension reference into the staged config.
 3. Map all four native variables. A generic connection does not invent these application-specific names.
 4. Pass the developer-supplied password to the schema's sensitive resource property from a `@secure()` parameter, and assign that same parameter directly to the workload's `MYSQL_PASSWORD` `env.value`. Radius encrypts and injects it, so no wrapper `Radius.Security/secrets` resource or `secretKeyRef` is needed.
 5. Referencing the image and Recipe-mapped MySQL host creates dependency ordering. Omit a generic connection unless the request explicitly requires Radius relationship metadata or the source consumes its exact projection.
@@ -41,7 +41,7 @@ The requested profile runs the application with MySQL instead of its default SQL
 - The selected MySQL type and source-built workload are both emitted.
 - Every required native variable appears with exact spelling and format.
 - The workload password comes from the same `@secure()` parameter assigned to `env.value`; no password is hardcoded and no wrapper secret or `secretKeyRef` is authored.
-- The exact target Recipe maps every consumed output and is registered for every emitted type.
+- Every authored property and referenced output exists with the required access mode in the JIT response; target-specific Recipe population remains a deployment-readiness check.
 - The source build uses the pinned commit and Recipe-validated tag/platform behavior, without unsupported package-manager or architecture assumptions.
 - The process listener, image entrypoint, and database name/version agree with the pinned source.
 - The definition compiles against an extension compatible with the exact target contract and has no unresolved runtime caveat.

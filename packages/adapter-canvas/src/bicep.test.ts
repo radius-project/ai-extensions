@@ -23,6 +23,7 @@ param password string
 @description('The full container image reference to build and push.')
 param image string
 @description('Username for the OCI registry the containerImages recipe pushes to.')
+@secure()
 param registryUsername string
 @secure()
 param registryPassword string
@@ -107,9 +108,8 @@ describe("buildDeployRadCommand", () => {
   });
 
   it("does not inline the registry credentials into the deploy command", () => {
-    // registryUsername is not @secure, so without WORKFLOW_MANAGED_PARAMS it
-    // would land in the public bucket and be inlined here, colliding with the
-    // workflow-injected --parameters registryUsername.
+    // WORKFLOW_MANAGED_PARAMS keeps both values out of every locally assembled
+    // deploy parameter bucket; the workflow injects them from the runner.
     const parsed = appParams(APP_BICEP);
     const resolved = resolveDeployParams(parsed);
     const { public: publicParams } = partitionParams(parsed, resolved);
