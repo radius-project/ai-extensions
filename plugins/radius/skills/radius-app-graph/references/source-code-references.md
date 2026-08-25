@@ -8,8 +8,8 @@ Radius treats this as optional metadata that a developer would normally hand-add
 
 The reference surfaces on the graph node as `codeRef` and is sourced from the resource's `codeReference` value:
 
-- **In `app.bicep`** — set `codeReference: '<path>[#L<line>]'` inside a resource's `properties`. `rad app graph` preserves it and the canvas renders the link. When authoring or updating `app.bicep` (see the `radius-app-bicep` skill), populate `codeReference` for every non-application resource you can locate. Built-in types get the property from Radius's base resource schema; a generated `Radius.Resources/*` custom type is a closed object built from `custom-types.yaml` and accepts it only because that manifest declares it, so on a custom type generated before that rule, add the property to the manifest and republish the extension rather than authoring an unsupported property.
-- **At graph-build time** — the AI agent (this skill) discovers `codeReference` for any resource that is still missing one, using the heuristics below. Authoring it into `app.bicep` is preferred because it is durable and higher quality; the agent pass is the fallback.
+- **In `app.bicep`** — set `codeReference: '<path>[#L<line>]'` inside every non-application resource's `properties`. `rad app graph` preserves it and the canvas renders the link. The `radius-app-bicep` skill must populate it before publishing a generated model. Built-in types get the property from Radius's base resource schema; a generated `Radius.Resources/*` custom type is a closed object built from `custom-types.yaml` and accepts it only because that manifest declares it, so on a custom type generated before that rule, add the property to the manifest and republish the extension rather than authoring an unsupported property.
+- **When a graph reports a missing reference** — repair the staged `app.bicep` through the `radius-app-bicep` skill and rebuild the graph. The instance-scoped graph update action is retained for compatibility, but it is not durable model state and must not be used as the completion path for a generated model.
 
 `applications` resources never get a source reference — skip them.
 
@@ -39,31 +39,31 @@ Keep the search bounded (don't fetch the whole repo): a few dozen candidate file
 
 ### File-name patterns by category
 
-| Category | Filename cues (basename, any dir depth) |
-|---|---|
-| mysql | `db`,`database`,`persistence`,`connection`,`datastore`,`mysql`; `config/database`; `models/{index,db}`; `prisma/schema.prisma`; `knexfile` |
-| postgres | `db`,`database`,`persistence`,`connection`,`datastore`,`postgres`,`pg`; `config/database`; `prisma/schema.prisma`; `knexfile` |
-| redis | `redis`,`cache`,`session`; `config/{redis,cache}` |
-| mongo | `db`,`database`,`mongo`,`mongoose`; `models/{index,db}` |
-| rabbitmq | `queue`,`messaging`,`rabbitmq`,`amqp`,`broker`,`event(s)` |
-| neo4j | `db`,`database`,`neo4j`,`graph` |
-| container | `Dockerfile`; `server`,`app`,`main`,`index` (incl. under `src/`) |
-| secret | `secret(s)`,`credential(s)`,`auth`,`env`; `config/{secrets,credentials}`; `.env`(`.example`/`.sample`) |
+| Category  | Filename cues (basename, any dir depth)                                                                                                    |
+|-----------|--------------------------------------------------------------------------------------------------------------------------------------------|
+| mysql     | `db`,`database`,`persistence`,`connection`,`datastore`,`mysql`; `config/database`; `models/{index,db}`; `prisma/schema.prisma`; `knexfile` |
+| postgres  | `db`,`database`,`persistence`,`connection`,`datastore`,`postgres`,`pg`; `config/database`; `prisma/schema.prisma`; `knexfile`              |
+| redis     | `redis`,`cache`,`session`; `config/{redis,cache}`                                                                                          |
+| mongo     | `db`,`database`,`mongo`,`mongoose`; `models/{index,db}`                                                                                    |
+| rabbitmq  | `queue`,`messaging`,`rabbitmq`,`amqp`,`broker`,`event(s)`                                                                                  |
+| neo4j     | `db`,`database`,`neo4j`,`graph`                                                                                                            |
+| container | `Dockerfile`; `server`,`app`,`main`,`index` (incl. under `src/`)                                                                           |
+| secret    | `secret(s)`,`credential(s)`,`auth`,`env`; `config/{secrets,credentials}`; `.env`(`.example`/`.sample`)                                     |
 
 Source extensions considered for content scans: `.js .ts .mjs .cjs .jsx .tsx .py .go .java .rb`.
 
 ### Initialization/content patterns by category
 
-| Category | First-match line cues (case-insensitive) |
-|---|---|
-| mysql | `createConnection`, `createPool`, `mysql.connect`, `new MySQL`, `mysql2` |
-| postgres | `new Pool`, `pg.connect`, `new Client`, `createClient`, `psycopg`, `sqlalchemy` |
-| redis | `createClient`, `new Redis`, `Redis(`, `redis.connect`, `ioredis` |
-| mongo | `mongoose.connect`, `MongoClient`, `mongo.connect`, `new Mongo` |
-| rabbitmq | `amqp.connect`, `createChannel`, `RabbitMQ`, `pika.` |
-| neo4j | `neo4j.driver`, `GraphDatabase`, `new Driver` |
-| container | `listen(`, `createServer`, `app.listen`, `http.ListenAndServe`, `Flask(` |
-| secret | `getSecret`, `SECRET_`, `process.env`, `os.environ` |
+| Category  | First-match line cues (case-insensitive)                                        |
+|-----------|---------------------------------------------------------------------------------|
+| mysql     | `createConnection`, `createPool`, `mysql.connect`, `new MySQL`, `mysql2`        |
+| postgres  | `new Pool`, `pg.connect`, `new Client`, `createClient`, `psycopg`, `sqlalchemy` |
+| redis     | `createClient`, `new Redis`, `Redis(`, `redis.connect`, `ioredis`               |
+| mongo     | `mongoose.connect`, `MongoClient`, `mongo.connect`, `new Mongo`                 |
+| rabbitmq  | `amqp.connect`, `createChannel`, `RabbitMQ`, `pika.`                            |
+| neo4j     | `neo4j.driver`, `GraphDatabase`, `new Driver`                                   |
+| container | `listen(`, `createServer`, `app.listen`, `http.ListenAndServe`, `Flask(`        |
+| secret    | `getSecret`, `SECRET_`, `process.env`, `os.environ`                             |
 
 ### Always skip
 
@@ -74,7 +74,7 @@ Source extensions considered for content scans: `.js .ts .mjs .cjs .jsx .tsx .py
 
 - Author a **repo-relative path** with forward slashes, optionally `#L<line>`: `src/db/mysql.js#L14`, `services/api/Dockerfile`. This is the canonical authored value.
 - Do not author a branch or full URL. The canvas resolves the repo-relative value against the graph's repo and branch into `<repo-url>/blob/<branch>/<path>#L<line>`. Radius's base resource schema documents `codeReference` as a fully-qualified source URI, but authoring a full URL breaks this canvas deep-link path, so keep authored values repo-relative.
-- If nothing credible is found, leave the reference empty rather than linking a wrong or test file — an empty link is better than a misleading one.
+- If nothing credible is found, stop and report that the generated model is incomplete rather than linking a wrong/test file or publishing without the durable reference.
 
 ## Verify
 

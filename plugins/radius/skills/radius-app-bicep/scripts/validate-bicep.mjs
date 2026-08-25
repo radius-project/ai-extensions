@@ -376,6 +376,55 @@ function checkContainerImageBuildSources(
   return failed;
 }
 
+function checkSourceCodeReferences(template, app, parentPath = "") {
+  let failed = false;
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
+    if (resource?.type === "Microsoft.Resources/deployments") {
+      const nestedTemplate = resource?.properties?.template;
+      if (
+        nestedTemplate !== null &&
+        typeof nestedTemplate === "object" &&
+        !Array.isArray(nestedTemplate) &&
+        checkSourceCodeReferences(nestedTemplate, app, resourcePath)
+      ) {
+        failed = true;
+      }
+      continue;
+    }
+    if (
+      typeof resource?.type !== "string" ||
+      !resource.type.startsWith("Radius.") ||
+      resource.type.startsWith("Radius.Core/applications@")
+    ) {
+      continue;
+    }
+
+    const codeReference = resource?.properties?.properties?.codeReference;
+    if (typeof codeReference !== "string" || !codeReference.trim()) {
+      console.error(
+        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: every non-application Radius resource must store its verified repo-relative source location in app.bicep.`
+      );
+      failed = true;
+      continue;
+    }
+    const sourceLocationPattern =
+      /^(?!\.{1,2}(?:\/|$))(?!.*(?:^|\/)\.\.(?:\/|$))[^#\0]+(?:#L[1-9]\d*)?$/u;
+    if (
+      /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(codeReference) ||
+      codeReference.startsWith("/") ||
+      codeReference.includes("\\") ||
+      !sourceLocationPattern.test(codeReference)
+    ) {
+      console.error(
+        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: "${codeReference}" must be a repo-relative path using forward slashes, optionally followed by #L<line>.`
+      );
+      failed = true;
+    }
+  }
+  return failed;
+}
+
 const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
 const bicep = path.join(
   os.homedir(),
@@ -435,7 +484,14 @@ function check(app) {
   }
 
   const invalidBuildSource = checkContainerImageBuildSources(template, app);
-  return compilerFindings.some(isFailure) || invalidBuildSource ? 1 : 0;
+  const invalidSourceReference = checkSourceCodeReferences(template, app);
+  return (
+      compilerFindings.some(isFailure) ||
+        invalidBuildSource ||
+        invalidSourceReference
+    ) ?
+      1
+    : 0;
 }
 
 function main() {
