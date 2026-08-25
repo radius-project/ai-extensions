@@ -414,21 +414,31 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     expect(await report(1)).toBe(1);
   });
 
-  it("keeps the handoff fire-and-forget when the session cannot take the message", async () => {
+  it("releases the handoff reservation when the session rejects delivery, allowing a later call to deliver", async () => {
     const { ext, capturedHostCallbacks } = setup();
     const session = createFakeSession();
-    (session.send as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new Error("session closed")
-    );
+    const send = session.send as ReturnType<typeof vi.fn>;
+    send.mockRejectedValueOnce(new Error("session closed"));
+    send.mockResolvedValueOnce(undefined);
     ext.attachSession(session);
 
+    // First call fails — the reservation must be released.
     await expect(
       capturedHostCallbacks.appBicepHandoff!({
         repo: "acme/widgets",
         branches: ["main"],
         page: "graph"
       })
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow("session closed");
+    expect(send).toHaveBeenCalledOnce();
+
+    // Second call succeeds — proves the dedupe key was freed.
+    await capturedHostCallbacks.appBicepHandoff!({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph"
+    });
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it("registers a deploy-repair handoff that sends the full prompt to the agent and a short display prompt to the timeline", async () => {

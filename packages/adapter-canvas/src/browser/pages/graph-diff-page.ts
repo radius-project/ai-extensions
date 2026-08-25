@@ -79,6 +79,7 @@ export function initializeGraphDiffPage(
   let progress: ScopeTimer | null = null;
   let progressView: GraphProgressView | null = null;
   let appBicepRetry: ScopeTimer | null = null;
+  let initialRefresh = state.resources.length > 0;
 
   const stopAppBicepRetry = (): void => {
     if (appBicepRetry !== null) entry.cancel(appBicepRetry);
@@ -132,7 +133,10 @@ export function initializeGraphDiffPage(
       });
   };
 
-  const compare = (headElement: DomSelectElement): void => {
+  const compare = (
+    headElement: DomSelectElement,
+    refresh = state.resources.length > 0
+  ): void => {
     pending = null;
     stopAppBicepRetry();
     const base = baseSelect?.value ?? "";
@@ -171,7 +175,7 @@ export function initializeGraphDiffPage(
       .fetch("/api/diff-branches", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ base, head, repo }),
+        body: JSON.stringify({ base, head, repo, refresh }),
         signal: requestAbort?.signal
       })
       .then((response) => response.json())
@@ -196,7 +200,7 @@ export function initializeGraphDiffPage(
           // sat there permanently, even after the model landed.
           appBicepRetry = entry.after(DIFF_RETRY_MS, () => {
             appBicepRetry = null;
-            compare(headElement);
+            compare(headElement, refresh);
           });
         } else {
           const error = readString(payload, "error");
@@ -240,7 +244,11 @@ export function initializeGraphDiffPage(
     stopAppBicepRetry();
     stopProgress();
     if (pending !== null) entry.cancel(pending);
-    pending = entry.after(DIFF_DEBOUNCE_MS, () => compare(headElement));
+    const refresh = initialRefresh;
+    initialRefresh = false;
+    pending = entry.after(DIFF_DEBOUNCE_MS, () =>
+      compare(headElement, refresh)
+    );
   };
 
   if (headSelect) {
@@ -256,7 +264,7 @@ export function initializeGraphDiffPage(
   void populateDiffBranches(context, state.repo, {
     preferBase: state.base,
     preferHead: state.head,
-    autoCompare: state.resources.length === 0 && !state.modelingError,
+    autoCompare: !state.modelingError,
     lifecycle: entry
   });
 

@@ -138,6 +138,48 @@ describe("initializeGraphDiffPage", () => {
     expect(head.listenerCount()).toBe(0);
   });
 
+  it("reconciles freshness for preloaded diff resources by invoking the HTTP workflow", async () => {
+    const { browser, status } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    let diffCalls = 0;
+    let requestBody = "";
+    browser.net.handle("/api/diff-branches", (init) => {
+      diffCalls++;
+      requestBody = String(init?.body ?? "");
+      return jsonResponse({
+        message: "The preloaded diff is current."
+      });
+    });
+    const render = vi.fn();
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: render });
+    await flushPromises();
+
+    // After branch listing loads, auto-compare triggers the debounced POST.
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(diffCalls).toBe(1);
+    expect(requestBody).toContain('"refresh":true');
+    expect(render).toHaveBeenCalledOnce();
+    expect(status.textContent).toBe("The preloaded diff is current.");
+  });
+
+  it("reloads when preloaded diff resources are stale and the workflow says so", async () => {
+    const { browser } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({ reload: true })
+    );
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    await flushPromises();
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(1);
+  });
+
   it("rejects a stale comparison and leaves no debounce timer", async () => {
     const { browser, head, status } = fixture();
     browser.net.supportsAbort = false;
@@ -203,6 +245,7 @@ describe("initializeGraphDiffPage", () => {
       radiusRenderGraph: vi.fn(),
       radiusSetGraphError: setError
     });
+    await flushPromises();
 
     head.dispatch("change");
     browser.clock.tick(DIFF_DEBOUNCE_MS);

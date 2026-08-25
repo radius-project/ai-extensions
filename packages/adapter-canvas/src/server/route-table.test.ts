@@ -191,6 +191,7 @@ const productionHandlers = {
     settleDeployStatuses: () => {},
     errorMessage: (error) => String(error),
     repoMatchesWorkspace: () => false,
+    observeModelingRun: () => Promise.resolve(null),
     now: () => 0
   }),
   ...createGraphsPlanningStreamRoutes({

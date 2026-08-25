@@ -55,11 +55,14 @@ export interface AppModelHandoffDependencies {
     branch: string,
     state: CanvasState
   ): Promise<AppSourceEvaluation>;
-  send(message: HandoffMessage): void;
+  send(message: HandoffMessage): Promise<void>;
   log(message: string): void;
   // False once the same staleness evidence has already been handed off. Owned by
   // the caller so the memo outlives any single canvas instance.
   shouldRequestRefresh(key: string): boolean;
+  // Releases an extension-scoped refresh memo entry. Called when delivery fails
+  // so a later attempt can re-deliver the same staleness signal.
+  releaseRefreshMemo(key: string): void;
 }
 
 export type AppModelHandoff = (
@@ -148,7 +151,14 @@ export function createAppModelHandoff(
         return;
       }
       if (state && state.appBicepHandoffKey !== key) return;
-      deps.send(appBicepHandoffMessage(repo, page, targets));
+      try {
+        await deps.send(appBicepHandoffMessage(repo, page, targets));
+      } catch (sendError) {
+        if (state?.appBicepHandoffKey === key) {
+          delete state.appBicepHandoffKey;
+        }
+        throw sendError;
+      }
       return;
     }
 
@@ -161,8 +171,22 @@ export function createAppModelHandoff(
       (status) => status.refreshable && status.freshness.requiresConfirmation
     );
     if (unverified) {
-      if (!deps.shouldRequestRefresh(refreshRequestKey(unverified))) return;
-      deps.send(appModelUnverifiedMessage(unverified));
+      const refreshKey = refreshRequestKey(unverified);
+      if (!deps.shouldRequestRefresh(refreshKey)) {
+        if (state?.appBicepHandoffKey === key) {
+          delete state.appBicepHandoffKey;
+        }
+        return;
+      }
+      try {
+        await deps.send(appModelUnverifiedMessage(unverified));
+      } catch (sendError) {
+        if (state?.appBicepHandoffKey === key) {
+          delete state.appBicepHandoffKey;
+        }
+        deps.releaseRefreshMemo(refreshKey);
+        throw sendError;
+      }
       return;
     }
 
@@ -170,8 +194,22 @@ export function createAppModelHandoff(
       (status) => status.refreshable && status.freshness.stale
     );
     if (outdated) {
-      if (!deps.shouldRequestRefresh(refreshRequestKey(outdated))) return;
-      deps.send(appModelRefreshMessage(outdated));
+      const refreshKey = refreshRequestKey(outdated);
+      if (!deps.shouldRequestRefresh(refreshKey)) {
+        if (state?.appBicepHandoffKey === key) {
+          delete state.appBicepHandoffKey;
+        }
+        return;
+      }
+      try {
+        await deps.send(appModelRefreshMessage(outdated));
+      } catch (sendError) {
+        if (state?.appBicepHandoffKey === key) {
+          delete state.appBicepHandoffKey;
+        }
+        deps.releaseRefreshMemo(refreshKey);
+        throw sendError;
+      }
       return;
     }
 

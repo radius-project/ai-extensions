@@ -216,6 +216,75 @@ describe("initializePlannedGraphPage", () => {
     expect(environment.listenerCount()).toBe(0);
   });
 
+  it("reconciles freshness for cached planned resources by invoking the plan workflow", async () => {
+    const { browser, status } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    let planCalls = 0;
+    let requestBody = "";
+    browser.net.handle("/api/plan-graph", (init) => {
+      planCalls++;
+      requestBody = String(init?.body ?? "");
+      return jsonResponse({ refreshed: true });
+    });
+    const render = vi.fn();
+    initializePlannedGraphPage(browser.context, {
+      radiusRenderGraph: render,
+      radiusSetGraphLoading: vi.fn()
+    });
+    await flushPromises();
+    // After selectors load, queue(true) fires immediately (no debounce).
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(planCalls).toBe(1);
+    expect(requestBody).toContain('"refresh":true');
+    expect(render).toHaveBeenCalledOnce();
+    expect(status.textContent).toBe("The planned deployment is current.");
+  });
+
+  it("reloads when cached planned resources are stale and the workflow says so", async () => {
+    const { browser } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    browser.net.handle("/api/plan-graph", () => jsonResponse({ reload: true }));
+    initializePlannedGraphPage(browser.context, {
+      radiusRenderGraph: vi.fn(),
+      radiusSetGraphLoading: vi.fn()
+    });
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(1);
+  });
+
+  it("uses refresh mode only for the initial cached reconciliation", async () => {
+    const { browser, branch } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    const bodies: string[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
+      bodies.push(String(init?.body ?? ""));
+      return jsonResponse(
+        bodies.length === 1 ? { refreshed: true } : { reload: true }
+      );
+    });
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toContain('"refresh":true');
+    expect(bodies[1]).toContain('"refresh":false');
+  });
+
   it("coalesces changes and ignores an outdated plan response", async () => {
     const { browser, branch, status } = fixture();
     browser.net.handle("/api/plan-graph", () =>
@@ -356,7 +425,9 @@ describe("initializePlannedGraphPage", () => {
       resources: [{ id: "app/web" }],
       envListing: "error"
     });
-    browser.net.handle("/api/plan-graph", () => jsonResponse({}));
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ refreshed: true })
+    );
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
 
@@ -395,15 +466,21 @@ describe("initializePlannedGraphPage", () => {
   });
 
   it("sets a create-environment message on the container via the initial follow-up", async () => {
-    const { browser, container } = fixture({
+    const { browser, container, status } = fixture({
       envListing: "empty",
       resources: [{ id: "app/web" }]
     });
     container.innerHTML = "<div>stale</div>";
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ refreshed: true })
+    );
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
 
-    expect(container.innerHTML).toContain(
+    expect(container.innerHTML).toBe("<div>stale</div>");
+    expect(status.textContent).toContain(
       "Create an environment to preview the planned deployment for this application."
     );
   });
@@ -413,7 +490,9 @@ describe("initializePlannedGraphPage", () => {
       envListing: "empty",
       resources: [{ id: "app/web" }]
     });
-    browser.net.handle("/api/plan-graph", () => jsonResponse({}));
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ refreshed: true })
+    );
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     container.innerHTML = "<div>stale</div>";
@@ -909,10 +988,12 @@ describe("initializePlannedGraphPage", () => {
     expect(hint.innerHTML).toContain(
       "deployment plan is still updating, so deployment is temporarily unavailable"
     );
+    expect(
+      browser.net.calls.some((call) => call.url === "/api/plan-graph")
+    ).toBe(true);
 
     plan.resolve(jsonResponse({ reload: true }));
     await flushPromises();
-    expect(button.disabled).toBe(false);
   });
 
   it("abandons a queued plan when the page is torn down before it drains", async () => {

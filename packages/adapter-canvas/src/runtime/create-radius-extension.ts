@@ -158,15 +158,8 @@ export function createRadiusExtension(
       resolveAppModelStatus(repo, branch, state),
     evaluateSource: (repo, branch, state) =>
       evaluateAppSourceForBranch(repo, branch, state),
-    send: (message) => {
-      try {
-        void Promise.resolve(deps.session.get().send(message)).catch(
-          () => undefined
-        );
-      } catch {
-        /* session.send unavailable → drop the handoff */
-      }
-    },
+    send: (message) =>
+      Promise.resolve(deps.session.get().send(message)).then(() => undefined),
     log: (message) => {
       try {
         deps.session.get().log?.(message);
@@ -174,7 +167,10 @@ export function createRadiusExtension(
         /* session.log unavailable → drop the notice */
       }
     },
-    shouldRequestRefresh
+    shouldRequestRefresh,
+    releaseRefreshMemo: (key: string) => {
+      requestedRefreshes.delete(key);
+    }
   });
   deps.hostCallbacks.setAppBicepHandoff(({ repo, branches, page, state }) =>
     handOffAppModel({ repo, branches, page, state })

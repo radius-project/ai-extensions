@@ -93,6 +93,7 @@ export function initializePlannedGraphPage(
   let progressView: GraphProgressView | null = null;
   let selectionQueuedWhileLoading = false;
   let appBicepRetry: ScopeTimer | null = null;
+  let nextRequestRefresh = page.resources.length > 0;
   // Re-issues the current selection. Assigned once the scheduler exists, since
   // the retry must go through the same serialization as a user-driven request
   // rather than starting a second overlapping compile.
@@ -141,9 +142,11 @@ export function initializePlannedGraphPage(
       typeof providers[selectedEnvironment] === "string" ?
         providers[selectedEnvironment]
       : page.provider;
+    const refresh = nextRequestRefresh;
+    nextRequestRefresh = false;
     const current = (): boolean => entry.active && isCurrent();
 
-    if (plan.envsStale) {
+    if (plan.envsStale && !refresh) {
       status(
         context,
         page.resources.length > 0 ?
@@ -161,7 +164,7 @@ export function initializePlannedGraphPage(
       );
       return Promise.resolve();
     }
-    if (!plan.hasEnv || !selectedEnvironment) {
+    if ((!plan.hasEnv || !selectedEnvironment) && !refresh) {
       status(
         context,
         "Create an environment to preview the planned deployment for this application.",
@@ -232,7 +235,8 @@ export function initializePlannedGraphPage(
           repo: page.repo,
           branch: selectedBranch,
           provider: selectedProvider,
-          environment: selectedEnvironment
+          environment: selectedEnvironment,
+          refresh
         }),
         signal: abort?.signal
       })
@@ -243,8 +247,28 @@ export function initializePlannedGraphPage(
           context.nav.reload();
           return;
         }
+        if (readBoolean(payload, "refreshed")) {
+          plan.requestFailed = false;
+          if (plan.envsStale) {
+            status(
+              context,
+              "Environments could not be loaded. The last planned graph is retained.",
+              "error"
+            );
+          } else if (!plan.hasEnv || !selectedEnvironment) {
+            status(
+              context,
+              "Create an environment to preview the planned deployment for this application.",
+              "info"
+            );
+          } else {
+            status(context, "The planned deployment is current.", "info");
+          }
+          return;
+        }
         plan.requestFailed = true;
         if (readBoolean(payload, "needsAppBicep")) {
+          nextRequestRefresh = refresh;
           status(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the planned graph will appear once it is saved.",
@@ -323,6 +347,7 @@ export function initializePlannedGraphPage(
   for (const selector of [app, branch, environment]) {
     if (!selector) continue;
     entry.on(selector, "change", () => {
+      nextRequestRefresh = false;
       queue();
     });
   }
@@ -366,14 +391,10 @@ export function initializePlannedGraphPage(
     }
   }).then(() => {
     if (!entry.active) return;
-    if (page.resources.length === 0) queue(true);
-    else if (!plan.hasEnv && !plan.envsStale) {
-      const container = context.dom.byId("graph-container");
-      if (container) {
-        container.innerHTML =
-          '<div class="status info">Create an environment to preview the planned deployment for this application.</div>';
-      }
-    }
+    // Always invoke the plan workflow to reconcile freshness, even when
+    // preloaded resources are displayed. The visible cached graph is preserved
+    // while the HTTP workflow checks whether the model is missing or stale.
+    queue(true);
   });
 
   entry.onTeardown(() => {

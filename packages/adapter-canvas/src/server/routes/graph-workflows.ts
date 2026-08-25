@@ -145,8 +145,14 @@ export interface GraphWorkflowDependencies<
     headResources: CanvasGraphResource[]
   ): CanvasGraphResource[];
   // Newest filesystem activity from a modeling run in this instance's
-  // workspace. Read only while a request is answering `needsAppBicep`.
-  observeModelingRun(state: CanvasState): Promise<number | null>;
+  // workspace, scoped to the given repository and branches so unrelated
+  // local modeling activity does not extend waits for a different target.
+  // Read only while a request is answering `needsAppBicep`.
+  observeModelingRun(
+    state: CanvasState,
+    repo: string,
+    branches: string[]
+  ): Promise<number | null>;
   record(value: unknown): Record<string, unknown>;
   optionalString(value: unknown): string;
   errorMessage(error: unknown): string;
@@ -191,6 +197,7 @@ function beginGraphProgress(
   state: CanvasState,
   view: GraphProgressView,
   key: string,
+  target: { repo: string; branches: string[] },
   nowMs: number
 ): GraphProgressHandle {
   const existing = graphProgressRecord(state, view);
@@ -214,12 +221,16 @@ function beginGraphProgress(
         graphProgressActive: true,
         graphProgressView: view,
         graphProgressKey: key,
+        graphProgressRepo: target.repo,
+        graphProgressBranches: target.branches,
         graphProgressOwner: 0,
         graphProgressAwaitingModel: false
       }
     );
   record.graphProgressActive = true;
   record.graphProgressAwaitingModel = false;
+  record.graphProgressRepo = target.repo;
+  record.graphProgressBranches = target.branches;
   record.graphProgressOwner += 1;
   state.graphProgressRecords ??= {};
   state.graphProgressRecords[view] = record;
@@ -376,6 +387,9 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         | { entry: TEntry; request: Omit<GraphRepairRequest, "diagnostic"> }
         | undefined;
       shouldRepair: () => boolean;
+      // The repo and branches the workflow is modeling, so the liveness probe
+      // only reports activity relevant to this target.
+      modelingTarget: () => { repo: string; branches: string[] };
     }
   ): Promise<GraphWorkflowOutcome> {
     let outcome: GraphWorkflowOutcome;
@@ -404,9 +418,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     if (!state) return outcome;
     // Only an answer that asks the page to keep waiting needs the liveness
     // probe, so the ordinary success and failure paths pay nothing for it.
+    const target = hooks.modelingTarget();
     const modelingActivityAtMs =
       outcome.payload.needsAppBicep === true ?
-        await dependencies.observeModelingRun(state)
+        await dependencies.observeModelingRun(
+          state,
+          target.repo,
+          target.branches
+        )
       : null;
     return settleGraphProgress(
       state,
@@ -535,6 +554,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         state,
         "graph",
         JSON.stringify({ repo, branch }),
+        { repo, branches: [branch] },
         dependencies.now()
       );
       activeProgressHandle = progressHandle;
@@ -723,7 +743,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           activeState,
           "graph",
           activeSourceToken
-        )
+        ),
+      modelingTarget: () => ({
+        repo: activeRepair?.repo || "",
+        branches: activeRepair ? [activeRepair.branch] : []
+      })
     });
   }
 
@@ -750,6 +774,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       const branch = data.branch || dependencies.defaultBranchForState(state);
       activeRepair = { entry, repo, branch };
       const provider = data.provider || "azure";
+      const previousPlannedResources = state.plannedResources;
+      const previousPlanSelection = {
+        repo: state.plannedRepo,
+        branch: state.plannedBranch,
+        provider: state.plannedProvider,
+        environment: state.plannedEnvironment
+      };
       const planGeneration = dependencies.beginPlannedGraphRequest(state);
       activeGeneration = planGeneration;
       // Persist the selected environment so re-opening (or reloading) the
@@ -771,6 +802,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           provider,
           environment: state.plannedEnvironment
         }),
+        { repo, branches: [branch] },
         dependencies.now()
       );
       activeProgressHandle = progressHandle;
@@ -928,7 +960,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       }
       addEvent("rendering_graph", "succeeded", "Rendered the planned graph.");
       dependencies.clearGraphRepairAttempt(entry, "planned");
-      return json(200, { reload: true });
+      const resourcesChanged =
+        JSON.stringify(previousPlannedResources) !==
+        JSON.stringify(plannedResources);
+      const selectionChanged =
+        previousPlanSelection.repo !== repo ||
+        previousPlanSelection.branch !== branch ||
+        previousPlanSelection.provider !== provider ||
+        previousPlanSelection.environment !== state.plannedEnvironment;
+      const refreshed =
+        data.refresh === true && !resourcesChanged && !selectionChanged;
+      return json(200, {
+        reload: !refreshed,
+        ...(refreshed ? { refreshed: true } : {})
+      });
     };
     return await settleWorkflow(run, {
       state: () => activeState,
@@ -968,7 +1013,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           activeState,
           "planned",
           activeSourceToken
-        )
+        ),
+      modelingTarget: () => ({
+        repo: activeRepair?.repo || "",
+        branches: activeRepair ? [activeRepair.branch] : []
+      })
     });
   }
 
@@ -994,6 +1043,12 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       if (!entry) return MISSING_ENTRY_OUTCOME;
       const state = entry.state;
       activeState = state;
+      const previousDiffResources = state.diffResources;
+      const previousDiffSelection = {
+        repo: state.diffTargetRepo,
+        base: state.diffBase,
+        head: state.diffHead
+      };
       activeRepair = {
         entry,
         repo,
@@ -1004,6 +1059,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         state,
         "diff",
         JSON.stringify({ repo, base: data.base, head: data.head }),
+        { repo, branches: [data.base, data.head] },
         dependencies.now()
       );
       activeProgressHandle = progressHandle;
@@ -1206,9 +1262,18 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       addEvent("rendering_graph", "succeeded", "Rendered the graph diff.");
       dependencies.clearGraphRepairAttempt(entry, "diff");
 
+      const resourcesChanged =
+        JSON.stringify(previousDiffResources) !== JSON.stringify(diffResources);
+      const selectionChanged =
+        previousDiffSelection.repo !== repo ||
+        previousDiffSelection.base !== data.base ||
+        previousDiffSelection.head !== data.head;
+      const refreshed =
+        data.refresh === true && !resourcesChanged && !selectionChanged;
       return json(200, {
         message: `Comparing ${data.base} → ${data.head}`,
-        reload: true
+        reload: !refreshed,
+        ...(refreshed ? { refreshed: true } : {})
       });
     };
     return await settleWorkflow(run, {
@@ -1255,7 +1320,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             sourceRefContext?.token || ""
           )
         );
-      }
+      },
+      modelingTarget: () => ({
+        repo: activeRepair?.repo || "",
+        branches: activeRepair ? [activeRepair.base, activeRepair.head] : []
+      })
     });
   }
 

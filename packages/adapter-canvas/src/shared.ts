@@ -150,6 +150,8 @@ export interface GraphProgressRecord {
   graphProgressActive: boolean;
   graphProgressView: GraphProgressView;
   graphProgressKey: string;
+  graphProgressRepo?: string;
+  graphProgressBranches?: string[];
   graphProgressOwner: number;
   graphProgressAwaitingModel: boolean;
   // Accounting for the app.bicep wait, owned by the graph workflow that answers

@@ -81,7 +81,7 @@ function harness(
     resolveContext,
     resolveStatus,
     evaluateSource,
-    send: (message) => {
+    send: async (message) => {
       sent.push(message);
     },
     log: (message) => {
@@ -91,6 +91,9 @@ function harness(
       if (requested.has(key)) return false;
       requested.add(key);
       return true;
+    },
+    releaseRefreshMemo: (key: string) => {
+      requested.delete(key);
     },
     ...overrides
   };
@@ -603,7 +606,7 @@ describe("createAppModelHandoff", () => {
     expect(sent).toHaveLength(1);
   });
 
-  it("consumes the panel's key even when the memo suppresses the message", async () => {
+  it("releases the panel key when the stale-model memo suppresses the message", async () => {
     const state: CanvasState = {};
     const { handOff, sent } = harness({
       shouldRequestRefresh: () => false,
@@ -615,10 +618,10 @@ describe("createAppModelHandoff", () => {
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
 
     expect(sent).toEqual([]);
-    expect(state.appBicepHandoffKey).toBeTruthy();
+    expect(state.appBicepHandoffKey).toBeUndefined();
   });
 
-  it("consumes the panel's key when an unverified model's memo suppresses the message", async () => {
+  it("releases the panel key when an unverified-model memo suppresses the message", async () => {
     const state: CanvasState = {};
     const { handOff, sent } = harness({
       shouldRequestRefresh: () => false,
@@ -628,7 +631,7 @@ describe("createAppModelHandoff", () => {
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
 
     expect(sent).toEqual([]);
-    expect(state.appBicepHandoffKey).toBeTruthy();
+    expect(state.appBicepHandoffKey).toBeUndefined();
   });
 
   it("does nothing without a repository", async () => {
@@ -682,5 +685,174 @@ describe("createAppModelHandoff", () => {
       handOff({ repo: "a/b", branches: ["feat"], page: "graph" })
     ).rejects.toThrow("reader offline");
     expect(sent).toEqual([]);
+  });
+
+  it("releases the panel reservation when send fails for a missing model, allowing retry", async () => {
+    const state: CanvasState = {};
+    let sendAttempt = 0;
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      send: async (message) => {
+        sendAttempt++;
+        if (sendAttempt === 1) throw new Error("session closed");
+        sent.push(message);
+      }
+    });
+    const request = {
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    };
+
+    await expect(handOff(request)).rejects.toThrow("session closed");
+    expect(state.appBicepHandoffKey).toBeUndefined();
+
+    await handOff(request);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].prompt).toContain("radius_generate_app");
+  });
+
+  it("does not release a superseding panel reservation when an older send fails for a missing model", async () => {
+    const state: CanvasState = {};
+    let rejectSend!: (error: Error) => void;
+    const send = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSend = reject;
+        })
+    );
+    const { handOff } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      send
+    });
+
+    const pending = handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    });
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+    state.appBicepHandoffKey = "newer-request";
+
+    rejectSend(new Error("session closed"));
+    await expect(pending).rejects.toThrow("session closed");
+    expect(state.appBicepHandoffKey).toBe("newer-request");
+  });
+
+  it("releases the panel reservation and refresh memo when send fails for a stale model, allowing retry", async () => {
+    const state: CanvasState = {};
+    let sendAttempt = 0;
+    const { handOff, sent } = harness({
+      statuses: {
+        feat: modelStatus("a/b", "feat", {
+          status: "source-changed",
+          sourceCommit: "aaa"
+        })
+      },
+      send: async (message) => {
+        sendAttempt++;
+        if (sendAttempt === 1) throw new Error("session closed");
+        sent.push(message);
+      }
+    });
+    const request = {
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    };
+
+    await expect(handOff(request)).rejects.toThrow("session closed");
+    expect(state.appBicepHandoffKey).toBeUndefined();
+
+    // Retry succeeds — both the panel reservation and the refresh memo were released.
+    await handOff(request);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].prompt).toContain("no longer describes the current source");
+  });
+
+  it("retries a superseding stale-model handoff after the shared delivery fails", async () => {
+    const state: CanvasState = {};
+    let rejectFirstSend!: (error: Error) => void;
+    let sendAttempt = 0;
+    const { handOff, sent } = harness({
+      statuses: {
+        main: modelStatus("a/b", "main", {
+          status: "source-changed",
+          sourceCommit: "aaa"
+        }),
+        feature: modelStatus("a/b", "feature", { status: "up-to-date" })
+      },
+      send: (message) => {
+        sendAttempt++;
+        if (sendAttempt === 1) {
+          return new Promise<void>((_resolve, reject) => {
+            rejectFirstSend = reject;
+          });
+        }
+        sent.push(message);
+        return Promise.resolve();
+      }
+    });
+
+    const first = handOff({
+      repo: "a/b",
+      branches: ["main"],
+      page: "planned",
+      state
+    });
+    await vi.waitFor(() => expect(sendAttempt).toBe(1));
+
+    await handOff({
+      repo: "a/b",
+      branches: ["main", "feature"],
+      page: "graph-diff",
+      state
+    });
+    expect(state.appBicepHandoffKey).toBeUndefined();
+
+    rejectFirstSend(new Error("session closed"));
+    await expect(first).rejects.toThrow("session closed");
+
+    await handOff({
+      repo: "a/b",
+      branches: ["main", "feature"],
+      page: "graph-diff",
+      state
+    });
+    expect(sent).toHaveLength(1);
+  });
+
+  it("releases the panel reservation and refresh memo when send fails for an unverified model, allowing retry", async () => {
+    const state: CanvasState = {};
+    let sendAttempt = 0;
+    const { handOff, sent } = harness({
+      statuses: {
+        feat: modelStatus("a/b", "feat", {
+          status: "edited",
+          sourceCommit: "aaa"
+        })
+      },
+      send: async (message) => {
+        sendAttempt++;
+        if (sendAttempt === 1) throw new Error("session closed");
+        sent.push(message);
+      }
+    });
+    const request = {
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    };
+
+    await expect(handOff(request)).rejects.toThrow("session closed");
+    expect(state.appBicepHandoffKey).toBeUndefined();
+
+    await handOff(request);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].prompt).toContain("could not be verified");
   });
 });

@@ -160,6 +160,8 @@ function graphProgressState(
         graphProgressActive: false,
         graphProgressView: view,
         graphProgressKey: "",
+        graphProgressRepo: "octo/app",
+        graphProgressBranches: ["main"],
         graphProgressOwner: 1,
         graphProgressAwaitingModel: false,
         ...overrides
@@ -238,6 +240,8 @@ interface FakeOptions {
   modeledStatus?: number;
   modeledResources?: CanvasGraphResource[];
   nowMs?: number;
+  // Scripted filesystem-observed activity timestamp for observeModelingRun.
+  observedActivityAtMs?: number;
 }
 
 // Key derivation shared by the `deployStatusKeys` fake and the two map-builder
@@ -398,6 +402,14 @@ function fakes(
     repoMatchesWorkspace: (current, repo) => {
       calls.log.push(`repoMatchesWorkspace(${current.workspaceRepo}|${repo})`);
       return !!current.workspaceRepo && current.workspaceRepo === repo;
+    },
+    observeModelingRun: () => {
+      calls.log.push("observeModelingRun");
+      return Promise.resolve(
+        options.observedActivityAtMs !== undefined ?
+          options.observedActivityAtMs
+        : null
+      );
     },
     now: () => nowMs
   };
@@ -772,6 +784,136 @@ describe("graphs-planning read routes (SU-09)", () => {
       state: "failed",
       detail: GRAPH_APP_BICEP_MAX_WAIT_MESSAGE
     });
+  });
+
+  it("probes the filesystem before committing idle expiry and extends the wait when fresh activity is found", async () => {
+    const calls: Calls = { log: [] };
+    // The recorded lastActivityAtMs is old enough to trigger expiry...
+    const staleActivityMs = 5_000;
+    const nowMs = staleActivityMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS;
+    // ...but the filesystem shows a newer timestamp that keeps the wait open.
+    const freshActivityMs = nowMs - 1_000;
+    const scriptedState = graphProgressState("graph", {
+      graphProgressActive: true,
+      graphProgressAwaitingModel: true,
+      graphProgressWaitStartedAtMs: 1_000,
+      graphProgressLastActivityAtMs: staleActivityMs,
+      graphProgressStartedAtMs: 1_000,
+      graphBuildEvents: []
+    });
+    const { deps, state } = fakes(calls, {
+      nowMs,
+      state: scriptedState,
+      observedActivityAtMs: freshActivityMs
+    });
+
+    await run("/api/progress", handleProgress, deps);
+
+    // The record's lastActivityAtMs was refreshed from the filesystem probe.
+    expect(
+      state?.graphProgressRecords?.graph?.graphProgressLastActivityAtMs
+    ).toBe(freshActivityMs);
+    // The wait is still open — the record was NOT expired.
+    expect(state?.graphProgressRecords?.graph?.graphProgressActive).toBe(true);
+    expect(state?.graphProgressRecords?.graph?.graphProgressAwaitingModel).toBe(
+      true
+    );
+    expect(calls.log).toContain("observeModelingRun");
+  });
+
+  it("commits idle expiry when the filesystem probe finds no fresh activity", async () => {
+    const calls: Calls = { log: [] };
+    const staleActivityMs = 5_000;
+    const nowMs = staleActivityMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS;
+    const scriptedState = graphProgressState("graph", {
+      graphProgressActive: true,
+      graphProgressAwaitingModel: true,
+      graphProgressWaitStartedAtMs: 1_000,
+      graphProgressLastActivityAtMs: staleActivityMs,
+      graphProgressStartedAtMs: 1_000,
+      graphBuildEvents: []
+    });
+    // observeModelingRun returns null — no filesystem evidence.
+    const { deps, state } = fakes(calls, {
+      nowMs,
+      state: scriptedState
+    });
+
+    await run("/api/progress", handleProgress, deps);
+
+    // The wait expired despite the probe, because no fresh activity was found.
+    expect(state?.graphProgressRecords?.graph?.graphProgressActive).toBe(false);
+    expect(calls.log).toContain("observeModelingRun");
+  });
+
+  it("does not let an older progress poll expire a reused same-key owner", async () => {
+    const calls: Calls = { log: [] };
+    const staleActivityMs = 5_000;
+    const nowMs = staleActivityMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS;
+    const scriptedState = graphProgressState("graph", {
+      graphProgressActive: true,
+      graphProgressAwaitingModel: true,
+      graphProgressWaitStartedAtMs: 1_000,
+      graphProgressLastActivityAtMs: staleActivityMs,
+      graphProgressStartedAtMs: 1_000,
+      graphBuildEvents: []
+    });
+    const { deps, state } = fakes(calls, { nowMs, state: scriptedState });
+    let releaseProbe!: (activityAtMs: number | null) => void;
+    deps.observeModelingRun = () =>
+      new Promise<number | null>((resolve) => {
+        releaseProbe = resolve;
+      });
+
+    const pending = run("/api/progress", handleProgress, deps);
+    await Promise.resolve();
+    expect(releaseProbe).toBeTypeOf("function");
+    const record = state?.graphProgressRecords?.graph;
+    expect(record).toBeDefined();
+    if (!record) throw new Error("Expected graph progress record.");
+    record.graphProgressOwner += 1;
+    releaseProbe(null);
+    await pending;
+
+    expect(record.graphProgressActive).toBe(true);
+    expect(record.graphProgressAwaitingModel).toBe(true);
+    expect(record.graphProgressWaitExpiredMessage).toBeUndefined();
+  });
+
+  it("re-evaluates a concurrent probe against activity recorded by another poll", async () => {
+    const calls: Calls = { log: [] };
+    const staleActivityMs = 5_000;
+    const nowMs = staleActivityMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS;
+    const freshActivityMs = nowMs - 1_000;
+    const scriptedState = graphProgressState("graph", {
+      graphProgressActive: true,
+      graphProgressAwaitingModel: true,
+      graphProgressWaitStartedAtMs: 1_000,
+      graphProgressLastActivityAtMs: staleActivityMs,
+      graphProgressStartedAtMs: 1_000,
+      graphBuildEvents: []
+    });
+    const { deps, state } = fakes(calls, { nowMs, state: scriptedState });
+    const probes: Array<(activityAtMs: number | null) => void> = [];
+    deps.observeModelingRun = () =>
+      new Promise<number | null>((resolve) => {
+        probes.push(resolve);
+      });
+
+    const first = run("/api/progress", handleProgress, deps);
+    const second = run("/api/progress", handleProgress, deps);
+    await Promise.resolve();
+    expect(probes).toHaveLength(2);
+
+    probes[0](freshActivityMs);
+    await first;
+    probes[1](null);
+    await second;
+
+    const record = state?.graphProgressRecords?.graph;
+    expect(record?.graphProgressLastActivityAtMs).toBe(freshActivityMs);
+    expect(record?.graphProgressActive).toBe(true);
+    expect(record?.graphProgressWaitExpiredMessage).toBeUndefined();
   });
 
   // A clock that jumped backwards must not produce a negative age, which would

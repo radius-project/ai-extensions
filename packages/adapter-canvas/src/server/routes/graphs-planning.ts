@@ -107,6 +107,13 @@ export interface GraphsPlanningReadsDependencies {
   ): void;
   errorMessage(error: unknown): string;
   repoMatchesWorkspace(state: CanvasState, repo: string): boolean;
+  // Newest filesystem activity from a modeling run, used to refresh liveness
+  // before committing a terminal idle expiry in the progress poller.
+  observeModelingRun(
+    state: CanvasState,
+    repo: string,
+    branches: string[]
+  ): Promise<number | null>;
   // Wall clock for the build record's elapsed time.
   now(): number;
 }
@@ -118,10 +125,10 @@ export interface GraphsPlanningReadsDependencies {
 // concurrent with the workflow request itself, so a reader that only saw
 // `events` could apply an older in-flight response over a newer snapshot and
 // visibly regress the reported stage.
-export function handleProgress(
+export async function handleProgress(
   context: CanvasRequestContext,
   dependencies: GraphsPlanningReadsDependencies
-): void {
+): Promise<void> {
   const { response, url } = context;
   const entry = dependencies.readInstanceEntry(context.instanceId);
   const state = entry?.state;
@@ -144,7 +151,46 @@ export function handleProgress(
       lastActivityAtMs: record.graphProgressLastActivityAtMs ?? null
     });
     if (wait.status === "waiting") continue;
-    expireGraphProgressWait(record, wait.message);
+    let terminalMessage = wait.message;
+    const observedGeneration = record.graphProgressGeneration;
+    const observedOwner = record.graphProgressOwner;
+    // Before committing a terminal idle expiry, probe the filesystem for
+    // fresh liveness evidence. Workflow retries observe every 10s while
+    // progress polls every 800ms; near the 5-minute boundary, real activity
+    // may have occurred after the last workflow observation and be falsely
+    // marked stalled without this check.
+    if (state && record.graphProgressRepo && record.graphProgressBranches) {
+      const freshActivityAtMs = await dependencies.observeModelingRun(
+        state,
+        record.graphProgressRepo,
+        record.graphProgressBranches
+      );
+      if (
+        state.graphProgressRecords?.[record.graphProgressView] !== record ||
+        record.graphProgressGeneration !== observedGeneration ||
+        record.graphProgressOwner !== observedOwner ||
+        !record.graphProgressActive ||
+        !record.graphProgressAwaitingModel
+      ) {
+        continue;
+      }
+      if (freshActivityAtMs !== null) {
+        record.graphProgressLastActivityAtMs = Math.max(
+          record.graphProgressLastActivityAtMs ?? 0,
+          freshActivityAtMs
+        );
+      }
+      // Another concurrent poll may have recorded newer activity while this
+      // probe was in flight, so every settlement re-evaluates the merged record.
+      const refreshed = evaluateAppBicepWait({
+        nowMs: dependencies.now(),
+        waitStartedAtMs: record.graphProgressWaitStartedAtMs,
+        lastActivityAtMs: record.graphProgressLastActivityAtMs ?? null
+      });
+      if (refreshed.status === "waiting") continue;
+      terminalMessage = refreshed.message;
+    }
+    expireGraphProgressWait(record, terminalMessage);
   }
   const requestedView = url.searchParams.get("view");
   const record =

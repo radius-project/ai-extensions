@@ -120,7 +120,11 @@ interface Harness {
   plannedOutputs: unknown[];
   // How many times an answer asked the workspace whether a modeling run is in
   // flight. Kept out of `order` so it cannot perturb stage-ordering assertions.
-  modelingObservations: { count: number };
+  modelingObservations: {
+    count: number;
+    lastRepo?: string;
+    lastBranches?: string[];
+  };
   // Everything the workflows sent to the diagnostics sink instead of the canvas.
   loggedErrors: string[];
   workflows: GraphPlanningWorkflows;
@@ -159,7 +163,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   // capture a start time is distinguishable from one that started at 0.
   let clockMs = 1_000;
   const order: string[] = [];
-  const modelingObservations = { count: 0 };
+  const modelingObservations: Harness["modelingObservations"] = { count: 0 };
   const handoffs: HandoffCall[] = [];
   const recipePackCalls: string[] = [];
   const recipeResolutions: Harness["recipeResolutions"] = [];
@@ -245,8 +249,10 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     clearGraphRepairAttempt: () => {},
     listBranchPaths: (_entry, _repo, branch) =>
       Promise.resolve(harnessScript.branchPaths?.[branch] ?? []),
-    observeModelingRun: () => {
+    observeModelingRun: (_state, repo, branches) => {
       modelingObservations.count++;
+      modelingObservations.lastRepo = repo;
+      modelingObservations.lastBranches = branches;
       return (
         harnessScript.observeModelingRun?.() ??
         Promise.resolve(harnessScript.modelingActivityAtMs ?? null)
@@ -605,6 +611,21 @@ describe("graph planning workflows", () => {
         await harness.run("loadGraph", '{"repo":"octo/app"}');
 
         expect(harness.modelingObservations.count).toBe(0);
+      });
+
+      it("passes the workflow repo and branch to the modeling run probe", async () => {
+        const harness = start({
+          selections: { develop: selectionOf({ content: null }) }
+        });
+
+        await harness.run(
+          "loadGraph",
+          '{"repo":"octo/infra","branch":"develop"}'
+        );
+
+        expect(harness.modelingObservations.count).toBeGreaterThan(0);
+        expect(harness.modelingObservations.lastRepo).toBe("octo/infra");
+        expect(harness.modelingObservations.lastBranches).toEqual(["develop"]);
       });
     });
 
@@ -1199,6 +1220,52 @@ describe("graph planning workflows", () => {
       ]);
     });
 
+    it("reconciles unchanged preloaded resources without requesting a reload", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "", remote: false } },
+        compiled: { main: [{ id: "res-a" } as CanvasGraphResource] }
+      });
+      harness.plannedOutputs.push({ id: "res-a" });
+      harness.state.plannedResources = [{ id: "res-a" }];
+      harness.state.plannedRepo = "octo/app";
+      harness.state.plannedBranch = "main";
+      harness.state.plannedProvider = "azure";
+      harness.state.plannedEnvironment = "";
+
+      const outcome = await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","refresh":true}'
+      );
+
+      expect(outcome.payload).toEqual({
+        reload: false,
+        refreshed: true
+      });
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
+    it("reloads unchanged resources when the planned selection changes", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "", remote: false } },
+        compiled: { main: [{ id: "res-a" } as CanvasGraphResource] }
+      });
+      harness.plannedOutputs.push({ id: "res-a" });
+      harness.state.plannedResources = [{ id: "res-a" }];
+      harness.state.plannedRepo = "octo/app";
+      harness.state.plannedBranch = "main";
+      harness.state.plannedProvider = "azure";
+      harness.state.plannedEnvironment = "dev";
+
+      const outcome = await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","environment":"prod","refresh":true}'
+      );
+
+      expect(outcome.payload).toEqual({ reload: true });
+    });
+
     it("does not append planned events after another workflow owns progress", async () => {
       const harness = start({
         selections: { main: selectionOf() },
@@ -1534,6 +1601,71 @@ describe("graph planning workflows", () => {
         "rendering_graph:running",
         "rendering_graph:succeeded"
       ]);
+    });
+
+    it("reconciles an unchanged preloaded diff without requesting a reload", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
+        },
+        staged: {
+          main: { dir: "", remote: false },
+          "feature/x": { dir: "", remote: false }
+        },
+        compiled: {
+          main: [{ id: "shared" } as CanvasGraphResource],
+          "feature/x": [{ id: "shared" } as CanvasGraphResource]
+        }
+      });
+      await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x"}'
+      );
+
+      const outcome = await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x","refresh":true}'
+      );
+
+      expect(outcome.payload).toEqual({
+        message: "Comparing main → feature/x",
+        reload: false,
+        refreshed: true
+      });
+      expect(harness.handoffs).toHaveLength(2);
+    });
+
+    it("reloads unchanged resources when the diff selection changes", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
+        },
+        staged: {
+          main: { dir: "", remote: false },
+          "feature/x": { dir: "", remote: false }
+        },
+        compiled: {
+          main: [{ id: "shared" } as CanvasGraphResource],
+          "feature/x": [{ id: "shared" } as CanvasGraphResource]
+        }
+      });
+      await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x"}'
+      );
+      harness.state.diffHead = "old-feature";
+
+      const outcome = await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x","refresh":true}'
+      );
+
+      expect(outcome.payload).toEqual({
+        message: "Comparing main → feature/x",
+        reload: true
+      });
     });
 
     it("does not append diff events after another workflow owns progress", async () => {

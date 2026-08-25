@@ -896,8 +896,21 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     resolveRecipeOutputs(github, resources, recipes, provider),
   computeGraphDiff: (baseResources, headResources) =>
     computeGraphDiff(baseResources, headResources),
-  observeModelingRun: (state) =>
-    modelingRunLastActivityAtMs(state.workspacePath),
+  observeModelingRun: (state, repo, branches) => {
+    // Only probe the workspace filesystem when the modeling target matches
+    // the workspace repo and at least one target branch matches the workspace
+    // branch. Unrelated local modeling activity must not extend waits for a
+    // remote branch or a different repository.
+    if (
+      !repo ||
+      !state.workspaceRepo ||
+      state.workspaceRepo !== repo ||
+      !branches.some((branch) => branch === state.workspaceBranch)
+    ) {
+      return Promise.resolve(null);
+    }
+    return modelingRunLastActivityAtMs(state.workspacePath);
+  },
   record,
   optionalString,
   errorMessage,
@@ -960,6 +973,17 @@ const graphsPlanningRoutes = createGraphsPlanningRoutes({
   settleDeployStatuses,
   errorMessage,
   repoMatchesWorkspace,
+  observeModelingRun: (state, repo, branches) => {
+    if (
+      !repo ||
+      !state.workspaceRepo ||
+      state.workspaceRepo !== repo ||
+      !branches.some((branch) => branch === state.workspaceBranch)
+    ) {
+      return Promise.resolve(null);
+    }
+    return modelingRunLastActivityAtMs(state.workspacePath);
+  },
   now: () => Date.now()
 });
 
