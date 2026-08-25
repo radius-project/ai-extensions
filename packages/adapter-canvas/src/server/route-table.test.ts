@@ -90,7 +90,7 @@ const productionHandlers = {
     get: () => null,
     acquireForRetry: () => ({ ok: true }),
     persistOperations: () => Promise.resolve(),
-    isPullRequestMerged: () => Promise.resolve(false),
+    checkPullRequestMerge: () => Promise.resolve({ state: "open" }),
     schedule: () => true,
     invalidateEnvironmentListing: () => {}
   }),
@@ -333,6 +333,7 @@ const productionHandlers = {
     now: () => 0,
     getOperation: () => null,
     getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
+    isSelectedGitHubAuthorizationError: () => false,
     hasCompleteVerificationIdentity: () => false,
     findWorkflowRun: () => Promise.resolve(null),
     settleVerificationDispatchRecovery: () => {},

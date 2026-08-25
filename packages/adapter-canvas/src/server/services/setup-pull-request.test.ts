@@ -1,10 +1,15 @@
-import { describe, expect, it } from "vitest";
-import { isSetupPullRequestMerged } from "./setup-pull-request.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  checkSetupPullRequestMerge,
+  checkSetupPullRequestMergeForOperation,
+  isSetupPullRequestMerged
+} from "./setup-pull-request.js";
+import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 
 // A fetch that throws on any path the scenario did not model, so "no network
 // call" is an assertable outcome rather than an assumption.
 function fetchFor(
-  responses: Record<string, { ok: boolean; json: unknown }>,
+  responses: Record<string, { ok: boolean; json: unknown; error?: string }>,
   calls: string[] = []
 ) {
   return async (apiPath: string) => {
@@ -29,6 +34,163 @@ describe("isSetupPullRequestMerged", () => {
 
     expect(merged).toBe(true);
     expect(calls).toEqual(["repos/contoso/store/pulls/7"]);
+  });
+
+  describe("checkSetupPullRequestMerge", () => {
+    it("distinguishes an unreadable pull request from an open one", async () => {
+      const check = await checkSetupPullRequestMerge(
+        "contoso/store",
+        "https://github.com/contoso/store/pull/7",
+        fetchFor({
+          "repos/contoso/store/pulls/7": {
+            ok: false,
+            json: null,
+            error: "HTTP 403"
+          }
+        })
+      );
+
+      expect(check).toEqual({ state: "unavailable", detail: "HTTP 403" });
+    });
+
+    describe("checkSetupPullRequestMergeForOperation", () => {
+      it("uses the operation selected executor for the merge read", async () => {
+        const executor = successfulSelectedGhExecutor({ login: "alice" });
+        const created: string[] = [];
+        const reads: Array<{ executor: unknown; path: string }> = [];
+
+        const check = await checkSetupPullRequestMergeForOperation(
+          {
+            repo: "contoso/store",
+            context: { githubLogin: " alice " }
+          },
+          "https://github.com/contoso/store/pull/7",
+          {
+            createExecutor: async (login) => {
+              created.push(login);
+              return executor;
+            },
+            fetchJson: async (actingExecutor, path) => {
+              reads.push({ executor: actingExecutor, path });
+              return { ok: true, json: { merged: true } };
+            },
+            errorMessage: (error) => String(error)
+          }
+        );
+
+        expect(check).toEqual({ state: "merged" });
+        expect(created).toEqual(["alice"]);
+        expect(reads).toEqual([
+          {
+            executor,
+            path: "repos/contoso/store/pulls/7"
+          }
+        ]);
+      });
+
+      it("fails closed before GitHub when the operation has no selected login", async () => {
+        const createExecutor = vi.fn();
+        const fetchJson = vi.fn();
+
+        const check = await checkSetupPullRequestMergeForOperation(
+          { repo: "contoso/store", context: {} },
+          "https://github.com/contoso/store/pull/7",
+          {
+            createExecutor,
+            fetchJson,
+            errorMessage: (error) => String(error)
+          }
+        );
+
+        expect(check).toEqual({
+          state: "unavailable",
+          login: "",
+          detail: "The operation has no saved GitHub account."
+        });
+        expect(createExecutor).not.toHaveBeenCalled();
+        expect(fetchJson).not.toHaveBeenCalled();
+      });
+
+      it("returns selected-account guidance when executor acquisition fails", async () => {
+        const check = await checkSetupPullRequestMergeForOperation(
+          {
+            repo: "contoso/store",
+            context: { githubLogin: "alice" }
+          },
+          "https://github.com/contoso/store/pull/7",
+          {
+            createExecutor: () =>
+              Promise.reject(new Error("credential unavailable")),
+            fetchJson: vi.fn(),
+            errorMessage: (error) =>
+              error instanceof Error ? error.message : String(error)
+          }
+        );
+
+        expect(check).toEqual({
+          state: "unavailable",
+          login: "alice",
+          detail: "credential unavailable"
+        });
+      });
+
+      it("retains the selected login when its pull request read fails", async () => {
+        const executor = successfulSelectedGhExecutor({ login: "alice" });
+        const check = await checkSetupPullRequestMergeForOperation(
+          {
+            repo: "contoso/store",
+            context: { githubLogin: "alice" }
+          },
+          "https://github.com/contoso/store/pull/7",
+          {
+            createExecutor: () => Promise.resolve(executor),
+            fetchJson: () =>
+              Promise.resolve({ ok: false, json: null, error: "HTTP 403" }),
+            errorMessage: (error) => String(error)
+          }
+        );
+
+        expect(check).toEqual({
+          state: "unavailable",
+          login: "alice",
+          detail: "HTTP 403"
+        });
+      });
+
+      it("uses the saved pull request repository when a legacy operation has no repo", async () => {
+        const executor = successfulSelectedGhExecutor({ login: "alice" });
+        const paths: string[] = [];
+        const check = await checkSetupPullRequestMergeForOperation(
+          { context: { githubLogin: "alice" } },
+          "https://github.com/contoso/store/pull/7",
+          {
+            createExecutor: () => Promise.resolve(executor),
+            fetchJson: (_executor, path) => {
+              paths.push(path);
+              return Promise.resolve({ ok: true, json: { merged: false } });
+            },
+            errorMessage: (error) => String(error)
+          }
+        );
+
+        expect(check).toEqual({ state: "open" });
+        expect(paths).toEqual(["repos/contoso/store/pulls/7"]);
+      });
+    });
+
+    it("explains why an invalid saved pull request cannot be checked", async () => {
+      const check = await checkSetupPullRequestMerge(
+        "contoso/store",
+        "https://github.com/attacker/store/pull/7",
+        fetchFor({})
+      );
+
+      expect(check).toEqual({
+        state: "unavailable",
+        detail:
+          "The saved setup pull request URL is missing, invalid, or names another repository."
+      });
+    });
   });
 
   it("accepts a merge timestamp from a response with no merged flag", async () => {

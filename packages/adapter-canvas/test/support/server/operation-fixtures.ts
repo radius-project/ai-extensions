@@ -105,6 +105,7 @@ export function mergeHandoff({
   pullRequestUrl = FIXTURE_PULL_REQUEST
 }: { repo?: string; pullRequestUrl?: string | null } = {}): OperationFixture {
   const op = newOperation(repo);
+  op.context = { githubLogin: "alice" };
   recordAzureApp(op, { state: "created", appId: "app-1" });
   recordServicePrincipal(op, { state: "created", appId: "app-1" });
   recordCommittedWorkflowFile(op, {

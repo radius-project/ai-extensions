@@ -1866,6 +1866,71 @@ function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
   );
 }
 
+export function markVerificationRetryAcquisition(
+  op: any,
+  commandId: string,
+  classification?: string | null,
+  provisionalToken?: string
+): any {
+  if (!op) return op;
+  const reuseProvisional =
+    typeof provisionalToken === "string" &&
+    provisionalToken.length > 0 &&
+    op.verification?.acquisitionProvisional === true &&
+    op.verification?.acquisitionProvisionalToken === provisionalToken;
+  const acquisitionDeadline = ensureVerificationRetryAcquisitionDeadline(
+    op,
+    !reuseProvisional
+  );
+  op.verification = {
+    ...(op.verification || {}),
+    acquisitionPending: true,
+    retryCommandId: commandId,
+    retryClassification: classification || null,
+    acquisitionDeadline
+  };
+  delete op.verification.acquisitionProvisional;
+  delete op.verification.acquisitionProvisionalToken;
+  return op;
+}
+
+export function ensureVerificationRetryAcquisitionDeadline(
+  op: any,
+  forceNew = false
+): number {
+  if (!op) return 0;
+  const existing = Number(op.verification?.acquisitionDeadline);
+  const deadline =
+    !forceNew && Number.isFinite(existing) && existing > 0 ?
+      existing
+    : Date.now() + 45 * 60 * 1000;
+  op.verification = {
+    ...(op.verification || {}),
+    acquisitionDeadline: deadline
+  };
+  return deadline;
+}
+
+export function markVerificationRetryPrecondition(
+  op: any,
+  token: string
+): number {
+  if (!op) return 0;
+  const deadline = ensureVerificationRetryAcquisitionDeadline(op, true);
+  op.verification.acquisitionProvisional = true;
+  op.verification.acquisitionProvisionalToken = token;
+  return deadline;
+}
+
+export function hasPendingVerificationAcquisition(op: any): boolean {
+  return Boolean(
+    op?.currentStage === STAGE_VERIFY &&
+    op?.verification?.acquisitionPending === true &&
+    typeof op.verification.retryCommandId === "string" &&
+    op.verification.retryCommandId
+  );
+}
+
 export function hasReachedSetupCommitPoint(op: any): boolean {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return false;
@@ -2570,6 +2635,9 @@ const VERIFICATION_RETRY_CLASSIFICATIONS: Record<string, string> = {
   "verify-run-rbac-failed": "azure-rbac-propagation",
   "verify-run-failed": "verification-run-failed",
   "verification-tracking-expired": "verification-tracking-expired",
+  "verification-retry-github-account-unavailable": "github-account-unavailable",
+  "verification-retry-persist-failed": "verification-persist-failed",
+  "verify-dispatch-baseline-failed": "verification-baseline-failed",
   // The dispatch call itself failed, so no run was ever created: nothing was
   // verified, nothing was written, and asking GitHub again is the whole fix.
   "verify-dispatch-failed": "verification-dispatch-failed"
@@ -2609,6 +2677,8 @@ export function hasVerificationProvenance(op: any): boolean {
   return Boolean(
     op.repo &&
     op.environment &&
+    typeof op.context?.githubLogin === "string" &&
+    op.context.githubLogin.trim() &&
     typeof verification?.workflow === "string" &&
     verification.workflow &&
     typeof verification?.ref === "string" &&
@@ -3572,8 +3642,14 @@ const VERIFICATION_RETRY_DESCRIPTIONS: Record<string, string> = {
     "The verification workflow failed for a reason other than Azure role propagation. Review the run, correct the problem, then Radius starts the same verification workflow again.",
   "verification-tracking-expired":
     "Radius stopped following the previous verification run. It starts the same workflow again on the same branch.",
+  "verification-baseline-failed":
+    "Radius could not read a trustworthy workflow-run baseline, so it did not dispatch verification. It checks GitHub again before retrying.",
+  "verification-persist-failed":
+    "Radius could not save the previous retry before contacting GitHub. It tries the same verification again after storage is available.",
   "verification-dispatch-failed":
-    "GitHub refused the request that starts the verification workflow, so nothing ran. Radius asks GitHub to start the same workflow again."
+    "GitHub refused the request that starts the verification workflow, so nothing ran. Radius asks GitHub to start the same workflow again.",
+  "github-account-unavailable":
+    "Radius could not use the GitHub account selected for this setup. Re-check that account, then retry verification."
 };
 
 const SETUP_STEP_LABELS: Record<string, string> = {
@@ -4586,6 +4662,8 @@ export function rollbackRetryAttempt(op: any, snapshot: any): any {
   else op.resumeFrom = snapshot.resumeFrom;
   if (snapshot.inputRequired === undefined) delete op.inputRequired;
   else op.inputRequired = structuredClone(snapshot.inputRequired);
+  if (snapshot.verification === undefined) delete op.verification;
+  else op.verification = structuredClone(snapshot.verification);
   // `finish` opens cleanup on the way out, so a rolled-back terminal transition
   // has to put the ledger's cleanup record back too or the next projection
   // reports a rollback that never happened.
@@ -4613,6 +4691,10 @@ export function snapshotRetryState(op: any): any {
     executionActive: op.executionActive,
     resumeFrom: op.resumeFrom,
     inputRequired: op.inputRequired,
+    verification:
+      op.verification === undefined ?
+        undefined
+      : structuredClone(op.verification),
     cleanup: ledger?.cleanup ? structuredClone(ledger.cleanup) : undefined,
     notifiedAt: op.journey?.notifiedAt ?? null
   };
@@ -4801,6 +4883,9 @@ export function hasCompleteVerificationIdentity(op: any): boolean {
   const verification = op?.verification;
   return Boolean(
     op?.currentStage === STAGE_VERIFY &&
+    verification?.acquisitionPending !== true &&
+    typeof op?.context?.githubLogin === "string" &&
+    op.context.githubLogin.trim() &&
     Number.isFinite(Number(verification?.dispatchedAt)) &&
     Number(verification.dispatchedAt) > 0 &&
     typeof verification?.workflow === "string" &&
@@ -5046,6 +5131,11 @@ export function fromPersistedOperation(value: any): any {
 
 export function reconcileRestoredOperation(op: any): any {
   if (!op) return op;
+  if (op.verification?.acquisitionProvisional === true) {
+    delete op.verification.acquisitionProvisional;
+    delete op.verification.acquisitionProvisionalToken;
+    delete op.verification.acquisitionDeadline;
+  }
   if (unresolvedProviderMutations(op).length > 0) {
     const rollbackPending = op.providerRecovery?.state === "rollback_pending";
     // Reopened so the recovery scheduler, which skips ended records, can
@@ -5115,6 +5205,61 @@ export function reconcileRestoredOperation(op: any): any {
       if (stage.state === "running") stage.state = "pending";
     }
     op.recoveryState = "interrupted";
+    return op;
+  }
+  if (hasPendingVerificationAcquisition(op)) {
+    op.recoveryState = "verification_acquisition_pending";
+    return op;
+  }
+  const currentDispatchTarget =
+    typeof op.verification?.dispatchMutationTarget === "string" ?
+      op.verification.dispatchMutationTarget
+    : "";
+  const rejectedVerificationDispatch =
+    currentDispatchTarget ?
+      op.providerRecovery?.mutations?.find(
+        (mutation: ProviderMutationRecord) =>
+          mutation.kind === "github_workflow.dispatch_retry" &&
+          mutation.target === currentDispatchTarget &&
+          mutation.status === "not_applied"
+      )
+    : undefined;
+  if (rejectedVerificationDispatch) {
+    const now = nowIso();
+    op.state = "failed_partial";
+    op.endedAt = now;
+    op.lastActivityAt = now;
+    op.failure = {
+      code: "verify-dispatch-failed",
+      stage: STAGE_VERIFY,
+      stepSeq: null,
+      message:
+        "GitHub rejected the credential verification retry before the previous process stopped. Correct the problem and retry verification.",
+      classification: "user-fixable",
+      evidence: rejectedVerificationDispatch.evidence || null
+    };
+    op.recoveryState = "verification_retry_rejected";
+    return op;
+  }
+  if (
+    op.currentStage === STAGE_VERIFY &&
+    op.verification &&
+    (typeof op.context?.githubLogin !== "string" ||
+      !op.context.githubLogin.trim())
+  ) {
+    const now = nowIso();
+    op.state = "failed_partial";
+    op.endedAt = now;
+    op.lastActivityAt = now;
+    op.failure = {
+      code: "verification-retry-github-account-missing",
+      stage: STAGE_VERIFY,
+      stepSeq: null,
+      message:
+        "Radius cannot resume credential verification because this operation does not name the GitHub account that started it. Start a new environment setup after re-checking the account.",
+      classification: "user-fixable"
+    };
+    op.recoveryState = "manual_required";
     return op;
   }
   if (hasCompleteVerificationIdentity(op)) {

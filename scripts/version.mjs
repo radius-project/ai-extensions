@@ -6,11 +6,11 @@
 //   plugins/radius/plugin.json        version                     (manifest Copilot reads)
 //   .github/plugin/marketplace.json   metadata.version            (catalog version)
 //   .github/plugin/marketplace.json   plugins[radius].version
-//   .github/plugin/marketplace.json   plugins[radius-edge].version
 //
-// The catalog on main is the manifest end users add, so both plugin entries are
-// derived there. An edge publish then restamps its own entry with the snapshot
-// version in its throwaway workspace.
+// The catalog on main is the manifest end users add. Its `radius` source ref
+// selects the default channel: edge now, and latest after the stable launch.
+// Edge publishes retarget and restamp their throwaway catalog copy so the
+// generated edge branch remains independently installable after that switch.
 //
 // Usage:
 //   node scripts/version.mjs                    print the source-of-truth version
@@ -18,7 +18,8 @@
 //   node scripts/version.mjs --sync             rewrite derived files from the source
 //   node scripts/version.mjs --set <version>    write a stable version everywhere
 //   node scripts/version.mjs --set <version> --channel edge
-//                                                stamp only the edge catalog entry
+//                                                retarget and stamp the generated
+//                                                edge catalog entry
 //   node scripts/version.mjs --release-notes    print the current changelog entry
 //   node scripts/version.mjs --compare <version>
 //                                                print 1, 0 or -1 for how the
@@ -36,7 +37,6 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE = "plugins/radius/package.json";
 const CHANGELOG = "plugins/radius/CHANGELOG.md";
 const PLUGIN_NAME = "radius";
-const EDGE_PLUGIN_NAME = "radius-edge";
 
 // CI stamps prerelease versions such as 0.1.0-edge-20260807014054, so this must
 // accept the full semver grammar rather than a bare MAJOR.MINOR.PATCH.
@@ -70,14 +70,22 @@ function targets(channel = "stable") {
   const pluginManifest = read("plugins/radius/plugin.json");
   const marketplace = read(".github/plugin/marketplace.json");
 
-  const catalogEntry = (name) => {
+  const catalogEntry = (name, publishedRef) => {
     const entry = marketplace.json.plugins?.find((p) => p.name === name);
     if (!entry) fail(`no "${name}" plugin entry in ${marketplace.file}`);
+    if (publishedRef && (!entry.source || typeof entry.source !== "object")) {
+      fail(
+        `"${name}" needs an object source for an ${channel} publish in ${marketplace.file}`
+      );
+    }
     return {
       where: `${marketplace.file}#plugins[${name}].version`,
       doc: marketplace,
       get: () => entry.version,
-      set: (v) => (entry.version = v)
+      set: (v) => {
+        entry.version = v;
+        if (publishedRef) entry.source.ref = publishedRef;
+      }
     };
   };
 
@@ -88,9 +96,9 @@ function targets(channel = "stable") {
     set: (v) => (marketplace.json.metadata.version = v)
   };
 
-  // An edge publish owns nothing but its own rolling catalog entry: the plugin
-  // manifest and the stable entry keep the released version.
-  if (channel === "edge") return [catalogEntry(EDGE_PLUGIN_NAME)];
+  // An edge publish owns only the active catalog entry: the plugin manifest and
+  // catalog metadata keep the released version.
+  if (channel === "edge") return [catalogEntry(PLUGIN_NAME, "edge")];
 
   return [
     {
@@ -100,8 +108,7 @@ function targets(channel = "stable") {
       set: (v) => (pluginManifest.json.version = v)
     },
     metadata,
-    catalogEntry(PLUGIN_NAME),
-    catalogEntry(EDGE_PLUGIN_NAME)
+    catalogEntry(PLUGIN_NAME)
   ];
 }
 

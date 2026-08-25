@@ -103,6 +103,8 @@ import {
   matchDeleteOperationEnvironment,
   hasSurvivingCreatedArtifacts,
   isSetupExited,
+  hasPendingVerificationAcquisition,
+  markVerificationRetryAcquisition,
   setupExitState,
   EXIT_COMMAND_KIND,
   EXIT_COMMAND_OUTCOME,
@@ -3020,6 +3022,25 @@ describe("startup reconciliation", () => {
 
   it("keeps dispatched verification pending", () => {
     const op = newOp();
+    op.context = { githubLogin: "alice" };
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      event: "workflow_dispatch",
+      operationMarker: "op_test",
+      runId: null,
+      runUrl: null
+    };
+    reconcileRestoredOperation(op);
+    expect(op.state).toBe("running");
+    expect(op.recoveryState).toBe("verification_pending");
+  });
+
+  it("fails a restored verification closed when no selected account was saved", () => {
+    const op = newOp();
     enterStage(op, STAGE_VERIFY);
     op.verification = {
       dispatchedAt: Date.now(),
@@ -3029,7 +3050,167 @@ describe("startup reconciliation", () => {
       runId: null,
       runUrl: null
     };
+
     reconcileRestoredOperation(op);
+
+    expect(op.state).toBe("failed_partial");
+    expect(op.recoveryState).toBe("manual_required");
+    expect(op.failure.code).toBe("verification-retry-github-account-missing");
+  });
+
+  it("fails a restored verification closed when the selected account is blank", () => {
+    const op = newOp();
+    op.context = { githubLogin: " \t " };
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      event: "workflow_dispatch",
+      operationMarker: "op_test",
+      runId: null,
+      runUrl: null
+    };
+
+    reconcileRestoredOperation(op);
+
+    expect(op).toMatchObject({
+      state: "failed_partial",
+      recoveryState: "manual_required",
+      failure: {
+        code: "verification-retry-github-account-missing"
+      }
+    });
+  });
+
+  it("restores a pending verification retry acquisition instead of monitoring the prior run", () => {
+    const op = newOp();
+    op.context = { githubLogin: "alice" };
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "41",
+      runUrl: "https://github.com/contoso/store/actions/runs/41"
+    };
+    markVerificationRetryAcquisition(op, "cmd-retry");
+
+    reconcileRestoredOperation(op);
+
+    expect(hasPendingVerificationAcquisition(op)).toBe(true);
+    expect(op.state).toBe("running");
+    expect(op.recoveryState).toBe("verification_acquisition_pending");
+    expect(op.verification).toMatchObject({
+      acquisitionPending: true,
+      retryCommandId: "cmd-retry",
+      runId: "41"
+    });
+  });
+
+  it("discards a provisional retry deadline after restart", () => {
+    const op = newOp();
+    op.verification = {
+      acquisitionProvisional: true,
+      acquisitionProvisionalToken: "request-a",
+      acquisitionDeadline: Date.now() + 60_000
+    };
+
+    reconcileRestoredOperation(op);
+
+    expect(op.verification).not.toHaveProperty("acquisitionProvisional");
+    expect(op.verification).not.toHaveProperty("acquisitionProvisionalToken");
+    expect(op.verification).not.toHaveProperty("acquisitionDeadline");
+  });
+
+  it("restores a rejected verification dispatch as retryable failure", () => {
+    const op = verifiableOp();
+    const target = "contoso/store:verify:main:dev:op_test";
+    op.verification.dispatchMutationTarget = target;
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_workflow.dispatch_retry",
+      target
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "not_applied",
+      "GitHub rejected the dispatch."
+    );
+
+    reconcileRestoredOperation(op);
+
+    expect(op).toMatchObject({
+      state: "failed_partial",
+      recoveryState: "verification_retry_rejected",
+      failure: {
+        code: "verify-dispatch-failed",
+        evidence: "GitHub rejected the dispatch."
+      }
+    });
+    expect(canRetryVerification(op)).toMatchObject({
+      ok: true,
+      classification: "verification-dispatch-failed"
+    });
+  });
+
+  it("does not attribute an older rejected dispatch to the current generation", () => {
+    const op = verifiableOp();
+    op.verification = {
+      ...op.verification,
+      event: "workflow_dispatch",
+      operationMarker: "op_test",
+      baselineRunId: 40,
+      dispatchMutationTarget: "contoso/store:verify:main:dev:cmd-current"
+    };
+    const rejected = prepareProviderMutation(op, {
+      kind: "github_workflow.dispatch_retry",
+      target: "contoso/store:verify:main:dev:cmd-old"
+    });
+    settleProviderMutation(
+      op,
+      rejected.mutationId,
+      "not_applied",
+      "GitHub rejected the old dispatch."
+    );
+    const current = prepareProviderMutation(op, {
+      kind: "github_workflow.dispatch_retry",
+      target: "contoso/store:verify:main:dev:cmd-current"
+    });
+    settleProviderMutation(
+      op,
+      current.mutationId,
+      "confirmed",
+      "GitHub accepted the current dispatch."
+    );
+
+    reconcileRestoredOperation(op);
+
+    expect(op.state).toBe("running");
+    expect(op.recoveryState).toBe("verification_pending");
+    expect(op.failure).toBeNull();
+  });
+
+  it("recovers a pre-dispatch checkpoint by monitoring instead of redispatching", () => {
+    const op = newOp();
+    op.context = { githubLogin: "alice" };
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: null,
+      runUrl: null,
+      dispatchPending: true,
+      retryCommandId: "cmd-retry"
+    };
+
+    reconcileRestoredOperation(op);
+
+    expect(hasPendingVerificationAcquisition(op)).toBe(false);
     expect(op.state).toBe("running");
     expect(op.recoveryState).toBe("verification_pending");
   });
@@ -3308,6 +3489,7 @@ describe("keepalive predicate", () => {
 
   it("uses a bounded dispatch-based lifetime for live verification", () => {
     const op = newOp();
+    op.context = { githubLogin: "alice" };
     enterStage(op, STAGE_VERIFY);
     op.verification = {
       dispatchedAt: Date.now() - 20 * 60 * 1000,
@@ -3875,6 +4057,7 @@ describe("the options the announcement passes to session.log", () => {
 
 function verifiableOp() {
   const op = newOp();
+  op.context = { githubLogin: "alice" };
   recordAzureApp(op, {
     state: "created",
     appId: "app-1",
@@ -4267,6 +4450,30 @@ describe("retry eligibility", () => {
       "verification-tracking-expired"
     );
 
+    const unavailableAccount = verifiableOp();
+    finish(unavailableAccount, "failed_partial", {
+      failure: { code: "verification-retry-github-account-unavailable" }
+    });
+    expect(classifyVerificationRetry(unavailableAccount)).toBe(
+      "github-account-unavailable"
+    );
+
+    const baselineFailure = verifiableOp();
+    finish(baselineFailure, "failed_partial", {
+      failure: { code: "verify-dispatch-baseline-failed" }
+    });
+    expect(classifyVerificationRetry(baselineFailure)).toBe(
+      "verification-baseline-failed"
+    );
+
+    const persistenceFailure = verifiableOp();
+    finish(persistenceFailure, "failed_partial", {
+      failure: { code: "verification-retry-persist-failed" }
+    });
+    expect(classifyVerificationRetry(persistenceFailure)).toBe(
+      "verification-persist-failed"
+    );
+
     const unknown = verifiableOp();
     finish(unknown, "failed_partial", { failure: { code: "who-knows" } });
     expect(classifyVerificationRetry(unknown)).toBeNull();
@@ -4291,6 +4498,14 @@ describe("retry eligibility", () => {
     noIdentity.verification.workflow = "";
     requireMerge(noIdentity);
     expect(canRetryVerification(noIdentity)).toMatchObject({
+      ok: false,
+      code: "verification-provenance-incomplete"
+    });
+
+    const noGitHubIdentity = verifiableOp();
+    noGitHubIdentity.context = {};
+    requireMerge(noGitHubIdentity);
+    expect(canRetryVerification(noGitHubIdentity)).toMatchObject({
       ok: false,
       code: "verification-provenance-incomplete"
     });
