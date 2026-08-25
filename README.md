@@ -1,6 +1,6 @@
-# Radius AI Extension
+# Radius Canvas extension
 
-Radius AI Extension is a GitHub Copilot **plugin** for the
+The Radius Canvas extension is a GitHub Copilot **plugin** for the
 [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app).
 It lets you define, visualize, and deploy an
 application with [Radius](https://github.com/radius-project/radius) without
@@ -19,7 +19,7 @@ The canvas extension is a compiled bundle that is not committed to `main`. CI bu
 See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin
 bundles and how to use it.
 
-> **NOTE:** Radius AI Extension is in preview. Send us your feedback:
+> **NOTE:** The Radius Canvas extension is in preview. Send us your feedback:
 > [open an issue](https://github.com/radius-project/ai-extensions/issues/new/choose)
 > and tell us what you think.
 
@@ -112,7 +112,7 @@ adapters.
 - ⚠️ **Found an issue?** - [Open a bug report](https://github.com/radius-project/ai-extensions/issues/new/choose)
 - 💡 **Have a proposal?** - [Open a feature request](https://github.com/radius-project/ai-extensions/issues/new/choose)
 
-## Contributing to Radius AI Extension
+## Contributing to the Radius Canvas extension
 
 Visit [Contributing](./CONTRIBUTING.md) for more information on how to build,
 test, and contribute to this repository.

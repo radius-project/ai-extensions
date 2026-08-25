@@ -1,6 +1,6 @@
-# Contributing to Radius AI Extension
+# Contributing to the Radius Canvas extension
 
-Radius AI Extension is in preview and under active development. We welcome
+The Radius Canvas extension is in preview and under active development. We welcome
 feedback in the form of issues along with code contributions that
 follow the guidelines below.
 
