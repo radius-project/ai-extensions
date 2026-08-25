@@ -68,8 +68,8 @@ export function dockerPrerequisiteError(result) {
   }
   const [, osType] = result.stdout.trim().split("|");
   if (osType !== "linux") {
-    return osType
-      ? `Docker is running with ${osType} containers. Switch Docker Desktop to Linux containers (or enable a Linux engine), then retry.`
+    return osType ?
+        `Docker is running with ${osType} containers. Switch Docker Desktop to Linux containers (or enable a Linux engine), then retry.`
       : "Docker did not report its container engine type. Ensure Docker is configured to run Linux containers, then retry.";
   }
   return null;
