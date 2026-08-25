@@ -66,6 +66,12 @@ export function dockerPrerequisiteError(result) {
     const detail = result.stderr?.trim();
     return `The Docker CLI is installed, but the Docker daemon is unavailable. Start Docker Desktop or Docker Engine, then retry.${detail ? `\n${detail}` : ""}`;
   }
+  const [, osType] = result.stdout.trim().split("|");
+  if (osType !== "linux") {
+    return osType
+      ? `Docker is running with ${osType} containers. Switch Docker Desktop to Linux containers (or enable a Linux engine), then retry.`
+      : "Docker did not report its container engine type. Ensure Docker is configured to run Linux containers, then retry.";
+  }
   return null;
 }
 
@@ -78,18 +84,14 @@ function runDocker(args, options = {}) {
 }
 
 function requireDocker() {
-  const result = runDocker(["info", "--format", "{{.ServerVersion}}|{{.OSType}}"], {
-    stdio: ["ignore", "pipe", "pipe"]
-  });
+  const result = runDocker(
+    ["info", "--format", "{{.ServerVersion}}|{{.OSType}}"],
+    {
+      stdio: ["ignore", "pipe", "pipe"]
+    }
+  );
   const error = dockerPrerequisiteError(result);
   if (error) throw new Error(error);
-
-  const [, osType] = (result.stdout ?? "").trim().split("|");
-  if (osType && osType !== "linux") {
-    throw new Error(
-      `Docker is running with ${osType} containers. Switch Docker Desktop to Linux containers (or enable a Linux engine), then retry.`
-    );
-  }
 }
 
 function prepareOutputDirectories() {
