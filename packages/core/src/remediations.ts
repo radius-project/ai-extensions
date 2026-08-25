@@ -500,9 +500,10 @@ function buildGithubAccountScopes(
       impact: "high",
       confirmTitle: "Grant GitHub access?",
       confirmBody:
-        `\`gh auth switch\` makes @${login} the active GitHub CLI account for ` +
-        "github.com machine-wide until you switch back, which affects every " +
-        "tool on this machine that uses GitHub CLI. `gh auth refresh` then " +
+        `This will make @${login} the active GitHub CLI account if it is not already active. ` +
+        "The active account changes for github.com machine-wide until you " +
+        "switch back, which affects every tool on this machine that uses " +
+        "GitHub CLI. `gh auth refresh` then " +
         `grants ${granted}. You will need to complete the GitHub ` +
         "authorization in your browser.",
       confirmLabel: "Grant GitHub access",

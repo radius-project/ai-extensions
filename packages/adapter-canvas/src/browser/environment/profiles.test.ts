@@ -1641,6 +1641,9 @@ describe("github identity loading and rendering", () => {
     await handle?.loadGithubIdentity();
 
     expect(page.repairEl.style.display).toBe("");
+    expect(fakeText(page.noteEl)).toContain(
+      "This will make @alice the active GitHub CLI account if it is not already active."
+    );
     // The command must be an actionable callout, not prose the user has to
     // retype, so the run affordance has to be present.
     expect(fakeText(page.repairEl)).toContain(COMMAND_RUN_LABEL);

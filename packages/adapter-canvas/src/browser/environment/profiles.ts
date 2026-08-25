@@ -740,6 +740,7 @@ export function initializeCredentialProfilesPanel(
       ghEmptyEl.style.display = identity.accounts.length > 0 ? "none" : "";
 
     if (noteEl && githubReadiness) {
+      const remediation = githubReadiness.repairRemediation;
       setChildren(context.dom, noteEl, [
         {
           tag: "strong",
@@ -748,7 +749,8 @@ export function initializeCredentialProfilesPanel(
             (githubReadiness.ready ?
               "Ready to configure deployments"
             : "Additional GitHub access is required")
-        }
+        },
+        ...(remediation ? [{ tag: "div", text: remediation.confirmBody }] : [])
       ]);
       noteEl.style.color =
         githubReadiness.ready ?

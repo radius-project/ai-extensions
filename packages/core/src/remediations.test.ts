@@ -282,6 +282,9 @@ describe("github remediations", () => {
 
     expect(remediation.displayCommand).toBe(expected);
     expect(remediation.impact).toBe("high");
+    expect(remediation.confirmBody).toContain(
+      "This will make @octocat the active GitHub CLI account if it is not already active."
+    );
     expect(remediation.confirmBody).toContain("machine-wide");
     expect(remediation.followUp).toContain("Re-check");
   });
