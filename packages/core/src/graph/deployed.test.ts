@@ -275,6 +275,13 @@ describe("mergeDeployedGraphMetadata", () => {
     expect(merged[0].outputResources).toEqual(modeled[0].outputResources);
   });
 
+  it("preserves provider-resolved outputs when deployment metadata is empty", () => {
+    const merged = mergeDeployedGraphMetadata(modeled, [
+      { ...modeled[0], outputResources: [] }
+    ]);
+    expect(merged[0].outputResources).toEqual(modeled[0].outputResources);
+  });
+
   it("keeps the first duplicate parent and never mutates either input", () => {
     const first = {
       ...modeled[0],

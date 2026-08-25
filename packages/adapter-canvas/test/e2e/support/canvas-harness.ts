@@ -562,6 +562,18 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         stdout: `success\thttps://github.com/${REPOSITORY}/actions/runs/1`
       },
       {
+        // The deployed-page resolver reads only the latest status when it
+        // already carries the run URL.
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/deployments/dep-1/statuses?per_page=1`,
+          "--jq",
+          '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "") + "\\t" + (.[0].description // "")'
+        ],
+        stdout: `success\thttps://github.com/${REPOSITORY}/actions/runs/1\t`
+      },
+      {
         tool: "gh",
         args: [
           "api",

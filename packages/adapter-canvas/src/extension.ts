@@ -113,6 +113,7 @@ const execFileAsync = promisify(execFile);
 const sessionHolder = createSessionHolder();
 
 const dependencies: RadiusExtensionDependencies = {
+  logError: (message) => console.error(message),
   session: sessionHolder,
   servers,
   getOrCreateServer,

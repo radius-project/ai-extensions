@@ -163,6 +163,7 @@ export async function handleDeleteEnvironment(
     }
     if (active) {
       const deleting = active.status === "deleting";
+      const deleteFailed = active.status === "delete-failed";
       response.setHeader("Content-Type", "application/json");
       response.writeHead(409);
       response.end(
@@ -170,13 +171,20 @@ export async function handleDeleteEnvironment(
           error:
             deleting ?
               `Application "${active.app}" is still being deleted from environment "${envName}". Wait for that to finish before deleting the environment.`
+            : deleteFailed ?
+              `The previous teardown of application "${active.app}" from environment "${envName}" failed. Retry Delete or stop tracking the deployment before deleting the environment.`
             : `Application "${active.app}" is still deployed to environment "${envName}". Delete the application deployment first, then delete the environment.`,
           code: "app-deployed",
           app: active.app,
           environment: envName,
-          redirect: `/?page=deploying&app=${encodeURIComponent(
-            active.app
-          )}&env=${encodeURIComponent(envName)}`
+          redirect:
+            deleteFailed ?
+              `/?page=deployed&application=${encodeURIComponent(
+                active.app
+              )}&environment=${encodeURIComponent(envName)}`
+            : `/?page=deploying&app=${encodeURIComponent(
+                active.app
+              )}&env=${encodeURIComponent(envName)}`
         })
       );
       return;

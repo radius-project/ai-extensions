@@ -151,7 +151,24 @@ describe("radiusDeployBadgeSvg", () => {
       radiusDeployBadgeSvg().slice("data:image/svg+xml,".length)
     );
     expect(fallback).toContain('stroke="#0969da"');
+    expect(fallback).toContain("animation:spin 1s linear infinite");
+    expect(fallback).toContain("prefers-reduced-motion:reduce");
+    expect(fallback).toContain(".spinner{animation:none}");
     expect(radiusDeployBadgeSvg("anything-else")).toBe(radiusDeployBadgeSvg());
+  });
+
+  it("keeps progress animated indefinitely and leaves terminal badges static", () => {
+    const progress = decodeURIComponent(
+      radiusDeployBadgeSvg("progress").slice("data:image/svg+xml,".length)
+    );
+    expect(progress).toContain("animation:spin 1s linear infinite");
+
+    for (const terminal of ["success", "failed"]) {
+      const svg = decodeURIComponent(
+        radiusDeployBadgeSvg(terminal).slice("data:image/svg+xml,".length)
+      );
+      expect(svg).not.toContain("@keyframes spin");
+    }
   });
 
   it("memoizes each kind so repeat calls return the identical string", () => {

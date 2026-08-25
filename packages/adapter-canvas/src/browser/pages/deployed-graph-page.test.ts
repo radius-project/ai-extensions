@@ -85,11 +85,13 @@ function fixture(options: FixtureOptions = {}) {
     repo,
     branch: branchField,
     graphBranch: graphBranchField,
-    provider: providerField
+    provider: providerField,
+    mutationNonce: "nonce-1"
   });
   const appSelect = createFakeSelect("deployed-app-select");
   const envSelect = createFakeSelect("deployed-env-select");
   const action = createFakeInput("deployed-delete-btn");
+  const stopTrackingAction = createFakeInput("deployed-stop-tracking-btn");
   const status = createFakeElement("deployed-status");
   const label = createFakeElement("deployed-graph-label");
   const note = createFakeElement("deployed-mode-note");
@@ -106,6 +108,7 @@ function fixture(options: FixtureOptions = {}) {
   if (withAppSelect) elements.push(appSelect);
   if (withEnvSelect) elements.push(envSelect);
   if (withAction) elements.push(action);
+  if (withAction) elements.push(stopTrackingAction);
   if (withStatus) elements.push(status);
   if (withLabel) elements.push(label);
   if (withNote) elements.push(note);
@@ -160,6 +163,7 @@ function fixture(options: FixtureOptions = {}) {
     appSelect,
     envSelect,
     action,
+    stopTrackingAction,
     status,
     label,
     note,
@@ -252,6 +256,67 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.clock.pending).toBe(0);
   });
 
+  it("does not show a deploying legend for a never-deployed graph", async () => {
+    const { browser } = fixture();
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          resources: [{ id: "app/web", deployStatus: "pending" }],
+          mode: "greyed",
+          branch: "feature"
+        })
+    );
+    const render = vi.fn();
+
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    expect(render).toHaveBeenCalledWith(
+      "graph-container",
+      expect.any(Array),
+      expect.objectContaining({ deployMode: true, showLegend: false })
+    );
+  });
+
+  it("remounts when a live graph becomes terminal so legend settings follow the mode", async () => {
+    const { browser } = fixture();
+    let mode = "live";
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          resources: [{ id: "app/web", deployStatus: "success" }],
+          mode,
+          branch: "feature"
+        })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () =>
+      jsonResponse({ status: "complete", logsNew: [], logTotal: 0 })
+    );
+    const update = vi.fn();
+    const destroy = vi.fn();
+    const render = vi.fn(() => ({ update, destroy }));
+
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+    expect(render).toHaveBeenCalledTimes(1);
+
+    mode = "terminal";
+    browser.clock.tick(DEPLOYED_GRAPH_POLL_MS);
+    await flushPromises();
+
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(update).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledTimes(2);
+  });
+
   it("polls only a live graph and pauses while hidden", async () => {
     const { browser } = fixture();
     const url =
@@ -322,7 +387,7 @@ describe("initializeDeployedGraphPage", () => {
     );
     await flushPromises();
 
-    expect(createDialog).toHaveBeenCalledTimes(1);
+    expect(createDialog).toHaveBeenCalledTimes(2);
     expect(action.dataset.mode).toBe("delete");
     appSelect.value = "app";
     envSelect.value = "dev";
@@ -330,7 +395,7 @@ describe("initializeDeployedGraphPage", () => {
 
     expect(opens).toEqual([["app", "dev"]]);
     teardown();
-    expect(dialogTeardown).toHaveBeenCalledTimes(1);
+    expect(dialogTeardown).toHaveBeenCalledTimes(2);
   });
 
   it("ignores an invalid delete dialog factory result", async () => {
@@ -1601,6 +1666,231 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.nav.assigned).toEqual(["/?page=deploying"]);
     expect(modal.style.display).toBe("none");
   });
+
+  it("keeps cloud teardown available after a failed redeploy", async () => {
+    const { browser, action, stopTrackingAction, appSelect, envSelect } =
+      fixture({
+        deployments: [{ app: "app", environment: "dev", status: "failed" }]
+      });
+    const { createDialog, confirm, wasOpened } = createConfirmingDialog();
+    browser.net.handle("/api/delete-deployment", () => jsonResponse({}));
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    expect(action.textContent).toBe("Delete Deployment");
+    expect(stopTrackingAction.style.display).toBe("none");
+    stopTrackingAction.dispatch("click");
+    expect(wasOpened()).toBe(false);
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(
+      browser.net.calls.some((call) => call.url === "/api/delete-deployment")
+    ).toBe(true);
+    expect(browser.nav.assigned).toEqual(["/?page=deploying"]);
+  });
+
+  it("offers stop tracking only after a failed teardown and sends its identity", async () => {
+    const {
+      browser,
+      action,
+      stopTrackingAction,
+      appSelect,
+      envSelect,
+      inlineStatus
+    } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm, wasOpened } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse({ outcome: "abandoned" })
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    expect(action.dataset.mode).toBe("delete");
+    expect(action.textContent).toBe("Retry Delete");
+    expect(stopTrackingAction.textContent).toBe("Stop tracking deployment");
+    expect(stopTrackingAction.style.display).toBe("");
+    expect(createDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variant: "abandon",
+        modalId: "deploy-abandon-modal"
+      })
+    );
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    stopTrackingAction.dispatch("click");
+    expect(wasOpened()).toBe(true);
+    confirm();
+    expect(stopTrackingAction.textContent).toBe("Stopping tracking…");
+    await flushPromises();
+
+    const request = browser.net.calls.find(
+      (call) => call.url === "/api/abandon-deployment"
+    );
+    expect(request?.init).toEqual({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Radius-Mutation-Nonce": "nonce-1"
+      },
+      body: JSON.stringify({
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      })
+    });
+    expect(inlineStatus.textContent).toContain(
+      "Cloud resources were not deleted"
+    );
+    expect(inlineStatus.textContent).toContain("may still exist");
+    expect(action.dataset.mode).toBe("deploy");
+    expect(browser.nav.assigned).toEqual([]);
+  });
+
+  it("surfaces a stop-tracking refusal from the server", async () => {
+    const { browser, action, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse({ error: "not failed" }, false, 409)
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    stopTrackingAction.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe("not failed");
+    expect(action.dataset.mode).toBe("delete");
+    expect(stopTrackingAction.disabled).toBe(false);
+  });
+
+  it("uses a generic abandonment refusal when the server omits an error", async () => {
+    const { browser, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse({}, false, 500)
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    stopTrackingAction.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe(
+      "Could not stop tracking the deployment."
+    );
+  });
+
+  it("turns a stale mutation nonce refusal into a reload instruction", async () => {
+    const { browser, action, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      jsonResponse(
+        { error: "This browser mutation request is not trusted." },
+        false,
+        403
+      )
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    stopTrackingAction.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe(
+      "This Radius Canvas page is out of date. Reload it and try again."
+    );
+    expect(action.dataset.mode).toBe("delete");
+    expect(stopTrackingAction.disabled).toBe(false);
+  });
+
+  it("surfaces a transport-safe abandonment failure and restores the action", async () => {
+    const { browser, action, stopTrackingAction, inlineStatus } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm } = createConfirmingDialog();
+    browser.net.handle("/api/abandon-deployment", () =>
+      Promise.reject(new Error("secret-shaped detail"))
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    stopTrackingAction.dispatch("click");
+    confirm();
+    await flushPromises();
+
+    expect(inlineStatus.textContent).toBe(
+      "Could not stop tracking the deployment. Please try again."
+    );
+    expect(inlineStatus.textContent).not.toContain("secret-shaped");
+    expect(action.dataset.mode).toBe("delete");
+    expect(stopTrackingAction.disabled).toBe(false);
+    expect(browser.logger.errors).toHaveLength(1);
+  });
+
+  it.each(["success", "failure"] as const)(
+    "ignores a stale abandonment %s after teardown",
+    async (outcome) => {
+      const { browser, stopTrackingAction, inlineStatus } = fixture({
+        deployments: [
+          { app: "app", environment: "dev", status: "delete-failed" }
+        ]
+      });
+      const { createDialog, confirm } = createConfirmingDialog();
+      const request = createDeferred<HttpResponse>();
+      browser.net.handle("/api/abandon-deployment", () => request.promise);
+      const teardown = initializeDeployedGraphPage(
+        browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+
+      stopTrackingAction.dispatch("click");
+      confirm();
+      teardown();
+      if (outcome === "success") {
+        request.resolve(jsonResponse({ outcome: "abandoned" }));
+      } else {
+        request.reject(new Error("stale"));
+      }
+      await flushPromises();
+
+      expect(inlineStatus.textContent).toBe("");
+      expect(browser.logger.errors).toHaveLength(0);
+    }
+  );
 
   it("surfaces a delete failure returned by the server", async () => {
     const { browser, action, appSelect, envSelect, inlineStatus } = fixture();
