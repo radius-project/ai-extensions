@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import path, { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -52,6 +53,29 @@ export function createDockerRunArgs({ mode, root, uid, gid, pathApi = path }) {
     "run",
     mode === "check" ? "test:visual:stability" : "test:visual:update"
   );
+  return args;
+}
+
+export function createDockerBuildArgs({
+  root = repoRoot,
+  home = homedir(),
+  fileExists = existsSync,
+  pathApi = path
+} = {}) {
+  const args = [
+    "build",
+    "--platform",
+    "linux/amd64",
+    "--file",
+    dockerfile,
+    "--tag",
+    CANONICAL_VISUAL_IMAGE
+  ];
+  const userNpmrc = pathApi.resolve(home, ".npmrc");
+  if (fileExists(userNpmrc)) {
+    args.push("--secret", `id=npmrc,src=${userNpmrc}`);
+  }
+  args.push(root);
   return args;
 }
 
@@ -116,19 +140,7 @@ export function runCanonicalVisual(argv = process.argv.slice(2)) {
   requireDocker();
   prepareOutputDirectories();
 
-  const build = runDocker(
-    [
-      "build",
-      "--platform",
-      "linux/amd64",
-      "--file",
-      dockerfile,
-      "--tag",
-      CANONICAL_VISUAL_IMAGE,
-      "."
-    ],
-    { stdio: "inherit" }
-  );
+  const build = runDocker(createDockerBuildArgs(), { stdio: "inherit" });
   requireSuccessfulCommand(build, "Failed to build the canonical visual image");
 
   const run = runDocker(

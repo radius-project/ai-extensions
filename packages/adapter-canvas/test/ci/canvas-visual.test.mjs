@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   CANONICAL_VISUAL_IMAGE,
+  createDockerBuildArgs,
   createDockerRunArgs,
   dockerPrerequisiteError,
   parseVisualMode
@@ -61,6 +62,32 @@ describe("canonical Canvas visual runner", () => {
       "run",
       "test:visual:update"
     ]);
+  });
+
+  it("passes a user npmrc to the image build as a secret when present", () => {
+    const args = createDockerBuildArgs({
+      root: "C:\\src\\ai-extensions",
+      home: "C:\\Users\\developer",
+      fileExists: (file) => file === "C:\\Users\\developer\\.npmrc",
+      pathApi: win32
+    });
+
+    expect(args).toContain("--secret");
+    expect(args).toContain(
+      "id=npmrc,src=C:\\Users\\developer\\.npmrc"
+    );
+    expect(args.at(-1)).toBe("C:\\src\\ai-extensions");
+  });
+
+  it("builds without an npmrc secret when the user file is absent", () => {
+    const args = createDockerBuildArgs({
+      root: "/src/ai-extensions",
+      home: "/home/developer",
+      fileExists: () => false
+    });
+
+    expect(args).not.toContain("--secret");
+    expect(args.at(-1)).toBe("/src/ai-extensions");
   });
 
   it("reports missing, unavailable, and non-Linux Docker prerequisites", () => {
