@@ -4534,8 +4534,12 @@ export function explainMissingPackagesScope(
     fix.runnable ?
       "Run the command below (or switch to an account that has it in the Create Environment dialog), then retry."
     : `Grant @${login} the read:packages and write:packages scopes with GitHub CLI (or switch to an account that has them in the Create Environment dialog), then retry.`;
+  const accountSwitchWarning =
+    fix.runnable ?
+      ` This will make @${login} the active GitHub CLI account if it is not already active. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`
+    : "";
   return {
-    message: `${missing} ${grant} Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`,
+    message: `${missing} ${grant}${accountSwitchWarning}`,
     remediation: fix.runnable ? fix : null
   };
 }

@@ -313,6 +313,9 @@ describe("preflightGhcrPackageWriteAccess", () => {
     expect(result.remediation?.runnable).toBe(true);
     // The prose points at the callout rather than repeating the command.
     expect(result.error).not.toContain("gh auth switch -h github.com -u");
+    expect(result.error).toContain(
+      "This will make @pubuser the active GitHub CLI account if it is not already active."
+    );
     expect(result.error).not.toContain("&&");
     expect(result.error).not.toContain("previous-login");
   });
@@ -459,6 +462,7 @@ describe("preflightGhcrPackageWriteAccess", () => {
     // the flags that only a built command carries.
     expect(result.error).not.toContain("-h github.com -u");
     expect(result.error).toContain("Grant @");
+    expect(result.error).not.toContain("This will make @");
     // Nothing to offer the callout either, so the prose has to stand alone.
     expect(result.remediation).toBeNull();
   });
