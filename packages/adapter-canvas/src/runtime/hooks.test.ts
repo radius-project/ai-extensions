@@ -356,6 +356,7 @@ interface StatusOverrides {
   requiresConfirmation?: boolean;
   reason?: string;
   sourceCommit?: string;
+  appBicepHash?: string;
 }
 
 function modelStatus(
@@ -372,9 +373,9 @@ function modelStatus(
       status,
       stale: status !== "up-to-date" && status !== "missing",
       requiresConfirmation:
-        overrides.requiresConfirmation ??
-        (status === "unrecorded" || status === "edited"),
+        overrides.requiresConfirmation ?? status === "manually-edited",
       reason: overrides.reason ?? `because it is ${status}`,
+      appBicepHash: overrides.appBicepHash ?? "sha256:model",
       origin:
         overrides.sourceCommit === undefined ?
           null
@@ -760,7 +761,10 @@ describe("evaluateAppBicepHook", () => {
     expect(out?.additionalContext).toContain("No .radius/app.bicep exists");
   });
 
-  it.each(["source-changed", "generator-changed"] as const)(
+  // `unrecorded` is denied like any other refreshable model. A missing origin
+  // record says nothing about whether a person edited the file, and every model
+  // written before records existed has none, so asking would prompt everyone.
+  it.each(["source-changed", "generator-changed", "unrecorded"] as const)(
     "denies and asks for a refresh when the workspace model is %s",
     async (status) => {
       const deps = makeDeps({
@@ -773,26 +777,29 @@ describe("evaluateAppBicepHook", () => {
       const out = await evaluateAppBicepHook(OPEN_GRAPH, deps);
 
       expect(out?.permissionDecision).toBe("deny");
-      expect(out?.permissionDecisionReason).toContain("out of date");
+      expect(out?.permissionDecisionReason).toContain("must be regenerated");
       expect(out?.permissionDecisionReason).toContain("feat");
+      // The deny reason has to name the specific evidence, not just say a
+      // refresh is needed: what we know differs per status and the agent
+      // should be told which one it is.
+      expect(out?.permissionDecisionReason).toContain(
+        `because it is ${status}`
+      );
       expect(out?.additionalContext).toContain(`because it is ${status}`);
       expect(out?.additionalContext).toContain("Refresh it now");
     }
   );
 
-  it.each(["unrecorded", "edited"] as const)(
-    "allows a %s model rather than overwriting content the user may own",
-    async (status) => {
-      const deps = makeDeps({
-        state: { contextRepo: "a/b" },
-        appModelStatus: vi.fn(async (repo: string, branch: string) =>
-          modelStatus(repo, branch, { status })
-        )
-      });
+  it("allows an edited model rather than overwriting content the user owns", async () => {
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "manually-edited" })
+      )
+    });
 
-      expect(await evaluateAppBicepHook(OPEN_GRAPH, deps)).toBeUndefined();
-    }
-  );
+    expect(await evaluateAppBicepHook(OPEN_GRAPH, deps)).toBeUndefined();
+  });
 
   // A regeneration that does not clear the drift must not block every later
   // open: the user would be stuck with a view they cannot reach at all.
@@ -811,6 +818,48 @@ describe("evaluateAppBicepHook", () => {
       (await evaluateAppBicepHook(OPEN_GRAPH, deps))?.permissionDecision
     ).toBe("deny");
     expect(await evaluateAppBicepHook(OPEN_GRAPH, deps)).toBeUndefined();
+  });
+
+  // An unrecorded model carries no record, so without its own fingerprint every
+  // one of them on a branch shares a key. Swapping the file for a different one
+  // would then look like the request already made, and never be denied.
+  it("asks again when an unrecorded model is replaced by a different one", async () => {
+    let appBicepHash = "sha256:first";
+    const deps = makeDeps({
+      state: { contextRepo: "a/b" },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "unrecorded", appBicepHash })
+      )
+    });
+
+    expect(
+      (await evaluateAppBicepHook(OPEN_GRAPH, deps))?.permissionDecision
+    ).toBe("deny");
+    appBicepHash = "sha256:second";
+
+    expect(
+      (await evaluateAppBicepHook(OPEN_GRAPH, deps))?.permissionDecision
+    ).toBe("deny");
+  });
+
+  // The same model can stop being safe to replace without its bytes changing at
+  // all: a gitignore rule starts matching it, or it is removed from the index.
+  // The verdict flips from "regenerate silently" to "ask", so the key must too.
+  it("does not treat an unsafe unrecorded model as an already-requested refresh", () => {
+    const safe = refreshRequestKey(
+      modelStatus("a/b", "feat", {
+        status: "unrecorded",
+        requiresConfirmation: false
+      })
+    );
+    const unsafe = refreshRequestKey(
+      modelStatus("a/b", "feat", {
+        status: "unrecorded",
+        requiresConfirmation: true
+      })
+    );
+
+    expect(safe).not.toBe(unsafe);
   });
 
   it("asks again when a regeneration produced new evidence", async () => {
@@ -940,7 +989,7 @@ describe("appModelRefreshPrompt", () => {
       "radius_generate_app"
     );
     expect(appModelRefreshDisplayPrompt(modelStatus("", "feat"))).toContain(
-      "Refreshing the application model (branch `feat`)"
+      "Regenerating the application model (branch `feat`)"
     );
   });
 });
@@ -998,14 +1047,16 @@ describe("appModelRefreshReminder", () => {
 
   it("omits the repo phrase when the repo is unknown", () => {
     expect(
-      appModelRefreshReminder(modelStatus("", "feat", { status: "edited" }))
+      appModelRefreshReminder(
+        modelStatus("", "feat", { status: "manually-edited" })
+      )
     ).toContain("The application model on branch `feat`");
   });
 });
 
 describe("appModelUnverifiedPrompt", () => {
   const status = modelStatus("octo/app", "feat", {
-    status: "edited",
+    status: "manually-edited",
     reason: "the model no longer matches its origin record"
   });
 
@@ -1021,7 +1072,9 @@ describe("appModelUnverifiedPrompt", () => {
 
   it("omits the repo phrase when the repo is unknown", () => {
     expect(
-      appModelUnverifiedPrompt(modelStatus("", "feat", { status: "edited" }))
+      appModelUnverifiedPrompt(
+        modelStatus("", "feat", { status: "manually-edited" })
+      )
     ).toContain("The Radius graph rendered");
   });
 
@@ -1042,7 +1095,7 @@ describe("appModelUnverifiedPrompt", () => {
 
   it("omits the repo phrase from the timeline when the repo is unknown", () => {
     expect(appModelUnverifiedDisplayPrompt(modelStatus("", "feat"))).toContain(
-      "Checking whether the application model (branch `feat`)"
+      "Asking before regenerating the application model (branch `feat`)"
     );
   });
 });
