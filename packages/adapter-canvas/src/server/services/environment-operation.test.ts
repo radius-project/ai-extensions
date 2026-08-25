@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   createOperation,
+  prepareProviderMutation,
   promoteCreatedGitHubEnvironment,
+  settleProviderMutation,
+  provenOwnedCleanupTargets,
   recordGitHubEnvironment,
   setCanonicalEnvironment
 } from "../../operations.js";
@@ -115,6 +118,9 @@ function dependencies(
       persistEnvironmentResolution: async () => {
         events.push("persist");
         return true;
+      },
+      persistProviderMutation: async () => {
+        events.push("persist-provider-mutation");
       },
       finalizeEnvironmentResolutionFailure: async (_target, input) => {
         failures.push(input);
@@ -548,5 +554,200 @@ describe("runEnvironmentOperationWorkflow", () => {
         }
       }
     ]);
+  });
+});
+
+// A GitHub environment is addressed by a name the customer can delete and
+// recreate. The id GitHub reports for it is the only thing that tells the one
+// this workflow wrote from a replacement, and the rollback's identity gate
+// refuses to delete without it — so the workflow has to put it in the ledger,
+// not just the canonical name.
+describe("the id a later rollback has to match", () => {
+  function creates(body: Record<string, unknown>) {
+    return successfulSelectedGhExecutor({
+      run: async (args) => {
+        // The preflight read finds nothing, so the workflow creates it.
+        if (!args.includes("--method")) {
+          return command({ code: 1, stderr: "HTTP 404: Not Found" });
+        }
+        return command({ stdout: JSON.stringify(body) });
+      }
+    });
+  }
+
+  it("records the id GitHub reported for the environment it created", async () => {
+    const op = operation();
+    const test = dependencies(op);
+
+    expect(
+      await runEnvironmentOperationWorkflow(
+        op,
+        creates({ id: 1234567, name: "production" }),
+        test.dependencies
+      )
+    ).toEqual({ shouldMonitor: true });
+
+    expect(op.setupArtifacts.githubEnvironment).toMatchObject({
+      state: "created_candidate",
+      repo: "octo/app",
+      name: "production",
+      providerId: "1234567"
+    });
+  });
+
+  it("hands that id to the identity the rollback deletes on", async () => {
+    const op = operation();
+    const test = dependencies(op, {
+      promoteCreatedGitHubEnvironment: (target, identity) =>
+        promoteCreatedGitHubEnvironment(target, identity)
+    });
+
+    await runEnvironmentOperationWorkflow(
+      op,
+      creates({
+        id: 1234567,
+        node_id: "MDExOkVudmlyb25tZW50MTIzNDU2Nw==",
+        name: "production",
+        created_at: new Date(NOW).toISOString()
+      }),
+      test.dependencies
+    );
+
+    // The id leads the cleanup identity, so a rollback that later reads the
+    // name back can require the same id before deleting anything.
+    expect(
+      provenOwnedCleanupTargets(op)
+        .filter((entry) => entry.artifactType === "github_environment")
+        .map((entry) => entry.identity)
+    ).toEqual(["1234567|octo/app:production"]);
+  });
+
+  it("falls back to the node id when GitHub reports no numeric id", async () => {
+    const op = operation();
+    const test = dependencies(op);
+
+    await runEnvironmentOperationWorkflow(
+      op,
+      creates({ node_id: "MDExOkVudmlyb25tZW50OTk5", name: "production" }),
+      test.dependencies
+    );
+
+    expect(op.setupArtifacts.githubEnvironment.providerId).toBe(
+      "MDExOkVudmlyb25tZW50OTk5"
+    );
+  });
+
+  it("tells the customer when a restart cannot prove it owns the name", async () => {
+    const op = operation();
+    const test = dependencies(op);
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_environment.put",
+      target: "octo/app:production"
+    });
+    mutation.preparedAt = new Date(NOW).toISOString();
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "confirmed",
+      null,
+      "1234567"
+    );
+
+    await runEnvironmentOperationWorkflow(
+      op,
+      successfulSelectedGhExecutor({
+        run: async () =>
+          command({
+            stdout: JSON.stringify({
+              id: 7654321,
+              name: "production",
+              created_at: new Date(NOW).toISOString()
+            })
+          })
+      }),
+      test.dependencies
+    );
+
+    // Leaving it silently would hand back an environment nobody knows about.
+    expect(
+      test.events.filter((entry) => entry.includes("outside its cleanup scope"))
+    ).toHaveLength(1);
+    expect(op.setupArtifacts.githubEnvironment.state).toBe("created_candidate");
+  });
+
+  it("records no id when GitHub reports none, so the rollback refuses to guess", async () => {
+    const op = operation();
+    const test = dependencies(op, {
+      promoteCreatedGitHubEnvironment: (target, identity) =>
+        promoteCreatedGitHubEnvironment(target, identity)
+    });
+
+    await runEnvironmentOperationWorkflow(
+      op,
+      creates({
+        name: "production",
+        created_at: new Date(NOW).toISOString()
+      }),
+      test.dependencies
+    );
+
+    // Null, never the name standing in for an id: the cleanup gate reads this
+    // as "no way to tell a replacement apart" and leaves the resource alone.
+    expect(op.setupArtifacts.githubEnvironment.providerId).toBeNull();
+    expect(
+      provenOwnedCleanupTargets(op)
+        .filter((entry) => entry.artifactType === "github_environment")
+        .map((entry) => entry.identity)
+    ).toEqual(["octo/app:production"]);
+  });
+});
+
+// The route that finalizes a failure builds the environment reader the cleanup
+// identity gate needs out of the executor it is handed. Handing it anything
+// else — or nothing — reads the environment as some other account.
+describe("the executor a failing workflow hands to cleanup", () => {
+  it("is the same pinned executor the workflow ran its GitHub work with", async () => {
+    const op = operation();
+    const handed: unknown[] = [];
+    const test = dependencies(op, {
+      preflightRepoAdmin: async () => "You need admin on octo/app.",
+      finalizeEnvironmentResolutionFailure: async (
+        _target,
+        _input,
+        executor
+      ) => {
+        handed.push(executor);
+      }
+    });
+    const executor = successfulSelectedGhExecutor();
+
+    await runEnvironmentOperationWorkflow(op, executor, test.dependencies);
+
+    expect(handed).toEqual([executor]);
+  });
+
+  it("is handed along after the environment exists, when there is something to clean", async () => {
+    const op = operation();
+    const handed: unknown[] = [];
+    const test = dependencies(op, {
+      preflightGhcrPackageWriteAccess: async () => ({
+        ok: false,
+        status: 403,
+        error: "Your token cannot write packages.",
+        code: "ghcr-package-write-required"
+      }),
+      finalizeEnvironmentResolutionFailure: async (
+        _target,
+        _input,
+        executor
+      ) => {
+        handed.push(executor);
+      }
+    });
+    const executor = successfulSelectedGhExecutor();
+
+    await runEnvironmentOperationWorkflow(op, executor, test.dependencies);
+
+    expect(handed).toEqual([executor]);
   });
 });

@@ -333,6 +333,7 @@ const productionHandlers = {
     getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
     hasCompleteVerificationIdentity: () => false,
     findWorkflowRun: () => Promise.resolve(null),
+    settleVerificationDispatchRecovery: () => {},
     getRunDetail: () => Promise.resolve(null),
     fetchRunLog: () => Promise.resolve(null),
     extractErrorLines: () => [],

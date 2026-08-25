@@ -122,6 +122,7 @@ function deps(
       "hasCompleteVerificationIdentity"
     ) as never,
     findWorkflowRun: unset("findWorkflowRun") as never,
+    settleVerificationDispatchRecovery: () => {},
     getRunDetail: unset("getRunDetail") as never,
     fetchRunLog: unset("fetchRunLog") as never,
     extractErrorLines: unset("extractErrorLines") as never,
@@ -1076,7 +1077,7 @@ describe("environments — verify-status", () => {
     });
   });
 
-  it("uses legacy ambient verification for pre-pinning operations", async () => {
+  it("does not adopt an unmarked run for pre-pinning operations", async () => {
     const operation = {
       repo: "o/r",
       environment: "dev",
@@ -1104,19 +1105,14 @@ describe("environments — verify-status", () => {
         findWorkflowRun
       })
     );
-    expect(findWorkflowRun).toHaveBeenCalledWith(
-      "o/r",
-      "verify.yml",
-      123,
-      null
-    );
+    expect(findWorkflowRun).not.toHaveBeenCalled();
     expect(JSON.parse(recording.body)).toEqual({
       state: "pending",
       runId: null
     });
   });
 
-  it("caches a discovered run id onto instance state when there is no operation", async () => {
+  it("does not cache an unmarked run when there is no operation", async () => {
     const state: Record<string, unknown> = { deployDispatchedAt: 123 };
     const findWorkflowRun = vi.fn(() => Promise.resolve(555));
     const { recording, ctx } = context("GET", "/api/verify-status?repo=o/r");
@@ -1128,17 +1124,11 @@ describe("environments — verify-status", () => {
         getRunDetail: () => Promise.resolve(null)
       })
     );
-    expect(findWorkflowRun).toHaveBeenCalledWith(
-      "o/r",
-      "radius-verify-credentials.yml",
-      123,
-      null
-    );
-    expect(state.verifyRunId).toBe(555);
+    expect(findWorkflowRun).not.toHaveBeenCalled();
+    expect(state.verifyRunId).toBeUndefined();
     expect(JSON.parse(recording.body)).toEqual({
       state: "pending",
-      runId: 555,
-      runUrl: "https://github.com/o/r/actions/runs/555"
+      runId: null
     });
   });
 
@@ -1613,7 +1603,7 @@ describe("environments — real loopback", () => {
     });
   });
 
-  it("discovers and persists a matched operation run id over controlled HTTP", async () => {
+  it("does not let an unrelated successful run finish initial verification", async () => {
     const operation = {
       repo: "octo/app",
       environment: "dev",
@@ -1626,13 +1616,14 @@ describe("environments — real loopback", () => {
       }
     };
     const findWorkflowRun = vi.fn(() => Promise.resolve(55));
+    const getRunDetail = vi.fn(() => Promise.resolve(null));
     const persistOperations = vi.fn(() => Promise.resolve());
     const container = createControlledEnvironmentServer({
       readInstanceEntry: () => undefined,
       getOperation: () => operation,
       hasCompleteVerificationIdentity: () => true,
       findWorkflowRun,
-      getRunDetail: () => Promise.resolve(null),
+      getRunDetail,
       persistBestEffort,
       persistOperations,
       reportOperationDiagnostic: () => {}
@@ -1646,25 +1637,17 @@ describe("environments — real loopback", () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
         state: "pending",
-        runId: 55,
-        runUrl: "https://github.com/octo/app/actions/runs/55"
+        runId: null
       });
-      expect(findWorkflowRun).toHaveBeenCalledWith(
-        "octo/app",
-        "verify.yml",
-        123,
-        null,
-        expect.objectContaining({ login: "octocat" })
-      );
+      expect(findWorkflowRun).not.toHaveBeenCalled();
+      expect(getRunDetail).not.toHaveBeenCalled();
       expect(operation.verification).toEqual({
         dispatchedAt: 123,
         workflow: "verify.yml",
         ref: "feature",
-        environment: "dev",
-        runId: "55",
-        runUrl: "https://github.com/octo/app/actions/runs/55"
+        environment: "dev"
       });
-      expect(persistOperations).toHaveBeenCalledOnce();
+      expect(persistOperations).not.toHaveBeenCalled();
     } finally {
       await container.stopAll();
     }
