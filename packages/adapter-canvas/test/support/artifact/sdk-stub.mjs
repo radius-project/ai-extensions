@@ -22,9 +22,10 @@ export async function joinSession(declaration) {
   const generateApp = declaration.tools.find(
     (tool) => tool.name === "radius_generate_app"
   );
-  const bundledSkill = await generateApp?.handler({
+  const bootstrapText = await generateApp?.handler({
     repoPath: process.env.RADIUS_ARTIFACT_WORKSPACE
   });
+  const bootstrap = JSON.parse(String(bootstrapText));
   await send({
     type: "registered",
     snapshot: {
@@ -55,14 +56,11 @@ export async function joinSession(declaration) {
           callable: typeof hook === "function"
         }))
         .sort((left, right) => left.name.localeCompare(right.name)),
-      bundledSkill: {
-        hasSkill: String(bundledSkill).includes("# radius-app-bicep skill"),
-        hasCustomTypes: String(bundledSkill).includes(
-          "Reference: references/custom-resource-types.md"
-        ),
-        hasSourceReferences: String(bundledSkill).includes(
-          "Reference: ../radius-app-graph/references/source-code-references.md"
-        )
+      bootstrap: {
+        compact: String(bootstrapText).length < 1000,
+        skill: bootstrap.skill,
+        hasSkillBase: Boolean(bootstrap.skillBase),
+        hasSkillVersion: Boolean(bootstrap.skillVersion)
       }
     }
   });

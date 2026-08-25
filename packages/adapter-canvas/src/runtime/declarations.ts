@@ -208,7 +208,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_generate_app",
     description:
-      "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns the full radius-app-bicep skill (SKILL.md and all reference files, bundled with the extension) so the agent uses authoritative, schema-accurate Radius.* types and compiles the result before finishing.",
+      "Starts Radius app.bicep authoring after checking whether the repository is modelable. Use the installed radius-app-bicep skill for the workflow. Returns only the repository path, packaged skill path, and generator version needed to follow that skill.",
     parameters: {
       type: "object",
       properties: {

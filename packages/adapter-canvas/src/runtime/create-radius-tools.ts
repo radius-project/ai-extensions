@@ -43,16 +43,16 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
   return [
     {
       ...declarationByName.get("radius_generate_app")!,
-      // Two source checks gate the authoring instructions, and they differ in
+      // Two source checks gate the authoring handoff, and they differ in
       // kind. A repository with no Dockerfile is refused outright (2.1): the
       // product cannot model it, so the skill is withheld entirely. A repository
       // with SEVERAL Dockerfiles is not refused at all (2.2) — it is the normal
       // shape of a microservices application and must still be modeled as one
-      // application — so the skill is handed over as usual, with a brief
+      // application — so the bootstrap is returned as usual, with a brief
       // appended describing the candidate directories and the narrow case in
       // which the agent should stop and ask the user where the application is.
       //
-      // Any failure to establish the repository's contents hands over the skill
+      // Any failure to establish the repository's contents returns the handoff
       // unchanged: both checks act on evidence, never on a lookup that did not
       // work.
       handler: async (args: ToolArgs) => {
