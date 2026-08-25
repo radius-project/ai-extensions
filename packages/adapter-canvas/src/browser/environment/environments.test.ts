@@ -832,6 +832,89 @@ describe("environment list behavior", () => {
   });
 });
 
+// The table is the server's listing and nothing else. A rollback removes the
+// environment behind a row that is still reported as Pending — because the
+// setup's verify run never completed — so the reload after the rollback has to
+// take the row away, and nothing in the browser may keep it, re-add it, or
+// invent one for an operation that just finished.
+describe("environment rows after a rollback", () => {
+  function listing(page: ReturnType<typeof renderPage>, payloads: unknown[]) {
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () => {
+      const next = payloads.shift();
+      if (next === undefined) throw new Error("unexpected listing request");
+      return jsonResponse(next);
+    });
+  }
+
+  it("takes the pending row away when the listing stops reporting it", async () => {
+    const page = renderPage();
+    listing(page, [
+      { environments: [{ name: "dev", status: "pending", provider: "azure" }] },
+      { environments: [] }
+    ]);
+
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+    expect(page.elements.tableBody.innerHTML).toContain("dev");
+    expect(page.elements.tableBody.innerHTML).toContain("Pending");
+    // A pending row keeps the table polling, which is how a row that is still
+    // being removed refreshes itself.
+    expect(page.browser.clock.timeouts).toBe(1);
+
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    expect(page.elements.tableBody.innerHTML).toContain(
+      "No environments created yet"
+    );
+    expect(page.elements.tableBody.innerHTML).not.toContain("dev");
+    // Nothing is pending any more, so the table stops polling instead of
+    // re-rendering the environment the rollback removed.
+    expect(page.browser.clock.timeouts).toBe(0);
+    expect(page.browser.net.calls).toHaveLength(2);
+  });
+
+  it("keeps a pending row the listing still reports after a stop", async () => {
+    const page = renderPage();
+    listing(page, [
+      { environments: [{ name: "dev", status: "pending", provider: "azure" }] },
+      { environments: [{ name: "dev", status: "pending", provider: "azure" }] }
+    ]);
+
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    // A stopped setup keeps its resources, so the row that reports them is the
+    // truthful one and the table keeps watching it.
+    expect(page.elements.tableBody.innerHTML).toContain("dev");
+    expect(page.elements.tableBody.innerHTML).toContain("Pending");
+    expect(page.browser.clock.timeouts).toBe(1);
+  });
+
+  it("renders exactly the rows the listing returned, in its order", async () => {
+    const page = renderPage();
+    listing(page, [
+      {
+        environments: [
+          { name: "staging", status: "success", provider: "azure" },
+          { name: "prod", status: "failed", provider: "aws" }
+        ]
+      }
+    ]);
+
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    const body = page.elements.tableBody.innerHTML;
+    expect(body.indexOf("staging")).toBeGreaterThan(-1);
+    expect(body.indexOf("staging")).toBeLessThan(body.indexOf("prod"));
+    expect(body.match(/<tr>/g)).toHaveLength(2);
+    expect(body).not.toContain("Pending");
+  });
+});
+
 describe("environment deletion", () => {
   async function readyDelete(name = "dev") {
     const page = renderPage();

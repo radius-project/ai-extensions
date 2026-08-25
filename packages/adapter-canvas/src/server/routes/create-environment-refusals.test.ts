@@ -68,6 +68,17 @@ function ports(script: Script = {}): Recorder {
         return script.existing ?? null;
       },
       isStale: () => script.stale ?? false,
+      // The real predicate: a closed record is never resumable, whatever else
+      // about the continuation matches.
+      isTerminalState: (state) =>
+        [
+          "succeeded",
+          "succeeded_with_warnings",
+          "action_required",
+          "failed",
+          "failed_partial",
+          "cancelled"
+        ].includes(String(state ?? "")),
       createOperation: (input) =>
         script.created ??
         operation({
@@ -239,6 +250,33 @@ describe("the create-environment refusal ladder", () => {
           error: "Setup is already running for octo/app.",
           code: "operation-in-progress",
           operationId: "op-running"
+        }
+      }
+    });
+    expect(recorder.persistCalls).toBe(0);
+  });
+
+  it("rung 5 — distinguishes cleanup authority from a running operation", async () => {
+    const recorder = ports({
+      start: {
+        ok: false,
+        reason: "previous-cleanup-required",
+        conflict: { operationId: "op-cleanup" }
+      }
+    });
+
+    await expect(
+      admitCreateEnvironmentRequest({ repo: "octo/app" }, recorder.ports)
+    ).resolves.toEqual({
+      outcome: "refused",
+      operation: null,
+      refusal: {
+        status: 409,
+        body: {
+          error:
+            "An earlier setup for octo/app must finish rollback before a new setup can start.",
+          code: "previous-cleanup-required",
+          operationId: "op-cleanup"
         }
       }
     });

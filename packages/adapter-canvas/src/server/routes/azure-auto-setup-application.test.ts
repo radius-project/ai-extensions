@@ -34,6 +34,7 @@ const OIDC: ResolveOidcSubjectResult = {
 interface Harness {
   input: AzureAutoSetupApplicationInput;
   calls: string[];
+  recorded: Record<string, unknown>[];
   failures: Record<string, unknown>[];
   responses: Array<{ status: number; payload: unknown }>;
   steps: string[];
@@ -63,6 +64,7 @@ function harness(
   } = {}
 ): Harness {
   const calls: string[] = [];
+  const recorded: Record<string, unknown>[] = [];
   const failures: Record<string, unknown>[] = [];
   const responses: Array<{ status: number; payload: unknown }> = [];
   const operation: AzureAutoSetupOperation = {
@@ -81,8 +83,10 @@ function harness(
         }),
       finish: options.finish ?? (() => calls.push("finish")),
       report: options.report ?? (() => calls.push("report")),
-      recordAzureApp: (_operation, patch) =>
-        calls.push(`record:${String(patch.state)}`)
+      recordAzureApp: (_operation, patch) => {
+        recorded.push(patch);
+        calls.push(`record:${String(patch.state)}`);
+      }
     }
   });
   const workflow: AzureAutoSetupWorkflow = {
@@ -109,6 +113,7 @@ function harness(
   };
   return {
     calls,
+    recorded,
     failures,
     responses,
     steps: workflow.steps,
@@ -218,7 +223,14 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       state: "reused"
     });
     expect(test.calls).toEqual(["record:reused", "persist"]);
-    expect(azCalls).toHaveLength(3);
+    // The tag read is the fourth call: reuse now records where the application
+    // came from, and only its Radius provenance tags can say.
+    expect(azCalls).toEqual([
+      `ad app show --id ${APP_ID} --query id -o tsv`,
+      "ad signed-in-user show --query id -o tsv",
+      `ad app owner list --id ${APP_ID} --query [].id -o tsv`,
+      `ad app show --id ${APP_ID} --query tags -o json`
+    ]);
     expect(test.steps).toContain(
       `✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${APP_ID}`
     );
@@ -392,6 +404,9 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         if (line.startsWith("ad app owner list")) {
           return command({ stdout: USER_ID });
         }
+        if (line.startsWith("ad app show --id") && line.includes("tags")) {
+          return command({ stdout: "[]" });
+        }
         throw new Error(`unscripted az call: ${line}`);
       }
     });
@@ -406,6 +421,9 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       `✅ Using the selected App Registration: ${APP_ID}`
     );
     expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
+    expect(test.recorded).toEqual([
+      expect.objectContaining({ state: "reused", origin: "pre_existing" })
+    ]);
   });
 
   it("fails closed when ownership of an explicit application cannot be read", async () => {
@@ -540,6 +558,148 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       `✅ Reusing existing App Registration: ${APP_ID}`
     );
     expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
+    // The list projection already carries tags, so an untagged match is decided
+    // without a second lookup.
+    expect(test.recorded[0]).toMatchObject({ origin: "pre_existing" });
+  });
+
+  it("names an earlier Radius setup as the source of a reused name match", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({
+            stdout: JSON.stringify([
+              {
+                appId: APP_ID,
+                displayName: "Radius",
+                createdDateTime: "today",
+                tags: buildRadiusAppProvenanceTags({
+                  repo: "octo/app",
+                  environment: "dev",
+                  operationId: "op_earlier"
+                })
+              }
+            ])
+          });
+        }
+        if (line.startsWith("ad signed-in-user show")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list")) {
+          return command({ stdout: USER_ID });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toEqual({
+      clientId: APP_ID,
+      appName: "radius-deploy-octo-app",
+      state: "reused"
+    });
+    expect(test.recorded[0]).toMatchObject({
+      state: "reused",
+      origin: "radius_earlier_setup",
+      appId: APP_ID
+    });
+  });
+
+  it("names an earlier Radius setup behind the repository's AZURE_CLIENT_ID", async () => {
+    const test = harness({
+      overrides: { requestedClientId: APP_ID },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("--query tags")) {
+          return command({
+            stdout: JSON.stringify(
+              buildRadiusAppProvenanceTags({
+                repo: "octo/app",
+                environment: "dev",
+                operationId: "op_earlier"
+              })
+            )
+          });
+        }
+        if (line.startsWith("ad app show --id")) {
+          return command({ stdout: "app-object" });
+        }
+        if (line.startsWith("ad signed-in-user show")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list")) {
+          return command({ stdout: USER_ID });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await resolveAzureAutoSetupApplication(test.input);
+
+    expect(test.recorded[0]).toMatchObject({
+      state: "reused",
+      origin: "radius_earlier_setup"
+    });
+  });
+
+  it("does not claim Radius provenance from another environment's tags", async () => {
+    const test = harness({
+      overrides: { requestedClientId: APP_ID },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("--query tags")) {
+          return command({
+            stdout: JSON.stringify(
+              buildRadiusAppProvenanceTags({
+                repo: "octo/app",
+                environment: "prod",
+                operationId: "op_earlier"
+              })
+            )
+          });
+        }
+        if (line.startsWith("ad app show --id")) {
+          return command({ stdout: "app-object" });
+        }
+        if (line.startsWith("ad signed-in-user show")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list")) {
+          return command({ stdout: USER_ID });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await resolveAzureAutoSetupApplication(test.input);
+
+    expect(test.recorded[0]).toMatchObject({ origin: "pre_existing" });
+  });
+
+  it("claims nothing when the provenance tags cannot be read", async () => {
+    const test = harness({
+      overrides: { requestedClientId: APP_ID },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("--query tags")) {
+          return command({ code: 1, stderr: "Graph denied" });
+        }
+        if (line.startsWith("ad app show --id")) {
+          return command({ stdout: "app-object" });
+        }
+        if (line.startsWith("ad signed-in-user show")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list")) {
+          return command({ stdout: USER_ID });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+    await resolveAzureAutoSetupApplication(test.input);
+    await resolveAzureAutoSetupApplication(test.input);
+    expect(test.recorded[0]).toMatchObject({ origin: "pre_existing" });
+    expect(test.recorded[0]).toMatchObject({ origin: "pre_existing" });
   });
 
   it("fails closed when the reused name match cannot be persisted", async () => {
@@ -726,6 +886,11 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       `✅ Entra app registration created: ${APP_ID}`
     );
     expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
+    expect(test.recorded[0]).toMatchObject({
+      state: "created",
+      origin: "this_operation",
+      appId: APP_ID
+    });
     const create = azCalls.findIndex((line) =>
       line.startsWith("ad app create ")
     );
