@@ -1591,6 +1591,46 @@ describe("operation commands", () => {
     expect(bottomButtons(browser)).toHaveLength(0);
   });
 
+  it("renders deletion-specific failure details", () => {
+    const browser = setup();
+    renderActions(
+      browser,
+      [
+        {
+          id: "retry-deletion",
+          kind: "retry_deletion",
+          label: "Retry deletion",
+          description: "Retry unfinished deletion steps.",
+          path: "/api/operations/op-1/retry/deletion",
+          pending: false
+        }
+      ],
+      {
+        kind: "delete",
+        state: "failed_partial",
+        terminalState: "failed_partial",
+        headline: {
+          title: "Deletion could not continue",
+          message: "Review the error, then retry deletion."
+        },
+        failure: { message: "The delete workflow failed." }
+      }
+    );
+
+    expect(browser.els[PROGRESS_IDS.failureTitle].textContent).toBe(
+      "Deletion could not continue"
+    );
+    expect(browser.els[PROGRESS_IDS.failureMessage].textContent).toBe(
+      "The delete workflow failed."
+    );
+    expect(browser.els[PROGRESS_IDS.cleanupStatus].textContent).toContain(
+      "Deletion stopped before all stages completed."
+    );
+    expect(browser.els[PROGRESS_IDS.retry].textContent).toBe(
+      "Retry deletion resumes from the unfinished stage."
+    );
+  });
+
   it("keeps the retry in the command row and Exit setup below the details", () => {
     const browser = setup();
     renderActions(

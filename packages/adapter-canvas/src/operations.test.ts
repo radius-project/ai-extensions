@@ -4657,6 +4657,33 @@ describe("action projection", () => {
     expect(projectOperationActions(succeeded)).toEqual([]);
   });
 
+  it("projects deletion language even when legacy setup commands are present", () => {
+    const failed = newDeleteOp();
+    enterStage(failed, failed.stages[0].id);
+    setStageState(failed, failed.stages[0].id, "failed");
+    failed.control.commands.push({
+      kind: "retry_setup",
+      commandId: `${failed.operationId}:retry_setup:2:setup`,
+      attempt: 2,
+      target: "setup",
+      state: "finished",
+      acceptedAt: failed.startedAt,
+      completedAt: failed.startedAt,
+      outcome: "failed_partial"
+    });
+    finish(failed, "failed_partial", {
+      failure: { code: "radius-env-delete-failed" }
+    });
+
+    expect(projectOperationHeadline(failed)).toEqual({
+      code: "deletion-incomplete",
+      title: "Deletion could not continue",
+      message:
+        "Radius stopped at Delete Radius environment. Review the error, then retry deletion. Completed stages will be skipped."
+    });
+    expect(projectActionGuidance(failed)).toEqual([]);
+  });
+
   it("resets only unfinished delete stages for a retry", () => {
     const op = newDeleteOp();
     op.stages[0].state = "succeeded";

@@ -3665,6 +3665,7 @@ const DETAIL_GUIDANCE_CODES = Object.freeze([
 
 export function projectActionGuidance(op: any): any[] {
   if (!op || !isTerminalState(op.state)) return [];
+  if (op.kind === OPERATION_KIND_DELETE) return [];
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
     return [];
   // A closed setup has no path left to explain. Listing why a rollback is
@@ -3693,6 +3694,29 @@ export function projectActionGuidance(op: any): any[] {
  */
 export function projectOperationHeadline(op: any): any {
   if (!op) return null;
+  if (op.kind === OPERATION_KIND_DELETE) {
+    if (!isTerminalState(op.state)) {
+      return {
+        code: "deleting-environment",
+        title: "Deleting environment…",
+        message:
+          "Radius is completing the remaining deletion stages. Deletion cannot be stopped or rolled back."
+      };
+    }
+    if (op.state === "failed" || op.state === "failed_partial") {
+      const stage = op.stages.find(
+        (entry: any) => entry.id === op.currentStage
+      );
+      return {
+        code: "deletion-incomplete",
+        title: "Deletion could not continue",
+        message: `Radius stopped at ${
+          stage?.label || "an unfinished deletion stage"
+        }. Review the error, then retry deletion. Completed stages will be skipped.`
+      };
+    }
+    return null;
+  }
   const activeCleanup = activeCommandKind(op);
   if (!isTerminalState(op.state)) {
     if (activeCleanup === "rollback" || activeCleanup === "retry_cleanup") {
@@ -4028,6 +4052,13 @@ export function projectOperationActions(op: any): any[] {
  */
 export function projectNextTransition(op: any): any {
   if (!op || isTerminalState(op.state)) return null;
+  if (op.kind === OPERATION_KIND_DELETE) {
+    return {
+      code: "deleting-environment",
+      message:
+        "Deletion is running. If it fails, Retry deletion resumes from the unfinished stage."
+    };
+  }
   const active = activeCommandKind(op);
   // Cleanup owns the record while it runs, and it is the one activity with no
   // action of its own — so it has to name itself or the panel would be silent.

@@ -1034,6 +1034,30 @@ export function initializeEnvironmentOperations(
     }
 
     const cleanup = op.cleanup;
+    if (op.kind === "delete") {
+      messageEl.textContent =
+        op.failure && op.failure.message !== "" ?
+          op.failure.message
+        : "The deletion request failed.";
+      const titleEl = dom.byId(PROGRESS_IDS.failureTitle);
+      if (titleEl) {
+        titleEl.textContent =
+          op.headline?.title || "Deletion could not continue";
+      }
+      cleanupEl.textContent =
+        "Deletion stopped before all stages completed. Completed stages remain recorded and will not be repeated.";
+      retryEl.textContent =
+        op.actions.some((action) => action.kind === "retry_deletion") ?
+          "Retry deletion resumes from the unfinished stage."
+        : "";
+      setFailureList(
+        [],
+        dom.byId(PROGRESS_IDS.cleanupWarningsList),
+        dom.byId(PROGRESS_IDS.cleanupWarningsBlock)
+      );
+      card.style.display = "";
+      return;
+    }
     const cleanupStatus =
       cleanup.state === "running" ? "Cleanup is still running."
       : cleanup.state === "pending" ? "Cleanup has not started yet."
