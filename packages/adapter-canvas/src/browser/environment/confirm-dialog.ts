@@ -8,6 +8,11 @@ import type {
 export interface EnvironmentConfirmOptions {
   readonly title: string;
   readonly message: string;
+  readonly messageLink?: {
+    readonly label: string;
+    readonly href: string;
+    readonly suffix?: string;
+  };
   readonly usageLabel?: string;
   readonly usage?: readonly string[];
   readonly confirmLabel: string;
@@ -124,7 +129,20 @@ export function createEnvironmentConfirmDialog(
       pendingConfirm = options.onConfirm;
       pendingCancel = options.onCancel ?? null;
       title.textContent = options.title;
-      message.textContent = options.message;
+      if (options.messageLink) {
+        const prefix = context.dom.createElement("span");
+        prefix.textContent = options.message;
+        const link = context.dom.createElement("a");
+        link.textContent = options.messageLink.label;
+        link.setAttribute("href", options.messageLink.href);
+        link.setAttribute("target", "_blank");
+        link.setAttribute("rel", "noopener noreferrer");
+        const suffix = context.dom.createElement("span");
+        suffix.textContent = options.messageLink.suffix ?? "";
+        message.replaceChildren(prefix, link, suffix);
+      } else {
+        message.textContent = options.message;
+      }
       confirm.textContent = options.confirmLabel;
       confirm.className =
         options.confirmVariant === "primary" ?

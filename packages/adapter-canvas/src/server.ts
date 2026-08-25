@@ -670,7 +670,7 @@ const operationsControlRoutes = createOperationsControlRoutes({
       operation.operationId
     );
     if (!coordinator) return false;
-    if (kind === "setup_continuation") {
+    if (kind === "setup_continuation" || kind === "deletion_retry") {
       coordinator.scheduleEnvironmentOperation(operation);
     } else {
       coordinator.scheduleCommandTask(kind, operation, commandId);

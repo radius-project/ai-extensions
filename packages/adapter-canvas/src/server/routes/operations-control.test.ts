@@ -34,6 +34,7 @@ import {
   requestStop,
   requireInput,
   setCommandState,
+  setStageState,
   stopAtBoundary,
   EXIT_COMMAND_KIND,
   OPERATION_KIND_DELETE,
@@ -191,6 +192,22 @@ function dependencies(
     }
   };
   return Object.assign(base, overrides, { journal });
+}
+
+function retryableDeletion(): OperationFixture {
+  const op = createOperation({
+    provider: "azure",
+    repo: FIXTURE_REPO,
+    environment: "dev",
+    kind: OPERATION_KIND_DELETE,
+    stages: buildDeleteStages()
+  }) as OperationFixture;
+  op.stages[0].state = "succeeded";
+  setStageState(op, op.stages[1].id, "failed");
+  finish(op, "failed_partial", {
+    failure: { code: "credential-delete-failed" }
+  });
+  return op;
 }
 
 describe("the route registry", () => {
@@ -500,6 +517,34 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       }
     ]);
     // Saved before any work was scheduled.
+    expect(out.journal.persistCalls).toBe(1);
+  });
+
+  it("retries only unfinished delete stages with the delete runner", async () => {
+    const op = retryableDeletion();
+    const out = await drive(handleRetryOperation, op, "retry/deletion");
+
+    expect(out.recording.status).toBe(202);
+    const payload = out.payload();
+    expect(payload.attempt).toBe(1);
+    expect(payload.commandId).toBe(
+      `${op.operationId}:retry_deletion:1:${op.stages[1].id}`
+    );
+    expect(op.state).toBe("running");
+    expect(op.stages.map((stage) => stage.state)).toEqual([
+      "succeeded",
+      "pending",
+      "pending",
+      "pending"
+    ]);
+    expect(op.currentStage).toBe(op.stages[1].id);
+    expect(out.journal.scheduled).toEqual([
+      {
+        kind: "deletion_retry",
+        instanceId: "panel-a",
+        commandId: payload.commandId
+      }
+    ]);
     expect(out.journal.persistCalls).toBe(1);
   });
 
@@ -1240,6 +1285,18 @@ describe("contracts shared by every control route", () => {
       persistFailureCode: "operation-retry-persist-failed",
       persistFailureError:
         "Radius could not save the retry request, so no work was started. Try again."
+    },
+    {
+      name: "retry/deletion",
+      path: (id: string) => `/api/operations/${id}/retry/deletion`,
+      handler: handleRetryOperation,
+      operation: retryableDeletion,
+      restoredState: "failed_partial",
+      attemptKind: "deletion",
+      restoredAttempt: 0,
+      persistFailureCode: "operation-retry-persist-failed",
+      persistFailureError:
+        "Radius could not save the retry request, so no work was started. Try again."
     }
   ] as const;
 
@@ -1283,7 +1340,10 @@ describe("contracts shared by every control route", () => {
 
       expect(out.recording.status).toBe(409);
       expect(out.payload()).toEqual({
-        error: "Another setup is already running for contoso/store.",
+        error:
+          route.name === "retry/deletion" ?
+            "Another environment operation is already running for contoso/store."
+          : "Another setup is already running for contoso/store.",
         code: "operation-in-progress",
         operationId: "op_live"
       });
@@ -1295,7 +1355,7 @@ describe("contracts shared by every control route", () => {
   // The two first-choice commands answer a repeated submission with the command
   // already in flight, so a double click never continues or deletes twice.
   const firstChoiceRoutes = commandRoutes.filter(
-    (route) => route.name !== "retry/setup"
+    (route) => route.name !== "retry/setup" && route.name !== "retry/deletion"
   );
 
   it.each(firstChoiceRoutes)(

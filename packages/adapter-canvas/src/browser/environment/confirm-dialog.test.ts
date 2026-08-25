@@ -119,6 +119,35 @@ describe("createEnvironmentConfirmDialog", () => {
     expect(elements["env-confirm-cancel"].focusCount).toBe(0);
   });
 
+  it("renders an external link inline with an acknowledgement message", () => {
+    const { dialog, elements } = openDialog();
+
+    dialog.show({
+      title: "Environment deleted",
+      message: "Delete the retained app registration in the ",
+      messageLink: {
+        label: "Azure portal",
+        href: "https://portal.azure.com/#view/apps",
+        suffix: "."
+      },
+      confirmLabel: "Done",
+      hideCancel: true,
+      onConfirm: vi.fn()
+    });
+
+    const message = elements["env-confirm-message"];
+    expect(fakeText(message)).toBe(
+      "Delete the retained app registration in the Azure portal."
+    );
+    const link = message.children[1];
+    expect(link?.textContent).toBe("Azure portal");
+    expect(link?.getAttribute("href")).toBe(
+      "https://portal.azure.com/#view/apps"
+    );
+    expect(link?.getAttribute("target")).toBe("_blank");
+    expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
   it("restores the cancel button on a later dialog after hiding it once", () => {
     const { dialog, elements } = openDialog();
 

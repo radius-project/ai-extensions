@@ -95,30 +95,15 @@ document is the delete implementation itself.
 
 #### User story 1
 
-A developer has a working `dev` environment and clicks **Delete Env**. Deletion
-dispatches the delete-environment workflow (which needs the federated credential
-to authenticate to the cluster), then removes the credential and the GitHub
-environment. The Entra app registration is **left in place**, and the operation
-shows a notification telling the developer it was not deleted and that they can
-remove it in Azure themselves if they no longer need it.
+A developer has a working `dev` environment and clicks **Delete Env**. Deletion dispatches the delete-environment workflow (which needs the federated credential to authenticate to the cluster), then removes the credential and the GitHub environment. The Entra app registration is **left in place**, and the completion acknowledgement links to the Azure Portal so the developer can remove it if it is no longer needed.
 
 #### User story 2
 
-A delete run fails partway — say the federated-credential delete errors. The
-developer retries. Because every step is idempotent, the steps that already
-finished report "already gone" and the run converges instead of failing on the
-already-deleted pieces. The progress panel shows what was torn down before the
-failure so the developer knows the current state.
+A delete run fails partway — say the federated-credential delete errors. The progress panel offers **Retry deletion**. The durable retry command reopens the same operation, preserves completed stages, and resumes at the first failed, warning, or skipped stage. Because every deletion primitive is idempotent, the run converges instead of failing on already-deleted pieces.
 
 ## User experience (if applicable)
 
-Delete Environment runs as a tracked operation with a progress panel. The panel
-shows each stage (Radius environment delete, federated-credential delete, GitHub
-environment delete, app-registration review), streams human-readable steps, and
-on conclusion surfaces a summary of what was removed, what was left in place
-(the app registration), and any warnings. A hard fail-closed stop shows the
-steps completed so far plus a retry affordance. No new prompts are introduced
-beyond the existing delete confirmation.
+Delete Environment runs as a tracked operation with a progress panel. The panel shows each stage (Radius environment delete, federated-credential delete, GitHub environment delete, app-registration review), streams human-readable steps, and on conclusion surfaces a summary of what was removed, what was left in place (the app registration), and any warnings. A hard fail-closed outcome shows the completed stages and offers **Retry deletion** when unfinished stages remain. Delete operations are not pausable and never show the create flow's **Stop setup**, **Continue setup**, rollback, or exit controls. No new prompts are introduced beyond the existing delete confirmation.
 
 ## Design
 

@@ -1915,6 +1915,16 @@ describe("operation commands", () => {
       "Retrying setup…"
     ],
     [
+      "a deletion retry without exposing setup wording",
+      {
+        id: "retry-deletion",
+        kind: "retry_deletion",
+        label: "Retry deletion",
+        path: "/api/operations/op-1/retry/deletion"
+      },
+      "Retrying deletion…"
+    ],
+    [
       "an unknown command with the general acceptance sentence",
       {
         id: "unknown",
@@ -1936,6 +1946,35 @@ describe("operation commands", () => {
     );
     pending.resolve(jsonResponse({ operation: null }));
     await flushPromises();
+  });
+
+  it("clears the stale failure and refreshes environments when deletion retry starts", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    browser.els[ERROR_BANNER_ID].style.display = "";
+    const action = {
+      id: "retry-deletion",
+      kind: "retry_deletion",
+      label: "Retry deletion",
+      path: "/api/operations/op-1/retry/deletion"
+    };
+
+    await pressCommand(
+      browser,
+      () =>
+        jsonResponse({
+          operation: op({
+            kind: "delete",
+            state: "running",
+            terminalState: null,
+            actions: []
+          })
+        }),
+      { action, deps: deps.deps }
+    );
+
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
+    expect(deps.reloadCount).toBe(1);
   });
 
   it("degrades quietly when the command region is not on the page", () => {

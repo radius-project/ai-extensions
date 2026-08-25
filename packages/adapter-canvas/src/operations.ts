@@ -36,13 +36,18 @@ import {
 // (commit, blob and content digests) so a rollback after the workflow commit
 // point can prove the files it would revert are still exactly what Radius wrote.
 // Version 4 distinguishes a path proven absent before setup from an older record
-// that never observed the previous path state. Versions 1 through 3 still load:
+// that never observed the previous path state. Versions 1 through 4 still load:
 // `readOperationControl` and
 // `readSetupArtifactLedger` fill the new fields with safe defaults rather than
 // discarding the operation, and a default of "no provenance" fails a
 // post-commit rollback closed instead of guessing.
-export const OPERATION_SCHEMA_VERSION = 4;
-export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4]);
+// Version 5 adds deletion retry as a durable command and attempt kind. Older
+// records load with a zero deletion-attempt count and no command, while an older
+// extension rejects a version-5 record instead of dropping an in-flight retry.
+export const OPERATION_SCHEMA_VERSION = 5;
+export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([
+  1, 2, 3, 4, 5
+]);
 
 // `deleted` is written only after a cleanup attempt proved the resource is gone
 // (removed by Radius, or already absent). It keeps a rolled-back artifact out of
@@ -213,13 +218,15 @@ export type OperationCommandKind =
   | "continue_setup"
   | "retry_setup"
   | "retry_verification"
+  | "retry_deletion"
   | "rollback"
   | "retry_cleanup"
   | "exit_setup";
 
 export type OperationCommandState = "accepted" | "running" | "finished";
 
-export type OperationAttemptKind = "setup" | "verification" | "cleanup";
+export type OperationAttemptKind =
+  "setup" | "verification" | "cleanup" | "deletion";
 
 export type OperationCommandRecord = {
   kind: OperationCommandKind;
@@ -242,6 +249,7 @@ export type OperationAttemptCounters = {
   setup: number;
   verification: number;
   cleanup: number;
+  deletion: number;
 };
 
 export type OperationOutcomeRecord = {
@@ -265,7 +273,7 @@ const MAX_RETAINED_OUTCOMES = 20;
 export function createOperationControl(): OperationControlRecord {
   return {
     stop: { requestedAt: null, acknowledgedAt: null, boundary: null },
-    attempts: { setup: 1, verification: 0, cleanup: 0 },
+    attempts: { setup: 1, verification: 0, cleanup: 0, deletion: 0 },
     commands: [],
     outcomes: []
   };
@@ -286,6 +294,7 @@ const COMMAND_KINDS = Object.freeze([
   "continue_setup",
   "retry_setup",
   "retry_verification",
+  "retry_deletion",
   "rollback",
   "retry_cleanup",
   "exit_setup"
@@ -307,7 +316,12 @@ const DISPOSAL_COMMAND_KINDS = Object.freeze([
   EXIT_COMMAND_KIND
 ]);
 const COMMAND_STATES = Object.freeze(["accepted", "running", "finished"]);
-const ATTEMPT_KINDS = Object.freeze(["setup", "verification", "cleanup"]);
+const ATTEMPT_KINDS = Object.freeze([
+  "setup",
+  "verification",
+  "cleanup",
+  "deletion"
+]);
 
 /**
  * Normalize a persisted control record, filling schema-version-1 gaps.
@@ -335,7 +349,8 @@ export function readOperationControl(value: any): OperationControlRecord {
   control.attempts = {
     setup: positiveInt(attempts.setup, 1),
     verification: positiveInt(attempts.verification, 0),
-    cleanup: positiveInt(attempts.cleanup, 0)
+    cleanup: positiveInt(attempts.cleanup, 0),
+    deletion: positiveInt(attempts.deletion, 0)
   };
   if (Array.isArray(value.commands)) {
     for (const entry of value.commands) {
@@ -2828,6 +2843,65 @@ export function hasUnfinishedCleanupAuthority(op: any): boolean {
   );
 }
 
+const DELETE_RETRY_TERMINAL_STATES = Object.freeze([
+  "failed",
+  "failed_partial",
+  "action_required",
+  "succeeded_with_warnings"
+]);
+
+/**
+ * Whether a terminal delete operation has unfinished teardown work to repeat.
+ *
+ * A successful stage is immutable evidence that its idempotent deletion already
+ * converged, so retry starts at the first failed, warning, or skipped stage and
+ * never reopens a fully successful deletion.
+ */
+export function canRetryDeletion(op: any): any {
+  if (!op) return { ok: false, code: "unknown-operation" };
+  if (op.kind !== OPERATION_KIND_DELETE)
+    return { ok: false, code: "deletion-retry-not-delete" };
+  if (!isTerminalState(op.state))
+    return { ok: false, code: "operation-active" };
+  if (!DELETE_RETRY_TERMINAL_STATES.includes(op.state))
+    return { ok: false, code: "deletion-retry-not-retryable" };
+  const stage = op.stages?.find((entry: any) =>
+    ["failed", "warning", "skipped"].includes(entry.state)
+  );
+  if (!stage) return { ok: false, code: "deletion-retry-nothing-unresolved" };
+  return {
+    ok: true,
+    code: "deletion-retry-allowed",
+    resumeFrom: stage.id,
+    target: stage.id
+  };
+}
+
+/**
+ * Position a reopened delete operation at its first unfinished stage.
+ *
+ * Completed stages remain succeeded and are skipped by the resume-safe runner.
+ * Output from stages being repeated is removed so an old warning cannot make a
+ * successful retry finish with warnings; the prior terminal verdict remains in
+ * the durable attempt-outcome history recorded by `beginRetryAttempt`.
+ */
+export function applyDeletionRetry(op: any): any {
+  const resetStages = new Set<string>();
+  let resumeFrom = "";
+  for (const stage of op.stages) {
+    if (stage.state === "succeeded") continue;
+    if (!resumeFrom) resumeFrom = stage.id;
+    stage.state = "pending";
+    resetStages.add(stage.id);
+  }
+  op.steps = (op.steps || []).filter(
+    (step: any) => !resetStages.has(String(step.stage || ""))
+  );
+  if (resumeFrom) op.currentStage = resumeFrom;
+  delete op.inputRequired;
+  return op;
+}
+
 // ─── Action projection ───────────────────────────────────────────────────────
 // The server decides what a customer may do; the page renders that list. Copying
 // eligibility rules into browser code is how the two surfaces drift apart, and a
@@ -3094,14 +3168,30 @@ export function projectOperationHeadline(op: any): any {
 
 export function projectOperationActions(op: any): any[] {
   if (!op) return [];
-  // A deletion runs a fixed, non-interruptible teardown: its runner honors no
-  // stop, continue, retry, rollback, or exit command. Offering any create-side
-  // control on a delete op would promise an action the runner cannot keep, and
-  // accepting one (a stop) would strand or, on restart, wrongly cancel the
-  // deletion. Delete progress and completion are driven by the delete-specific
-  // panel, so this control set is empty for delete ops.
-  if (op.kind === OPERATION_KIND_DELETE) return [];
   const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
+  if (op.kind === OPERATION_KIND_DELETE) {
+    // Delete work is not pausable and cannot be rolled back. While it is live,
+    // project no setup controls; once it ends with unfinished work, offer only
+    // the deletion-specific retry that resumes its idempotent stage sequence.
+    const retry = canRetryDeletion(op);
+    if (!retry.ok) return [];
+    return [
+      {
+        id: "retry-deletion",
+        kind: "retry_deletion",
+        label: "Retry deletion",
+        placement: "row",
+        tone: "primary",
+        requiresConfirmation: false,
+        description:
+          "Radius retries the unfinished deletion steps and skips everything already deleted.",
+        method: "POST",
+        path: `${base}/retry/deletion`,
+        pending: false,
+        resumeFrom: retry.resumeFrom
+      }
+    ];
+  }
   const control = op.control || createOperationControl();
   if (!isTerminalState(op.state)) {
     // A confirmed rollback is one cooperative server-owned command: cleanup has
@@ -3347,6 +3437,18 @@ export function projectNextTransition(op: any): any {
     return {
       code: "retrying-setup",
       message: `Retrying setup from ${setupStepLabel(op.resumeFrom)}…`
+    };
+  }
+  if (active === "retry_deletion") {
+    return {
+      code: "retrying-deletion",
+      message: "Retrying the unfinished environment deletion steps…"
+    };
+  }
+  if (op.kind === OPERATION_KIND_DELETE) {
+    return {
+      code: "deleting-environment",
+      message: "Radius is running the next environment deletion step."
     };
   }
   if (op.currentStage === STAGE_VERIFY && op.verification?.dispatchedAt) {

@@ -6,11 +6,13 @@ import {
 import {
   acceptCommand,
   announceOperationTerminal,
+  applyDeletionRetry,
   applySetupResumePoint,
   applyStopRequest,
   beginRetryAttempt,
   canContinueSetup,
   canExitSetup,
+  canRetryDeletion,
   canRetryCleanup,
   canRetrySetup,
   canRetryVerification,
@@ -86,6 +88,7 @@ type OperationCommandName =
 export type OperationScheduleKind =
   | "setup_continuation"
   | "verification_retry"
+  | "deletion_retry"
   | "cleanup_retry"
   | "rollback"
   | "exit_setup";
@@ -315,7 +318,8 @@ function unknownOperation(context: CanvasRequestContext): void {
 async function resolveOperation(
   context: CanvasRequestContext,
   template: string,
-  dependencies: Pick<OperationsControlDependencies, "get">
+  dependencies: Pick<OperationsControlDependencies, "get">,
+  { allowDelete = false }: { allowDelete?: boolean } = {}
 ): Promise<{
   operationId: string;
   operation: OperationRecord;
@@ -329,13 +333,9 @@ async function resolveOperation(
     unknownOperation(context);
     return null;
   }
-  // These are setup (create) controls. A deletion runs its own fixed teardown
-  // with no stop, continue, retry, rollback, or exit boundary, so applying one
-  // here would either promise an action the delete runner cannot honor or, in
-  // the case of stop, record a cancellation the runner ignores and a restart
-  // then wrongly finalizes. Refuse them for delete ops rather than corrupt the
-  // record. Deletion is observed through the status route, which is unaffected.
-  if (operation.kind === OPERATION_KIND_DELETE) {
+  // Delete operations share this durable command route only for Retry deletion.
+  // Stop, setup retry/continue, rollback, and exit remain create-only controls.
+  if (operation.kind === OPERATION_KIND_DELETE && !allowDelete) {
     sendJson(context, 409, {
       error:
         "This operation is a deletion and is not controlled through setup controls.",
@@ -493,6 +493,8 @@ function enterVerifyStage(operation: OperationRecord): void {
 
 const applyResumePoint: CommandSpec["prepare"] = (operation, eligibility) =>
   applySetupResumePoint(operation, eligibility.resumeFrom);
+const applyDeleteResumePoint: CommandSpec["prepare"] = (operation) =>
+  applyDeletionRetry(operation);
 
 const RETRY_PERSIST_FAILURE = {
   persistFailureCode: "operation-retry-persist-failed",
@@ -613,6 +615,17 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     schedulerMiss: "close-operation",
     ...RETRY_PERSIST_FAILURE
   },
+  deletion: {
+    name: "deletion",
+    commandKind: "retry_deletion",
+    attemptKind: "deletion",
+    eligibility: canRetryDeletion,
+    activeKinds: ["retry_deletion"],
+    prepare: applyDeleteResumePoint,
+    scheduleKind: "deletion_retry",
+    schedulerMiss: "close-operation",
+    ...RETRY_PERSIST_FAILURE
+  },
   cleanup: {
     name: "cleanup",
     commandKind: "retry_cleanup",
@@ -645,7 +658,12 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
 };
 
 function isRetryKind(value: string): value is OperationRetryKind {
-  return value === "setup" || value === "verification" || value === "cleanup";
+  return (
+    value === "setup" ||
+    value === "verification" ||
+    value === "cleanup" ||
+    value === "deletion"
+  );
 }
 
 /**
@@ -668,8 +686,12 @@ async function runAcceptedCommand(
 ): Promise<void> {
   const lock = dependencies.acquireForRetry(operation);
   if (!lock.ok) {
+    const work =
+      operation.kind === OPERATION_KIND_DELETE ?
+        "environment operation"
+      : "setup";
     sendJson(context, 409, {
-      error: `Another setup is already running for ${String(operation.repo ?? "")}.`,
+      error: `Another ${work} is already running for ${String(operation.repo ?? "")}.`,
       code: "operation-in-progress",
       operationId: lock.conflict.operationId
     });
@@ -794,9 +816,15 @@ async function runCommandRoute(
   selectSpec: (
     params: Readonly<Record<string, string>>,
     operationId: string
-  ) => CommandSpec | null
+  ) => CommandSpec | null,
+  options: { allowDelete?: boolean } = {}
 ): Promise<void> {
-  const resolved = await resolveOperation(context, route, dependencies);
+  const resolved = await resolveOperation(
+    context,
+    route,
+    dependencies,
+    options
+  );
   if (!resolved) return;
   const { operationId, operation, params } = resolved;
   const spec = selectSpec(params, operationId);
@@ -908,6 +936,10 @@ export function handleRetryOperation(
   context: CanvasRequestContext,
   dependencies: OperationsControlDependencies
 ): Promise<void> {
+  const pathRetryKind = decodeSegment(
+    templatePathParameters(RETRY_OPERATION_ROUTE, context.pathname)
+      ?.retryKind ?? ""
+  );
   return runCommandRoute(
     context,
     dependencies,
@@ -923,7 +955,8 @@ export function handleRetryOperation(
         return null;
       }
       return COMMANDS[requestedKind];
-    }
+    },
+    { allowDelete: pathRetryKind === "deletion" }
   );
 }
 

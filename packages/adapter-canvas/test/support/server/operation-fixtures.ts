@@ -32,6 +32,7 @@ export type OperationFixture = OperationRecord & {
   control: OperationControlRecord;
   journey: { notifiedAt: string | null; [key: string]: unknown };
   failure: { code: string | null; [key: string]: unknown } | null;
+  stages: Array<{ id: string; state: string; [key: string]: unknown }>;
 };
 
 /** A running Azure setup with the identity stages planned. */

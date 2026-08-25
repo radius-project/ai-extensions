@@ -32,6 +32,7 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse,
   textResponse
@@ -1519,15 +1520,20 @@ describe("initializeEnvironmentPage", () => {
     expect(page.elements["env-confirm-title"].textContent).toBe(
       "Environment deleted"
     );
-    expect(page.elements["env-confirm-message"].textContent).not.toContain(
-      "reported warnings"
-    );
-    expect(page.elements["env-confirm-message"].textContent).toContain(
+    const acknowledgement = fakeText(page.elements["env-confirm-message"]);
+    expect(acknowledgement).not.toContain("reported warnings");
+    expect(acknowledgement).toContain(
       "Microsoft Entra app registration was not deleted"
     );
-    expect(page.elements["env-confirm-message"].textContent).toContain(
-      "Azure portal"
+    expect(acknowledgement).toContain("delete it in the Azure portal.");
+    expect(acknowledgement).not.toContain("yourself");
+    const portalLink = page.elements["env-confirm-message"].children[1];
+    expect(portalLink?.textContent).toBe("Azure portal");
+    expect(portalLink?.getAttribute("href")).toBe(
+      "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
     );
+    expect(portalLink?.getAttribute("target")).toBe("_blank");
+    expect(portalLink?.getAttribute("rel")).toBe("noopener noreferrer");
     expect(page.elements["env-confirm-ok"].textContent).toBe("Done");
     // The acknowledgement is a single-button dialog: cancel is hidden.
     expect(page.elements["env-confirm-cancel"].style.display).toBe("none");
@@ -1593,10 +1599,10 @@ describe("initializeEnvironmentPage", () => {
     expect(page.elements["env-confirm-title"].textContent).toBe(
       "Environment deleted with warnings"
     );
-    expect(page.elements["env-confirm-message"].textContent).toContain(
+    expect(fakeText(page.elements["env-confirm-message"])).toContain(
       "reported warnings"
     );
-    expect(page.elements["env-confirm-message"].textContent).toContain(
+    expect(fakeText(page.elements["env-confirm-message"])).toContain(
       "Microsoft Entra app registration was not deleted"
     );
 
@@ -1650,7 +1656,7 @@ describe("initializeEnvironmentPage", () => {
     expect(page.elements["env-confirm-title"].textContent).toBe(
       "Environment deleted"
     );
-    expect(page.elements["env-confirm-message"].textContent).toContain(
+    expect(fakeText(page.elements["env-confirm-message"])).toContain(
       "Microsoft Entra app registration was not deleted"
     );
 

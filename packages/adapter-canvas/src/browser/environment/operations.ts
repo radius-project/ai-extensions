@@ -146,6 +146,7 @@ const CANCELLED_ACTIVITY_MESSAGE = "Environment setup cancelled.";
 const CLEANING_COMMAND_KINDS: ReadonlySet<string> = new Set([
   "rollback",
   "retry_cleanup",
+  "retry_deletion",
   "exit_setup"
 ]);
 
@@ -158,6 +159,7 @@ const COMMAND_STATUS_TEXT: Readonly<Record<string, string>> = {
     "Rollback retry started. Removing the resources still present…",
   continue_setup: "Continuing setup…",
   retry_setup: "Retrying setup…",
+  retry_deletion: "Retrying deletion…",
   exit_setup: "Closing this setup and removing the resources Radius created…"
 };
 

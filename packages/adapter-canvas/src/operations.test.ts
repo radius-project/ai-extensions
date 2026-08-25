@@ -50,11 +50,13 @@ import {
   toPersistedOperation,
   fromPersistedOperation,
   acceptCommand,
+  applyDeletionRetry,
   applyStopRequest,
   ambiguousSetupOwnership,
   beginRetryAttempt,
   buildCommandId,
   canContinueSetup,
+  canRetryDeletion,
   canRetryCleanup,
   canRetrySetup,
   canRetryVerification,
@@ -3149,7 +3151,12 @@ describe("schema version 2 migration", () => {
       ]
     });
     expect(control.commands.map((entry) => entry.commandId)).toEqual(["ok"]);
-    expect(control.attempts).toEqual({ setup: 1, verification: 3, cleanup: 0 });
+    expect(control.attempts).toEqual({
+      setup: 1,
+      verification: 3,
+      cleanup: 0,
+      deletion: 0
+    });
     expect(control.outcomes).toHaveLength(1);
     expect(control.stop.acknowledgedAt).toBeNull();
     expect(readOperationControl(null)).toEqual(createOperationControl());
@@ -3174,6 +3181,7 @@ describe("schema version 2 migration", () => {
       idempotency: { "idem:op_1:retry_setup:2:setup": "setup" },
       outcomes: []
     });
+
     expect(control.commands).toEqual([
       {
         kind: "retry_setup",
@@ -3188,6 +3196,49 @@ describe("schema version 2 migration", () => {
     ]);
     expect(control).not.toHaveProperty("idempotency");
     expect(control.attempts.setup).toBe(2);
+  });
+
+  it("restores the durable deletion retry command and attempt history", () => {
+    const control = readOperationControl({
+      attempts: { setup: 1, verification: 0, cleanup: 0, deletion: 2 },
+      commands: [
+        {
+          kind: "retry_deletion",
+          commandId: "op_delete:retry_deletion:2:delete_federated_credential",
+          attempt: 2,
+          target: "delete_federated_credential",
+          state: "running",
+          acceptedAt: "2026-01-01T00:00:00.000Z",
+          completedAt: null,
+          outcome: null
+        }
+      ],
+      outcomes: [
+        {
+          kind: "deletion",
+          attempt: 1,
+          state: "failed_partial",
+          code: "credential-delete-failed",
+          recordedAt: "2026-01-01T00:00:00.000Z"
+        }
+      ]
+    });
+
+    expect(control.attempts.deletion).toBe(2);
+    expect(control.commands).toEqual([
+      expect.objectContaining({
+        kind: "retry_deletion",
+        state: "running",
+        attempt: 2
+      })
+    ]);
+    expect(control.outcomes).toEqual([
+      expect.objectContaining({
+        kind: "deletion",
+        state: "failed_partial",
+        code: "credential-delete-failed"
+      })
+    ]);
   });
 
   it("creates the control record on demand for a legacy in-memory operation", () => {
@@ -3594,22 +3645,77 @@ describe("action projection", () => {
     expect(projectOperationActions(op)[0].pending).toBe(true);
   });
 
-  it("offers no create-side controls for a delete operation", () => {
-    // A deletion runs a fixed teardown its runner cannot stop, continue, retry,
-    // roll back, or exit. Surfacing any of those controls would promise an
-    // action the runner ignores, so a live delete op offers none of them.
+  it("offers no setup or pause controls for a live delete operation", () => {
     const running = newDeleteOp();
     expect(projectOperationActions(running)).toEqual([]);
-    // Even a stop already recorded against the delete op (e.g. via a crafted
-    // request) must not resurface as a pending control.
     requestStop(running);
     expect(projectOperationActions(running)).toEqual([]);
-    // A terminal delete op likewise exposes no retry/rollback/exit surface.
+  });
+
+  it("offers only Retry deletion when teardown has unfinished stages", () => {
     const failed = newDeleteOp();
+    enterStage(failed, failed.stages[0].id);
+    setStageState(failed, failed.stages[0].id, "failed");
     finish(failed, "failed_partial", {
       failure: { code: "operation-stalled" }
     });
-    expect(projectOperationActions(failed)).toEqual([]);
+    expect(projectOperationActions(failed)).toEqual([
+      expect.objectContaining({
+        id: "retry-deletion",
+        kind: "retry_deletion",
+        label: "Retry deletion",
+        path: `/api/operations/${failed.operationId}/retry/deletion`,
+        requiresConfirmation: false,
+        resumeFrom: failed.stages[0].id
+      })
+    ]);
+
+    const succeeded = newDeleteOp();
+    for (const stage of succeeded.stages) stage.state = "succeeded";
+    finishSucceeded(succeeded);
+    expect(projectOperationActions(succeeded)).toEqual([]);
+  });
+
+  it("resets only unfinished delete stages for a retry", () => {
+    const op = newDeleteOp();
+    op.stages[0].state = "succeeded";
+    op.stages[1].state = "failed";
+    op.stages[2].state = "skipped";
+    op.stages[3].state = "succeeded";
+    addStep(op, {
+      stage: op.stages[0].id,
+      kind: "mutation",
+      label: "Radius environment deleted",
+      state: "succeeded"
+    });
+    addStep(op, {
+      stage: op.stages[1].id,
+      kind: "warning",
+      label: "Credential delete failed",
+      state: "warning"
+    });
+    finish(op, "failed_partial", {
+      failure: { code: "credential-delete-failed" }
+    });
+
+    expect(canRetryDeletion(op)).toMatchObject({
+      ok: true,
+      resumeFrom: op.stages[1].id
+    });
+    beginRetryAttempt(op, "deletion");
+    applyDeletionRetry(op);
+
+    expect(op.stages.map((stage) => stage.state)).toEqual([
+      "succeeded",
+      "pending",
+      "pending",
+      "succeeded"
+    ]);
+    expect(op.currentStage).toBe(op.stages[1].id);
+    expect(op.steps.map((step) => step.label)).toEqual([
+      "Radius environment deleted"
+    ]);
+    expect(op.control.attempts.deletion).toBe(1);
   });
 
   it("explains the immediate stop while a prompt is open", () => {

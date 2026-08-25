@@ -225,7 +225,12 @@ export function initializeEnvironmentPage(
         withWarnings ?
           "Environment deleted with warnings"
         : "Environment deleted",
-      message: `${outcome}\n\nIts Microsoft Entra app registration was not deleted — Radius never removes app registrations automatically because they can be shared by other environments or services. If you no longer need it, delete it yourself in the Azure portal.`,
+      message: `${outcome}\n\nIts Microsoft Entra app registration was not deleted — Radius never removes app registrations automatically because they can be shared by other environments or services. If you no longer need it, delete it in the `,
+      messageLink: {
+        label: "Azure portal",
+        href: "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+        suffix: "."
+      },
       confirmLabel: "Done",
       confirmVariant: "primary",
       hideCancel: true,
