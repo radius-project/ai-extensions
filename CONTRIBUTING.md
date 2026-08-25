@@ -1,8 +1,6 @@
 # Contributing to the Radius Canvas extension
 
-The Radius Canvas extension is in preview and under active development. We welcome
-feedback in the form of issues along with code contributions that
-follow the guidelines below.
+The Radius Canvas extension is in preview and under active development. We welcome feedback in the form of issues along with code contributions that follow the guidelines below.
 
 For what this repository is and does, see the [README](./README.md). This guide
 covers how to build, test, and contribute to it.
