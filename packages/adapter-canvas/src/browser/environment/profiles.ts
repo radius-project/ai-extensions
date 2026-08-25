@@ -9,12 +9,20 @@
 // injects — never through a shared browser global.
 
 import { isDomElement } from "../context.js";
+import { createCommandAction } from "../command-action.js";
+import type { CommandActionHandle } from "../command-action.js";
+import {
+  isRemediationId,
+  remediationView
+} from "@radius-project/core/remediations";
+import type { RemediationView } from "@radius-project/core/remediations";
 import { setChildren } from "../dom.js";
 import type { ElementSpec } from "../dom.js";
 import { beginEntry } from "../lifecycle.js";
 import { isRecord, readArray, readBoolean, readString } from "../json.js";
 import type {
   BrowserContext,
+  DomElement,
   DomEventListener,
   DomEventTarget
 } from "../ports.js";
@@ -89,6 +97,7 @@ export interface GithubReadiness {
   readonly credentialSource: string;
   readonly summary: string;
   readonly repair: string;
+  readonly repairRemediation: RemediationView | null;
   readonly selectionHandle: string;
   readonly checks: Readonly<Record<string, GithubReadinessCheck>>;
 }
@@ -189,6 +198,22 @@ export function parseGithubReadiness(payload: unknown): GithubReadiness {
     credentialSource: readString(readiness, "credentialSource"),
     summary: readString(readiness, "summary"),
     repair: readString(readiness, "repair"),
+    // The server names the remediation; core builds the command. The page is
+    // never trusted with the command text itself.
+    repairRemediation: (() => {
+      const raw = readiness.repairRemediation;
+      if (!isRecord(raw)) return null;
+      const id = readString(raw, "id");
+      if (!isRemediationId(id)) return null;
+      const params: Record<string, string> = {};
+      if (isRecord(raw.params)) {
+        for (const [key, value] of Object.entries(raw.params)) {
+          if (typeof value === "string") params[key] = value;
+        }
+      }
+      const view = remediationView(id, params);
+      return view.runnable ? view : null;
+    })(),
     selectionHandle: readString(payload, "selectionHandle"),
     checks
   };
@@ -452,6 +477,23 @@ export function initializeCredentialProfilesPanel(
   const repairEl = context.dom.byId(GITHUB_IDENTITY_IDS.repair);
   const fixAccessBtn = context.dom.byId(GITHUB_IDENTITY_IDS.fix);
 
+  let repairAction: CommandActionHandle | null = null;
+  const mountRepairAction = (
+    host: DomElement,
+    remediation: RemediationView | null
+  ): void => {
+    repairAction?.dispose();
+    repairAction = null;
+    host.replaceChildren();
+    if (!remediation) return;
+    repairAction = createCommandAction(context, {
+      host,
+      remediation,
+      mutationNonce: deps.mutationNonce || "",
+      idPrefix: "env-gh-repair"
+    });
+  };
+
   let profiles: CredentialProfile[] = [];
   let selectedProfile: CredentialProfile | null = null;
   let profilesToken = 0;
@@ -654,8 +696,18 @@ export function initializeCredentialProfilesPanel(
       fixAccessBtn.style.display = githubReadiness?.repair ? "" : "none";
     }
     if (repairEl) {
-      repairEl.textContent = githubReadiness?.repair || "";
-      repairEl.style.display = githubReadiness?.repair ? "" : "none";
+      const remediation = githubReadiness?.repairRemediation ?? null;
+      // A runnable scope gap becomes a callout with Copy and Run. Everything
+      // else — a repository grant, a failed restoration — stays prose, because
+      // there is no command that would fix it.
+      if (remediation) {
+        repairEl.style.display = "";
+        mountRepairAction(repairEl, remediation);
+      } else {
+        mountRepairAction(repairEl, null);
+        repairEl.textContent = githubReadiness?.repair || "";
+        repairEl.style.display = githubReadiness?.repair ? "" : "none";
+      }
     }
     if (detailsEl && githubReadiness) {
       const detailSpecs: ElementSpec[] = [];

@@ -221,7 +221,7 @@ export function environmentsPaneMarkup(
             <details id="env-gh-details-panel" style="margin-top:8px; font-size:12px;">
               <summary>View technical details</summary>
               <div id="env-gh-technical-details" style="margin-top:6px; line-height:1.5;"></div>
-              <div id="env-gh-repair" style="display:none; margin-top:6px; font-family:monospace; overflow-wrap:anywhere;"></div>
+              <div id="env-gh-repair" style="display:none; margin-top:6px; overflow-wrap:anywhere;"></div>
             </details>
           </div>
         </div>

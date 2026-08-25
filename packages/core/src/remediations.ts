@@ -30,6 +30,7 @@ export const REMEDIATION_IDS = [
   "github-cli-login",
   "github-packages-scope",
   "github-workflow-scope",
+  "github-account-scopes",
   "git-push-branch"
 ] as const;
 
@@ -378,6 +379,76 @@ function buildGithubWorkflowScope(): Remediation {
   };
 }
 
+/**
+ * The environment wizard's readiness check can find a chosen account short of
+ * the workflow scope, the packages scopes, or both at once, and it always has
+ * to make that account active first. Neither single-scope remediation covers
+ * that, so this one takes the two needs as booleans and derives the scopes
+ * itself. The scope strings are never supplied by the caller.
+ */
+function buildGithubAccountScopes(
+  params: Readonly<Record<string, unknown>>
+): RemediationResult {
+  const login = githubLogin(params.login);
+  if (!login) {
+    return {
+      ok: false,
+      reason:
+        "Granting GitHub access needs the GitHub account login Radius detected."
+    };
+  }
+  const workflow = params.workflow === true || params.workflow === "true";
+  const packages = params.packages === true || params.packages === "true";
+  if (!workflow && !packages) {
+    return {
+      ok: false,
+      reason: "Radius did not find a GitHub scope that needs granting."
+    };
+  }
+  const scopes = [
+    ...(workflow ? ["workflow"] : []),
+    ...(packages ? ["read:packages", "write:packages"] : [])
+  ];
+  const refresh = ["gh", "auth", "refresh", "-h", "github.com"];
+  for (const scope of scopes) {
+    refresh.push("-s", scope);
+  }
+  const granted =
+    workflow && packages ? "the workflow and package permissions"
+    : workflow ? "the workflow permission"
+    : "package publishing permission";
+  return {
+    ok: true,
+    remediation: {
+      id: "github-account-scopes",
+      params: {
+        login,
+        ...(workflow ? { workflow: "true" } : {}),
+        ...(packages ? { packages: "true" } : {})
+      },
+      title: "Grant the GitHub access Radius needs",
+      displayCommand:
+        `gh auth switch -h github.com -u ${login} && ` + refresh.join(" "),
+      argv: [
+        ["gh", "auth", "switch", "-h", "github.com", "-u", login],
+        refresh
+      ],
+      cwd: "anywhere",
+      impact: "high",
+      confirmTitle: "Grant GitHub access?",
+      confirmBody:
+        `\`gh auth switch\` makes @${login} the active GitHub CLI account for ` +
+        "github.com machine-wide until you switch back, which affects every " +
+        "tool on this machine that uses GitHub CLI. `gh auth refresh` then " +
+        `grants ${granted}. You will need to complete the GitHub ` +
+        "authorization in your browser.",
+      confirmLabel: "Grant GitHub access",
+      followUp:
+        "After the authorization finishes, return to the Radius canvas and click Re-check."
+    }
+  };
+}
+
 const MODEL_COMMIT_MESSAGE = "Add Radius application model";
 
 function buildGitPushBranch(
@@ -476,6 +547,8 @@ export function buildRemediation(
       return buildGithubPackagesScope(values);
     case "github-workflow-scope":
       return { ok: true, remediation: buildGithubWorkflowScope() };
+    case "github-account-scopes":
+      return buildGithubAccountScopes(values);
     case "git-push-branch":
       return buildGitPushBranch(values);
   }
@@ -542,6 +615,8 @@ function displayPromptFor(remediation: Remediation): string {
       return "Granting the GitHub CLI account permission to publish packages for Radius.";
     case "github-workflow-scope":
       return "Granting the GitHub CLI token the workflow scope the Radius canvas needs.";
+    case "github-account-scopes":
+      return `Granting the GitHub account @${remediation.params.login} the access the Radius canvas needs.`;
     case "git-push-branch":
       return remediation.params.paths ?
           `Committing the generated Radius files and pushing ${remediation.params.branch} to GitHub.`
@@ -567,6 +642,8 @@ function reasonFor(remediation: Remediation): string {
       return `The GitHub CLI account @${remediation.params.login} cannot publish packages, which the Radius canvas needs to store environment state.`;
     case "github-workflow-scope":
       return "The GitHub CLI token is missing the workflow scope, which the Radius canvas needs to manage GitHub Actions workflow files.";
+    case "github-account-scopes":
+      return `The GitHub account @${remediation.params.login} is missing access the Radius canvas needs, and it is not the active GitHub CLI account yet.`;
     case "git-push-branch":
       return remediation.params.paths ?
           `The generated Radius files (${remediation.params.paths

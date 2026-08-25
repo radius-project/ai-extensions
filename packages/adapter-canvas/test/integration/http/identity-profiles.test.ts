@@ -94,6 +94,7 @@ function start(): Harness {
             identity: { state: "ready", detail: "ready" }
           },
           repair: null,
+          repairRemediation: null,
           restoration: null
         },
         selectionHandle: "selection-handle",

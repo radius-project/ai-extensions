@@ -162,6 +162,7 @@ const productionHandlers = {
           identity: { state: "error", detail: "" }
         },
         repair: null,
+        repairRemediation: null,
         restoration: null
       }
     }),

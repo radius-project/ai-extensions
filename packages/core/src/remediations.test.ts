@@ -26,6 +26,7 @@ const VALID_PARAMS: Readonly<Record<RemediationId, Record<string, string>>> = {
   "github-cli-login": {},
   "github-packages-scope": { login: "octocat" },
   "github-workflow-scope": {},
+  "github-account-scopes": { login: "octocat", packages: "true" },
   "git-push-branch": { branch: "feature/add-run-command" }
 };
 
@@ -235,6 +236,90 @@ describe("github remediations", () => {
       "gh auth refresh -h github.com -s workflow"
     );
     expect(remediation.impact).toBe("high");
+  });
+
+  it.each([
+    [
+      "workflow only",
+      { login: "octocat", workflow: "true" },
+      "gh auth switch -h github.com -u octocat && gh auth refresh -h github.com -s workflow"
+    ],
+    [
+      "packages only",
+      { login: "octocat", packages: "true" },
+      "gh auth switch -h github.com -u octocat && gh auth refresh -h github.com -s read:packages -s write:packages"
+    ],
+    [
+      "both scopes",
+      { login: "octocat", workflow: "true", packages: "true" },
+      "gh auth switch -h github.com -u octocat && gh auth refresh -h github.com -s workflow -s read:packages -s write:packages"
+    ]
+  ])("builds the account scope grant for %s", (_label, params, expected) => {
+    const remediation = build("github-account-scopes", params);
+
+    expect(remediation.displayCommand).toBe(expected);
+    expect(remediation.impact).toBe("high");
+    expect(remediation.confirmBody).toContain("machine-wide");
+    expect(remediation.followUp).toContain("Re-check");
+  });
+
+  it("switches the account before refreshing it, never as one shell string", () => {
+    const remediation = build("github-account-scopes", {
+      login: "octocat",
+      packages: "true"
+    });
+
+    expect(remediation.argv).toEqual([
+      ["gh", "auth", "switch", "-h", "github.com", "-u", "octocat"],
+      [
+        "gh",
+        "auth",
+        "refresh",
+        "-h",
+        "github.com",
+        "-s",
+        "read:packages",
+        "-s",
+        "write:packages"
+      ]
+    ]);
+  });
+
+  it("derives scopes itself so a caller cannot inject one", () => {
+    const remediation = build("github-account-scopes", {
+      login: "octocat",
+      packages: "true",
+      scopes: "admin:org",
+      workflow: "yes"
+    });
+
+    // `workflow: "yes"` is not the literal `true`, so the workflow scope is
+    // not granted, and the stray `scopes` parameter is ignored entirely.
+    expect(remediation.displayCommand).not.toContain("admin:org");
+    expect(remediation.displayCommand).not.toContain("workflow");
+    expect(remediation.params).toEqual({ login: "octocat", packages: "true" });
+  });
+
+  it("refuses an unusable login", () => {
+    expect(
+      buildRemediation("github-account-scopes", {
+        login: "octo cat",
+        packages: "true"
+      })
+    ).toEqual({
+      ok: false,
+      reason:
+        "Granting GitHub access needs the GitHub account login Radius detected."
+    });
+  });
+
+  it("refuses when no scope is actually missing", () => {
+    expect(
+      buildRemediation("github-account-scopes", { login: "octocat" })
+    ).toEqual({
+      ok: false,
+      reason: "Radius did not find a GitHub scope that needs granting."
+    });
   });
 
   it("treats gh auth login as machine-wide", () => {

@@ -30,6 +30,13 @@ export interface GitHubAccountReadiness {
     identity: GitHubReadinessCheck;
   };
   repair: string | null;
+  /**
+   * The structured form of `repair` when the fix is a command Radius knows how
+   * to run. `repair` stays as prose for the cases that are not a command (a
+   * missing repository grant, a failed account restoration), so the two are
+   * not redundant.
+   */
+  repairRemediation: { id: string; params: Record<string, string> } | null;
   restoration: GitHubAccountRestoration | null;
 }
 
@@ -387,6 +394,23 @@ export function createGitHubAccountReadinessService(
               lease.value.repositoryReady
             )
           : lease.restoration.guidance;
+        // Only a scope gap is a runnable command. A missing repository grant
+        // or a failed restoration stays prose, so the callout never appears
+        // offering to run something that would not fix the stated problem.
+        const repairRemediation =
+          (
+            restorationReady &&
+            (lease.value.needsWorkflow || lease.value.needsPackages)
+          ) ?
+            {
+              id: "github-account-scopes",
+              params: {
+                login: lease.selectedLogin,
+                ...(lease.value.needsWorkflow ? { workflow: "true" } : {}),
+                ...(lease.value.needsPackages ? { packages: "true" } : {})
+              }
+            }
+          : null;
         return {
           ready,
           login: lease.selectedLogin,
@@ -397,6 +421,7 @@ export function createGitHubAccountReadinessService(
             : "Additional GitHub access is required",
           checks,
           repair,
+          repairRemediation,
           restoration: lease.restoration
         };
       } catch (error) {
@@ -415,6 +440,7 @@ export function createGitHubAccountReadinessService(
             packages: check
           },
           repair: null,
+          repairRemediation: null,
           restoration: null
         };
       }
