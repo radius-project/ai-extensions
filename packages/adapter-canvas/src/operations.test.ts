@@ -48,7 +48,6 @@ import {
   summarize,
   toClientView,
   toPersistedOperation,
-  fromPersistedOperation,
   acceptCommand,
   applyDeletionRetry,
   applyStopRequest,

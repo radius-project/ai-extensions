@@ -111,6 +111,7 @@ async function start(
     // No application is deployed to the environment, so the delete route's
     // fail-closed guard passes and the deletion itself is what is observed.
     resolveEnvDeployment: async () => null,
+    activeDeleteEnvironment: () => null,
     runCommand: async (command, args) => {
       commands.push([command, ...args]);
       return "";
@@ -327,17 +328,28 @@ describe("environment listing cache after a rollback", () => {
     expect(harness.cache.get(REPO)).toBeDefined();
   });
 
-  it("refreshes the listing when the delete route removes an environment", async () => {
+  it("refreshes the listing when the delete flow tears down the environment", async () => {
     const harness = await start(listingScript("7\tdev"));
 
     expect(names((await harness.list()).body)).toEqual(["dev"]);
 
-    const deletion = await harness.deleteEnvironment("dev");
+    // The delete route now starts a background operation (issue #303), whose
+    // GitHub-environment stage runs the same shared idempotent primitive the
+    // rollback pass uses. Driving that primitive against the real cache proves
+    // the delete flow refreshes the picker exactly as rollback does.
+    const outcome = await deleteGitHubEnvironmentIdempotent(REPO, "dev", {
+      runGh: async (args) => {
+        harness.commands.push(["gh", ...args]);
+        return { code: 0 };
+      },
+      invalidateEnvListCache: (repo) => {
+        harness.invalidate(repo);
+      }
+    });
     harness.setScript(listingScript(""));
     const after = await harness.list();
 
-    expect(deletion.status).toBe(200);
-    expect(deletion.body).toEqual({ success: true });
+    expect(outcome).toEqual({ outcome: "deleted" });
     expect(harness.commands).toContainEqual([
       "gh",
       "api",
@@ -514,17 +526,22 @@ describe("a listing already in flight when the environment is removed", () => {
     expect(names(after.body)).toEqual([]);
   });
 
-  it("is never cached when the delete route removed the environment meanwhile", async () => {
+  it("is never cached when the delete flow removed the environment meanwhile", async () => {
     const harness = await start(pendingListingScript("7\tdev"));
     const held = harness.holdPath(STATUSES_PATH);
     const inFlight = harness.list();
     await held.reached;
 
-    const deletion = await harness.deleteEnvironment("dev");
+    const outcome = await deleteGitHubEnvironmentIdempotent(REPO, "dev", {
+      runGh: async () => ({ code: 0 }),
+      invalidateEnvListCache: (repo) => {
+        harness.invalidate(repo);
+      }
+    });
     held.release();
     await inFlight;
 
-    expect(deletion.status).toBe(200);
+    expect(outcome).toEqual({ outcome: "deleted" });
     expect(harness.cache.get(REPO)).toBeUndefined();
 
     harness.setScript(pendingListingScript(""));
