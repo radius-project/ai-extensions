@@ -112,6 +112,7 @@ function deps(
     logError: unset("logError") as never,
     discoverEnvironmentTarget: unset("discoverEnvironmentTarget") as never,
     createOperation: unset("createOperation") as never,
+    activeDeleteOperation: () => null,
     buildDeleteStages: unset("buildDeleteStages") as never,
     startOperation: unset("startOperation") as never,
     toClientView: unset("toClientView") as never,
@@ -691,6 +692,51 @@ describe("environments — delete-environment refusal ladder", () => {
     const body = JSON.parse(recording.body);
     expect(body.code).toBe("operation-in-progress");
     expect(body.operationId).toBe("op-existing");
+  });
+
+  it("returns the existing delete operation without starting another run", async () => {
+    const existing: DeleteOperationRecord = {
+      operationId: "op-existing-delete",
+      currentStage: "delete-radius-env"
+    };
+    const resolveEnvDeployment = vi.fn();
+    const discoverEnvironmentTarget = vi.fn();
+    const createOperation = vi.fn();
+    const startOperation = vi.fn();
+    const toClientView = vi.fn(() => ({
+      operationId: existing.operationId,
+      kind: "delete"
+    }));
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        activeDeleteOperation: (repo, environment) =>
+          repo === "o/r" && environment === "dev" ? existing : null,
+        resolveEnvDeployment,
+        discoverEnvironmentTarget,
+        createOperation,
+        startOperation,
+        toClientView
+      })
+    );
+
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: 'Deletion is already running for environment "dev".',
+      code: "delete-operation-in-progress",
+      operationId: "op-existing-delete",
+      operation: { operationId: "op-existing-delete", kind: "delete" }
+    });
+    expect(resolveEnvDeployment).not.toHaveBeenCalled();
+    expect(discoverEnvironmentTarget).not.toHaveBeenCalled();
+    expect(createOperation).not.toHaveBeenCalled();
+    expect(startOperation).not.toHaveBeenCalled();
   });
 
   it("400s with provider-unsupported guidance for an AWS environment", async () => {

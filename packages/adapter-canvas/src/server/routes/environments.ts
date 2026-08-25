@@ -123,6 +123,20 @@ export async function handleDeleteEnvironment(
       );
       return;
     }
+    const existingDelete = dependencies.activeDeleteOperation(repo, envName);
+    if (existingDelete) {
+      response.setHeader("Content-Type", "application/json");
+      response.writeHead(409);
+      response.end(
+        JSON.stringify({
+          error: `Deletion is already running for environment "${envName}".`,
+          code: "delete-operation-in-progress",
+          operationId: existingDelete.operationId,
+          operation: dependencies.toClientView(existingDelete)
+        })
+      );
+      return;
+    }
     // Guard: an environment must not be deleted while an application is still
     // deployed to it (its cloud resources would be orphaned). Require the app
     // deployment to be torn down first and point the client at the app-deletion

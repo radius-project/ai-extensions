@@ -311,6 +311,7 @@ const productionHandlers = {
         tenantId: "",
         repoId: 1
       }),
+    activeDeleteOperation: () => null,
     createOperation: () => ({ operationId: "op", currentStage: null }),
     buildDeleteStages: () => [],
     startOperation: () => ({

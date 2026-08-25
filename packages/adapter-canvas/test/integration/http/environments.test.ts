@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createEnvironmentsRoutes } from "../../../src/server/routes/environments.js";
@@ -112,6 +112,7 @@ async function start(
     // fail-closed guard passes and the deletion itself is what is observed.
     resolveEnvDeployment: async () => null,
     activeDeleteEnvironment: () => "",
+    activeDeleteOperation: () => null,
     runCommand: async (command, args) => {
       commands.push([command, ...args]);
       return "";
@@ -405,6 +406,40 @@ describe("environment listing cache after environment cleanup", () => {
       "/repos/octo/app/environments/dev"
     ]);
     expect(names(after.body)).toEqual([]);
+  });
+
+  it("rejects a second delete request while the first operation is active", async () => {
+    const operation = createOperation({
+      kind: "delete",
+      provider: "azure",
+      repo: REPO,
+      environment: "dev",
+      stages: buildDeleteStages({ includeAzureCleanup: true })
+    });
+    const resolveEnvDeployment = vi.fn();
+    const discoverEnvironmentTarget = vi.fn();
+    const harness = await start(listingScript("7\tdev"), {
+      activeDeleteOperation: (repo, environment) =>
+        repo === REPO && environment === "dev" ? operation : null,
+      resolveEnvDeployment,
+      discoverEnvironmentTarget,
+      toClientView
+    });
+
+    const duplicate = await harness.deleteEnvironment("dev");
+
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body).toMatchObject({
+      code: "delete-operation-in-progress",
+      operationId: operation.operationId,
+      operation: {
+        operationId: operation.operationId,
+        kind: "delete",
+        state: "running"
+      }
+    });
+    expect(resolveEnvDeployment).not.toHaveBeenCalled();
+    expect(discoverEnvironmentTarget).not.toHaveBeenCalled();
   });
 });
 

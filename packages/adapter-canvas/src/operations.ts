@@ -1941,7 +1941,7 @@ function reuseExplanation(kind: string, origin: any): string {
 // derived from the fields that actually name the resource, and a result written
 // before this field existed is still matched through its recorded target.
 
-function normalizeIdentityPart(value: any): string {
+export function normalizeIdentityPart(value: any): string {
   return String(value == null ? "" : value)
     .trim()
     .toLowerCase();

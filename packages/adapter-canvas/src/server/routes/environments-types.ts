@@ -128,6 +128,10 @@ export interface EnvironmentsDependencies {
   }>;
   // Async delete-operation lifecycle (issue #303). Shares the create flow's
   // OperationRecord registry, persistence, and server-owned task scheduler.
+  activeDeleteOperation(
+    repo: string,
+    environment: string
+  ): DeleteOperationRecord | null;
   createOperation(input: unknown): DeleteOperationRecord;
   buildDeleteStages(options: { includeAzureCleanup: boolean }): unknown;
   startOperation(op: DeleteOperationRecord): DeleteStartResult;
