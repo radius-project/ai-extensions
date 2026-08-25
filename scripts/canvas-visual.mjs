@@ -78,11 +78,18 @@ function runDocker(args, options = {}) {
 }
 
 function requireDocker() {
-  const result = runDocker(["info", "--format", "{{.ServerVersion}}"], {
+  const result = runDocker(["info", "--format", "{{.ServerVersion}}|{{.OSType}}"], {
     stdio: ["ignore", "pipe", "pipe"]
   });
   const error = dockerPrerequisiteError(result);
   if (error) throw new Error(error);
+
+  const [, osType] = (result.stdout ?? "").trim().split("|");
+  if (osType && osType !== "linux") {
+    throw new Error(
+      `Docker is running with ${osType} containers. Switch Docker Desktop to Linux containers (or enable a Linux engine), then retry.`
+    );
+  }
 }
 
 function prepareOutputDirectories() {
