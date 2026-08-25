@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { SelectedGhExecutor } from "../../gh.js";
 import {
   prepareProviderMutation,
-  settleProviderMutation
+  providerMutationRecord,
+  requestStop,
+  settleProviderMutation,
+  unresolvedProviderMutations
 } from "../../operations.js";
 import {
   isGitHubRateLimitError,
@@ -218,6 +221,45 @@ describe("selected-account verification retry runner", () => {
       outcome: "cancelled"
     });
     expect(target.providerRecovery).toBeUndefined();
+  });
+
+  it("finishes reconciliation-pending when Stop cannot settle around an older mutation", async () => {
+    const target = operation();
+    prepareProviderMutation(target, {
+      kind: "github_environment.put",
+      target: "contoso/store:dev",
+      intent: {
+        created: true
+      }
+    });
+    requestStop(target);
+    const dependencies = runnerDependencies();
+
+    await runVerificationRetry(target, "cmd-1", dependencies);
+
+    expect(dependencies.journal.calls.map((entry) => entry.args[0])).toEqual([
+      "run"
+    ]);
+    expect(dependencies.journal.commands).toContainEqual({
+      state: "finished",
+      outcome: "provider-reconciliation-pending"
+    });
+    expect(dependencies.journal.monitored).toEqual([]);
+    expect(unresolvedProviderMutations(target)).toEqual([
+      expect.objectContaining({
+        kind: "github_environment.put",
+        status: "prepared"
+      })
+    ]);
+    expect(
+      providerMutationRecord(
+        target,
+        "github_workflow.dispatch_retry",
+        "contoso/store:radius-verify-credentials.yml:main:dev:cmd-1"
+      )
+    ).toMatchObject({
+      status: "not_applied"
+    });
   });
 
   it("does not cancel a dispatch that has already started", async () => {

@@ -16,11 +16,14 @@ import {
 import { createWorkflowFileCommitter } from "./create-environment-workflow-committer.js";
 import {
   providerMutationRecord,
+  shouldStop,
   unresolvedProviderMutations
 } from "../../operations.js";
 import {
   applyProviderConfiguration,
-  publishWorkflowFiles
+  publishWorkflowFiles,
+  providerCredentialStatus,
+  type ProviderCredentialStatus
 } from "./create-environment-workflow-publisher.js";
 import {
   ensureGitHubEnvironment,
@@ -38,7 +41,6 @@ import type {
   GhcrPreflightResult,
   SetupFailureResponse
 } from "./create-environment-types.js";
-import { shouldStop, unresolvedProviderMutations } from "../../operations.js";
 import {
   executeRecoverableMutation,
   providerMutationWillWrite,
@@ -636,9 +638,14 @@ export async function handleCreateEnvironment(
     const prBranch = (): string | null =>
       committer.pullRequestState()?.branch || null;
 
-    let credentialsComplete = true;
-    let missingCredNote = "";
-    if (!reconcilingProviderMutation) {
+    let providerConfiguration: ProviderCredentialStatus;
+    if (reconcilingProviderMutation) {
+      providerConfiguration = providerCredentialStatus(provider, data, {
+        azureCredential: () => dependencies.azureCredential(),
+        awsCredential: () => dependencies.awsCredential(),
+        optionalString: (value) => dependencies.optionalString(value)
+      });
+    } else {
       // Tag the environment as Radius-managed so the listing can filter out
       // environments created outside this extension.
       if (!(await stopBoundary("before-radius-managed-variable"))) return;
@@ -696,7 +703,7 @@ export async function handleCreateEnvironment(
       // Provider identity fields are a coherent login contract. Exposing a Stop
       // between individual values would preserve a credential set that cannot
       // identify one principal, tenant, and subscription together.
-      const providerConfiguration = await runMutationAttempt(
+      const providerConfigurationAttempt = await runMutationAttempt(
         "after-provider-configuration-attempt",
         () =>
           applyProviderConfiguration(provider, data, {
@@ -709,10 +716,11 @@ export async function handleCreateEnvironment(
             }
           })
       );
-      if (!providerConfiguration.completed) return;
-      ({ credentialsComplete, missingCredNote } = providerConfiguration.value);
+      if (!providerConfigurationAttempt.completed) return;
+      providerConfiguration = providerConfigurationAttempt.value;
       if (!(await checkpoint("after-provider-configuration"))) return;
     }
+    const { credentialsComplete, missingCredNote } = providerConfiguration;
     // When verification is deliberately not dispatched (incomplete cloud
     // credentials, or workflows that only exist on a PR branch), this holds the
     // reason so the response can signal the client to skip polling
@@ -740,7 +748,7 @@ export async function handleCreateEnvironment(
         recordCommittedWorkflowFile: (op, entry) =>
           dependencies.recordCommittedWorkflowFile(op, entry),
         deleteLegacyDeployWorkflow: (repo) =>
-          reconcilingProviderMutation ?
+          unresolvedProviderMutations(operation).length > 0 ?
             Promise.resolve(true)
           : dependencies.deleteLegacyDeployWorkflow(
               repo,
@@ -1215,8 +1223,6 @@ export async function handleCreateEnvironment(
           "No verification run with this operation's exact marker is visible yet."
         );
       };
-      const dispatchMutationKind = "github_workflow.dispatch";
-      const dispatchMutationTarget = `${targetRepo}:${dependencies.verifyWorkflowFile}:${verificationRef}:${envName}`;
       // The boundary above guarded the indexing wait and the baseline read. This
       // one guards the write itself, so a stop recorded while those reads ran is
       // honored before GitHub is asked to start a run. A journaled attempt that

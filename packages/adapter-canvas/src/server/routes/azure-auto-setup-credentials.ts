@@ -559,6 +559,7 @@ async function assignRole(
           ),
         mutate: () => runAz(buildRoleAssignmentArgs(input)),
         accept: (value) => value,
+        createdByOperation: (value) => !value.stderr.includes("already exists"),
         reconcile: async () => {
           if (!input.assignmentId) {
             return {
@@ -636,7 +637,20 @@ async function assignRole(
           }
           return {
             state: "applied" as const,
-            value: { code: 0, stdout: listed.stdout, stderr: "" },
+            value: {
+              code: 0,
+              stdout: listed.stdout,
+              stderr:
+                (
+                  providerMutationRecord(
+                    operation,
+                    mutationKind,
+                    mutationTarget
+                  )?.createdByOperation === false
+                ) ?
+                  "already exists"
+                : ""
+            },
             evidence:
               "The deterministic assignment ID, principal, role, and scope matched."
           };
@@ -656,7 +670,7 @@ async function assignRole(
     if (last.code === 0) {
       return {
         ok: true,
-        created: true,
+        created: !last.stderr.includes("already exists"),
         stderr: ""
       };
     }

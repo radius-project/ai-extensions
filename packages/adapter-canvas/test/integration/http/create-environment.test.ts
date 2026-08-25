@@ -137,6 +137,55 @@ const digestOf = (content: string): string =>
 const DEPLOY_WORKFLOW_BODY = "on: workflow_dispatch\njobs:\n";
 const WORKFLOW_CONTENT_DIGEST = digestOf(DEPLOY_WORKFLOW_BODY);
 const VERIFY_CONTENT_DIGEST = digestOf(MARKED_VERIFY_WORKFLOW);
+const VERIFY_OPERATION_MARKER = `radius-operation:op-http:workflow:${VERIFY_CONTENT_DIGEST.slice(0, 16)}`;
+
+function prepareVerifyWorkflowRecovery(
+  operation: CreateEnvironmentOperation
+): void {
+  prepareProviderMutation(operation, {
+    kind: "github_workflow.put",
+    target:
+      "octo/app:<default>:.github/workflows/radius-verify-credentials.yml",
+    intent: {
+      branch: "<default>",
+      path: ".github/workflows/radius-verify-credentials.yml",
+      previousBlobSha: null,
+      previousBlobKnown: true,
+      contentSha256: VERIFY_CONTENT_DIGEST,
+      operationMarker: VERIFY_OPERATION_MARKER
+    }
+  });
+}
+
+function recoveredVerifyWorkflowRules(): GhRule[] {
+  return [
+    {
+      match:
+        /^api \/repos\/octo\/app\/contents\/\.github\/workflows\/radius-verify-credentials\.yml$/,
+      result: {
+        code: 0,
+        stdout: JSON.stringify({
+          sha: "b".repeat(40),
+          content: Buffer.from(MARKED_VERIFY_WORKFLOW).toString("base64")
+        })
+      }
+    },
+    {
+      match: /^api \/repos\/octo\/app\/commits\?path=/,
+      result: {
+        code: 0,
+        stdout: JSON.stringify([
+          {
+            sha: "c".repeat(40),
+            commit: {
+              message: `Add workflow\n\nRadius-Operation: ${VERIFY_OPERATION_MARKER}`
+            }
+          }
+        ])
+      }
+    }
+  ];
+}
 
 const DEFAULT_GH_RULES: GhRule[] = [
   {
@@ -1045,6 +1094,69 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
         }
       }
     ]);
+  });
+
+  it("recomputes incomplete credentials while reconciling a workflow", async () => {
+    const harness = start({
+      preparedEnvironment: {
+        requestedName: "dev",
+        canonicalName: "dev",
+        state: "reused"
+      },
+      azureCredential: () => ({ clientId: "c", tenantId: "t" }),
+      gh: recoveredVerifyWorkflowRules()
+    });
+    prepareVerifyWorkflowRecovery(harness.operation);
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "dev",
+      operationEnvironment: "dev",
+      operationId: "op-http"
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      success: true,
+      verifySkipped: true,
+      verifyRunUrl: ""
+    });
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+    expect(harness.finished).toEqual([
+      {
+        state: "action_required",
+        options: {
+          terminal: {
+            reason: "credentials-incomplete",
+            pullRequestUrl: null,
+            userMessage: payload.verifySkipReason
+          }
+        }
+      }
+    ]);
+  });
+
+  it("deletes the legacy workflow after successful workflow reconciliation", async () => {
+    const harness = start({
+      preparedEnvironment: {
+        requestedName: "dev",
+        canonicalName: "dev",
+        state: "reused"
+      },
+      gh: recoveredVerifyWorkflowRules()
+    });
+    prepareVerifyWorkflowRecovery(harness.operation);
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "dev",
+      operationEnvironment: "dev",
+      operationId: "op-http"
+    });
+
+    expect(response.status).toBe(200);
+    expect(harness.journal).toContain("deleteLegacyDeployWorkflow");
   });
 
   it("preflights GHCR package scopes before bootstrapping the state package", async () => {

@@ -1,6 +1,7 @@
 import type { SelectedGhExecutor } from "../../gh.js";
 import {
   providerMutationRecord,
+  shouldStop,
   settleProviderMutation
 } from "../../operations.js";
 import {
@@ -668,6 +669,20 @@ export async function runVerificationRetry(
         rethrowReconciliationError: dependencies.isAuthorizationError
       });
     } catch (error) {
+      if (
+        error instanceof ProviderMutationRecoveryError &&
+        error.code === "provider-mutation-outcome-unknown" &&
+        shouldStop(operation)
+      ) {
+        dependencies.setCommandState(
+          operation,
+          commandId,
+          "finished",
+          "provider-reconciliation-pending"
+        );
+        await dependencies.persist(operation);
+        return;
+      }
       if (
         error instanceof ProviderMutationRecoveryError &&
         error.code === "provider-mutation-recovery-persistence-failed"

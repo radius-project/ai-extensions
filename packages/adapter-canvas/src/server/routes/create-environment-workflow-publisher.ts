@@ -46,6 +46,43 @@ export interface ProviderCredentialStatus {
   missingCredNote: string;
 }
 
+export function providerCredentialStatus(
+  provider: string,
+  data: CreateEnvironmentRequestData,
+  ports: Pick<
+    ProviderConfigurationPorts,
+    "azureCredential" | "awsCredential" | "optionalString"
+  >
+): ProviderCredentialStatus {
+  if (provider === "azure") {
+    const azureCreds = ports.azureCredential();
+    const credentialsComplete = cloudCredentialsComplete("azure", {
+      clientId: data.clientId || ports.optionalString(azureCreds.clientId),
+      tenantId: data.tenantId || ports.optionalString(azureCreds.tenantId),
+      subscriptionId:
+        data.subscriptionId || ports.optionalString(azureCreds.subscriptionId)
+    });
+    return {
+      credentialsComplete,
+      missingCredNote:
+        credentialsComplete ? "" : (
+          "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
+        )
+    };
+  }
+
+  const credentialsComplete = cloudCredentialsComplete("aws", {
+    roleArn: data.roleArn || ""
+  });
+  return {
+    credentialsComplete,
+    missingCredNote:
+      credentialsComplete ? "" : (
+        "The AWS IAM role ARN is not configured for this environment. Enter it (or use auto-setup), then verify credentials from the Environments list."
+      )
+  };
+}
+
 // The RBAC scope at which to grant the environment identity a subscription-
 // visible role. A role assignment at resource-group scope still surfaces the
 // parent subscription to `az account list` / azure/login (fixing the
@@ -86,6 +123,7 @@ export async function applyProviderConfiguration(
   ports.pushStep("Setting environment variables and secrets...");
   const azureCreds = ports.azureCredential();
   const awsCreds = ports.awsCredential();
+  const credentialStatus = providerCredentialStatus(provider, data, ports);
 
   if (provider === "azure") {
     const clientId = data.clientId || ports.optionalString(azureCreds.clientId);
@@ -113,21 +151,11 @@ export async function applyProviderConfiguration(
       data.namespace
     ].filter(Boolean).length;
     ports.pushStep(`Set ${setCount} environment value(s) for Azure.`);
-    if (
-      !cloudCredentialsComplete("azure", {
-        clientId,
-        tenantId,
-        subscriptionId
-      })
-    ) {
+    if (!credentialStatus.credentialsComplete) {
       ports.pushStep(
         "⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually."
       );
-      return {
-        credentialsComplete: false,
-        missingCredNote:
-          "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
-      };
+      return credentialStatus;
     }
     // Credentials are complete, but a manually-entered app registration may have
     // no role assignment that surfaces the subscription — verify then fails at
@@ -155,15 +183,11 @@ export async function applyProviderConfiguration(
   await ports.setEnvironmentVariable("RADIUS_VPC_ID", data.vpcId);
   await ports.setEnvironmentVariable("RADIUS_SUBNET_IDS", data.subnetIds);
   await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
-  if (!cloudCredentialsComplete("aws", { roleArn })) {
+  if (!credentialStatus.credentialsComplete) {
     ports.pushStep(
       "⚠️ Missing AWS role ARN. Enter it or use auto-setup before verifying credentials."
     );
-    return {
-      credentialsComplete: false,
-      missingCredNote:
-        "The AWS IAM role ARN is not configured for this environment. Enter it (or use auto-setup), then verify credentials from the Environments list."
-    };
+    return credentialStatus;
   }
   return { credentialsComplete: true, missingCredNote: "" };
 }

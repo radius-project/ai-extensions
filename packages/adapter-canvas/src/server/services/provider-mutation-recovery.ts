@@ -407,6 +407,15 @@ export async function executeRecoverableMutation<T>(input: {
    */
   providerIdOf?(result: ProviderMutationCommandResult, value: T): string | null;
   /**
+   * Record whether an acknowledged create actually made its target. Some
+   * providers return success for "already exists"; recovery must preserve that
+   * distinction so rollback never takes ownership of a reused resource.
+   */
+  createdByOperation?(
+    result: ProviderMutationCommandResult,
+    value: T
+  ): boolean | undefined;
+  /**
    * What the journal should record for a write that ended well.
    *
    * A caller that treats a provider's "this already holds" as success must say
@@ -479,6 +488,7 @@ export async function executeRecoverableMutation<T>(input: {
       // The refused attempt made nothing, so any id it once carried belongs to
       // an earlier world and must not be matched against what this one writes.
       mutation.providerId = null;
+      delete mutation.createdByOperation;
       // The refused attempt's intent described the world it was about to write
       // into. That world has moved on, so a fresh attempt journals the state it
       // actually read rather than inheriting a predecessor that is no longer
@@ -498,7 +508,13 @@ export async function executeRecoverableMutation<T>(input: {
         input.persist,
         "after Stop prevented the provider request"
       );
-      await input.beforeMutation();
+      const stopCompleted = !(await input.beforeMutation());
+      if (!stopCompleted) {
+        throw new ProviderMutationRecoveryError(
+          "Radius must reconcile the existing provider request before it can honor Stop or start another provider mutation.",
+          "provider-mutation-outcome-unknown"
+        );
+      }
       return { state: "cancelled" };
     }
     let result: ProviderMutationCommandResult;
@@ -553,7 +569,8 @@ export async function executeRecoverableMutation<T>(input: {
         "confirmed",
         input.acceptedEvidence?.(result) ||
           "The provider acknowledged the mutation.",
-        input.providerIdOf?.(result, value) ?? null
+        input.providerIdOf?.(result, value) ?? null,
+        input.createdByOperation?.(result, value)
       );
       await persistOrThrow(input.persist, "after the provider acknowledged it");
       return { state: "applied", value, recovered: false };

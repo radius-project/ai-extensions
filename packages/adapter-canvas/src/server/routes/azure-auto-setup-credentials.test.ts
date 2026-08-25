@@ -997,7 +997,35 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     }
   );
 
-  it("accepts already-existing role assignments without recording new artifacts", async () => {
+  it.each([0, 1])(
+    "accepts code %i already-existing role assignments without recording new artifacts",
+    async (code) => {
+      const test = harness({
+        runAz: async (args) => {
+          const line = args.join(" ");
+          if (line.includes("federated-credential list")) {
+            return result({
+              stdout: JSON.stringify([{ name: "dev", subject: SUBJECT }])
+            });
+          }
+          if (line.startsWith("role assignment create ")) {
+            return result({ code, stderr: "already exists" });
+          }
+          throw new Error(`unexpected az call: ${line}`);
+        }
+      });
+
+      expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+      expect(test.calls.some((call) => call.startsWith("role:"))).toBe(false);
+    }
+  );
+
+  it("preserves non-ownership through a transient reconciliation failure", async () => {
+    const assignments = new Map<
+      string,
+      { objectId: string; role: string; scope: string }
+    >();
+    let failNextRead = false;
     const test = harness({
       runAz: async (args) => {
         const line = args.join(" ");
@@ -1007,12 +1035,50 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
           });
         }
         if (line.startsWith("role assignment create ")) {
-          return result({ code: 1, stderr: "already exists" });
+          const assignmentId = args[args.indexOf("--name") + 1];
+          assignments.set(assignmentId, {
+            objectId: args[args.indexOf("--assignee-object-id") + 1],
+            role: args[args.indexOf("--role") + 1],
+            scope: args[args.indexOf("--scope") + 1]
+          });
+          return result({ code: 0, stderr: "already exists" });
+        }
+        if (line.startsWith("role assignment list ")) {
+          if (failNextRead) {
+            failNextRead = false;
+            return result({ code: 1, stderr: "temporarily unavailable" });
+          }
+          const assignmentId = /name=='([^']+)'/.exec(
+            args[args.indexOf("--query") + 1]
+          )?.[1];
+          const assignment =
+            assignmentId ? assignments.get(assignmentId) : undefined;
+          return result({
+            stdout: JSON.stringify(
+              assignment ?
+                [
+                  {
+                    id: `${assignment.scope}/providers/Microsoft.Authorization/roleAssignments/${assignmentId}`,
+                    principalId: assignment.objectId,
+                    roleDefinitionName: assignment.role,
+                    scope: assignment.scope
+                  }
+                ]
+              : []
+            )
+          });
         }
         throw new Error(`unexpected az call: ${line}`);
       }
     });
 
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    failNextRead = true;
+    await expect(
+      configureAzureAutoSetupCredentials(test.input)
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown"
+    });
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
     expect(test.calls.some((call) => call.startsWith("role:"))).toBe(false);
   });

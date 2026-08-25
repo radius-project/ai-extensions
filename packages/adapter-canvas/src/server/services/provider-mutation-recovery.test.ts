@@ -93,6 +93,48 @@ describe("provider mutation recovery", () => {
     ]);
   });
 
+  it("defers Stop while an older provider mutation still needs reconciliation", async () => {
+    const operation = createOperation({ operationId: "op_test" });
+    prepareProviderMutation(operation, {
+      kind: "provider_registration.create",
+      target: "provider-a",
+      intent: {
+        provider: "azure"
+      }
+    });
+    requestStop(operation);
+    const mutation = vi.fn(async () => command());
+    const beforeMutation = vi.fn(async () => true);
+
+    await expect(
+      executeRecoverableMutation({
+        operation,
+        kind: "github_environment.put",
+        target: "octo/app:dev",
+        persist: async () => undefined,
+        beforeMutation,
+        mutate: mutation,
+        accept: (result) => result,
+        reconcile: async () => ({ state: "not_applied" })
+      })
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown"
+    });
+
+    expect(mutation).not.toHaveBeenCalled();
+    expect(beforeMutation).toHaveBeenCalledOnce();
+    expect(operation.providerRecovery?.mutations).toEqual([
+      expect.objectContaining({
+        kind: "provider_registration.create",
+        status: "prepared"
+      }),
+      expect.objectContaining({
+        kind: "github_environment.put",
+        status: "not_applied"
+      })
+    ]);
+  });
+
   it("does not repeat a prepared mutation after restart and adopts provider state", async () => {
     const operation = createOperation({ operationId: "op_test" });
     const mutate = vi.fn(async () => command());
