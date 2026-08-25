@@ -279,6 +279,7 @@ import { createDeploymentAbandonmentService } from "./server/services/deployment
 import { resolveEnvironmentDeployment } from "./server/services/deployment-resolver.js";
 import type { DeploymentRow } from "./server/services/deployment-resolver.js";
 import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
+import type { RemediationReference } from "./server/services/environment-operation.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
@@ -3391,6 +3392,7 @@ export async function finalizeSetupFailure(
     stage,
     classification,
     evidence = null,
+    remediation = null,
     extra = {},
     steps,
     runAz,
@@ -3402,6 +3404,7 @@ export async function finalizeSetupFailure(
     stage?: string | null;
     classification?: string;
     evidence?: string | null;
+    remediation?: RemediationReference | null;
     extra?: Record<string, unknown>;
     steps?: string[];
     runAz?: ((args: string[]) => Promise<Partial<CommandResult>>) | null;
@@ -3511,7 +3514,10 @@ export async function finalizeSetupFailure(
         classification:
           classification ||
           (status === 403 ? "needs-someone-else" : "user-fixable"),
-        evidence
+        evidence,
+        // Only the id and params: the canvas rebuilds the command from the
+        // registry so a persisted record cannot carry one of its own.
+        ...(remediation ? { remediation } : {})
       }
     });
   }
@@ -3574,6 +3580,10 @@ type GhcrPackagePreflightResult =
       status: 403;
       code: "ghcr-auth-failed" | "ghcr-scope-required";
       error: string;
+      // The command the customer should run, when there is one the registry
+      // will build. Carried alongside the prose so the canvas can offer Copy /
+      // Run with Copilot instead of leaving a command to be retyped by hand.
+      remediation?: RemediationView | null;
     };
 
 // Resolve the exact GitHub Packages credential GHCR writes will use, then check
@@ -3671,15 +3681,17 @@ export async function preflightGhcrPackageWriteAccess(
     : ghPkgIdentity.actingLogin === ghPkgLogin ? ghPkgIdentity.actingHasPackages
     : false;
   if (!ghPkgHasPackages) {
+    const scope = explainMissingPackagesScope(
+      ghPkgLogin,
+      packageCredentials.source,
+      ghPkgIdentity.accounts || []
+    );
     return {
       ok: false,
       status: 403,
       code: "ghcr-scope-required",
-      error: explainMissingPackagesScope(
-        ghPkgLogin,
-        packageCredentials.source,
-        ghPkgIdentity.accounts || []
-      )
+      error: scope.message,
+      remediation: scope.remediation
     };
   }
 
@@ -3700,19 +3712,30 @@ export function explainMissingPackagesScope(
   login: string,
   source: GhcrPackageCredentials["source"],
   accounts: readonly GitHubIdentityAccount[]
-): string {
+): { message: string; remediation: RemediationView | null } {
   const missing = `The GitHub account @${login} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR.`;
   if (source === "injected-token") {
     const alternative =
       accounts.find(
         (a) => a.switchable && a.hasPackages && a.login !== login
       ) || null;
-    return (
-      `${missing} That credential is the Copilot session token, which overrides stored gh logins, so "gh auth refresh" cannot add the scope to it. ` +
-      (alternative ?
-        `Select the stored account @${alternative.login} in the Create Environment dialog, then retry.`
-      : `Run "gh auth login -h github.com -s read:packages -s write:packages" to sign in a stored account that can publish packages, then retry.`)
-    );
+    const preamble = `${missing} That credential is the Copilot session token, which overrides stored gh logins, so "gh auth refresh" cannot add the scope to it. `;
+    if (alternative) {
+      // Switching accounts happens in the dialog, so there is no command here.
+      return {
+        message: `${preamble}Select the stored account @${alternative.login} in the Create Environment dialog, then retry.`,
+        remediation: null
+      };
+    }
+    const login_ = remediationView("github-cli-login", { packages: "true" });
+    return {
+      message:
+        preamble +
+        (login_.runnable ?
+          "Run the command below to sign in a stored account that can publish packages, then retry."
+        : 'Run "gh auth login -h github.com -s read:packages -s write:packages" to sign in a stored account that can publish packages, then retry.'),
+      remediation: login_.runnable ? login_ : null
+    };
   }
   // Build the command from the remediation registry rather than by hand. A
   // hand-written copy drifts from what the Copy/Run buttons offer and misses
@@ -3724,9 +3747,12 @@ export function explainMissingPackagesScope(
   });
   const grant =
     fix.runnable ?
-      `Run:\n${fix.command}\n(or switch to an account that has it in the Create Environment dialog), then retry.`
+      "Run the command below (or switch to an account that has it in the Create Environment dialog), then retry."
     : `Grant @${login} the read:packages and write:packages scopes with GitHub CLI (or switch to an account that has them in the Create Environment dialog), then retry.`;
-  return `${missing} ${grant} Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`;
+  return {
+    message: `${missing} ${grant} Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`,
+    remediation: fix.runnable ? fix : null
+  };
 }
 
 // How many of an environment's newest deployment records to resolve

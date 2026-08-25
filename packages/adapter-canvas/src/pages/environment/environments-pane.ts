@@ -71,6 +71,7 @@ export function environmentsPaneMarkup(
     <div id="env-progress-failure" class="env-progress__failure" style="display:none;" role="alert">
       <div id="env-progress-failure-title" class="env-progress__failure-title">Setup didn’t finish</div>
       <div id="env-progress-failure-message" class="env-progress__failure-copy"></div>
+      <div id="env-progress-failure-command" class="env-progress__failure-block"></div>
       <div id="env-progress-cleanup-status" class="env-progress__failure-copy"></div>
       <div id="env-progress-retry" class="env-progress__failure-copy"></div>
       <div id="env-progress-cleanup-warnings-block" class="env-progress__failure-block" style="display:none;">

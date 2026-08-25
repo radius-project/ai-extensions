@@ -46,6 +46,7 @@ export interface EnvironmentOperationWorkflowDependencies {
         status: number;
         error: string;
         code: string;
+        remediation?: unknown;
       }
   >;
   readGitHubJson(
@@ -70,7 +71,12 @@ export interface EnvironmentOperationWorkflowDependencies {
   ): Promise<boolean>;
   finalizeEnvironmentResolutionFailure(
     operation: EnvironmentOperationRecord,
-    input: { status: number; error: string; code: string },
+    input: {
+      status: number;
+      error: string;
+      code: string;
+      remediation?: RemediationReference | null;
+    },
     executor: SelectedGhExecutor
   ): Promise<void>;
   getOperation(operationId: string): EnvironmentOperationRecord | undefined;
@@ -79,6 +85,33 @@ export interface EnvironmentOperationWorkflowDependencies {
     data: unknown
   ): Promise<Record<string, unknown> | null>;
   now(): number;
+}
+
+/**
+ * The id and params a remediation can be rebuilt from.
+ *
+ * Only the reference travels. Rebuilding from the registry at the point of use
+ * keeps the rule that a command is never transported as a string, so a record
+ * that survived persistence cannot smuggle one in.
+ */
+export interface RemediationReference {
+  id: string;
+  params: Record<string, string>;
+}
+
+function remediationReference(value: unknown): RemediationReference | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as { id?: unknown; params?: unknown };
+  if (typeof candidate.id !== "string" || candidate.id === "") return null;
+  const params: Record<string, string> = {};
+  if (candidate.params && typeof candidate.params === "object") {
+    for (const [key, raw] of Object.entries(
+      candidate.params as Record<string, unknown>
+    )) {
+      if (typeof raw === "string") params[key] = raw;
+    }
+  }
+  return { id: candidate.id, params };
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -116,6 +149,9 @@ async function failResolution(
     (typeof failure.code === "string" && failure.code) ||
     "github-environment-resolution-failed";
   const status = typeof failure.status === "number" ? failure.status : 400;
+  // Preflights that know a fix hand one over. Read it structurally rather than
+  // trusting the shape: `error` here is `unknown`, and most callers have none.
+  const remediation = remediationReference(failure.remediation);
   if (ensureError?.createdCandidate) {
     dependencies.recordGitHubEnvironment(operation, {
       state: "created_candidate",
@@ -129,7 +165,8 @@ async function failResolution(
     {
       status,
       error: message,
-      code
+      code,
+      remediation
     },
     executor
   );
@@ -158,7 +195,8 @@ export async function runEnvironmentOperationWorkflow(
     return failResolution(operation, executor, dependencies, {
       status: packageAccess.status,
       message: packageAccess.error,
-      code: packageAccess.code
+      code: packageAccess.code,
+      remediation: remediationReference(packageAccess.remediation)
     });
   }
 

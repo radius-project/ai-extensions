@@ -173,11 +173,14 @@ describe("preflightGhcrPackageWriteAccess", () => {
     if (result.ok) throw new Error("expected GHCR preflight to fail");
     expect(result.code).toBe("ghcr-scope-required");
     expect(result.error).toContain("@pubuser");
-    // Built from the remediation registry, so it matches the Copy/Run buttons
-    // and stays line-separated for shells that cannot parse `&&`.
-    expect(result.error).toContain(
+    // The command travels as a remediation so the canvas can offer Copy / Run
+    // with Copilot, and stays line-separated for shells that cannot parse `&&`.
+    expect(result.remediation?.command).toBe(
       "gh auth switch -h github.com -u pubuser\ngh auth refresh -h github.com -s read:packages -s write:packages"
     );
+    expect(result.remediation?.runnable).toBe(true);
+    // The prose points at the callout rather than repeating the command.
+    expect(result.error).not.toContain("gh auth switch -h github.com -u");
     expect(result.error).not.toContain("&&");
     expect(result.error).not.toContain("previous-login");
   });
@@ -231,7 +234,7 @@ describe("preflightGhcrPackageWriteAccess", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected GHCR preflight to fail");
     expect(result.code).toBe("ghcr-scope-required");
-    expect(result.error).toContain(
+    expect(result.remediation?.command).toBe(
       "gh auth login -h github.com -s read:packages -s write:packages"
     );
     expect(result.error).not.toContain("gh auth switch -h github.com");
@@ -262,6 +265,9 @@ describe("preflightGhcrPackageWriteAccess", () => {
     if (result.ok) throw new Error("expected GHCR preflight to fail");
     expect(result.error).toContain("Select the stored account @storeduser");
     expect(result.error).not.toContain("gh auth login");
+    // Switching accounts happens in the dialog, so there is no command to run
+    // and the callout must not appear offering one.
+    expect(result.remediation).toBeNull();
   });
 
   it("falls back to the acting account when the credential login is absent from the account list", async () => {
@@ -321,6 +327,8 @@ describe("preflightGhcrPackageWriteAccess", () => {
     // the flags that only a built command carries.
     expect(result.error).not.toContain("-h github.com -u");
     expect(result.error).toContain("Grant @");
+    // Nothing to offer the callout either, so the prose has to stand alone.
+    expect(result.remediation).toBeNull();
   });
 
   it("fails closed when nothing describes the credential login", async () => {

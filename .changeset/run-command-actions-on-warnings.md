@@ -26,3 +26,7 @@ Those suggestions now render as a callout with the command shown verbatim, **Cop
 
 - Build the GitHub scope guidance in the readiness service and the GHCR write preflight from the remediation registry instead of writing the commands out by hand. The two hand-written copies had already drifted to long-form flags and would not have picked up the shell-portability fix, and each now falls back to prose rather than splicing a login the registry refuses into a command.
 - Removed two newly introduced `&&` command joins on `main` (the GHCR packages-scope explainer and the credentials pane) by deriving both from the remediation registry, so the commands stay parseable in Windows PowerShell 5.1. The `github-cli-login` remediation now accepts `workflow` and `packages` opt-in booleans, and the credentials pane targets the account that actually publishes rather than the acting account.
+- Render the create-environment GHCR `write:packages` failure as a Copy / Run with
+  Copilot callout on the setup failure card instead of a command buried in prose.
+  Only the remediation id and its params are persisted and polled; the browser
+  rebuilds the command from the registry, so no command text is ever transported.
