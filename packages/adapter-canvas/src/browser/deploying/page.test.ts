@@ -2768,6 +2768,7 @@ describe("pure helpers", () => {
     ["failed", "Failed"],
     ["pending", "Pending"],
     ["deleting", "Deleting…"],
+    ["delete-failed", "Delete failed"],
     ["unknown-status", "Pending"]
   ])("renders %s as text without a colored circle", (status, label) => {
     expect(deploymentStatusMarkup(status)).toBe(label);
