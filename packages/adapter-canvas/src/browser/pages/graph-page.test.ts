@@ -511,14 +511,21 @@ describe("initializeGraphPage", () => {
     );
   });
 
-  it("reloads the page once the graph finishes generating", async () => {
-    const { browser, status } = fixture({ loaded: false });
+  it("does not reload for a legacy reload-only graph response", async () => {
+    const setError = vi.fn();
+    const { browser } = fixture({ loaded: false });
     browser.net.handle("/api/load-graph", () => jsonResponse({ reload: true }));
-    initializeGraphPage(browser.context, globals());
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
     await flushPromises();
 
-    expect(browser.nav.reloads).toBe(1);
-    expect(status?.textContent).toBe("Application graph ready.");
+    expect(browser.nav.reloads).toBe(0);
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "The application graph response did not include any resources."
+    );
   });
 
   it("renders generated resources in place without reloading", async () => {
@@ -527,13 +534,16 @@ describe("initializeGraphPage", () => {
     let calls = 0;
     browser.net.handle("/api/load-graph", () => {
       calls++;
-      return calls === 1 ?
+      return (
+        calls === 1 ? jsonResponse({ needsAppBicep: true })
+        : calls === 2 ?
           jsonResponse({
             reload: true,
             resources: [{ id: "app/generated" }],
             fromWorkspace: false
           })
-        : jsonResponse({ needsAppBicep: true });
+        : jsonResponse({ needsAppBicep: true })
+      );
     });
     initializeGraphPage(
       browser.context,
@@ -542,11 +552,13 @@ describe("initializeGraphPage", () => {
       })
     );
     await flushPromises();
+    browser.clock.tick(GRAPH_RETRY_MS);
+    await flushPromises();
 
     expect(browser.nav.reloads).toBe(0);
     expect(
       browser.net.calls.filter((call) => call.url === "/api/load-graph")
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(render).toHaveBeenCalledWith(
       "graph-container",
       expect.arrayContaining([
