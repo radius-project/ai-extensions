@@ -93,9 +93,8 @@ function ghHeaders(): Record<string, string> {
 }
 
 async function fetchRadiusExtensionBlobs(ref: string): Promise<RadiusBlob[]> {
-  const url = `https://api.github.com/repos/${RADIUS_REPO}/git/trees/${encodeURIComponent(
-    ref
-  )}?recursive=1`;
+  const encodedRef = encodeURIComponent(ref);
+  const url = `https://api.github.com/repos/${RADIUS_REPO}/git/trees/${encodedRef}?recursive=1`;
   const res = await fetch(url, { headers: ghHeaders() });
   if (!res.ok) {
     throw new Error(`failed to fetch Radius tree ${url}: ${res.status}`);
@@ -135,7 +134,10 @@ async function readLocalExtensionFile(rel: string): Promise<Buffer> {
 // raw bytes without a lossy utf-8 round trip.
 function expectedLocalBytes(radiusBytes: Buffer): Buffer {
   if (radiusBytes.includes(T1_FROM) || radiusBytes.includes(T2_FROM)) {
-    return Buffer.from(applyPortTransform(radiusBytes.toString("utf8")), "utf8");
+    return Buffer.from(
+      applyPortTransform(radiusBytes.toString("utf8")),
+      "utf8"
+    );
   }
   return radiusBytes;
 }
