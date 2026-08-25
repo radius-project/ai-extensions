@@ -2,8 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 import { isGitHubRateLimitError } from "../../deploy.js";
 import {
+  acquireSelectedExecutor,
   monitorVerificationWithSelectedAccount,
   runVerificationRetry,
+  shouldResumeKnownVerificationRun,
+  shouldReuseVerificationDispatch,
+  verificationRetryTargetPhase,
+  verificationTrackingDeadline,
   type SelectedVerificationMonitorDependencies,
   type VerificationRetryDependencies,
   type VerificationRetryOperation
@@ -113,6 +118,109 @@ function dependencies(
 }
 
 describe("verification retry selected account", () => {
+  it("keeps a fresh acquisition deadline when resuming an older known run", () => {
+    expect(
+      verificationTrackingDeadline(
+        operation({
+          verification: {
+            dispatchedAt: 1,
+            acquisitionDeadline: 9_000
+          }
+        }),
+        () => 5_000
+      )
+    ).toBe(9_000);
+    expect(
+      verificationTrackingDeadline(
+        operation({ verification: { dispatchedAt: 1_000 } }),
+        () => 5_000
+      )
+    ).toBe(1_000 + 45 * 60 * 1000);
+    expect(
+      verificationTrackingDeadline(operation({ verification: {} }), () => 5_000)
+    ).toBe(5_000 + 45 * 60 * 1000);
+  });
+
+  it.each([
+    ["prepared", null, true],
+    ["outcome_unknown", null, true],
+    ["confirmed", null, true],
+    ["confirmed", "41", false],
+    ["not_applied", null, false]
+  ])(
+    "reuses a %s dispatch only while its selected-account outcome remains unresolved",
+    (previousStatus, runId, expected) => {
+      expect(
+        shouldReuseVerificationDispatch({
+          accountUnavailablePhase: "dispatch",
+          previousStatus,
+          runId
+        })
+      ).toBe(expected);
+    }
+  );
+
+  it("does not reuse a dispatch from an earlier acquisition or retry generation", () => {
+    expect(
+      shouldReuseVerificationDispatch({
+        accountUnavailablePhase: "acquisition",
+        previousStatus: "outcome_unknown",
+        runId: null
+      })
+    ).toBe(false);
+    expect(
+      shouldReuseVerificationDispatch({
+        accountUnavailablePhase: "dispatch",
+        previousStatus: "not_applied",
+        runId: null
+      })
+    ).toBe(false);
+  });
+
+  it("preserves monitoring and dispatch targets across repeated acquisition failures", () => {
+    expect(verificationRetryTargetPhase("monitor")).toBe("monitor");
+    expect(verificationRetryTargetPhase("dispatch")).toBe("dispatch");
+    expect(verificationRetryTargetPhase("acquisition")).toBe("acquisition");
+    expect(verificationRetryTargetPhase(null)).toBe("acquisition");
+    expect(
+      shouldResumeKnownVerificationRun({
+        accountUnavailablePhase: "monitor",
+        runId: "41"
+      })
+    ).toBe(true);
+    expect(
+      shouldResumeKnownVerificationRun({
+        accountUnavailablePhase: "dispatch",
+        runId: "41"
+      })
+    ).toBe(false);
+    expect(
+      shouldResumeKnownVerificationRun({
+        accountUnavailablePhase: "monitor",
+        runId: null
+      })
+    ).toBe(false);
+  });
+
+  it("expires before acquiring when the durable deadline has elapsed", async () => {
+    const createExecutor = vi.fn();
+
+    const result = await acquireSelectedExecutor("alice", 100, {
+      createExecutor,
+      isRateLimitError: isGitHubRateLimitError,
+      now: () => 100,
+      sleep: () => Promise.resolve(),
+      errorMessage: (error) => String(error)
+    });
+
+    expect(result).toEqual({
+      state: "expired",
+      detail:
+        "GitHub rate limiting prevented Radius from reacquiring the selected account."
+    });
+    expect(createExecutor).not.toHaveBeenCalled();
+  });
+
   it("uses the selected executor for dispatch and keeps it registered through monitoring", async () => {
     const op = operation();
     let registeredDuringMonitor = false;
@@ -464,6 +572,19 @@ describe("verification retry selected account", () => {
       await monitorVerificationWithSelectedAccount(op, deps);
 
       expect(registeredDuringMonitor).toBe(true);
+      expect(deps.unregistered).toEqual(["op_retry"]);
+    });
+
+    it("runs recovery discovery on the registered executor before monitoring", async () => {
+      const beforeMonitor = vi.fn(() => Promise.resolve(false));
+      const monitor = vi.fn();
+      const deps = monitorDependencies({ beforeMonitor, monitor });
+
+      await monitorVerificationWithSelectedAccount(operation(), deps);
+
+      expect(beforeMonitor).toHaveBeenCalledTimes(1);
+      expect(deps.registered).toEqual(["op_retry"]);
+      expect(monitor).not.toHaveBeenCalled();
       expect(deps.unregistered).toEqual(["op_retry"]);
     });
 

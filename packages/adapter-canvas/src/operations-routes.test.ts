@@ -535,6 +535,7 @@ describe("GET /api/operations/{id}", () => {
     it("rejects incomplete verification identity instead of adopting a run", async () => {
       const op = seed("contoso/incomplete-identity");
       enterStage(op, STAGE_VERIFY);
+      op.context = { githubLogin: "octocat" };
       op.verification = { dispatchedAt: Date.now() };
 
       const { body } = await getJson(
@@ -654,6 +655,7 @@ function seedRetryableSetup(repo) {
 
 function seedMergeHandoff(repo) {
   const op = seed(repo);
+  op.context = { githubLogin: "octocat" };
   recordAzureApp(op, { state: "created", appId: "app-1" });
   recordServicePrincipal(op, { state: "created", appId: "app-1" });
   recordCommittedWorkflowFile(op, {

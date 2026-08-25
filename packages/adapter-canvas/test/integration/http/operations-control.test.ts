@@ -495,7 +495,7 @@ describe("operation controls real-loopback HIT", () => {
         "Radius could not verify the setup pull request with @alice. Re-check that GitHub account and try again.",
       detail: "selected credential unavailable"
     });
-    expect(harness.persistCalls).toEqual([]);
+    expect(harness.persistCalls).toEqual(["persist"]);
     expect(harness.scheduled).toEqual([]);
   });
 

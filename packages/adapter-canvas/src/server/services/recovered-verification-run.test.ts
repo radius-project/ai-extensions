@@ -60,6 +60,7 @@ function guidanceOf(outcome: RecoveredVerificationRunOutcome): string {
   if (outcome.state !== "hand_off") {
     throw new Error(`expected a hand-off, got ${outcome.state}`);
   }
+
   return outcome.guidance;
 }
 
@@ -82,6 +83,19 @@ describe("reading a restarted verification's dispatch identity", () => {
         "fallback.yml"
       )
     ).toEqual(identity());
+  });
+
+  it("propagates selected-account authorization failures to the caller", async () => {
+    const authorizationError = new Error("selected account forbidden");
+
+    await expect(
+      recoverVerificationRun({
+        runId: null,
+        identity: identity(),
+        listRuns: () => Promise.reject(authorizationError),
+        isAuthorizationError: (error) => error === authorizationError
+      })
+    ).rejects.toBe(authorizationError);
   });
 
   it("falls back to the operation's own environment and the default workflow", () => {

@@ -10,11 +10,35 @@ import {
   fetchRunLog,
   findWorkflowRun,
   getRunDetail,
-  isSelectedGhAuthorizationError
+  isSelectedGhAuthorizationError,
+  selectedCommandAuthorizationError
 } from "./deploy.js";
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
 
 describe("selected-account workflow reads", () => {
+  it("classifies direct selected-account command authorization failures", async () => {
+    const executor = successfulSelectedGhExecutor({ login: "alice" });
+
+    await expect(
+      selectedCommandAuthorizationError(executor, "contoso/store", {
+        code: 1,
+        stdout: "",
+        stderr: "gh: Forbidden (HTTP 403)"
+      })
+    ).resolves.toMatchObject({
+      name: "SelectedGhAuthorizationError",
+      login: "alice",
+      status: 403
+    });
+    await expect(
+      selectedCommandAuthorizationError(executor, "contoso/store", {
+        code: 1,
+        stdout: "",
+        stderr: "gh: Too Many Requests (HTTP 429)"
+      })
+    ).resolves.toBeNull();
+  });
+
   it.each([
     ["run discovery", 401, "gh: Unauthorized (HTTP 401)", "list"],
     ["run detail", 403, "gh: Forbidden (HTTP 403)", "detail"]

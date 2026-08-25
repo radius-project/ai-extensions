@@ -214,6 +214,26 @@ async function selectedRepositoryAccessError(
   }
 }
 
+export async function selectedCommandAuthorizationError(
+  executor: SelectedGhExecutor,
+  repo: string,
+  result: { code: string | number; stdout: string; stderr: string }
+): Promise<SelectedGhAuthorizationError | null> {
+  if (Number(result.code) === 0) return null;
+  if (isRateLimitFailure(result.stdout, result.stderr)) return null;
+  const status = selectedFailureStatus(result.stdout, result.stderr);
+  if (status === 404) {
+    return selectedRepositoryAccessError(executor, repo);
+  }
+  return status === 401 || status === 403 ?
+      new SelectedGhAuthorizationError(
+        executor.login,
+        status,
+        (result.stderr || result.stdout).trim()
+      )
+    : null;
+}
+
 async function selectedWorkflowJson(
   executor: SelectedGhExecutor,
   repo: string,

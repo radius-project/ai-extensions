@@ -24,6 +24,7 @@ import {
   canRetryCleanup,
   finish,
   finishSucceeded,
+  markVerificationRetryAcquisition,
   onOperationTerminal,
   recordAzureApp,
   recordCleanupState,
@@ -552,7 +553,8 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     expect(payload.operation.currentStage).toBe(STAGE_VERIFY);
     expect(op.verification).toMatchObject({
       acquisitionPending: true,
-      retryCommandId: payload.commandId
+      retryCommandId: payload.commandId,
+      retryClassification: "workflow-installation-pending"
     });
     // The action_required verdict is kept as history.
     expect(payload.operation.outcomes).toEqual([
@@ -581,7 +583,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
 
     expect(out.recording.status).toBe(500);
     expect(out.payload()).toMatchObject({
-      code: "operation-retry-persist-failed",
+      code: "verification-retry-persist-failed",
       detail: "disk gone"
     });
     expect(op.state).toBe("action_required");
@@ -647,6 +649,47 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     });
   });
 
+  it("does not restore stale provisional state over a concurrent accepted retry", async () => {
+    const op = mergeHandoff();
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
+      checkPullRequestMerge: () => {
+        beginRetryAttempt(op, "verification");
+        op.verification = {
+          operationMarker: "concurrent-marker"
+        };
+        markVerificationRetryAcquisition(op, "concurrent-command");
+        return Promise.resolve({ state: "open" });
+      }
+    });
+
+    expect(out.recording.status).toBe(409);
+    expect(op.verification).toMatchObject({
+      operationMarker: "concurrent-marker",
+      retryCommandId: "concurrent-command"
+    });
+  });
+
+  it("does not restore stale provisional state when its persistence fails", async () => {
+    const op = mergeHandoff();
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
+      persistOperations: () => {
+        beginRetryAttempt(op, "verification");
+        op.verification = {
+          operationMarker: "concurrent-marker"
+        };
+        markVerificationRetryAcquisition(op, "concurrent-command");
+        return Promise.reject(new Error("disk unavailable"));
+      }
+    });
+
+    expect(out.recording.status).toBe(500);
+    expect(out.payload().code).toBe("verification-retry-persist-failed");
+    expect(op.verification).toMatchObject({
+      operationMarker: "concurrent-marker",
+      retryCommandId: "concurrent-command"
+    });
+  });
+
   it("fails closed when the selected account cannot verify the setup pull request", async () => {
     const op = mergeHandoff();
     op.context = { githubLogin: "alice" };
@@ -668,7 +711,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       pullRequestUrl: "https://github.com/contoso/store/pull/7"
     });
     expect(op.state).toBe("action_required");
-    expect(out.journal.persistCalls).toBe(0);
+    expect(out.journal.persistCalls).toBe(1);
     expect(out.journal.scheduled).toEqual([]);
   });
 

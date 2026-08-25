@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { CanvasRequestContext } from "../request-context.js";
 import {
   templatePathParameters,
@@ -16,6 +17,7 @@ import {
   canRetryVerification,
   canStartRollback,
   enterStage,
+  markVerificationRetryPrecondition,
   findActiveCommand,
   finish,
   markVerificationRetryAcquisition,
@@ -448,12 +450,39 @@ async function requireMergedSetupPullRequest({
   eligibility
 }: CommandRequest): Promise<boolean> {
   if (!eligibility.requiresMergedPullRequest) return true;
+  const previousVerification = structuredClone(operation.verification);
+  const provisionalToken = randomUUID();
+  markVerificationRetryPrecondition(operation, provisionalToken);
+  const restoreProvisionalDeadline = (): void => {
+    const current = operation.verification as
+      { acquisitionProvisionalToken?: unknown } | undefined;
+    if (current?.acquisitionProvisionalToken !== provisionalToken) return;
+    operation.verification = structuredClone(previousVerification);
+    // Do not persist this restoration: a concurrent request may already have
+    // accepted and durably written a newer retry. The abandoned provisional
+    // marker is harmless on disk and is removed during hydration.
+  };
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    restoreProvisionalDeadline();
+    sendJson(context, 500, {
+      error:
+        "Radius could not save the verification retry deadline, so it did not contact GitHub.",
+      code: "verification-retry-persist-failed",
+      operationId,
+      detail: errorMessage(error),
+      operation: clientView(operation)
+    });
+    return false;
+  }
   const pullRequestUrl = eligibility.pullRequestUrl ?? null;
   const merge = await dependencies.checkPullRequestMerge(
     operation,
     pullRequestUrl
   );
   if (merge.state === "unavailable") {
+    restoreProvisionalDeadline();
     const account = merge.login ? `@${merge.login}` : "the selected account";
     sendJson(context, 409, {
       error: `Radius could not verify the setup pull request with ${account}. Re-check that GitHub account and try again.`,
@@ -466,6 +495,7 @@ async function requireMergedSetupPullRequest({
     return false;
   }
   if (merge.state === "open") {
+    restoreProvisionalDeadline();
     sendJson(context, 409, {
       error:
         "The setup pull request has not merged yet, so the verification workflow is not installed on the target branch.",
@@ -613,8 +643,12 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     attemptKind: "verification",
     eligibility: canRetryVerification,
     prepare: enterVerifyStage,
-    prepareAccepted: (operation, _eligibility, commandId) => {
-      markVerificationRetryAcquisition(operation, commandId);
+    prepareAccepted: (operation, eligibility, commandId) => {
+      markVerificationRetryAcquisition(
+        operation,
+        commandId,
+        eligibility.classification || null
+      );
     },
     precondition: requireMergedSetupPullRequest,
     scheduleKind: "verification_retry",

@@ -106,6 +106,7 @@ export interface SelectedVerificationMonitorDependencies {
   createExecutor(login: string): Promise<SelectedGhExecutor>;
   registerExecutor(operationId: string, executor: SelectedGhExecutor): void;
   unregisterExecutor(operationId: string): void;
+  beforeMonitor?(executor: SelectedGhExecutor): Promise<boolean>;
   monitor(operationId: string): Promise<void>;
   accountUnavailable(
     operation: VerificationRetryOperation,
@@ -125,7 +126,59 @@ export interface SelectedVerificationMonitorDependencies {
 const SELECTED_EXECUTOR_ACQUISITION_WINDOW_MS = 45 * 60 * 1000;
 const SELECTED_EXECUTOR_MAX_RETRY_DELAY_MS = 15_000;
 
-interface SelectedExecutorAcquisitionDependencies {
+export function verificationTrackingDeadline(
+  operation: VerificationRetryOperation,
+  now: () => number
+): number {
+  const persistedDeadline = Number(operation.verification?.acquisitionDeadline);
+  if (Number.isFinite(persistedDeadline) && persistedDeadline > 0) {
+    return persistedDeadline;
+  }
+  const dispatchedAt = Number(operation.verification?.dispatchedAt);
+  return Number.isFinite(dispatchedAt) && dispatchedAt > 0 ?
+      dispatchedAt + SELECTED_EXECUTOR_ACQUISITION_WINDOW_MS
+    : now() + SELECTED_EXECUTOR_ACQUISITION_WINDOW_MS;
+}
+
+export function shouldReuseVerificationDispatch(input: {
+  accountUnavailablePhase: unknown;
+  previousStatus: unknown;
+  runId: unknown;
+}): boolean {
+  if (input.accountUnavailablePhase !== "dispatch") {
+    return false;
+  }
+  return (
+    input.previousStatus === "prepared" ||
+    input.previousStatus === "outcome_unknown" ||
+    (input.previousStatus === "confirmed" &&
+      (input.runId == null || !String(input.runId)))
+  );
+}
+
+export type VerificationRetryTargetPhase =
+  "monitor" | "acquisition" | "dispatch";
+
+export function verificationRetryTargetPhase(
+  previousPhase: unknown
+): VerificationRetryTargetPhase {
+  return previousPhase === "monitor" || previousPhase === "dispatch" ?
+      previousPhase
+    : "acquisition";
+}
+
+export function shouldResumeKnownVerificationRun(input: {
+  accountUnavailablePhase: unknown;
+  runId: unknown;
+}): boolean {
+  return Boolean(
+    input.accountUnavailablePhase === "monitor" &&
+    input.runId != null &&
+    String(input.runId)
+  );
+}
+
+export interface SelectedExecutorAcquisitionDependencies {
   createExecutor(login: string): Promise<SelectedGhExecutor>;
   isRateLimitError(error: unknown): boolean;
   now(): number;
@@ -133,12 +186,12 @@ interface SelectedExecutorAcquisitionDependencies {
   errorMessage(error: unknown): string;
 }
 
-type SelectedExecutorAcquisition =
+export type SelectedExecutorAcquisition =
   | { state: "ready"; executor: SelectedGhExecutor }
   | { state: "unavailable"; detail: string }
   | { state: "expired"; detail: string };
 
-async function acquireSelectedExecutor(
+export async function acquireSelectedExecutor(
   login: string,
   deadline: number,
   dependencies: SelectedExecutorAcquisitionDependencies
@@ -189,11 +242,7 @@ export async function monitorVerificationWithSelectedAccount(
     return;
   }
 
-  const dispatchedAt = Number(operation.verification?.dispatchedAt);
-  const deadline =
-    Number.isFinite(dispatchedAt) && dispatchedAt > 0 ?
-      dispatchedAt + SELECTED_EXECUTOR_ACQUISITION_WINDOW_MS
-    : dependencies.now() + SELECTED_EXECUTOR_ACQUISITION_WINDOW_MS;
+  const deadline = verificationTrackingDeadline(operation, dependencies.now);
   const acquisition = await acquireSelectedExecutor(
     login,
     deadline,
@@ -211,6 +260,12 @@ export async function monitorVerificationWithSelectedAccount(
 
   dependencies.registerExecutor(operation.operationId, executor);
   try {
+    if (
+      dependencies.beforeMonitor &&
+      !(await dependencies.beforeMonitor(executor))
+    ) {
+      return;
+    }
     await dependencies.monitor(operation.operationId);
   } finally {
     dependencies.unregisterExecutor(operation.operationId);

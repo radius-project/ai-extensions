@@ -26,6 +26,7 @@ import { getOrCreateServer, persistBestEffort } from "../../server.js";
 import {
   addLegacyStep as recordLegacyStep,
   finishSucceeded as finishSetupSucceeded,
+  hasCompleteVerificationIdentity,
   isTerminalState as isSetupTerminalState
 } from "../../operations.js";
 import {
@@ -1024,7 +1025,11 @@ describe("environments — verify-status", () => {
       ctx,
       deps({
         readInstanceEntry: () => undefined,
-        getOperation: () => ({ repo: "o/r", environment: "dev" }),
+        getOperation: () => ({
+          repo: "o/r",
+          environment: "dev",
+          context: { githubLogin: "octocat" }
+        }),
         hasCompleteVerificationIdentity: () => false
       })
     );
@@ -1084,22 +1089,6 @@ describe("environments — verify-status", () => {
 
   it.each([
     {
-      phase: "run discovery",
-      status: 401 as const,
-      runId: null,
-      findWorkflowRun: () =>
-        Promise.reject(
-          new SelectedGhAuthorizationError(
-            "alice",
-            401,
-            "gh: Unauthorized (HTTP 401)"
-          )
-        ),
-      getRunDetail: () => {
-        throw new Error("run detail must not be read");
-      }
-    },
-    {
       phase: "run detail",
       status: 403 as const,
       runId: "55",
@@ -1114,22 +1103,6 @@ describe("environments — verify-status", () => {
             "gh: Forbidden (HTTP 403)"
           )
         )
-    },
-    {
-      phase: "masked private-repository run discovery",
-      status: 404 as const,
-      runId: null,
-      findWorkflowRun: () =>
-        Promise.reject(
-          new SelectedGhAuthorizationError(
-            "alice",
-            404,
-            "gh: Not Found (HTTP 404)"
-          )
-        ),
-      getRunDetail: () => {
-        throw new Error("run detail must not be read");
-      }
     }
   ])(
     "terminalizes selected-account $phase authorization failure immediately",
@@ -1164,7 +1137,7 @@ describe("environments — verify-status", () => {
           getSelectedGitHubExecutor: () =>
             successfulSelectedGhExecutor({ login: "alice" }),
           isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
-          hasCompleteVerificationIdentity: () => true,
+          hasCompleteVerificationIdentity,
           findWorkflowRun,
           getRunDetail,
           addLegacyStep: (_operation, text) => {
@@ -1203,8 +1176,8 @@ describe("environments — verify-status", () => {
     }
   );
 
-  it("keeps a selected-account transient discovery failure pollable", async () => {
-    const operation = {
+  it("does not let a stale successful poll finish a newer verification retry", async () => {
+    const operation: any = {
       operationId: "op1",
       repo: "o/r",
       environment: "dev",
@@ -1216,9 +1189,12 @@ describe("environments — verify-status", () => {
         workflow: "verify.yml",
         ref: "main",
         environment: "dev",
-        runId: null
+        runId: "55",
+        retryCommandId: "cmd-old"
       }
     };
+    let executor = successfulSelectedGhExecutor({ login: "alice" });
+    const finishSucceeded = vi.fn();
     const { recording, ctx } = context(
       "GET",
       "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
@@ -1229,23 +1205,98 @@ describe("environments — verify-status", () => {
       deps({
         readInstanceEntry: () => undefined,
         getOperation: () => operation,
-        getSelectedGitHubExecutor: () =>
-          successfulSelectedGhExecutor({ login: "alice" }),
-        isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+        getSelectedGitHubExecutor: () => executor,
         hasCompleteVerificationIdentity: () => true,
-        findWorkflowRun: () =>
-          Promise.reject(new Error("gh: Service Unavailable (HTTP 503)"))
+        getRunDetail: () => {
+          operation.verification = {
+            ...operation.verification,
+            dispatchedAt: 456,
+            runId: "77",
+            retryCommandId: "cmd-new"
+          };
+          executor = successfulSelectedGhExecutor({ login: "alice" });
+          return Promise.resolve({
+            status: "completed",
+            conclusion: "success",
+            steps: []
+          });
+        },
+        finishSucceeded
       })
     );
 
     expect(JSON.parse(recording.body)).toEqual({
-      state: "unknown",
-      error: "gh: Service Unavailable (HTTP 503)"
+      state: "pending",
+      runId: "77"
     });
+    expect(finishSucceeded).not.toHaveBeenCalled();
     expect(operation.state).toBe("running");
   });
 
-  it("does not adopt an unmarked run for pre-pinning operations", async () => {
+  it("does not let a stale authorization failure terminate a newer retry", async () => {
+    const operation: any = {
+      operationId: "op1",
+      repo: "o/r",
+      environment: "dev",
+      state: "running",
+      currentStage: "verify",
+      context: { githubLogin: "alice" },
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "main",
+        environment: "dev",
+        runId: "55",
+        retryCommandId: "cmd-old"
+      }
+    };
+    let executor = successfulSelectedGhExecutor({ login: "alice" });
+    const finish = vi.fn();
+    const persistOperations = vi.fn(() => Promise.resolve());
+    const { recording, ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
+    );
+
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => operation,
+        getSelectedGitHubExecutor: () => executor,
+        hasCompleteVerificationIdentity: () => true,
+        getRunDetail: () => {
+          operation.verification = {
+            ...operation.verification,
+            dispatchedAt: 456,
+            runId: "77",
+            retryCommandId: "cmd-new"
+          };
+          executor = successfulSelectedGhExecutor({ login: "alice" });
+          return Promise.reject(
+            new SelectedGhAuthorizationError(
+              "alice",
+              403,
+              "gh: Forbidden (HTTP 403)"
+            )
+          );
+        },
+        isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+        finish,
+        persistOperations
+      })
+    );
+
+    expect(JSON.parse(recording.body)).toEqual({
+      state: "pending",
+      runId: "77"
+    });
+    expect(finish).not.toHaveBeenCalled();
+    expect(persistOperations).not.toHaveBeenCalled();
+    expect(operation.state).toBe("running");
+  });
+
+  it("fails an operation-scoped verification closed without a saved account", async () => {
     const operation = {
       repo: "o/r",
       environment: "dev",
@@ -1259,6 +1310,8 @@ describe("environments — verify-status", () => {
       }
     };
     const findWorkflowRun = vi.fn(() => Promise.resolve(null));
+    const finish = vi.fn();
+    const persistBestEffort = vi.fn(() => Promise.resolve(true));
     const { recording, ctx } = context(
       "GET",
       "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
@@ -1268,16 +1321,34 @@ describe("environments — verify-status", () => {
       deps({
         readInstanceEntry: () => undefined,
         getOperation: () => operation,
-        hasCompleteVerificationIdentity: () => true,
+        hasCompleteVerificationIdentity,
         getSelectedGitHubExecutor: () => undefined,
-        findWorkflowRun
+        findWorkflowRun,
+        addLegacyStep: vi.fn(),
+        finish,
+        persistBestEffort,
+        persistOperations: () => Promise.resolve(),
+        reportOperationDiagnostic: () => {}
       })
     );
     expect(findWorkflowRun).not.toHaveBeenCalled();
     expect(JSON.parse(recording.body)).toEqual({
-      state: "pending",
-      runId: null
+      state: "failed",
+      terminal: true,
+      code: "verification-retry-github-account-missing",
+      runId: null,
+      error:
+        "Radius cannot monitor credential verification because this operation does not name the GitHub account that started it."
     });
+    expect(finish).toHaveBeenCalledWith(
+      operation,
+      "failed_partial",
+      expect.objectContaining({
+        failure: expect.objectContaining({
+          code: "verification-retry-github-account-missing"
+        })
+      })
+    );
   });
 
   it("does not cache an unmarked run when there is no operation", async () => {
@@ -1333,6 +1404,7 @@ describe("environments — verify-status", () => {
     const op = {
       repo: "o/r",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       state: "running",
       currentStage: "verify",
       verification: { dispatchedAt: 1, runId: 9 }
@@ -1380,6 +1452,7 @@ describe("environments — verify-status", () => {
     const op = {
       repo: "o/r",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       state: "input_required",
       currentStage: "verify",
       verification: { dispatchedAt: 1, runId: 9 }
@@ -1427,6 +1500,7 @@ describe("environments — verify-status", () => {
     const op = {
       repo: "o/r",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       currentStage: "verify",
       verification: { dispatchedAt: 1, runId: 9 }
     };
@@ -1492,6 +1566,7 @@ describe("environments — verify-status", () => {
       const op = {
         repo: "o/r",
         environment: "dev",
+        context: { githubLogin: "octocat" },
         currentStage: "verify",
         verification: { dispatchedAt: 1, runId: 9 }
       };
@@ -1538,6 +1613,7 @@ describe("environments — verify-status", () => {
     const op = {
       repo: "o/r",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       currentStage: "verify",
       verification: { dispatchedAt: 1, runId: 9 }
     };
@@ -1775,6 +1851,7 @@ describe("environments — real loopback", () => {
     const operation = {
       repo: "octo/app",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       currentStage: "verify",
       verification: {
         dispatchedAt: 123,
@@ -1825,6 +1902,7 @@ describe("environments — real loopback", () => {
     const operation = {
       repo: "octo/app",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       state: "running",
       currentStage: "verify",
       stages: [{ id: "verify", state: "running" }],
@@ -1887,6 +1965,7 @@ describe("environments — real loopback", () => {
     const operation = {
       repo: "octo/app",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       currentStage: "verify",
       verification: {
         dispatchedAt: 123,
