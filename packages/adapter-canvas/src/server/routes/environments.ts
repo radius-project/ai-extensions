@@ -163,6 +163,7 @@ export async function handleDeleteEnvironment(
     }
     if (active) {
       const deleting = active.status === "deleting";
+      const deleteFailed = active.status === "delete-failed";
       response.setHeader("Content-Type", "application/json");
       response.writeHead(409);
       response.end(
@@ -170,13 +171,20 @@ export async function handleDeleteEnvironment(
           error:
             deleting ?
               `Application "${active.app}" is still being deleted from environment "${envName}". Wait for that to finish before deleting the environment.`
+            : deleteFailed ?
+              `The previous teardown of application "${active.app}" from environment "${envName}" failed. Retry Delete or stop tracking the deployment before deleting the environment.`
             : `Application "${active.app}" is still deployed to environment "${envName}". Delete the application deployment first, then delete the environment.`,
           code: "app-deployed",
           app: active.app,
           environment: envName,
-          redirect: `/?page=deploying&app=${encodeURIComponent(
-            active.app
-          )}&env=${encodeURIComponent(envName)}`
+          redirect:
+            deleteFailed ?
+              `/?page=deployed&application=${encodeURIComponent(
+                active.app
+              )}&environment=${encodeURIComponent(envName)}`
+            : `/?page=deploying&app=${encodeURIComponent(
+                active.app
+              )}&env=${encodeURIComponent(envName)}`
         })
       );
       return;
@@ -256,6 +264,19 @@ export async function handleListEnvironments(
     respond(cached.payload);
     return;
   }
+
+  // The generation this listing is being assembled against. Anything that
+  // removes an environment — the delete route, or a rollback or exit that
+  // deletes the one this setup created — invalidates the repo's listing, and
+  // that invalidation must survive a listing that started before it. Caching
+  // such a payload would put the removed environment back in front of the
+  // customer for a whole TTL, which is exactly what a completed rollback
+  // promised it would not do.
+  const generation = dependencies.envListCacheGeneration(repo);
+  const cacheListing = (payload: unknown): void => {
+    if (dependencies.envListCacheGeneration(repo) !== generation) return;
+    dependencies.envListCacheSet(repo, { at: dependencies.now(), payload });
+  };
 
   const gh = (args: string[], timeout = 12000): Promise<string> =>
     new Promise<string>((resolve) => {
@@ -339,7 +360,7 @@ export async function handleListEnvironments(
     if (rows.length === 0) {
       const payload = { environments: [] };
       respond(payload);
-      dependencies.envListCacheSet(repo, { at: dependencies.now(), payload });
+      cacheListing(payload);
       return;
     }
 
@@ -474,10 +495,7 @@ export async function handleListEnvironments(
         environment !== null
     );
     respond({ environments: managedEnvironments });
-    dependencies.envListCacheSet(repo, {
-      at: dependencies.now(),
-      payload: { environments: managedEnvironments }
-    });
+    cacheListing({ environments: managedEnvironments });
     // Background self-heal: update any committed workflow files that have
     // drifted from the upstream Radius templates. Also target the session
     // worktree branch (when it's this repo's) so a worktree-consistent deploy
@@ -502,6 +520,21 @@ export async function handleListEnvironments(
 // tracked operation's repo/environment and carry a complete dispatch identity,
 // or the poll is rejected as expired. Every response is 200 with
 // `Cache-Control: no-store`; the state field carries the verdict.
+export function isAzureRbacVerificationFailure(
+  failedSteps: readonly { name?: string }[],
+  log: string,
+  noSubscriptionsHelp: string
+): boolean {
+  if (noSubscriptionsHelp !== "") return true;
+  const failedAtAzureAccess = failedSteps.some((step) =>
+    /verify.*(?:aks|azure).*access/i.test(String(step.name))
+  );
+  if (!failedAtAzureAccess) return false;
+  return /(?:AuthorizationFailed|\bForbidden\b|does not have authorization|not authorized|insufficient privileges|role assignment|cannot (?:get|list|create|update|patch|delete) resource)/i.test(
+    log
+  );
+}
+
 export async function handleVerifyStatus(
   context: CanvasRequestContext,
   dependencies: EnvironmentsDependencies
@@ -519,6 +552,40 @@ export async function handleVerifyStatus(
     respond({ state: "unknown", error: "No repository specified." });
     return;
   }
+
+  let verificationRequest:
+    | {
+        operation: any;
+        executor: unknown;
+        runId: string;
+        dispatchedAt: string;
+        dispatchMutationTarget: string;
+        retryCommandId: string;
+      }
+    | undefined;
+  const isCurrentVerificationRequest = (): boolean => {
+    if (!verificationRequest || !operationId) return true;
+    const current: any = dependencies.getOperation(operationId);
+    const verification = current?.verification || {};
+    return (
+      current === verificationRequest.operation &&
+      String(verification.runId || "") === verificationRequest.runId &&
+      String(verification.dispatchedAt || "") ===
+        verificationRequest.dispatchedAt &&
+      String(verification.dispatchMutationTarget || "") ===
+        verificationRequest.dispatchMutationTarget &&
+      String(verification.retryCommandId || "") ===
+        verificationRequest.retryCommandId
+    );
+  };
+  const respondWithCurrentVerification = (): void => {
+    const current: any =
+      operationId ? dependencies.getOperation(operationId) : undefined;
+    respond({
+      state: "pending",
+      runId: current?.verification?.runId || null
+    });
+  };
 
   try {
     const entry = dependencies.readInstanceEntry(context.instanceId);
@@ -538,6 +605,41 @@ export async function handleVerifyStatus(
       });
       return;
     }
+    const pinnedLogin =
+      typeof verifyOp?.context?.githubLogin === "string" ?
+        verifyOp.context.githubLogin.trim()
+      : "";
+    if (operationId && verifyOp && !pinnedLogin) {
+      dependencies.addLegacyStep(
+        verifyOp,
+        "❌ The saved GitHub account for credential verification is missing."
+      );
+      dependencies.finish(verifyOp, "failed_partial", {
+        failure: {
+          code: "verification-retry-github-account-missing",
+          stage: verifyOp.currentStage,
+          stepSeq: null,
+          message:
+            "Radius cannot monitor credential verification because this operation does not name the GitHub account that started it. Start a new environment setup after re-checking the account.",
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      await dependencies.persistBestEffort({
+        operation: verifyOp,
+        persist: dependencies.persistOperations,
+        report: dependencies.reportOperationDiagnostic
+      });
+      respond({
+        state: "failed",
+        terminal: true,
+        code: "verification-retry-github-account-missing",
+        runId: verifyOp.verification?.runId || null,
+        error:
+          "Radius cannot monitor credential verification because this operation does not name the GitHub account that started it."
+      });
+      return;
+    }
     if (verifyOp && !dependencies.hasCompleteVerificationIdentity(verifyOp)) {
       respond({
         state: "expired",
@@ -550,10 +652,6 @@ export async function handleVerifyStatus(
       operationId ?
         dependencies.getSelectedGitHubExecutor(operationId) || undefined
       : undefined;
-    const pinnedLogin =
-      typeof verifyOp?.context?.githubLogin === "string" ?
-        verifyOp.context.githubLogin.trim()
-      : "";
     if (operationId && pinnedLogin && !selectedExecutor) {
       respond({
         state: "pending",
@@ -561,56 +659,36 @@ export async function handleVerifyStatus(
       });
       return;
     }
-    const dispatchedAt =
-      verifyOp?.verification?.dispatchedAt ||
-      entry?.state?.deployDispatchedAt ||
-      0;
-    let runId: number | string | null =
+    const runId: number | string | null =
       verifyOp?.verification?.runId || entry?.state?.verifyRunId || null;
     if (!runId) {
-      const workflow =
-        verifyOp?.verification?.workflow || dependencies.verifyWorkflowFile;
-      runId =
-        selectedExecutor ?
-          await dependencies.findWorkflowRun(
-            repo,
-            workflow,
-            dispatchedAt,
-            null,
-            selectedExecutor
-          )
-        : await dependencies.findWorkflowRun(
-            repo,
-            workflow,
-            dispatchedAt,
-            null
-          );
-      if (runId && verifyOp) {
-        verifyOp.verification = {
-          dispatchedAt: verifyOp.verification.dispatchedAt,
-          workflow: verifyOp.verification.workflow,
-          ref: verifyOp.verification.ref,
-          environment: verifyOp.verification.environment,
-          runId: String(runId),
-          runUrl: "https://github.com/" + repo + "/actions/runs/" + runId
-        };
-        await dependencies.persistBestEffort({
-          operation: verifyOp,
-          persist: () => dependencies.persistOperations(),
-          report: (diagnostic) =>
-            dependencies.reportOperationDiagnostic(diagnostic)
-        });
-      } else if (runId && entry) entry.state!.verifyRunId = runId;
-    }
-    if (!runId) {
+      // GitHub's run-list response has no operation-specific dispatch marker.
+      // Baseline ID and time can narrow candidates but cannot prove identity, so
+      // monitoring must wait for a run ID established by a stronger contract.
       respond({ state: "pending", runId: null });
       return;
+    }
+    if (operationId && verifyOp && selectedExecutor) {
+      verificationRequest = {
+        operation: verifyOp,
+        executor: selectedExecutor,
+        runId: String(runId),
+        dispatchedAt: String(verifyOp.verification?.dispatchedAt || ""),
+        dispatchMutationTarget: String(
+          verifyOp.verification?.dispatchMutationTarget || ""
+        ),
+        retryCommandId: String(verifyOp.verification?.retryCommandId || "")
+      };
     }
 
     const detail =
       selectedExecutor ?
         await dependencies.getRunDetail(repo, runId, selectedExecutor)
       : await dependencies.getRunDetail(repo, runId);
+    if (!isCurrentVerificationRequest()) {
+      respondWithCurrentVerification();
+      return;
+    }
     const runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
     if (!detail) {
       respond({ state: "pending", runId, runUrl });
@@ -670,6 +748,10 @@ export async function handleVerifyStatus(
       selectedExecutor ?
         await dependencies.fetchRunLog(repo, runId, selectedExecutor)
       : await dependencies.fetchRunLog(repo, runId);
+    if (!isCurrentVerificationRequest()) {
+      respondWithCurrentVerification();
+      return;
+    }
     const lines = dependencies.extractErrorLines(log, 8);
     if (lines.length) errMsg += "\n" + lines.join("\n");
     const azureLoginLog = dependencies.extractGitHubActionsStepLog(
@@ -679,17 +761,28 @@ export async function handleVerifyStatus(
     // Distinct failure stages (OIDC enterprise-claim rejection vs. a successful
     // login with no visible subscription — issue #219), so at most one applies;
     // take the first match so the raw-error separator is never emitted twice.
-    const failureHelp =
-      dependencies.explainOidcEnterpriseClaim(azureLoginLog) ||
-      dependencies.explainNoSubscriptions(log);
+    const oidcHelp = dependencies.explainOidcEnterpriseClaim(azureLoginLog);
+    const noSubscriptionsHelp =
+      oidcHelp === "" ? dependencies.explainNoSubscriptions(log) : "";
+    const failureHelp = oidcHelp || noSubscriptionsHelp;
     if (failureHelp)
       errMsg = failureHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
     if (verifyOp && verifyOp.currentStage === dependencies.stageVerify) {
+      const failedAtAzureAccess = isAzureRbacVerificationFailure(
+        failed,
+        log || "",
+        noSubscriptionsHelp
+      );
       // Everything before verification succeeded and still exists, so this is
-      // partial rather than total failure.
+      // partial rather than total failure. Only a positively identified Azure
+      // access failure gets propagation copy; OIDC, workflow, and runner failures
+      // retain the generic verification classification.
       dependencies.finish(verifyOp, "failed_partial", {
         failure: {
-          code: "verify-run-failed",
+          code:
+            failedAtAzureAccess ?
+              "verify-run-rbac-failed"
+            : "verify-run-failed",
           stage: dependencies.stageVerify,
           message:
             "Credential verification failed. " +
@@ -709,6 +802,56 @@ export async function handleVerifyStatus(
     }
     respond({ state: "failed", runId, runUrl, error: errMsg });
   } catch (e) {
+    if (!isCurrentVerificationRequest()) {
+      respondWithCurrentVerification();
+      return;
+    }
+    const failedOperation: any = verificationRequest?.operation || null;
+    const failedExecutor = verificationRequest?.executor;
+    const failedLogin =
+      typeof failedOperation?.context?.githubLogin === "string" ?
+        failedOperation.context.githubLogin.trim()
+      : "";
+    if (
+      failedOperation &&
+      failedExecutor &&
+      dependencies.isSelectedGitHubAuthorizationError(e)
+    ) {
+      const account = failedLogin ? `@${failedLogin}` : "the selected account";
+      const message = `Radius could not use ${account} to monitor credential verification. Re-check that account and retry verification.`;
+      dependencies.addLegacyStep(
+        failedOperation,
+        `❌ Could not use ${account} to monitor credential verification.`
+      );
+      failedOperation.verification = {
+        ...(failedOperation.verification || {}),
+        accountUnavailablePhase: "monitor"
+      };
+      dependencies.finish(failedOperation, "failed_partial", {
+        failure: {
+          code: "verification-retry-github-account-unavailable",
+          stage: dependencies.stageVerify,
+          stepSeq: null,
+          message,
+          classification: "user-fixable",
+          evidence: dependencies.errorMessage(e)
+        }
+      });
+      await dependencies.persistBestEffort({
+        operation: failedOperation,
+        persist: () => dependencies.persistOperations(),
+        report: (diagnostic) =>
+          dependencies.reportOperationDiagnostic(diagnostic)
+      });
+      respond({
+        state: "failed",
+        terminal: true,
+        code: "verification-retry-github-account-unavailable",
+        runId: failedOperation?.verification?.runId || null,
+        error: message
+      });
+      return;
+    }
     respond({ state: "unknown", error: dependencies.errorMessage(e) });
   }
 }

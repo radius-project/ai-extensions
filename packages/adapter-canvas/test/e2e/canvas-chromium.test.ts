@@ -97,6 +97,75 @@ function bodyFor(canvas: CanvasHarness, pathName: string): unknown {
   )?.body;
 }
 
+async function routeDeployedPage(
+  page: Page,
+  deploymentStatus: () => string,
+  abandon?: (body: unknown, nonce: string) => void
+): Promise<void> {
+  await page.route("**/api/list-applications**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ applications: [{ name: "radius-app" }] })
+    });
+  });
+  await page.route("**/api/list-environments**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        environments: [
+          {
+            name: "fixture-environment",
+            provider: "azure",
+            status: "success"
+          }
+        ]
+      })
+    });
+  });
+  await page.route("**/api/list-deployments**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        deployments: [
+          {
+            app: "radius-app",
+            environment: "fixture-environment",
+            status: deploymentStatus()
+          }
+        ]
+      })
+    });
+  });
+  await page.route("**/api/deployed-graph**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ resources: [], mode: "greyed" })
+    });
+  });
+  await page.route("**/api/deploy-status**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ status: "pending", logTotal: 0 })
+    });
+  });
+  await page.route("**/api/abandon-deployment", async (route) => {
+    abandon?.(
+      route.request().postDataJSON(),
+      route.request().headers()["x-radius-mutation-nonce"] ?? ""
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ outcome: "abandoned" })
+    });
+  });
+}
+
 // Environment creation is a two-step wizard: step 1 picks the cloud credential
 // profile, step 2 holds the environment name and the GitHub identity block.
 // Step 2 is hidden until a profile is chosen, so any journey that asserts on
@@ -741,12 +810,15 @@ test.describe("Radius Canvas in Chromium", () => {
       `${canvas.baseUrl}/?page=environment&operationId=${result.operationId}`
     );
     // Resuming shows the durable server outcome, never a browser-cancellation
-    // story, even though the page that started it was torn down twice.
-    await expect(
-      page.getByRole("link", {
-        name: 'Creating environment "fixture-environment" failed.'
-      })
-    ).toBeVisible();
+    // story, even though the page that started it was torn down twice. The
+    // resumed panel is what narrates it: the top-nav chip defers to the inline
+    // panel whenever the panel is on screen, so asserting the chip here would
+    // be asserting that the panel failed to come back.
+    const resumedPanel = page.locator("#env-progress-panel");
+    await expect(resumedPanel).toBeVisible();
+    await expect(resumedPanel).toContainText(
+      'Creating environment "fixture-environment" failed.'
+    );
     await expect(page.locator("body")).not.toContainText("cancelled");
     await expect(page.locator("body")).not.toContainText("Cancelled");
     expect(bodyFor(canvas, "/api/operations")).toMatchObject({
@@ -757,6 +829,144 @@ test.describe("Radius Canvas in Chromium", () => {
       cluster: "fixture-cluster"
     });
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
+  });
+
+  test("retries restored verification through the selected account and exact run identity @safety", async ({
+    page,
+    canvas
+  }) => {
+    const operationId = await canvas.seedRestartedVerificationFailure();
+    const exactCreatedAt = new Date().toISOString();
+    const decoyCreatedAt = new Date(Date.now() + 1000).toISOString();
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      {
+        tool: "gh",
+        args: [
+          "run",
+          "list",
+          "--workflow=radius-verify-credentials.yml",
+          "--limit",
+          "10",
+          "--json",
+          "databaseId",
+          "--repo",
+          REPOSITORY
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: '[{"databaseId":40}]'
+      },
+      {
+        tool: "gh",
+        args: [
+          "workflow",
+          "run",
+          "radius-verify-credentials.yml",
+          "-f",
+          "environment=fixture-environment",
+          "-f",
+          `radius_operation=${operationId}`,
+          "--repo",
+          REPOSITORY,
+          "--ref",
+          WORKTREE_BRANCH
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: ""
+      },
+      {
+        tool: "gh",
+        args: [
+          "run",
+          "list",
+          "--workflow=radius-verify-credentials.yml",
+          "--limit",
+          "10",
+          "--json",
+          "databaseId,createdAt,displayTitle,event,headBranch",
+          "--repo",
+          REPOSITORY
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: JSON.stringify([
+          {
+            databaseId: 42,
+            createdAt: decoyCreatedAt,
+            displayTitle:
+              "Radius verify fixture-environment [another-operation]",
+            event: "workflow_dispatch",
+            headBranch: WORKTREE_BRANCH
+          },
+          {
+            databaseId: 41,
+            createdAt: exactCreatedAt,
+            displayTitle: `Radius verify fixture-environment [${operationId}]`,
+            event: "workflow_dispatch",
+            headBranch: WORKTREE_BRANCH
+          }
+        ])
+      },
+      {
+        tool: "gh",
+        args: [
+          "run",
+          "view",
+          "41",
+          "--json",
+          "status,conclusion,jobs",
+          "--repo",
+          REPOSITORY
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: JSON.stringify({
+          status: "completed",
+          conclusion: "success",
+          jobs: []
+        })
+      }
+    );
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "environment");
+
+    const retry = page.locator("#env-progress-command-retry-verification");
+    await expect(retry).toBeVisible();
+    await expect(retry).toHaveText("Retry verification");
+    await retry.click();
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "gh" &&
+            call.args[0] === "workflow" &&
+            call.args.includes(`radius_operation=${operationId}`)
+        )
+      )
+      .toBe(true);
+    await expect
+      .poll(async () => (await canvas.operationRecord(operationId))["state"], {
+        timeout: 15_000
+      })
+      .toBe("succeeded");
+
+    const record = await canvas.operationRecord(operationId);
+    expect(record["verification"]).toMatchObject({
+      baselineRunId: 40,
+      runId: "41",
+      runUrl: `https://github.com/${REPOSITORY}/actions/runs/41`,
+      operationMarker: operationId
+    });
+    expect(record["providerRecovery"]).toMatchObject({
+      mutations: [
+        expect.objectContaining({
+          kind: "github_workflow.dispatch_retry",
+          status: "confirmed",
+          providerIdempotencyKey: operationId
+        })
+      ]
+    });
+    await expect(page.locator("body")).toContainText("Environment created");
+    await expectNoWcagViolations(page);
   });
 
   test("sends the worktree branch the page selected when Deploy is activated @safety", async ({
@@ -1011,6 +1221,96 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect
       .poll(() => bodyFor(canvas, "/api/delete-deployment"))
       .toMatchObject({ environment: "fixture-environment" });
+  });
+
+  test("offers stop tracking only after teardown fails in Chromium @safety", async ({
+    page,
+    canvas
+  }) => {
+    let status = "success";
+    await routeDeployedPage(page, () => status);
+    await gotoCanvas(page, canvas, "deployed");
+
+    await expect(
+      page.getByRole("button", { name: "Delete Deployment" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop tracking deployment" })
+    ).toHaveCount(0);
+
+    status = "failed";
+    await page.reload();
+    await expect(
+      page.getByRole("button", { name: "Delete Deployment" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop tracking deployment" })
+    ).toHaveCount(0);
+
+    status = "delete-failed";
+    await page.reload();
+    await expect(
+      page.getByRole("button", { name: "Retry Delete" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop tracking deployment" })
+    ).toBeVisible();
+  });
+
+  test("confirms stop-tracking recovery by keyboard and sends the failed teardown identity @safety", async ({
+    page,
+    canvas
+  }) => {
+    const requests: Array<{ body: unknown; nonce: string }> = [];
+    await routeDeployedPage(
+      page,
+      () => "delete-failed",
+      (body, nonce) => {
+        requests.push({ body, nonce });
+      }
+    );
+    await gotoCanvas(page, canvas, "deployed");
+
+    const action = page.getByRole("button", {
+      name: "Stop tracking deployment"
+    });
+    await action.focus();
+    await page.keyboard.press("Enter");
+
+    const dialog = page.getByRole("dialog", {
+      name: "Stop Tracking Deployment"
+    });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("does not delete cloud resources");
+    const intent = page.getByRole("button", {
+      name: "I want to stop tracking this deployment"
+    });
+    await expect(intent).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toContainText(
+      "Resources created before the deployment failed may remain"
+    );
+    await page.keyboard.press("Enter");
+
+    const input = page.locator("#del-confirm-input");
+    await expect(input).toBeFocused();
+    await expectNoWcagViolations(page);
+    await page.keyboard.type("radius-app/fixture-environment");
+    await page.keyboard.press("Enter");
+
+    await expect.poll(() => requests).toHaveLength(1);
+    expect(requests[0].body).toEqual({
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      application: "radius-app"
+    });
+    expect(requests[0].nonce).not.toBe("");
+    await expect(page.locator("#deployed-inline-status")).toContainText(
+      "Cloud resources were not deleted"
+    );
+    await expect(page.locator("#deployed-delete-btn")).toHaveText(
+      "Deploy Application"
+    );
   });
 
   test("reveals the environment form by keyboard and returns focus to the reveal control", async ({

@@ -22,6 +22,7 @@ interface Harness {
   preflight: string | Error;
   validSlugs: string[];
   identityThrows?: Error;
+  identityOverrides?: Partial<GitHubIdentity>;
 }
 
 function identityFor(login: string): GitHubIdentity {
@@ -31,6 +32,9 @@ function identityFor(login: string): GitHubIdentity {
     mismatch: false,
     actingHasWorkflow: true,
     actingHasPackages: false,
+    packagesLogin: "octo",
+    packagesHasWrite: false,
+    packagesCredentialSource: "keyring",
     reason: `reason-${login}`,
     accounts: []
   };
@@ -75,7 +79,10 @@ function start(): Harness {
         if (harness.identityThrows) {
           return Promise.reject(harness.identityThrows);
         }
-        return Promise.resolve(identityFor(harness.login));
+        return Promise.resolve({
+          ...identityFor(harness.login),
+          ...(harness.identityOverrides ?? {})
+        });
       },
       resetGhIdentityCache: () => {
         harness.calls.push("reset");
@@ -266,6 +273,28 @@ describe("identity-profiles real-loopback HIT (RF-02)", () => {
     );
     expect(invalid.status).toBe(200);
     expect(harness.calls).toEqual(["identity->initial-login"]);
+  });
+
+  it("serves the resolved packages credential and an unresolved account selection verbatim", async () => {
+    // The dialog decides what guidance to show from these fields, so the route
+    // must pass through the resolved credential source so the dialog can give
+    // guidance that applies to the credential that will actually publish.
+    const harness = start();
+    harness.identityOverrides = {
+      packagesLogin: "tokuser",
+      packagesCredentialSource: "injected-token",
+      packagesHasWrite: false,
+      reason: "token-has-workflow"
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/github-identity`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      packagesCredentialSource: "injected-token",
+      packagesHasWrite: false,
+      reason: "token-has-workflow"
+    });
   });
 
   it("answers a failed identity resolution with 200 and an empty account list", async () => {

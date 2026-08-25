@@ -327,6 +327,11 @@ export class FakeDocument extends FakeEventTarget implements DomDocument {
     return element;
   }
 
+  /** Drop an element from the document, as a host page re-render would. */
+  remove(elementId: string): void {
+    this.elements.delete(elementId);
+  }
+
   getElementById(elementId: string): unknown {
     return this.elements.get(elementId) ?? null;
   }
@@ -479,7 +484,7 @@ export function createFakeClock(startMs = 0): FakeClock {
   return clock;
 }
 
-type NetworkHandler = (
+export type NetworkHandler = (
   init?: HttpRequestInit
 ) => HttpResponse | Promise<HttpResponse>;
 

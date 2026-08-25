@@ -33,6 +33,7 @@ export const OPERATION_ID = "operation-fixture-1";
 type ServerModule = typeof import("../../../src/server.js");
 type GhModule = typeof import("../../../src/gh.js");
 type SharedModule = typeof import("../../../src/shared.js");
+type OperationsModule = typeof import("../../../src/operations.js");
 
 interface RetryRemovalOptions {
   attempts?: number;
@@ -562,6 +563,18 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         stdout: `success\thttps://github.com/${REPOSITORY}/actions/runs/1`
       },
       {
+        // The deployed-page resolver reads only the latest status when it
+        // already carries the run URL.
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/deployments/dep-1/statuses?per_page=1`,
+          "--jq",
+          '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "") + "\\t" + (.[0].description // "")'
+        ],
+        stdout: `success\thttps://github.com/${REPOSITORY}/actions/runs/1\t`
+      },
+      {
         tool: "gh",
         args: [
           "api",
@@ -611,6 +624,15 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         writeFiles: [
           { path: "$BICEP", content: "fake-bicep", executable: true }
         ]
+      },
+      {
+        // buildGraphViaRad derives the bicepconfig `extensions.radius` pin from
+        // the release of the binary that will run the compile, so the fake CLI
+        // must report one: an unmodeled command exits 127, which would leave the
+        // reference underivable and fail the compile closed.
+        tool: "rad",
+        args: ["version", "--cli", "--output", "json"],
+        stdout: JSON.stringify({ version: "v0.60.0", bicep: "0.41.2" })
       },
       {
         tool: "rad",
@@ -809,6 +831,7 @@ export class CanvasHarness {
   private readonly serverModule: ServerModule;
   private readonly ghModule: GhModule;
   private readonly originalFetch: typeof fetch;
+  private readonly seededOperationIds = new Set<string>();
 
   private constructor(input: {
     page: Page;
@@ -1036,6 +1059,72 @@ export class CanvasHarness {
     await this.ghModule.primeGhIdentity().catch(() => undefined);
   }
 
+  async seedRestartedVerificationFailure(): Promise<string> {
+    const operationModule: OperationsModule =
+      await import("../../../src/operations.js");
+    const operation = operationModule.createOperation({
+      operationId: "op_chromium_verification",
+      provider: "azure",
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      stages: operationModule.buildStages({ includeIdentity: true }),
+      journey: { origin: "environments" }
+    });
+    operation.context = { githubLogin: "repo-user" };
+    operationModule.recordAzureApp(operation, {
+      state: "created",
+      appId: "fixture-app-id",
+      displayName: "radius-fixture"
+    });
+    operationModule.recordCommittedWorkflowFile(operation, {
+      path: ".github/workflows/radius-verify-credentials.yml",
+      mode: "default_branch",
+      branch: WORKTREE_BRANCH
+    });
+    operationModule.recordCommitState(operation, {
+      mode: "default_branch",
+      branch: WORKTREE_BRANCH,
+      baseBranch: WORKTREE_BRANCH
+    });
+    operationModule.enterStage(operation, operationModule.STAGE_VERIFY);
+    operation.verification = {
+      dispatchedAt: Date.now() - 1000,
+      workflow: "radius-verify-credentials.yml",
+      ref: WORKTREE_BRANCH,
+      environment: "fixture-environment",
+      event: "workflow_dispatch",
+      operationMarker: operation.operationId,
+      runId: "39",
+      runUrl: `https://github.com/${REPOSITORY}/actions/runs/39`
+    };
+    operationModule.finish(operation, "failed_partial", {
+      failure: {
+        code: "verify-run-failed",
+        stage: operationModule.STAGE_VERIFY,
+        message: "Credential verification failed.",
+        classification: "user-fixable",
+        evidence: "The controlled verification run failed."
+      }
+    });
+
+    const restored = operationModule.fromPersistedOperation(
+      JSON.parse(JSON.stringify(operation))
+    );
+    operationModule.reconcileRestoredOperation(restored);
+    operationModule.operations.put(restored);
+    await operationModule.operations.persist();
+    this.seededOperationIds.add(restored.operationId);
+    return restored.operationId;
+  }
+
+  async operationRecord(operationId: string): Promise<Record<string, unknown>> {
+    const operationModule: OperationsModule =
+      await import("../../../src/operations.js");
+    return structuredClone(
+      operationModule.operations.get(operationId) as Record<string, unknown>
+    );
+  }
+
   // Replaces the graph the fake `rad app graph` writes, for a test that needs a
   // different topology than the shared fixture. Accepts either raw `rad` JSON
   // text or the parsed object.
@@ -1148,6 +1237,15 @@ export class CanvasHarness {
         }, 1000).unref?.();
       });
     }
+    await captureCleanupError(errors, async () => {
+      const operationModule: OperationsModule =
+        await import("../../../src/operations.js");
+      for (const operationId of this.seededOperationIds) {
+        operationModule.operations.delete(operationId);
+      }
+      this.seededOperationIds.clear();
+      await operationModule.operations.persist();
+    });
     await captureCleanupError(errors, () => closePage(this.page));
     await captureCleanupError(errors, () =>
       stopHarnessServer(this.entry, this.instanceId, this.serverModule)

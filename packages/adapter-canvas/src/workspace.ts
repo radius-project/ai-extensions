@@ -478,6 +478,50 @@ export async function workspaceSourceChangedSince(
   return result.stdout.length > 0 || untracked.stdout.length > 0;
 }
 
+// Whether the existing app model could be recovered if we overwrote it.
+//
+// Regeneration writes the working tree and never commits, so for a file that is
+// tracked and clean the overwrite is an ordinary uncommitted diff the user can
+// inspect and undo with `git checkout --`. Nothing is lost. For a file that is
+// untracked, or that already carries uncommitted changes, no copy exists
+// anywhere and the overwrite is permanent.
+//
+// This is the question worth asking before replacing a model we cannot prove we
+// generated. "Was it edited" is unanswerable without an origin record, but "can
+// they get it back" is answerable, and it is the one that decides whether
+// regenerating can do harm.
+//
+// `git status --porcelain` prints nothing for a tracked, unmodified path, `??`
+// for an untracked one, and a status code for a modified one. The caller only
+// reaches here for a model it already read, so empty output means tracked and
+// clean rather than absent. Returns undefined when git cannot answer, which
+// callers must treat as "not shown to be recoverable" rather than as safe.
+//
+// `--ignored` is load-bearing. Without it an untracked model that a gitignore
+// rule matches prints nothing at all, which is indistinguishable from tracked
+// and clean, so the file git has never seen would read as safe to overwrite.
+// That is the exact case this guard exists to catch. With the flag it prints
+// `!!` instead. A model that is force-added and committed is no longer ignored,
+// so this does not manufacture a prompt for one that is genuinely recoverable.
+//
+// Both supported model paths are asked about at once, since the caller does not
+// track which layout the model came from. A stray untracked file at the other
+// path makes this report false, which errs toward asking rather than replacing.
+export async function workspaceModelRecoverable(
+  workspacePath: string | null | undefined
+): Promise<boolean | undefined> {
+  if (!workspacePath) return undefined;
+  const result = await runGitResult(workspacePath, [
+    "status",
+    "--porcelain",
+    "--ignored",
+    "--",
+    ...WORKSPACE_BICEP_PATHS
+  ]);
+  if (!result.ok) return undefined;
+  return result.stdout.length === 0;
+}
+
 // Absolute path to the app-graph.json that should sit next to the given
 // repo-relative app.bicep path inside the local workspace (e.g.
 // `.radius/app.bicep` -> `.radius/app-graph.json`, root `app.bicep` ->

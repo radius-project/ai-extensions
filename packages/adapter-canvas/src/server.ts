@@ -55,6 +55,7 @@ import {
   ghApiJson,
   getGitHubIdentity,
   getGhPackageCredentials,
+  ghCommandCredentialSource,
   resetGhIdentityCache,
   createSelectedGhExecutor,
   getActiveKeyringLogin,
@@ -66,7 +67,11 @@ import {
   selectedCreatePullRequest,
   selectedFetchFileFromRepo
 } from "./gh.js";
-import type { CliOptions, SelectedGhExecutor } from "./gh.js";
+import type {
+  CliOptions,
+  GitHubIdentityAccount,
+  SelectedGhExecutor
+} from "./gh.js";
 import {
   buildAppDeleteArgs,
   isAzResourceNotFound,
@@ -126,9 +131,16 @@ import {
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
+  promoteCreatedGitHubEnvironment,
   recordCommitState,
   recordCommittedWorkflowFile,
   recordCleanupState,
+  recordCleanupDeletion,
+  reconcileRestoredOperation,
+  cleanupArtifactIdentity,
+  cleanupTargetKey,
+  formatGitHubEnvironmentLabel,
+  hasReachedSetupCommitPoint,
   projectCleanupSummary,
   finish,
   finishSucceeded,
@@ -136,10 +148,28 @@ import {
   requireInput,
   resumeAfterInput,
   setExecutionActive,
+  announceOperationTerminal,
+  shouldStop,
+  stopAtBoundary,
+  setCommandState,
+  providerMutationId,
+  providerMutationRecord,
+  optionalIdentityString,
+  provenOwnedCleanupTargets,
+  providerRecoveryManualGuidance,
+  settleProviderMutation,
+  unresolvedProviderMutations,
+  workflowRollbackCommitState,
+  workflowRollbackTargets,
   INPUT_REQUIRED_STATE,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
   STAGE_VERIFY
+} from "./operations.js";
+import type {
+  SetupCleanupArtifactType,
+  SetupCleanupOutcome,
+  SetupCleanupResult
 } from "./operations.js";
 import {
   radArtifactsDirForSelection,
@@ -169,7 +199,10 @@ import {
   extractRadDeployError,
   explainOidcEnterpriseClaim,
   explainNoSubscriptions,
-  explainRepoAccessForEnvSetup
+  explainRepoAccessForEnvSetup,
+  isGitHubRateLimitError,
+  isSelectedGhAuthorizationError,
+  selectedCommandAuthorizationError
 } from "./deploy.js";
 import {
   applyDeployMessages,
@@ -196,6 +229,21 @@ import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
+import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
+import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
+import {
+  CLEANUP_COMMANDS,
+  cleanupRemovedGitHubEnvironment
+} from "./server/services/cleanup-commands.js";
+import { createEnvironmentListingCache } from "./server/services/environment-listing-cache.js";
+import type { CleanupCommandKind } from "./server/services/cleanup-commands.js";
+import { runWorkflowRollback } from "./server/services/workflow-rollback.js";
+import type { WorkflowRollbackPorts } from "./server/services/workflow-rollback.js";
+import {
+  createWorkflowRollbackPorts,
+  createSelectedWorkflowRollbackCommand
+} from "./server/services/workflow-rollback-ports.js";
+import type { WorkflowRollbackCommand } from "./server/services/workflow-rollback-ports.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
@@ -226,17 +274,78 @@ import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
+import { toGhCommandResult } from "./server/services/gh-command-result.js";
+import { executeRecoverableMutation } from "./server/services/provider-mutation-recovery.js";
+import {
+  pendingBranchDelete,
+  reconcileRecoveredBranchDelete
+} from "./server/services/recovered-branch-delete.js";
+import {
+  branchRefListingArgs,
+  branchRefReadArgs,
+  isNotFoundResponse
+} from "./server/services/branch-absence.js";
+import {
+  parseEnvironmentProviderId,
+  selectedEnvironmentReader
+} from "./server/services/github-environment.js";
+
+export { selectedEnvironmentReader };
+import {
+  CleanupJournalPersistenceError,
+  type CleanupIdentityVerdict,
+  cleanupDeletionKind,
+  executeJournaledCleanupDeletion,
+  isCleanupDeletionKind,
+  type CleanupDeletionCommandResult,
+  type CleanupDeletionOutcome,
+  type ExactIdentityRead
+} from "./server/services/cleanup-deletion-journal.js";
+import type { ResourceAbsenceProof } from "./server/services/resource-absence.js";
+import {
+  ENVIRONMENT_PAGE_SIZE,
+  environmentListingArgs,
+  environmentNameFromApiPath,
+  environmentsApiPath,
+  proveEnvironmentAbsent
+} from "./server/services/environment-absence.js";
+import {
+  readRecoveredVerificationIdentity,
+  recoverVerificationRun,
+  verificationActionsUrl
+} from "./server/services/recovered-verification-run.js";
+import {
+  planRecoveredCleanup,
+  planRecoveredSchedule
+} from "./server/services/recovered-cleanup-command.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
+import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
+import { resolveEnvironmentDeployment } from "./server/services/deployment-resolver.js";
+import type { DeploymentRow } from "./server/services/deployment-resolver.js";
 import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
+import {
+  monitorVerificationWithSelectedAccount,
+  verificationAcquisitionExpiredCopy,
+  verificationTrackingDeadline
+} from "./server/services/verification-retry.js";
+import {
+  resolveAcknowledgedVerificationRun,
+  runVerificationRetry as runSelectedVerificationRetry
+} from "./server/services/verification-retry-runner.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
+export { resolveDeployStatus } from "./server/services/deployment-resolver.js";
+export { resolveAcknowledgedVerificationRun };
 
 interface CommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
+  // Set when the runner's timeout killed the child. The command's outcome is
+  // then unknown, so no credential fallback may re-run it.
+  timedOut?: boolean;
 }
 
 export async function persistMutationCheckpoint({
@@ -252,7 +361,6 @@ export async function persistMutationCheckpoint({
 }): Promise<boolean> {
   try {
     await persist();
-    return true;
   } catch (error) {
     report?.({
       code: "operation-store-write-failed",
@@ -267,6 +375,21 @@ export async function persistMutationCheckpoint({
     );
     return false;
   }
+  // Every provider write in the setup passes through here on its way to the
+  // next one, which makes this the one place that can guarantee reconciliation's
+  // verdict is honored. Once recovery has decided the interrupted attempt must
+  // be undone, continuing forward would add resources to the set about to be
+  // deleted — and each one added after the decision is one the rollback's
+  // selection never learned about.
+  if (operation?.providerRecovery?.state === "rollback_pending") {
+    await fail(
+      409,
+      "Radius reconciled the interrupted provider request and must roll back before making any further provider changes.",
+      "provider-rollback-pending"
+    );
+    return false;
+  }
+  return true;
 }
 
 export async function persistBestEffort({
@@ -290,6 +413,43 @@ export async function persistBestEffort({
   }
 }
 
+/**
+ * Honor a recorded stop at a named safe boundary between remote mutations.
+ *
+ * Called before a mutation begins and again once its provenance is saved, never
+ * while an Azure CLI, GitHub CLI, or HTTP call is in flight. Radius does not
+ * kill a running process: it lets the current write finish, records what it did,
+ * and stops before the next one. Returns true when the caller may continue.
+ */
+export async function guardStopBoundary({
+  operation,
+  boundary,
+  persist,
+  report,
+  respond
+}: {
+  operation: any;
+  boundary: string;
+  persist: () => Promise<void>;
+  report?: (diagnostic: { code: string; message: string }) => void;
+  respond: (status: number, body: Record<string, unknown>) => void;
+}): Promise<boolean> {
+  if (!shouldStop(operation)) return true;
+  // The terminal announcement waits for the durable write, so a cancellation
+  // that failed to save is never reported as a finished setup.
+  stopAtBoundary(operation, boundary, { announce: false });
+  const saved = await persistBestEffort({ operation, persist, report });
+  if (saved) announceOperationTerminal(operation);
+  respond(200, {
+    cancelled: true,
+    code: "operation-stopped",
+    boundary,
+    operationId: operation.operationId,
+    operation: toClientView(operation)
+  });
+  return false;
+}
+
 interface ChildProcessInput {
   stdin: { end(): unknown } | null;
 }
@@ -309,11 +469,7 @@ function runCliCommand(
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(cmd, args, { timeout }, (err, stdout, stderr) => {
-      resolve({
-        code: err ? err.code || 1 : 0,
-        stdout: stdout || "",
-        stderr: stderr || ""
-      });
+      resolve(toGhCommandResult(err, stdout, stderr));
     });
     endChildInput(child);
   });
@@ -470,31 +626,6 @@ function canvasGraphResources(values: unknown[]): CanvasGraphResource[] {
   });
 }
 
-interface DeploymentRecord {
-  id: string;
-  state: string;
-  runUrl: string;
-  isDeploy: boolean;
-  isDelete: boolean;
-  runStatus: string;
-  runConclusion: string;
-}
-
-interface DeploymentRow {
-  app: string;
-  environment: string;
-  provider: string;
-  status: string;
-  deploymentId: string;
-  runUrl: string;
-}
-
-interface DeployStatusRecord {
-  runConclusion?: string;
-  runStatus?: string;
-  state?: string;
-}
-
 // Composition root for the migrated `liveness-source` family. The handlers
 // receive only the three seams they use; the open handler is read through a
 // getter so the SDK entry can still register it after construction.
@@ -505,17 +636,29 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
   toSafeRepoRelPath
 });
 
+// Server-owned work is scheduled on the instance that received the request, so
+// an instance that is gone reports a miss instead of silently dropping accepted
+// work. Every route that schedules resolves its runner through here.
+function resolveInstanceRunner(
+  instanceId: string,
+  operationId: string
+): ReturnType<typeof createInstanceRequestCoordinator> | null {
+  const coordinator = instanceRequestCoordinators.get(instanceId);
+  if (!coordinator) {
+    console.error(
+      `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operationId}.`
+    );
+    return null;
+  }
+  return coordinator;
+}
+
 function scheduleEnvironmentOperationForInstance(
   instanceId: string,
   operation: { operationId: string }
 ): boolean {
-  const coordinator = instanceRequestCoordinators.get(instanceId);
-  if (!coordinator) {
-    console.error(
-      `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operation.operationId}.`
-    );
-    return false;
-  }
+  const coordinator = resolveInstanceRunner(instanceId, operation.operationId);
+  if (!coordinator) return false;
   coordinator.scheduleEnvironmentOperation(operation);
   return true;
 }
@@ -538,6 +681,7 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     buildStages,
     createOperation,
     claimSelectionHandle: (input) => githubSelectionHandles.claim(input),
+    startConflict: (repo) => operations.startConflict(repo),
     startOperation: (op) => operations.start(op),
     persistOperations: () => operations.persist(),
     finish,
@@ -559,6 +703,50 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
   }
 );
 
+// Composition root for the cooperative controls in the same `operations-status`
+// family: stop, continue, rollback, and the setup, verification, and cleanup
+// retries.
+//
+// Eligibility, command identity, and the retry snapshot are imported directly by
+// the route module from `operations.ts`, which is independently tested; the
+// merge proof stays in its own service with a single GitHub port. What is
+// injected here is the genuine I/O the routes cannot decide alone.
+const operationsControlRoutes = createOperationsControlRoutes({
+  get: (operationId) => operations.get(operationId),
+  acquireForRetry: (op) => operations.acquireForRetry(op),
+  persistOperations: () => operations.persist(),
+  checkPullRequestMerge: (op, pullRequestUrl) =>
+    checkSetupPullRequestMergeForOperation(op, pullRequestUrl, {
+      createExecutor: (login) =>
+        githubAccountCoordinator.createReadOnlyExecutor(login),
+      fetchJson: async (executor, apiPath) => {
+        const result = await selectedGhApiJson(executor, apiPath);
+        return { ok: result.ok, json: result.json, error: result.stderr };
+      },
+      errorMessage
+    }),
+  schedule: ({ kind, instanceId, operation, commandId }) => {
+    const coordinator = resolveInstanceRunner(
+      instanceId,
+      operation.operationId
+    );
+    if (!coordinator) return false;
+    if (kind === "setup_continuation") {
+      coordinator.scheduleEnvironmentOperation(operation);
+    } else {
+      coordinator.scheduleCommandTask(kind, operation, commandId);
+    }
+    return true;
+  },
+  // The environments picker reads a repo-scoped cached listing, so an exit that
+  // closes a setup has to drop it here: the browser reloads the table straight
+  // after, and a cached payload would answer with the environment the abandoned
+  // attempt left behind.
+  invalidateEnvironmentListing: (repo) => {
+    envListCache.invalidate(repo);
+  }
+});
+
 // Composition root for the migrated `repositories` family. Three seams: the
 // subprocess runner, a reader for the live instance state the branch cache is
 // written to, and the workspace-repo predicate, which stays defined here and is
@@ -573,13 +761,15 @@ const repositoriesRoutes = createRepositoriesRoutes({
 });
 
 // Composition root for the migrated `deployments` family: the read routes, the
-// destructive POST /api/delete-deployment, and POST /api/deploy, whose
-// multi-stage runtime behavior lives in the deploy services composed below.
+// destructive POST /api/delete-deployment, GitHub-only
+// POST /api/abandon-deployment, and POST /api/deploy, whose multi-stage runtime
+// behavior lives in the deploy services composed below.
 //
 // The listing cache, its TTL and the deploy service are read through getters
 // because all three are declared further down the module and would otherwise be
 // in the temporal dead zone when this object is built at import time.
 const deploymentsRoutes = createDeploymentsRoutes({
+  isValidRepoSlug,
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   triggerDeployRepairHandoff,
   triggerDeployFailureNotice,
@@ -611,11 +801,7 @@ const deploymentsRoutes = createDeploymentsRoutes({
       const opts: CliOptions = { timeout };
       if (extraEnv) opts.env = extraEnv;
       cliExec("gh", args, opts, (err, stdout, stderr) => {
-        resolve({
-          code: err ? err.code || 1 : 0,
-          stdout: (stdout || "").trim(),
-          stderr: stderr || ""
-        });
+        resolve(toGhCommandResult(err, stdout, stderr, { trimStdout: true }));
       });
     }),
   readProcessEnv: () => process.env,
@@ -625,6 +811,9 @@ const deploymentsRoutes = createDeploymentsRoutes({
   // file names and the instance container they narrow over exist.
   get deployRequest() {
     return deployRequestService;
+  },
+  get abandonment() {
+    return deploymentAbandonmentService;
   }
 });
 
@@ -1001,8 +1190,9 @@ const environmentsRoutes = createEnvironmentsRoutes({
     envListCache.set(repo, entry);
   },
   envListCacheDelete: (repo) => {
-    envListCache.delete(repo);
+    envListCache.invalidate(repo);
   },
+  envListCacheGeneration: (repo) => envListCache.generation(repo),
   envListTtlMs: ENV_LIST_TTL_MS,
   kickoffWorkflowSync: (repo, managedEnvironments, workingBranch) =>
     kickoffWorkflowSync(repo, managedEnvironments, workingBranch),
@@ -1010,9 +1200,37 @@ const environmentsRoutes = createEnvironmentsRoutes({
   getOperation: (operationId) => operations.get(operationId),
   getSelectedGitHubExecutor: (operationId) =>
     selectedGitHubExecutorsByOperation.get(operationId),
+  isSelectedGitHubAuthorizationError: (error) =>
+    isSelectedGhAuthorizationError(error),
   hasCompleteVerificationIdentity,
-  findWorkflowRun: (repo, workflowFile, sinceMs, knownId, executor) =>
-    findWorkflowRun(repo, workflowFile, sinceMs, knownId, executor),
+  findWorkflowRun: (
+    repo,
+    workflowFile,
+    sinceMs,
+    knownId,
+    executor,
+    afterRunId
+  ) =>
+    findWorkflowRun(repo, workflowFile, sinceMs, knownId, executor, afterRunId),
+  settleVerificationDispatchRecovery: (operation, runId) => {
+    const op = operation as any;
+    const verification = op?.verification;
+    if (!verification) return;
+    const target = `${op.repo}:${verification.workflow}:${verification.ref}:${verification.environment}`;
+    const mutation = providerMutationRecord(
+      op,
+      "github_workflow.dispatch",
+      target
+    );
+    if (mutation) {
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "confirmed",
+        `Adopted verification run ${runId} after the saved pre-dispatch baseline.`
+      );
+    }
+  },
   getRunDetail: (repo, runId, executor) => getRunDetail(repo, runId, executor),
   fetchRunLog: (repo, runId, executor) => fetchRunLog(repo, runId, executor),
   extractErrorLines: (logText, max) => extractErrorLines(logText, max),
@@ -1050,6 +1268,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   isValidRepoSlug,
   getOperation: (operationId) => operations.get(operationId),
   isStale: (operation) => isStale(operation),
+  isTerminalState: (state) => isTerminalState(state),
   createOperation,
   buildStages,
   startOperation: (operation) => operations.start(operation),
@@ -1071,6 +1290,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
     finalizeSetupFailure(operation, input as never),
   persistMutationCheckpoint,
   persistBestEffort,
+  guardStopBoundary,
   runAzCommand: (args) => runCliCommand("az", args),
   preflightRepoAdmin: (repo, executor) => preflightRepoAdmin(repo, executor),
   preflightGhcrPackageWriteAccess: (executor) =>
@@ -1125,8 +1345,10 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   recordGitHubEnvironment: (operation, patch) => {
     recordGitHubEnvironment(operation, patch);
   },
+  promoteCreatedGitHubEnvironment: (operation, identity) =>
+    promoteCreatedGitHubEnvironment(operation, identity),
   envListCacheDelete: (repo) => {
-    envListCache.delete(repo);
+    envListCache.invalidate(repo);
   },
   ociStateBackend: OCI_STATE_BACKEND,
   defaultStateArchive: DEFAULT_STATE_ARCHIVE,
@@ -1177,6 +1399,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
 const serverRoutes = createServerRouteTable({
   ...livenessSourceRoutes,
   ...operationsStatusRoutes,
+  ...operationsControlRoutes,
   ...repositoriesRoutes,
   ...deploymentsRoutes,
   ...azureDiscoveryRoutes,
@@ -1226,7 +1449,7 @@ const canvasServer = createCanvasServer(
       const coordinator = instanceRequestCoordinators.get(instanceId);
       if (coordinator) {
         entry.state.browserMutationNonce = coordinator.browserMutationNonce;
-        coordinator.startRecoveredVerificationTasks();
+        coordinator.startRecoveredTasks();
       }
     },
     onStopped: (instanceId) => {
@@ -1241,12 +1464,37 @@ const canvasServer = createCanvasServer(
 export const servers = canvasServer.instances;
 
 let environmentOperationTestRunner:
-  ((operationId: string) => Promise<void>) | null = null;
+  ((operationId: string, commandId?: string) => Promise<void>) | null = null;
 
 export function setEnvironmentOperationTestRunner(
-  runner: ((operationId: string) => Promise<void>) | null
+  runner: ((operationId: string, commandId?: string) => Promise<void>) | null
 ): void {
   environmentOperationTestRunner = runner;
+}
+
+export function reopenProviderReconciliation(operation: any): boolean {
+  if (!operation || unresolvedProviderMutations(operation).length === 0) {
+    return false;
+  }
+
+  reconcileRestoredOperation(operation);
+  setExecutionActive(operation, false);
+  return true;
+}
+
+export function cleanupProviderRecoveryDisposition(operation: any): {
+  blockers: ReturnType<typeof unresolvedProviderMutations>;
+  mayStartDestructiveCleanup: boolean;
+  mayCompleteCleanup: boolean;
+} {
+  const blockers = unresolvedProviderMutations(operation);
+  return {
+    blockers,
+    mayStartDestructiveCleanup: blockers.every(
+      (mutation) => mutation.kind === "github_branch.delete"
+    ),
+    mayCompleteCleanup: blockers.length === 0
+  };
 }
 
 const activeEnvironmentTasks = new Map<string, Set<string>>();
@@ -1421,8 +1669,12 @@ function cachedDeployStatusReader(
 }
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
-// and deploy pages snappy. Invalidated on environment creation.
-const envListCache = new Map<string, CachedPayload>();
+// and deploy pages snappy. Invalidated on environment creation, on an explicit
+// environment delete, and by the rollback and exit passes that remove the
+// environment a setup created. Eviction goes through `invalidate`, which also
+// makes any listing already in flight for that repository unable to cache what
+// it read — see `server/services/environment-listing-cache.ts`.
+const envListCache = createEnvironmentListingCache();
 
 // Short-lived cache for the /api/list-deployments listing. The listing fans out
 // into many per-record `gh api` calls, so caching keeps the deploy page snappy
@@ -1453,7 +1705,7 @@ export function resetListingCaches(
 export interface DeploymentDispatchReservation {
   repo: string;
   environment: string;
-  kind: "deploy" | "delete";
+  kind: "deploy" | "delete" | "abandon";
   expiresAt: number;
   attemptId?: string;
 }
@@ -2300,11 +2552,7 @@ function runGhForDeploy(
       args,
       { timeout: 30000, ...(options.env ? { env: options.env } : {}) },
       (err, stdout, stderr) => {
-        resolve({
-          code: err ? err.code || 1 : 0,
-          stdout: stdout || "",
-          stderr: stderr || ""
-        });
+        resolve(toGhCommandResult(err, stdout, stderr));
       }
     );
   });
@@ -2323,11 +2571,7 @@ function runGhWithStdinForDeploy(
       args,
       { timeout: 30000, ...(options.env ? { env: options.env } : {}) },
       (err, stdout, stderr) => {
-        resolve({
-          code: err ? err.code || 1 : 0,
-          stdout: stdout || "",
-          stderr: stderr || ""
-        });
+        resolve(toGhCommandResult(err, stdout, stderr));
       }
     );
     if (stdin !== undefined) child.stdin?.end(stdin);
@@ -2391,6 +2635,7 @@ const deployDispatchService = createDeployDispatchService({
   },
   runGitHubJson: (apiPath) => runGitHubJsonRequest(apiPath),
   readProcessEnv: () => process.env,
+  ghCredentialSource: ghCommandCredentialSource,
   fetchFileForSelection: (entry, repo, branch, repoPath) =>
     fetchFileForSelection(entry as CanvasServerEntry, repo, branch, repoPath),
   appParams,
@@ -2476,6 +2721,24 @@ const deployRequestService = createDeployRequestService({
   errorMessage
 });
 
+const deploymentAbandonmentService = createDeploymentAbandonmentService({
+  isValidRepoSlug,
+  readInstanceState: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.state,
+  activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+  localDeploymentBlocksMutation: (state) =>
+    localDeploymentBlocksMutation(state),
+  reserveDeploymentMutation: (state, reservation) =>
+    reserveDeploymentMutation(state, reservation),
+  releaseDeploymentMutation,
+  deploymentStatusBlocksMutation,
+  resolveEnvDeployment,
+  ghOrThrow: (args) => ghOrThrow(args),
+  invalidateDeployListCache: (repo) => {
+    deployListCache.delete(repo);
+  }
+});
+
 // gh runner that REJECTS on failure, so callers can fail closed instead of
 // silently treating a GitHub outage or timeout as "no data". Used by the
 // deployment-resolution paths where an empty result must not be mistaken for a
@@ -2486,6 +2749,154 @@ function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
       if (err) reject(err);
       else resolve((stdout || "").trim());
     });
+  });
+}
+
+export function resolveGitHubEnvironmentCreateState(
+  result: Partial<CommandResult> | null | undefined
+): "created_candidate" | "reused" | null {
+  if (!result) return null;
+  if (result.code === 0 || result.code === "0") return "reused";
+  const detail = `${result.stderr || ""}\n${result.stdout || ""}`;
+  return /HTTP 404|Not Found|404\b/i.test(detail) ? "created_candidate" : null;
+}
+
+export interface CleanupGitHubContext {
+  rollbackCommand: WorkflowRollbackCommand;
+  deleteEnvironment(args: string[]): Promise<void>;
+  /** Reads an exact resource back through the same selected account. */
+  readEnvironment(args: string[]): Promise<CommandResult>;
+}
+
+export async function resolveCleanupGitHubContext({
+  targets,
+  selectedLogin,
+  createExecutor = createSelectedGhExecutor,
+  formatError = errorMessage
+}: {
+  targets: readonly { artifactType: string }[];
+  selectedLogin: string;
+  createExecutor?: (login: string) => Promise<SelectedGhExecutor>;
+  formatError?: (error: unknown) => string;
+}): Promise<CleanupGitHubContext> {
+  const needsGitHub = targets.some(
+    (entry) =>
+      entry.artifactType === "workflow_file" ||
+      entry.artifactType === "github_environment"
+  );
+  let executor: SelectedGhExecutor | null = null;
+  let unavailable = "";
+  if (needsGitHub) {
+    if (!selectedLogin) {
+      unavailable =
+        "The operation record does not name the GitHub account that created these artifacts.";
+    } else {
+      try {
+        executor = await createExecutor(selectedLogin);
+        await executor.verifyIdentity();
+      } catch (error) {
+        unavailable = formatError(error);
+      }
+    }
+  }
+  const failure = unavailable || "The selected GitHub account is unavailable.";
+  return {
+    rollbackCommand:
+      executor ?
+        createSelectedWorkflowRollbackCommand(executor)
+      : async () => ({
+          ok: false,
+          status: null,
+          stdout: "",
+          stderr: failure
+        }),
+    readEnvironment:
+      executor ?
+        (args) => executor.run(args, { timeout: 12000 })
+      : async () => ({ code: 1, stdout: "", stderr: failure }),
+    deleteEnvironment:
+      executor ?
+        async (args) => {
+          const deleted = await executor.run(args, { timeout: 20000 });
+          if (deleted.code === 0 || deleted.code === "0") return;
+          const detail = (deleted.stderr || deleted.stdout || "").trim();
+          if (!deleted.timedOut) {
+            throw new Error(
+              detail || "Could not delete the GitHub environment."
+            );
+          }
+          const path = args.at(-1) || "";
+          const reread = await executor.run(["api", path], { timeout: 12000 });
+          if (reread.code === 0 || reread.code === "0") {
+            throw new Error(
+              "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. The GitHub environment identity is still present, and deleting it by name again could remove a replacement resource."
+            );
+          }
+          if (
+            /(?:HTTP\s+404|\bNot Found\b)/i.test(
+              `${reread.stderr}\n${reread.stdout}`
+            )
+          ) {
+            // GitHub answers 404 both for an environment that is gone and for
+            // one this token is not allowed to see, and it decides that per
+            // resource: reading the repository proves nothing about the Actions
+            // environments API. So the corroborating read is the environments
+            // listing itself, read to its end by the same executor, and absence
+            // only means absence when the whole listing came back without it.
+            const proof = await proveEnvironmentAbsentAt(path, (args) =>
+              executor.run(args, { timeout: 12000 })
+            );
+            if (proof.state === "absent") return;
+            throw new Error(
+              "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. " +
+                proof.detail
+            );
+          }
+          throw new Error(
+            "Outcome unknown after provider timeout; Radius will not repeat this delete blindly. GitHub environment state could not be read safely."
+          );
+        }
+      : async () => {
+          throw new Error(failure);
+        }
+  };
+}
+export {
+  ENVIRONMENT_PAGE_SIZE,
+  environmentsApiPath,
+  environmentNameFromApiPath
+};
+
+/**
+ * Prove the environment an API path names absent, through the same account.
+ *
+ * Shared by the timed-out delete and the journal's reconcile so the two cannot
+ * disagree: neither may read a bare 404 from the environment endpoint as
+ * absence, because GitHub returns that for a hidden environment too.
+ */
+async function proveEnvironmentAbsentAt(
+  environmentApiPath: string,
+  run: (args: string[]) => Promise<CommandResult>,
+  recordedProviderId?: string | null
+): Promise<ResourceAbsenceProof> {
+  const name = environmentNameFromApiPath(environmentApiPath);
+  const listingPath = environmentsApiPath(environmentApiPath);
+  if (!name || !listingPath) {
+    return {
+      state: "unknown",
+      detail:
+        "Radius could not derive the environments listing for the path it deleted through."
+    };
+  }
+  return proveEnvironmentAbsent({
+    repo: listingPath.replace(/^\/repos\//, "").replace(/\/environments$/, ""),
+    name,
+    recordedProviderId,
+    ports: {
+      listEnvironments: (page) =>
+        run(environmentListingArgs(listingPath, page)),
+      readEnvironment: () => run(["api", environmentApiPath])
+    }
   });
 }
 
@@ -2511,22 +2922,37 @@ export async function deleteNewlyCreatedGitHubEnvironment(
 }
 
 function buildRoleAssignmentDeleteArgs({
+  assignmentId,
   objectId,
   role,
   scope
 }: {
+  assignmentId?: string;
   objectId: string;
   role: string;
   scope: string;
 }): string[] {
+  if (assignmentId) {
+    const assignmentResourceId = `${scope.replace(
+      /\/+$/,
+      ""
+    )}/providers/Microsoft.Authorization/roleAssignments/${assignmentId}`;
+    return [
+      "role",
+      "assignment",
+      "delete",
+      "--ids",
+      assignmentResourceId,
+      "--output",
+      "none"
+    ];
+  }
   return [
     "role",
     "assignment",
     "delete",
     "--assignee-object-id",
     objectId,
-    "--assignee-principal-type",
-    "ServicePrincipal",
     "--role",
     role,
     "--scope",
@@ -2565,6 +2991,14 @@ function isAzureCleanupNotFound(
 ): boolean {
   const detail = `${result?.stderr || ""}\n${result?.stdout || ""}`;
   if (artifactType === "role_assignment") {
+    if (result?.code === 0 || result?.code === "0") {
+      try {
+        const matches = JSON.parse(String(result.stdout || ""));
+        if (Array.isArray(matches) && matches.length === 0) return true;
+      } catch {
+        // Fall through to the provider's diagnostic text.
+      }
+    }
     return /No matched assignments were found to delete|No matching role assignments were found|The role assignment does not exist/i.test(
       detail
     );
@@ -2593,11 +3027,45 @@ function cleanupTargetLabel(
   return String(artifact.appId || "");
 }
 
+/**
+ * Find or create the Service Principal for an App Registration, and say which
+ * of the two actually happened.
+ *
+ * Three outcomes, deliberately not two:
+ *
+ *   reused            — the lookup that runs *before* any create found it, so
+ *                       it existed independently of this attempt.
+ *   created           — the lookup found nothing and `az ad sp create`
+ *                       succeeded, so this attempt made it and may remove it.
+ *   created_candidate — the lookup found nothing, the create's outcome could
+ *                       not be established, and a later lookup found a
+ *                       principal anyway. Radius very likely created it, but
+ *                       "very likely" is not a licence to delete, and calling
+ *                       it `reused` would claim something provably false: it
+ *                       was absent moments ago.
+ *
+ * Collapsing the third case into `reused` is what put a Service Principal this
+ * setup created under "Radius will keep — reused" and out of every rollback.
+ *
+ * The create itself is journaled when a recovery port is supplied. Without one,
+ * a restart between the request and its answer left no record that a create had
+ * been issued at all, so the next attempt reran it — the one replay the
+ * journal exists to prevent.
+ */
 export async function ensureServicePrincipal(
   clientId: string,
-  runAz: (args: string[]) => Promise<Partial<CommandResult>>
+  runAz: (args: string[]) => Promise<Partial<CommandResult>>,
+  mutationRecovery?: {
+    operation: object & { operationId: string };
+    persist(): Promise<void>;
+  }
 ): Promise<
-  | { ok: true; state: "created" | "reused"; objectId: string | null }
+  | {
+      ok: true;
+      state: "created" | "reused" | "created_candidate";
+      origin: "unknown" | "pre_existing" | "this_operation";
+      objectId: string | null;
+    }
   | { ok: false; stderr: string }
 > {
   const showArgs = [
@@ -2611,87 +3079,302 @@ export async function ensureServicePrincipal(
     "-o",
     "tsv"
   ];
-  const before = await runAz(showArgs);
-  const existingObjectId = String(before.stdout || "").trim();
-  if ((before.code === 0 || before.code === "0") && existingObjectId) {
-    return { ok: true, state: "reused", objectId: existingObjectId };
+  const readObjectId = async (): Promise<{
+    ok: boolean;
+    objectId: string;
+    stderr: string;
+  }> => {
+    const result = await runAz(showArgs);
+    return {
+      ok: result.code === 0 || result.code === "0",
+      objectId: String(result.stdout || "").trim(),
+      stderr: String(result.stderr || "").trim()
+    };
+  };
+  const pendingCreate =
+    mutationRecovery ?
+      providerMutationRecord(
+        mutationRecovery.operation,
+        "azure_service_principal.create",
+        clientId
+      )
+    : null;
+  const before = await readObjectId();
+  if (before.ok && before.objectId) {
+    // A principal that is here now is not automatically one that was here
+    // before. This operation may have created it and crashed before the ledger
+    // caught up, and reading that as pre-existing would leave a principal
+    // Radius made behind at rollback. The journal is asked first.
+    if (!pendingCreate) {
+      return {
+        ok: true,
+        state: "reused",
+        origin: "pre_existing",
+        objectId: before.objectId
+      };
+    }
+    if (pendingCreate.status === "manual_required") {
+      return {
+        ok: false,
+        stderr:
+          pendingCreate.evidence ||
+          `Radius cannot prove who created the Service Principal for application ${clientId}.`
+      };
+    }
+    if (pendingCreate.status === "not_applied") {
+      // Entra refused this operation's create, so what answers now predates it.
+      return {
+        ok: true,
+        state: "reused",
+        origin: "pre_existing",
+        objectId: before.objectId
+      };
+    }
+    if (pendingCreate.status === "confirmed") {
+      const recorded = pendingCreate.providerId || null;
+      if (recorded && recorded === before.objectId) {
+        // Entra acknowledged the create and recorded this exact object id, so
+        // the rollback owns it even though the crash beat the ledger.
+        return {
+          ok: true,
+          state: "created",
+          origin: "this_operation",
+          objectId: before.objectId
+        };
+      }
+      // Either the confirmation predates object ids being recorded, or the
+      // principal under this application is a different object than the one
+      // this operation made. Neither proves ownership, so nothing is claimed
+      // and nothing will be deleted.
+      return {
+        ok: true,
+        state: "created_candidate",
+        origin: "unknown",
+        objectId: before.objectId
+      };
+    }
+    // prepared or outcome_unknown: the create was issued and never answered.
+    // It is not replayed, and it is not claimed either.
+    return {
+      ok: true,
+      state: "created_candidate",
+      origin: "unknown",
+      objectId: before.objectId
+    };
   }
-  if (before.code === 0 || before.code === "0") {
+  if (before.ok) {
     return {
       ok: false,
       stderr: "The Service Principal lookup returned an empty object id."
     };
   }
-  if (before.code !== 0 && !isAzResourceNotFound(before.stderr)) {
+  if (!isAzResourceNotFound(before.stderr)) {
     return {
       ok: false,
       stderr:
-        String(before.stderr || "").trim() ||
+        before.stderr ||
         "Failed to look up the Service Principal before creation."
     };
   }
 
-  const create = await runAz(["ad", "sp", "create", "--id", clientId]);
-  if (create.code === 0 || create.code === "0") {
-    return { ok: true, state: "created", objectId: null };
-  }
-
-  const after = await runAz(showArgs);
-  const racedObjectId = String(after.stdout || "").trim();
-  if ((after.code === 0 || after.code === "0") && racedObjectId) {
-    return { ok: true, state: "reused", objectId: racedObjectId };
-  }
-
-  return {
-    ok: false,
-    stderr:
-      String(create.stderr || "").trim() ||
-      String(after.stderr || "").trim() ||
-      "Could not create or find the Service Principal."
+  const createArgs = ["ad", "sp", "create", "--id", clientId];
+  const createdObjectId = (result: Partial<CommandResult>): string | null => {
+    try {
+      const body = JSON.parse(String(result.stdout || "")) as {
+        id?: unknown;
+      };
+      return optionalIdentityString(body?.id);
+    } catch {
+      return null;
+    }
   };
+  const runCreate = async (): Promise<CommandResult> => {
+    const result = await runAz(createArgs);
+    return {
+      code: result.code ?? 1,
+      stdout: String(result.stdout || ""),
+      stderr: String(result.stderr || ""),
+      ...(result.timedOut === true ? { timedOut: true } : {})
+    };
+  };
+  if (!mutationRecovery) {
+    const create = await runCreate();
+    if (create.code === 0 || create.code === "0") {
+      return {
+        ok: true,
+        state: "created",
+        origin: "this_operation",
+        objectId: createdObjectId(create)
+      };
+    }
+    const after = await readObjectId();
+    if (after.ok && after.objectId) {
+      // Absent before this attempt, present after its own create attempt: this
+      // reconciles a failed create against reality, and it is not a reuse.
+      return {
+        ok: true,
+        state: "created_candidate",
+        origin: "unknown",
+        objectId: after.objectId
+      };
+    }
+    return {
+      ok: false,
+      stderr:
+        create.stderr ||
+        after.stderr ||
+        "Could not create or find the Service Principal."
+    };
+  }
+
+  const recovered = await executeRecoverableMutation<string>({
+    operation: mutationRecovery.operation,
+    kind: "azure_service_principal.create",
+    target: clientId,
+    providerIdempotencyKey: clientId,
+    persist: mutationRecovery.persist,
+    mutate: runCreate,
+    accept: (result) => createdObjectId(result) || "",
+    // Settled with the confirmed status, so a crash between Entra's answer and
+    // the ledger still leaves a restart able to tell this principal from one
+    // that was already there.
+    providerIdOf: (result) => createdObjectId(result),
+    reconcile: async () => {
+      const after = await readObjectId();
+      if (after.ok && after.objectId) {
+        // `--id` is the App Registration's own client id, so a principal found
+        // this way is the exact principal for the exact application this
+        // operation created. What the read cannot settle is provenance: the
+        // principal was absent before Radius asked for it, and Radius asked
+        // once, but a concurrent creator would look identical. So the object id
+        // is adopted and ownership is not.
+        return {
+          state: "applied",
+          value: after.objectId,
+          evidence:
+            "The Service Principal for this operation's exact application client id exists after the interrupted create."
+        };
+      }
+      if (after.ok) {
+        throw new Error(
+          "The Service Principal lookup returned an empty object id."
+        );
+      }
+      if (isAzResourceNotFound(after.stderr)) {
+        return {
+          state: "not_applied",
+          evidence:
+            "Microsoft Entra confirmed no Service Principal exists for this application."
+        };
+      }
+      throw new Error(
+        after.stderr || "The Service Principal state could not be read."
+      );
+    }
+  });
+  if (recovered.state === "not_applied") {
+    const rejected = recovered.result;
+    return {
+      ok: false,
+      stderr:
+        (rejected?.stderr || rejected?.stdout || "").trim() ||
+        "Could not create or find the Service Principal."
+    };
+  }
+  return recovered.recovered ?
+      {
+        ok: true,
+        state: "created_candidate",
+        origin: "unknown",
+        objectId: recovered.value
+      }
+    : {
+        ok: true,
+        state: "created",
+        origin: "this_operation",
+        objectId: recovered.value || null
+      };
+}
+
+/**
+ * Hand every deletion this pass could not settle to the customer.
+ *
+ * Reconciliation only ever runs against a live record, so an unresolved cleanup
+ * delete on a record that is about to become terminal would stay unresolved for
+ * the life of the extension — blocking the destructive commands, blocking a
+ * forward retry, and holding the repository lock with nothing able to release
+ * it. Naming the resource converts that into a refusal the panel can show and
+ * the customer can act on, and releases the lock so a fresh setup is possible.
+ */
+export function quarantineUnsettledCleanupDeletions(op: any): number {
+  const unsettled = unresolvedProviderMutations(op).filter((mutation) =>
+    isCleanupDeletionKind(mutation.kind)
+  );
+  for (const mutation of unsettled) {
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "manual_required",
+      `Radius issued one delete for ${mutation.kind.replace(".cleanup_delete", "")} ${mutation.target} and could not establish whether it took effect. ` +
+        "It will not repeat that delete. Check that resource and remove it yourself if it is unwanted, then start a new setup."
+    );
+  }
+  return unsettled.length;
 }
 
 export async function cleanupAzureSetupArtifacts(
   op: any,
   {
     runAz,
-    steps
+    steps,
+    only,
+    onResultRecorded,
+    persistJournal
   }: {
     runAz: (args: string[]) => Promise<Partial<CommandResult>>;
     steps?: string[];
+    // The stable keys a retry is allowed to touch. Rebuilding the full deletion
+    // set instead would re-issue deletes for artifacts an earlier attempt
+    // already removed and, worse, silently drop the ones it could not.
+    only?: ReadonlySet<string> | null;
+    // Called after each result is written into the ledger, so a caller that
+    // owns durable storage can save one deletion before the next one starts.
+    onResultRecorded?: () => Promise<void> | void;
+    // Writes the mutation journal to disk. Supplied wherever durable storage
+    // exists, because a delete that is not written down before it is issued is
+    // one a later attempt cannot tell from a delete that never happened.
+    persistJournal?: () => Promise<void>;
   }
 ): Promise<{
   attempt: number;
   state: "not_needed" | "succeeded" | "succeeded_with_warnings";
-  results: Array<{
-    attempt: number;
-    artifactType:
-      | "role_assignment"
-      | "federated_credential"
-      | "service_principal"
-      | "azure_app";
-    target: string;
-    outcome: "deleted" | "not_found" | "warning" | "skipped";
-    detail: string | null;
-  }>;
+  results: SetupCleanupResult[];
   warnings: string[];
+  attemptedKeys: Set<string>;
 }> {
   const ledger = getSetupArtifactLedger(op);
   const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
   const priorResults =
     Array.isArray(ledger?.cleanup?.results) ? ledger.cleanup.results : [];
   if (!ledger) {
-    return { attempt, state: "not_needed", results: [], warnings: [] };
+    return {
+      attempt,
+      state: "not_needed",
+      results: [],
+      warnings: [],
+      attemptedKeys: new Set()
+    };
   }
 
   const deletions: Array<{
-    artifactType:
-      | "role_assignment"
-      | "federated_credential"
-      | "service_principal"
-      | "azure_app";
+    artifactType: SetupCleanupArtifactType;
     artifact: Record<string, unknown>;
     args?: string[];
+    readArgs?: string[];
+    // Reads the resource's own immutable id, for kinds addressed by a name the
+    // customer may reuse. Present together with the id the ledger recorded.
+    identityArgs?: string[];
+    recordedProviderId?: string | null;
     missingDetail?: string;
   }> = [];
 
@@ -2703,10 +3386,26 @@ export async function cleanupAzureSetupArtifacts(
       ...(objectId ?
         {
           args: buildRoleAssignmentDeleteArgs({
+            assignmentId: String(roleAssignment.assignmentId || ""),
             objectId,
             role: String(roleAssignment.role || ""),
             scope: String(roleAssignment.scope || "")
-          })
+          }),
+          ...(roleAssignment.assignmentId ?
+            {
+              readArgs: [
+                "role",
+                "assignment",
+                "list",
+                "--scope",
+                String(roleAssignment.scope || ""),
+                "--query",
+                `[?name=='${String(roleAssignment.assignmentId)}'].id`,
+                "-o",
+                "json"
+              ]
+            }
+          : {})
         }
       : {
           missingDetail:
@@ -2727,7 +3426,36 @@ export async function cleanupAzureSetupArtifacts(
           args: buildFederatedCredentialDeleteArgs({
             appId: cleanupAppId,
             name: String(credential.name || "")
-          })
+          }),
+          readArgs: [
+            "ad",
+            "app",
+            "federated-credential",
+            "show",
+            "--id",
+            cleanupAppId,
+            "--federated-credential-id",
+            String(credential.name || ""),
+            "-o",
+            "none"
+          ],
+          // A credential name is the customer's to reuse inside their own
+          // application, so the id decides whether this is still Radius's.
+          identityArgs: [
+            "ad",
+            "app",
+            "federated-credential",
+            "show",
+            "--id",
+            cleanupAppId,
+            "--federated-credential-id",
+            String(credential.name || ""),
+            "--query",
+            "id",
+            "-o",
+            "tsv"
+          ],
+          recordedProviderId: optionalString(credential.providerId)
         }
       : {
           missingDetail:
@@ -2737,17 +3465,33 @@ export async function cleanupAzureSetupArtifacts(
   }
 
   if (ledger.servicePrincipal.state === "created") {
-    const spId = String(
-      ledger.servicePrincipal.appId || ledger.servicePrincipal.objectId || ""
-    ).trim();
+    // Only the object id will do. `az ad sp delete --id <appId>` removes
+    // whichever principal that application has now, which is the replacement
+    // if the customer made one.
+    const spObjectId = optionalString(ledger.servicePrincipal.objectId);
     deletions.push({
       artifactType: "service_principal",
       artifact: ledger.servicePrincipal as Record<string, unknown>,
-      ...(spId ?
-        { args: buildServicePrincipalDeleteArgs({ id: spId }) }
+      ...(spObjectId ?
+        {
+          args: buildServicePrincipalDeleteArgs({ id: spObjectId }),
+          readArgs: ["ad", "sp", "show", "--id", spObjectId, "-o", "none"],
+          identityArgs: [
+            "ad",
+            "sp",
+            "show",
+            "--id",
+            spObjectId,
+            "--query",
+            "id",
+            "-o",
+            "tsv"
+          ],
+          recordedProviderId: spObjectId
+        }
       : {
           missingDetail:
-            "Missing the Service Principal id needed to delete the created identity."
+            "The Service Principal was recorded without Microsoft Entra's own object id for it, so Radius cannot tell it from a principal recreated for the same application. Review it and remove it yourself if it is unwanted."
         })
     });
   }
@@ -2758,7 +3502,10 @@ export async function cleanupAzureSetupArtifacts(
       artifactType: "azure_app",
       artifact: ledger.azureApp as Record<string, unknown>,
       ...(appId ?
-        { args: buildAppDeleteArgs({ appId }) }
+        {
+          args: buildAppDeleteArgs({ appId }),
+          readArgs: ["ad", "app", "show", "--id", appId, "-o", "none"]
+        }
       : {
           missingDetail:
             "Missing the App Registration id needed to delete the created application."
@@ -2766,9 +3513,49 @@ export async function cleanupAzureSetupArtifacts(
     });
   }
 
-  if (deletions.length === 0) {
+  const selected =
+    only ?
+      deletions.filter((deletion) => {
+        const label = cleanupTargetLabel(
+          deletion.artifactType,
+          deletion.artifact
+        );
+        // Matched on the label as well as the identity, because a result an
+        // earlier version wrote was keyed before the provider's own id led the
+        // identity. Without this a retry would find nothing to do and leave
+        // the target it was named for outstanding forever.
+        return (
+          only.has(
+            cleanupTargetKey({
+              artifactType: deletion.artifactType,
+              identity: cleanupArtifactIdentity(
+                deletion.artifactType,
+                deletion.artifact
+              ),
+              target: label
+            })
+          ) ||
+          only.has(
+            cleanupTargetKey({
+              artifactType: deletion.artifactType,
+              identity: "",
+              target: label
+            })
+          )
+        );
+      })
+    : deletions;
+  const attemptedKeys = new Set<string>();
+
+  if (selected.length === 0) {
     recordCleanupState(op, { attempts: attempt, state: "not_needed" });
-    return { attempt, state: "not_needed", results: [], warnings: [] };
+    return {
+      attempt,
+      state: "not_needed",
+      results: [],
+      warnings: [],
+      attemptedKeys
+    };
   }
 
   recordCleanupState(op, { attempts: attempt, state: "running" });
@@ -2777,104 +3564,208 @@ export async function cleanupAzureSetupArtifacts(
   );
 
   const warnings: string[] = [];
-  const attemptResults: Array<{
-    attempt: number;
-    artifactType:
-      | "role_assignment"
-      | "federated_credential"
-      | "service_principal"
-      | "azure_app";
-    target: string;
-    outcome: "deleted" | "not_found" | "warning" | "skipped";
-    detail: string | null;
-  }> = [];
-  const pushResult = (
-    artifactType:
-      | "role_assignment"
-      | "federated_credential"
-      | "service_principal"
-      | "azure_app",
+  const attemptResults: SetupCleanupResult[] = [];
+  // Results this pass did not produce survive it. A caller that already
+  // recorded part of the same attempt — the rollback runner's GitHub pass runs
+  // before this one — must not lose its row to the replace rule below.
+  const mergedResults = (): SetupCleanupResult[] => [
+    ...priorResults.filter(
+      (entry: SetupCleanupResult) =>
+        entry.attempt < attempt || !attemptedKeys.has(cleanupTargetKey(entry))
+    ),
+    ...attemptResults
+  ];
+  const pushResult = async (
+    artifactType: SetupCleanupArtifactType,
     artifact: Record<string, unknown>,
-    outcome: "deleted" | "not_found" | "warning" | "skipped",
+    outcome: SetupCleanupOutcome,
     detail: string | null
   ) => {
+    const identity = cleanupArtifactIdentity(artifactType, artifact);
     attemptResults.push({
       attempt,
       artifactType,
       target: cleanupTargetLabel(artifactType, artifact),
+      identity,
       outcome,
       detail
     });
+    attemptedKeys.add(cleanupTargetKey({ artifactType, identity }));
+    // Ownership moves only on proof. A warning leaves the ledger claiming the
+    // resource, which is what keeps it retryable and keeps it listed.
+    if (outcome === "deleted" || outcome === "not_found") {
+      recordCleanupDeletion(op, { artifactType, identity });
+    }
+    // Each outcome lands in the ledger before the next deletion starts, so an
+    // interrupted rollback never loses the record of a resource it removed.
+    // The attempt stays `running` until the pass ends, which is how a later
+    // read tells an interrupted attempt from a finished one.
+    recordCleanupState(op, {
+      attempts: attempt,
+      state: "running",
+      results: mergedResults()
+    });
+    await onResultRecorded?.();
   };
 
-  for (const deletion of deletions) {
+  for (const deletion of selected) {
     const label = cleanupTargetLabel(deletion.artifactType, deletion.artifact);
-    if (deletion.missingDetail) {
-      warnings.push(deletion.missingDetail);
-      steps?.push(`⚠ ${deletion.missingDetail}`);
-      pushResult(
+    const identity = cleanupArtifactIdentity(
+      deletion.artifactType,
+      deletion.artifact
+    );
+    // Every delete below is addressed by an exact immutable provider identity
+    // and read back by the same one. An artifact that cannot supply both is one
+    // Radius could only delete by name, and a name after a rebuild belongs to
+    // the customer's replacement rather than to this attempt's leftover.
+    const unidentifiable =
+      deletion.missingDetail ||
+      (!deletion.readArgs ?
+        `${label} has no stable provider identity Radius can verify before and after a delete, so it will not remove it. Review it and delete it yourself if it is unwanted.`
+      : !identity ?
+        `${label} was recorded without the provider identity a safe delete needs.`
+      : null);
+    if (unidentifiable) {
+      warnings.push(unidentifiable);
+      steps?.push(`⚠ ${unidentifiable}`);
+      await pushResult(
         deletion.artifactType,
         deletion.artifact,
         "skipped",
-        deletion.missingDetail
+        unidentifiable
       );
       continue;
     }
 
-    let result: Partial<CommandResult>;
+    const readArgs = deletion.readArgs as string[];
+    const readExactIdentity = async (): Promise<ExactIdentityRead> => {
+      let reread: Partial<CommandResult>;
+      try {
+        reread = await runAz(readArgs);
+      } catch {
+        return "unreadable";
+      }
+      if (isAzureCleanupNotFound(deletion.artifactType, reread))
+        return "absent";
+      return reread.code === 0 || reread.code === "0" ?
+          "present"
+        : "unreadable";
+    };
+
+    async function confirmRecordedIdentity(): Promise<CleanupIdentityVerdict> {
+      const recorded = deletion.recordedProviderId;
+      if (!recorded) {
+        return {
+          decision: "refuse",
+          detail: `${label} was recorded without the provider id that tells it from a resource recreated under the same name, so Radius will not delete it. Review it and remove it yourself if it is unwanted.`
+        };
+      }
+      let current: Partial<CommandResult>;
+      try {
+        current = await runAz(deletion.identityArgs as string[]);
+      } catch (error) {
+        return {
+          decision: "refuse",
+          detail: `Radius could not read ${label} to confirm its identity: ${errorMessage(error)}. It removed nothing.`
+        };
+      }
+      if (current.code !== 0 && current.code !== "0") {
+        // Already gone. There is nothing under the name to delete, so the
+        // artifact settles without a request that could only ever reach
+        // whichever resource takes the name next.
+        if (isAzureCleanupNotFound(deletion.artifactType, current)) {
+          return { decision: "absent" };
+        }
+        return {
+          decision: "refuse",
+          detail: `Radius could not read ${label} to confirm its identity, so it removed nothing.`
+        };
+      }
+      const live = String(current.stdout || "").trim();
+      if (!live) {
+        return {
+          decision: "refuse",
+          detail: `The provider did not report an id for ${label}, so Radius cannot confirm it is the resource it created. It removed nothing.`
+        };
+      }
+      if (live === recorded) return { decision: "delete" };
+      return {
+        decision: "refuse",
+        detail: `${label} now has a different provider id than the one Radius created, so the name belongs to a replacement. Radius removed nothing.`
+      };
+    }
+
+    let settled: CleanupDeletionOutcome;
     try {
-      result = await runAz(deletion.args || []);
+      settled = await executeJournaledCleanupDeletion({
+        operation: op,
+        artifactType: deletion.artifactType,
+        identity,
+        label,
+        ...(deletion.identityArgs ? { confirmRecordedIdentity } : {}),
+        persist: persistJournal ?? (async () => {}),
+        runDelete: async () => {
+          const result = await runAz(deletion.args || []);
+          return {
+            code: result.code ?? 1,
+            stdout: String(result.stdout || ""),
+            stderr: String(result.stderr || ""),
+            ...(result.timedOut === true ? { timedOut: true } : {})
+          };
+        },
+        isAlreadyAbsent: (result: CleanupDeletionCommandResult) =>
+          isAzureCleanupNotFound(deletion.artifactType, result),
+        readExactIdentity
+      });
     } catch (error) {
-      const detail =
-        error instanceof Error ?
-          error.message
-        : String(error || "Unknown error");
-      const warning = `Failed to delete ${label}: ${detail}`;
+      if (!(error instanceof CleanupJournalPersistenceError)) throw error;
+      // The journal did not reach disk. Radius stops here rather than deleting
+      // anything else it could not account for afterwards.
+      const detail = `Radius stopped this rollback because it could not save the record of what it was deleting: ${error.message}`;
+      warnings.push(detail);
+      steps?.push(`⚠ ${detail}`);
+      await pushResult(
+        deletion.artifactType,
+        deletion.artifact,
+        "warning",
+        detail
+      );
+      break;
+    }
+
+    if (settled.outcome === "deleted") {
+      steps?.push(`✅ Deleted ${label}`);
+    } else if (settled.outcome === "not_found") {
+      steps?.push(`✅ ${label} was already absent`);
+    } else {
+      const warning = `Failed to delete ${label}: ${settled.detail}`;
       warnings.push(warning);
       steps?.push(`⚠ ${warning}`);
-      pushResult(deletion.artifactType, deletion.artifact, "warning", detail);
-      continue;
     }
-
-    if (result.code === 0 || result.code === "0") {
-      steps?.push(`✅ Deleted ${label}`);
-      pushResult(deletion.artifactType, deletion.artifact, "deleted", null);
-      continue;
-    }
-
-    if (isAzureCleanupNotFound(deletion.artifactType, result)) {
-      steps?.push(`✅ ${label} was already absent`);
-      pushResult(deletion.artifactType, deletion.artifact, "not_found", null);
-      continue;
-    }
-
-    const detail =
-      String(result.stderr || "").trim() ||
-      String(result.stdout || "").trim() ||
-      "Unknown Azure CLI error.";
-    const warning = `Failed to delete ${label}: ${detail}`;
-    warnings.push(warning);
-    steps?.push(`⚠ ${warning}`);
-    pushResult(deletion.artifactType, deletion.artifact, "warning", detail);
+    await pushResult(
+      deletion.artifactType,
+      deletion.artifact,
+      settled.outcome,
+      settled.detail
+    );
   }
 
   const finalState = warnings.length ? "succeeded_with_warnings" : "succeeded";
-  const results = [...priorResults, ...attemptResults];
+  // Results from this attempt replace the ones it re-tried; anything an earlier
+  // attempt recorded and this one did not touch survives untouched.
+  const results = mergedResults();
   recordCleanupState(op, {
     state: finalState,
     attempts: attempt,
     results
   });
-  return { attempt, state: finalState, results: attemptResults, warnings };
-}
-
-function hasReachedSetupCommitPoint(op: any): boolean {
-  const ledger = getSetupArtifactLedger(op);
-  if (!ledger) return false;
-  return (
-    ledger.commit.mode !== "not_started" ||
-    ledger.commit.workflowFiles.length > 0
-  );
+  return {
+    attempt,
+    state: finalState,
+    results: attemptResults,
+    warnings,
+    attemptedKeys
+  };
 }
 
 function sanitizeFailureExtra(extra: Record<string, unknown> = {}) {
@@ -2882,6 +3773,318 @@ function sanitizeFailureExtra(extra: Record<string, unknown> = {}) {
   delete safe.azError;
   delete safe.ghError;
   return safe;
+}
+
+/**
+ * Remove the GitHub environment this attempt created, or explain why it stays.
+ *
+ * Shared by the failure path and the cleanup retry. A retry that skipped this
+ * would offer to remove a proven-owned environment and then quietly delete only
+ * the Azure artifacts, reporting a clean rollback while the environment survived.
+ */
+/**
+ * Revert the workflow files this operation committed, and say whether anything
+ * else may be removed.
+ *
+ * Extracted alongside `cleanupGitHubEnvironmentArtifact` for the same reason:
+ * the pass that decides whether a rollback may proceed is the one that most
+ * needs to be exercised directly, without a live instance or a real `gh`. The
+ * selection, the provenance proof, and the removal itself live in the workflow
+ * rollback service; this function is the ledger's half of the transaction —
+ * choosing the targets, recording what came back, and reporting the block.
+ */
+export async function rollbackCommittedWorkflowFiles(
+  op: any,
+  {
+    attempt,
+    ports,
+    only,
+    steps
+  }: {
+    attempt: number;
+    ports: WorkflowRollbackPorts;
+    only?: Set<string> | null;
+    steps?: string[];
+  }
+): Promise<{
+  results: SetupCleanupResult[];
+  warnings: string[];
+  blocked: boolean;
+  attempted: boolean;
+}> {
+  const files = workflowRollbackTargets(op, only ?? null);
+  if (files.length === 0) {
+    return { results: [], warnings: [], blocked: false, attempted: false };
+  }
+  const outcome = await runWorkflowRollback(
+    {
+      repo: String(op?.repo || ""),
+      attempt,
+      commit: workflowRollbackCommitState(op),
+      files
+    },
+    ports
+  );
+  for (const entry of outcome.results) {
+    if (
+      entry.outcome === "deleted" ||
+      entry.outcome === "restored" ||
+      entry.outcome === "not_found"
+    ) {
+      recordCleanupDeletion(op, {
+        artifactType: "workflow_file",
+        identity: entry.identity ?? undefined
+      });
+    }
+  }
+  steps?.push(...outcome.steps);
+  return {
+    results: outcome.results,
+    warnings: outcome.warnings,
+    blocked: outcome.blocked,
+    attempted: true
+  };
+}
+
+export async function cleanupGitHubEnvironmentArtifact(
+  op: any,
+  {
+    attempt,
+    runDeleteEnvironment,
+    readEnvironment,
+    persistJournal,
+    invalidateEnvironmentListing,
+    steps
+  }: {
+    attempt: number;
+    runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
+    // Reads the exact environment back after an interrupted delete, and writes
+    // the mutation journal. Supplied wherever durable storage exists.
+    readEnvironment?: ((args: string[]) => Promise<CommandResult>) | null;
+    persistJournal?: () => Promise<void>;
+    // Called with the repository whose environment was proven removed, so the
+    // listing the picker reads stops answering from a cache that still holds
+    // it. The server owns this: the browser cannot invalidate a server cache,
+    // and a reload that hits the cached payload would redisplay the
+    // rolled-back environment under its last known status.
+    invalidateEnvironmentListing?: ((repo: string) => void) | null;
+    steps?: string[];
+  }
+): Promise<{
+  results: SetupCleanupResult[];
+  warnings: string[];
+  attempted: boolean;
+}> {
+  const ledger = getSetupArtifactLedger(op);
+  const results: SetupCleanupResult[] = [];
+  const warnings: string[] = [];
+  if (!ledger) return { results, warnings, attempted: false };
+  const artifact = ledger.githubEnvironment;
+  if (artifact.state !== "created" && artifact.state !== "created_candidate") {
+    return { results, warnings, attempted: false };
+  }
+  const envRepo = optionalString(artifact.repo);
+  const envName = optionalString(artifact.name);
+  const target = formatGitHubEnvironmentLabel(artifact);
+  const identity = cleanupArtifactIdentity("github_environment", artifact);
+  const recordOutcome = (
+    outcome: SetupCleanupOutcome,
+    detail: string | null
+  ) => {
+    results.push({
+      attempt,
+      artifactType: "github_environment",
+      target,
+      identity,
+      outcome,
+      detail
+    });
+    if (outcome === "deleted" || outcome === "not_found") {
+      recordCleanupDeletion(op, {
+        artifactType: "github_environment",
+        identity
+      });
+    }
+  };
+
+  if (artifact.state === "created_candidate") {
+    const detail = `GitHub environment "${target}" was left in place because a pre-create 404 followed by GitHub's idempotent PUT cannot prove this request created it. Review it manually and delete it yourself if this setup should be rolled back.`;
+    warnings.push(detail);
+    steps?.push(`⚠️ ${detail}`);
+    recordOutcome("skipped", detail);
+    return { results, warnings, attempted: true };
+  }
+
+  if (!runDeleteEnvironment) {
+    const detail =
+      "Missing the GitHub delete helper needed to remove the newly created environment.";
+    warnings.push(detail);
+    steps?.push(`⚠️ ${detail}`);
+    recordOutcome("warning", detail);
+    return { results, warnings, attempted: true };
+  }
+
+  if (!envRepo || !envName) {
+    const detail =
+      "Missing the GitHub environment name or repository needed to target the newly created environment precisely.";
+    warnings.push(detail);
+    steps?.push(`⚠️ ${detail}`);
+    recordOutcome("warning", detail);
+    return { results, warnings, attempted: true };
+  }
+
+  const environmentPath = `/repos/${envRepo}/environments/${encodeURIComponent(envName)}`;
+  const deleteArgs = ["api", "--method", "DELETE", environmentPath];
+  let settled: CleanupDeletionOutcome;
+  try {
+    settled = await executeJournaledCleanupDeletion({
+      operation: op,
+      artifactType: "github_environment",
+      identity: identity || `${envRepo}:${envName}`,
+      label: `GitHub environment "${target}"`,
+      persist: persistJournal ?? (async () => {}),
+      runDelete: async () => {
+        try {
+          await runDeleteEnvironment(deleteArgs);
+          return { code: 0, stdout: "", stderr: "" };
+        } catch (cleanupError) {
+          const detail = errorMessage(cleanupError);
+          // The delete helper throws its own "outcome unknown" sentence when a
+          // timeout left the answer in doubt. That is not a rejection, so it is
+          // carried through as one rather than settled as "nothing happened".
+          return {
+            code: 1,
+            stdout: "",
+            stderr: detail,
+            ...(/Outcome unknown after provider timeout/i.test(detail) ?
+              { timedOut: true }
+            : {})
+          };
+        }
+      },
+      // GitHub answers 404 to the DELETE itself both for an environment that
+      // is already gone and for one this token is not allowed to see. Neither
+      // reading is safe to record, so the answer is deferred to the
+      // reconciliation below, which proves absence through the listing.
+      // Names are reused. Before the one delete goes out, the environment
+      // answering to this name has to still be the one the ledger recorded.
+      confirmRecordedIdentity: async (): Promise<CleanupIdentityVerdict> => {
+        const recorded = optionalString(artifact.providerId);
+        if (!recorded) {
+          return {
+            decision: "refuse",
+            detail: `GitHub environment "${target}" was recorded without GitHub's own id for it, so Radius cannot tell it from an environment recreated under the same name. Review it and delete it yourself if it is unwanted.`
+          };
+        }
+        if (!readEnvironment) {
+          return {
+            decision: "refuse",
+            detail: `Radius has no way to read GitHub environment "${target}" back, so it cannot confirm the environment under that name is still the one it created.`
+          };
+        }
+        let current: CommandResult;
+        try {
+          current = await readEnvironment(["api", environmentPath]);
+        } catch (error) {
+          return {
+            decision: "refuse",
+            detail: `Radius could not read GitHub environment "${target}" to confirm its identity: ${errorMessage(error)}. It removed nothing.`
+          };
+        }
+        if (current.code !== 0 && current.code !== "0") {
+          // A bare 404 here is what GitHub answers for an environment this
+          // token may not see, so it authorizes nothing on its own. Absence has
+          // to come from a listing the same account can actually read, and a
+          // resource that is gone settles without a delete being issued at all.
+          if (!isNotFoundResponse(current)) {
+            return {
+              decision: "refuse",
+              detail: `Radius could not read GitHub environment "${target}" to confirm its identity, so it removed nothing.`
+            };
+          }
+          let proof: Awaited<ReturnType<typeof proveEnvironmentAbsentAt>>;
+          try {
+            proof = await proveEnvironmentAbsentAt(
+              environmentPath,
+              readEnvironment,
+              recorded
+            );
+          } catch (error) {
+            return {
+              decision: "refuse",
+              detail: `Radius could not confirm whether GitHub environment "${target}" is gone: ${errorMessage(error)}. It removed nothing.`
+            };
+          }
+          if (proof.state === "absent") return { decision: "absent" };
+          return {
+            decision: "refuse",
+            detail: `GitHub answered 404 for environment "${target}", but Radius could not prove from a listing the selected account can read that it is actually gone, so it removed nothing.`
+          };
+        }
+        let live: string | null;
+        try {
+          live = parseEnvironmentProviderId(JSON.parse(current.stdout));
+        } catch {
+          live = null;
+        }
+        if (!live) {
+          return {
+            decision: "refuse",
+            detail: `GitHub did not report an id for environment "${target}", so Radius cannot confirm it is the environment it created. It removed nothing.`
+          };
+        }
+        return live === recorded ?
+            { decision: "delete" }
+          : {
+              decision: "refuse",
+              detail: `GitHub environment "${target}" now has a different id than the one Radius created, so the name belongs to a replacement. Radius removed nothing.`
+            };
+      },
+      isAlreadyAbsent: (result) =>
+        isNotFoundResponse(result) ? "unproven" : false,
+      // The same proof the delete port uses. A bare 404 from the environment
+      // endpoint is what GitHub answers for an environment this token cannot
+      // see, so settling a deletion on it would move ledger ownership for a
+      // resource that is still there.
+      readExactIdentity: async () => {
+        if (!readEnvironment) return "unreadable";
+        try {
+          const proof = await proveEnvironmentAbsentAt(
+            environmentPath,
+            readEnvironment,
+            optionalString(artifact.providerId)
+          );
+          if (proof.state === "absent") return "absent";
+          return proof.state === "present" ? "present" : "unreadable";
+        } catch {
+          return "unreadable";
+        }
+      }
+    });
+  } catch (error) {
+    if (!(error instanceof CleanupJournalPersistenceError)) throw error;
+    const detail = `Radius stopped before removing GitHub environment "${target}" because it could not save the record of what it was deleting: ${error.message}`;
+    warnings.push(detail);
+    steps?.push(`⚠️ ${detail}`);
+    recordOutcome("warning", detail);
+    return { results, warnings, attempted: true };
+  }
+
+  if (settled.outcome === "deleted" || settled.outcome === "not_found") {
+    steps?.push(
+      settled.outcome === "deleted" ?
+        `✅ Deleted GitHub environment "${envName}"`
+      : `✅ GitHub environment "${envName}" was already absent`
+    );
+    recordOutcome(settled.outcome, null);
+    invalidateEnvironmentListing?.(envRepo);
+  } else {
+    const warning = `Failed to delete GitHub environment "${envName}": ${settled.detail}`;
+    warnings.push(warning);
+    steps?.push(`⚠️ ${warning}`);
+    recordOutcome(settled.outcome, settled.detail);
+  }
+  return { results, warnings, attempted: true };
 }
 
 export async function finalizeSetupFailure(
@@ -2896,7 +4099,8 @@ export async function finalizeSetupFailure(
     extra = {},
     steps,
     runAz,
-    runDeleteEnvironment
+    runDeleteEnvironment,
+    readEnvironment
   }: {
     status: number;
     error: string;
@@ -2908,6 +4112,7 @@ export async function finalizeSetupFailure(
     steps?: string[];
     runAz?: ((args: string[]) => Promise<Partial<CommandResult>>) | null;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
+    readEnvironment?: ((args: string[]) => Promise<CommandResult>) | null;
   }
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const safeExtra = sanitizeFailureExtra(extra || {});
@@ -2927,23 +4132,36 @@ export async function finalizeSetupFailure(
         rollbackBeforeCommit: boolean;
         state: "not_needed" | "succeeded" | "succeeded_with_warnings";
         warnings: string[];
-        results: Array<{
-          attempt: number;
-          artifactType:
-            | "github_environment"
-            | "role_assignment"
-            | "federated_credential"
-            | "service_principal"
-            | "azure_app";
-          target: string;
-          outcome: "deleted" | "not_found" | "warning" | "skipped";
-          detail: string | null;
-        }>;
+        results: SetupCleanupResult[];
       }
     | undefined;
 
   if (ledger) {
-    if (commitPointReached) {
+    // A quarantined or unproven provider mutation means Radius cannot say what
+    // this attempt owns. Deleting the App Registration and the GitHub
+    // environment on that footing is the destructive half of the same guess the
+    // journal exists to refuse — and it would contradict, in the same response,
+    // the guidance the record already carries. Unproven counts as well as
+    // quarantined: an interrupted request that reached the provider is exactly
+    // the one whose resource is missing from the ledger. This is deliberately
+    // stricter than the disposition that governs a customer's explicit
+    // post-terminal rollback, because nobody asked for this one.
+    const unresolved = unresolvedProviderMutations(op);
+    const quarantine =
+      providerRecoveryManualGuidance(op) ||
+      (unresolved.length > 0 ?
+        `Radius has not confirmed the outcome of ${unresolved[0].kind} for ${unresolved[0].target}, so it cannot tell which resources this attempt owns.`
+      : null);
+    if (quarantine && !commitPointReached) {
+      recordCleanupState(op, { state: "not_needed" });
+      addLegacyStep(
+        op,
+        "⚠️ Radius removed nothing automatically because it could not prove what this attempt owns."
+      );
+      body.providerRecoveryGuidance = quarantine;
+      cleanupSummary = projectCleanupSummary(op);
+      terminalState = "failed_partial";
+    } else if (commitPointReached) {
       recordCleanupState(op, { state: "not_needed" });
       cleanupSummary = projectCleanupSummary(op);
       if (ledger.commit.workflowFiles.length > 0)
@@ -2951,129 +4169,47 @@ export async function finalizeSetupFailure(
     } else {
       const attempt = Number(ledger.cleanup.attempts || 0) + 1;
       const warnings: string[] = [];
-      let results: Array<{
-        attempt: number;
-        artifactType:
-          | "github_environment"
-          | "role_assignment"
-          | "federated_credential"
-          | "service_principal"
-          | "azure_app";
-        target: string;
-        outcome: "deleted" | "not_found" | "warning" | "skipped";
-        detail: string | null;
-      }> = [];
+      let results: SetupCleanupResult[] = [];
       let cleanupState: "not_needed" | "succeeded" | "succeeded_with_warnings" =
         "not_needed";
 
       if (runAz) {
         const azureCleanup = await cleanupAzureSetupArtifacts(op, {
           runAz,
-          steps
+          steps,
+          persistJournal: () => operations.persist()
         });
         warnings.push(...azureCleanup.warnings);
-        results = [
-          ...results,
-          ...(azureCleanup.results as Array<{
-            attempt: number;
-            artifactType:
-              | "role_assignment"
-              | "federated_credential"
-              | "service_principal"
-              | "azure_app";
-            target: string;
-            outcome: "deleted" | "not_found" | "warning" | "skipped";
-            detail: string | null;
-          }>)
-        ];
+        results = [...results, ...azureCleanup.results];
         cleanupState = azureCleanup.state;
       } else {
         recordCleanupState(op, { attempts: attempt, state: "not_needed" });
       }
 
-      const envRepo = optionalString(ledger.githubEnvironment.repo);
-      const envName = optionalString(ledger.githubEnvironment.name);
-      if (ledger.githubEnvironment.state === "created") {
-        const target =
-          envRepo && envName ?
-            `${envRepo}:${envName}`
-          : envName || envRepo || "GitHub environment";
-        if (!runDeleteEnvironment) {
-          const detail =
-            "Missing the GitHub delete helper needed to remove the newly created environment.";
-          warnings.push(detail);
-          steps?.push(`⚠️ ${detail}`);
-          results.push({
-            attempt,
-            artifactType: "github_environment",
-            target,
-            outcome: "warning",
-            detail
-          });
-          cleanupState = "succeeded_with_warnings";
-        } else {
-          try {
-            const deleted = await deleteNewlyCreatedGitHubEnvironment(
-              ledger.githubEnvironment,
-              runDeleteEnvironment
-            );
-            if (deleted) {
-              steps?.push(`✅ Deleted GitHub environment "${envName}"`);
-              results.push({
-                attempt,
-                artifactType: "github_environment",
-                target,
-                outcome: "deleted",
-                detail: null
-              });
-              if (cleanupState === "not_needed") cleanupState = "succeeded";
-            } else {
-              const detail =
-                "Missing the GitHub environment name or repository needed to target the newly created environment precisely.";
-              warnings.push(detail);
-              steps?.push(`⚠️ ${detail}`);
-              results.push({
-                attempt,
-                artifactType: "github_environment",
-                target,
-                outcome: "warning",
-                detail
-              });
-              cleanupState = "succeeded_with_warnings";
-            }
-          } catch (cleanupError) {
-            const detail = errorMessage(cleanupError);
-            const warning = `Failed to delete GitHub environment "${envName}": ${detail}`;
-            warnings.push(warning);
-            steps?.push(`⚠️ ${warning}`);
-            results.push({
-              attempt,
-              artifactType: "github_environment",
-              target,
-              outcome: "warning",
-              detail
-            });
-            cleanupState = "succeeded_with_warnings";
-          }
-        }
-      } else if (ledger.githubEnvironment.state === "created_candidate") {
-        const target =
-          envRepo && envName ?
-            `${envRepo}:${envName}`
-          : envName || envRepo || "GitHub environment";
-        const detail = `GitHub environment "${target}" was left in place because a pre-create 404 followed by GitHub's idempotent PUT cannot prove this request created it. Review it manually and delete it yourself if this setup should be rolled back.`;
-        warnings.push(detail);
-        steps?.push(`⚠️ ${detail}`);
-        results.push({
-          attempt,
-          artifactType: "github_environment",
-          target,
-          outcome: "skipped",
-          detail
-        });
+      const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
+        attempt,
+        runDeleteEnvironment,
+        readEnvironment,
+        persistJournal: () => operations.persist(),
+        invalidateEnvironmentListing: (repo) => {
+          envListCache.invalidate(repo);
+        },
+        steps
+      });
+      warnings.push(...environmentCleanup.warnings);
+      results = [...results, ...environmentCleanup.results];
+      if (environmentCleanup.warnings.length > 0) {
         cleanupState = "succeeded_with_warnings";
+      } else if (
+        environmentCleanup.results.length > 0 &&
+        cleanupState === "not_needed"
+      ) {
+        cleanupState = "succeeded";
       }
 
+      // Same reason as the rollback runner: this record is about to be terminal,
+      // so an unresolved deletion would have nobody left to settle it.
+      quarantineUnsettledCleanupDeletions(op);
       if (results.length > 0) {
         const priorResults =
           Array.isArray(ledger.cleanup.results) ?
@@ -3178,9 +4314,11 @@ type GhcrPackagePreflightResult =
     };
 
 // Resolve the exact GitHub Packages credential GHCR writes will use, then check
-// that very account for write:packages. The package credential is authoritative:
-// on multi-account machines it can differ from a merely-active gh login, and the
-// packages scope is read keyring-first to match getGhPackageCredentials.
+// that very account for write:packages. The package credential is
+// authoritative: on multi-account machines it can differ from a merely-active
+// gh login, and the credential's own `source` decides both which scopes are
+// read and which remediation is possible — a `gh auth refresh` cannot change an
+// injected session token.
 export async function preflightGhcrPackageWriteAccess(
   loadCredentials: GhcrPackageCredentialLoader = getGhPackageCredentials,
   loadIdentity: GhcrPackageIdentityLoader = getGitHubIdentity,
@@ -3213,6 +4351,15 @@ export async function preflightGhcrPackageWriteAccess(
           mismatch: false,
           actingHasWorkflow: selectedExecutor.scopes.includes("workflow"),
           actingHasPackages: selectedExecutor.scopes.includes("write:packages"),
+          // The selected executor *is* the credential GHCR writes will use, so
+          // the packages fields describe it directly rather than whichever
+          // account happens to be active in the CLI.
+          packagesLogin: selectedExecutor.login,
+          packagesHasWrite: selectedExecutor.scopes.includes("write:packages"),
+          packagesCredentialSource:
+            selectedExecutor.credentialSource === "keyring" ?
+              "keyring"
+            : "injected-token",
           reason: "selected-account-executor",
           accounts: [
             {
@@ -3246,10 +4393,18 @@ export async function preflightGhcrPackageWriteAccess(
         "Could not determine which GitHub account the GHCR package credentials belong to. Re-authenticate to GitHub Packages and retry."
     };
   }
+  // The identity reports the scopes of the credential it resolved. Trust it
+  // only when that is the same credential this preflight holds; otherwise fall
+  // back to the account list.
   const ghPkgAccount =
     (ghPkgIdentity.accounts || []).find((a) => a.login === ghPkgLogin) || null;
   const ghPkgHasPackages =
-    ghPkgAccount ? ghPkgAccount.hasPackages
+    (
+      ghPkgIdentity.packagesLogin === ghPkgLogin &&
+      ghPkgIdentity.packagesCredentialSource === packageCredentials.source
+    ) ?
+      ghPkgIdentity.packagesHasWrite
+    : ghPkgAccount ? ghPkgAccount.hasPackages
     : ghPkgIdentity.actingLogin === ghPkgLogin ? ghPkgIdentity.actingHasPackages
     : false;
   if (!ghPkgHasPackages) {
@@ -3257,7 +4412,11 @@ export async function preflightGhcrPackageWriteAccess(
       ok: false,
       status: 403,
       code: "ghcr-scope-required",
-      error: `The account @${ghPkgLogin} needs the write:packages permission to proceed. In the terminal, run: gh auth switch --hostname github.com --user ${ghPkgLogin}. Then run: gh auth refresh --hostname github.com --scopes read:packages,write:packages. This will make @${ghPkgLogin} the active GitHub CLI account if it is not already active.`
+      error: explainMissingPackagesScope(
+        ghPkgLogin,
+        packageCredentials.source,
+        ghPkgIdentity.accounts || []
+      )
     };
   }
 
@@ -3267,6 +4426,32 @@ export async function preflightGhcrPackageWriteAccess(
     identity: ghPkgIdentity,
     login: ghPkgLogin
   };
+}
+
+// Build the remediation for a packages credential that lacks write:packages.
+// The advice depends on WHICH credential was resolved: a stored keyring login
+// can be refreshed in place, while the host-injected session token overrides
+// stored logins and can only be replaced by selecting another stored account —
+// and that is worth suggesting only when such an account actually exists.
+export function explainMissingPackagesScope(
+  login: string,
+  source: GhcrPackageCredentials["source"],
+  accounts: readonly GitHubIdentityAccount[]
+): string {
+  const missing = `The GitHub account @${login} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR.`;
+  if (source === "injected-token") {
+    const alternative =
+      accounts.find(
+        (a) => a.switchable && a.hasPackages && a.login !== login
+      ) || null;
+    return (
+      `${missing} That credential is the Copilot session token, which overrides stored gh logins, so "gh auth refresh" cannot add the scope to it. ` +
+      (alternative ?
+        `Select the stored account @${alternative.login} in the Create Environment dialog, then retry.`
+      : `Run "gh auth login -h github.com -s read:packages -s write:packages" to sign in a stored account that can publish packages, then retry.`)
+    );
+  }
+  return `${missing} Run "gh auth switch -h github.com -u ${login} && gh auth refresh -h github.com -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`;
 }
 
 // How many of an environment's newest deployment records to resolve
@@ -3314,27 +4499,6 @@ async function resolveRepoAppName(
   return appName;
 }
 
-// Derive the deployment status for a single deploy record from the linked
-// workflow run's completion state, falling back to the deployment-status record
-// when no run information is available.  Exported for unit tests.
-//
-// `rec` must carry: { runConclusion, runStatus, state }
-// Returns one of: "success" | "failed" | "pending"
-export function resolveDeployStatus(rec: DeployStatusRecord): string {
-  if (rec.runConclusion === "success") return "success";
-  if (rec.runConclusion) return "failed"; // completed, non-success (failure/cancelled/timed_out/…)
-  if (rec.runStatus && rec.runStatus !== "completed") return "pending"; // genuinely still running
-  // No linked run (or unknown run state): fall back to the deployment
-  // record's own state so we still reflect a terminal outcome.
-  if (rec.state === "success") return "success";
-  if (rec.state === "failure" || rec.state === "error") return "failed";
-  return "pending";
-}
-
-// Read the `default:` of the `environment` input under `on.workflow_dispatch.inputs`.
-// Indentation-aware rather than a bare regex, because `environment:` also appears as a
-// job-level key and matching the wrong one would silently mis-target a deploy. Kept as
-// hand-rolled parsing to avoid pulling a YAML dependency into the adapter for one field.
 // Resolve the CURRENT application deployment for a single environment, or null
 // when no application is deployed (no deploy/delete record, or the latest delete
 // succeeded). Scoped to the environment's OWN deployment history (the GitHub
@@ -3352,122 +4516,12 @@ async function resolveEnvDeployment(
   environment: string,
   appName: string
 ): Promise<DeploymentRow | null> {
-  appName = appName || repo.split("/").pop() || repo;
-  // Provider is cosmetic (drives portal links only), so a lookup failure here
-  // must not block the whole resolution — soft-fail to an empty provider.
-  let provider = "";
-  try {
-    const varsRaw = await ghOrThrow([
-      "api",
-      `/repos/${repo}/environments/${encodeURIComponent(
-        environment
-      )}/variables?per_page=100`,
-      "--jq",
-      ".variables[].name"
-    ]);
-    if (/AZURE_/.test(varsRaw)) provider = "azure";
-    else if (/AWS_/.test(varsRaw)) provider = "aws";
-  } catch {
-    /* provider stays "" */
-  }
-
-  // Newest-first deployment records for THIS environment only.
-  const idsRaw = await ghOrThrow([
-    "api",
-    `/repos/${repo}/deployments?per_page=100&environment=${encodeURIComponent(
-      environment
-    )}`,
-    "--jq",
-    ".[].id"
-  ]);
-  const ids = idsRaw ? idsRaw.split("\n").filter(Boolean) : [];
-
-  const resolveRecord = async (id: string): Promise<DeploymentRecord> => {
-    const stateRaw = await ghOrThrow([
-      "api",
-      `/repos/${repo}/deployments/${id}/statuses?per_page=1`,
-      "--jq",
-      '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "")'
-    ]);
-    const tab = stateRaw.indexOf("\t");
-    const state = tab === -1 ? stateRaw : stateRaw.slice(0, tab);
-    const logUrl = tab === -1 ? "" : stateRaw.slice(tab + 1);
-    let runUrl = "";
-    const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
-    if (m) runUrl = `https://github.com/${repo}/actions/runs/${m[1]}`;
-    else if (/^https?:\/\//.test(logUrl || "")) runUrl = logUrl;
-    let runPath = "";
-    let runStatus = "";
-    let runConclusion = "";
-    if (m) {
-      const runInfo = await ghOrThrow([
-        "api",
-        `/repos/${repo}/actions/runs/${m[1]}`,
-        "--jq",
-        '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
-      ]);
-      const parts = runInfo.split("\t");
-      runPath = parts[0] || "";
-      runStatus = parts[1] || "";
-      runConclusion = parts[2] || "";
-    }
-    const isDeploy = new RegExp(
-      `(^|/)${DEPLOY_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`
-    ).test(runPath);
-    const isDelete = new RegExp(
-      `(^|/)${DELETE_WORKFLOW_FILE.replace(/[.]/g, "\\$&")}$`
-    ).test(runPath);
-    return { id, state, runUrl, isDeploy, isDelete, runStatus, runConclusion };
-  };
-
-  // Apply the selection rules to a resolved record:
-  //   'skip'  → not relevant (verify-credentials, or a failed delete); keep walking
-  //   null    → app deleted; environment has no active deployment
-  //   object  → the deployment row for this environment
-  const decide = (rec: DeploymentRecord): DeploymentRow | "skip" | null => {
-    if (!rec.isDeploy && !rec.isDelete) return "skip";
-    if (rec.isDelete && rec.runConclusion === "success") return null;
-    if (rec.isDelete && rec.runConclusion && rec.runConclusion !== "success")
-      return "skip";
-    let status: string;
-    if (rec.isDelete) {
-      status = "deleting"; // delete still in progress
-    } else {
-      // Deploy status is derived from the WORKFLOW RUN's completion, not the
-      // GitHub deployment-status record. A failed deploy often leaves that
-      // record stuck at "pending"/"in_progress" (the workflow never posts a
-      // terminal "failure" status), which previously mis-reported a failed
-      // deploy as "pending" and wrongly kept the Deploy button greyed out.
-      // Treat the run as authoritative: only a run that has NOT completed is
-      // "pending"; a completed run is "success" or "failed" by its
-      // conclusion, and a failed deploy does not block a redeploy.
-      status = resolveDeployStatus(rec);
-    }
-    return {
-      app: appName,
-      environment,
-      provider,
-      status,
-      deploymentId: rec.id,
-      runUrl: rec.runUrl
-    };
-  };
-
-  // Resolve the newest batch concurrently, then apply the rules newest-first.
-  const batch = ids.slice(0, DEPLOY_MAX_PARALLEL_RECORDS);
-  const resolved = await Promise.all(batch.map(resolveRecord));
-  for (const rec of resolved) {
-    const r = decide(rec);
-    if (r === "skip") continue;
-    return r;
-  }
-  // Rare fallback: nothing decisive in the newest batch — walk the rest serially.
-  for (const id of ids.slice(DEPLOY_MAX_PARALLEL_RECORDS)) {
-    const r = decide(await resolveRecord(id));
-    if (r === "skip") continue;
-    return r;
-  }
-  return null;
+  return resolveEnvironmentDeployment(repo, environment, appName, {
+    ghOrThrow,
+    deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
+    deleteWorkflowFile: DELETE_WORKFLOW_FILE,
+    maxParallelRecords: DEPLOY_MAX_PARALLEL_RECORDS
+  });
 }
 
 /**
@@ -3487,7 +4541,10 @@ async function deleteLegacyDeployWorkflow(
     );
     const sha = lookup.code === 0 ? lookup.stdout.trim() : "";
     if (!sha) return false;
-    await executor.run(
+    // Answering `true` for a DELETE that failed would report a removal that did
+    // not happen, and the legacy workflow would keep double-triggering
+    // alongside the new dispatcher with nothing saying so.
+    const removed = await executor.run(
       [
         "api",
         "--method",
@@ -3500,7 +4557,7 @@ async function deleteLegacyDeployWorkflow(
       ],
       { timeout: 30000 }
     );
-    return true;
+    return removed.code === 0 || removed.code === "0";
   }
   return new Promise((resolve) => {
     cliExec(
@@ -3526,7 +4583,7 @@ async function deleteLegacyDeployWorkflow(
             "sha=" + sha
           ],
           { timeout: 30000 },
-          () => resolve(true)
+          (deleteErr) => resolve(!deleteErr)
         );
       }
     );
@@ -3735,13 +4792,29 @@ function createInstanceRequestCoordinator(
   resolveBaseUrl: () => string
 ) {
   const serverOwnedTasks = new Map<string, Promise<void>>();
+  const automaticRecoveryRollbacks = new Set<string>();
+  const providerReconciliationTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
   const serverOwnedToken = randomUUID();
   const browserMutationNonce = randomUUID();
+
+  // Every server-owned runner saves through the same registry and reports
+  // through the same diagnostic channel, so the wiring is bound once rather
+  // than rebuilt at each write.
+  const saveOperation = (operation: any): Promise<boolean> =>
+    persistBestEffort({
+      operation,
+      persist: () => operations.persist(),
+      report: (diagnostic) => operations.report?.(diagnostic)
+    });
 
   function scheduleServerOwnedTask(
     operationId: string,
     task: () => Promise<void>
   ): void {
+    let reconciliationNeeded = false;
     let instanceTasks = activeEnvironmentTasks.get(instanceId);
     if (!instanceTasks) {
       instanceTasks = new Set();
@@ -3763,6 +4836,23 @@ function createInstanceRequestCoordinator(
       .catch(async (error) => {
         const current = operations.get(operationId);
         if (shuttingDownInstances.has(instanceId)) return;
+        if (reopenProviderReconciliation(current)) {
+          if (
+            !current.steps.some(
+              (step: { label?: string }) =>
+                step.label ===
+                "⏳ A provider step's outcome could not be confirmed. Radius is reconciling it without repeating the mutation."
+            )
+          ) {
+            addLegacyStep(
+              current,
+              "⏳ A provider step's outcome could not be confirmed. Radius is reconciling it without repeating the mutation."
+            );
+          }
+          reconciliationNeeded = true;
+          await operations.persist().catch(() => {});
+          return;
+        }
         if (current && !current.endedAt) {
           finish(current, "failed", {
             failure: {
@@ -3796,8 +4886,62 @@ function createInstanceRequestCoordinator(
             }
           }
         }
+        if (
+          current?.endedAt &&
+          current.providerRecovery?.state === "rollback_pending" &&
+          !providerRecoveryManualGuidance(current)
+        ) {
+          scheduleAutomaticRecoveryRollback(operationId);
+        } else if (
+          reconciliationNeeded &&
+          current &&
+          !current.endedAt &&
+          unresolvedProviderMutations(current).length > 0
+        ) {
+          scheduleProviderReconciliation(operationId);
+        }
       });
     serverOwnedTasks.set(operationId, running);
+  }
+
+  function scheduleProviderReconciliation(operationId: string): void {
+    if (providerReconciliationTimers.has(operationId)) return;
+    const timer = setTimeout(() => {
+      providerReconciliationTimers.delete(operationId);
+      if (shuttingDownInstances.has(instanceId)) return;
+      const operation = operations.get(operationId);
+      if (
+        !operation ||
+        operation.endedAt ||
+        unresolvedProviderMutations(operation).length === 0
+      ) {
+        return;
+      }
+      scheduleRecoveredProviderMutation(operation);
+    }, 5000);
+    timer.unref?.();
+    providerReconciliationTimers.set(operationId, timer);
+  }
+
+  function scheduleAutomaticRecoveryRollback(operationId: string): void {
+    if (automaticRecoveryRollbacks.has(operationId)) return;
+    automaticRecoveryRollbacks.add(operationId);
+    queueMicrotask(() => {
+      void postInternal(
+        `/api/operations/${encodeURIComponent(operationId)}/rollback`,
+        {}
+      )
+        .catch((error) => {
+          operations.report?.({
+            scope: "provider-recovery-auto-rollback",
+            operationId,
+            message: errorMessage(error)
+          });
+        })
+        .finally(() => {
+          automaticRecoveryRollbacks.delete(operationId);
+        });
+    });
   }
 
   async function postInternal(pathname: string, data: unknown): Promise<any> {
@@ -3819,11 +4963,22 @@ function createInstanceRequestCoordinator(
   }
 
   async function monitorVerification(operationId: string): Promise<void> {
-    const deadline = Date.now() + 45 * 60 * 1000;
+    const initialOperation = operations.get(operationId);
+    const deadline = verificationTrackingDeadline(
+      initialOperation || { operationId },
+      Date.now
+    );
     let delayMs = 5000;
     while (Date.now() < deadline) {
       const op = operations.get(operationId);
       if (!op || op.endedAt || op.currentStage !== STAGE_VERIFY) return;
+      // Each polling observation is a safe boundary: nothing is being written.
+      if (shouldStop(op)) {
+        stopAtBoundary(op, "verification-observation", { announce: false });
+        const saved = await saveOperation(op);
+        if (saved) announceOperationTerminal(op);
+        return;
+      }
       const params = new URLSearchParams({
         repo: op.repo,
         environment: op.environment,
@@ -3858,11 +5013,7 @@ function createInstanceRequestCoordinator(
               evidence: null
             }
           });
-          await persistBestEffort({
-            operation: current,
-            persist: () => operations.persist(),
-            report: (diagnostic) => operations.report?.(diagnostic)
-          });
+          await saveOperation(current);
         }
         return;
       }
@@ -3878,17 +5029,69 @@ function createInstanceRequestCoordinator(
   }
 
   async function monitorVerificationAsSelectedAccount(
-    operationId: string,
-    login: string
+    op: any,
+    beforeMonitor?: (executor: SelectedGhExecutor) => Promise<boolean>
   ): Promise<void> {
-    const executor =
-      await githubAccountCoordinator.createReadOnlyExecutor(login);
-    selectedGitHubExecutorsByOperation.set(operationId, executor);
-    try {
-      await monitorVerification(operationId);
-    } finally {
-      selectedGitHubExecutorsByOperation.delete(operationId);
-    }
+    await monitorVerificationWithSelectedAccount(op, {
+      createExecutor: (login) =>
+        githubAccountCoordinator.createReadOnlyExecutor(login),
+      registerExecutor: (operationId, executor) => {
+        selectedGitHubExecutorsByOperation.set(operationId, executor);
+      },
+      unregisterExecutor: (operationId) => {
+        selectedGitHubExecutorsByOperation.delete(operationId);
+      },
+      beforeMonitor,
+      monitor: monitorVerification,
+      accountUnavailable: async (operation, login, detail) => {
+        operation.verification = {
+          ...(operation.verification || {}),
+          accountUnavailablePhase:
+            operation.verification?.runId ? "monitor" : "dispatch"
+        };
+        const account = login ? `@${login}` : "the saved GitHub account";
+        addLegacyStep(
+          operation,
+          `❌ Could not use ${account} to resume credential verification.`
+        );
+        finish(operation, "failed_partial", {
+          failure: {
+            code:
+              login ?
+                "verification-retry-github-account-unavailable"
+              : "verification-retry-github-account-missing",
+            stage: STAGE_VERIFY,
+            stepSeq: null,
+            message:
+              login ?
+                `Radius could not use @${login} to resume credential verification. Re-check that account and retry verification.`
+              : "Radius cannot resume credential verification because this operation has no saved GitHub account. Start a new environment setup.",
+            classification: "user-fixable",
+            evidence: detail
+          }
+        });
+        await saveOperation(operation);
+      },
+      trackingExpired: async (operation, expiration) => {
+        const copy = verificationAcquisitionExpiredCopy("resume", expiration);
+        finish(operation, "failed_partial", {
+          failure: {
+            code: "verification-tracking-expired",
+            stage: STAGE_VERIFY,
+            stepSeq: null,
+            message: copy.message,
+            classification: "user-fixable",
+            evidence: expiration.detail
+          }
+        });
+        await saveOperation(operation);
+      },
+      isRateLimitError: (error) => isGitHubRateLimitError(error),
+      now: Date.now,
+      sleep: (milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds)),
+      errorMessage
+    });
   }
 
   async function runEnvironmentOperation(operationId: string): Promise<void> {
@@ -3933,6 +5136,8 @@ function createInstanceRequestCoordinator(
             recordGitHubEnvironment: (operation, patch) => {
               recordGitHubEnvironment(operation, patch);
             },
+            promoteCreatedGitHubEnvironment: (operation, identity) =>
+              promoteCreatedGitHubEnvironment(operation, identity),
             addLegacyStep: (operation, text) => {
               addLegacyStep(operation, text);
             },
@@ -3956,10 +5161,12 @@ function createInstanceRequestCoordinator(
                             "GitHub API request failed."
                         );
                       }
-                    }
+                    },
+                    readEnvironment: selectedEnvironmentReader(executor)
                   });
                 }
               }),
+            persistProviderMutation: () => operations.persist(),
             finalizeEnvironmentResolutionFailure: async (
               operation,
               input,
@@ -3980,11 +5187,13 @@ function createInstanceRequestCoordinator(
                         "GitHub API request failed."
                     );
                   }
-                }
+                },
+                readEnvironment: selectedEnvironmentReader(selectedExecutor)
               });
             },
             getOperation: (id) => operations.get(id),
-            postInternal
+            postInternal,
+            now: () => Date.now()
           });
         },
         30000
@@ -4006,11 +5215,7 @@ function createInstanceRequestCoordinator(
           }`.trim()
         );
       }
-      await persistBestEffort({
-        operation: op,
-        persist: () => operations.persist(),
-        report: (diagnostic) => operations.report?.(diagnostic)
-      });
+      await saveOperation(op);
       if (!setup.value.shouldMonitor) return;
       await monitorVerification(operationId);
     } finally {
@@ -4020,10 +5225,593 @@ function createInstanceRequestCoordinator(
     }
   }
 
-  function startRecoveredVerificationTasks(): void {
+  /**
+   * Repeat verification against the exact workflow identity Radius saved.
+   *
+   * Two different failures land here: the workflow is not installed until the
+   * setup pull request merges, and an Azure role assignment can take minutes to
+   * propagate. Both are fixed by running the same workflow again on the same
+   * branch for the same environment — never by recreating the environment, and
+   * never by adopting some other run that happens to be in the repository.
+   */
+  async function runVerificationRetry(
+    operationId: string,
+    commandId: string
+  ): Promise<void> {
+    if (environmentOperationTestRunner) {
+      await environmentOperationTestRunner(operationId, commandId);
+      return;
+    }
+    const operation = operations.get(operationId);
+    if (!operation) return;
+    await runSelectedVerificationRetry(operation, commandId, {
+      createExecutor: (login) =>
+        githubAccountCoordinator.createReadOnlyExecutor(login),
+      registerExecutor: (id, executor) => {
+        selectedGitHubExecutorsByOperation.set(id, executor);
+      },
+      unregisterExecutor: (id) => {
+        selectedGitHubExecutorsByOperation.delete(id);
+      },
+      buildDispatchArgs: buildVerifyWorkflowDispatchArgs,
+      selectedCommandAuthorizationError,
+      isAuthorizationError: isSelectedGhAuthorizationError,
+      isRateLimitError: isGitHubRateLimitError,
+      now: Date.now,
+      sleep: (milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds)),
+      verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
+      stageVerify: STAGE_VERIFY,
+      addStep: (target, text, stage) => addLegacyStep(target, text, stage),
+      setCommandState,
+      finish,
+      persist: saveOperation,
+      persistJournal: () => operations.persist(),
+      monitor: monitorVerification,
+      currentState: (id) => operations.get(id)?.state || null,
+      errorMessage
+    });
+    return;
+  }
+
+  /**
+   * Delete the selected resources this attempt created, before the commit point.
+   *
+   * Deletion runs in reverse dependency order: the GitHub environment first,
+   * then the Azure role assignments, federated credentials, Service Principal,
+   * and finally the App Registration everything else hangs off. Each result is
+   * written to the ledger and persisted before the next deletion starts, so an
+   * interrupted pass still reports exactly what it removed.
+   */
+  async function runCleanupCommand(
+    kind: CleanupCommandKind,
+    operationId: string,
+    commandId: string
+  ): Promise<void> {
+    if (environmentOperationTestRunner) {
+      await environmentOperationTestRunner(operationId, commandId);
+      return;
+    }
+    const op = operations.get(operationId);
+    if (!op || op.endedAt) return;
+    const recoveryBeforeCleanup = cleanupProviderRecoveryDisposition(op);
+    if (!recoveryBeforeCleanup.mayStartDestructiveCleanup) {
+      throw new Error(
+        "Provider mutations must be reconciled before cleanup can continue."
+      );
+    }
+    const command = CLEANUP_COMMANDS[kind];
+    const selected = command.selectTargets(op);
+    const ledger = getSetupArtifactLedger(op);
+    const priorResults: SetupCleanupResult[] =
+      Array.isArray(ledger?.cleanup?.results) ?
+        [...ledger.cleanup.results]
+      : [];
+    const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
+    const steps: string[] = [];
+    const persist = async (): Promise<void> => {
+      await saveOperation(op);
+    };
+    const warnings: string[] = [];
+    let results: SetupCleanupResult[] = [];
+    const carriedResults = () => [
+      ...priorResults.filter((entry) => entry.attempt < attempt),
+      ...results
+    ];
+    const cleanupGitHub = await resolveCleanupGitHubContext({
+      targets: selected,
+      selectedLogin: optionalString(op.context?.githubLogin)
+    });
+
+    // The workflow files come first and gate everything after them. Removing
+    // the GitHub environment or the cloud identity while an installed workflow
+    // still references them would leave the repository with a job that fails at
+    // Azure Login rather than one that is simply gone, so a workflow pass that
+    // cannot finish stops the whole rollback here.
+    const workflowPass = await rollbackCommittedWorkflowFiles(op, {
+      attempt,
+      ports: createWorkflowRollbackPorts(cleanupGitHub.rollbackCommand),
+      only: new Set<string>(
+        selected
+          .filter(
+            (entry: { artifactType: string }) =>
+              entry.artifactType === "workflow_file"
+          )
+          .map((entry: { key: string }) => entry.key)
+      ),
+      steps
+    });
+    if (workflowPass.attempted) {
+      warnings.push(...workflowPass.warnings);
+      results = [...results, ...workflowPass.results];
+      recordCleanupState(op, { state: "running", results: carriedResults() });
+      await persist();
+      if (workflowPass.blocked) {
+        for (const step of steps) addLegacyStep(op, step);
+        recordCleanupState(op, {
+          attempts: attempt,
+          state: "succeeded_with_warnings",
+          results: carriedResults()
+        });
+        setCommandState(op, commandId, "finished", "blocked");
+        finish(op, "failed_partial", {
+          failure: {
+            code: "setup-rollback-blocked",
+            stage: op.currentStage,
+            stepSeq: null,
+            message:
+              "Radius could not prove every committed workflow file is still the file it wrote, so it removed nothing and kept the environment and credentials in place.",
+            classification: "user-fixable",
+            evidence: null
+          }
+        });
+        await persist();
+        return;
+      }
+    }
+
+    // A GitHub environment can be one of the selected targets, and skipping it
+    // here would report a clean removal while the environment survived.
+    if (
+      selected.some(
+        (entry: { artifactType: string }) =>
+          entry.artifactType === "github_environment"
+      )
+    ) {
+      const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
+        attempt,
+        runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
+        readEnvironment: cleanupGitHub.readEnvironment,
+        persistJournal: () => operations.persist(),
+        invalidateEnvironmentListing: (repo) => {
+          envListCache.invalidate(repo);
+        },
+        steps
+      });
+      warnings.push(...environmentCleanup.warnings);
+      results = [...results, ...environmentCleanup.results];
+      if (environmentCleanup.results.length > 0) {
+        // The attempt counter stays where it is until the Azure pass claims it,
+        // so both passes record against the same cleanup attempt.
+        recordCleanupState(op, { state: "running", results: carriedResults() });
+        await persist();
+      }
+    }
+
+    const runAz = (args: string[]): Promise<CommandResult> =>
+      runCliCommand("az", args);
+    const azureCleanup = await cleanupAzureSetupArtifacts(op, {
+      runAz,
+      steps,
+      only: new Set<string>(
+        selected
+          .filter(
+            (entry: { artifactType: string }) =>
+              entry.artifactType !== "github_environment"
+          )
+          .map((entry: { key: string }) => entry.key)
+      ),
+      onResultRecorded: persist,
+      persistJournal: () => operations.persist()
+    });
+    warnings.push(...azureCleanup.warnings);
+    results = [...results, ...azureCleanup.results];
+
+    for (const step of steps) addLegacyStep(op, step);
+    // A deletion this pass issued and could not settle has nobody left to
+    // settle it: the record is about to end, and every scheduler that would
+    // reread it is gated on a live operation. Leaving it merely unresolved
+    // would hold the repository behind an entry no command can clear, so it is
+    // handed to the customer by name instead. The delete is still never
+    // repeated — `manual_required` refuses that as firmly as `outcome_unknown`.
+    quarantineUnsettledCleanupDeletions(op);
+    const recoveryAfterCleanup = cleanupProviderRecoveryDisposition(op);
+    if (!recoveryAfterCleanup.mayCompleteCleanup) {
+      recordCleanupState(op, {
+        attempts: azureCleanup.attempt,
+        state: "pending",
+        results: carriedResults()
+      });
+      setCommandState(
+        op,
+        commandId,
+        "finished",
+        "provider-reconciliation-pending"
+      );
+      finish(op, "failed_partial", {
+        failure: {
+          code: "provider-reconciliation-pending",
+          stage: op.currentStage,
+          stepSeq: null,
+          message:
+            "Cleanup could not finish because one or more provider mutation outcomes are still unresolved.",
+          classification: "user-fixable",
+          evidence: recoveryAfterCleanup.blockers
+            .map((mutation) => `${mutation.kind} for ${mutation.target}`)
+            .join("; ")
+        }
+      });
+      await persist();
+      return;
+    }
+    // The browser reloads the environment table the moment this record turns
+    // terminal, and that reload is answered from the repo-scoped listing cache.
+    // Invalidating here — before `finish`, not only where the deletion happened
+    // — means the reload cannot be answered from a listing assembled before the
+    // removal, so a completed rollback never hands the customer back the
+    // environment it just removed.
+    const cleanupRepo = String(op.repo || "");
+    if (cleanupRepo !== "" && cleanupRemovedGitHubEnvironment(results)) {
+      envListCache.invalidate(cleanupRepo);
+    }
+    recordCleanupState(op, {
+      attempts: azureCleanup.attempt,
+      state: warnings.length ? "succeeded_with_warnings" : "succeeded",
+      results: carriedResults()
+    });
+    if (
+      kind === "rollback" &&
+      op.providerRecovery?.state === "rollback_pending"
+    ) {
+      op.providerRecovery.state = "complete";
+      op.recoveryState = null;
+    }
+    setCommandState(
+      op,
+      commandId,
+      "finished",
+      warnings.length ? "warnings" : command.cleanedOutcome
+    );
+    if (warnings.length > 0) {
+      finish(op, "failed_partial", {
+        failure: {
+          code: "setup-cleanup-incomplete",
+          stage: op.currentStage,
+          stepSeq: null,
+          message: command.incompleteMessage,
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+    } else {
+      finish(op, "cancelled", {
+        terminal: {
+          reason: command.terminalReason,
+          userMessage: command.cleanedMessage
+        }
+      });
+    }
+    await persist();
+  }
+
+  /**
+   * Settle an unresolved setup-branch deletion before anything else runs.
+   *
+   * This is the one recovery that cannot be folded into the others. Running the
+   * setup forward would rebuild against a branch whose fate is unknown, and
+   * running the rollback would report a cleanup that skipped the branch it was
+   * supposed to remove first. Both are resolved here, or the record ends saying
+   * plainly that the branch is the customer's to remove.
+   */
+  async function runRecoveredBranchDelete(operationId: string): Promise<void> {
+    const op = operations.get(operationId);
+    if (!op) return;
+    const mutation = pendingBranchDelete(op);
+    if (!mutation) return;
+    // The branch belongs to the account that created it. An ambient `gh` here
+    // would read the repository as whoever the CLI happens to be logged in as,
+    // and a 404 from the wrong identity is exactly the answer this recovery
+    // must never mistake for "the branch is gone".
+    const selectedLogin =
+      typeof op.context?.githubLogin === "string" ?
+        op.context.githubLogin.trim()
+      : "";
+    let executor: SelectedGhExecutor;
+    try {
+      if (!selectedLogin) {
+        throw new Error(
+          "The operation record does not name the GitHub account that created the setup branch."
+        );
+      }
+      executor =
+        await githubAccountCoordinator.createReadOnlyExecutor(selectedLogin);
+      await executor.verifyIdentity();
+    } catch (error) {
+      await failRecoveredBranchDelete(
+        op,
+        "setup-branch-delete-unresolved",
+        "Radius could not use the GitHub account that created the recovered setup branch, so it still cannot say whether its deletion took effect: " +
+          `${errorMessage(error)}. It changed nothing further.`
+      );
+      return;
+    }
+    const outcome = await reconcileRecoveredBranchDelete({
+      operation: op,
+      mutation,
+      readBranchRef: (repo, branch) =>
+        executor.run(branchRefReadArgs(repo, branch)),
+      // The same permission the 404 came from. Matching-refs answers with every
+      // ref sharing the prefix, so the account either can see this repository's
+      // refs — in which case the branch's absence from the listing is real — or
+      // cannot, in which case nothing is concluded.
+      listBranchRefs: (repo, branch, page) =>
+        executor.run(branchRefListingArgs(repo, branch, page))
+    });
+    if (outcome.state === "removed") {
+      addLegacyStep(op, `✅ ${outcome.evidence}`);
+      // `operations.persist` rather than the best-effort save: a command a
+      // runner executes but no reload can find is the one shape that lets the
+      // same deletion be scheduled again after the next restart.
+      const plan = await planRecoveredCleanup({
+        operation: op,
+        persist: () => operations.persist()
+      });
+      if (plan.state === "resume" || plan.state === "start") {
+        if (plan.state === "start") {
+          addLegacyStep(
+            op,
+            "⏳ Rolling back the resources this interrupted attempt created."
+          );
+        }
+        await saveOperation(op);
+        await runCleanupCommand(plan.kind, operationId, plan.commandId);
+        return;
+      }
+      // Nothing is left to remove, or a provider answer is still outstanding.
+      // The record has to become terminal either way so the panel stops showing
+      // work nothing will do, and so the refusal the gates already compute is
+      // the one the customer reads.
+      finish(op, "failed_partial", {
+        failure: {
+          code: "setup-branch-removed-pending-rollback",
+          stage: op.currentStage,
+          stepSeq: null,
+          message:
+            plan.state === "blocked" ?
+              `Radius removed the setup branch an interrupted attempt had created, but it cannot remove anything else yet. ${plan.detail}`
+            : "Radius removed the setup branch an interrupted attempt had created. Nothing else from this attempt is left to remove.",
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      await saveOperation(op);
+      return;
+    }
+    addLegacyStep(op, `⚠️ ${outcome.guidance}`);
+    await failRecoveredBranchDelete(
+      op,
+      outcome.state === "unreadable" ?
+        "setup-branch-delete-unresolved"
+      : "setup-branch-delete-manual-required",
+      outcome.guidance,
+      { announced: true }
+    );
+  }
+
+  /**
+   * End a recovered branch delete that could not be settled.
+   *
+   * The blocker is written to the provider recovery record as well as the
+   * failure, because the recovery state is what the destructive gates read: a
+   * failure message alone would still leave Rollback and Exit on offer for a
+   * record whose setup branch may still be in the repository.
+   */
+  async function failRecoveredBranchDelete(
+    op: any,
+    code: string,
+    guidance: string,
+    { announced = false }: { announced?: boolean } = {}
+  ): Promise<void> {
+    if (!announced) addLegacyStep(op, `⚠️ ${guidance}`);
+    if (op.providerRecovery) {
+      op.providerRecovery.state = "manual_required";
+      op.providerRecovery.guidance = guidance;
+    }
+    finish(op, "failed_partial", {
+      failure: {
+        code,
+        stage: op.currentStage,
+        stepSeq: null,
+        message: guidance,
+        classification: "user-fixable",
+        evidence: null
+      }
+    });
+    await saveOperation(op);
+  }
+
+  /**
+   * Run the deletion a reconciled operation decided on, opening one if needed.
+   *
+   * Reconciliation reaching `rollback_pending` is a decision, not a command:
+   * without a durable command behind it the record would sit running with no
+   * pass to execute and no entry the panel could name. Resolving it here keeps
+   * that decision and the command that carries it out in one place, whether the
+   * pass was already in flight when the process went away or has to be opened.
+   */
+
+  /**
+   * Read back the exact identity of every deletion this operation left open.
+   *
+   * Restricted to artifacts whose journal entry is still unresolved, because a
+   * cleanup executor asked about an artifact with no entry would delete it.
+   * For the ones it is asked about, `executeRecoverableMutation` takes the
+   * reconcile branch — the delete is never issued a second time — so this
+   * settles them from provider state alone.
+   */
+  async function reconcileUnsettledCleanupDeletions(op: any): Promise<void> {
+    const unsettled = new Set(
+      unresolvedProviderMutations(op)
+        .filter((mutation) => isCleanupDeletionKind(mutation.kind))
+        .map((mutation) => mutation.mutationId)
+    );
+    if (unsettled.size === 0) return;
+    const targets = provenOwnedCleanupTargets(op).filter((target: any) =>
+      unsettled.has(
+        providerMutationId(
+          op.operationId,
+          cleanupDeletionKind(String(target.artifactType)),
+          String(target.identity ?? "")
+        )
+      )
+    );
+    if (targets.length === 0) return;
+    const steps: string[] = [];
+    const selectedLogin = optionalString(op.context?.githubLogin);
+    if (
+      targets.some(
+        (target: any) => target.artifactType === "github_environment"
+      )
+    ) {
+      const cleanupGitHub = await resolveCleanupGitHubContext({
+        targets,
+        selectedLogin
+      });
+      await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: Number(getSetupArtifactLedger(op)?.cleanup?.attempts || 1),
+        runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
+        readEnvironment: cleanupGitHub.readEnvironment,
+        persistJournal: () => operations.persist(),
+        invalidateEnvironmentListing: (repo) => {
+          envListCache.invalidate(repo);
+        },
+        steps
+      });
+    }
+    const azureKeys = new Set<string>(
+      targets
+        .filter((target: any) => target.artifactType !== "github_environment")
+        .map((target: any) => String(target.key))
+    );
+    if (azureKeys.size > 0 && op.provider === "azure") {
+      await cleanupAzureSetupArtifacts(op, {
+        runAz: (args: string[]) => runCliCommand("az", args),
+        steps,
+        only: azureKeys,
+        persistJournal: () => operations.persist()
+      });
+    }
+    for (const step of steps) addLegacyStep(op, step);
+    await saveOperation(op);
+  }
+
+  async function runRecoveredCleanup(operationId: string): Promise<void> {
+    const op = operations.get(operationId);
+    if (!op || op.endedAt) return;
+    // Settle the deletions this operation already issued before deciding
+    // anything else. The executors reconcile a journaled entry by reading its
+    // exact identity and never reissue it, so this is the reconciliation the
+    // resume gate is waiting on rather than another pass over the ledger.
+    await reconcileUnsettledCleanupDeletions(op);
+    const plan = await planRecoveredCleanup({
+      operation: op,
+      persist: () => operations.persist()
+    });
+    if (plan.state === "resume" || plan.state === "start") {
+      await runCleanupCommand(plan.kind, operationId, plan.commandId);
+      return;
+    }
+    // Nothing executable is left. Terminalizing is what stops the record from
+    // holding the repository open for a pass that will never be scheduled; the
+    // destructive gates then decide what, if anything, the customer is offered.
+    // A deletion still awaiting an answer is named before that happens, because
+    // once the record is terminal nothing will reread it.
+    quarantineUnsettledCleanupDeletions(op);
+    // A record that was already terminal when recovery reopened it keeps the
+    // verdict the customer was shown. Reconciliation names what it could not
+    // settle, but a cancellation does not become a failure because a delete it
+    // issued lost its answer.
+    const priorOutcome = op.reconciliationPriorOutcome;
+    finish(op, priorOutcome?.state || "failed_partial", {
+      failure: {
+        code:
+          plan.state === "blocked" ?
+            "provider-reconciliation-manual-required"
+          : "setup-rollback-nothing-owned",
+        stage: op.currentStage,
+        stepSeq: null,
+        message:
+          plan.state === "blocked" ?
+            plan.detail
+          : "Radius reconciled the interrupted setup and found nothing it can prove it created, so it removed nothing.",
+        classification: "user-fixable",
+        evidence: null
+      }
+    });
+    delete op.reconciliationPriorOutcome;
+    await saveOperation(op);
+  }
+
+  function scheduleRecoveredProviderMutation(op: {
+    operationId: string;
+    providerRecovery?: { state?: string };
+    control?: {
+      commands?: Array<{ commandId?: string; kind?: string; state?: string }>;
+    };
+  }): void {
+    const next = planRecoveredSchedule(op);
+    if (next.kind === "branch_delete") {
+      scheduleServerOwnedTask(op.operationId, () =>
+        runRecoveredBranchDelete(op.operationId)
+      );
+      return;
+    }
+    if (next.kind === "cleanup") {
+      scheduleServerOwnedTask(op.operationId, () =>
+        runRecoveredCleanup(op.operationId)
+      );
+      return;
+    }
+    if (next.kind === "verification_retry") {
+      const commandId = next.commandId;
+      scheduleServerOwnedTask(op.operationId, () =>
+        runVerificationRetry(op.operationId, commandId)
+      );
+      return;
+    }
+    scheduleEnvironmentOperation(op);
+  }
+
+  function startRecoveredTasks(): void {
     for (const op of operations.all()) {
       if (
-        op.recoveryState !== "verification_pending" ||
+        op.endedAt &&
+        op.providerRecovery?.state === "rollback_pending" &&
+        !providerRecoveryManualGuidance(op)
+      ) {
+        scheduleAutomaticRecoveryRollback(op.operationId);
+        continue;
+      }
+      if (
+        op.recoveryState === "provider_reconciliation_pending" &&
+        !op.endedAt
+      ) {
+        scheduleRecoveredProviderMutation(op);
+        continue;
+      }
+      if (
+        (op.recoveryState !== "verification_pending" &&
+          op.recoveryState !== "verification_acquisition_pending") ||
         op.currentStage !== STAGE_VERIFY ||
         op.endedAt ||
         activeVerificationMonitors.has(op.operationId)
@@ -4032,23 +5820,122 @@ function createInstanceRequestCoordinator(
       activeVerificationMonitors.add(op.operationId);
       scheduleServerOwnedTask(op.operationId, async () => {
         try {
-          const selectedLogin =
-            typeof op.context?.githubLogin === "string" ?
-              op.context.githubLogin
-            : "";
-          if (selectedLogin) {
-            await monitorVerificationAsSelectedAccount(
+          if (op.recoveryState === "verification_acquisition_pending") {
+            await runVerificationRetry(
               op.operationId,
-              selectedLogin
+              String(op.verification?.retryCommandId || "")
             );
           } else {
-            await monitorVerification(op.operationId);
+            await monitorVerificationAsSelectedAccount(op, (executor) =>
+              resolveRecoveredVerificationRun(op, executor)
+            );
           }
         } finally {
           activeVerificationMonitors.delete(op.operationId);
         }
       });
     }
+  }
+
+  /**
+   * Give a restarted verification the run identity its dispatch never recorded.
+   *
+   * The dispatch is journaled before the request goes out and confirmed after
+   * GitHub accepts it, so a restart in between leaves a record that knows a run
+   * exists and cannot say which one. Monitoring that record polls a null run id
+   * until the tracking window closes, which reads as a hung setup. So the run is
+   * discovered here first, by the operation-specific marker and nothing weaker,
+   * and a record whose workflow never carried a marker is handed to the customer
+   * immediately rather than waiting for an identity it can never obtain.
+   *
+   * Returns whether monitoring should continue.
+   */
+  async function resolveRecoveredVerificationRun(
+    op: any,
+    executor: SelectedGhExecutor
+  ): Promise<boolean> {
+    const identity = readRecoveredVerificationIdentity(
+      op,
+      VERIFY_WORKFLOW_FILE
+    );
+    const actionsUrl = verificationActionsUrl(identity.repo, identity.workflow);
+    const handOff = async (guidance: string): Promise<boolean> => {
+      op.verification = {
+        ...(op.verification || {}),
+        runId: null,
+        runUrl: actionsUrl
+      };
+      finish(op, "action_required", {
+        terminal: { reason: "verification-run-manual", userMessage: guidance }
+      });
+      await saveOperation(op);
+      return false;
+    };
+    const listArgs = [
+      "run",
+      "list",
+      "--workflow=" + identity.workflow,
+      "--limit",
+      "10",
+      "--json",
+      "databaseId,createdAt,displayTitle,event,headBranch",
+      "--repo",
+      identity.repo
+    ];
+    let outcome;
+    try {
+      outcome = await recoverVerificationRun({
+        runId: op.verification?.runId,
+        identity,
+        listRuns: async () => {
+          const listed = await executor.run(listArgs, { timeout: 30000 });
+          const authorizationError = await selectedCommandAuthorizationError(
+            executor,
+            identity.repo,
+            listed
+          );
+          if (authorizationError) throw authorizationError;
+          return listed;
+        },
+        isAuthorizationError: isSelectedGhAuthorizationError
+      });
+    } catch (error) {
+      if (!isSelectedGhAuthorizationError(error)) throw error;
+      addLegacyStep(
+        op,
+        `❌ Could not use @${executor.login} to recover credential verification.`
+      );
+      finish(op, "failed_partial", {
+        failure: {
+          code: "verification-retry-github-account-unavailable",
+          stage: STAGE_VERIFY,
+          stepSeq: null,
+          message: `Radius could not use @${executor.login} to resume credential verification. Re-check that account and retry verification.`,
+          classification: "user-fixable",
+          evidence: error.message
+        }
+      });
+      op.verification = {
+        ...(op.verification || {}),
+        accountUnavailablePhase: "dispatch"
+      };
+      await saveOperation(op);
+      return false;
+    }
+    if (outcome.state === "monitor") return true;
+    if (outcome.state === "hand_off") return handOff(outcome.guidance);
+    op.verification = {
+      ...(op.verification || {}),
+      runId: outcome.runId,
+      runUrl: outcome.runUrl
+    };
+    addLegacyStep(
+      op,
+      `✅ Recovered the credential verification run this setup dispatched: ${outcome.runUrl}`,
+      STAGE_VERIFY
+    );
+    await saveOperation(op);
+    return true;
   }
 
   const handleUnmatchedRequest = async (
@@ -4118,13 +6005,28 @@ function createInstanceRequestCoordinator(
       runEnvironmentOperation(op.operationId)
     );
   };
+  // The three cooperative-control runners, exposed for the same reason: the
+  // control routes are composed once at module init and hand the accepted
+  // command back to the instance that received the request.
+  const scheduleCommandTask = (
+    kind: "verification_retry" | "cleanup_retry" | "rollback" | "exit_setup",
+    op: { operationId: string },
+    commandId: string
+  ): void => {
+    scheduleServerOwnedTask(op.operationId, () =>
+      kind === "verification_retry" ?
+        runVerificationRetry(op.operationId, commandId)
+      : runCleanupCommand(kind, op.operationId, commandId)
+    );
+  };
   return {
     browserMutationNonce,
     handleUnmatchedRequest,
-    startRecoveredVerificationTasks,
+    startRecoveredTasks,
     isServerOwned,
     validateBrowserMutation,
-    scheduleEnvironmentOperation
+    scheduleEnvironmentOperation,
+    scheduleCommandTask
   };
 }
 

@@ -44,6 +44,13 @@ interface Harness {
   persistCalls: string[];
   scheduled: Array<{ instanceId: string; operationId: string }>;
   scheduleAccepted: { value: boolean };
+  startConflict: {
+    value: {
+      ok: false;
+      conflict: { operationId: string };
+      reason: "operation-in-progress" | "previous-cleanup-required";
+    } | null;
+  };
 }
 
 const RUNNING: OperationActionRecord = {
@@ -89,6 +96,7 @@ function start(strictBrowserMutations = false): Harness {
   const persistCalls: string[] = [];
   const scheduled: Array<{ instanceId: string; operationId: string }> = [];
   const scheduleAccepted = { value: true };
+  const startConflict: Harness["startConflict"] = { value: null };
   const persistOperations = (): Promise<void> => {
     persistCalls.push("persist");
     return persistError.value ?
@@ -139,6 +147,13 @@ function start(strictBrowserMutations = false): Harness {
         isUuid,
         buildStages,
         createOperation,
+        startConflict: (repo) => {
+          if (startConflict.value) return startConflict.value;
+          const existing = running.get(repo);
+          return existing ?
+              { ok: false, reason: "operation-in-progress", conflict: existing }
+            : null;
+        },
         startOperation: (op) => {
           const existing = running.get(op.repo as string);
           if (existing) return { ok: false, conflict: existing };
@@ -198,6 +213,7 @@ function start(strictBrowserMutations = false): Harness {
     persistCalls,
     scheduled,
     scheduleAccepted,
+    startConflict,
     setLatest(record) {
       latest = record;
     }
@@ -334,6 +350,33 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     });
     // Only the first request scheduled work.
     expect(harness.scheduled).toHaveLength(1);
+  });
+
+  it("returns the prior cleanup operation without registering or scheduling a new setup", async () => {
+    const harness = start();
+    harness.startConflict.value = {
+      ok: false,
+      conflict: { operationId: "op-cleanup" },
+      reason: "previous-cleanup-required"
+    };
+    const recordCount = harness.records.size;
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/operations`, {
+      method: "POST",
+      body: JSON.stringify(VALID_AZURE_BODY)
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error:
+        "An earlier setup for octo/app must finish rollback before a new setup can start.",
+      code: "previous-cleanup-required",
+      operationId: "op-cleanup"
+    });
+    expect(harness.records.size).toBe(recordCount);
+    expect(harness.persistCalls).toEqual([]);
+    expect(harness.scheduled).toEqual([]);
   });
 
   it("answers 500 and never schedules when durable registration fails", async () => {

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
   createDeploymentsRoutes,
+  handleAbandonDeployment,
   handleDeleteDeployment,
   handleDeploy,
   handleDeployReset,
@@ -74,6 +75,7 @@ function dependencies(
   overrides: Partial<DeploymentsDependencies> = {}
 ): DeploymentsDependencies {
   return {
+    isValidRepoSlug: (value) => value === "octo/todolist",
     readInstanceEntry: () => {
       throw new Error("readInstanceEntry not stubbed");
     },
@@ -142,6 +144,11 @@ function dependencies(
     deployRequest: {
       deploy: () => {
         throw new Error("deployRequest.deploy not stubbed");
+      }
+    },
+    abandonment: {
+      abandon: () => {
+        throw new Error("abandonment.abandon not stubbed");
       }
     },
     ...overrides
@@ -217,7 +224,7 @@ const JSON_HEADERS = {
 };
 
 describe("deployments routes (SU-06)", () => {
-  it("declares exactly the six routes it owns", () => {
+  it("declares exactly the seven routes it owns", () => {
     const routes = createDeploymentsRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
       "GET /api/deploy-status",
@@ -225,7 +232,8 @@ describe("deployments routes (SU-06)", () => {
       "GET /api/list-deployments",
       "POST /api/deploy",
       "POST /api/deploy-reset",
-      "POST /api/delete-deployment"
+      "POST /api/delete-deployment",
+      "POST /api/abandon-deployment"
     ]);
   });
 
@@ -246,6 +254,16 @@ describe("deployments routes (SU-06)", () => {
         resetDeploymentViewState: () => {},
         deployRequest: {
           deploy: () => Promise.resolve({ status: 200, body: { ok: true } })
+        },
+        abandonment: {
+          abandon: () =>
+            Promise.resolve({
+              status: 400,
+              body: {
+                error:
+                  "A valid repo, environment, and application are required to abandon deployment tracking."
+              }
+            })
         }
       })
     );
@@ -283,7 +301,14 @@ describe("deployments routes (SU-06)", () => {
     const remove = context("POST", "/api/delete-deployment", "{}");
     await routes["POST /api/delete-deployment"](remove.context);
     expect(JSON.parse(remove.recording.body)).toEqual({
-      error: "repo, environment, and application are required."
+      error: "A valid repo, environment, and application are required."
+    });
+
+    const abandon = context("POST", "/api/abandon-deployment", "{}");
+    await routes["POST /api/abandon-deployment"](abandon.context);
+    expect(JSON.parse(abandon.recording.body)).toEqual({
+      error:
+        "A valid repo, environment, and application are required to abandon deployment tracking."
     });
   });
 
@@ -1215,7 +1240,7 @@ describe("deployments routes (SU-06)", () => {
       return context("POST", "/api/delete-deployment", body);
     }
 
-    it("refuses a request missing any of repo, environment or application", async () => {
+    it("refuses a request missing or malformed repo, environment or application", async () => {
       for (const body of [
         // An absent body is not a parse error: it means "{}", which then fails
         // the required-fields check rather than the JSON check.
@@ -1225,7 +1250,8 @@ describe("deployments routes (SU-06)", () => {
         '{"repo":"octo/todolist","environment":"dev"}',
         '{"environment":"dev","application":"todolist"}',
         // Present but empty is the same refusal: the handler coerces with `||`.
-        '{"repo":"","environment":"dev","application":"todolist"}'
+        '{"repo":"","environment":"dev","application":"todolist"}',
+        '{"repo":"invalid","environment":"dev","application":"todolist"}'
       ]) {
         const { recording, context: ctx } = deleteContext(body);
         await handleDeleteDeployment(
@@ -1238,7 +1264,7 @@ describe("deployments routes (SU-06)", () => {
         );
         expect(recording.status).toBe(400);
         expect(JSON.parse(recording.body)).toEqual({
-          error: "repo, environment, and application are required."
+          error: "A valid repo, environment, and application are required."
         });
       }
     });
@@ -1598,6 +1624,28 @@ describe("deployments routes (SU-06)", () => {
       );
     });
 
+    it("does not retry for a whitespace-only injected token", async () => {
+      const { recording, context: ctx } = deleteContext();
+      let calls = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({ GH_TOKEN: "   " }),
+          runGh: () => {
+            calls += 1;
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: "workflow scope missing"
+            });
+          }
+        })
+      );
+
+      expect(calls).toBe(1);
+      expect(recording.status).toBe(400);
+    });
+
     it("still retries when GH_TOKEN is empty but GITHUB_TOKEN is set", async () => {
       const { recording, context: ctx } = deleteContext();
       let calls = 0;
@@ -1632,7 +1680,10 @@ describe("deployments routes (SU-06)", () => {
             return Promise.resolve({
               code: 1,
               stdout: "",
-              stderr: calls === 1 ? "first failure" : "second failure"
+              stderr:
+                calls === 1 ?
+                  "first failure: missing workflow scope"
+                : "second failure"
             });
           }
         })
@@ -1640,6 +1691,56 @@ describe("deployments routes (SU-06)", () => {
 
       expect(calls).toBe(2);
       expect(JSON.parse(recording.body).error).toContain("first failure");
+      expect(JSON.parse(recording.body).error).not.toContain("second failure");
+    });
+
+    it("does not re-dispatch a delete whose first attempt timed out", async () => {
+      // A timed-out dispatch may already have been accepted, so a retry could
+      // start a second delete run.
+      const { recording, context: ctx } = deleteContext();
+      let calls = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({ GH_TOKEN: "t" }),
+          runGh: () => {
+            calls += 1;
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: "missing workflow scope",
+              timedOut: true
+            });
+          }
+        })
+      );
+
+      expect(calls).toBe(1);
+      expect(recording.status).toBe(400);
+    });
+
+    it("does not re-dispatch a failure the keyring credential cannot fix", async () => {
+      const { recording, context: ctx } = deleteContext();
+      const stderrs: string[] = [];
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readProcessEnv: () => ({ GH_TOKEN: "t" }),
+          runGh: () => {
+            stderrs.push("call");
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: "HTTP 403: Actions are disabled for this repository"
+            });
+          }
+        })
+      );
+
+      expect(stderrs).toHaveLength(1);
+      expect(JSON.parse(recording.body).error).toContain(
+        "Actions are disabled for this repository"
+      );
     });
 
     it("retries a not-found race only when the workflow was just created", async () => {
@@ -1675,6 +1776,40 @@ describe("deployments routes (SU-06)", () => {
       // The 3s registration wait, then the 2s and 5s retry backoffs. The lease
       // timer is the trailing entry.
       expect(delays.slice(0, 3)).toEqual([3000, 2000, 5000]);
+    });
+
+    it("does not retry a timed-out 404 from the workflow registration race", async () => {
+      const { recording, context: ctx } = deleteContext();
+      const delays: number[] = [];
+      let calls = 0;
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          ensureWorkflowsCurrent: () =>
+            Promise.resolve({
+              created: [".github/workflows/delete-application.yml"],
+              failed: []
+            }),
+          setTimer: (callback, ms) => {
+            delays.push(ms);
+            callback();
+            return {};
+          },
+          runGh: () => {
+            calls += 1;
+            return Promise.resolve({
+              code: 1,
+              stdout: "",
+              stderr: "HTTP 404: Not Found",
+              timedOut: true
+            });
+          }
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(calls).toBe(1);
+      expect(delays.filter((delay) => delay < 30_000)).toEqual([3000]);
     });
 
     it("stops retrying a failure that is not the registration race", async () => {
@@ -1814,6 +1949,97 @@ describe("deployments routes (SU-06)", () => {
       expect(released).toEqual([LEASE]);
       fire();
       expect(released).toEqual([LEASE]);
+    });
+  });
+
+  describe("POST /api/abandon-deployment", () => {
+    it("rejects malformed JSON without acquiring a lease", async () => {
+      const { recording, context: ctx } = context(
+        "POST",
+        "/api/abandon-deployment",
+        "{"
+      );
+      await handleAbandonDeployment(
+        ctx,
+        dependencies({
+          abandonment: {
+            abandon: () => {
+              throw new Error("must not delegate malformed input");
+            }
+          }
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toHaveProperty("error");
+    });
+
+    it("delegates parsed input and serializes the service result", async () => {
+      const calls: unknown[] = [];
+      const { recording, context: ctx } = context(
+        "POST",
+        "/api/abandon-deployment",
+        '{"repo":"octo/todolist","environment":"dev","application":"todolist"}'
+      );
+      await handleAbandonDeployment(
+        ctx,
+        dependencies({
+          abandonment: {
+            abandon: (input) => {
+              calls.push(input);
+              return Promise.resolve({
+                status: 200,
+                body: { outcome: "abandoned" }
+              });
+            }
+          }
+        })
+      );
+
+      expect(calls).toEqual([
+        {
+          instanceId: "panel-a",
+          payload: {
+            repo: "octo/todolist",
+            environment: "dev",
+            application: "todolist"
+          }
+        }
+      ]);
+      expect(recording.status).toBe(200);
+      expect(JSON.parse(recording.body)).toEqual({
+        outcome: "abandoned"
+      });
+    });
+
+    it("delegates an empty body as an empty request object", async () => {
+      const calls: unknown[] = [];
+      const { recording, context: ctx } = context(
+        "POST",
+        "/api/abandon-deployment"
+      );
+      await handleAbandonDeployment(
+        ctx,
+        dependencies({
+          abandonment: {
+            abandon: (input) => {
+              calls.push(input);
+              return Promise.resolve({
+                status: 400,
+                body: { error: "missing identity" }
+              });
+            }
+          }
+        })
+      );
+
+      expect(calls).toEqual([
+        {
+          instanceId: "panel-a",
+          payload: {}
+        }
+      ]);
+      expect(recording.status).toBe(400);
     });
   });
 });

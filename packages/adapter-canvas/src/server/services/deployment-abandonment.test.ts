@@ -1,0 +1,389 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  createDeploymentAbandonmentService,
+  type DeploymentAbandonmentDependencies,
+  type DeploymentAbandonmentReservation
+} from "./deployment-abandonment.js";
+import type { DeploymentRow } from "./deployment-resolver.js";
+
+const PAYLOAD = {
+  repo: "octo/todolist",
+  environment: "dev",
+  application: "todolist"
+};
+const ABANDON_LEASE: DeploymentAbandonmentReservation = {
+  repo: PAYLOAD.repo,
+  environment: PAYLOAD.environment,
+  kind: "abandon",
+  expiresAt: 10
+};
+
+function row(status: string): DeploymentRow {
+  return {
+    app: PAYLOAD.application,
+    environment: PAYLOAD.environment,
+    provider: "azure",
+    status,
+    deploymentId: "dep-dev",
+    runUrl: "https://example.test/dev"
+  };
+}
+
+function dependencies(
+  overrides: Partial<DeploymentAbandonmentDependencies> = {}
+): DeploymentAbandonmentDependencies {
+  return {
+    isValidRepoSlug: (value) => value === PAYLOAD.repo,
+    readInstanceState: () => ({}),
+    activeDeploymentMutation: () => undefined,
+    localDeploymentBlocksMutation: () => false,
+    reserveDeploymentMutation: () => ABANDON_LEASE,
+    releaseDeploymentMutation: () => {},
+    deploymentStatusBlocksMutation: (status) =>
+      status === "pending" || status === "in_progress" || status === "deleting",
+    resolveEnvDeployment: () => Promise.resolve(row("delete-failed")),
+    ghOrThrow: () => Promise.resolve(""),
+    invalidateDeployListCache: () => {},
+    ...overrides
+  };
+}
+
+function abandon(
+  overrides: Partial<DeploymentAbandonmentDependencies> = {},
+  payload: unknown = PAYLOAD
+) {
+  return createDeploymentAbandonmentService(dependencies(overrides)).abandon({
+    instanceId: "panel-a",
+    payload
+  });
+}
+
+describe("createDeploymentAbandonmentService", () => {
+  it("fails construction when a required dependency is missing", () => {
+    const incomplete = dependencies();
+    Reflect.deleteProperty(incomplete, "ghOrThrow");
+
+    expect(() => createDeploymentAbandonmentService(incomplete)).toThrow(
+      "createDeploymentAbandonmentService is missing required dependencies: ghOrThrow"
+    );
+  });
+
+  it.each([
+    null,
+    [],
+    {},
+    { ...PAYLOAD, repo: [] },
+    { ...PAYLOAD, environment: " " },
+    { ...PAYLOAD, application: " " },
+    { ...PAYLOAD, repo: "invalid" }
+  ])("rejects invalid identity %# before reading state", async (payload) => {
+    const readInstanceState = vi.fn(() => {
+      throw new Error("must reject before reading state");
+    });
+
+    await expect(abandon({ readInstanceState }, payload)).resolves.toEqual({
+      status: 400,
+      body: {
+        error:
+          "A valid repo, environment, and application are required to stop tracking a deployment."
+      }
+    });
+    expect(readInstanceState).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when Canvas state is unavailable", async () => {
+    await expect(
+      abandon({ readInstanceState: () => undefined })
+    ).resolves.toEqual({
+      status: 503,
+      body: { error: "Canvas server state is unavailable." }
+    });
+  });
+
+  it.each([
+    [
+      "deploy",
+      true,
+      undefined,
+      "A deploy operation for octo/todolist in environment dev"
+    ],
+    [
+      "delete",
+      false,
+      {
+        repo: "octo/other",
+        environment: "prod",
+        kind: "delete",
+        expiresAt: 10
+      },
+      "A delete operation for octo/other in environment prod"
+    ],
+    [
+      "abandon",
+      false,
+      {
+        repo: "octo/other",
+        environment: "prod",
+        kind: "abandon",
+        expiresAt: 10
+      },
+      "An abandonment operation for octo/other in environment prod"
+    ]
+  ] as const)(
+    "refuses while a %s operation is active",
+    async (_kind, localOnly, active, description) => {
+      const reserveDeploymentMutation = vi.fn(() => {
+        throw new Error("must not reserve while another operation is active");
+      });
+
+      const result = await abandon({
+        localDeploymentBlocksMutation: () => localOnly,
+        activeDeploymentMutation: () => active,
+        reserveDeploymentMutation
+      });
+
+      expect(result).toEqual({
+        status: 409,
+        body: {
+          error: `${description} is already in progress. Wait for it to finish before stopping deployment tracking.`
+        }
+      });
+      expect(reserveDeploymentMutation).not.toHaveBeenCalled();
+    }
+  );
+
+  it("reports an abandonment winner when reservation is lost in a race", async () => {
+    let reads = 0;
+
+    const result = await abandon({
+      reserveDeploymentMutation: () => null,
+      activeDeploymentMutation: () => {
+        reads++;
+        return reads === 1 ? undefined : (
+            {
+              repo: "octo/winner",
+              environment: "prod",
+              kind: "abandon",
+              expiresAt: 10
+            }
+          );
+      }
+    });
+
+    expect(result).toEqual({
+      status: 409,
+      body: {
+        error:
+          "An abandonment operation for octo/winner in environment prod is already starting."
+      }
+    });
+  });
+
+  it("uses a generic race message when no winner can be read", async () => {
+    await expect(
+      abandon({ reserveDeploymentMutation: () => null })
+    ).resolves.toEqual({
+      status: 409,
+      body: { error: "Another deployment operation is already starting." }
+    });
+  });
+
+  it("releases the lease when current GitHub state is unavailable", async () => {
+    const releaseDeploymentMutation = vi.fn();
+
+    await expect(
+      abandon({
+        resolveEnvDeployment: () => Promise.reject(new Error("offline")),
+        releaseDeploymentMutation
+      })
+    ).resolves.toEqual({
+      status: 503,
+      body: {
+        error:
+          "Could not verify the current deployment state. Check your GitHub connection and try again."
+      }
+    });
+    expect(releaseDeploymentMutation).toHaveBeenCalledWith(
+      expect.any(Object),
+      ABANDON_LEASE
+    );
+  });
+
+  it.each([
+    [null, "No failed teardown is available to stop tracking."],
+    [row("success"), "Only a failed teardown can be removed from tracking."],
+    [row("failed"), "Only a failed teardown can be removed from tracking."],
+    [
+      row("pending"),
+      "This application is still being deployed. Wait for it to finish before stopping deployment tracking."
+    ],
+    [
+      row("deleting"),
+      "This deployment is being deleted and cannot be removed from tracking."
+    ],
+    [
+      { ...row("failed"), deploymentId: "" },
+      "No failed teardown is available to stop tracking."
+    ]
+  ] as const)(
+    "refuses an ineligible resolved state and releases its lease",
+    async (current, error) => {
+      const releaseDeploymentMutation = vi.fn();
+
+      await expect(
+        abandon({
+          resolveEnvDeployment: () => Promise.resolve(current),
+          releaseDeploymentMutation
+        })
+      ).resolves.toEqual({ status: 409, body: { error } });
+      expect(releaseDeploymentMutation).toHaveBeenCalledWith(
+        expect.any(Object),
+        ABANDON_LEASE
+      );
+    }
+  );
+
+  it("marks the failed teardown inactive, evicts cache, and releases the lease", async () => {
+    const ghOrThrow = vi.fn<(args: string[]) => Promise<string>>(() =>
+      Promise.resolve("")
+    );
+    const invalidateDeployListCache = vi.fn();
+    const releaseDeploymentMutation = vi.fn();
+
+    await expect(
+      abandon({
+        ghOrThrow,
+        invalidateDeployListCache,
+        releaseDeploymentMutation
+      })
+    ).resolves.toEqual({
+      status: 200,
+      body: { outcome: "abandoned" }
+    });
+
+    expect(ghOrThrow).toHaveBeenCalledWith([
+      "api",
+      "--method",
+      "POST",
+      "/repos/octo/todolist/deployments/dep-dev/statuses",
+      "-f",
+      "state=inactive",
+      "-f",
+      "description=Tracking abandoned in Radius Canvas; cloud resources were not deleted.",
+      "-f",
+      "log_url=https://example.test/dev"
+    ]);
+    expect(invalidateDeployListCache).toHaveBeenCalledWith(PAYLOAD.repo);
+    expect(releaseDeploymentMutation).toHaveBeenCalledWith(
+      expect.any(Object),
+      ABANDON_LEASE
+    );
+  });
+
+  it("retires the matching failed deploy attempt after GitHub records abandonment", async () => {
+    const state = {
+      deployAttempt: {
+        id: "attempt-dev",
+        targetRepo: PAYLOAD.repo,
+        environment: PAYLOAD.environment
+      },
+      deployResult: { error: "failed" },
+      deployStatus: "failed",
+      deployError: "failed",
+      deployErrorKind: "run-unconfirmed" as const,
+      deployErrorBranch: "main",
+      deployStartedAt: 1,
+      deployFinishedAt: 2,
+      deployLogs: ["failed"],
+      deployLogBase: 1,
+      deployRunId: "run-1",
+      deployRunUrl: "https://example.test/run-1",
+      deployRepairing: false,
+      deployHandoffState: "reported",
+      deployHandoffAttempts: 1,
+      deployNoticeState: "reported",
+      deployNoticeAttempts: 1,
+      deployRepairAttempts: 1
+    };
+
+    await expect(
+      abandon({ readInstanceState: () => state })
+    ).resolves.toMatchObject({ status: 200 });
+
+    expect(state).toEqual({});
+  });
+
+  it("does not retire a different deploy attempt", async () => {
+    const deployAttempt = {
+      id: "attempt-prod",
+      targetRepo: PAYLOAD.repo,
+      environment: "prod"
+    };
+    const state = { deployAttempt, deployStatus: "failed" };
+
+    await expect(
+      abandon({ readInstanceState: () => state })
+    ).resolves.toMatchObject({ status: 200 });
+
+    expect(state).toEqual({ deployAttempt, deployStatus: "failed" });
+  });
+
+  it("omits a blank run URL from the inactive status request", async () => {
+    const ghOrThrow = vi.fn<(args: string[]) => Promise<string>>(() =>
+      Promise.resolve("")
+    );
+
+    await expect(
+      abandon({
+        resolveEnvDeployment: () =>
+          Promise.resolve({ ...row("delete-failed"), runUrl: "" }),
+        ghOrThrow
+      })
+    ).resolves.toMatchObject({ status: 200 });
+    expect(ghOrThrow.mock.calls[0]?.[0]).not.toContain(
+      expect.stringContaining("log_url=")
+    );
+  });
+
+  it("reports a GitHub mutation failure without evicting cache and releases the lease", async () => {
+    const invalidateDeployListCache = vi.fn();
+    const releaseDeploymentMutation = vi.fn();
+
+    await expect(
+      abandon({
+        ghOrThrow: () => Promise.reject("denied"),
+        invalidateDeployListCache,
+        releaseDeploymentMutation
+      })
+    ).resolves.toEqual({
+      status: 502,
+      body: {
+        error:
+          "Could not stop tracking the deployment on GitHub. Cloud resources were not changed."
+      }
+    });
+    expect(invalidateDeployListCache).not.toHaveBeenCalled();
+    expect(releaseDeploymentMutation).toHaveBeenCalledWith(
+      expect.any(Object),
+      ABANDON_LEASE
+    );
+  });
+
+  it.each([
+    "HTTP 403: Forbidden",
+    "Resource not accessible by personal access token",
+    "token is missing a required scope"
+  ])("gives an actionable permission hint for %s", async (message) => {
+    await expect(
+      abandon({
+        ghOrThrow: () => Promise.reject(new Error(message))
+      })
+    ).resolves.toEqual({
+      status: 502,
+      body: {
+        error:
+          "Could not stop tracking the deployment on GitHub because the active GitHub token lacks permission to update deployments. Run `gh auth refresh -h github.com -s repo` in a terminal, then retry. Cloud resources were not changed."
+      }
+    });
+  });
+});

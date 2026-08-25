@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  prepareProviderMutation,
+  settleProviderMutation
+} from "../../operations.js";
+import {
   buildRadiusAppProvenanceTags,
   type ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
@@ -34,6 +38,7 @@ const OIDC: ResolveOidcSubjectResult = {
 interface Harness {
   input: AzureAutoSetupApplicationInput;
   calls: string[];
+  recorded: Record<string, unknown>[];
   failures: Record<string, unknown>[];
   responses: Array<{ status: number; payload: unknown }>;
   steps: string[];
@@ -45,7 +50,8 @@ function command(
   return {
     code: partial.code ?? 0,
     stdout: partial.stdout ?? "",
-    stderr: partial.stderr ?? ""
+    stderr: partial.stderr ?? "",
+    ...(partial.timedOut ? { timedOut: true } : {})
   };
 }
 
@@ -63,6 +69,7 @@ function harness(
   } = {}
 ): Harness {
   const calls: string[] = [];
+  const recorded: Record<string, unknown>[] = [];
   const failures: Record<string, unknown>[] = [];
   const responses: Array<{ status: number; payload: unknown }> = [];
   const operation: AzureAutoSetupOperation = {
@@ -81,8 +88,10 @@ function harness(
         }),
       finish: options.finish ?? (() => calls.push("finish")),
       report: options.report ?? (() => calls.push("report")),
-      recordAzureApp: (_operation, patch) =>
-        calls.push(`record:${String(patch.state)}`)
+      recordAzureApp: (_operation, patch) => {
+        recorded.push(patch);
+        calls.push(`record:${String(patch.state)}`);
+      }
     }
   });
   const workflow: AzureAutoSetupWorkflow = {
@@ -109,6 +118,7 @@ function harness(
   };
   return {
     calls,
+    recorded,
     failures,
     responses,
     steps: workflow.steps,
@@ -218,7 +228,14 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       state: "reused"
     });
     expect(test.calls).toEqual(["record:reused", "persist"]);
-    expect(azCalls).toHaveLength(3);
+    // The tag read is the fourth call: reuse now records where the application
+    // came from, and only its Radius provenance tags can say.
+    expect(azCalls).toEqual([
+      `ad app show --id ${APP_ID} --query id -o tsv`,
+      "ad signed-in-user show --query id -o tsv",
+      `ad app owner list --id ${APP_ID} --query [].id -o tsv`,
+      `ad app show --id ${APP_ID} --query tags -o json`
+    ]);
     expect(test.steps).toContain(
       `✅ Reusing the App Registration already wired into AZURE_CLIENT_ID: ${APP_ID}`
     );
@@ -280,7 +297,11 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           return command({ stdout: "[]" });
         }
         if (line.startsWith("ad app create ")) {
-          return command({ code: 1, stderr: "creation denied" });
+          return command({
+            code: 1,
+            stderr:
+              "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+          });
         }
         throw new Error(`unscripted az call: ${line}`);
       }
@@ -392,6 +413,9 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         if (line.startsWith("ad app owner list")) {
           return command({ stdout: USER_ID });
         }
+        if (line.startsWith("ad app show --id") && line.includes("tags")) {
+          return command({ stdout: "[]" });
+        }
         throw new Error(`unscripted az call: ${line}`);
       }
     });
@@ -406,6 +430,9 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       `✅ Using the selected App Registration: ${APP_ID}`
     );
     expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
+    expect(test.recorded).toEqual([
+      expect.objectContaining({ state: "reused", origin: "pre_existing" })
+    ]);
   });
 
   it("fails closed when ownership of an explicit application cannot be read", async () => {
@@ -540,6 +567,148 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       `✅ Reusing existing App Registration: ${APP_ID}`
     );
     expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
+    // The list projection already carries tags, so an untagged match is decided
+    // without a second lookup.
+    expect(test.recorded[0]).toMatchObject({ origin: "pre_existing" });
+  });
+
+  it("names an earlier Radius setup as the source of a reused name match", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({
+            stdout: JSON.stringify([
+              {
+                appId: APP_ID,
+                displayName: "Radius",
+                createdDateTime: "today",
+                tags: buildRadiusAppProvenanceTags({
+                  repo: "octo/app",
+                  environment: "dev",
+                  operationId: "op_earlier"
+                })
+              }
+            ])
+          });
+        }
+        if (line.startsWith("ad signed-in-user show")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list")) {
+          return command({ stdout: USER_ID });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toEqual({
+      clientId: APP_ID,
+      appName: "radius-deploy-octo-app",
+      state: "reused"
+    });
+    expect(test.recorded[0]).toMatchObject({
+      state: "reused",
+      origin: "radius_earlier_setup",
+      appId: APP_ID
+    });
+  });
+
+  it("names an earlier Radius setup behind the repository's AZURE_CLIENT_ID", async () => {
+    const test = harness({
+      overrides: { requestedClientId: APP_ID },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("--query tags")) {
+          return command({
+            stdout: JSON.stringify(
+              buildRadiusAppProvenanceTags({
+                repo: "octo/app",
+                environment: "dev",
+                operationId: "op_earlier"
+              })
+            )
+          });
+        }
+        if (line.startsWith("ad app show --id")) {
+          return command({ stdout: "app-object" });
+        }
+        if (line.startsWith("ad signed-in-user show")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list")) {
+          return command({ stdout: USER_ID });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await resolveAzureAutoSetupApplication(test.input);
+
+    expect(test.recorded[0]).toMatchObject({
+      state: "reused",
+      origin: "radius_earlier_setup"
+    });
+  });
+
+  it("does not claim Radius provenance from another environment's tags", async () => {
+    const test = harness({
+      overrides: { requestedClientId: APP_ID },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("--query tags")) {
+          return command({
+            stdout: JSON.stringify(
+              buildRadiusAppProvenanceTags({
+                repo: "octo/app",
+                environment: "prod",
+                operationId: "op_earlier"
+              })
+            )
+          });
+        }
+        if (line.startsWith("ad app show --id")) {
+          return command({ stdout: "app-object" });
+        }
+        if (line.startsWith("ad signed-in-user show")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list")) {
+          return command({ stdout: USER_ID });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await resolveAzureAutoSetupApplication(test.input);
+
+    expect(test.recorded[0]).toMatchObject({ origin: "pre_existing" });
+  });
+
+  it("claims nothing when the provenance tags cannot be read", async () => {
+    const test = harness({
+      overrides: { requestedClientId: APP_ID },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("--query tags")) {
+          return command({ code: 1, stderr: "Graph denied" });
+        }
+        if (line.startsWith("ad app show --id")) {
+          return command({ stdout: "app-object" });
+        }
+        if (line.startsWith("ad signed-in-user show")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list")) {
+          return command({ stdout: USER_ID });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+    await resolveAzureAutoSetupApplication(test.input);
+    await resolveAzureAutoSetupApplication(test.input);
+    expect(test.recorded[0]).toMatchObject({ origin: "pre_existing" });
+    expect(test.recorded[0]).toMatchObject({ origin: "pre_existing" });
   });
 
   it("fails closed when the reused name match cannot be persisted", async () => {
@@ -684,6 +853,464 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     });
   });
 
+  it("refuses a recent same-name application without immutable operation provenance", async () => {
+    let listCalls = 0;
+    let createCalls = 0;
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          listCalls += 1;
+          return command({
+            stdout:
+              listCalls === 1 ? "[]" : (
+                JSON.stringify([
+                  {
+                    appId: APP_ID,
+                    displayName: "radius-deploy-octo-app",
+                    createdDateTime: new Date().toISOString()
+                  },
+                  {
+                    appId: "55555555-5555-5555-5555-555555555555",
+                    displayName: "radius-deploy-octo-app",
+                    createdDateTime: new Date().toISOString()
+                  }
+                ])
+              )
+          });
+        }
+        if (line.startsWith("ad app create ")) {
+          createCalls += 1;
+          return command({ code: 1, timedOut: true });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("immutable provenance")
+    });
+    expect(createCalls).toBe(1);
+    expect(test.recorded).toEqual([]);
+    expect(
+      (
+        test.input.workflow.operation as AzureAutoSetupOperation & {
+          providerRecovery: { mutations: Array<{ status: string }> };
+        }
+      ).providerRecovery.mutations[0]?.status
+    ).toBe("manual_required");
+  });
+
+  it("adopts an interrupted application only from immutable operation provenance", async () => {
+    let listCalls = 0;
+    const requiredTags = buildRadiusAppProvenanceTags({
+      repo: "octo/app",
+      environment: "dev",
+      operationId: "op-app"
+    });
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          listCalls += 1;
+          return command({
+            stdout:
+              listCalls === 1 ? "[]" : (
+                JSON.stringify([
+                  {
+                    appId: APP_ID,
+                    displayName: "radius-deploy-octo-app",
+                    tags: requiredTags
+                  }
+                ])
+              )
+          });
+        }
+        if (line.startsWith("ad app create ")) {
+          return command({ code: 1, timedOut: true });
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return command({ stdout: "different-ambient-principal" });
+        }
+        if (line.startsWith("ad app owner list ")) {
+          return command({ stdout: "different-ambient-principal" });
+        }
+        if (line.startsWith("ad app owner add ")) return command();
+        if (line.startsWith("rest --method PATCH ")) return command();
+        if (line.startsWith("ad app show ") && line.includes("--query tags")) {
+          return command({ stdout: JSON.stringify(requiredTags) });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({
+      clientId: APP_ID,
+      state: "created"
+    });
+    expect(test.recorded).toContainEqual(
+      expect.objectContaining({
+        state: "created",
+        appId: APP_ID,
+        origin: "this_operation"
+      })
+    );
+  });
+
+  it("reconciles a restarted application before reuse and transfers directly to rollback", async () => {
+    let listCalls = 0;
+    let ownerAdds = 0;
+    const requiredTags = buildRadiusAppProvenanceTags({
+      operationId: "op-app"
+    });
+    let test: Harness;
+    test = harness({
+      checkpoint: async () =>
+        (
+          test.input.workflow.operation as AzureAutoSetupOperation & {
+            providerRecovery?: { state?: string };
+          }
+        ).providerRecovery?.state !== "rollback_pending",
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          listCalls += 1;
+          if (listCalls === 1) return command({ stdout: "[]" });
+          if (listCalls === 2)
+            return command({ code: 1, stderr: "temporarily unavailable" });
+          return command({
+            stdout: JSON.stringify([
+              {
+                appId: APP_ID,
+                displayName: "radius-deploy-octo-app",
+                tags: requiredTags
+              }
+            ])
+          });
+        }
+        if (line.startsWith("ad app create ")) {
+          return command({ code: 1, timedOut: true });
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return command({ stdout: "changed-principal" });
+        }
+        if (line.startsWith("ad app owner list ")) {
+          return command({ stdout: "changed-principal" });
+        }
+        if (line.startsWith("ad app owner add ")) {
+          ownerAdds += 1;
+          return command();
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+    (
+      test.input.workflow.operation as AzureAutoSetupOperation & {
+        recoveryState?: string;
+      }
+    ).recoveryState = "provider_reconciliation_pending";
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toBeNull();
+    expect(ownerAdds).toBe(0);
+    expect(
+      (
+        test.input.workflow.operation as AzureAutoSetupOperation & {
+          providerRecovery: { state: string };
+        }
+      ).providerRecovery.state
+    ).toBe("rollback_pending");
+  });
+
+  it("reconciles a pending application before reading a changed AZURE_CLIENT_ID", async () => {
+    const requiredTags = buildRadiusAppProvenanceTags({
+      operationId: "op-app"
+    });
+    let githubVariableReads = 0;
+    let unrelatedAppReads = 0;
+    let test: Harness;
+    test = harness({
+      checkpoint: async () =>
+        (
+          test.input.workflow.operation as AzureAutoSetupOperation & {
+            providerRecovery?: { state?: string };
+          }
+        ).providerRecovery?.state !== "rollback_pending",
+      runGitHubJson: async () => {
+        githubVariableReads += 1;
+        return {
+          ok: true,
+          status: 200,
+          json: { value: "55555555-5555-5555-5555-555555555555" }
+        };
+      },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({
+            stdout: JSON.stringify([
+              {
+                appId: APP_ID,
+                displayName: "radius-deploy-octo-app",
+                tags: requiredTags
+              }
+            ])
+          });
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app show ")) {
+          unrelatedAppReads += 1;
+          return command({ stdout: "unrelated-app" });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+    const operation = test.input.workflow
+      .operation as AzureAutoSetupOperation & {
+      recoveryState?: string;
+      providerRecovery: { state: string };
+    };
+    const mutation = prepareProviderMutation(operation, {
+      kind: "azure_application.create",
+      target: "octo/app:dev:radius-deploy-octo-app"
+    });
+    settleProviderMutation(
+      operation,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The response was lost."
+    );
+    operation.recoveryState = "provider_reconciliation_pending";
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toBeNull();
+    expect(githubVariableReads).toBe(0);
+    expect(unrelatedAppReads).toBe(0);
+    expect(operation.providerRecovery.state).toBe("rollback_pending");
+    expect(test.recorded).toContainEqual(
+      expect.objectContaining({
+        state: "created",
+        origin: "this_operation",
+        appId: APP_ID
+      })
+    );
+  });
+
+  it("adopts a restarted application by the ledger artifact it recorded", async () => {
+    let createCalls = 0;
+    let test: Harness;
+    test = harness({
+      checkpoint: async () =>
+        (
+          test.input.workflow.operation as AzureAutoSetupOperation & {
+            providerRecovery?: { state?: string };
+          }
+        ).providerRecovery?.state !== "rollback_pending",
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({
+            stdout: JSON.stringify([
+              {
+                appId: APP_ID,
+                displayName: "radius-deploy-octo-app",
+                tags: []
+              }
+            ])
+          });
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app create ")) {
+          createCalls += 1;
+          return command();
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+    const operation = test.input.workflow
+      .operation as AzureAutoSetupOperation & {
+      recoveryState?: string;
+      setupArtifacts: {
+        azureApp: { origin: string; appId: string };
+      };
+    };
+    operation.setupArtifacts = {
+      azureApp: { origin: "this_operation", appId: APP_ID }
+    };
+    operation.recoveryState = "provider_reconciliation_pending";
+    prepareProviderMutation(operation, {
+      kind: "azure_application.create",
+      target: "octo/app:dev:radius-deploy-octo-app"
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toBeNull();
+    expect(createCalls).toBe(0);
+    expect(
+      (
+        operation as AzureAutoSetupOperation & {
+          providerRecovery: { state: string };
+        }
+      ).providerRecovery.state
+    ).toBe("rollback_pending");
+  });
+
+  it("adopts a restarted application by the provider id settled with the acknowledgement", async () => {
+    // The window the journal exists to close: the create was acknowledged and
+    // settled, then the process died before `recordAzureApp` wrote the ledger
+    // artifact. No artifact, no tags — the settled provider id is the only
+    // identity that exists, so the reconcile has to match on it or orphan a
+    // real App Registration.
+    let createCalls = 0;
+    let test: Harness;
+    test = harness({
+      checkpoint: async () =>
+        (
+          test.input.workflow.operation as AzureAutoSetupOperation & {
+            providerRecovery?: { state?: string };
+          }
+        ).providerRecovery?.state !== "rollback_pending",
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({
+            stdout: JSON.stringify([
+              {
+                appId: APP_ID,
+                displayName: "radius-deploy-octo-app",
+                tags: []
+              }
+            ])
+          });
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app create ")) {
+          createCalls += 1;
+          return command();
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+    const operation = test.input.workflow
+      .operation as AzureAutoSetupOperation & {
+      recoveryState?: string;
+    };
+    operation.recoveryState = "provider_reconciliation_pending";
+    const mutation = prepareProviderMutation(operation, {
+      kind: "azure_application.create",
+      target: "octo/app:dev:radius-deploy-octo-app"
+    });
+    settleProviderMutation(
+      operation,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The provider request ended without a response.",
+      APP_ID
+    );
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toBeNull();
+    // Adopted, not recreated and not handed off.
+    expect(createCalls).toBe(0);
+    expect(
+      (
+        operation as AzureAutoSetupOperation & {
+          providerRecovery: { state: string };
+        }
+      ).providerRecovery.state
+    ).toBe("rollback_pending");
+  });
+
+  it("reconciles timed-out owner and provenance mutations before continuing", async () => {
+    const requiredTags = buildRadiusAppProvenanceTags({
+      repo: "octo/app",
+      environment: "dev",
+      operationId: "op-app"
+    });
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({ stdout: "[]" });
+        }
+        if (line.startsWith("ad app create ")) {
+          return command({ stdout: APP_ID });
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner add ")) {
+          return command({ code: 1, timedOut: true });
+        }
+        if (line.startsWith("ad app owner list ")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("rest --method PATCH ")) {
+          return command({ code: 1, timedOut: true });
+        }
+        if (line.startsWith("ad app show ") && line.includes("--query tags")) {
+          return command({ stdout: JSON.stringify(requiredTags) });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({
+      clientId: APP_ID,
+      state: "created"
+    });
+    expect(
+      (
+        test.input.workflow.operation as AzureAutoSetupOperation & {
+          providerRecovery: {
+            mutations: Array<{ kind: string; status: string }>;
+          };
+        }
+      ).providerRecovery.mutations
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "azure_app_owner.add",
+          status: "confirmed"
+        }),
+        expect.objectContaining({
+          kind: "azure_app_tags.patch",
+          status: "confirmed"
+        })
+      ])
+    );
+  });
+
   it("creates, owns, tags, and verifies a new application in order", async () => {
     const azCalls: string[] = [];
     const requiredTags = buildRadiusAppProvenanceTags({
@@ -721,11 +1348,27 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       appName: "radius-deploy-octo-app",
       state: "created"
     });
-    expect(test.calls).toEqual(["record:created", "checkpoint"]);
+    expect(test.calls).toEqual([
+      "persist",
+      "persist",
+      "record:created",
+      "checkpoint",
+      "persist",
+      "persist",
+      "checkpoint",
+      "persist",
+      "persist",
+      "checkpoint"
+    ]);
     expect(test.steps).toContain(
       `✅ Entra app registration created: ${APP_ID}`
     );
     expect(test.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
+    expect(test.recorded[0]).toMatchObject({
+      state: "created",
+      origin: "this_operation",
+      appId: APP_ID
+    });
     const create = azCalls.findIndex((line) =>
       line.startsWith("ad app create ")
     );
@@ -756,7 +1399,11 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           return command({ stdout: "[]" });
         }
         if (line.startsWith("ad app create ")) {
-          return command({ code: 1, stderr: "directory denied" });
+          return command({
+            code: 1,
+            stderr:
+              "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+          });
         }
         throw new Error(`unscripted az call: ${line}`);
       }
@@ -784,7 +1431,7 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     });
 
     expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
-    expect(test.calls).toEqual(["record:created"]);
+    expect(test.calls).toEqual(["persist", "persist", "record:created"]);
     expect(azCalls.some((line) => line.startsWith("ad app owner add "))).toBe(
       false
     );
@@ -823,7 +1470,11 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           }
           if (line.startsWith("ad app owner add ")) {
             return stage === "owner-add" ?
-                command({ code: 1, stderr: "owner denied" })
+                command({
+                  code: 1,
+                  stderr:
+                    "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+                })
               : command();
           }
           if (line.startsWith("ad app owner list ")) {
@@ -836,7 +1487,11 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           }
           if (line.startsWith("rest --method PATCH ")) {
             return stage === "tag-patch" ?
-                command({ code: 1, stderr: "tag denied" })
+                command({
+                  code: 1,
+                  stderr:
+                    "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+                })
               : command();
           }
           if (
