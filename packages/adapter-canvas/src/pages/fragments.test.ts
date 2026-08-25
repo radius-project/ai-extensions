@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  ABANDON_DEPLOYMENT_DIALOG_HTML,
   DELETE_DEPLOYMENT_DIALOG_HTML,
   GRAPH_DIFF_SUBTITLE
 } from "./fragments.js";
@@ -19,6 +20,30 @@ describe("DELETE_DEPLOYMENT_DIALOG_HTML", () => {
     ]) {
       expect(DELETE_DEPLOYMENT_DIALOG_HTML).toContain(`id="${id}"`);
     }
+  });
+
+  describe("ABANDON_DEPLOYMENT_DIALOG_HTML", () => {
+    it("declares a separate labelled dialog with an empty client-owned body", () => {
+      expect(ABANDON_DEPLOYMENT_DIALOG_HTML).toContain(
+        'id="deploy-abandon-modal"'
+      );
+      expect(ABANDON_DEPLOYMENT_DIALOG_HTML).toContain(
+        'aria-labelledby="deploy-abandon-title"'
+      );
+      expect(ABANDON_DEPLOYMENT_DIALOG_HTML).toContain(
+        '<span class="rad-ddlg__title" id="deploy-abandon-title">Stop Tracking Deployment</span>'
+      );
+      for (const id of [
+        "deploy-abandon-title",
+        "deploy-abandon-close",
+        "deploy-abandon-app",
+        "deploy-abandon-env",
+        "deploy-abandon-body"
+      ]) {
+        expect(ABANDON_DEPLOYMENT_DIALOG_HTML).toContain(`id="${id}"`);
+      }
+      expect(ABANDON_DEPLOYMENT_DIALOG_HTML).not.toContain("${");
+    });
   });
 
   it("ships no confirmation copy of its own so every page shares one flow", () => {

@@ -40,6 +40,7 @@ interface DeployedPageState {
   branch: string;
   graphBranch: string;
   provider: string;
+  mutationNonce: string;
 }
 
 interface DeploymentState {
@@ -76,7 +77,8 @@ function parseState(context: BrowserContext): DeployedPageState {
     repo: readString(state, "repo"),
     branch: readString(state, "branch") || "main",
     graphBranch: readString(state, "graphBranch") || "main",
-    provider: readString(state, "provider") || "azure"
+    provider: readString(state, "provider") || "azure",
+    mutationNonce: readString(state, "mutationNonce")
   };
 }
 
@@ -121,6 +123,9 @@ export function initializeDeployedGraphPage(
   const appSelect = context.dom.selectById("deployed-app-select");
   const envSelect = context.dom.selectById("deployed-env-select");
   const action = context.dom.inputById("deployed-delete-btn");
+  const stopTrackingAction = context.dom.inputById(
+    "deployed-stop-tracking-btn"
+  );
   const status = context.dom.byId("deployed-status");
   const label = context.dom.byId("deployed-graph-label");
   const note = context.dom.byId("deployed-mode-note");
@@ -669,6 +674,68 @@ export function initializeDeployedGraphPage(
       });
   };
 
+  const runAbandon = (application: string, environment: string): void => {
+    // This callback is reachable only from the stop-tracking control registered
+    // below, so the control exists whenever the callback can run.
+    /* v8 ignore next */
+    if (stopTrackingAction) {
+      stopTrackingAction.disabled = true;
+      stopTrackingAction.textContent = "Stopping tracking…";
+    }
+    void context.net
+      .fetch("/api/abandon-deployment", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": page.mutationNonce
+        },
+        body: JSON.stringify({
+          repo: page.repo,
+          environment,
+          application
+        })
+      })
+      .then((response) =>
+        response.json().then((payload) => ({ response, payload }))
+      )
+      .then(({ response, payload }) => {
+        if (!entry.active) return;
+        if (!response.ok || readString(payload, "outcome") !== "abandoned") {
+          setInline(
+            context,
+            "error",
+            response.status === 403 ?
+              "This Radius Canvas page is out of date. Reload it and try again."
+            : readString(payload, "error") ||
+                "Could not stop tracking the deployment."
+          );
+          refreshControls();
+          return;
+        }
+        deployments.delete(deploymentKey(application, environment));
+        setInline(
+          context,
+          "info",
+          "Stopped tracking this deployment. Cloud resources were not deleted and may still exist."
+        );
+        refreshControls();
+        loadGraph();
+      })
+      .catch((error: unknown) => {
+        if (!entry.active) return;
+        context.logger.error(
+          "Radius deployment tracking could not be stopped.",
+          error
+        );
+        setInline(
+          context,
+          "error",
+          "Could not stop tracking the deployment. Please try again."
+        );
+        refreshControls();
+      });
+  };
+
   const createDialog = optionalBrowserFunction(
     globalScope,
     "radiusCreateDeleteDeploymentDialog"
@@ -677,7 +744,22 @@ export function initializeDeployedGraphPage(
     createDialog ?
       asDeleteDialog(createDialog({ onConfirm: runDelete }))
     : null;
+  const abandonDialog =
+    createDialog ?
+      asDeleteDialog(
+        createDialog({
+          modalId: "deploy-abandon-modal",
+          bodyId: "deploy-abandon-body",
+          appId: "deploy-abandon-app",
+          envId: "deploy-abandon-env",
+          closeId: "deploy-abandon-close",
+          variant: "abandon",
+          onConfirm: runAbandon
+        })
+      )
+    : null;
   if (dialog?.teardown) entry.onTeardown(dialog.teardown);
+  if (abandonDialog?.teardown) entry.onTeardown(abandonDialog.teardown);
 
   if (appSelect) {
     entry.on(appSelect, "change", () => {
@@ -708,6 +790,18 @@ export function initializeDeployedGraphPage(
         );
       } else if (dialog && selectedApplication() && selectedEnvironment()) {
         dialog.open(selectedApplication(), selectedEnvironment());
+      }
+    });
+  }
+  if (stopTrackingAction) {
+    entry.on(stopTrackingAction, "click", () => {
+      if (
+        abandonDialog &&
+        selectedStatus() === "delete-failed" &&
+        selectedApplication() &&
+        selectedEnvironment()
+      ) {
+        abandonDialog.open(selectedApplication(), selectedEnvironment());
       }
     });
   }
