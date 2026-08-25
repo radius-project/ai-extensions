@@ -2105,9 +2105,19 @@ export function initializeEnvironmentOperations(
     const mySession = session;
     setCommandBusy(false);
     void fetchTracked(operationsByRepoUrl(repo))
-      .then((response) => response.json())
+      .then((response) => {
+        // A failed request is not evidence that the repo has no operation. If a
+        // deletion is still in flight, hiding its panel on a transient 5xx would
+        // strand the user with no visible progress until the next mount. Treat a
+        // non-OK response like a network error and leave whatever is on screen.
+        if (!response.ok) throw new Error("resume request failed");
+        return response.json();
+      })
       .then((payload) => {
         if (!scope.active || mySession !== session) return;
+        // Only a well-formed envelope is authoritative. A malformed body is, like
+        // a failed request, no reason to tear down a possibly live panel.
+        if (!isRecord(payload)) return;
         const op = parseOperationResponse(payload);
         // The server is the authority on what this repo should show. When it
         // reports nothing — no operation, or one the user has dismissed — the

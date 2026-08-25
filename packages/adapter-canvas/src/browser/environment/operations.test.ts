@@ -4948,6 +4948,36 @@ describe("exiting a setup", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
   });
 
+  it("leaves a visible panel alone when the resume request fails", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ error: "boom" }, false, 500)
+    );
+    const { controller } = controllerWithHarness(browser);
+    // A transient server failure is not proof the repo has no operation, so an
+    // in-flight deletion panel must survive it rather than vanish until remount.
+    browser.els[PROGRESS_IDS.panel].style.display = "";
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+  });
+
+  it("leaves a visible panel alone when the resume payload is malformed", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () => jsonResponse("not-an-object"));
+    const { controller } = controllerWithHarness(browser);
+    // A body that is not the expected envelope is treated like a failed request:
+    // it cannot authoritatively tear down a possibly live panel.
+    browser.els[PROGRESS_IDS.panel].style.display = "";
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+  });
+
   it("keeps a terminal action instead of replacing it with acknowledgement", () => {
     const browser = setup();
     const { controller } = controllerWithHarness(browser);
