@@ -139,7 +139,7 @@ Test priority is independent of implementation phase. **P0** layers are required
 | Stable visual behavior                                                           | A reviewed visual baseline, only when the changed state is in the selected visual set                                                                                                                               |
 | Real host installation, discovery, or panel lifecycle                            | Real-host qualification; loopback HTTP and emulated contracts must never be reported as host coverage                                                                                                               |
 
-Add a level when its boundary exists and can run. Phases 0 and 1 are complete, so unit tests, runtime integration (`packages/adapter-canvas/test/integration/runtime/`), and built-extension smoke (`packages/adapter-canvas/test/integration/artifact/`) apply now. HTTP integration applies as the server boundary lands in Phase 2, the Chromium layers become required gates in Phase 6, visual follows in Phase 7, and real-host is a scheduled and release gate in Phase 8 that never blocks a pull request. When a layer's infrastructure does not exist yet, add the focused evidence the active phase requires at the strongest available layer and state the gap plainly instead of inventing a suite or implying one passed.
+All phases are complete except Phase 8, which is real-host testing that is a scheduled and release gate that never blocks a pull request. 
 
 Match the evidence to the kind of change:
 
@@ -158,7 +158,7 @@ Choose the cheapest layer that can faithfully represent the regression, but do n
 - Treat 100% as a quality goal, not a mandate to force coverage through unnatural testing techniques. Do not expose production internals solely for tests, add test-only branches or hooks, over-mock implementation details, invoke unreachable states artificially, or write assertions whose only purpose is to execute a line. Prefer behavior-focused tests through natural seams; when a legitimate path cannot be exercised naturally, document the limitation as described below.
 - When a changed path sits in an area whose testability work has not landed, meet the phase's required evidence and record the residual gap. Do not chase the percentage with broad module mocks or private reach-through, and do not treat the gap as permission to skip the coverage that the current structure does support.
 - Repository aggregate and per-package coverage must never decrease. The accepted baseline lives in `coverage-baseline.json` and is enforced as Vitest thresholds in `vitest.config.ts`; treat it as a hard floor. Raise it alongside tested production changes, and never lower it without explicit justification and review approval.
-- The 80% line, 80% function, and 70% branch thresholds that apply to newly extracted runtime, route, and renderer modules are minimum migration gates, not the target for new work under this skill. `packages/adapter-canvas/src/browser/**` has completed its migration and is pinned at 100% statements, branches, functions, and lines; that directory is held to the goal directly rather than to a migration gate.
+- The 80% line, 80% function, and 70% branch thresholds that apply to newly extracted runtime, route, and renderer modules are minimum migration gates, not the target for new work under this skill. 
 - A directory pinned at 100% has no headroom, so the escape valve is explicit rather than silent. When a changed path in such a directory is genuinely unreachable — a defensive branch that only a violated invariant could reach, or a platform capability the test substrate cannot withhold — mark exactly that path with a `/* v8 ignore next */` comment whose adjacent line states why it is unreachable and what would have to change to make it testable, and call it out in the pull request for review. Never widen the ignore beyond the unreachable path, never ignore a path merely because covering it is awkward, and never lower the pinned threshold instead. An ignore without a justification comment, or one a reviewer has not accepted, is coverage gaming under the rule above.
 - Coverage percentages do not replace scenario gates. Explicitly test worktree branch selection, stale source-reference rejection, external-error propagation, path confinement, resumable operation identity, destructive fail-closed behavior, and retained action, tool, lifecycle, route, and artifact contracts whenever affected.
 - Do not game coverage with ignored executable lines, uncovered allowlists, trivial assertions, or tests coupled to implementation details.
@@ -181,13 +181,13 @@ pnpm run test:integration:runtime
 pnpm run test:integration:artifact
 ```
 
-Also run every additional suite the active phase has introduced for the affected boundary. Do not report completion when a required suite is skipped or replaced by manual validation. When a layer does not exist yet, say so explicitly instead of implying it passed.
+Also run every additional suite the active phase has introduced for the affected boundary. Do not report completion when a required suite is skipped or replaced by manual validation. 
 
 Before finishing, confirm:
 
 - Every production behavior change that is reachable through a real seam has meaningful unit coverage.
 - Those changed production paths target 100% line, statement, function, and branch coverage.
-- The boundary and scenario evidence required by the affected phase is checked in and executed, and any layer that does not exist yet is named as an explicit gap rather than faked.
+- The boundary and scenario evidence required by the affected phase is checked in and executed.
 - Architecture, package boundaries, state ownership, branch behavior, safety, and artifact contracts are preserved.
 - Tests are deterministic, isolated, secret-free, and clean up all resources.
 - Typecheck, lint, format, applicable tests, coverage, and build pass.
