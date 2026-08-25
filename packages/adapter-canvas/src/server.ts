@@ -3282,11 +3282,21 @@ export async function preflightGhcrPackageWriteAccess(
     : ghPkgIdentity.actingLogin === ghPkgLogin ? ghPkgIdentity.actingHasPackages
     : false;
   if (!ghPkgHasPackages) {
+    // Same rule as repairGuidance: the command comes from the registry so this
+    // message cannot drift from the Copy/Run buttons or miss the line-separated
+    // rendering that keeps it paste-able in Windows PowerShell 5.1.
+    const fix = remediationView("github-account-scopes", {
+      login: ghPkgLogin,
+      packages: "true"
+    });
     return {
       ok: false,
       status: 403,
       code: "ghcr-scope-required",
-      error: `The account @${ghPkgLogin} needs the write:packages permission to proceed. In the terminal, run: gh auth switch --hostname github.com --user ${ghPkgLogin}. Then run: gh auth refresh --hostname github.com --scopes read:packages,write:packages. This will make @${ghPkgLogin} the active GitHub CLI account if it is not already active.`
+      error:
+        fix.runnable ?
+          `The account @${ghPkgLogin} needs the write:packages permission to proceed. In the terminal, run:\n${fix.command}\nThe first command makes @${ghPkgLogin} the active GitHub CLI account if it is not already active.`
+        : `The account @${ghPkgLogin} needs the write:packages permission to proceed. Grant it the read:packages and write:packages scopes with GitHub CLI, or select an account that already has them.`
     };
   }
 

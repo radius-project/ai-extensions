@@ -152,13 +152,44 @@ describe("preflightGhcrPackageWriteAccess", () => {
     if (result.ok) throw new Error("expected GHCR preflight to fail");
     expect(result.code).toBe("ghcr-scope-required");
     expect(result.error).toContain("@pubuser");
+    // Built from the remediation registry, so it matches the Copy/Run buttons
+    // and stays line-separated for shells that cannot parse `&&`.
     expect(result.error).toContain(
-      "gh auth refresh --hostname github.com --scopes read:packages,write:packages"
+      "gh auth switch -h github.com -u pubuser\ngh auth refresh -h github.com -s read:packages -s write:packages"
     );
-    expect(result.error).toContain(
-      "gh auth switch --hostname github.com --user pubuser"
-    );
+    expect(result.error).not.toContain("&&");
     expect(result.error).not.toContain("previous-login");
+  });
+
+  it("falls back to prose when the login is one the registry will not run", async () => {
+    const hostile = "pub user; rm -rf /";
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => ({ token: "ghcr-token", username: hostile }),
+      async () => ({
+        actingLogin: hostile,
+        displayLogin: hostile,
+        mismatch: false,
+        actingHasWorkflow: true,
+        actingHasPackages: false,
+        reason: "user-selected-keyring-account",
+        accounts: [
+          {
+            login: hostile,
+            hasWorkflow: true,
+            hasPackages: false,
+            switchable: true,
+            acting: true
+          }
+        ]
+      })
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected GHCR preflight to fail");
+    expect(result.code).toBe("ghcr-scope-required");
+    // An unrunnable remediation must never be rendered as a command.
+    expect(result.error).not.toContain("gh auth switch");
+    expect(result.error).toContain("Grant it the read:packages");
   });
 });
 

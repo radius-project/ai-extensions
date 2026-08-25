@@ -1,5 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { stateRegistryForEnvironment } from "@radius-project/core";
+import {
+  remediationView,
+  stateRegistryForEnvironment
+} from "@radius-project/core";
 import type {
   GitHubAccountCoordinator,
   GitHubAccountRestoration
@@ -249,10 +252,18 @@ function repairGuidance(
       requiredPermissions.length === 1 ?
         `the ${requiredPermissions[0]} permission`
       : `the ${requiredPermissions.join(" and ")} permissions`;
-    const refresh = `gh auth refresh --hostname github.com --scopes ${refreshScopes.join(
-      ","
-    )}`;
-    return `The account @${login} needs ${permissions} to proceed. In the terminal, run: gh auth switch --hostname github.com --user ${login}. Then run: ${refresh}. This will make @${login} the active GitHub CLI account if it is not already active.`;
+    // Derive the command from the remediation registry rather than writing it
+    // out here. Hand-built copies drift from what the Copy/Run buttons offer,
+    // and they miss registry-wide rules -- most recently the switch to one
+    // command per line, because `&&` will not parse in Windows PowerShell 5.1.
+    const fix = remediationView("github-account-scopes", {
+      login,
+      ...(needsWorkflow ? { workflow: "true" } : {}),
+      ...(needsPackages ? { packages: "true" } : {})
+    });
+    return fix.runnable ?
+        `The account @${login} needs ${permissions} to proceed. In the terminal, run:\n${fix.command}\nThe first command makes @${login} the active GitHub CLI account if it is not already active.`
+      : `The account @${login} needs ${permissions} to proceed. Grant the missing scopes with GitHub CLI, or select an account that already has them.`;
   }
   if (!repositoryReady) {
     return `Grant @${login} repository administrator access, or select an account that can administer this repository.`;
