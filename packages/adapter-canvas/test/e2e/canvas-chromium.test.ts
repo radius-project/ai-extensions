@@ -14,6 +14,7 @@ import {
   type CanvasHarness
 } from "./support/canvas-harness.js";
 import type { Page } from "@playwright/test";
+import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const VALID_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
@@ -487,16 +488,16 @@ test.describe("Radius Canvas in Chromium", () => {
       "@acting-user"
     );
     await expectNoWcagViolations(page);
-    const showHowToFix = page.getByRole("button", {
-      name: "Show how to fix"
-    });
-    await expect(showHowToFix).toBeVisible();
-    await showHowToFix.focus();
-    await page.keyboard.press("Enter");
-    await expect(page.locator("#env-gh-details-panel")).toHaveAttribute(
-      "open",
-      ""
-    );
+
+    // The fix is offered directly, not tucked inside the technical-details
+    // disclosure, and it is reachable by keyboard.
+    const repair = page.locator("#env-gh-repair");
+    await expect(repair).toBeVisible();
+    await expect(repair).toContainText("gh auth switch");
+    const runButton = repair.getByRole("button", { name: COMMAND_RUN_LABEL });
+    await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
+    await runButton.focus();
+    await expect(runButton).toBeFocused();
     await canvas.expectCliInvoked("gh");
   });
 
