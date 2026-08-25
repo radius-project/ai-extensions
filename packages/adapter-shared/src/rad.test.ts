@@ -731,6 +731,54 @@ describeBuild(
   }
 );
 
+describeBuild("runRadAppGraph artifact completion", () => {
+  let binDir: string;
+  let bin: string;
+  let prevBinary: string | undefined;
+
+  beforeEach(() => {
+    binDir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-bin-"));
+    bin = path.join(binDir, "rad");
+    fs.writeFileSync(
+      bin,
+      [
+        "#!/usr/bin/env node",
+        'const fs = require("node:fs");',
+        'if (process.argv[2] === "app") {',
+        '  fs.writeFileSync("app-graph.json", "{");',
+        '  setTimeout(() => fs.writeFileSync("app-graph.json", JSON.stringify({ resources: [] })), 300);',
+        "  setInterval(() => {}, 1000);",
+        "} else {",
+        "  process.exit(0);",
+        "}",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    fs.chmodSync(bin, 0o755);
+    prevBinary = process.env.RADIUS_RAD_BINARY;
+    process.env.RADIUS_RAD_BINARY = bin;
+  });
+
+  afterEach(() => {
+    if (prevBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
+    else process.env.RADIUS_RAD_BINARY = prevBinary;
+    fs.rmSync(binDir, { recursive: true, force: true });
+  });
+
+  it("accepts a valid graph artifact without waiting for a lingering process", async () => {
+    const started = Date.now();
+    await expect(
+      buildGraphViaRad(
+        "resource app 'Radius.Core/applications@2023-10-01-preview' = {}",
+        ".radius/app.bicep",
+        { cleanupRadArtifactsDir: false }
+      )
+    ).resolves.toEqual([]);
+    expect(Date.now() - started).toBeLessThan(5000);
+  }, 10000);
+});
+
 describe("writeBicepCompileConfig", () => {
   let dir: string;
   let ws: string;

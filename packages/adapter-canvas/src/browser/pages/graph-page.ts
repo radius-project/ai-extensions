@@ -505,12 +505,13 @@ export function initializeGraphPage(
       });
   }
   void populateApplications(context, page.repo, "graph-app");
+  const branchListingGeneration = generation;
   void populateBranches(
     context,
     ["graph-branch"],
     page.repo,
     [page.branch],
-    () => entry.active
+    () => entry.active && generation === branchListingGeneration
   )
     .then(() => {
       if (!entry.active || hasLoadedGraph || !branchSelect?.value) return;
