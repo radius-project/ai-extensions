@@ -7,7 +7,8 @@ import {
   settleProviderMutation,
   provenOwnedCleanupTargets,
   recordGitHubEnvironment,
-  setCanonicalEnvironment
+  setCanonicalEnvironment,
+  unresolvedProviderMutations
 } from "../../operations.js";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 import {
@@ -209,49 +210,47 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(test.failures).toEqual([]);
   });
 
-  it.each([
-    {
-      name: "repository-admin failure",
-      overrides: {
-        preflightRepoAdmin: async () => "admin required"
+  it("reconciles an outstanding environment write before honoring Stop", async () => {
+    const op = operation();
+    requestStop(op);
+    prepareProviderMutation(op, {
+      kind: "github_environment.put",
+      target: "octo/app:production"
+    });
+    const test = dependencies(op, {
+      preflightRepoAdmin: async () => {
+        throw new Error("repository preflight must not run during recovery");
+      },
+      preflightGhcrPackageWriteAccess: async () => {
+        throw new Error("GHCR preflight must not run during recovery");
+      },
+      guardStopBoundary: async (_target, boundary) => {
+        test.events.push(`stop:${boundary}`);
+        return false;
       }
-    },
-    {
-      name: "GHCR package preflight failure",
-      overrides: {
-        preflightGhcrPackageWriteAccess: async () => ({
-          ok: false as const,
-          status: 403,
-          error: "GHCR package write access is missing.",
-          code: "ghcr-package-write-required"
-        })
+    });
+    const ghCalls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      run: async (args) => {
+        ghCalls.push(args);
+        return command({ code: 1, stderr: "HTTP 404" });
       }
-    }
-  ])(
-    "keeps reconciliation open when Stop meets a $name",
-    async ({ overrides }) => {
-      const op = operation();
-      requestStop(op);
-      prepareProviderMutation(op, {
-        kind: "github_environment.put",
-        target: "octo/app:production"
-      });
-      const test = dependencies(op, overrides);
+    });
 
-      await expect(
-        runEnvironmentOperationWorkflow(
-          op,
-          successfulSelectedGhExecutor(),
-          test.dependencies
-        )
-      ).rejects.toMatchObject({
-        code: "provider-mutation-outcome-unknown"
-      });
+    await expect(
+      runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).resolves.toEqual({ shouldMonitor: false });
 
-      expect(op.state).toBe("running");
-      expect(test.failures).toEqual([]);
-    }
-  );
+    expect(unresolvedProviderMutations(op)).toEqual([]);
+    expect(test.events).toEqual([
+      "persist-provider-mutation",
+      "stop:after-github-environment-attempt"
+    ]);
+    expect(test.failures).toEqual([]);
+    expect(ghCalls.some((args) => args.includes("PUT"))).toBe(false);
+    expect(test.events).not.toContain("preflight-admin");
+    expect(test.events).not.toContain("preflight-ghcr");
+  });
 
   it("persists GitHub's canonical name before Azure and propagates it downstream", async () => {
     const op = operation();

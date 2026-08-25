@@ -161,50 +161,53 @@ export async function runEnvironmentOperationWorkflow(
   executor: SelectedGhExecutor,
   dependencies: EnvironmentOperationWorkflowDependencies
 ): Promise<{ shouldMonitor: boolean }> {
-  if (
-    unresolvedProviderMutations(operation).length === 0 &&
-    !(await dependencies.guardStopBoundary(
-      operation,
-      "before-github-environment"
-    ))
-  ) {
-    return { shouldMonitor: false };
-  }
-  const accessMessage = await dependencies.preflightRepoAdmin(
-    operation.repo,
-    executor
-  );
-  if (accessMessage) {
+  const reconcilingProviderMutation =
+    unresolvedProviderMutations(operation).length > 0;
+  if (!reconcilingProviderMutation) {
     if (
       !(await dependencies.guardStopBoundary(
         operation,
-        "before-setup-failure-cleanup"
+        "before-github-environment"
       ))
     ) {
       return { shouldMonitor: false };
     }
-    return failResolution(operation, executor, dependencies, {
-      status: 403,
-      message: accessMessage,
-      code: "repo-admin-required"
-    });
-  }
-  const packageAccess =
-    await dependencies.preflightGhcrPackageWriteAccess(executor);
-  if (!packageAccess.ok) {
-    if (
-      !(await dependencies.guardStopBoundary(
-        operation,
-        "before-setup-failure-cleanup"
-      ))
-    ) {
-      return { shouldMonitor: false };
+    const accessMessage = await dependencies.preflightRepoAdmin(
+      operation.repo,
+      executor
+    );
+    if (accessMessage) {
+      if (
+        !(await dependencies.guardStopBoundary(
+          operation,
+          "before-setup-failure-cleanup"
+        ))
+      ) {
+        return { shouldMonitor: false };
+      }
+      return failResolution(operation, executor, dependencies, {
+        status: 403,
+        message: accessMessage,
+        code: "repo-admin-required"
+      });
     }
-    return failResolution(operation, executor, dependencies, {
-      status: packageAccess.status,
-      message: packageAccess.error,
-      code: packageAccess.code
-    });
+    const packageAccess =
+      await dependencies.preflightGhcrPackageWriteAccess(executor);
+    if (!packageAccess.ok) {
+      if (
+        !(await dependencies.guardStopBoundary(
+          operation,
+          "before-setup-failure-cleanup"
+        ))
+      ) {
+        return { shouldMonitor: false };
+      }
+      return failResolution(operation, executor, dependencies, {
+        status: packageAccess.status,
+        message: packageAccess.error,
+        code: packageAccess.code
+      });
+    }
   }
 
   let ensured: EnsuredGitHubEnvironment;
