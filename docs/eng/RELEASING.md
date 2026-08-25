@@ -34,16 +34,16 @@ Because every package is private, [`privatePackages`](https://changesets.dev/gui
 
 [`plugins/radius/package.json`](../../plugins/radius/package.json) is the **single source of truth**. Every other version string is derived from it by [`scripts/version.mjs`](../../scripts/version.mjs):
 
-| File                              | How it gets its version                                                                                            |
-|-----------------------------------|--------------------------------------------------------------------------------------------------------------------|
-| `plugins/radius/package.json`     | Bumped by `changeset version`. **Source of truth.**                                                                |
-| `plugins/radius/plugin.json`      | Derived - `version`.                                                                                               |
-| `.github/plugin/marketplace.json` | Derived - `metadata.version` and both plugin entries; an edge publish restamps `radius-edge` in its own workspace. |
-| `packages/*/package.json`         | Not versioned - ignored by Changesets.                                                                             |
+| File                              | How it gets its version                                                                                                        |
+|-----------------------------------|--------------------------------------------------------------------------------------------------------------------------------|
+| `plugins/radius/package.json`     | Bumped by `changeset version`. **Source of truth.**                                                                            |
+| `plugins/radius/plugin.json`      | Derived - `version`.                                                                                                           |
+| `.github/plugin/marketplace.json` | Derived - `metadata.version` and the `radius` plugin entry; an edge publish retargets and restamps its generated catalog copy. |
+| `packages/*/package.json`         | Not versioned - ignored by Changesets.                                                                                         |
 
 `pnpm run version` is `changeset version` followed by that sync, and it is the command the release workflow runs. CI runs `pnpm run version:check` and fails the build if the derived files drift; `pnpm run version:sync` repairs them. Never hand-edit a derived version.
 
-The catalog on `main` is the manifest end users add, so both of its plugin entries carry the released version. The rolling `radius-edge` entry is only restamped with the snapshot version inside the edge publish workspace, which never reaches `main`.
+The catalog on `main` is the manifest end users add, so its single `radius` entry carries the released version. During the preview period that entry's `source.ref` is `edge`. The edge publish retargets and restamps its generated catalog copy with the snapshot version in a workspace that never reaches `main`. After the first stable release, changing the `source.ref` on `main` to `latest` makes stable the default without renaming the plugin or retiring the explicit edge install target.
 
 > The marketplace's `metadata.version` currently tracks the plugin version because there is exactly one plugin. If this marketplace ever lists a second plugin, decouple that field.
 
@@ -112,7 +112,7 @@ Because Changesets owns the version, an edge build cannot claim to be a release:
 
 Because the branch is an orphan, it carries **no source and no history** - a clone of `releases/edge` contains only the artifact. The commit message records the `main` SHA it was built from, which is the only link back to the source. A CI guard fails the publish if anything outside `plugins/radius/dist/` lands in the tree.
 
-The plugin sources in [`.github/plugin/marketplace.json`](../../.github/plugin/marketplace.json) pin `path: plugins/radius/dist`: `radius-edge` follows the `edge` tag and `radius` follows `latest`. Each install therefore resolves matching skills and canvas files from one generated artifact commit. This is why the build output can stay git-ignored on `main`.
+The plugin source in [`.github/plugin/marketplace.json`](../../.github/plugin/marketplace.json) pins `path: plugins/radius/dist`. The single `radius` entry follows the `edge` tag while the plugin is in preview; changing its ref to `latest` makes stable the default later. Generated edge and stable catalogs point their own copies at the corresponding artifact ref. Each install therefore resolves matching skills and canvas files from one generated artifact commit. This is why the build output can stay git-ignored on `main`.
 
 Both `releases/edge` and `edge` are replaced wholesale on every push to `main`, so superseded bundles become unreferenced objects rather than permanent repository growth. See [docs/design/2026-07-canvas-bundle-publishing.md](../design/2026-07-canvas-bundle-publishing.md) for the full design.
 
@@ -132,7 +132,7 @@ Everything local that can fail - checks, build, packaging and attestation - happ
 
 The two branches carry an identical `plugins/radius/dist/`; they differ only in the catalog's `source.ref`, which each one points at itself. So `marketplace add radius-project/ai-extensions#releases/radius/v0.1.0` pins that exact release, and `#releases/latest` tracks stable - neither redirects to edge.
 
-> The catalog exposes `radius-edge` through the rolling `edge` tag and `radius` through `latest`. The stable entry becomes installable after the first stable release; use the explicitly named edge entry before then.
+> The catalog exposes one plugin named `radius`. It follows `edge` during preview and switches to `latest` after the first stable release; add an explicit generated marketplace branch to pin edge, latest, or one exact version independently of that default.
 
 ### Why there are two version tags
 
