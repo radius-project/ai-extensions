@@ -584,7 +584,7 @@ describe("initializeGraphPage", () => {
       "Copilot is generating .radius/app.bicep"
     );
     expect(browser.clock.timeouts).toBe(1);
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);
   });
 
   it("presents an empty successful graph as loaded without a ready banner", async () => {
@@ -650,7 +650,7 @@ describe("initializeGraphPage", () => {
       calls++;
       return calls === 1 ?
           jsonResponse({ stale: true })
-        : jsonResponse({ reload: true });
+        : jsonResponse({ resources: [{ id: "app/current" }] });
     });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -661,7 +661,7 @@ describe("initializeGraphPage", () => {
     browser.clock.tick(GRAPH_STALE_RETRY_MS);
     await flushPromises();
     expect(calls).toBe(2);
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
   });
 
   it("surfaces a load error message returned by the server", async () => {
@@ -683,9 +683,11 @@ describe("initializeGraphPage", () => {
     expect(status?.textContent).toBe("");
   });
 
-  it("regenerates the graph for a newly selected branch and reloads", async () => {
+  it("regenerates the graph for a newly selected branch in place", async () => {
     const { browser, branch, status } = fixture({ loaded: true });
-    browser.net.handle("/api/load-graph", () => jsonResponse({ reload: true }));
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/current" }] })
+    );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
@@ -696,7 +698,7 @@ describe("initializeGraphPage", () => {
     );
     await flushPromises();
 
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
   });
 
   it("updates a loaded graph for a new branch using response provenance", async () => {
@@ -798,7 +800,7 @@ describe("initializeGraphPage", () => {
       calls++;
       if (calls === 1) return jsonResponse({});
       if (calls === 2) return stale.promise;
-      return jsonResponse({ reload: true });
+      return jsonResponse({ resources: [{ id: "app/current" }] });
     });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -811,8 +813,7 @@ describe("initializeGraphPage", () => {
 
     stale.resolve(jsonResponse({ reload: true }));
     await flushPromises();
-    // Only the second (current) regenerate request's reload should count.
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
   });
 
   it("does nothing when reloading a branch without a repository", async () => {
@@ -1149,7 +1150,9 @@ describe("initializeGraphPage", () => {
     let calls = 0;
     browser.net.handle("/api/load-graph", () => {
       calls++;
-      return calls === 1 ? first.promise : jsonResponse({ reload: true });
+      return calls === 1 ?
+          first.promise
+        : jsonResponse({ resources: [{ id: "app/current" }] });
     });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -1161,7 +1164,7 @@ describe("initializeGraphPage", () => {
     first.reject(new Error("stale failure"));
     await flushPromises();
 
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
     expect(browser.logger.errors).toHaveLength(0);
   });
 
@@ -1173,7 +1176,7 @@ describe("initializeGraphPage", () => {
       calls++;
       if (calls === 1) return jsonResponse({});
       if (calls === 2) return stale.promise;
-      return jsonResponse({ reload: true });
+      return jsonResponse({ resources: [{ id: "app/current" }] });
     });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -1187,7 +1190,7 @@ describe("initializeGraphPage", () => {
     stale.reject(new Error("stale regenerate failure"));
     await flushPromises();
 
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
     expect(browser.logger.errors).toHaveLength(0);
   });
 
@@ -1239,7 +1242,9 @@ describe("initializeGraphPage", () => {
     let calls = 0;
     browser.net.handle("/api/load-graph", () => {
       calls++;
-      return calls === 1 ? refresh.promise : jsonResponse({ reload: true });
+      return calls === 1 ?
+          refresh.promise
+        : jsonResponse({ resources: [{ id: "app/current" }] });
     });
     initializeGraphPage(browser.context, globals());
     branch.dispatch("change");
@@ -1249,7 +1254,7 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(browser.logger.errors).toHaveLength(0);
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
   });
 
   it("ignores a stale progress failure superseded by a branch change", async () => {
