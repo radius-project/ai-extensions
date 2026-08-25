@@ -344,7 +344,7 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       (call) => call[0] as { prompt: string }
     );
     expect(sent).toHaveLength(1);
-    expect(sent[0].prompt).toContain("could not be verified");
+    expect(sent[0].prompt).toContain("needs to be regenerated");
   });
 
   it("reports the same unchanged model only once per panel", async () => {

@@ -148,6 +148,7 @@ interface StatusOverrides {
   requiresConfirmation?: boolean;
   reason?: string;
   sourceCommit?: string;
+  appBicepHash?: string;
 }
 
 function modelStatus(
@@ -164,9 +165,9 @@ function modelStatus(
       status,
       stale: status !== "up-to-date" && status !== "missing",
       requiresConfirmation:
-        overrides.requiresConfirmation ??
-        (status === "unrecorded" || status === "edited"),
+        overrides.requiresConfirmation ?? status === "manually-edited",
       reason: overrides.reason ?? `because it is ${status}`,
+      appBicepHash: overrides.appBicepHash ?? "sha256:model",
       origin:
         overrides.sourceCommit === undefined ?
           null
@@ -214,7 +215,7 @@ describe("appModelRefreshPrompt", () => {
       "radius_generate_app"
     );
     expect(appModelRefreshDisplayPrompt(modelStatus("", "feat"))).toContain(
-      "Refreshing the application model (branch `feat`)"
+      "Regenerating the application model (branch `feat`)"
     );
   });
 });
@@ -255,7 +256,7 @@ describe("refreshRequestKey", () => {
 
 describe("appModelUnverifiedPrompt", () => {
   const status = modelStatus("octo/app", "feat", {
-    status: "edited",
+    status: "manually-edited",
     reason: "the model no longer matches its origin record"
   });
 
@@ -271,7 +272,9 @@ describe("appModelUnverifiedPrompt", () => {
 
   it("omits the repo phrase when the repo is unknown", () => {
     expect(
-      appModelUnverifiedPrompt(modelStatus("", "feat", { status: "edited" }))
+      appModelUnverifiedPrompt(
+        modelStatus("", "feat", { status: "manually-edited" })
+      )
     ).toContain("The Radius graph rendered");
   });
 
@@ -292,7 +295,7 @@ describe("appModelUnverifiedPrompt", () => {
 
   it("omits the repo phrase from the timeline when the repo is unknown", () => {
     expect(appModelUnverifiedDisplayPrompt(modelStatus("", "feat"))).toContain(
-      "Checking whether the application model (branch `feat`)"
+      "Asking before regenerating the application model (branch `feat`)"
     );
   });
 });

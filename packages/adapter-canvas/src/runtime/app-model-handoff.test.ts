@@ -35,8 +35,9 @@ function modelStatus(
       stale: status !== "up-to-date" && status !== "missing",
       requiresConfirmation:
         overrides.requiresConfirmation ??
-        (status === "unrecorded" || status === "edited"),
+        (status === "unrecorded" || status === "manually-edited"),
       reason: overrides.reason ?? `because it is ${status}`,
+      appBicepHash: "sha256:abc",
       origin:
         overrides.sourceCommit === undefined ?
           null
@@ -117,7 +118,7 @@ describe("appModelHandoffKey", () => {
     const edited = appModelHandoffKey(
       "a/b",
       ["feat"],
-      [modelStatus("a/b", "feat", { status: "edited" })]
+      [modelStatus("a/b", "feat", { status: "manually-edited" })]
     );
 
     expect(stale).not.toBe(edited);
@@ -448,21 +449,23 @@ describe("createAppModelHandoff", () => {
 
   it("asks the user before regenerating a model it cannot verify", async () => {
     const { handOff, sent } = harness({
-      statuses: { feat: modelStatus("a/b", "feat", { status: "edited" }) }
+      statuses: {
+        feat: modelStatus("a/b", "feat", { status: "manually-edited" })
+      }
     });
 
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph" });
 
     expect(sent).toHaveLength(1);
     expect(sent[0].prompt).toContain("ask whether they want the model");
-    expect(sent[0].displayPrompt).toContain("Checking whether");
+    expect(sent[0].displayPrompt).toContain("Asking before regenerating");
   });
 
   it("prefers the confirmation conversation over a plain refresh when both apply", async () => {
     const { handOff, sent } = harness({
       statuses: {
         main: modelStatus("a/b", "main", { status: "source-changed" }),
-        feat: modelStatus("a/b", "feat", { status: "edited" })
+        feat: modelStatus("a/b", "feat", { status: "manually-edited" })
       }
     });
 
@@ -473,7 +476,7 @@ describe("createAppModelHandoff", () => {
     });
 
     expect(sent).toHaveLength(1);
-    expect(sent[0].prompt).toContain("could not be verified");
+    expect(sent[0].prompt).toContain("would discard content");
   });
 
   it("only notes a stale model on a branch modeling may not rewrite", async () => {
@@ -537,7 +540,9 @@ describe("createAppModelHandoff", () => {
     const { handOff, sent } = harness({ statuses });
 
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
-    statuses.feat = modelStatus("a/b", "feat", { status: "edited" });
+    statuses.feat = modelStatus("a/b", "feat", {
+      status: "manually-edited"
+    });
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
 
     expect(sent).toHaveLength(2);
@@ -584,7 +589,7 @@ describe("createAppModelHandoff", () => {
     const { handOff, sent } = harness({
       statuses: {
         feat: modelStatus("a/b", "feat", {
-          status: "edited",
+          status: "manually-edited",
           sourceCommit: "aaa"
         })
       }
@@ -625,7 +630,9 @@ describe("createAppModelHandoff", () => {
     const state: CanvasState = {};
     const { handOff, sent } = harness({
       shouldRequestRefresh: () => false,
-      statuses: { feat: modelStatus("a/b", "feat", { status: "edited" }) }
+      statuses: {
+        feat: modelStatus("a/b", "feat", { status: "manually-edited" })
+      }
     });
 
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
@@ -770,7 +777,7 @@ describe("createAppModelHandoff", () => {
     // Retry succeeds — both the panel reservation and the refresh memo were released.
     await handOff(request);
     expect(sent).toHaveLength(1);
-    expect(sent[0].prompt).toContain("no longer describes the current source");
+    expect(sent[0].prompt).toContain("needs to be regenerated");
   });
 
   it("retries a superseding stale-model handoff after the shared delivery fails", async () => {
@@ -831,7 +838,7 @@ describe("createAppModelHandoff", () => {
     const { handOff, sent } = harness({
       statuses: {
         feat: modelStatus("a/b", "feat", {
-          status: "edited",
+          status: "manually-edited",
           sourceCommit: "aaa"
         })
       },
@@ -853,6 +860,6 @@ describe("createAppModelHandoff", () => {
 
     await handOff(request);
     expect(sent).toHaveLength(1);
-    expect(sent[0].prompt).toContain("could not be verified");
+    expect(sent[0].prompt).toContain("would discard content");
   });
 });

@@ -27,6 +27,7 @@ import {
   infrastructureFailureSummaryList,
   modelFailureSummaryList
 } from "../model-failure-policy.js";
+import { freshnessIdentity } from "@radius-project/core";
 import type { AppModelStatus } from "./graph-context.js";
 
 interface DeployRepairDetails {
@@ -80,17 +81,17 @@ function graphSourceNote(
   ].join(" ");
 }
 
-// Identifies one staleness signal: the same branch, classification, and recorded
-// origin describe the same request to regenerate. A regeneration changes the
-// record, so genuinely new drift produces a new key.
+// Identifies one staleness signal: the same branch, classification, and evidence
+// describe the same request to regenerate. A regeneration changes the evidence,
+// so genuinely new drift produces a new key. freshnessIdentity supplies the
+// evidence half, including the part that keeps an unrecorded model that is safe
+// to replace from being confused with one that is not.
 export function refreshRequestKey(status: AppModelStatus): string {
-  const origin = status.freshness.origin;
   return [
     status.repo,
     status.branch,
     status.freshness.status,
-    origin?.sourceCommit ?? "",
-    origin?.skillVersion ?? ""
+    freshnessIdentity(status.freshness)
   ].join("::");
 }
 
@@ -166,7 +167,7 @@ export function appBicepHandoffMessage(
 export function appModelRefreshPrompt(status: AppModelStatus): string {
   const where = status.repo ? ` for ${status.repo}` : "";
   return [
-    `The Radius graph${where} on branch \`${status.branch}\` just rendered from an application model that no longer describes the current source.`,
+    `The Radius graph${where} on branch \`${status.branch}\` just rendered from an application model that needs to be regenerated.`,
     "",
     status.freshness.reason,
     "",
@@ -181,7 +182,7 @@ export function appModelRefreshPrompt(status: AppModelStatus): string {
 // Timeline stand-in for appModelRefreshPrompt.
 export function appModelRefreshDisplayPrompt(status: AppModelStatus): string {
   const where = status.repo ? ` for ${status.repo}` : "";
-  return `Refreshing the application model${where} (branch \`${status.branch}\`), which no longer matches the current source.`;
+  return `Regenerating the application model${where} (branch \`${status.branch}\`) before showing the graph.`;
 }
 
 export function appModelRefreshMessage(status: AppModelStatus): HandoffMessage {
@@ -191,15 +192,19 @@ export function appModelRefreshMessage(status: AppModelStatus): HandoffMessage {
   };
 }
 
-// Prompt sent when a graph canvas renders a model this extension cannot prove it
-// generated: hand-edited since generation, or carrying no usable origin record.
+// Prompt sent when a graph canvas renders a model that needs regenerating and
+// whose content the refresh would take with it. Two cases reach here: a model
+// edited after it was generated, and a model with no origin record that git
+// cannot give back because it is untracked or already modified.
 // The view is NOT blocked for these: the file on disk is what would deploy, so it
-// is the honest thing to render. But regenerating would destroy content the user
-// may have written deliberately, so the refresh is offered rather than taken.
+// is the honest thing to render. But regenerating would destroy content that
+// exists nowhere else, so the refresh is offered rather than taken. A hand edit
+// on a model that needs no refresh never reaches here, and a model with no record
+// that IS committed and clean does not either: git has that one.
 export function appModelUnverifiedPrompt(status: AppModelStatus): string {
   const where = status.repo ? ` for ${status.repo}` : "";
   return [
-    `The Radius graph${where} rendered from the existing .radius/app.bicep on branch \`${status.branch}\`, but that model could not be verified against the current source.`,
+    `The Radius graph${where} rendered from the existing .radius/app.bicep on branch \`${status.branch}\`, but that model needs to be regenerated and doing so would discard content that exists nowhere else.`,
     "",
     status.freshness.reason,
     "",
@@ -217,7 +222,7 @@ export function appModelUnverifiedDisplayPrompt(
   status: AppModelStatus
 ): string {
   const where = status.repo ? ` for ${status.repo}` : "";
-  return `Checking whether the application model${where} (branch \`${status.branch}\`) still matches the current source.`;
+  return `Asking before regenerating the application model${where} (branch \`${status.branch}\`).`;
 }
 
 export function appModelUnverifiedMessage(

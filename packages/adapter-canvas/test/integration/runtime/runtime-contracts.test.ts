@@ -693,7 +693,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     const sent = (harness.session.send as ReturnType<typeof vi.fn>).mock.calls
       .map((call) => JSON.stringify(call[0]))
       .join("\n");
-    expect(sent).toContain("no longer describes the current source");
+    expect(sent).toContain("source has changed since");
     expect(sent).toContain("radius_generate_app");
 
     // The skill regenerates and rewrites the origin record against the branch's
