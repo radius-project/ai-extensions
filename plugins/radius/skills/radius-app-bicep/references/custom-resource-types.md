@@ -121,6 +121,8 @@ A pack may use the module under a type name unrelated to the one you are generat
 https://raw.githubusercontent.com/Azure/bicep-registry-modules/avm/res/<service>/<resource>/<x.y.z>/avm/res/<service>/<resource>/main.bicep
 ```
 
+`avm/res/<service>/<resource>` is the same path that follows `mcr.microsoft.com/bicep/` in the `source`, and it appears twice: first as part of the release tag (`avm/res/<service>/<resource>/<x.y.z>`), then as the directory holding `main.bicep`. For `mcr.microsoft.com/bicep/avm/res/service-bus/namespace:0.16.2` that resolves to `.../bicep-registry-modules/avm/res/service-bus/namespace/0.16.2/avm/res/service-bus/namespace/main.bicep`. Read the `output` and `param` declarations there; a secure output is still declared with a plain `output` statement under its `@secure()` decorator.
+
 The `main` branch and the module README document the newest release. Reading them while pinning an older version is how a mapping ends up naming an output that does not exist at the pinned version — `primaryConnectionString` on `service-bus/namespace` exists from `0.15.0` onward, but not in `0.12.0`.
 
 Radius rejects a mapping to an output the pinned module does not declare, failing the deploy with `InvalidRecipeOutputs` before provisioning starts. Verifying the interface up front avoids that round trip; note that the check covers `outputs` only, so a wrong or missing `parameters` key still surfaces later as a provisioning or runtime auth failure.
