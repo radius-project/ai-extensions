@@ -4900,7 +4900,8 @@ export function reconcileRestoredOperation(op: any): any {
   if (
     op.currentStage === STAGE_VERIFY &&
     op.verification &&
-    typeof op.context?.githubLogin !== "string"
+    (typeof op.context?.githubLogin !== "string" ||
+      !op.context.githubLogin.trim())
   ) {
     const now = nowIso();
     op.state = "failed_partial";

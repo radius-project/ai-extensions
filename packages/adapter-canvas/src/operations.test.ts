@@ -2751,6 +2751,32 @@ describe("startup reconciliation", () => {
     expect(op.failure.code).toBe("verification-retry-github-account-missing");
   });
 
+  it("fails a restored verification closed when the selected account is blank", () => {
+    const op = newOp();
+    op.context = { githubLogin: " \t " };
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      event: "workflow_dispatch",
+      operationMarker: "op_test",
+      runId: null,
+      runUrl: null
+    };
+
+    reconcileRestoredOperation(op);
+
+    expect(op).toMatchObject({
+      state: "failed_partial",
+      recoveryState: "manual_required",
+      failure: {
+        code: "verification-retry-github-account-missing"
+      }
+    });
+  });
+
   it("restores a pending verification retry acquisition instead of monitoring the prior run", () => {
     const op = newOp();
     op.context = { githubLogin: "alice" };

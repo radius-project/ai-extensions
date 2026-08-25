@@ -125,6 +125,8 @@ export interface SelectedVerificationMonitorDependencies {
 
 const SELECTED_EXECUTOR_ACQUISITION_WINDOW_MS = 45 * 60 * 1000;
 const SELECTED_EXECUTOR_MAX_RETRY_DELAY_MS = 15_000;
+const SELECTED_EXECUTOR_DEADLINE_ELAPSED_DETAIL =
+  "The selected GitHub account acquisition deadline elapsed.";
 
 export function verificationTrackingDeadline(
   operation: VerificationRetryOperation,
@@ -197,16 +199,15 @@ export async function acquireSelectedExecutor(
   dependencies: SelectedExecutorAcquisitionDependencies
 ): Promise<SelectedExecutorAcquisition> {
   let delayMs = 1000;
-  let rateLimitDetail =
-    "GitHub rate limiting prevented Radius from reacquiring the selected account.";
+  let expirationDetail = SELECTED_EXECUTOR_DEADLINE_ELAPSED_DETAIL;
   while (true) {
     if (dependencies.now() >= deadline) {
-      return { state: "expired", detail: rateLimitDetail };
+      return { state: "expired", detail: expirationDetail };
     }
     try {
       const executor = await dependencies.createExecutor(login);
       if (dependencies.now() >= deadline) {
-        return { state: "expired", detail: rateLimitDetail };
+        return { state: "expired", detail: expirationDetail };
       }
       return { state: "ready", executor };
     } catch (error) {
@@ -214,7 +215,7 @@ export async function acquireSelectedExecutor(
       if (!dependencies.isRateLimitError(error)) {
         return { state: "unavailable", detail };
       }
-      rateLimitDetail = detail;
+      expirationDetail = detail;
       const remainingMs = deadline - dependencies.now();
       if (remainingMs <= 0) {
         return { state: "expired", detail };

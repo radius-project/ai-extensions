@@ -215,8 +215,7 @@ describe("verification retry selected account", () => {
 
     expect(result).toEqual({
       state: "expired",
-      detail:
-        "GitHub rate limiting prevented Radius from reacquiring the selected account."
+      detail: "The selected GitHub account acquisition deadline elapsed."
     });
     expect(createExecutor).not.toHaveBeenCalled();
   });
@@ -718,7 +717,7 @@ describe("verification retry selected account", () => {
 
       expect(expired).toHaveBeenCalledWith(
         op,
-        "GitHub rate limiting prevented Radius from reacquiring the selected account."
+        "The selected GitHub account acquisition deadline elapsed."
       );
       expect(deps.registered).toEqual([]);
       expect(deps.unregistered).toEqual([]);
