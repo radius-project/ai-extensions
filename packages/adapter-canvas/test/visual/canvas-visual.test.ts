@@ -546,6 +546,9 @@ test.describe("Radius Canvas visual baselines", () => {
         .getByRole("button", { name: "New Credential Profile" })
         .click();
       await expect(page.locator("#cred-form")).toBeVisible();
+      await expect(page.locator("#cred-ghcr-status")).toContainText(
+        "using the stored GitHub CLI credential"
+      );
       await screenshot(page, `vi-05-credential-profile-form-${theme}.png`);
     });
   }
