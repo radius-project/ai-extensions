@@ -113,13 +113,24 @@ jobs:
               exit 1
             fi
             current_source="${current_message##* for }"
-            if [[ ! "$current_source" =~ ^[0-9a-f]{40}$ ]] || \
-               ! git cat-file -e "$current_source^{commit}"; then
+            if [[ ! "$current_source" =~ ^[0-9a-f]{40}$ ]]; then
               echo "::error::releases/edge records an invalid source commit: $current_source"
               exit 1
             fi
 
-            if [ "$current_source" != "$GITHUB_SHA" ]; then
+            # Rewriting main orphans the commit edge was published from, leaving
+            # a well-formed SHA that no longer exists here. Ancestry is then
+            # unknowable and every later push would wedge, so re-baseline the
+            # channel only when this run is main's current tip and therefore
+            # cannot be a stale rerun.
+            if ! git cat-file -e "$current_source^{commit}" 2>/dev/null; then
+              git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+              if [ "$GITHUB_SHA" != "$(git rev-parse refs/remotes/origin/main)" ]; then
+                echo "::error::Published edge source $current_source is no longer in main's history, and $GITHUB_SHA is not main's current tip. Re-run Publish for the newest commit on main to re-baseline releases/edge."
+                exit 1
+              fi
+              echo "::notice::Published edge source $current_source is no longer in main's history; re-baselining releases/edge on $GITHUB_SHA."
+            elif [ "$current_source" != "$GITHUB_SHA" ]; then
               if git merge-base --is-ancestor "$current_source" "$GITHUB_SHA"; then
                 : # This run moves edge forward.
               elif git merge-base --is-ancestor "$GITHUB_SHA" "$current_source"; then
