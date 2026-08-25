@@ -234,13 +234,17 @@ export async function selectedCommandAuthorizationError(
     : null;
 }
 
+type SelectedWorkflowJsonRead =
+  | { state: "value"; value: unknown }
+  | { state: "missing" }
+  | { state: "fallback" };
+
 async function selectedWorkflowJson(
   executor: SelectedGhExecutor,
   repo: string,
   args: string[],
-  fallback: unknown,
   timeout = 15000
-): Promise<unknown> {
+): Promise<SelectedWorkflowJsonRead> {
   try {
     const result = await executor.run(args, { timeout });
     if (Number(result.code) !== 0) {
@@ -251,7 +255,7 @@ async function selectedWorkflowJson(
           repo
         );
         if (repositoryError) throw repositoryError;
-        return fallback;
+        return { state: "missing" };
       }
       const authorizationError = selectedAuthorizationError(
         executor,
@@ -259,12 +263,12 @@ async function selectedWorkflowJson(
         result.stderr
       );
       if (authorizationError) throw authorizationError;
-      return fallback;
+      return { state: "fallback" };
     }
     try {
-      return JSON.parse(result.stdout.trim());
+      return { state: "value", value: JSON.parse(result.stdout.trim()) };
     } catch {
-      return fallback;
+      return { state: "fallback" };
     }
   } catch (error) {
     if (isSelectedGhAuthorizationError(error)) throw error;
@@ -275,7 +279,7 @@ async function selectedWorkflowJson(
         repo
       );
       if (repositoryError) throw repositoryError;
-      return fallback;
+      return { state: "missing" };
     }
     const authorizationError = rejectedSelectedAuthorizationError(
       executor,
@@ -303,7 +307,7 @@ export function ghJson(
             result.stderr
           );
           if (authorizationError) throw authorizationError;
-          return fallback;
+          return { state: "fallback" };
         }
         try {
           return JSON.parse(result.stdout.trim());
@@ -401,9 +405,13 @@ export async function findWorkflowRun(
     "--repo",
     repo
   ];
+  const selectedRead =
+    executor ? await selectedWorkflowJson(executor, repo, args) : null;
   const runs =
-    executor ?
-      await selectedWorkflowJson(executor, repo, args, [])
+    selectedRead ?
+      selectedRead.state === "value" ?
+        selectedRead.value
+      : []
     : await ghJson(args, []);
   if (!Array.isArray(runs)) return null;
   // Prefer a monotonic run-id baseline when the caller captured one just before
@@ -453,9 +461,14 @@ export async function getRunDetail(
     "--repo",
     repo
   ];
+  const selectedDetail =
+    executor ? await selectedWorkflowJson(executor, repo, detailArgs) : null;
+  if (selectedDetail?.state === "missing") return null;
   let data =
-    executor ?
-      await selectedWorkflowJson(executor, repo, detailArgs, null)
+    selectedDetail ?
+      selectedDetail.state === "value" ?
+        selectedDetail.value
+      : null
     : await ghJson(detailArgs, null);
   // The jobs sub-resource (/actions/runs/<id>/jobs) is intermittently flaky
   // (HTTP 503) and, when included, fails the whole `gh run view` call — which
@@ -474,9 +487,14 @@ export async function getRunDetail(
       "--repo",
       repo
     ];
+    const selectedStatus =
+      executor ? await selectedWorkflowJson(executor, repo, statusArgs) : null;
+    if (selectedStatus?.state === "missing") return null;
     data =
-      executor ?
-        await selectedWorkflowJson(executor, repo, statusArgs, null)
+      selectedStatus ?
+        selectedStatus.state === "value" ?
+          selectedStatus.value
+        : null
       : await ghJson(statusArgs, null);
     if (!isRecord(data)) return null;
     return {
@@ -525,7 +543,7 @@ export async function fetchRunLog(
         }
       );
       if (Number(result.code) !== 0) {
-        if (selectedFailureStatus(result.stdout, result.stderr) === 404) {
+        if (selectedFailureStatus("", result.stderr) === 404) {
           const repositoryError = await selectedRepositoryAccessError(
             executor,
             repo
@@ -535,7 +553,7 @@ export async function fetchRunLog(
         }
         const authorizationError = selectedAuthorizationError(
           executor,
-          result.stdout,
+          "",
           result.stderr
         );
         if (authorizationError) throw authorizationError;

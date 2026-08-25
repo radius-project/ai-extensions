@@ -167,7 +167,7 @@ describe("selected-account workflow reads", () => {
     await expect(
       getRunDetail("contoso/store", "41", executor)
     ).resolves.toBeNull();
-    expect(calls.map((args) => args[0])).toEqual(["run", "api", "run", "api"]);
+    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
   });
 
   it("keeps a masked run 404 pending when its repository probe is rate-limited", async () => {
@@ -266,8 +266,8 @@ describe("selected-account workflow reads", () => {
       login: "alice",
       run: async () => ({
         code: 1,
-        stdout: "gh: Unauthorized (HTTP 401)",
-        stderr: ""
+        stdout: "",
+        stderr: "gh: Unauthorized (HTTP 401)"
       })
     });
 
@@ -278,6 +278,21 @@ describe("selected-account workflow reads", () => {
       login: "alice",
       status: 401
     });
+  });
+
+  it("does not read workflow log stdout as a GitHub authorization failure", async () => {
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async () => ({
+        code: 1,
+        stdout: "curl failed against a service endpoint (HTTP 403)",
+        stderr: "gh: could not retrieve the workflow log"
+      })
+    });
+
+    await expect(
+      fetchRunLog("contoso/store", "41", executor)
+    ).resolves.toBeNull();
   });
 
   it("keeps transient selected-account run log failure pollable", async () => {

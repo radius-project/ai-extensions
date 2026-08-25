@@ -111,10 +111,6 @@ import {
   planCredentialVerification
 } from "./verification-plan.js";
 import {
-  findExactVerificationRun,
-  hasPostDispatchVerificationRuns
-} from "./verification-run-identity.js";
-import {
   operations,
   isTerminalState,
   isStale,
@@ -279,10 +275,7 @@ import { createDeployRequestService } from "./server/services/deploy-request.js"
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
-import {
-  executeRecoverableMutation,
-  ProviderMutationRecoveryError
-} from "./server/services/provider-mutation-recovery.js";
+import { executeRecoverableMutation } from "./server/services/provider-mutation-recovery.js";
 import {
   pendingBranchDelete,
   reconcileRecoveredBranchDelete
@@ -332,17 +325,19 @@ import { resolveEnvironmentDeployment } from "./server/services/deployment-resol
 import type { DeploymentRow } from "./server/services/deployment-resolver.js";
 import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
 import {
-  acquireSelectedExecutor,
   monitorVerificationWithSelectedAccount,
-  shouldResumeKnownVerificationRun,
-  shouldReuseVerificationDispatch,
-  verificationRetryTargetPhase,
+  verificationAcquisitionExpiredCopy,
   verificationTrackingDeadline
 } from "./server/services/verification-retry.js";
+import {
+  resolveAcknowledgedVerificationRun,
+  runVerificationRetry as runSelectedVerificationRetry
+} from "./server/services/verification-retry-runner.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
 export { resolveDeployStatus } from "./server/services/deployment-resolver.js";
+export { resolveAcknowledgedVerificationRun };
 
 interface CommandResult {
   code: string | number;
@@ -1475,44 +1470,6 @@ export function setEnvironmentOperationTestRunner(
   runner: ((operationId: string, commandId?: string) => Promise<void>) | null
 ): void {
   environmentOperationTestRunner = runner;
-}
-
-export async function resolveAcknowledgedVerificationRun(input: {
-  operationMarker: string;
-  pause(milliseconds: number): Promise<void>;
-  discover(): Promise<
-    | { state: "applied"; value: string }
-    | { state: "manual_required"; guidance: string }
-  >;
-  actionsUrl: string;
-  isAuthorizationError?(error: unknown): boolean;
-}): Promise<
-  | { state: "applied"; runId: string }
-  | { state: "manual_required"; guidance: string }
-> {
-  if (!input.operationMarker) {
-    return {
-      state: "manual_required",
-      guidance:
-        `The installed verification workflow does not expose Radius's operation marker. Check ${input.actionsUrl}; ` +
-        "Radius will not guess which run belongs to this retry or dispatch another run."
-    };
-  }
-  await input.pause(5000);
-  try {
-    const discovered = await input.discover();
-    return discovered.state === "applied" ?
-        { state: "applied", runId: discovered.value }
-      : discovered;
-  } catch (error) {
-    if (input.isAuthorizationError?.(error)) throw error;
-    return {
-      state: "manual_required",
-      guidance:
-        `GitHub accepted verification, but Radius could not confirm the exact marked run. Review ${input.actionsUrl}. ` +
-        "Radius will not adopt or redispatch a run."
-    };
-  }
 }
 
 export function reopenProviderReconciliation(operation: any): boolean {
@@ -5115,16 +5072,16 @@ function createInstanceRequestCoordinator(
         });
         await saveOperation(operation);
       },
-      trackingExpired: async (operation, detail) => {
+      trackingExpired: async (operation, expiration) => {
+        const copy = verificationAcquisitionExpiredCopy("resume", expiration);
         finish(operation, "failed_partial", {
           failure: {
             code: "verification-tracking-expired",
             stage: STAGE_VERIFY,
             stepSeq: null,
-            message:
-              "Radius could not resume credential verification before the GitHub rate limit retry window expired.",
+            message: copy.message,
             classification: "user-fixable",
-            evidence: detail
+            evidence: expiration.detail
           }
         });
         await saveOperation(operation);
@@ -5285,707 +5242,36 @@ function createInstanceRequestCoordinator(
       await environmentOperationTestRunner(operationId, commandId);
       return;
     }
-    const op = operations.get(operationId);
-    if (!op || op.endedAt) return;
-    const selectedLogin =
-      typeof op.context?.githubLogin === "string" ?
-        op.context.githubLogin.trim()
-      : "";
-    if (!selectedLogin) {
-      addLegacyStep(
-        op,
-        "❌ The saved GitHub account for this verification retry is missing."
-      );
-      setCommandState(op, commandId, "finished", "github-account-missing");
-      finish(op, "failed_partial", {
-        failure: {
-          code: "verification-retry-github-account-missing",
-          stage: STAGE_VERIFY,
-          stepSeq: null,
-          message:
-            "Radius cannot retry credential verification because this operation does not name the GitHub account that started it.",
-          classification: "user-fixable",
-          evidence: null
-        }
-      });
-      await saveOperation(op);
-      return;
-    }
-    const savedBeforeAcquisition = { ...(op.verification || {}) };
-    const retryTargetPhase = verificationRetryTargetPhase(
-      savedBeforeAcquisition.accountUnavailablePhase
-    );
-    let acquisitionDeadline = Number(
-      savedBeforeAcquisition.acquisitionDeadline
-    );
-    if (!Number.isFinite(acquisitionDeadline) || acquisitionDeadline <= 0) {
-      acquisitionDeadline = Date.now() + 45 * 60 * 1000;
-      op.verification = {
-        ...savedBeforeAcquisition,
-        acquisitionPending: true,
-        acquisitionDeadline,
-        retryCommandId: commandId
-      };
-      setCommandState(op, commandId, "running");
-      if (!(await saveOperation(op))) {
-        setCommandState(op, commandId, "finished", "persistence-failed");
-        finish(op, "failed_partial", {
-          failure: {
-            code: "verification-retry-persist-failed",
-            stage: STAGE_VERIFY,
-            stepSeq: null,
-            message:
-              "Radius could not save the verification retry deadline, so it did not contact GitHub.",
-            classification: "system",
-            evidence: null
-          }
-        });
-        await saveOperation(op);
-        return;
-      }
-    }
-    const acquisition = await acquireSelectedExecutor(
-      selectedLogin,
-      acquisitionDeadline,
-      {
-        createExecutor: (login) =>
-          githubAccountCoordinator.createReadOnlyExecutor(login),
-        isRateLimitError: (error) => isGitHubRateLimitError(error),
-        now: Date.now,
-        sleep: (milliseconds) =>
-          new Promise((resolve) => setTimeout(resolve, milliseconds)),
-        errorMessage
-      }
-    );
-    if (acquisition.state !== "ready") {
-      const expired = acquisition.state === "expired";
-      addLegacyStep(
-        op,
-        expired ?
-          "❌ GitHub rate limiting prevented the verification retry from starting."
-        : `❌ Could not use @${selectedLogin} to retry credential verification.`
-      );
-      setCommandState(
-        op,
-        commandId,
-        "finished",
-        expired ? "tracking-expired" : "github-account-unavailable"
-      );
-      finish(op, "failed_partial", {
-        failure: {
-          code:
-            expired ?
-              "verification-tracking-expired"
-            : "verification-retry-github-account-unavailable",
-          stage: STAGE_VERIFY,
-          stepSeq: null,
-          message:
-            expired ?
-              "Radius could not start credential verification before the GitHub rate limit retry window expired."
-            : `Radius could not use @${selectedLogin} to retry credential verification. Re-check that account and try again.`,
-          classification: "user-fixable",
-          evidence: acquisition.detail
-        }
-      });
-      op.verification = {
-        ...(op.verification || {}),
-        accountUnavailablePhase: retryTargetPhase
-      };
-      await saveOperation(op);
-      return;
-    }
-    const selectedExecutor = acquisition.executor;
-    selectedGitHubExecutorsByOperation.set(operationId, selectedExecutor);
-    try {
-      const saved = op.verification || {};
-      const resumeKnownRun = shouldResumeKnownVerificationRun({
-        accountUnavailablePhase: saved.accountUnavailablePhase,
-        runId: saved.runId
-      });
-      if (resumeKnownRun) {
-        op.verification = {
-          ...saved,
-          acquisitionPending: false,
-          accountUnavailablePhase: null,
-          retryCommandId: commandId
-        };
-        setCommandState(op, commandId, "running");
-        if (!(await saveOperation(op))) {
-          op.verification = {
-            ...saved,
-            acquisitionPending: true,
-            retryCommandId: commandId
-          };
-          setCommandState(op, commandId, "finished", "persistence-failed");
-          finish(op, "failed_partial", {
-            failure: {
-              code: "verification-retry-persist-failed",
-              stage: STAGE_VERIFY,
-              stepSeq: null,
-              message:
-                "Radius could not save the verification monitoring retry, so it did not contact GitHub.",
-              classification: "system",
-              evidence: null
-            }
-          });
-          await saveOperation(op);
-          return;
-        }
-        await monitorVerification(operationId);
-        setCommandState(
-          op,
-          commandId,
-          "finished",
-          operations.get(operationId)?.state || null
-        );
-        await saveOperation(op);
-        return;
-      }
-      const workflow = String(saved.workflow || VERIFY_WORKFLOW_FILE);
-      const ref = String(saved.ref || "");
-      const environment = String(saved.environment || op.environment);
-      const operationMarker =
-        typeof saved.operationMarker === "string" ? saved.operationMarker : "";
-      const verificationActionsUrl =
-        `https://github.com/${op.repo}/actions/workflows/` +
-        encodeURIComponent(workflow);
-      const previousMutationTarget =
-        typeof saved.dispatchMutationTarget === "string" ?
-          saved.dispatchMutationTarget
-        : "";
-      const previousDispatchMutation =
-        previousMutationTarget ?
-          providerMutationRecord(
-            op,
-            "github_workflow.dispatch_retry",
-            previousMutationTarget
-          )
-        : null;
-      const reusePreviousMutation =
-        previousMutationTarget &&
-        shouldReuseVerificationDispatch({
-          accountUnavailablePhase: saved.accountUnavailablePhase,
-          previousStatus: previousDispatchMutation?.status,
-          runId: saved.runId
-        });
-      const mutationTarget =
-        reusePreviousMutation ?
-          previousMutationTarget
-        : `${op.repo}:${workflow}:${ref}:${environment}:${commandId}`;
-      const existingMutation = providerMutationRecord(
-        op,
-        "github_workflow.dispatch_retry",
-        mutationTarget
-      );
-      const existingDispatchMayExist =
-        existingMutation?.status === "prepared" ||
-        existingMutation?.status === "outcome_unknown" ||
-        (existingMutation?.status === "confirmed" &&
-          (saved.runId == null || !String(saved.runId)));
-      const replayRejectedMutation = existingMutation?.status === "not_applied";
-      const dispatchedAt =
-        (
-          existingMutation &&
-          !replayRejectedMutation &&
-          Number.isFinite(Number(saved.dispatchedAt))
-        ) ?
-          Number(saved.dispatchedAt)
-        : Date.now();
-      let baselineRunId =
-        (
-          existingMutation &&
-          !replayRejectedMutation &&
-          Number.isFinite(Number(saved.baselineRunId))
-        ) ?
-          Number(saved.baselineRunId)
-        : null;
-      if (!existingMutation || replayRejectedMutation) {
-        const baseline = await selectedExecutor.run(
-          [
-            "run",
-            "list",
-            "--workflow=" + workflow,
-            "--limit",
-            "10",
-            "--json",
-            "databaseId",
-            "--repo",
-            op.repo
-          ],
-          { timeout: 30000 }
-        );
-        if (baseline.code !== 0 && baseline.code !== "0") {
-          const authorizationError = await selectedCommandAuthorizationError(
-            selectedExecutor,
-            op.repo,
-            baseline
-          );
-          if (authorizationError) {
-            addLegacyStep(
-              op,
-              `❌ Could not use @${selectedLogin} to read verification runs.`
-            );
-            setCommandState(
-              op,
-              commandId,
-              "finished",
-              "github-account-unavailable"
-            );
-            finish(op, "failed_partial", {
-              failure: {
-                code: "verification-retry-github-account-unavailable",
-                stage: STAGE_VERIFY,
-                stepSeq: null,
-                message: `Radius could not use @${selectedLogin} to retry credential verification. Re-check that account and try again.`,
-                classification: "user-fixable",
-                evidence: authorizationError.message
-              }
-            });
-            op.verification = {
-              ...(op.verification || {}),
-              accountUnavailablePhase: "dispatch"
-            };
-            await saveOperation(op);
-            return;
-          }
-          const detail =
-            (baseline.stderr || baseline.stdout || "").trim() ||
-            "The GitHub CLI request failed.";
-          setCommandState(op, commandId, "finished", "baseline-failed");
-          finish(op, "failed_partial", {
-            failure: {
-              code: "verify-dispatch-baseline-failed",
-              stage: STAGE_VERIFY,
-              stepSeq: null,
-              message:
-                "Radius could not establish a workflow-run baseline, so it did not dispatch verification.",
-              classification: "user-fixable",
-              evidence: detail
-            }
-          });
-          op.verification = {
-            ...(op.verification || {}),
-            accountUnavailablePhase: "dispatch"
-          };
-          await saveOperation(op);
-          return;
-        }
-        try {
-          const runs = JSON.parse(baseline.stdout) as Array<{
-            databaseId?: unknown;
-          }>;
-          if (!Array.isArray(runs)) {
-            throw new Error("GitHub returned a non-array workflow run list.");
-          }
-          if (
-            runs.some((run) => {
-              const id = run?.databaseId;
-              return (
-                typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0
-              );
-            })
-          ) {
-            throw new Error(
-              "GitHub returned a workflow run without a valid databaseId."
-            );
-          }
-          baselineRunId = runs.reduce<number | null>((latest, run) => {
-            const id = typeof run.databaseId === "number" ? run.databaseId : 0;
-            return latest === null || id > latest ? id : latest;
-          }, null);
-        } catch (error) {
-          setCommandState(op, commandId, "finished", "baseline-failed");
-          finish(op, "failed_partial", {
-            failure: {
-              code: "verify-dispatch-baseline-failed",
-              stage: STAGE_VERIFY,
-              stepSeq: null,
-              message:
-                "Radius could not establish a readable workflow-run baseline, so it did not dispatch verification.",
-              classification: "user-fixable",
-              evidence: errorMessage(error)
-            }
-          });
-          op.verification = {
-            ...(op.verification || {}),
-            accountUnavailablePhase: "dispatch"
-          };
-          await saveOperation(op);
-          return;
-        }
-      }
-      op.verification = {
-        acquisitionDeadline,
-        dispatchedAt,
-        dispatchMutationTarget: mutationTarget,
-        accountUnavailablePhase: null,
-        workflow,
-        ref,
-        environment,
-        // The marker and event are the dispatch's identity. The recoverable
-        // mutation persists this whole record together with its prepared journal
-        // entry before the request goes out.
-        event: "workflow_dispatch",
-        operationMarker: operationMarker || null,
-        baselineRunId,
-        runId: null,
-        runUrl: null
-      };
-      const discoverAcceptedRun = async () => {
-        const listed = await selectedExecutor.run(
-          [
-            "run",
-            "list",
-            "--workflow=" + workflow,
-            "--limit",
-            "10",
-            "--json",
-            "databaseId,createdAt,displayTitle,event,headBranch",
-            "--repo",
-            op.repo
-          ],
-          { timeout: 30000 }
-        );
-        if (listed.code !== 0 && listed.code !== "0") {
-          const authorizationError = await selectedCommandAuthorizationError(
-            selectedExecutor,
-            op.repo,
-            listed
-          );
-          if (authorizationError) throw authorizationError;
-          throw new Error(
-            listed.stderr ||
-              listed.stdout ||
-              "GitHub workflow runs could not be read."
-          );
-        }
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(listed.stdout);
-        } catch {
-          throw new Error("GitHub returned an unreadable workflow run list.");
-        }
-        if (!operationMarker) {
-          return {
-            state: "manual_required" as const,
-            guidance:
-              `The installed verification workflow does not expose Radius's operation marker. Check ${verificationActionsUrl}; ` +
-              "Radius will not guess which run belongs to this retry or dispatch another run."
-          };
-        }
-        const exact = findExactVerificationRun(parsed, {
-          baselineRunId,
-          dispatchedAt,
-          ref,
-          environment,
-          operationMarker
-        });
-        if (exact.state === "applied") {
-          return {
-            state: "applied" as const,
-            value: exact.runId,
-            evidence:
-              "The workflow, ref, environment, event, and operation-specific run title matched exactly."
-          };
-        }
-        if (exact.state === "ambiguous") {
-          return {
-            state: "manual_required" as const,
-            guidance:
-              `Multiple verification retry runs carry this operation's exact marker. Check ${verificationActionsUrl}; ` +
-              "Radius will not choose one or dispatch another run."
-          };
-        }
-        if (
-          hasPostDispatchVerificationRuns(parsed, baselineRunId, dispatchedAt)
-        ) {
-          return {
-            state: "manual_required" as const,
-            guidance:
-              `GitHub exposed one or more new verification retry runs, but none matches this operation's exact workflow/ref/environment/event marker. ` +
-              `Check ${verificationActionsUrl}; Radius will not adopt or redispatch a run.`
-          };
-        }
-        throw new Error(
-          "GitHub has not exposed the accepted verification retry run yet."
-        );
-      };
-      let dispatch;
-      let providerRequestStarted = false;
-      try {
-        dispatch = await executeRecoverableMutation({
-          operation: op,
-          kind: "github_workflow.dispatch_retry",
-          target: mutationTarget,
-          providerIdempotencyKey: operationMarker || null,
-          persist: () => operations.persist(),
-          mutate: () => {
-            providerRequestStarted = true;
-            return selectedExecutor.run(
-              buildVerifyWorkflowDispatchArgs({
-                workflowFile: workflow,
-                targetRepo: op.repo,
-                envName: environment,
-                ref,
-                operationMarker
-              }),
-              { timeout: 30000 }
-            );
-          },
-          accept: () => "",
-          reconcile: discoverAcceptedRun,
-          rethrowReconciliationError: isSelectedGhAuthorizationError
-        });
-      } catch (error) {
-        if (
-          error instanceof ProviderMutationRecoveryError &&
-          error.code === "provider-mutation-recovery-persistence-failed"
-        ) {
-          const dispatchMayExist =
-            providerRequestStarted || existingDispatchMayExist;
-          const mutation = providerMutationRecord(
-            op,
-            "github_workflow.dispatch_retry",
-            mutationTarget
-          );
-          if (mutation?.status === "manual_required") {
-            const guidance =
-              mutation.evidence ||
-              "Radius could not prove which verification run belongs to this retry.";
-            addLegacyStep(op, `⚠️ ${guidance}`);
-            setCommandState(op, commandId, "finished", "manual-required");
-            finish(op, "failed_partial", {
-              failure: {
-                code: "provider-mutation-manual-required",
-                stage: STAGE_VERIFY,
-                stepSeq: null,
-                message: guidance,
-                classification: "user-fixable",
-                evidence: error.message
-              }
-            });
-            op.verification = {
-              ...(op.verification || {}),
-              accountUnavailablePhase: "dispatch"
-            };
-            await saveOperation(op);
-            return;
-          }
-          if (!dispatchMayExist && mutation?.status === "prepared") {
-            settleProviderMutation(
-              op,
-              mutation.mutationId,
-              "not_applied",
-              "Radius did not send the verification dispatch because its journal could not be saved."
-            );
-          }
-          addLegacyStep(
-            op,
-            "❌ Could not save the verification dispatch recovery record."
-          );
-          setCommandState(op, commandId, "finished", "persistence-failed");
-          finish(op, "failed_partial", {
-            failure: {
-              code: "verification-retry-persist-failed",
-              stage: STAGE_VERIFY,
-              stepSeq: null,
-              message:
-                "Radius could not save the verification dispatch recovery record. Retry after operation storage is available.",
-              classification: "system",
-              evidence: error.message
-            }
-          });
-          op.verification = {
-            ...(op.verification || {}),
-            accountUnavailablePhase:
-              dispatchMayExist ? "dispatch" : "acquisition"
-          };
-          await saveOperation(op);
-          return;
-        }
-        if (!isSelectedGhAuthorizationError(error)) throw error;
-        addLegacyStep(
-          op,
-          `❌ Could not use @${selectedLogin} to read verification runs.`
-        );
-        setCommandState(
-          op,
-          commandId,
-          "finished",
-          "github-account-unavailable"
-        );
-        finish(op, "failed_partial", {
-          failure: {
-            code: "verification-retry-github-account-unavailable",
-            stage: STAGE_VERIFY,
-            stepSeq: null,
-            message: `Radius could not use @${selectedLogin} to retry credential verification. Re-check that account and try again.`,
-            classification: "user-fixable",
-            evidence: error.message
-          }
-        });
-        op.verification = {
-          ...(op.verification || {}),
-          accountUnavailablePhase: "dispatch"
-        };
-        await saveOperation(op);
-        return;
-      }
-      if (dispatch.state === "not_applied") {
-        const rejected = dispatch.result;
-        const authorizationError =
-          rejected ?
-            await selectedCommandAuthorizationError(
-              selectedExecutor,
-              op.repo,
-              rejected
-            )
-          : null;
-        if (authorizationError) {
-          addLegacyStep(
-            op,
-            `❌ Could not use @${selectedLogin} to dispatch verification.`
-          );
-          setCommandState(
-            op,
-            commandId,
-            "finished",
-            "github-account-unavailable"
-          );
-          finish(op, "failed_partial", {
-            failure: {
-              code: "verification-retry-github-account-unavailable",
-              stage: STAGE_VERIFY,
-              stepSeq: null,
-              message: `Radius could not use @${selectedLogin} to retry credential verification. Re-check that account and try again.`,
-              classification: "user-fixable",
-              evidence: authorizationError.message
-            }
-          });
-          op.verification = {
-            ...(op.verification || {}),
-            accountUnavailablePhase: "dispatch"
-          };
-          await saveOperation(op);
-          return;
-        }
-        const detail =
-          (rejected?.stderr || rejected?.stdout || "").trim() ||
-          "The GitHub CLI request failed.";
-        addLegacyStep(op, "❌ Could not dispatch the verify workflow again.");
-        setCommandState(op, commandId, "finished", "dispatch-failed");
-        finish(op, "failed_partial", {
-          failure: {
-            code: "verify-dispatch-failed",
-            stage: STAGE_VERIFY,
-            stepSeq: null,
-            message:
-              "Radius could not dispatch the credential verification workflow again.",
-            classification: "user-fixable",
-            evidence: detail
-          }
-        });
-        op.verification = {
-          ...(op.verification || {}),
-          accountUnavailablePhase: "dispatch"
-        };
-        await saveOperation(op);
-        return;
-      }
-      let acceptedRunId =
-        dispatch.state === "applied" && dispatch.recovered ?
-          String(dispatch.value)
-        : null;
-      let verificationManualGuidance = "";
-      if (!acceptedRunId) {
-        let adoption;
-        try {
-          adoption = await resolveAcknowledgedVerificationRun({
-            operationMarker,
-            pause: (milliseconds) =>
-              new Promise((resolve) => setTimeout(resolve, milliseconds)),
-            discover: discoverAcceptedRun,
-            actionsUrl: verificationActionsUrl,
-            isAuthorizationError: isSelectedGhAuthorizationError
-          });
-        } catch (error) {
-          if (!isSelectedGhAuthorizationError(error)) throw error;
-          addLegacyStep(
-            op,
-            `❌ Could not use @${selectedLogin} to read verification runs.`
-          );
-          setCommandState(
-            op,
-            commandId,
-            "finished",
-            "github-account-unavailable"
-          );
-          finish(op, "failed_partial", {
-            failure: {
-              code: "verification-retry-github-account-unavailable",
-              stage: STAGE_VERIFY,
-              stepSeq: null,
-              message: `Radius could not use @${selectedLogin} to retry credential verification. Re-check that account and try again.`,
-              classification: "user-fixable",
-              evidence: error.message
-            }
-          });
-          op.verification = {
-            ...(op.verification || {}),
-            accountUnavailablePhase: "dispatch"
-          };
-          await saveOperation(op);
-          return;
-        }
-        if (adoption.state === "applied") {
-          acceptedRunId = adoption.runId;
-        } else {
-          verificationManualGuidance = adoption.guidance;
-        }
-      }
-      op.verification = {
-        acquisitionDeadline,
-        dispatchedAt,
-        dispatchMutationTarget: mutationTarget,
-        accountUnavailablePhase: null,
-        workflow,
-        ref,
-        environment,
-        event: "workflow_dispatch",
-        operationMarker: operationMarker || null,
-        baselineRunId,
-        runId: acceptedRunId,
-        runUrl:
-          acceptedRunId ?
-            `https://github.com/${op.repo}/actions/runs/${acceptedRunId}`
-          : null
-      };
-      addLegacyStep(op, "✅ Verify workflow dispatched again.", STAGE_VERIFY);
-      if (!op.verification.runId) {
-        op.verification.runUrl = verificationActionsUrl;
-        setCommandState(op, commandId, "finished", "action_required");
-        finish(op, "action_required", {
-          terminal: {
-            reason: "verification-run-manual",
-            userMessage: verificationManualGuidance
-          }
-        });
-        await saveOperation(op);
-        return;
-      }
-      setCommandState(op, commandId, "running");
-      await saveOperation(op);
-      await monitorVerification(operationId);
-      setCommandState(
-        op,
-        commandId,
-        "finished",
-        operations.get(operationId)?.state || null
-      );
-      await saveOperation(op);
-    } finally {
-      selectedGitHubExecutorsByOperation.delete(operationId);
-    }
+    const operation = operations.get(operationId);
+    if (!operation) return;
+    await runSelectedVerificationRetry(operation, commandId, {
+      createExecutor: (login) =>
+        githubAccountCoordinator.createReadOnlyExecutor(login),
+      registerExecutor: (id, executor) => {
+        selectedGitHubExecutorsByOperation.set(id, executor);
+      },
+      unregisterExecutor: (id) => {
+        selectedGitHubExecutorsByOperation.delete(id);
+      },
+      buildDispatchArgs: buildVerifyWorkflowDispatchArgs,
+      selectedCommandAuthorizationError,
+      isAuthorizationError: isSelectedGhAuthorizationError,
+      isRateLimitError: isGitHubRateLimitError,
+      now: Date.now,
+      sleep: (milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds)),
+      verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
+      stageVerify: STAGE_VERIFY,
+      addStep: (target, text, stage) => addLegacyStep(target, text, stage),
+      setCommandState,
+      finish,
+      persist: saveOperation,
+      persistJournal: () => operations.persist(),
+      monitor: monitorVerification,
+      currentState: (id) => operations.get(id)?.state || null,
+      errorMessage
+    });
+    return;
   }
 
   /**

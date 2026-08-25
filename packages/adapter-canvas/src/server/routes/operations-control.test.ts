@@ -591,6 +591,53 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     expect(out.journal.scheduled).toEqual([]);
   });
 
+  it("restores the pre-request verification state when the accepted retry cannot be saved", async () => {
+    const op = mergeHandoff();
+    const previousVerification = structuredClone(op.verification);
+    let persistCalls = 0;
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
+      checkPullRequestMerge: () => Promise.resolve({ state: "merged" }),
+      persistOperations: () => {
+        persistCalls += 1;
+        return persistCalls === 1 ?
+            Promise.resolve()
+          : Promise.reject(new Error("disk gone after merge proof"));
+      }
+    });
+
+    expect(out.recording.status).toBe(500);
+    expect(out.payload()).toMatchObject({
+      code: "operation-retry-persist-failed",
+      detail: "disk gone after merge proof"
+    });
+    expect(op.state).toBe("action_required");
+    expect(op.verification).toEqual(previousVerification);
+    expect(out.journal.scheduled).toEqual([]);
+  });
+
+  it("reuses only the provisional deadline minted by the current request", async () => {
+    const op = mergeHandoff();
+    const deadlines: number[] = [];
+    const out = await drive(handleRetryOperation, op, "retry/verification", {
+      checkPullRequestMerge: () => Promise.resolve({ state: "merged" }),
+      persistOperations: () => {
+        deadlines.push(
+          Number(
+            (op.verification as { acquisitionDeadline?: unknown } | undefined)
+              ?.acquisitionDeadline
+          )
+        );
+        return Promise.resolve();
+      }
+    });
+
+    expect(out.recording.status).toBe(202);
+    expect(deadlines).toHaveLength(2);
+    expect(deadlines[1]).toBe(deadlines[0]);
+    expect(op.verification).not.toHaveProperty("acquisitionProvisional");
+    expect(op.verification).not.toHaveProperty("acquisitionProvisionalToken");
+  });
+
   it("repeats verification without a merge proof for an Azure RBAC failure", async () => {
     // Role propagation needs no pull request, so the merge port must not be
     // reached at all: asking GitHub about a pull request this failure does not
@@ -613,6 +660,32 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
         commandId: payload.commandId
       }
     ]);
+  });
+
+  it("does not reuse a stale provisional deadline when no merge proof is required", async () => {
+    const op = mergeHandoff();
+    op.state = "failed_partial";
+    op.terminal = null;
+    op.failure = { code: "verify-run-failed", message: "role not ready" };
+    op.verification = {
+      ...(op.verification || {}),
+      acquisitionProvisional: true,
+      acquisitionProvisionalToken: "older-request",
+      acquisitionDeadline: 1
+    };
+    const before = Date.now();
+
+    const out = await drive(handleRetryOperation, op, "retry/verification");
+
+    expect(out.recording.status).toBe(202);
+    expect(
+      Number(
+        (op.verification as { acquisitionDeadline?: unknown } | undefined)
+          ?.acquisitionDeadline
+      )
+    ).toBeGreaterThan(before);
+    expect(op.verification).not.toHaveProperty("acquisitionProvisional");
+    expect(op.verification).not.toHaveProperty("acquisitionProvisionalToken");
   });
 
   it("refuses when the record changed while the pull request was checked", async () => {

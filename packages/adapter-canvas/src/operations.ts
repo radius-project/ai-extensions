@@ -1780,10 +1780,15 @@ function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
 export function markVerificationRetryAcquisition(
   op: any,
   commandId: string,
-  classification?: string | null
+  classification?: string | null,
+  provisionalToken?: string
 ): any {
   if (!op) return op;
-  const reuseProvisional = op.verification?.acquisitionProvisional === true;
+  const reuseProvisional =
+    typeof provisionalToken === "string" &&
+    provisionalToken.length > 0 &&
+    op.verification?.acquisitionProvisional === true &&
+    op.verification?.acquisitionProvisionalToken === provisionalToken;
   const acquisitionDeadline = ensureVerificationRetryAcquisitionDeadline(
     op,
     !reuseProvisional
