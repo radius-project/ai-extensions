@@ -695,6 +695,13 @@ export function remediationSessionMessage(
         "```console",
         remediation.displayCommand,
         "```",
+        // The displayed commands are one per line rather than `&&`-chained, so
+        // that the text stays paste-able in shells that cannot parse `&&`. That
+        // loses the "stop on failure" half of `&&`, which matters here: `gh auth
+        // refresh` acts on the active account, so running it after a failed
+        // `gh auth switch` grants the scope to the wrong account. On this path
+        // the agent is the one executing, so the condition is stated instead.
+        "If a command fails, stop and report it rather than running the rest.",
         // Only a remediation that stages files can over-stage. Saying this for
         // one that does not — a `gh auth` pair — hands the agent an instruction
         // whose "paths named above" do not exist.

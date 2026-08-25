@@ -711,6 +711,19 @@ describe("remediationSessionMessage", () => {
     );
   });
 
+  it("tells the agent to stop when one of an ordered sequence fails", () => {
+    // The displayed commands are line-separated rather than `&&`-chained for
+    // portability, so the stop-on-failure condition has to be stated.
+    for (const remediation of [
+      build("github-account-scopes", { login: "octocat", packages: "true" }),
+      build("git-push-branch", { branch: "feature/login", paths: ".radius" })
+    ]) {
+      expect(remediationSessionMessage(remediation).prompt).toContain(
+        "If a command fails, stop and report it rather than running the rest."
+      );
+    }
+  });
+
   it("keeps the staging instruction out of a remediation that stages nothing", () => {
     const message = remediationSessionMessage(
       build("github-account-scopes", { login: "octocat", packages: "true" })
