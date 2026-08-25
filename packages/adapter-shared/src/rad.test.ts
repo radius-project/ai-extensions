@@ -15,6 +15,7 @@ import {
   MANAGED_BICEP_PATH,
   resolveExistingRadBinary,
   buildGraphViaRad,
+  runRadAppGraph,
   writeBicepCompileConfig,
   runRadBicepPublishExtension,
   spawnRad,
@@ -734,6 +735,8 @@ describeBuild(
 describeBuild("runRadAppGraph artifact completion", () => {
   let binDir: string;
   let bin: string;
+  let bicepBackup: Buffer | null;
+  let bicepMode: number | null;
   let prevBinary: string | undefined;
 
   beforeEach(() => {
@@ -756,6 +759,16 @@ describeBuild("runRadAppGraph artifact completion", () => {
       "utf8"
     );
     fs.chmodSync(bin, 0o755);
+    if (fs.existsSync(MANAGED_BICEP_PATH)) {
+      bicepBackup = fs.readFileSync(MANAGED_BICEP_PATH);
+      bicepMode = fs.statSync(MANAGED_BICEP_PATH).mode;
+    } else {
+      bicepBackup = null;
+      bicepMode = null;
+    }
+    fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
+    fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
+    fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
     prevBinary = process.env.RADIUS_RAD_BINARY;
     process.env.RADIUS_RAD_BINARY = bin;
   });
@@ -764,17 +777,24 @@ describeBuild("runRadAppGraph artifact completion", () => {
     if (prevBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
     else process.env.RADIUS_RAD_BINARY = prevBinary;
     fs.rmSync(binDir, { recursive: true, force: true });
+    fs.rmSync(MANAGED_BICEP_PATH, { force: true });
+    if (bicepBackup) {
+      fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_BICEP_PATH, bicepBackup);
+      if (bicepMode !== null) fs.chmodSync(MANAGED_BICEP_PATH, bicepMode);
+    }
   });
 
   it("accepts a valid graph artifact without waiting for a lingering process", async () => {
+    const bicepFile = path.join(binDir, "app.bicep");
+    fs.writeFileSync(
+      bicepFile,
+      "resource app 'Radius.Core/applications@2023-10-01-preview' = {}"
+    );
     const started = Date.now();
-    await expect(
-      buildGraphViaRad(
-        "resource app 'Radius.Core/applications@2023-10-01-preview' = {}",
-        ".radius/app.bicep",
-        { cleanupRadArtifactsDir: false }
-      )
-    ).resolves.toEqual([]);
+    await expect(runRadAppGraph(bicepFile, { radPath: bin })).resolves.toEqual({
+      resources: []
+    });
     expect(Date.now() - started).toBeLessThan(5000);
   }, 10000);
 });
