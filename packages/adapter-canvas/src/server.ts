@@ -18,6 +18,7 @@ import {
   deployStatusKeys,
   fetchBicepFromRepo,
   fetchRecipePack,
+  mergeDeployedGraphMetadata,
   projectDeployedGraph,
   resolveRecipeOutputs,
   DEFAULT_STATE_ARCHIVE,
@@ -208,6 +209,12 @@ import {
 import { createGraphsPlanningWritesRoutes } from "./server/routes/graphs-planning-writes.js";
 import { createGraphPlanningWorkflows } from "./server/routes/graph-workflows.js";
 import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
+import {
+  beginGraphRepairAttempt,
+  clearGraphRepairAttempt,
+  graphRepairHandoffMessage,
+  type GraphRepairRequest
+} from "./graph-model-repair.js";
 import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
 import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
 import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
@@ -802,29 +809,6 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   errorMessage
 });
 
-// Composition root for the read-only half of the `graphs-planning` family. Ten
-// narrow function seams: the instance-state reader, the cached deploy-status
-// reader factory, the two artifact map builders, the status-key and projection
-// helpers from `@radius-project/core`, the canvas resource normalizer, the
-// message applier, and the record/error/workspace-repo helpers that stay defined
-// here. The reader factory is injected already-cached so the route module owns
-// no cache of its own.
-const graphsPlanningRoutes = createGraphsPlanningRoutes({
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  createDeployStatusReader: (options) => cachedDeployStatusReader(options),
-  buildDeployStatusMap,
-  buildDeployMessageMap,
-  deployStatusKeys,
-  projectDeployedGraph: (modeled, statusByKey) =>
-    projectDeployedGraph(modeled as any[], statusByKey),
-  canvasGraphResources,
-  applyDeployMessages,
-  record,
-  errorMessage,
-  repoMatchesWorkspace,
-  now: () => Date.now()
-});
-
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   defaultBranchForState,
@@ -832,8 +816,14 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
     prepareSourceRefResources(entry, "graph", context),
   commitSourceRef: (entry, resources, context, expectedToken) =>
     setSourceRefResources(entry, "graph", resources, context, expectedToken),
+  isCurrentSourceRef: (entry, expectedToken) =>
+    isCurrentSourceRefToken(entry.state, "graph", expectedToken),
   triggerAppBicepHandoff: (entry, repo, branch) =>
     triggerAppBicepHandoff(entry, repo, branch, "graph"),
+  triggerGraphRepairHandoff: (entry, request) =>
+    triggerGraphRepairHandoff(entry, request),
+  clearGraphRepairAttempt: (entry) =>
+    clearGraphRepairAttempt(entry.state, "graph"),
   fetchBicepSelection: (entry, repo, branch) =>
     fetchBicepSelection(entry, repo, branch),
   listBranchPaths: (entry, repo, branch) =>
@@ -845,7 +835,8 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   buildGraphViaRad: (content, bicepPath, options) =>
     buildGraphViaRad(content, bicepPath, options),
   canvasGraphResources,
-  errorMessage
+  errorMessage,
+  logError: (message) => console.error(message)
 });
 
 // Composition root for the write half of the `graphs-planning` family. The
@@ -877,6 +868,12 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     }
   }),
   triggerAppBicepHandoff,
+  triggerGraphRepairHandoff: (entry, request) =>
+    triggerGraphRepairHandoff(entry, request),
+  clearGraphRepairAttempt: (entry, view) => {
+    clearGraphRepairAttempt(entry.state, view);
+    if (view === "diff") delete entry.state.diffModelingFailed;
+  },
   listBranchPaths: (entry, repo, branch) =>
     listBranchPaths(entry, repo, branch),
   prepareSourceRefResources: (entry, view, sourceRefInput) =>
@@ -897,6 +894,65 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   record,
   optionalString,
   errorMessage,
+  logError: (message) => console.error(message),
+  now: () => Date.now()
+});
+
+function triggerGraphRepairHandoff(
+  entry: CanvasServerEntry,
+  request: GraphRepairRequest
+) {
+  if (request.view === "diff") entry.state.diffModelingFailed = true;
+  const attempt = beginGraphRepairAttempt(entry.state, request);
+  if (attempt.repairing) {
+    void invokeSessionPrompt(
+      sessionPromptHandler,
+      graphRepairHandoffMessage(request, attempt)
+    ).then((result) => {
+      if (result.status >= 400) {
+        console.error(
+          `[radius graph] failed to hand repair attempt ${attempt.attempt} to the agent: ${result.error}`
+        );
+      }
+    });
+  }
+  return attempt;
+}
+
+// Composition root for the read-only half of the `graphs-planning` family. The
+// Deployed route reads status through the cached artifact reader, but obtains its
+// fixed topology through the same modeled-graph workflow and cache as the Graph
+// route. It never parses Bicep or invokes rad through a second path.
+const graphsPlanningRoutes = createGraphsPlanningRoutes({
+  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  createDeployStatusReader: (options) => cachedDeployStatusReader(options),
+  loadModeledGraph: async (instanceId, repo, branch) => {
+    const outcome = await graphPlanningWorkflows.loadGraph({
+      instanceId,
+      body: JSON.stringify({ repo, branch, refresh: true })
+    });
+    const workflowError = optionalString(outcome.payload.error);
+    return {
+      status: outcome.status,
+      retry: outcome.payload.needsAppBicep === true,
+      error:
+        workflowError ||
+        (outcome.status >= 400 ?
+          `Modeled graph load failed with status ${outcome.status}.`
+        : undefined)
+    };
+  },
+  buildDeployStatusMap,
+  buildDeployMessageMap,
+  deployStatusKeys,
+  mergeDeployedGraphMetadata,
+  projectDeployedGraph: (modeled, statusByKey) =>
+    projectDeployedGraph(modeled as any[], statusByKey),
+  canvasGraphResources,
+  applyDeployMessages,
+  settleDeployStatuses,
+  errorMessage,
+  repoMatchesWorkspace,
   now: () => Date.now()
 });
 
@@ -1969,6 +2025,10 @@ export function beginDeployAttempt(
   state.deployErrorBranch = null;
   state.deployRunUrl = null;
   state.deployRunId = null;
+  // Concrete outputs belong to one deployment attempt. Keeping the previous
+  // graph would relabel a later failed run with stale resource and portal data.
+  state.deployedGraph = null;
+  state.deployedGraphRepo = undefined;
   // Only a redeploy inside an existing repair loop is already owned by the
   // agent. Every other deploy — including the agent's first one, which opens no
   // loop — must stay eligible to hand its failure off; marking that one as

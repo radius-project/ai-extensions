@@ -1,6 +1,6 @@
 # Deployed graph retrieval (workflow artifacts)
 
-The canvas "Deployed" tab renders the application graph a deploy actually produced, painted with per-resource deploy status. This document is the normative producer/consumer interface: the artifact the GitHub Actions deploy workflow publishes, and how the canvas finds, validates, and applies it.
+The canvas "Deployed" tab renders the selected branch's modeled application graph, painted with per-resource deploy status. This document is the normative producer/consumer interface: the artifact the GitHub Actions deploy workflow publishes, and how the canvas finds, validates, and applies its deployment metadata.
 
 ## Why workflow artifacts
 
@@ -45,7 +45,7 @@ The two sanitizer implementations agree on multi-byte input even though `sed` co
 | File                      | When         | Purpose                                                |
 |---------------------------|--------------|--------------------------------------------------------|
 | `deploy-progress.json`    | Every upload | Per-resource status map — the status signal            |
-| `deploy-graph.json`       | Final upload | Deployed application graph from `rad app graph`        |
+| `deploy-graph.json`       | Final upload | Terminal deployed metadata from `rad app graph`        |
 | `deploy-state.txt`        | Every upload | Key/value run envelope. Not read by the canvas.        |
 | `deploy-controlplane.log` | Best effort  | Control-plane / recipe output                          |
 | `deploy-activity.log`     | Best effort  | `rad` command result envelope. Not read by the canvas. |
@@ -72,6 +72,9 @@ Live uploads carry `deploy-progress.json` with state `in_progress`. The fixed-na
       "id": "/planes/radius/local/resourcegroups/dev/providers/Radius.Compute/containers/frontend",
       "name": "frontend",
       "type": "Radius.Compute/containers",
+      "outputResourceIds": [
+        "/planes/radius/local/resourcegroups/dev/providers/Applications.Core/containers/frontend/providers/apps/Deployment/frontend"
+      ],
       "provisioningState": "Succeeded",
       "status": "success",
       "message": ""
@@ -93,6 +96,7 @@ Live uploads carry `deploy-progress.json` with state `in_progress`. The fixed-na
 | `resources[].id`                | string  | No       | Full UCP resource id when known. Primary status key. Frequently an empty string, because `rad resource list` does not always populate one; an empty id is treated as absent and never becomes a lookup key. |
 | `resources[].name`              | string  | Yes      | Radius resource name. Fallback status key.                                                                                                                                                                  |
 | `resources[].type`              | string  | Yes      | Radius resource type. May carry an `@api-version` suffix, which the consumer strips.                                                                                                                        |
+| `resources[].outputResourceIds` | array   | No       | Exact resolved output IDs from Radius status, sorted and deduplicated by the producer. The consumer uses them only as additional status/message correlation keys. Legacy payloads may omit this field.      |
 | `resources[].provisioningState` | string  | No       | Raw Radius value, verbatim.                                                                                                                                                                                 |
 | `resources[].status`            | string  | No       | Normalized: `pending`, `in_progress`, `success`, or `failed`.                                                                                                                                               |
 | `resources[].message`           | string  | No       | Short status or failure detail. Surfaced in the node popup as escaped text, never parsed. An empty string means "no message".                                                                               |
@@ -132,9 +136,9 @@ Reads are cached for a short TTL and de-duplicated with single-flight, so the de
 
 ## Rendering
 
-The Deployed tab is a projection, not a distinct graph: a fixed topology painted with a status map resolved separately. `projectDeployedGraph` in [`packages/core/src/graph/deployed.ts`](../../packages/core/src/graph/deployed.ts) applies the shared visualization filter, strips output resources, and stamps each node with its status. Keeping topology and status independent means the graph renders before any status is known and never changes shape when a deploy starts or ends, so React Flow keeps its viewport across every transition.
+The Deployed tab is a projection, not a distinct graph: the full modeled topology for the selected repository and graph branch, painted with a status map resolved separately. A fresh Deployed page builds that topology through the same modeled-graph workflow and cache as the Graph tab. Neither `deploy-graph.json` nor the in-session cached deployed graph supplies topology: a failed deployment can publish only the resources that reached the control plane, with missing modeled nodes and connections. Those deployed graphs are terminal metadata only. `projectDeployedGraph` in [`packages/core/src/graph/deployed.ts`](../../packages/core/src/graph/deployed.ts) applies the shared visualization filter, strips output resources, and stamps each node with its status. Keeping topology and status independent means the graph renders before any status is known and never changes shape when a deploy starts or ends, so React Flow keeps its viewport across every transition.
 
-`GET /api/deployed-graph` accepts `repo`, and optionally `application` and `environment`. The page's selectors are authoritative: a user can select an environment other than the one the current session deployed to, and the graph follows the selection rather than rendering another environment's deploy under the selected environment's label. The response is `{ resources, repo, branch, mode, updatedAt }`, where `mode` is:
+`GET /api/deployed-graph` accepts `repo`, and optionally `application` and `environment`. The page's selectors are authoritative: a user can select an environment other than the one the current session deployed to, and the graph follows the selection rather than rendering another environment's deploy under the selected environment's label. The response is `{ resources, repo, branch, mode, updatedAt }`, where each modeled parent may retain nested concrete `outputResources` metadata and `mode` is:
 
 - `greyed` — nothing is known about a deployment; the modeled topology renders with every node pending.
 - `live` — a deploy is in flight for the current selection.
@@ -144,15 +148,16 @@ The Deployed tab is a projection, not a distinct graph: a fixed topology painted
 
 `updatedAt` is the payload's own timestamp, so the UI reports the age of the data rather than the age of the last fetch. Polling more often does not make an old deployment newer.
 
-Resources on this route always carry an empty `outputResources`: the Deployed view is one node per Radius resource.
+Nested `outputResources` do not become graph nodes. The route merges them from `deploy-graph.json` onto the exact modeled parent id and the deploy-mode renderer uses the same representative-output selection as Planned graph, so a MySQL parent can display `Microsoft.DBforMySQL/flexibleServers` without adding its lock, database, or firewall children to the topology. When final metadata is missing or does not match an exact parent id, the modeled resource and its existing metadata remain unchanged; no provider type is inferred.
 
-Each node's status is matched to a payload entry by, in priority order, exact `id`, then lowercased `name|type` with the API version stripped, then lowercased `name`. The middle tier matters because modeled resource ids are synthesized locally by the modeling side and are not guaranteed to equal the UCP ids the control plane reports; without it, an id mismatch would silently degrade every node to bare-name matching, which collides across types.
+Each node's status is matched to a payload entry by, in priority order, exact modeled `id`, exact `outputResourceIds`, then lowercased `name|type` with the API version stripped, then lowercased `name`. Exact output IDs correlate producer status with explicit resolved children while remaining compatible with legacy payloads that omit them. The `name|type` tier matters because modeled resource ids are synthesized locally by the modeling side and are not guaranteed to equal the UCP ids the control plane reports; without it, an id mismatch would silently degrade every node to bare-name matching, which collides across types.
 
 Merging successive snapshots is deliberately conservative, because each payload is an independent snapshot rather than a stream of transitions:
 
 - `failed` is terminal within a run and is never downgraded by a later snapshot.
 - `success` regresses only on an explicit `failed`.
 - A resource missing from a payload keeps its current status. A payload that does not mention a resource carries no information about it and must not reset a node that has already advanced. This holds for the projection too: projecting against an empty status map leaves a deployed application deployed rather than repainting it pending.
+- Within one validated run, the greatest accepted artifact sequence overwrites stale in-session monitor values for the keys it contains. Monitor values fill only resources omitted by that snapshot.
 - On the run's terminal conclusion, success forces every node green; any other conclusion fails whatever is still pending or in progress while leaving already-terminal values alone.
 
 A single read inspects at most nine candidate artifacts, enough for the eight live slots and terminal artifact. Each candidate costs a `gh run download` subprocess, a temporary directory and an unzip, so the bounded ring and immutable-ID cache prevent a 15-second poll from repeatedly downloading the same payloads.

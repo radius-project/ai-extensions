@@ -252,6 +252,67 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.clock.pending).toBe(0);
   });
 
+  it("does not show a deploying legend for a never-deployed graph", async () => {
+    const { browser } = fixture();
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          resources: [{ id: "app/web", deployStatus: "pending" }],
+          mode: "greyed",
+          branch: "feature"
+        })
+    );
+    const render = vi.fn();
+
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    expect(render).toHaveBeenCalledWith(
+      "graph-container",
+      expect.any(Array),
+      expect.objectContaining({ deployMode: true, showLegend: false })
+    );
+  });
+
+  it("remounts when a live graph becomes terminal so legend settings follow the mode", async () => {
+    const { browser } = fixture();
+    let mode = "live";
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          resources: [{ id: "app/web", deployStatus: "success" }],
+          mode,
+          branch: "feature"
+        })
+    );
+    browser.net.handle("/api/deploy-status?since=0", () =>
+      jsonResponse({ status: "complete", logsNew: [], logTotal: 0 })
+    );
+    const update = vi.fn();
+    const destroy = vi.fn();
+    const render = vi.fn(() => ({ update, destroy }));
+
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+    expect(render).toHaveBeenCalledTimes(1);
+
+    mode = "terminal";
+    browser.clock.tick(DEPLOYED_GRAPH_POLL_MS);
+    await flushPromises();
+
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(update).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledTimes(2);
+  });
+
   it("polls only a live graph and pauses while hidden", async () => {
     const { browser } = fixture();
     const url =
@@ -558,6 +619,51 @@ describe("initializeDeployedGraphPage", () => {
     expect(browser.logger.errors.length).toBeGreaterThan(0);
   });
 
+  it("shows a modeled workflow error returned by the graph route", async () => {
+    const { browser, status } = fixture();
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse(
+          { error: "Application model compilation failed." },
+          false,
+          400
+        )
+    );
+
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(status.className).toBe("status error");
+    expect(status.textContent).toBe("Application model compilation failed.");
+  });
+
+  it("retries while application model generation is pending", async () => {
+    const { browser } = fixture();
+    let calls = 0;
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => {
+        calls++;
+        return calls === 1 ?
+            jsonResponse({
+              error: "Copilot is generating .radius/app.bicep.",
+              retry: true
+            })
+          : jsonResponse({ resources: [], mode: "greyed" });
+      }
+    );
+
+    initializeDeployedGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(calls).toBe(1);
+
+    browser.clock.tick(DEPLOYED_GRAPH_POLL_MS);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+  });
+
   it("keeps a rendered graph on screen when a later refresh fails", async () => {
     const { browser, appSelect, status } = fixture();
     const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
@@ -587,6 +693,40 @@ describe("initializeDeployedGraphPage", () => {
     await flushPromises();
 
     expect(status.className).not.toBe("status error");
+  });
+
+  it("keeps a rendered graph and reports a later modeled workflow error", async () => {
+    const { browser, appSelect, note, status } = fixture();
+    const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
+    let call = 0;
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => {
+        call++;
+        return call === 1 ?
+            jsonResponse({
+              resources: [{ id: "app/web" }],
+              mode: "terminal",
+              branch: "feature"
+            })
+          : jsonResponse(
+              { error: "Application model compilation failed." },
+              false,
+              400
+            );
+      }
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: () => controller })
+    );
+    await flushPromises();
+
+    appSelect.dispatch("change");
+    await flushPromises();
+
+    expect(status.className).not.toBe("status error");
+    expect(note.textContent).toBe("Application model compilation failed.");
   });
 
   it("ignores a stale graph response superseded by another selection", async () => {

@@ -94,6 +94,7 @@ import { withGhcrDockerConfig } from "./ghcr.js";
 import {
   resolveExistingRadiusArtifact,
   resolveRadiusArtifactTarget,
+  resolveStagingDirPrefix,
   validateGhcrTargetForRepo
 } from "./publish-targets.js";
 import { createSessionHolder } from "./runtime/session.js";
@@ -111,6 +112,7 @@ const execFileAsync = promisify(execFile);
 const sessionHolder = createSessionHolder();
 
 const dependencies: RadiusExtensionDependencies = {
+  logError: (message) => console.error(message),
   session: sessionHolder,
   servers,
   getOrCreateServer,
@@ -160,6 +162,7 @@ const dependencies: RadiusExtensionDependencies = {
   publishTargets: {
     resolveExistingRadiusArtifact,
     resolveRadiusArtifactTarget,
+    resolveStagingDirPrefix,
     validateGhcrTargetForRepo
   },
   hostCallbacks: {

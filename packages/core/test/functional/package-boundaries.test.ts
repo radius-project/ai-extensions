@@ -296,13 +296,17 @@ describe("core package in a host without HTTP or DOM globals", () => {
       await readFile(join(packageRoot, "package.json"), "utf8")
     ) as { exports: Record<string, string> };
 
-    // Only these three subpaths have an importer outside core. `./modeling` and
-    // `./workflows` were declared but never imported, so they are not part of
-    // the package's contract. Targets are pinned alongside the keys: a subpath
-    // repointed at the wrong module keeps the same key set.
+    // Only these subpaths have an importer outside core; `./workflows` was
+    // declared but never imported, so it is not part of the package's contract.
+    // `./modeling` carries the staged-run rules, which are core's specification
+    // for the bundled promote script rather than public API, so they are
+    // reached here instead of being widened onto the top-level barrel. Targets
+    // are pinned alongside the keys: a subpath repointed at the wrong module
+    // keeps the same key set.
     expect(manifest.exports).toEqual({
       ".": "./src/index.ts",
       "./graph": "./src/graph/index.ts",
+      "./modeling": "./src/modeling/index.ts",
       "./platforms": "./src/platforms/index.ts"
     });
 
@@ -313,14 +317,16 @@ describe("core package in a host without HTTP or DOM globals", () => {
         pathToFileURL(join(packageRoot, manifest.exports[subpath])).href
       ) as Promise<Record<string, unknown>>;
 
-    const [barrel, graph, platforms] = await Promise.all([
+    const [barrel, graph, modeling, platforms] = await Promise.all([
       load("."),
       load("./graph"),
+      load("./modeling"),
       load("./platforms")
     ]);
 
     expect(typeof barrel.computeGraphDiff).toBe("function");
     expect(typeof graph.filterGraphVisualizationResources).toBe("function");
+    expect(typeof modeling.evaluateStagedRun).toBe("function");
     expect(typeof platforms.buildOidcSubject).toBe("function");
   });
 });
