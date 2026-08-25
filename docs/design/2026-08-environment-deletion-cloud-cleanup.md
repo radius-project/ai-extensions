@@ -14,7 +14,7 @@ eventually hit the per-app federated-credential limit.
 
 This document describes how **Delete Environment** (PR #398, this branch) cleans up an *established* environment: the stages it runs, the order it runs them in, why that order is load-bearing, how it stays idempotent and fail-closed, and why it deliberately leaves the Entra app registration in place and notifies the user instead of deleting it.
 
-Radius has a second, sibling flow — **Create-Environment rollback** — that tears down the *half-finished* artifacts of a setup that never succeeded. It is a different job with different rules, but it does a lot of the *same low-level work* (delete a GitHub environment, delete a federated credential, treat "not found" as success, report progress through the same panel). To avoid writing that work twice, the flows share pure command builders and provider result classifiers while retaining separate safety and recovery adapters. That sharing is called out inline where each primitive is described; the subject of this document is the delete implementation itself.
+Radius has a second, sibling flow — **Create-Environment rollback** — that tears down the *half-finished* artifacts of a setup that never succeeded. It is a different job with different rules, but it does a lot of the *same low-level work* (delete a GitHub environment, delete a federated credential, treat "not found" as success, report progress through the same panel). To avoid writing that work twice, the flows share pure command builders and provider result classifiers while retaining separate safety and recovery adapters. Those shared seams are called out inline; the subject of this document is the delete implementation itself.
 
 ## Terms and definitions
 
@@ -67,9 +67,7 @@ Radius has a second, sibling flow — **Create-Environment rollback** — that t
 - **Deleting role assignments or the service principal.** Those are governed by
   the broader established-environment identity model and are out of scope here.
 - **Depending on the setup artifact ledger.** Environments created before the ledger existed never recorded one, so deletion does not use it as authority. Credential deletion instead combines live discovery with its separate, immutable credential-consumer provenance and retains credentials when that proof is unavailable.
-- **Merging the delete and rollback flows.** They have different entry
-  conditions and opposite credential ordering; sharing primitives is not the
-  same as sharing the flow.
+- **Merging the delete and rollback flows.** They have different entry conditions and opposite credential ordering; sharing low-level mutation seams is not the same as sharing the flow.
 - **AWS teardown.** AWS is not a supported provider yet — a user cannot create
   an AWS environment, so the AWS branch is barebones framework only. The delete
   flow surfaces that AWS cleanup is not implemented rather than pretending to
@@ -83,7 +81,7 @@ A developer has a working `dev` environment and clicks **Delete Env**. Deletion 
 
 #### User story 2
 
-A delete run fails partway — say the federated-credential delete errors. The progress panel offers **Retry deletion**. The durable retry command reopens the same operation, preserves completed stages, and resumes at the first failed, warning, or skipped stage. Because every deletion primitive is idempotent, the run converges instead of failing on already-deleted pieces.
+A delete run fails partway — say the federated-credential delete errors. The progress panel offers **Retry deletion**. The durable retry command reopens the same operation, preserves completed stages, and resumes at the first failed, warning, or skipped stage. Because each destructive stage treats a confirmed-missing target as convergence, the run does not fail on already-deleted pieces.
 
 ## User experience (if applicable)
 
@@ -97,12 +95,9 @@ The delete flow has two layers:
 
 1. A **decision layer** — "is this an established environment the user confirmed
    deleting, what artifacts does it own, and are we allowed to proceed?"
-2. A **primitive layer** — "actually run one `az`/`gh` command to delete one
-   thing, idempotently, and record the result."
+2. A **mutation layer** — build argv through shared provider helpers, execute it through flow-specific safety and recovery adapters, classify the result, and record the operation step.
 
-The decision layer is specific to delete (established environment + live
-discovery + explicit confirmation). The primitive layer is generic teardown and
-is written to be shared with rollback.
+The decision layer is specific to deletion (established environment + live discovery + explicit confirmation). Deletion and rollback share pure command construction, Azure not-found classification, and the GitHub environment-list cache contract. They do not share whole mutation executors because rollback requires exact-identity proof and durable outcome-unknown reconciliation while deletion uses immutable credential-consumer provenance and immediate live revalidation.
 
 The deletion **order** is the load-bearing design decision. The
 delete-environment workflow authenticates to the cluster using the federated
@@ -121,40 +116,44 @@ graph TD
     S3["3. Delete GitHub environment<br/>(+ invalidate env-list cache)"]
     S4["4. Review app registration<br/>(leave in place + notify)"]
   end
-  subgraph Prim["Primitive layer (shared with rollback)"]
-    GHEnv["github-environment.ts<br/>deleteGitHubEnvironmentIdempotent"]
-    Az["idempotent FIC delete<br/>(azure-oidc.ts argv builders)"]
-    NotFound["not_found classifier"]
+  subgraph Shared["Lowest safe seams shared with rollback"]
+    GHArgs["buildGitHubEnvironmentDeleteArgs"]
+    AzArgs["buildFederatedCredentialDeleteArgs"]
+    AzNotFound["isAzResourceNotFound"]
+    Cache["environment-list cache invalidation contract"]
   end
   Confirm --> S1 --> S2 --> S3 --> S4
-  S2 --> Az
-  S3 --> GHEnv
-  S2 --> NotFound
-  S3 --> NotFound
+  S2 --> AzArgs
+  S2 --> AzNotFound
+  S3 --> GHArgs
+  S3 --> Cache
 ```
 
 ### Architecture diagram
 
-The sequence below shows the delete orchestrator driving the primitive layer,
-with each teardown reported through the operation store:
+The sequence below shows the delete orchestrator using the shared command seams while retaining deletion-specific execution and result policy. Each teardown is reported through the operation store:
 
 ```mermaid
 sequenceDiagram
   participant UI as Canvas UI
   participant Flow as Delete orchestrator
-  participant Prim as Shared primitives
+  participant Shared as Shared argv/classifiers
   participant Ext as az / gh CLI
 
   UI->>Flow: Delete Env (confirmed)
   Flow->>Ext: dispatch delete-environment workflow
   Ext-->>Flow: Radius env deleted (or fail-closed stop)
-  Flow->>Prim: deleteFederatedCredential(identity)
-  Prim->>Ext: az ad app federated-credential delete
-  Ext-->>Prim: ok / not found
-  Prim-->>Flow: result (deleted | not_found | warning)
-  Flow->>Prim: deleteGitHubEnvironmentIdempotent(repo, env)
-  Prim->>Ext: gh api DELETE .../environments/{env}
-  Prim-->>Flow: result + env-list cache invalidated
+  Flow->>Shared: buildFederatedCredentialDeleteArgs(identity)
+  Shared-->>Flow: az argv
+  Flow->>Ext: az ad app federated-credential delete
+  Ext-->>Flow: ok / not found / failed
+  Flow->>Shared: isAzResourceNotFound(stderr)
+  Shared-->>Flow: provider classification
+  Flow->>Shared: buildGitHubEnvironmentDeleteArgs(repo, env)
+  Shared-->>Flow: gh argv
+  Flow->>Ext: gh api DELETE .../environments/{env}
+  Ext-->>Flow: deleted / 404 / failed
+  Flow->>Flow: deletion result + env-list cache invalidation
   Flow->>UI: review app registration (leave + notify) → summary
 ```
 
@@ -187,12 +186,7 @@ The delete flow **never** removes the Entra app registration. It records a "left
 
 #### Idempotency and fail-closed behavior
 
-Every primitive treats a CLI "not found" as convergence, not failure, so a
-re-run after a partial deletion succeeds instead of erroring on already-deleted
-artifacts. Conversely, when an earlier step cannot be confirmed (for example the
-Radius environment delete), the flow fails closed: it stops before removing the
-credential and GitHub environment, surfaces the steps completed so far, and
-offers a retry, rather than deleting speculatively and stranding the user.
+Each destructive stage treats a confirmed "not found" as convergence, not failure, so a re-run after a partial deletion succeeds instead of erroring on already-deleted artifacts. Conversely, when an earlier step cannot be confirmed (for example the Radius environment delete), the flow fails closed: it stops before removing the credential and GitHub environment, surfaces the steps completed so far, and offers a retry, rather than deleting speculatively and stranding the user.
 
 #### How deletion and rollback share teardown code
 
@@ -218,9 +212,7 @@ a public contract.
 
 #### Core package — packages/core (if applicable)
 
-N/A. All of this lives in the canvas adapter. The primitives call `az`/`gh` and
-touch the operation store, which are adapter concerns; `packages/core` stays
-UI- and I/O-agnostic.
+N/A. All of this lives in the canvas adapter. The services call `az`/`gh` and touch the operation store, which are adapter concerns; `packages/core` stays UI- and I/O-agnostic.
 
 #### Canvas adapter — packages/adapter-canvas (if applicable)
 
@@ -252,11 +244,7 @@ entry (`minor`) documents the feature.
 ### Error handling
 
 - Deletion classifies a `not_found` result from `az`/`gh` as convergence (already-gone), never as a failure.
-- A primitive that genuinely fails records a `warning` and returns it; the
-  orchestrator decides whether that warning is fatal. This preserves the
-  fail-closed rule: if the Radius-environment delete cannot be confirmed, the
-  flow stops before removing the federated credential and GitHub environment
-  that a retry needs.
+- A failed mutation records an explicit failed or warning step according to its stage policy; the orchestrator decides whether cleanup may continue. This preserves the fail-closed rule: if the Radius-environment delete cannot be confirmed, the flow stops before removing the federated credential and GitHub environment that a retry needs.
 - If deletion stops partway, the progress panel reports **what was deleted
   before the failure** so the user knows the current state, plus a retry
   message. It does **not** claim the environment was fully torn down.
@@ -279,20 +267,12 @@ tests and each changed seam keeps its boundary tests:
 - **No coverage regression.** Changed production paths target 100% line/branch;
   the repo `coverage-baseline.json` floor must hold.
 
-Testing challenges: the primitives do real `az`/`gh` I/O, so they are injected
-behind `runAz` / GitHub ports and tested with deterministic fakes — no live
-cloud or network access in pull-request tests.
+Testing challenges: the production adapters do real `az`/`gh` I/O, so they are injected behind `runAz` / GitHub ports and tested with deterministic fakes — no live cloud or network access in pull-request tests.
 
 ## Security
 
-- **Stable identity, never display text.** Every primitive matches resources by
-  stable identity (`repo:env` for the GitHub environment, `name@subject` for the
-  FIC), never by friendly name, so a similarly named resource can never be
-  deleted by mistake.
-- **Fail-closed deletion.** When preconditions or external state cannot be
-  established, the primitive records a warning and the orchestrator stops rather
-  than deleting speculatively. This matches the repository rule that destructive
-  environment operations fail closed.
+- **Stable identity, never display text.** Credential cleanup matches immutable tenant, application-object, federated-credential-object, and repository IDs plus the recorded subject configuration. GitHub cleanup targets the confirmed repository and environment identity. Friendly display text never authorizes a destructive mutation.
+- **Fail-closed deletion.** When preconditions or external state cannot be established, the flow records an explicit failure or warning and stops rather than deleting speculatively. This matches the repository rule that destructive environment operations fail closed.
 - **App registration is never touched by the delete flow.** Delete Environment
   leaves the app registration in place and only notifies the user; it has no code
   path that removes an app registration.
@@ -304,51 +284,22 @@ cloud or network access in pull-request tests.
 
 ## Compatibility (optional)
 
-- **Backward compatible.** Delete Environment keeps working for environments
-  created before the artifact ledger existed, because it relies on live
-  discovery + user confirmation, not on provenance.
+- **Backward compatible.** Delete Environment does not depend on the setup artifact ledger, so established environments created before rollback provenance existed can still be removed. Federated credentials without immutable credential-consumer provenance are retained with a warning rather than deleted speculatively.
 - **AWS not supported.** No AWS environment can be created, so no established
   AWS environment can reach the delete flow; the AWS cleanup branch is inert
   framework until AWS support lands.
 
 ## Monitoring and logging
 
-Each stage appends a human-readable step to the operation (`addStep`) and, as the
-cleanup-result extraction lands, persists a structured cleanup result via
-`recordCleanupState`. `projectCleanupSummary` exposes the removed / kept /
-warning sets the progress panel renders, so an operator can see exactly which
-artifact reached which outcome (`deleted`, `not_found`, `warning`, `skipped`).
+Each stage appends human-readable mutation, observation, or warning steps to the durable deletion operation and persists after meaningful transitions. `toClientView` projects those stages, steps, warnings, failure evidence, and terminal status for the progress panel. A retry reopens the same operation, preserves succeeded stages, resets unresolved stages, and resumes through the same idempotent runner.
 
-## Development plan
+## Implementation status
 
-1. **Ship Delete Environment cleanup (PR #398).** Fail-closed staged teardown
-   (Radius env → FIC → GitHub env → app-registration review), idempotent
-   primitives, app-registration retention + notification, progress reporting.
-2. **Extract the GitHub-environment delete primitive** into the shared
-   `github-environment.ts` with injected ports (done in PR #398), so rollback
-   binds to it.
-3. **Extract the remaining shared primitives** in dependency order —
-   `cleanup-identity.ts`, then `azure-cleanup.ts`, then the shared `not_found`
-   classifier — each with unit tests.
-4. **Route delete through the shared summary.** Map `environment-deletion.ts`
-   outcomes onto `recordCleanupState` / `projectCleanupSummary`; update its tests
-   and the HTTP-integration coverage.
-5. **(Optional, gated on the open question below)** teach delete to consume
-   creation provenance when present.
-
-## Open questions
-
-- **Should Delete Environment consume creation provenance when it exists?** It
-  could target artifacts precisely from the ledger when a create operation is
-  still around, while falling back to live discovery for older environments.
-  Attractive, but risks blurring the eligibility boundary — needs review.
-- **One cleanup-result type, or a shared base with per-flow extensions?** Roles
-  and service principals only appear in rollback. A single shared type keeps
-  reporting uniform; a base type avoids rollback-only fields leaking into delete.
-- **Where should the shared services live** — under
-  `packages/adapter-canvas/src/server/services/` (proposed) or promoted toward
-  `packages/adapter-shared` if a future non-canvas adapter needs them? Start in
-  the canvas adapter; promote only if a second consumer appears.
+1. **Fail-closed staged teardown is implemented.** The runner removes the Radius environment, proven-safe federated credential, and GitHub environment in that order, then records the retained app registration.
+2. **Durable retry is implemented.** An incomplete operation exposes only **Retry deletion**; successful stages are preserved and unresolved stages are resumed. Delete operations never expose Stop setup, Continue setup, rollback, or exit controls.
+3. **Restart recovery is implemented.** Persisted typed request inputs rehydrate an in-progress deletion and schedule the same runner.
+4. **The safe overlap with rollback is implemented.** Both flows use the Azure credential-delete builder and not-found classifier, the GitHub environment-delete builder, argv-based executors, and the environment-list cache contract. Their authority, ordering, identity proof, journaling, and recovery remain separate.
+5. **Boundary coverage is implemented.** Real-loopback HTTP integration drives the accepted delete through the background runner, observes Azure and GitHub mutation argv, and verifies the refreshed environment list. Unit and built-extension suites cover the lower seams and packaged artifact.
 
 ## Alternatives considered
 
@@ -358,13 +309,8 @@ artifact reached which outcome (`deleted`, `not_found`, `warning`, `skipped`).
 - **Delete the app registration too.** Rejected: the registration can be shared
   by other environments or callers; removing a shared identity by mistake is far
   worse than leaving an unused one behind. Retain + notify instead.
-- **Keep delete's primitives private (Option 1).** Rejected: guarantees drift
-  between two copies of the same delete primitives and an inconsistent
-  cleanup-result vocabulary across the two UIs.
-- **Merge rollback and deletion into a single flow.** Rejected: different entry
-  conditions (unverified vs. established), different sources of truth (provenance
-  vs. discovery + confirmation), and opposite credential ordering would need so
-  many branches that the safety rules would be hard to verify.
+- **Keep all delete command construction private.** Rejected: duplicated Azure and GitHub argv construction would drift. Only the lowest safe seams are shared; flow-specific result and recovery policies remain separate.
+- **Merge rollback and deletion into a single flow.** Rejected: different entry conditions (unverified vs. established), different sources of truth (setup-ledger provenance vs. live discovery + credential-consumer provenance), and opposite credential ordering would need so many branches that the safety rules would be hard to verify.
 
 ## Design review notes
 

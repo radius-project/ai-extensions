@@ -33,18 +33,18 @@ graph TD
 
 Rollback and Delete Environment have different starting assumptions.
 
-| Concern             | Create Environment rollback                          | Delete Environment in PR #398                                      |
-|---------------------|------------------------------------------------------|--------------------------------------------------------------------|
-| Starting state      | Environment creation is incomplete or stopped        | Environment was created and appears in the environment list        |
-| Completion boundary | Credential verification has not succeeded            | Environment is an established resource                             |
-| Source of truth     | Creation operation's artifact ledger                 | Current deployed environment and deletion operation                |
-| Ownership rule      | Delete only artifacts this attempt proves it created | Delete the selected environment; review shared identity separately |
-| Workflows           | Revert creation-time workflow changes when safe      | Dispatch the committed environment-deletion workflow               |
-| App Registration    | Delete only when this attempt created it             | Prompt before deleting an unused registration                      |
-| Service Principal   | Delete only when this attempt created it             | Governed by the established-environment deletion design            |
-| Missing resources   | Record `not_found` and converge                      | Treat missing resources as warnings and converge                   |
+| Concern             | Create Environment rollback                          | Delete Environment in PR #398                                        |
+|---------------------|------------------------------------------------------|----------------------------------------------------------------------|
+| Starting state      | Environment creation is incomplete or stopped        | Environment was created and appears in the environment list          |
+| Completion boundary | Credential verification has not succeeded            | Environment is an established resource                               |
+| Source of truth     | Creation operation's artifact ledger                 | Live target plus immutable credential-consumer provenance            |
+| Ownership rule      | Delete only artifacts this attempt proves it created | Delete the target; remove only credentials proven safe and exclusive |
+| Workflows           | Revert creation-time workflow changes when safe      | Dispatch the committed environment-deletion workflow                 |
+| App Registration    | Delete only when this attempt created it             | Always retain; acknowledge with an inline Azure Portal link          |
+| Service Principal   | Delete only when this attempt created it             | Retain with the app registration                                     |
+| Missing resources   | Record `not_found` and converge                      | Record `not_found` and converge                                      |
 
-The two flows can share progress conventions and deletion primitives. They must not share an eligibility shortcut. Rollback leans on saved creation provenance, which an older established environment never recorded. Delete Environment discovers the current state and asks the customer to confirm, two steps rollback avoids by design.
+The flows share only the lowest safe mutation seams: Azure credential-delete argv and not-found classification, GitHub environment-delete argv, argv-based command execution, and the environment-list cache contract. They must not share an eligibility shortcut or whole executor. Rollback leans on saved creation provenance and durable mutation journaling; Delete Environment combines live discovery with immutable credential-consumer provenance and immediate revalidation.
 
 ## Completion boundary
 
@@ -481,26 +481,24 @@ Results from earlier attempts stay in the ledger, so the final report separates 
 9. **No application deployment:** rollback never deploys or deletes deployed applications.
 10. **Pinned GitHub identity:** workflow proof, workflow reversion, and GitHub environment deletion use the account saved on the operation, never an ambient account.
 
-## Discussion points for PR #398
+## Alignment with PR #398
 
-PR #398 adds deletion of an established environment. Aligning it with rollback raises these questions.
+### Shared mutation seams
 
-### Shared artifact model
-
-- Should deletion reuse the same stable identities and cleanup-result vocabulary?
-- Can deletion consume creation provenance when available, while still supporting older environments without it?
-- Should the two flows share a common GitHub-environment deletion primitive and environment-list cache invalidation?
+- Both flows use `buildFederatedCredentialDeleteArgs` and `isAzResourceNotFound` from `azure-oidc.ts`.
+- Both flows use `buildGitHubEnvironmentDeleteArgs` from `github-environment.ts` and invalidate the same environment-list cache after confirmed removal.
+- Delete Environment owns the 404-tolerant `deleteGitHubEnvironmentIdempotent` execution classifier. Rollback retains exact-identity reads, durable mutation journaling, and outcome-unknown reconciliation around the shared argv.
 
 ### Different identity policy
 
-Rollback deletes an App Registration or Service Principal only when the attempt created it. PR #398 proposes reviewing an App Registration after removing an environment and prompting before deleting one nothing else uses. Keep that distinction explicit:
+Rollback deletes an App Registration or Service Principal only when the attempt created it. Delete Environment never deletes either object; it records that the app registration was retained and links to the Azure Portal after a concluded deletion. Keep that distinction explicit:
 
 - Rollback has creation provenance.
-- Deletion has current usage discovery and user confirmation.
+- Deletion has live target discovery, immutable credential-consumer provenance, immediate live credential revalidation, and user confirmation.
 
 ### Sequencing
 
-Rollback removes workflows before credentials because those workflows reference the identity. PR #398 must keep its own load-bearing order: the environment-deletion workflow needs the federated credential until the Radius environment deletion workflow finishes.
+Rollback removes workflows before credentials because those workflows reference the identity. PR #398 keeps its own load-bearing order: the environment-deletion workflow needs the federated credential until the Radius environment deletion workflow finishes.
 
 ### Progress and recovery
 
@@ -508,15 +506,16 @@ Both flows can align on:
 
 - Durable operation records.
 - Stage and step reporting.
-- Stop or retry semantics at safe boundaries.
 - Idempotent `not_found` outcomes.
 - Persisting each destructive result.
 - Bottom **OK** on successful completion.
 - Cache invalidation and environment-list refresh after GitHub environment removal.
 
+Their controls remain flow-specific. Creation can expose **Stop setup**, Continue setup, rollback, and exit actions. An incomplete deletion exposes only **Retry deletion** and resumes the same durable operation; deletion is not pausable.
+
 ### Scope boundary
 
-Rollback handles an environment that never verified successfully. PR #398 handles an established environment. A shared service must preserve that product distinction and must keep rollback's provenance assumptions from becoming deletion's implicit assumptions.
+Rollback handles an environment that never verified successfully. PR #398 handles an established environment. The shared low-level seams preserve that product distinction and keep rollback's setup-ledger assumptions from becoming deletion's implicit authority.
 
 ## Source references
 
