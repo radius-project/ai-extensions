@@ -106,9 +106,13 @@ export interface RemediationView {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// GitHub logins are 1-39 characters of alphanumerics and single hyphens, and
-// cannot start or end with a hyphen.
-const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+// A personal GitHub login is 1-39 characters of alphanumerics and single
+// hyphens. An Enterprise Managed User login appends `_<enterprise-shortcode>`,
+// so the underscore has to be accepted or every EMU account is rejected here
+// and its remediation silently degrades to prose. Both forms must still start
+// and end with an alphanumeric, and the whole login stays bounded, so the only
+// characters that can reach an argv entry are alphanumerics, `-`, and `_`.
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,77}[A-Za-z0-9])?$/;
 
 // A deliberately narrow branch shape. Git accepts more than this, but anything
 // outside it (whitespace, `..`, a leading `-` that would read as a flag, a

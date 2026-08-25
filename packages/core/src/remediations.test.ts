@@ -212,7 +212,9 @@ describe("github remediations", () => {
     ["a login with a space", "octo cat"],
     ["a login starting with a hyphen", "-octocat"],
     ["a login ending with a hyphen", "octocat-"],
-    ["a login that is too long", "a".repeat(40)],
+    ["a login that is too long", "a".repeat(80)],
+    ["a login starting with an underscore", "_octocat"],
+    ["a login ending with an underscore", "octocat_"],
     ["a missing login", undefined],
     ["an empty login", ""]
   ])("refuses %s", (_label, login) => {
@@ -221,6 +223,23 @@ describe("github remediations", () => {
       reason:
         "Granting package access needs the GitHub account login Radius detected."
     });
+  });
+
+  it("accepts an Enterprise Managed User login", () => {
+    const remediation = build("github-packages-scope", {
+      login: "witsai_microsoft"
+    });
+
+    expect(remediation.params).toEqual({ login: "witsai_microsoft" });
+    expect(remediation.argv).toContainEqual([
+      "gh",
+      "auth",
+      "switch",
+      "-h",
+      "github.com",
+      "-u",
+      "witsai_microsoft"
+    ]);
   });
 
   it("accepts a single-character login", () => {
@@ -298,6 +317,23 @@ describe("github remediations", () => {
     expect(remediation.displayCommand).not.toContain("admin:org");
     expect(remediation.displayCommand).not.toContain("workflow");
     expect(remediation.params).toEqual({ login: "octocat", packages: "true" });
+  });
+
+  it("switches to an Enterprise Managed User login", () => {
+    const remediation = build("github-account-scopes", {
+      login: "witsai_microsoft",
+      packages: "true"
+    });
+
+    expect(remediation.argv).toContainEqual([
+      "gh",
+      "auth",
+      "switch",
+      "-h",
+      "github.com",
+      "-u",
+      "witsai_microsoft"
+    ]);
   });
 
   it("refuses an unusable login", () => {
