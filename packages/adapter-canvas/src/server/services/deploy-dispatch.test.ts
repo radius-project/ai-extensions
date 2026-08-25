@@ -416,7 +416,7 @@ describe("deploy dispatch environment and branch preflight", () => {
     // arrives on GitHub without the model the workflow reads.
     expect(state.deployError).toContain("git add -- .radius app.bicep");
     expect(state.deployError).toContain(
-      'git commit -m "Add Radius application model"'
+      'git commit -m "Add Radius application model" -- .radius app.bicep'
     );
     expect(state.deployError).toContain("git push -u origin feat");
     expect(state.deployError).toContain("pushing on its own would not publish");
@@ -424,7 +424,7 @@ describe("deploy dispatch environment and branch preflight", () => {
       "━━ Deploying Radius application ━━",
       '❌ Branch "feat" has not been pushed to acme/widgets.',
       "   Generated files are not committed yet: .radius, app.bicep — pushing alone would not publish them.",
-      '   Commit and push, then redeploy:  git add -- .radius app.bicep\n    git commit -m "Add Radius application model"\n    git push -u origin feat'
+      '   Commit and push, then redeploy:  git add -- .radius app.bicep\n    git commit -m "Add Radius application model" -- .radius app.bicep\n    git push -u origin feat'
     ]);
     expect(gh.calls).toEqual([]);
   });

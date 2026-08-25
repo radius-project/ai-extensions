@@ -115,8 +115,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,77}[A-Za-z0-9])?$/;
 
 // A deliberately narrow branch shape. Git accepts more than this, but anything
-// outside it (whitespace, `..`, a leading `-` that would read as a flag, a
-// trailing `.lock`) is refused rather than passed to `git push`.
+// outside it (whitespace, `..`, a leading `-` that would read as a flag, or an
+// invalid ref path component) is refused rather than passed to `git push`.
 const GIT_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
 function text(value: unknown): string {
@@ -144,7 +144,19 @@ function guid(value: unknown): string {
 function branchName(value: unknown): string {
   const candidate = text(value);
   if (!GIT_BRANCH.test(candidate)) return "";
-  if (candidate.includes("..") || candidate.endsWith(".lock")) return "";
+  if (candidate.includes("..")) return "";
+  const components = candidate.split("/");
+  if (
+    components.some(
+      (component) =>
+        component === "" ||
+        component.startsWith(".") ||
+        component.endsWith(".") ||
+        component.endsWith(".lock")
+    )
+  ) {
+    return "";
+  }
   return candidate;
 }
 
@@ -524,7 +536,7 @@ function buildGitPushBranch(
     paths.length > 0 ?
       [
         ["git", "add", "--", ...paths],
-        ["git", "commit", "-m", MODEL_COMMIT_MESSAGE],
+        ["git", "commit", "-m", MODEL_COMMIT_MESSAGE, "--", ...paths],
         ["git", "push", "-u", "origin", branch]
       ]
     : [["git", "push", "-u", "origin", branch]];
@@ -548,7 +560,8 @@ function buildGitPushBranch(
             ", "
           )}) on \`${branch}\` and then writes to the remote repository: ` +
           "every commit on the branch is published to origin and the branch " +
-          "starts tracking it. Nothing else in your working tree is staged. "
+          "starts tracking it. No other paths are staged or committed; " +
+          "anything already staged remains staged. "
         : `This writes to the remote repository: every commit on \`${branch}\` ` +
           "is published to origin and the branch starts tracking it. ") +
         "Review what you are about to publish before continuing.",

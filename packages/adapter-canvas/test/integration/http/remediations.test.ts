@@ -189,7 +189,7 @@ describe("run-remediation real-loopback HIT", () => {
     expect(harness.sent).toHaveLength(1);
     const prompt = harness.sent[0].prompt;
     expect(prompt).toContain(
-      `git add -- .radius app.bicep\ngit commit -m "Add Radius application model"\ngit push -u origin ${BRANCH}`
+      `git add -- .radius app.bicep\ngit commit -m "Add Radius application model" -- .radius app.bicep\ngit push -u origin ${BRANCH}`
     );
   });
 

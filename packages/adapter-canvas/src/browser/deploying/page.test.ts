@@ -1627,7 +1627,9 @@ describe("deploy flow", () => {
     // so the offer has to carry the staging and commit steps too.
     const offered = fakeText(page.pushActionHost);
     expect(offered).toContain("git add -- .radius app.bicep");
-    expect(offered).toContain('git commit -m "Add Radius application model"');
+    expect(offered).toContain(
+      'git commit -m "Add Radius application model" -- .radius app.bicep'
+    );
     expect(offered).toContain("git push -u origin feature");
   });
 

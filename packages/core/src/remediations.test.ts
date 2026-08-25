@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   REMEDIATION_IDS,
@@ -447,11 +451,19 @@ describe("git push remediation", () => {
       // branch without the model the deploy reads, which is the whole bug.
       expect(remediation.argv).toEqual([
         ["git", "add", "--", ".radius", "app.bicep"],
-        ["git", "commit", "-m", "Add Radius application model"],
+        [
+          "git",
+          "commit",
+          "-m",
+          "Add Radius application model",
+          "--",
+          ".radius",
+          "app.bicep"
+        ],
         ["git", "push", "-u", "origin", "feature/login"]
       ]);
       expect(remediation.displayCommand).toBe(
-        'git add -- .radius app.bicep\ngit commit -m "Add Radius application model"\ngit push -u origin feature/login'
+        'git add -- .radius app.bicep\ngit commit -m "Add Radius application model" -- .radius app.bicep\ngit push -u origin feature/login'
       );
       expect(remediation.params).toEqual({
         branch: "feature/login",
@@ -463,8 +475,50 @@ describe("git push remediation", () => {
       expect(remediation.confirmLabel).toBe("Commit and push");
       expect(remediation.confirmBody).toContain(".radius, app.bicep");
       expect(remediation.confirmBody).toContain(
-        "Nothing else in your working tree is staged"
+        "anything already staged remains staged"
       );
+    });
+
+    it("commits only generated paths and leaves unrelated staged work in the index", async () => {
+      const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), "radius-remediation-")
+      );
+      const git = (...args: readonly string[]) =>
+        execFileSync("git", args, { cwd: directory, encoding: "utf8" }).trim();
+
+      try {
+        git("init", "--quiet", "--initial-branch", "feature/login");
+        git("config", "user.email", "radius@example.invalid");
+        git("config", "user.name", "Radius Test");
+        await fs.writeFile(path.join(directory, "source.ts"), "export {};\n");
+        git("add", "--", "source.ts");
+        git("commit", "--quiet", "-m", "initial");
+
+        await fs.writeFile(
+          path.join(directory, "source.ts"),
+          "export const unrelated = true;\n"
+        );
+        await fs.writeFile(
+          path.join(directory, "app.bicep"),
+          "resource app {}\n"
+        );
+        git("add", "--", "source.ts");
+
+        const remediation = build("git-push-branch", {
+          branch: "feature/login",
+          paths: "app.bicep"
+        });
+        const [add, commit] = remediation.argv;
+        execFileSync(add[0], add.slice(1), { cwd: directory });
+        execFileSync(commit[0], commit.slice(1), { cwd: directory });
+
+        expect(git("show", "--format=", "--name-only", "HEAD")).toBe(
+          "app.bicep"
+        );
+        expect(git("diff", "--cached", "--name-only")).toBe("source.ts");
+      } finally {
+        await fs.rm(directory, { recursive: true, force: true });
+      }
     });
 
     it("accepts an array of paths", () => {
@@ -560,6 +614,11 @@ describe("git push remediation", () => {
     ["a branch with a space", "my branch"],
     ["a branch with a traversal", "feature/../main"],
     ["a lock ref", "feature/login.lock"],
+    ["a lock ref component", "feature.lock/login"],
+    ["a branch with a trailing slash", "feature/login/"],
+    ["a branch with a trailing dot", "feature/login."],
+    ["a branch with doubled slashes", "feature//login"],
+    ["a branch with a dot-prefixed component", "feature/.login"],
     ["a branch with a semicolon", "main;rm -rf /"],
     ["a branch with a newline", "main\nrm -rf /"],
     ["an over-long branch", `b${"x".repeat(200)}`],
@@ -721,7 +780,7 @@ describe("remediationSessionMessage", () => {
       "Run these commands, in order, in this Copilot session:"
     );
     expect(message.prompt).toContain(
-      'git add -- .radius\ngit commit -m "Add Radius application model"\ngit push -u origin feature/login'
+      'git add -- .radius\ngit commit -m "Add Radius application model" -- .radius\ngit push -u origin feature/login'
     );
     // Without this the agent could reasonably stage the whole worktree, which
     // would publish unrelated work the user never confirmed.

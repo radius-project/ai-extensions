@@ -785,7 +785,9 @@ export function createDeployDispatchService(
       dirty ?
         "git add -- " +
         paths.join(" ") +
-        '\n    git commit -m "Add Radius application model"\n    ' +
+        '\n    git commit -m "Add Radius application model" -- ' +
+        paths.join(" ") +
+        "\n    " +
         pushCmd
       : pushCmd;
     log('❌ Branch "' + deployRef + '" has not been pushed to ' + repo + ".");
