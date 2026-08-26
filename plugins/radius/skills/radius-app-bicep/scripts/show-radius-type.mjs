@@ -1,27 +1,55 @@
 #!/usr/bin/env node
 
+// Resolves predefined Radius resource types for an application-modeling run.
+// It asks the extension-managed `rad` binary for the exact Radius commit,
+// downloads that release's generated Bicep definitions from a pinned source,
+// converts them into compact model-facing schemas, and wires the matching
+// Radius extension into the staged bicepconfig.json.
+//
+// This is executable code rather than prompt guidance so release selection,
+// source confinement, cache safety, schema validation, and staged config
+// updates cannot be skipped by an agent. The installed plugin has no workspace
+// packages, so its staging constants intentionally mirror core and are guarded
+// against drift by the runtime tests.
+
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  DefinitionNotFoundError,
+  buildSchema,
+  selectResource,
+  validateGeneratedIndex,
+  validateGeneratedTypes
+} from "./radius-type-schema.mjs";
+
+export {
+  buildSchema,
+  decodePropertyFlags,
+  normalizeTypeReference,
+  parseIndexReference,
+  selectResource
+} from "./radius-type-schema.mjs";
 
 const CONTRACT_VERSION = 1;
 const GENERATED_ROOT =
   "https://raw.githubusercontent.com/radius-project/radius";
 const GENERATED_PATH = "hack/bicep-types-radius/generated";
+// This exact SHA pattern is the safety boundary around the only recursive
+// removal below ~/.radius. Never broaden it to accept arbitrary directory names.
 const COMMIT_DIRECTORY = /^[0-9a-f]{40}$/iu;
+// These copies must stay behavior-compatible with
+// packages/core/src/modeling/app-staging.ts. This script cannot import core in
+// the installed plugin; the runtime test imports core and guards against drift.
+const STAGING_DIR_PREFIX = ".staging-";
+const STAGING_RUN_RECORD = "run.json";
+const RETRY_DELAY_MS = 300;
+const MAX_RETRY_DELAY_MS = 5_000;
 const USAGE =
   "Usage: show-radius-type.mjs --staging <directory> Radius.<namespace>/<type>[@<api-version>] [...]";
-
-class DefinitionNotFoundError extends Error {
-  constructor(type) {
-    super(
-      `Definition for resource type "${type}" was not found in the generated catalog for this Radius release.`
-    );
-  }
-}
 
 function message(error) {
   return error instanceof Error ? error.message : String(error);
@@ -29,18 +57,6 @@ function message(error) {
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function sortedEntries(value) {
-  return Object.entries(value).sort(([left], [right]) => {
-    if (left < right) return -1;
-    // Distinct entries from an object cannot have equal keys.
-    /* v8 ignore next */
-    if (left > right) return 1;
-    // This return preserves the comparator contract for that unreachable case.
-    /* v8 ignore next */
-    return 0;
-  });
 }
 
 function usageError(text = USAGE) {
@@ -77,8 +93,15 @@ function parseArguments(args) {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--staging") {
-      if (stagingDir !== undefined || !args[index + 1]) throw usageError();
-      stagingDir = args[index + 1];
+      const value = args[index + 1];
+      if (
+        stagingDir !== undefined ||
+        typeof value !== "string" ||
+        value.startsWith("-")
+      ) {
+        throw usageError();
+      }
+      stagingDir = value;
       index += 1;
     } else if (arg.startsWith("-")) {
       throw usageError();
@@ -138,7 +161,7 @@ function requirePlainConfigSection(config, name, source) {
 
 function validateStagingDirectory(input) {
   const stagingDir = path.resolve(input);
-  const runFile = path.join(stagingDir, "run.json");
+  const runFile = path.join(stagingDir, STAGING_RUN_RECORD);
   let staging;
   let run;
   try {
@@ -152,7 +175,8 @@ function validateStagingDirectory(input) {
     staging.isSymbolicLink() ||
     !run.isFile() ||
     run.isSymbolicLink() ||
-    !/^\.staging-.+/u.test(path.basename(stagingDir))
+    !path.basename(stagingDir).startsWith(STAGING_DIR_PREFIX) ||
+    path.basename(stagingDir).length === STAGING_DIR_PREFIX.length
   ) {
     throw new Error(`Invalid Radius staging directory "${input}".`);
   }
@@ -258,7 +282,8 @@ function managedBinaries(home = os.homedir()) {
 async function queryManagedRadiusIdentity({
   env = process.env,
   home = os.homedir(),
-  processTimeoutMs = 10_000
+  processTimeoutMs = 10_000,
+  execFileSyncImpl = execFileSync
 } = {}) {
   const binaries = managedBinaries(home);
   const rad =
@@ -267,13 +292,17 @@ async function queryManagedRadiusIdentity({
     throw new Error(`Extension-managed Radius binary not found at "${rad}".`);
   }
   try {
-    const stdout = execFileSync(rad, ["version", "--cli", "--output", "json"], {
-      env: { ...env, BICEP: binaries.bicep },
-      timeout: processTimeoutMs,
-      maxBuffer: 1024 * 1024,
-      windowsHide: true,
-      encoding: "utf8"
-    });
+    const stdout = execFileSyncImpl(
+      rad,
+      ["version", "--cli", "--output", "json"],
+      {
+        env: { ...env, BICEP: binaries.bicep },
+        timeout: processTimeoutMs,
+        maxBuffer: 1024 * 1024,
+        windowsHide: true,
+        encoding: "utf8"
+      }
+    );
     return parseRadiusIdentity(stdout);
   } catch (error) {
     const detail = error?.stderr?.trim() || message(error);
@@ -283,435 +312,25 @@ async function queryManagedRadiusIdentity({
   }
 }
 
-export function parseIndexReference(reference) {
-  const match = /^([A-Za-z0-9._/-]+\/types\.json)#\/(0|[1-9]\d*)$/u.exec(
-    reference
-  );
-  if (match === null) {
-    throw new Error(`Generated resource reference "${reference}" is invalid.`);
-  }
-  const segments = match[1].split("/");
-  if (
-    match[1].startsWith("/") ||
-    match[1].includes("\\") ||
-    segments.some(
-      (segment) => segment === "" || segment === "." || segment === ".."
-    )
-  ) {
-    throw new Error(`Generated resource reference "${reference}" is unsafe.`);
-  }
-  const index = Number(match[2]);
-  if (!Number.isSafeInteger(index)) {
-    throw new Error(`Generated resource reference "${reference}" is invalid.`);
-  }
-  return { relativePath: match[1], index };
-}
-
-function localIndex(reference, context) {
-  const match = /^#\/(0|[1-9]\d*)$/u.exec(reference?.$ref);
-  if (!isObject(reference) || !match) {
-    throw new Error(`${context} must use a local #/N type reference.`);
-  }
-  return Number(match[1]);
-}
-
-function generatedNode(types, index, context) {
-  const node = types[index];
-  if (!isObject(node) || typeof node.$type !== "string") {
-    throw new Error(
-      `${context} references missing generated type node ${index}.`
-    );
-  }
-  return node;
-}
-
-function referencedNode(types, reference, context) {
-  const index = localIndex(reference, context);
-  return { index, node: generatedNode(types, index, context) };
-}
-
-function validateIndex(index) {
-  requireObject(index, "Generated index");
-  requireObject(index.resources, "Generated index resources");
-}
-
-function validateTypes(types) {
-  if (!Array.isArray(types)) {
-    throw new Error("Generated types file must contain a JSON array.");
-  }
-}
-
-export function selectResource(index, selector) {
-  validateIndex(index);
-  const prefix = `${selector.type}@`;
-  const availableApiVersions = Object.keys(index.resources)
-    .filter((key) => key.startsWith(prefix))
-    .map((key) => key.slice(prefix.length))
-    .sort();
-
-  let apiVersion = selector.apiVersion;
-  if (apiVersion === undefined) {
-    if (availableApiVersions.length === 0) {
-      throw new DefinitionNotFoundError(selector.type);
-    }
-    if (availableApiVersions.length > 1) {
-      throw new Error(
-        `Resource type "${selector.type}" has multiple API versions: ${availableApiVersions.join(
-          ", "
-        )}. Rerun with an exact @<api-version>.`
-      );
-    }
-    [apiVersion] = availableApiVersions;
-  }
-
-  const key = `${selector.type}@${apiVersion}`;
-  const entry = index.resources[key];
-  if (!isObject(entry)) {
-    const available =
-      availableApiVersions.length > 0 ?
-        ` Available versions: ${availableApiVersions.join(", ")}.`
-      : "";
-    throw new Error(`Resource type "${key}" is unavailable.${available}`);
-  }
-  return {
-    type: selector.type,
-    apiVersion,
-    reference: parseIndexReference(entry.$ref)
-  };
-}
-
-export function decodePropertyFlags(flags, context = "property") {
-  if (!Number.isSafeInteger(flags) || flags < 0) {
-    throw new Error(
-      `${context} contains unsupported property flags "${flags}".`
-    );
-  }
-  const result = {
-    required: (flags & 1) !== 0,
-    readable: (flags & 4) === 0,
-    writable: (flags & 2) === 0
-  };
-  return result;
-}
-
-function normalizeProperty(property, types, active, context) {
-  requireObject(property, context);
-  const flags = decodePropertyFlags(property.flags, context);
-  const schema = normalizeTypeReference(property.type, types, active, context);
-  if (!flags.readable) schema.writeOnly = true;
-  if (!flags.writable) schema.readOnly = true;
-  return { required: flags.required, schema };
-}
-
-function normalizeProperties(properties, types, active, context) {
-  requireObject(properties, context);
-  const result = { properties: {}, required: [] };
-  for (const [name, property] of sortedEntries(properties)) {
-    const normalized = normalizeProperty(
-      property,
-      types,
-      active,
-      `${context}.${name}`
-    );
-    result.properties[name] = normalized.schema;
-    if (normalized.required) result.required.push(name);
-  }
-  return result;
-}
-
-function objectSchema(normalized, additionalProperties, sensitive = false) {
-  const result = { type: "object" };
-  if (normalized.required.length > 0) result.required = normalized.required;
-  result.properties = normalized.properties;
-  result.additionalProperties = additionalProperties;
-  if (sensitive) result.sensitive = true;
-  return result;
-}
-
-function normalizeObject(node, types, active, context) {
-  return objectSchema(
-    normalizeProperties(
-      node.properties,
-      types,
-      active,
-      `${context}.properties`
-    ),
-    node.additionalProperties === undefined ?
-      false
-    : normalizeTypeReference(
-        node.additionalProperties,
-        types,
-        active,
-        `${context}.additionalProperties`
-      ),
-    node.sensitive === true
-  );
-}
-
-function mergeObjectSchemas(base, variant, context) {
-  const properties = {};
-  const names = [
-    ...new Set([
-      ...Object.keys(base.properties),
-      ...Object.keys(variant.properties)
-    ])
-  ].sort();
-  for (const name of names) {
-    if (
-      base.properties[name] !== undefined &&
-      variant.properties[name] !== undefined &&
-      JSON.stringify(base.properties[name]) !==
-        JSON.stringify(variant.properties[name])
-    ) {
-      throw new Error(`${context} redefines property "${name}" incompatibly.`);
-    }
-    properties[name] = variant.properties[name] ?? base.properties[name];
-  }
-  const result = { ...variant, properties };
-  const required = [
-    ...new Set([...(base.required ?? []), ...(variant.required ?? [])])
-  ].sort();
-  if (required.length > 0) result.required = required;
-  return result;
-}
-
-function normalizeDiscriminatedObject(node, types, active, context) {
-  if (typeof node.discriminator !== "string" || node.discriminator === "") {
-    throw new Error(`${context}.discriminator must be a nonempty string.`);
-  }
-  const base = objectSchema(
-    normalizeProperties(
-      node.baseProperties,
-      types,
-      active,
-      `${context}.baseProperties`
-    ),
-    false
-  );
-  const variants = {};
-  for (const [name, reference] of sortedEntries(
-    requireObject(node.elements, `${context}.elements`)
-  )) {
-    const variant = normalizeTypeReference(
-      reference,
-      types,
-      active,
-      `${context}.elements.${name}`
-    );
-    if (variant.type !== "object") {
-      throw new Error(`${context}.elements.${name} must resolve to an object.`);
-    }
-    variants[name] = mergeObjectSchemas(
-      base,
-      variant,
-      `${context}.elements.${name}`
-    );
-  }
-  return { ...base, discriminator: node.discriminator, variants };
-}
-
-function literalUnion(node, types, context) {
-  if (!Array.isArray(node.elements) || node.elements.length === 0) {
-    throw new Error(`${context}.elements must be a nonempty array.`);
-  }
-  const literals = node.elements.map((reference, index) =>
-    referencedNode(types, reference, `${context}.elements[${index}]`)
-  );
-  if (literals.some(({ node: item }) => item.$type !== "StringLiteralType")) {
-    return null;
-  }
-  const result = {
-    type: "string",
-    enum: [...new Set(literals.map(({ node: item }) => item.value))].sort()
-  };
-  for (const { node: item } of literals) {
-    if (typeof item.value !== "string") {
-      throw new Error(`${context} contains a non-string literal.`);
-    }
-    if (item.sensitive === true) result.sensitive = true;
-  }
-  return result;
-}
-
-function normalizeTypeNode(node, types, active, context) {
-  switch (node.$type) {
-    case "AnyType":
-      return { type: "any" };
-    case "NullType":
-      return { type: "null" };
-    case "BooleanType":
-      return { type: "boolean" };
-    case "IntegerType": {
-      const result = { type: "integer" };
-      if (node.minValue !== undefined) result.minimum = node.minValue;
-      if (node.maxValue !== undefined) result.maximum = node.maxValue;
-      return result;
-    }
-    case "StringType": {
-      const result = { type: "string" };
-      if (node.minLength !== undefined) result.minLength = node.minLength;
-      if (node.maxLength !== undefined) result.maxLength = node.maxLength;
-      if (node.pattern !== undefined) result.pattern = node.pattern;
-      if (node.sensitive === true) result.sensitive = true;
-      return result;
-    }
-    case "StringLiteralType": {
-      if (typeof node.value !== "string") {
-        throw new Error(`${context}.value must be a string.`);
-      }
-      const result = { type: "string", const: node.value };
-      if (node.sensitive === true) result.sensitive = true;
-      return result;
-    }
-    case "ArrayType": {
-      const result = {
-        type: "array",
-        items: normalizeTypeReference(
-          node.itemType,
-          types,
-          active,
-          `${context}.itemType`
-        )
-      };
-      if (node.minLength !== undefined) result.minItems = node.minLength;
-      if (node.maxLength !== undefined) result.maxItems = node.maxLength;
-      return result;
-    }
-    case "ObjectType":
-      return normalizeObject(node, types, active, context);
-    case "DiscriminatedObjectType":
-      return normalizeDiscriminatedObject(node, types, active, context);
-    case "UnionType": {
-      const literals = literalUnion(node, types, context);
-      if (literals !== null) return literals;
-      return {
-        oneOf: node.elements.map((reference, index) =>
-          normalizeTypeReference(
-            reference,
-            types,
-            active,
-            `${context}.elements[${index}]`
-          )
-        )
-      };
-    }
-    default:
-      throw new Error(
-        `${context} uses unsupported generated type kind "${node.$type}".`
-      );
-  }
-}
-
-export function normalizeTypeReference(
-  reference,
-  types,
-  active = new Set(),
-  context = "type"
-) {
-  const index = localIndex(reference, context);
-  if (active.has(index)) {
-    throw new Error(
-      `${context} contains a recursive type cycle at node ${index}.`
-    );
-  }
-  const node = generatedNode(types, index, context);
-  active.add(index);
-  try {
-    return normalizeTypeNode(node, types, active, `generated type ${index}`);
-  } finally {
-    active.delete(index);
-  }
-}
-
-function sameReference(left, right) {
-  return (
-    isObject(left) &&
-    isObject(right) &&
-    Object.keys(left).length === 1 &&
-    Object.keys(right).length === 1 &&
-    left.$ref === right.$ref
-  );
-}
-
-export function buildSchema(types, rootIndex) {
-  validateTypes(types);
-  const root = generatedNode(types, rootIndex, "resource root");
-  if (root.$type !== "ResourceType") {
-    throw new Error(
-      `Generated resource root ${rootIndex} is not ResourceType.`
-    );
-  }
-  const bodyRef = referencedNode(types, root.body, "generated resource body");
-  const body = bodyRef.node;
-  if (body.$type !== "ObjectType") {
-    throw new Error("Generated resource body must resolve to ObjectType.");
-  }
-  requireObject(body.properties, "Generated resource body properties");
-
-  let nestedProperties = {};
-  const propertiesEnvelope = body.properties.properties;
-  if (propertiesEnvelope !== undefined) {
-    const nested = referencedNode(
-      types,
-      propertiesEnvelope.type,
-      "generated resource properties envelope"
-    ).node;
-    if (nested.$type !== "ObjectType") {
-      throw new Error(
-        "Generated properties envelope must resolve to ObjectType."
-      );
-    }
-    nestedProperties = requireObject(
-      nested.properties,
-      "Generated nested resource properties"
-    );
-  }
-
-  const normalized = { properties: {}, required: [] };
-  const active = new Set([rootIndex, bodyRef.index]);
-  for (const [name, property] of sortedEntries(body.properties)) {
-    requireObject(property, `Generated resource body property "${name}"`);
-    const flags = decodePropertyFlags(
-      property.flags,
-      `Generated resource body property "${name}"`
-    );
-    // Radius repeats read-only properties at the body root when the same type
-    // already appears in the properties envelope. Omit only those exact mirrors
-    // so the model sees one output path without hiding anything it can author.
-    if (
-      name !== "properties" &&
-      !flags.writable &&
-      isObject(nestedProperties[name]) &&
-      sameReference(property.type, nestedProperties[name].type)
-    ) {
-      continue;
-    }
-    const propertySchema = normalizeProperty(
-      property,
-      types,
-      active,
-      `Generated resource body property "${name}"`
-    );
-    normalized.properties[name] = propertySchema.schema;
-    if (propertySchema.required) normalized.required.push(name);
-  }
-
-  return objectSchema(
-    normalized,
-    body.additionalProperties === undefined ?
-      false
-    : normalizeTypeReference(
-        body.additionalProperties,
-        types,
-        active,
-        "generated resource body additionalProperties"
-      ),
-    body.sensitive === true
-  );
-}
-
 function noRetry(text) {
   return Object.assign(new Error(text), { noRetry: true });
+}
+
+function defaultSleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function retryDelay(headers) {
+  const value = headers.get("retry-after");
+  if (value === null) return RETRY_DELAY_MS;
+
+  const seconds = Number(value);
+  const requested =
+    Number.isFinite(seconds) && seconds >= 0 ?
+      seconds * 1_000
+    : Date.parse(value) - Date.now();
+  if (!Number.isFinite(requested)) return RETRY_DELAY_MS;
+  return Math.min(MAX_RETRY_DELAY_MS, Math.max(RETRY_DELAY_MS, requested));
 }
 
 async function readBoundedText(response, maxBytes) {
@@ -746,7 +365,8 @@ export async function fetchJson(
   {
     fetchImpl = globalThis.fetch,
     timeoutMs = 15_000,
-    maxBytes = 5 * 1024 * 1024
+    maxBytes = 5 * 1024 * 1024,
+    sleep = defaultSleep
   } = {}
 ) {
   const source = new URL(url);
@@ -760,6 +380,7 @@ export async function fetchJson(
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let delay;
     try {
       const response = await fetchImpl(url, {
         headers: { accept: "application/json" },
@@ -778,6 +399,7 @@ export async function fetchJson(
           response.status === 429 ||
           response.status >= 500
         );
+        if (!error.noRetry) error.retryDelayMs = retryDelay(response.headers);
         throw error;
       }
       const text = await readBoundedText(response, maxBytes);
@@ -788,14 +410,17 @@ export async function fetchJson(
       }
     } catch (error) {
       const timedOut = error?.name === "AbortError";
-      const resolved =
-        timedOut ?
-          new Error(`Source request timed out after ${timeoutMs}ms.`)
-        : error;
-      if (attempt === 1 || error?.noRetry === true) throw resolved;
+      if (timedOut) {
+        throw new Error(`Source request timed out after ${timeoutMs}ms.`, {
+          cause: error
+        });
+      }
+      if (attempt === 1 || error?.noRetry === true) throw error;
+      delay = error?.retryDelayMs ?? RETRY_DELAY_MS;
     } finally {
       clearTimeout(timer);
     }
+    await sleep(delay);
   }
   throw new Error("Source request failed.");
 }
@@ -830,6 +455,16 @@ async function pruneCachedCommits(
     return;
   }
 
+  try {
+    const now = new Date();
+    await fsp.utimes(path.join(cacheRoot, currentCommit), now, now);
+  } catch (error) {
+    warn(
+      `Warning: could not update the active Radius definition cache: ${message(error)}`
+    );
+  }
+
+  const candidates = [];
   for (const entry of entries) {
     if (
       !entry.isDirectory() ||
@@ -839,13 +474,32 @@ async function pruneCachedCommits(
       continue;
     }
     try {
-      await fsp.rm(path.join(cacheRoot, entry.name), {
+      const stat = await fsp.stat(path.join(cacheRoot, entry.name));
+      candidates.push({ name: entry.name, modified: stat.mtimeMs });
+    } catch (error) {
+      warn(
+        `Warning: could not inspect Radius definition cache "${entry.name}": ${message(error)}`
+      );
+    }
+  }
+
+  let previous;
+  for (const candidate of candidates) {
+    if (previous === undefined || candidate.modified > previous.modified) {
+      previous = candidate;
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (candidate.name === previous?.name) continue;
+    try {
+      await fsp.rm(path.join(cacheRoot, candidate.name), {
         recursive: true,
         force: true
       });
     } catch (error) {
       warn(
-        `Warning: could not prune stale Radius definition cache "${entry.name}": ${message(error)}`
+        `Warning: could not prune stale Radius definition cache "${candidate.name}": ${message(error)}`
       );
     }
   }
@@ -897,44 +551,39 @@ async function loadGeneratedJson(
     fetchTimeoutMs = 15_000,
     maxResponseBytes = 5 * 1024 * 1024,
     skipCache = false,
+    sleep = defaultSleep,
     warn = (text) => console.error(text)
   } = {}
 ) {
   const file = cacheFile(cacheRoot, commit, relativePath);
   if (!skipCache) {
     const cached = await readCache(file, validate);
-    if (cached !== undefined) return { value: cached, cached: true, file };
+    if (cached !== undefined) {
+      return { value: cached, cached: true, cacheReady: true, file };
+    }
   }
   const url = `${GENERATED_ROOT}/${commit}/${GENERATED_PATH}/${relativePath}`;
   const fetched = await fetchJson(url, {
     fetchImpl,
     timeoutMs: fetchTimeoutMs,
-    maxBytes: maxResponseBytes
+    maxBytes: maxResponseBytes,
+    sleep
   });
   validate(fetched.value);
+  let cacheReady = false;
   try {
     await writeCache(file, fetched.text);
+    cacheReady = true;
   } catch (error) {
     warn(`Warning: could not cache Radius definitions: ${message(error)}`);
   }
-  return { value: fetched.value, cached: false, file };
+  return { value: fetched.value, cached: false, cacheReady, file };
 }
 
 export async function resolveRadiusTypes(selectors, options = {}) {
-  const parsed = [
-    ...new Map(
-      selectors.map((selector) => {
-        const parsedSelector =
-          typeof selector === "string" ?
-            parseResourceSelector(selector)
-          : selector;
-        return [
-          `${parsedSelector.type}@${parsedSelector.apiVersion ?? ""}`,
-          parsedSelector
-        ];
-      })
-    ).values()
-  ];
+  const parsed = selectors.map((selector) =>
+    typeof selector === "string" ? parseResourceSelector(selector) : selector
+  );
   const requested = parsed.map(
     (selector) =>
       `${selector.type}${selector.apiVersion ? `@${selector.apiVersion}` : ""}`
@@ -942,23 +591,21 @@ export async function resolveRadiusTypes(selectors, options = {}) {
   let current = requested.join(", ");
   let stage = "managed Radius identity";
   try {
-    const identity =
-      options.identity ?
-        parseRadiusIdentity(JSON.stringify(options.identity))
-      : await queryManagedRadiusIdentity(options);
-
-    await pruneCachedCommits(identity.commit, options);
+    const identity = await queryManagedRadiusIdentity(options);
 
     stage = "generated resource index";
     const index = await loadGeneratedJson(
       "index.json",
       identity.commit,
-      validateIndex,
+      validateGeneratedIndex,
       options
     );
+    if (index.cacheReady) await pruneCachedCommits(identity.commit, options);
     const loadedTypes = new Map();
     const resources = [];
     const notFound = [];
+    const resolvedKeys = new Set();
+    const notFoundTypes = new Set();
     for (const selector of parsed) {
       current = `${selector.type}${selector.apiVersion ? `@${selector.apiVersion}` : ""}`;
       stage = "resource selection";
@@ -967,6 +614,8 @@ export async function resolveRadiusTypes(selectors, options = {}) {
         selected = selectResource(index.value, selector);
       } catch (error) {
         if (!(error instanceof DefinitionNotFoundError)) throw error;
+        if (notFoundTypes.has(selector.type)) continue;
+        notFoundTypes.add(selector.type);
         notFound.push({
           type: selector.type,
           message: error.message
@@ -974,13 +623,17 @@ export async function resolveRadiusTypes(selectors, options = {}) {
         continue;
       }
 
+      const resolvedKey = `${selected.type}@${selected.apiVersion}`;
+      if (resolvedKeys.has(resolvedKey)) continue;
+      resolvedKeys.add(resolvedKey);
+
       stage = "generated namespace definitions";
       let types = loadedTypes.get(selected.reference.relativePath);
       if (types === undefined) {
         types = await loadGeneratedJson(
           selected.reference.relativePath,
           identity.commit,
-          validateTypes,
+          validateGeneratedTypes,
           options
         );
         loadedTypes.set(selected.reference.relativePath, types);
@@ -1000,7 +653,7 @@ export async function resolveRadiusTypes(selectors, options = {}) {
         types = await loadGeneratedJson(
           selected.reference.relativePath,
           identity.commit,
-          validateTypes,
+          validateGeneratedTypes,
           { ...options, skipCache: true }
         );
         loadedTypes.set(selected.reference.relativePath, types);
@@ -1050,10 +703,6 @@ export async function main(
       resources: contract.resources,
       notFound: contract.notFound
     })}\n`;
-    if (contract.notFound.length > 0) {
-      stdout.write(output);
-      return 1;
-    }
     await writeConfig(stagingDir, contract.extension);
     stdout.write(output);
     return 0;

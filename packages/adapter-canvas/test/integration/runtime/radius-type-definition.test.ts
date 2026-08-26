@@ -5,6 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  STAGING_DIR_PREFIX,
+  STAGING_RUN_RECORD
+} from "@radius-project/core/modeling";
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -64,10 +68,10 @@ function temporaryDirectory(): string {
 }
 
 function stagingDirectory(root = temporaryDirectory()): string {
-  const directory = path.join(root, ".radius", ".staging-test");
+  const directory = path.join(root, ".radius", `${STAGING_DIR_PREFIX}test`);
   fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(
-    path.join(directory, "run.json"),
+    path.join(directory, STAGING_RUN_RECORD),
     JSON.stringify({
       version: 1,
       runId: "test",
@@ -78,13 +82,28 @@ function stagingDirectory(root = temporaryDirectory()): string {
   return directory;
 }
 
-function cacheFile(cacheRoot: string, relativePath: string): string {
-  return path.join(cacheRoot, commit, ...relativePath.split("/"));
+function managedIdentityOptions({
+  radiusIdentity = identity,
+  execFileSyncImpl = () => JSON.stringify(radiusIdentity)
+} = {}) {
+  return {
+    env: { ...process.env, RADIUS_RAD_BINARY: process.execPath },
+    home: temporaryDirectory(),
+    execFileSyncImpl
+  };
 }
 
-function seedCache(cacheRoot: string): void {
-  const indexPath = cacheFile(cacheRoot, "index.json");
-  const typesPath = cacheFile(cacheRoot, fixtureTypePath);
+function cacheFile(
+  cacheRoot: string,
+  relativePath: string,
+  cacheCommit = commit
+): string {
+  return path.join(cacheRoot, cacheCommit, ...relativePath.split("/"));
+}
+
+function seedCache(cacheRoot: string, cacheCommit = commit): void {
+  const indexPath = cacheFile(cacheRoot, "index.json", cacheCommit);
+  const typesPath = cacheFile(cacheRoot, fixtureTypePath, cacheCommit);
   fs.mkdirSync(path.dirname(indexPath), { recursive: true });
   fs.mkdirSync(path.dirname(typesPath), { recursive: true });
   fs.copyFileSync(path.join(fixtureRoot, "index.json"), indexPath);
@@ -169,6 +188,14 @@ describe("resource selection and release identity", () => {
     expect(() =>
       resolver.selectResource(fixtureIndex, {
         type: "Radius.Data/neo4jDatabases"
+      })
+    ).toThrow(
+      /^Definition for resource type "Radius\.Data\/neo4jDatabases" was not found in the generated catalog for this Radius release\.$/u
+    );
+    expect(() =>
+      resolver.selectResource(fixtureIndex, {
+        type: "Radius.Data/neo4jDatabases",
+        apiVersion: "2025-08-01-preview"
       })
     ).toThrow(
       /^Definition for resource type "Radius\.Data\/neo4jDatabases" was not found in the generated catalog for this Radius release\.$/u
@@ -284,397 +311,16 @@ describe("resource selection and release identity", () => {
           apiVersion: "2025-08-01-preview"
         }
       )
-    ).toThrow(/unavailable\.$/u);
-  });
-});
-
-describe("compact model-facing schemas", () => {
-  it("returns canonical inputs and outputs in one recursive schema", () => {
-    const schema = resolver.buildSchema(fixtureTypes, 14);
-    const properties = schema.properties.properties.properties;
-
-    expect(Object.keys(schema.properties)).toEqual([
-      "apiVersion",
-      "id",
-      "location",
-      "name",
-      "properties",
-      "type"
-    ]);
-    expect(schema.properties.application).toBeUndefined();
-    expect(schema.required).toEqual(["name", "properties"]);
-    expect(schema.properties.name).toEqual({ type: "string" });
-    expect(schema.properties.properties.required).toEqual([
-      "environment",
-      "password",
-      "username"
-    ]);
-    expect(properties.application).toEqual({ type: "string" });
-    expect(properties.password).toEqual({
-      type: "string",
-      sensitive: true
-    });
-    expect(properties.host).toEqual({ type: "string", readOnly: true });
-    expect(properties.port).toEqual({ type: "string", readOnly: true });
-    expect(properties.size).toEqual({
-      type: "string",
-      enum: ["L", "M", "S"]
-    });
-  });
-
-  it("returns maps, arrays, and canonical compute outputs", () => {
-    const image = resolver.buildSchema(fixtureTypes, 19);
-    const imageProperties = image.properties.properties.properties;
-    expect(imageProperties.build.required).toEqual(["source"]);
-    expect(imageProperties.imageReference.readOnly).toBe(true);
-
-    const containers = resolver.buildSchema(fixtureTypes, 27);
-    const containerProperties = containers.properties.properties.properties;
-    expect(containerProperties.containers.additionalProperties).toMatchObject({
-      type: "object"
-    });
-    expect(containerProperties.hosts).toEqual({
-      type: "object",
-      properties: {},
-      additionalProperties: { type: "string" },
-      readOnly: true
-    });
-
-    const application = resolver.buildSchema(fixtureTypes, 32);
-    expect(JSON.stringify(application)).not.toMatch(/getGraph|functions/u);
-  });
-
-  it("normalizes primitives, general unions, and discriminated objects", () => {
-    const types = [
-      { $type: "AnyType" },
-      { $type: "NullType" },
-      { $type: "BooleanType" },
-      { $type: "IntegerType", minValue: 1, maxValue: 9 },
-      {
-        $type: "StringType",
-        minLength: 2,
-        maxLength: 8,
-        pattern: "^[a-z]+$"
-      },
-      { $type: "ArrayType", itemType: { $ref: "#/4" }, minLength: 1 },
-      { $type: "UnionType", elements: [{ $ref: "#/2" }, { $ref: "#/4" }] },
-      {
-        $type: "ObjectType",
-        name: "variant",
-        properties: {
-          value: { flags: 1, type: { $ref: "#/3" } }
-        }
-      },
-      {
-        $type: "DiscriminatedObjectType",
-        name: "choice",
-        discriminator: "kind",
-        baseProperties: {
-          kind: { flags: 1, type: { $ref: "#/4" } }
-        },
-        elements: { selected: { $ref: "#/7" } }
-      }
-    ];
-
-    expect(resolver.normalizeTypeReference({ $ref: "#/0" }, types)).toEqual({
-      type: "any"
-    });
-    expect(resolver.normalizeTypeReference({ $ref: "#/1" }, types)).toEqual({
-      type: "null"
-    });
-    expect(resolver.normalizeTypeReference({ $ref: "#/3" }, types)).toEqual({
-      type: "integer",
-      minimum: 1,
-      maximum: 9
-    });
-    expect(resolver.normalizeTypeReference({ $ref: "#/5" }, types)).toEqual({
-      type: "array",
-      items: {
-        type: "string",
-        minLength: 2,
-        maxLength: 8,
-        pattern: "^[a-z]+$"
-      },
-      minItems: 1
-    });
-    expect(resolver.normalizeTypeReference({ $ref: "#/6" }, types)).toEqual({
-      oneOf: [
-        { type: "boolean" },
-        {
-          type: "string",
-          minLength: 2,
-          maxLength: 8,
-          pattern: "^[a-z]+$"
-        }
-      ]
-    });
-    expect(
-      resolver.normalizeTypeReference({ $ref: "#/8" }, types)
-    ).toMatchObject({
-      type: "object",
-      discriminator: "kind",
-      required: ["kind"],
-      properties: { kind: { type: "string" } },
-      variants: {
-        selected: {
-          required: ["kind", "value"],
-          properties: {
-            kind: { type: "string" },
-            value: { type: "integer", minimum: 1, maximum: 9 }
-          }
-        }
-      }
-    });
-  });
-
-  it("ignores unknown property flag bits while decoding known access flags", () => {
-    expect(resolver.decodePropertyFlags(32)).toEqual({
-      required: false,
-      readable: true,
-      writable: true
-    });
-    expect(resolver.decodePropertyFlags(32 | 1 | 2 | 4)).toEqual({
-      required: true,
-      readable: false,
-      writable: false
-    });
-    for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(() => resolver.decodePropertyFlags(invalid)).toThrow(
-        /unsupported/u
-      );
-    }
-  });
-
-  it("fails on invalid references, kinds, and cycles", () => {
-    expect(() =>
-      resolver.normalizeTypeReference({ $ref: "other.json#/0" }, fixtureTypes)
-    ).toThrow(/local #\/N/u);
-    expect(() =>
-      resolver.normalizeTypeReference({ $ref: "#/0" }, [
-        { $type: "FutureType" }
-      ])
-    ).toThrow(/unsupported generated type kind/u);
-    expect(() =>
-      resolver.normalizeTypeReference({ $ref: "#/0" }, [
-        {
-          $type: "ObjectType",
-          properties: {
-            self: { flags: 0, type: { $ref: "#/0" } }
-          }
-        }
-      ])
-    ).toThrow(/recursive type cycle/u);
-  });
-
-  it("preserves write-only, sensitive, literal, and bounded collection semantics", () => {
-    const types = [
-      { $type: "StringType", sensitive: true },
-      { $type: "StringLiteralType", value: "token", sensitive: true },
-      {
-        $type: "ArrayType",
-        itemType: { $ref: "#/0" },
-        maxLength: 3
-      },
-      {
-        $type: "ObjectType",
-        sensitive: true,
-        properties: {
-          secret: { flags: 4, type: { $ref: "#/0" } }
-        }
-      },
-      {
-        $type: "UnionType",
-        elements: [{ $ref: "#/1" }]
-      }
-    ];
-
-    expect(resolver.normalizeTypeReference({ $ref: "#/0" }, types)).toEqual({
-      type: "string",
-      sensitive: true
-    });
-    expect(resolver.normalizeTypeReference({ $ref: "#/1" }, types)).toEqual({
-      type: "string",
-      const: "token",
-      sensitive: true
-    });
-    expect(resolver.normalizeTypeReference({ $ref: "#/2" }, types)).toEqual({
-      type: "array",
-      items: { type: "string", sensitive: true },
-      maxItems: 3
-    });
-    expect(resolver.normalizeTypeReference({ $ref: "#/3" }, types)).toEqual({
-      type: "object",
-      properties: {
-        secret: { type: "string", sensitive: true, writeOnly: true }
-      },
-      additionalProperties: false,
-      sensitive: true
-    });
-    expect(resolver.normalizeTypeReference({ $ref: "#/4" }, types)).toEqual({
-      type: "string",
-      enum: ["token"],
-      sensitive: true
-    });
-    expect(
-      resolver.normalizeTypeReference({ $ref: "#/0" }, [
-        { $type: "IntegerType" }
-      ])
-    ).toEqual({ type: "integer" });
-    expect(() =>
-      resolver.normalizeTypeReference({ $ref: "#/0" }, [
-        { $type: "StringLiteralType", value: 7 }
-      ])
-    ).toThrow(/value must be a string/u);
-  });
-
-  it("rejects malformed unions and discriminated object variants", () => {
-    expect(() =>
-      resolver.normalizeTypeReference({ $ref: "#/0" }, [
-        { $type: "UnionType", elements: [] }
-      ])
-    ).toThrow(/nonempty array/u);
-    expect(() =>
-      resolver.normalizeTypeReference({ $ref: "#/0" }, [
-        { $type: "UnionType", elements: [{ $ref: "#/1" }] },
-        { $type: "StringLiteralType", value: 7 }
-      ])
-    ).toThrow(/non-string literal/u);
-    expect(() =>
-      resolver.normalizeTypeReference({ $ref: "#/0" }, [
-        {
-          $type: "DiscriminatedObjectType",
-          discriminator: "",
-          baseProperties: {},
-          elements: {}
-        }
-      ])
-    ).toThrow(/discriminator must be a nonempty string/u);
-    expect(() =>
-      resolver.normalizeTypeReference({ $ref: "#/0" }, [
-        {
-          $type: "DiscriminatedObjectType",
-          discriminator: "kind",
-          baseProperties: {},
-          elements: { invalid: { $ref: "#/1" } }
-        },
-        { $type: "StringType" }
-      ])
-    ).toThrow(/must resolve to an object/u);
-    expect(() =>
-      resolver.normalizeTypeReference({ $ref: "#/0" }, [
-        {
-          $type: "DiscriminatedObjectType",
-          discriminator: "kind",
-          baseProperties: {
-            value: { flags: 0, type: { $ref: "#/2" } }
-          },
-          elements: { invalid: { $ref: "#/1" } }
-        },
-        {
-          $type: "ObjectType",
-          properties: {
-            value: { flags: 0, type: { $ref: "#/3" } }
-          }
-        },
-        { $type: "StringType" },
-        { $type: "BooleanType" }
-      ])
-    ).toThrow(/redefines property "value" incompatibly/u);
-
-    expect(
-      resolver.normalizeTypeReference({ $ref: "#/0" }, [
-        {
-          $type: "DiscriminatedObjectType",
-          discriminator: "kind",
-          baseProperties: {},
-          elements: { empty: { $ref: "#/1" } }
-        },
-        { $type: "ObjectType", properties: {} }
-      ])
-    ).toEqual({
-      type: "object",
-      properties: {},
-      additionalProperties: false,
-      discriminator: "kind",
-      variants: {
-        empty: {
-          type: "object",
-          properties: {},
-          additionalProperties: false
-        }
-      }
-    });
-  });
-
-  it("rejects malformed resource roots and envelopes", () => {
-    expect(() => resolver.buildSchema({}, 0)).toThrow(/JSON array/u);
-    expect(() => resolver.buildSchema([], 0)).toThrow(/missing generated/u);
-    expect(() => resolver.buildSchema([{ $type: "StringType" }], 0)).toThrow(
-      /is not ResourceType/u
+    ).toThrow(
+      /^Definition for resource type "Radius\.Core\/applications" was not found in the generated catalog for this Radius release\.$/u
     );
-    expect(() =>
-      resolver.buildSchema(
-        [
-          { $type: "ResourceType", body: { $ref: "#/1" } },
-          { $type: "StringType" }
-        ],
-        0
-      )
-    ).toThrow(/body must resolve to ObjectType/u);
-    expect(() =>
-      resolver.buildSchema(
-        [
-          { $type: "ResourceType", body: { $ref: "#/1" } },
-          {
-            $type: "ObjectType",
-            properties: { properties: { flags: 0, type: { $ref: "#/2" } } }
-          },
-          { $type: "StringType" }
-        ],
-        0
-      )
-    ).toThrow(/properties envelope must resolve to ObjectType/u);
-
-    expect(
-      resolver.buildSchema(
-        [
-          { $type: "ResourceType", body: { $ref: "#/1" } },
-          {
-            $type: "ObjectType",
-            properties: {
-              zeta: { flags: 0, type: { $ref: "#/2" } },
-              alpha: { flags: 0, type: { $ref: "#/2" } },
-              middle: { flags: 0, type: { $ref: "#/2" } }
-            },
-            additionalProperties: { $ref: "#/2" }
-          },
-          { $type: "StringType" }
-        ],
-        0
-      )
-    ).toEqual({
-      type: "object",
-      properties: {
-        alpha: { type: "string" },
-        middle: { type: "string" },
-        zeta: { type: "string" }
-      },
-      additionalProperties: { type: "string" }
-    });
-  });
-
-  it("emits no compiler internals or redundant model-facing metadata", () => {
-    const serialized = JSON.stringify(resolver.buildSchema(fixtureTypes, 14));
-    expect(serialized).not.toMatch(
-      /\$ref|"flags"|ObjectType|ResourceType|description|functions|readable|writable/u
-    );
-    expect(serialized).toContain('"required":["name","properties"]');
   });
 });
 
 describe("network and cache behavior", () => {
   it("retries retryable responses once", async () => {
     let attempts = 0;
+    const delays: number[] = [];
     const result = await resolver.fetchJson(
       `https://raw.githubusercontent.com/radius-project/radius/${commit}/index.json`,
       {
@@ -683,11 +329,35 @@ describe("network and cache behavior", () => {
           return new Response(attempts === 1 ? "busy" : '{"ok":true}', {
             status: attempts === 1 ? 500 : 200
           });
-        }
+        },
+        sleep: async (milliseconds: number) => delays.push(milliseconds)
       }
     );
     expect(attempts).toBe(2);
+    expect(delays).toEqual([300]);
     expect(result.value).toEqual({ ok: true });
+  });
+
+  it("uses the default retry clock", async () => {
+    vi.useFakeTimers();
+    try {
+      let attempts = 0;
+      const pending = resolver.fetchJson(
+        `https://raw.githubusercontent.com/radius-project/radius/${commit}/default-clock.json`,
+        {
+          fetchImpl: async () => {
+            attempts += 1;
+            return new Response(attempts === 1 ? "busy" : '{"ok":true}', {
+              status: attempts === 1 ? 500 : 200
+            });
+          }
+        }
+      );
+      await vi.runAllTimersAsync();
+      await expect(pending).resolves.toMatchObject({ value: { ok: true } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not retry ordinary 4xx responses", async () => {
@@ -808,6 +478,7 @@ describe("network and cache behavior", () => {
     expect(invalidAttempts).toBe(1);
 
     let transportAttempts = 0;
+    const transportDelays: number[] = [];
     const result = await resolver.fetchJson(
       `https://raw.githubusercontent.com/radius-project/radius/${commit}/transient.json`,
       {
@@ -815,15 +486,19 @@ describe("network and cache behavior", () => {
           transportAttempts += 1;
           if (transportAttempts === 1) throw new Error("connection reset");
           return new Response('{"ok":true}', { status: 200 });
-        }
+        },
+        sleep: async (milliseconds: number) =>
+          transportDelays.push(milliseconds)
       }
     );
     expect(transportAttempts).toBe(2);
+    expect(transportDelays).toEqual([300]);
     expect(result.value).toEqual({ ok: true });
   });
 
   it.each([408, 429])("retries HTTP %s once", async (status) => {
     let attempts = 0;
+    const delays: number[] = [];
     const result = await resolver.fetchJson(
       `https://raw.githubusercontent.com/radius-project/radius/${commit}/${status}.json`,
       {
@@ -832,11 +507,65 @@ describe("network and cache behavior", () => {
           return new Response(attempts === 1 ? "retry" : '{"ok":true}', {
             status: attempts === 1 ? status : 200
           });
-        }
+        },
+        sleep: async (milliseconds: number) => delays.push(milliseconds)
       }
     );
     expect(attempts).toBe(2);
+    expect(delays).toEqual([300]);
     expect(result.value).toEqual({ ok: true });
+  });
+
+  it.each([
+    ["2", 2_000],
+    ["60", 5_000],
+    ["invalid", 300],
+    ["0", 300]
+  ])("honors a bounded Retry-After value %s", async (retryAfter, expected) => {
+    let attempts = 0;
+    const delays: number[] = [];
+    await resolver.fetchJson(
+      `https://raw.githubusercontent.com/radius-project/radius/${commit}/rate-limit.json`,
+      {
+        fetchImpl: async () => {
+          attempts += 1;
+          return new Response(attempts === 1 ? "retry" : '{"ok":true}', {
+            status: attempts === 1 ? 429 : 200,
+            headers: attempts === 1 ? { "retry-after": retryAfter } : undefined
+          });
+        },
+        sleep: async (milliseconds: number) => delays.push(milliseconds)
+      }
+    );
+    expect(delays).toEqual([expected]);
+  });
+
+  it("honors an HTTP-date Retry-After value", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+    try {
+      let attempts = 0;
+      const delays: number[] = [];
+      await resolver.fetchJson(
+        `https://raw.githubusercontent.com/radius-project/radius/${commit}/dated-rate-limit.json`,
+        {
+          fetchImpl: async () => {
+            attempts += 1;
+            return new Response(attempts === 1 ? "retry" : '{"ok":true}', {
+              status: attempts === 1 ? 429 : 200,
+              headers:
+                attempts === 1 ?
+                  { "retry-after": "Wed, 26 Aug 2026 00:00:02 GMT" }
+                : undefined
+            });
+          },
+          sleep: async (milliseconds: number) => delays.push(milliseconds)
+        }
+      );
+      expect(delays).toEqual([2_000]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("bounds timed-out requests", async () => {
@@ -857,7 +586,7 @@ describe("network and cache behavior", () => {
         }
       )
     ).rejects.toThrow(/timed out/u);
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(1);
   });
 
   it("uses a valid cache without network access", async () => {
@@ -866,7 +595,7 @@ describe("network and cache behavior", () => {
     const contract = await resolver.resolveRadiusTypes(
       ["Radius.Data/postgreSqlDatabases"],
       {
-        identity,
+        ...managedIdentityOptions(),
         cacheRoot,
         fetchImpl: async () => {
           throw new Error("network should not be used");
@@ -877,21 +606,27 @@ describe("network and cache behavior", () => {
     expect(contract.resources[0].schema.properties.application).toBeUndefined();
   });
 
-  it("prunes stale commit caches while preserving active and unrelated entries", async () => {
+  it("retains the active and most recent previous commit caches", async () => {
     const cacheRoot = temporaryDirectory();
     seedCache(cacheRoot);
-    const staleCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const previousCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const staleCommit = "cccccccccccccccccccccccccccccccccccccccc";
     const commitNamedFile = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const previousDirectory = path.join(cacheRoot, previousCommit);
     const staleDirectory = path.join(cacheRoot, staleCommit);
     const unrelatedDirectory = path.join(cacheRoot, "local-notes");
     const unrelatedFile = path.join(cacheRoot, commitNamedFile);
+    fs.mkdirSync(previousDirectory);
+    fs.writeFileSync(path.join(previousDirectory, "index.json"), "{}");
     fs.mkdirSync(staleDirectory);
     fs.writeFileSync(path.join(staleDirectory, "index.json"), "{}");
+    fs.utimesSync(previousDirectory, new Date(2_000), new Date(2_000));
+    fs.utimesSync(staleDirectory, new Date(1_000), new Date(1_000));
     fs.mkdirSync(unrelatedDirectory);
     fs.writeFileSync(unrelatedFile, "keep");
 
     await resolver.resolveRadiusTypes(["Radius.Core/applications"], {
-      identity,
+      ...managedIdentityOptions(),
       cacheRoot,
       fetchImpl: async () => {
         throw new Error("network should not be used");
@@ -899,17 +634,77 @@ describe("network and cache behavior", () => {
     });
 
     expect(fs.existsSync(staleDirectory)).toBe(false);
+    expect(fs.existsSync(previousDirectory)).toBe(true);
     expect(fs.existsSync(path.join(cacheRoot, commit))).toBe(true);
     expect(fs.existsSync(unrelatedDirectory)).toBe(true);
     expect(fs.readFileSync(unrelatedFile, "utf8")).toBe("keep");
   });
 
+  it("lets two managed Radius versions reuse the same cache", async () => {
+    const cacheRoot = temporaryDirectory();
+    const previousCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    seedCache(cacheRoot);
+    seedCache(cacheRoot, previousCommit);
+    const offline = async () => {
+      throw new Error("network should not be used");
+    };
+
+    await resolver.resolveRadiusTypes(["Radius.Core/applications"], {
+      ...managedIdentityOptions(),
+      cacheRoot,
+      fetchImpl: offline
+    });
+    await resolver.resolveRadiusTypes(["Radius.Core/applications"], {
+      ...managedIdentityOptions({
+        radiusIdentity: { version: identity.version, commit: previousCommit }
+      }),
+      cacheRoot,
+      fetchImpl: offline
+    });
+
+    expect(fs.existsSync(path.join(cacheRoot, commit))).toBe(true);
+    expect(fs.existsSync(path.join(cacheRoot, previousCommit))).toBe(true);
+  });
+
+  it("preserves existing commit caches when a replacement index is unavailable", async () => {
+    const cacheRoot = temporaryDirectory();
+    const first = path.join(
+      cacheRoot,
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    const second = path.join(
+      cacheRoot,
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
+    fs.mkdirSync(first);
+    fs.mkdirSync(second);
+
+    await expect(
+      resolver.resolveRadiusTypes(["Radius.Core/applications"], {
+        ...managedIdentityOptions(),
+        cacheRoot,
+        fetchImpl: async () => {
+          throw new Error("offline");
+        },
+        sleep: async () => {}
+      })
+    ).rejects.toThrow(/offline/u);
+
+    expect(fs.existsSync(first)).toBe(true);
+    expect(fs.existsSync(second)).toBe(true);
+  });
+
   it("treats cache-pruning failures as non-fatal", async () => {
     const cacheRoot = temporaryDirectory();
     seedCache(cacheRoot);
-    const staleCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const previousCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const staleCommit = "cccccccccccccccccccccccccccccccccccccccc";
+    const previousDirectory = path.join(cacheRoot, previousCommit);
     const staleDirectory = path.join(cacheRoot, staleCommit);
+    fs.mkdirSync(previousDirectory);
     fs.mkdirSync(staleDirectory);
+    fs.utimesSync(previousDirectory, new Date(2_000), new Date(2_000));
+    fs.utimesSync(staleDirectory, new Date(1_000), new Date(1_000));
     const warnings: string[] = [];
 
     const readdir = vi
@@ -919,7 +714,7 @@ describe("network and cache behavior", () => {
       const contract = await resolver.resolveRadiusTypes(
         ["Radius.Core/applications"],
         {
-          identity,
+          ...managedIdentityOptions(),
           cacheRoot,
           fetchImpl: async () => {
             throw new Error("network should not be used");
@@ -945,7 +740,7 @@ describe("network and cache behavior", () => {
       const contract = await resolver.resolveRadiusTypes(
         ["Radius.Core/applications"],
         {
-          identity,
+          ...managedIdentityOptions(),
           cacheRoot,
           fetchImpl: async () => {
             throw new Error("network should not be used");
@@ -963,11 +758,66 @@ describe("network and cache behavior", () => {
     expect(fs.existsSync(staleDirectory)).toBe(true);
   });
 
+  it("keeps cache maintenance failures non-fatal and fail-safe", async () => {
+    const cacheRoot = temporaryDirectory();
+    seedCache(cacheRoot);
+    const previousCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const previousDirectory = path.join(cacheRoot, previousCommit);
+    fs.mkdirSync(previousDirectory);
+    const warnings: string[] = [];
+
+    const update = vi
+      .spyOn(fs.promises, "utimes")
+      .mockRejectedValueOnce(new Error("timestamp denied"));
+    const inspect = vi
+      .spyOn(fs.promises, "stat")
+      .mockRejectedValueOnce(new Error("stat denied"));
+    try {
+      const contract = await resolver.resolveRadiusTypes(
+        ["Radius.Core/applications"],
+        {
+          ...managedIdentityOptions(),
+          cacheRoot,
+          fetchImpl: async () => {
+            throw new Error("network should not be used");
+          },
+          warn: (warning: string) => warnings.push(warning)
+        }
+      );
+      expect(contract.resources[0].type).toBe("Radius.Core/applications");
+    } finally {
+      update.mockRestore();
+      inspect.mockRestore();
+    }
+
+    expect(warnings).toEqual([
+      "Warning: could not update the active Radius definition cache: timestamp denied",
+      `Warning: could not inspect Radius definition cache "${previousCommit}": stat denied`
+    ]);
+    expect(fs.existsSync(previousDirectory)).toBe(true);
+
+    const absent = Object.assign(new Error("gone"), { code: "ENOENT" });
+    const read = vi.spyOn(fs.promises, "readdir").mockRejectedValueOnce(absent);
+    try {
+      await resolver.resolveRadiusTypes(["Radius.Core/applications"], {
+        ...managedIdentityOptions(),
+        cacheRoot,
+        fetchImpl: async () => {
+          throw new Error("network should not be used");
+        },
+        warn: (warning: string) => warnings.push(warning)
+      });
+    } finally {
+      read.mockRestore();
+    }
+    expect(warnings).toHaveLength(2);
+  });
+
   it("resolves multiple types with one index and one namespace fetch", async () => {
     const cacheRoot = temporaryDirectory();
     const calls: string[] = [];
     const options = {
-      identity,
+      ...managedIdentityOptions(),
       cacheRoot,
       fetchImpl: fixtureFetch(calls)
     };
@@ -983,12 +833,16 @@ describe("network and cache behavior", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("returns duplicate selectors only once", async () => {
+  it("returns selectors that resolve to the same API version only once", async () => {
     const calls: string[] = [];
     const contract = await resolver.resolveRadiusTypes(
-      ["Radius.Core/applications", "Radius.Core/applications"],
+      [
+        "Radius.Core/applications",
+        "Radius.Core/applications@2025-08-01-preview",
+        "Radius.Core/applications"
+      ],
       {
-        identity,
+        ...managedIdentityOptions(),
         cacheRoot: temporaryDirectory(),
         fetchImpl: fixtureFetch(calls)
       }
@@ -1006,10 +860,11 @@ describe("network and cache behavior", () => {
       [
         "Radius.Core/applications",
         "Radius.Data/neo4jDatabases",
+        "Radius.Data/neo4jDatabases@2025-08-01-preview",
         "Radius.Data/postgreSqlDatabases"
       ],
       {
-        identity,
+        ...managedIdentityOptions(),
         cacheRoot: temporaryDirectory(),
         fetchImpl: fixtureFetch(calls)
       }
@@ -1035,7 +890,7 @@ describe("network and cache behavior", () => {
     fs.writeFileSync(corruptIndex, "{");
     const corruptCalls: string[] = [];
     await resolver.resolveRadiusTypes(["Radius.Core/applications"], {
-      identity,
+      ...managedIdentityOptions(),
       cacheRoot: corruptRoot,
       fetchImpl: fixtureFetch(corruptCalls)
     });
@@ -1045,12 +900,12 @@ describe("network and cache behavior", () => {
     const concurrentCalls: string[] = [];
     await Promise.all([
       resolver.resolveRadiusTypes(["Radius.Compute/containerImages"], {
-        identity,
+        ...managedIdentityOptions(),
         cacheRoot: concurrentRoot,
         fetchImpl: fixtureFetch(concurrentCalls)
       }),
       resolver.resolveRadiusTypes(["Radius.Compute/containerImages"], {
-        identity,
+        ...managedIdentityOptions(),
         cacheRoot: concurrentRoot,
         fetchImpl: fixtureFetch(concurrentCalls)
       })
@@ -1074,7 +929,7 @@ describe("network and cache behavior", () => {
     const contract = await resolver.resolveRadiusTypes(
       ["Radius.Core/applications"],
       {
-        identity,
+        ...managedIdentityOptions(),
         cacheRoot,
         fetchImpl: fixtureFetch(calls)
       }
@@ -1097,7 +952,7 @@ describe("network and cache behavior", () => {
     const contract = await resolver.resolveRadiusTypes(
       ["Radius.Core/applications"],
       {
-        identity,
+        ...managedIdentityOptions(),
         cacheRoot: blockedCacheRoot,
         fetchImpl: fixtureFetch(calls),
         warn: (warning: string) => warnings.push(warning)
@@ -1138,7 +993,7 @@ describe("network and cache behavior", () => {
           }
         ],
         {
-          identity,
+          ...managedIdentityOptions(),
           fetchImpl: fixtureFetch([])
         }
       );
@@ -1158,7 +1013,7 @@ describe("network and cache behavior", () => {
   it("reports the resolution stage and selected resource on failures", async () => {
     await expect(
       resolver.resolveRadiusTypes(["Radius.Core/applications"], {
-        identity,
+        ...managedIdentityOptions(),
         cacheRoot: temporaryDirectory(),
         fetchImpl: async () => new Response(JSON.stringify({}), { status: 200 })
       })
@@ -1168,7 +1023,7 @@ describe("network and cache behavior", () => {
 
     await expect(
       resolver.resolveRadiusTypes(["Radius.Core/applications@1900-01-01"], {
-        identity,
+        ...managedIdentityOptions(),
         cacheRoot: temporaryDirectory(),
         fetchImpl: fixtureFetch([])
       })
@@ -1176,7 +1031,7 @@ describe("network and cache behavior", () => {
 
     await expect(
       resolver.resolveRadiusTypes(["Radius.Core/applications"], {
-        identity,
+        ...managedIdentityOptions(),
         cacheRoot: temporaryDirectory(),
         fetchImpl: async (url: string) =>
           new Response(
@@ -1190,7 +1045,7 @@ describe("network and cache behavior", () => {
       resolver.resolveRadiusTypes(
         ["Radius.Core/applications@2025-08-01-preview"],
         {
-          identity,
+          ...managedIdentityOptions(),
           cacheRoot: temporaryDirectory(),
           fetchImpl: async (url: string) =>
             new Response(
@@ -1208,6 +1063,42 @@ describe("network and cache behavior", () => {
 });
 
 describe("command boundary", () => {
+  it("queries managed identity through the injected process boundary", async () => {
+    const cacheRoot = temporaryDirectory();
+    seedCache(cacheRoot);
+    const execFileSyncImpl = vi.fn(() => JSON.stringify(identity));
+    const identityOptions = managedIdentityOptions({ execFileSyncImpl });
+
+    const contract = await resolver.resolveRadiusTypes(
+      ["Radius.Core/applications"],
+      {
+        ...identityOptions,
+        cacheRoot,
+        fetchImpl: async () => {
+          throw new Error("network should not be used");
+        }
+      }
+    );
+
+    expect(contract.extension).toBe(identity.extension);
+    expect(execFileSyncImpl).toHaveBeenCalledExactlyOnceWith(
+      process.execPath,
+      ["version", "--cli", "--output", "json"],
+      expect.objectContaining({
+        encoding: "utf8",
+        env: expect.objectContaining({
+          BICEP: path.join(
+            identityOptions.home,
+            ".radius",
+            "ai-extensions",
+            "bin",
+            `bicep${process.platform === "win32" ? ".exe" : ""}`
+          )
+        })
+      })
+    );
+  });
+
   it("queries the configured managed binary through the importable resolver seam", async () => {
     const home = temporaryDirectory();
     const fakeVersion = path.join(home, "version");
@@ -1293,6 +1184,7 @@ describe("command boundary", () => {
     for (const args of [
       ["--staging"],
       ["--staging", "/tmp/one", "--staging", "/tmp/two"],
+      ["--staging", "--help", "Radius.Core/applications"],
       ["--unknown"],
       ["--staging", "/tmp/staging"],
       ["Radius.Core/applications"]
@@ -1337,7 +1229,7 @@ describe("command boundary", () => {
     expect(configured).toBe(identity.extension);
   });
 
-  it("prints found definitions and catalog misses without staging config", async () => {
+  it("prints and configures a successful partial contract", async () => {
     let stdout = "";
     let stderr = "";
     const staging = stagingDirectory();
@@ -1373,14 +1265,17 @@ describe("command boundary", () => {
       }
     );
 
-    expect(status).toBe(1);
+    expect(status).toBe(0);
     expect(JSON.parse(stdout)).toEqual({
       contractVersion: 1,
       resources: [resource],
       notFound: [missing]
     });
     expect(stderr).toBe("");
-    expect(writeConfig).not.toHaveBeenCalled();
+    expect(writeConfig).toHaveBeenCalledExactlyOnceWith(
+      staging,
+      identity.extension
+    );
   });
 
   it("rejects an invalid staging directory before resolution", async () => {
@@ -1391,7 +1286,7 @@ describe("command boundary", () => {
     const staging = path.join(
       temporaryDirectory(),
       ".radius",
-      ".staging-missing"
+      `${STAGING_DIR_PREFIX}missing`
     );
 
     const status = await resolver.main(
@@ -1464,7 +1359,7 @@ describe("command boundary", () => {
     expect(stderr).toBe("config conflict\n");
   });
 
-  it("returns found definitions from the executable when a catalog definition is missing", () => {
+  it("returns and configures partial results from the executable", () => {
     const home = temporaryDirectory();
     const staging = stagingDirectory(home);
     const fakeVersion = path.join(home, "version");
@@ -1507,7 +1402,7 @@ describe("command boundary", () => {
       }
     );
 
-    expect(result.status).toBe(1);
+    expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       contractVersion: 1,
       resources: [
@@ -1523,7 +1418,14 @@ describe("command boundary", () => {
       ]
     });
     expect(result.stderr).toBe("");
-    expect(fs.existsSync(path.join(staging, "bicepconfig.json"))).toBe(false);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
+      )
+    ).toEqual({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { radius: identity.extension }
+    });
   });
 
   it("runs end to end with the managed version command and offline cache", () => {
@@ -1736,14 +1638,14 @@ describe("staged Bicep configuration", () => {
       "staging-test"
     );
     fs.mkdirSync(wrongName, { recursive: true });
-    fs.writeFileSync(path.join(wrongName, "run.json"), "{}");
+    fs.writeFileSync(path.join(wrongName, STAGING_RUN_RECORD), "{}");
     await expect(
       resolver.writeStagedBicepConfig(wrongName, identity.extension)
     ).rejects.toThrow(/Invalid Radius staging/u);
 
     const invalidRun = stagingDirectory();
-    fs.rmSync(path.join(invalidRun, "run.json"));
-    fs.mkdirSync(path.join(invalidRun, "run.json"));
+    fs.rmSync(path.join(invalidRun, STAGING_RUN_RECORD));
+    fs.mkdirSync(path.join(invalidRun, STAGING_RUN_RECORD));
     await expect(
       resolver.writeStagedBicepConfig(invalidRun, identity.extension)
     ).rejects.toThrow(/Invalid Radius staging/u);
@@ -1760,7 +1662,7 @@ describe("staged Bicep configuration", () => {
       JSON.stringify({ baseline: { "app.bicep": 7 } })
     ]) {
       const staging = stagingDirectory();
-      fs.writeFileSync(path.join(staging, "run.json"), record);
+      fs.writeFileSync(path.join(staging, STAGING_RUN_RECORD), record);
 
       await expect(
         resolver.writeStagedBicepConfig(staging, identity.extension)
@@ -1770,7 +1672,7 @@ describe("staged Bicep configuration", () => {
 
     const staging = stagingDirectory();
     fs.writeFileSync(
-      path.join(staging, "run.json"),
+      path.join(staging, STAGING_RUN_RECORD),
       JSON.stringify({
         version: 1,
         runId: "test",
