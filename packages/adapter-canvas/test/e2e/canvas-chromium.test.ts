@@ -1342,6 +1342,8 @@ test.describe("Radius Canvas in Chromium", () => {
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) navigations += 1;
     });
+    await gotoCanvas(page, canvas, "planned");
+    await expectNoWcagViolations(page);
     await page.route("**/api/ping", async (route) => {
       pings += 1;
       await route.fulfill({
@@ -1350,9 +1352,6 @@ test.describe("Radius Canvas in Chromium", () => {
         body: "{}"
       });
     });
-
-    await gotoCanvas(page, canvas, "planned");
-    await expectNoWcagViolations(page);
     const initialNavigations = navigations;
     await page.evaluate("window.dispatchEvent(new Event('focus'))");
     await expect.poll(() => pings).toBe(1);
@@ -1360,7 +1359,13 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.evaluate("window.dispatchEvent(new Event('focus'))");
     await expect.poll(() => pings).toBe(2);
     await expect(page.locator("#radius-reconnect-overlay")).toBeVisible();
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
+    const recoveryNavigation = page.waitForNavigation({
+      waitUntil: "domcontentloaded"
+    });
+    await page.evaluate(
+      "setTimeout(() => window.dispatchEvent(new Event('focus')), 0)"
+    );
+    await recoveryNavigation;
     await expect.poll(() => pings).toBe(3);
     await expect.poll(() => navigations - initialNavigations).toBe(1);
     await expect(page).toHaveURL(/page=planned/);

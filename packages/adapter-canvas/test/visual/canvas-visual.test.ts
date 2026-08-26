@@ -486,7 +486,9 @@ test.describe("Radius Canvas visual baselines", () => {
       await expect(page.locator("#planned-branch")).toHaveValue(
         WORKTREE_BRANCH
       );
+      await expect(page.locator("#plan-btn")).toBeEnabled();
       await page.locator("#planned-branch").dispatchEvent("change");
+      await expect(page.locator("#plan-btn")).toBeDisabled();
       await expectWorktreeBranchRequests(requests.planGraph);
       await gotoVisual(page, canvas, "planned", theme);
       await expect(page.locator(".rad-node")).toHaveCount(2);
@@ -544,6 +546,9 @@ test.describe("Radius Canvas visual baselines", () => {
         .getByRole("button", { name: "New Credential Profile" })
         .click();
       await expect(page.locator("#cred-form")).toBeVisible();
+      await expect(page.locator("#cred-ghcr-status")).toContainText(
+        "using the stored GitHub CLI credential"
+      );
       await screenshot(page, `vi-05-credential-profile-form-${theme}.png`);
     });
   }
