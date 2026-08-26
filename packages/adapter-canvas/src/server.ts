@@ -252,6 +252,7 @@ import {
 import type { WorkflowRollbackCommand } from "./server/services/workflow-rollback-ports.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
+import { createTemporaryKubeconfig } from "./server/temporary-kubeconfig.js";
 import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
 import { composeAzureAutoSetupDependencies } from "./server/azure-auto-setup-dependencies.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
@@ -843,9 +844,7 @@ const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
   runAz: (command, args) => runCliCommand(command, args),
   runCli: (command, args, options) => runCommand(command, args, options),
   isUuid,
-  createTemporaryKubeconfigPath: () =>
-    join(tmpdir(), `radius-kubeconfig-${randomUUID()}`),
-  removeTemporaryKubeconfig: (path) => rmSync(path, { force: true }),
+  createTemporaryKubeconfig,
   parseServedReposFromSubjects: (subjects) =>
     parseServedReposFromSubjects(subjects as Iterable<unknown>)
 });

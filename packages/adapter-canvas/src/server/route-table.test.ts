@@ -151,8 +151,10 @@ const productionHandlers = {
     runAz: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
     runCli: () => Promise.resolve(""),
     isUuid: () => false,
-    createTemporaryKubeconfigPath: () => "/tmp/radius-kubeconfig-test",
-    removeTemporaryKubeconfig: () => {},
+    createTemporaryKubeconfig: () => ({
+      path: "/tmp/radius-kubeconfig-test",
+      remove: () => {}
+    }),
     parseServedReposFromSubjects: () => []
   }),
   ...createAzureAutoSetupRoutes(createAzureAutoSetupTestDependencies()),

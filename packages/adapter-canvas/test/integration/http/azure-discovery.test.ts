@@ -79,8 +79,10 @@ function start(): {
         return Promise.resolve(scripted);
       },
       isUuid,
-      createTemporaryKubeconfigPath: () => "/tmp/radius-kubeconfig-test",
-      removeTemporaryKubeconfig: () => {},
+      createTemporaryKubeconfig: () => ({
+        path: "/tmp/radius-kubeconfig-test",
+        remove: () => {}
+      }),
       parseServedReposFromSubjects: (subjects) =>
         parseServedReposFromSubjects(subjects as Iterable<unknown>)
     })
@@ -255,7 +257,7 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
     expect(got.status).toBe(404);
   });
 
-  it("answers 200 with the refusal shape for a bad subscriptionId and a bad body", async () => {
+  it("answers 200 with the refusal shape for unsafe discovery inputs and a bad body", async () => {
     // Nothing is scripted on `runCli`, so any spawn attempt throws: both of
     // these must be refused before the CLI is reached.
     start();
@@ -269,7 +271,21 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
     expect(refused.headers.get("content-type")).toBe("application/json");
     expect(await refused.text()).toBe(
       '{"error":"Invalid subscriptionId \\"x&calc\\" (expected a GUID).",' +
-        '"clusters":[],"resourceGroups":[],"namespaces":["default"],"vpcs":[],"subnets":[]}'
+        '"clusters":[],"resourceGroups":[],"namespaces":[],"vpcs":[],"subnets":[]}'
+    );
+
+    const unsafeTarget = await fetch(`${entry.baseUrl}/api/discover`, {
+      method: "POST",
+      body: JSON.stringify({
+        provider: "azure",
+        resourceGroup: 'rg" & whoami & "',
+        cluster: "-aks-option"
+      })
+    });
+    expect(unsafeTarget.status).toBe(200);
+    expect(await unsafeTarget.text()).toBe(
+      '{"error":"Invalid Azure resource group name.",' +
+        '"clusters":[],"resourceGroups":[],"namespaces":[],"vpcs":[],"subnets":[]}'
     );
 
     const malformed = await fetch(`${entry.baseUrl}/api/discover`, {

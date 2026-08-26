@@ -27,9 +27,15 @@ export interface DiscoveryDependencies {
     options: { timeout: number }
   ): Promise<string>;
   isUuid(value: unknown): boolean;
-  createTemporaryKubeconfigPath(): string;
-  removeTemporaryKubeconfig(path: string): void;
+  createTemporaryKubeconfig(): {
+    readonly path: string;
+    remove(): void;
+  };
 }
+
+const AZURE_RESOURCE_GROUP_PATTERN =
+  /^(?=.{1,90}$)[A-Za-z0-9._()-]*[A-Za-z0-9_()-]$/;
+const AKS_CLUSTER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$/;
 
 function record(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -84,13 +90,34 @@ export async function discoverResources(
       error: `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`,
       clusters: [],
       resourceGroups: [],
-      namespaces: ["default"],
+      namespaces: [],
       vpcs: [],
       subnets: []
     };
   }
 
   if (data.provider === "azure") {
+    const resourceGroup = optionalString(data.resourceGroup).trim();
+    const cluster = optionalString(data.cluster).trim();
+    const invalidTarget =
+      (
+        resourceGroup !== "" &&
+        !AZURE_RESOURCE_GROUP_PATTERN.test(resourceGroup)
+      ) ?
+        "Invalid Azure resource group name."
+      : cluster !== "" && !AKS_CLUSTER_PATTERN.test(cluster) ?
+        "Invalid AKS cluster name."
+      : "";
+    if (invalidTarget !== "") {
+      return {
+        error: invalidTarget,
+        clusters: [],
+        resourceGroups: [],
+        namespaces: [],
+        vpcs: [],
+        subnets: []
+      };
+    }
     // Set tenant/subscription context before querying
     if (data.subscriptionId) {
       try {
@@ -146,10 +173,8 @@ export async function discoverResources(
       result.errors = result.errors || {};
       result.errors.resourceGroups = errorMessage(e).slice(0, 800);
     }
-    const resourceGroup = optionalString(data.resourceGroup).trim();
-    const cluster = optionalString(data.cluster).trim();
     if (resourceGroup && cluster) {
-      const kubeconfigPath = dependencies.createTemporaryKubeconfigPath();
+      const kubeconfig = dependencies.createTemporaryKubeconfig();
       try {
         await dependencies.runCli(
           "az",
@@ -161,7 +186,7 @@ export async function discoverResources(
             "--resource-group",
             resourceGroup,
             "--file",
-            kubeconfigPath,
+            kubeconfig.path,
             "--overwrite-existing",
             ...subArgs
           ],
@@ -171,7 +196,7 @@ export async function discoverResources(
           "kubectl",
           [
             "--kubeconfig",
-            kubeconfigPath,
+            kubeconfig.path,
             "get",
             "namespaces",
             "-o",
@@ -185,11 +210,7 @@ export async function discoverResources(
         result.errors = result.errors || {};
         result.errors.namespaces = errorMessage(e).slice(0, 800);
       } finally {
-        try {
-          dependencies.removeTemporaryKubeconfig(kubeconfigPath);
-        } catch {
-          // Best-effort cleanup: do not fail discovery due to temp file deletion.
-        }
+        kubeconfig.remove();
       }
     }
   } else {

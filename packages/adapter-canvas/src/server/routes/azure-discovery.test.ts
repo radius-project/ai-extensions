@@ -105,8 +105,10 @@ function dependencies(
       throw new Error("runCli not stubbed");
     },
     isUuid,
-    createTemporaryKubeconfigPath: () => "/tmp/radius-kubeconfig-test",
-    removeTemporaryKubeconfig: () => {},
+    createTemporaryKubeconfig: () => ({
+      path: "/tmp/radius-kubeconfig-test",
+      remove: () => {}
+    }),
     parseServedReposFromSubjects: () => {
       throw new Error("parseServedReposFromSubjects not stubbed");
     },
@@ -575,7 +577,8 @@ describe("azure-discovery routes (SU-08)", () => {
         expect(recording.contentType, bad).toBe("application/json");
         expect(JSON.parse(recording.body), bad).toEqual({
           error: `Invalid subscriptionId "${bad}" (expected a GUID).`,
-          ...REFUSAL
+          ...REFUSAL,
+          namespaces: []
         });
       }
     });
@@ -886,7 +889,8 @@ describe("azure-discovery routes (SU-08)", () => {
 
       expect(JSON.parse(recording.body)).toEqual({
         error: 'Invalid subscriptionId "x&calc" (expected a GUID).',
-        ...REFUSAL
+        ...REFUSAL,
+        namespaces: []
       });
     });
 

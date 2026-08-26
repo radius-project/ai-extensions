@@ -84,7 +84,6 @@ export interface DiscoveryPanelHandle {
     subscriptionId: string,
     tenantId: string
   ): Promise<void>;
-  getComboValue(selectId: string, customId: string): string;
   findAzureClusterResourceGroup(clusterId: string): string;
   setPendingInfraSelection(
     config: EnvironmentInfrastructure | null,
@@ -612,10 +611,16 @@ export function initializeDiscoveryPanel(
     if (select.value === "__custom__") {
       return context.dom.inputById(customId)?.value ?? "";
     }
-    if (selectId === "azure-cluster-select") {
-      return renderedAzureClusters.get(select.value)?.id ?? select.value;
-    }
     return select.value;
+  };
+
+  const selectedAzureClusterId = (): string => {
+    const select = context.dom.selectById("azure-cluster-select");
+    if (!select) return "";
+    if (select.value === "__custom__") {
+      return context.dom.inputById("azure-cluster-custom")?.value ?? "";
+    }
+    return renderedAzureClusters.get(select.value)?.id ?? select.value;
   };
 
   // Shared-identity pin helpers. The pin (az-selected-app-id) makes this repo
@@ -870,6 +875,7 @@ export function initializeDiscoveryPanel(
     const customCluster = context.dom.inputById("azure-cluster-custom");
     if (customResourceGroup) {
       scope.on(customResourceGroup, "change", () => {
+        if (rgSelect.value !== "__custom__") return;
         const customClusterSelected = clusterSelect.value === "__custom__";
         applyAzureResourceGroupFilter(customResourceGroup.value);
         if (customClusterSelected) {
@@ -916,8 +922,7 @@ export function initializeDiscoveryPanel(
       : "";
     const cluster =
       provider === "azure" && (!accountChanged || pending !== null) ?
-        (pending?.cluster ??
-        comboValue("azure-cluster-select", "azure-cluster-custom"))
+        (pending?.cluster ?? selectedAzureClusterId())
       : "";
     const clusterIsCustom =
       context.dom.selectById("azure-cluster-select")?.value === "__custom__";
@@ -1006,11 +1011,7 @@ export function initializeDiscoveryPanel(
           context,
           "azure-namespace-select",
           sortDiscoveryOptions(
-            parseDiscoveryOptions(
-              data.errors?.namespaces ?
-                []
-              : readArrayOrDefault(raw, "namespaces", DEFAULT_NAMESPACES)
-            )
+            parseDiscoveryOptions(readArray(raw, "namespaces"))
           ),
           "Select namespace…"
         );
@@ -1090,15 +1091,11 @@ export function initializeDiscoveryPanel(
   const rediscoverAzureNamespaces = async (): Promise<void> => {
     const account = discoveryAccounts.azure;
     const resourceGroup = comboValue("azure-rg-select", "azure-rg-custom");
-    const cluster = comboValue("azure-cluster-select", "azure-cluster-custom");
+    const cluster = selectedAzureClusterId();
     const clusterResourceGroup =
       findAzureClusterResourceGroup(cluster) || resourceGroup;
     if (clusterResourceGroup === "" || cluster === "") return;
     await discoverResources("azure", account.subscriptionId, account.tenantId);
-  };
-
-  const getComboValue = (selectId: string, customId: string): string => {
-    return comboValue(selectId, customId);
   };
 
   const restoreInfrastructureValue = (
@@ -1159,7 +1156,6 @@ export function initializeDiscoveryPanel(
     promptServiceManagementReference: () => promptSmr(context),
     promptAppSelection: (options) => showAppPicker(context, options),
     discoverResources,
-    getComboValue,
     findAzureClusterResourceGroup,
     setPendingInfraSelection(config, provider) {
       pendingInfrastructure = config ? { provider, config } : null;
@@ -1167,21 +1163,18 @@ export function initializeDiscoveryPanel(
     currentInfraSelection(provider) {
       return provider === "aws" ?
           {
-            cluster: getComboValue("aws-cluster-select", "aws-cluster-custom"),
-            namespace: getComboValue(
+            cluster: comboValue("aws-cluster-select", "aws-cluster-custom"),
+            namespace: comboValue(
               "aws-namespace-select",
               "aws-namespace-custom"
             ),
-            vpcId: getComboValue("aws-vpc-select", "aws-vpc-custom"),
-            subnetIds: getComboValue("aws-subnets-select", "aws-subnets-custom")
+            vpcId: comboValue("aws-vpc-select", "aws-vpc-custom"),
+            subnetIds: comboValue("aws-subnets-select", "aws-subnets-custom")
           }
         : {
-            resourceGroup: getComboValue("azure-rg-select", "azure-rg-custom"),
-            cluster: getComboValue(
-              "azure-cluster-select",
-              "azure-cluster-custom"
-            ),
-            namespace: getComboValue(
+            resourceGroup: comboValue("azure-rg-select", "azure-rg-custom"),
+            cluster: selectedAzureClusterId(),
+            namespace: comboValue(
               "azure-namespace-select",
               "azure-namespace-custom"
             )
