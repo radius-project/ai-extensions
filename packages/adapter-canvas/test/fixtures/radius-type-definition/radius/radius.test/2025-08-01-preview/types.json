@@ -1,0 +1,578 @@
+[
+  {
+    "$type": "StringType"
+  },
+  {
+    "$type": "StringType",
+    "sensitive": true
+  },
+  {
+    "$type": "BooleanType"
+  },
+  {
+    "$type": "IntegerType",
+    "minValue": 1,
+    "maxValue": 10
+  },
+  {
+    "$type": "StringLiteralType",
+    "value": "S"
+  },
+  {
+    "$type": "StringLiteralType",
+    "value": "M"
+  },
+  {
+    "$type": "StringLiteralType",
+    "value": "L"
+  },
+  {
+    "$type": "UnionType",
+    "elements": [
+      {
+        "$ref": "#/4"
+      },
+      {
+        "$ref": "#/5"
+      },
+      {
+        "$ref": "#/6"
+      }
+    ]
+  },
+  {
+    "$type": "ObjectType",
+    "name": "connection",
+    "properties": {
+      "disableDefaultEnvVars": {
+        "flags": 0,
+        "type": {
+          "$ref": "#/2"
+        }
+      },
+      "source": {
+        "description": "Resource ID of the source resource.",
+        "flags": 1,
+        "type": {
+          "$ref": "#/0"
+        }
+      }
+    }
+  },
+  {
+    "$type": "ObjectType",
+    "name": "connections",
+    "properties": {},
+    "additionalProperties": {
+      "$ref": "#/8"
+    }
+  },
+  {
+    "$type": "ObjectType",
+    "name": "postgreSqlDatabasesProperties",
+    "properties": {
+      "application": {
+        "description": "(Optional) The Radius Application ID.",
+        "flags": 0,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "connections": {
+        "description": "Map of connection name to connection data.",
+        "flags": 0,
+        "type": {
+          "$ref": "#/9"
+        }
+      },
+      "environment": {
+        "description": "(Required) The Radius Environment ID.",
+        "flags": 1,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "host": {
+        "description": "The host name used to connect to the database.",
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "password": {
+        "description": "The administrator password.",
+        "flags": 1,
+        "type": {
+          "$ref": "#/1"
+        }
+      },
+      "port": {
+        "description": "The port number used to connect to the database.",
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "size": {
+        "description": "The database size.",
+        "flags": 0,
+        "type": {
+          "$ref": "#/7"
+        }
+      },
+      "username": {
+        "description": "The administrator username.",
+        "flags": 1,
+        "type": {
+          "$ref": "#/0"
+        }
+      }
+    }
+  },
+  {
+    "$type": "StringLiteralType",
+    "value": "2025-08-01-preview"
+  },
+  {
+    "$type": "StringLiteralType",
+    "value": "Radius.Data/postgreSqlDatabases"
+  },
+  {
+    "$type": "ObjectType",
+    "name": "Radius.Data/postgreSqlDatabases@2025-08-01-preview",
+    "properties": {
+      "apiVersion": {
+        "flags": 10,
+        "type": {
+          "$ref": "#/11"
+        }
+      },
+      "application": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "environment": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "host": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "id": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "location": {
+        "flags": 0,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "name": {
+        "flags": 17,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "password": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/1"
+        }
+      },
+      "port": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "properties": {
+        "flags": 1,
+        "type": {
+          "$ref": "#/10"
+        }
+      },
+      "size": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/7"
+        }
+      },
+      "type": {
+        "flags": 10,
+        "type": {
+          "$ref": "#/12"
+        }
+      },
+      "username": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      }
+    }
+  },
+  {
+    "$type": "ResourceType",
+    "name": "Radius.Data/postgreSqlDatabases@2025-08-01-preview",
+    "body": {
+      "$ref": "#/13"
+    },
+    "readableScopes": 0,
+    "writableScopes": 0,
+    "functions": {}
+  },
+  {
+    "$type": "ObjectType",
+    "name": "build",
+    "properties": {
+      "source": {
+        "flags": 1,
+        "type": {
+          "$ref": "#/0"
+        }
+      }
+    }
+  },
+  {
+    "$type": "ObjectType",
+    "name": "containerImagesProperties",
+    "properties": {
+      "application": {
+        "flags": 0,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "build": {
+        "flags": 1,
+        "type": {
+          "$ref": "#/15"
+        }
+      },
+      "environment": {
+        "flags": 1,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "imageReference": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      }
+    }
+  },
+  {
+    "$type": "StringLiteralType",
+    "value": "Radius.Compute/containerImages"
+  },
+  {
+    "$type": "ObjectType",
+    "name": "Radius.Compute/containerImages@2025-08-01-preview",
+    "properties": {
+      "apiVersion": {
+        "flags": 10,
+        "type": {
+          "$ref": "#/11"
+        }
+      },
+      "application": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "build": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/15"
+        }
+      },
+      "environment": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "id": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "name": {
+        "flags": 17,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "properties": {
+        "flags": 1,
+        "type": {
+          "$ref": "#/16"
+        }
+      },
+      "type": {
+        "flags": 10,
+        "type": {
+          "$ref": "#/17"
+        }
+      }
+    }
+  },
+  {
+    "$type": "ResourceType",
+    "name": "Radius.Compute/containerImages@2025-08-01-preview",
+    "body": {
+      "$ref": "#/18"
+    },
+    "readableScopes": 0,
+    "writableScopes": 0,
+    "functions": {}
+  },
+  {
+    "$type": "ArrayType",
+    "itemType": {
+      "$ref": "#/0"
+    }
+  },
+  {
+    "$type": "ObjectType",
+    "name": "hosts",
+    "properties": {},
+    "additionalProperties": {
+      "$ref": "#/0"
+    }
+  },
+  {
+    "$type": "ObjectType",
+    "name": "container",
+    "properties": {
+      "image": {
+        "flags": 1,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "ports": {
+        "flags": 0,
+        "type": {
+          "$ref": "#/20"
+        }
+      }
+    }
+  },
+  {
+    "$type": "ObjectType",
+    "name": "containers",
+    "properties": {},
+    "additionalProperties": {
+      "$ref": "#/22"
+    }
+  },
+  {
+    "$type": "ObjectType",
+    "name": "containersProperties",
+    "properties": {
+      "application": {
+        "flags": 0,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "containers": {
+        "flags": 1,
+        "type": {
+          "$ref": "#/23"
+        }
+      },
+      "environment": {
+        "flags": 1,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "hosts": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/21"
+        }
+      }
+    }
+  },
+  {
+    "$type": "StringLiteralType",
+    "value": "Radius.Compute/containers"
+  },
+  {
+    "$type": "ObjectType",
+    "name": "Radius.Compute/containers@2025-08-01-preview",
+    "properties": {
+      "apiVersion": {
+        "flags": 10,
+        "type": {
+          "$ref": "#/11"
+        }
+      },
+      "application": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "containers": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/23"
+        }
+      },
+      "environment": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "hosts": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/21"
+        }
+      },
+      "id": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "name": {
+        "flags": 17,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "properties": {
+        "flags": 1,
+        "type": {
+          "$ref": "#/24"
+        }
+      },
+      "type": {
+        "flags": 10,
+        "type": {
+          "$ref": "#/25"
+        }
+      }
+    }
+  },
+  {
+    "$type": "ResourceType",
+    "name": "Radius.Compute/containers@2025-08-01-preview",
+    "body": {
+      "$ref": "#/26"
+    },
+    "readableScopes": 0,
+    "writableScopes": 0,
+    "functions": {}
+  },
+  {
+    "$type": "ObjectType",
+    "name": "applicationsProperties",
+    "properties": {
+      "environment": {
+        "flags": 1,
+        "type": {
+          "$ref": "#/0"
+        }
+      }
+    }
+  },
+  {
+    "$type": "StringLiteralType",
+    "value": "Radius.Core/applications"
+  },
+  {
+    "$type": "FunctionType",
+    "parameters": [
+      {
+        "name": "includeIcons",
+        "type": {
+          "$ref": "#/2"
+        },
+        "description": "Include icon bytes."
+      }
+    ],
+    "output": {
+      "$ref": "#/0"
+    }
+  },
+  {
+    "$type": "ObjectType",
+    "name": "Radius.Core/applications@2025-08-01-preview",
+    "properties": {
+      "apiVersion": {
+        "flags": 10,
+        "type": {
+          "$ref": "#/11"
+        }
+      },
+      "environment": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "id": {
+        "flags": 2,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "name": {
+        "flags": 17,
+        "type": {
+          "$ref": "#/0"
+        }
+      },
+      "properties": {
+        "flags": 1,
+        "type": {
+          "$ref": "#/28"
+        }
+      },
+      "type": {
+        "flags": 10,
+        "type": {
+          "$ref": "#/29"
+        }
+      }
+    }
+  },
+  {
+    "$type": "ResourceType",
+    "name": "Radius.Core/applications@2025-08-01-preview",
+    "body": {
+      "$ref": "#/31"
+    },
+    "readableScopes": 0,
+    "writableScopes": 0,
+    "functions": {
+      "getGraph": {
+        "type": {
+          "$ref": "#/30"
+        },
+        "description": "Return the application graph."
+      }
+    }
+  }
+]
