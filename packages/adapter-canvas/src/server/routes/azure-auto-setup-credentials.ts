@@ -370,7 +370,9 @@ async function createFederatedCredentials({
       );
       return false;
     }
-    return checkpoint();
+    return checkpoint(
+      `after-record-credential-provenance:${origin}:${credential.name}`
+    );
   };
 
   for (const desired of oidc.federatedCredentials) {
