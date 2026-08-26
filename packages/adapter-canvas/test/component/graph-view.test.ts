@@ -134,25 +134,30 @@ describe("graph view in a real browser", () => {
     disposers.push(() => style.remove());
 
     mount({
+      deployMode: true,
       resources: [
         {
           id: "app/recommendation",
           name,
-          type: "Radius.Compute/containers"
+          type: "Radius.Compute/containers",
+          deployStatus: "success"
         }
       ]
     });
 
     const recommendation = await card(name);
     const title = within(recommendation).getByTitle(name);
+    const badge = within(recommendation).getByAltText("Deployed");
     const titleBounds = title.getBoundingClientRect();
     const cardBounds = recommendation.getBoundingClientRect();
+    const badgeBounds = badge.getBoundingClientRect();
     const styles = getComputedStyle(title);
 
     expect(title.scrollWidth).toBeGreaterThan(title.clientWidth);
     expect(styles.overflow).toBe("hidden");
     expect(styles.textOverflow).toBe("ellipsis");
     expect(titleBounds.right).toBeLessThanOrEqual(cardBounds.right);
+    expect(titleBounds.right).toBeLessThanOrEqual(badgeBounds.left);
   });
 
   it("renders the deployed parent with its representative concrete root type", async () => {

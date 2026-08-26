@@ -215,7 +215,10 @@ export function createNodeComponent(
       settings.deployMode ? safeExternalUrl(data.portalUrl) : null;
     const head = h(
       "div",
-      { className: "rad-node__head" },
+      {
+        className:
+          badge ? "rad-node__head rad-node__head--with-badge" : "rad-node__head"
+      },
       icon,
       h(
         "span",

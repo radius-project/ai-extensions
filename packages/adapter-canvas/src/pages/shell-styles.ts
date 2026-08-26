@@ -377,6 +377,7 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     pointer-events: auto; cursor: pointer;
   }
   .rad-node__head { display: flex; align-items: center; gap: 10px; }
+  .rad-node__head--with-badge { padding-right: 22px; }
   .rad-node__icon { width: 40px; height: 40px; flex: none; object-fit: contain; }
   .rad-node__badge { position: absolute; right: 12px; top: 12px; width: 22px; height: 22px; object-fit: contain; pointer-events: none; }
   .rad-node__title {

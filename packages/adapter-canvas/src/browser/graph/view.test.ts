@@ -358,8 +358,14 @@ describe("node card", () => {
       const badge = flattenElements(tree).find((element) =>
         String(element.props.className ?? "").startsWith("rad-node__badge")
       );
+      const head = flattenElements(tree).find((element) =>
+        String(element.props.className ?? "").includes("rad-node__head")
+      );
       expect(props(badge).alt).toBe(alt);
       expect(props(badge).className).toBe(`rad-node__badge${progressClass}`);
+      expect(props(head).className).toBe(
+        "rad-node__head rad-node__head--with-badge"
+      );
     }
   );
 
@@ -370,6 +376,9 @@ describe("node card", () => {
         String(element.props.className ?? "").includes("rad-node__badge")
       )
     ).toBe(false);
+    expect(props(findByClass(tree, "rad-node__head")).className).toBe(
+      "rad-node__head"
+    );
   });
 
   it("fits the type label after layout, keyed on the label itself", () => {

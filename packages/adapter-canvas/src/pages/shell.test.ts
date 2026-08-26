@@ -126,10 +126,14 @@ describe("pageShell", () => {
   it("constrains graph titles to the node card width", () => {
     const html = pageShell("My Title", "<p>hello</p>");
     const titleStyles = html.match(/\.rad-node__title\s*\{([^}]*)\}/)?.[1];
+    const badgeHeadStyles = html.match(
+      /\.rad-node__head--with-badge\s*\{([^}]*)\}/
+    )?.[1];
     expect(titleStyles).toContain("min-width: 0");
     expect(titleStyles).toContain("overflow: hidden");
     expect(titleStyles).toContain("text-overflow: ellipsis");
     expect(titleStyles).toContain("white-space: nowrap");
+    expect(badgeHeadStyles).toContain("padding-right: 22px");
   });
 
   it("shows a pointer over a deployed node portal link", () => {
