@@ -327,14 +327,26 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
       const workspace = await workspaceState();
       Object.assign(entry.state, workspace);
       const inputRepo = optionalString(input.repo);
+      const inputBranch = optionalString(input.branch);
       if (inputRepo) {
         entry.state.contextRepo = inputRepo;
-        if (inputRepo === workspace.workspaceRepo) {
-          entry.state.contextBranch = workspace.workspaceBranch;
-        } else {
-          entry.state.contextBranch = optionalString(input.branch) || "main";
-        }
-      } else if (!entry.state.contextRepo && deps.session.get().workspacePath) {
+        // An explicit branch can name another branch of the workspace repository.
+        // Only an omitted branch means "use the checked-out worktree branch".
+        entry.state.contextBranch =
+          inputBranch ||
+          (inputRepo === workspace.workspaceRepo ?
+            workspace.workspaceBranch
+          : "main");
+      } else if (inputBranch) {
+        // Omitting the repository selects the current context repository, but an
+        // explicitly named branch still identifies the remote selection to use.
+        entry.state.contextBranch = inputBranch;
+      }
+      if (
+        !inputRepo &&
+        !entry.state.contextRepo &&
+        deps.session.get().workspacePath
+      ) {
         try {
           const session = deps.session.get();
           const { stdout } = await deps.process.execFile(
