@@ -17,6 +17,10 @@ import { DEFAULT_CANVAS_PAGE } from "./hooks.js";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
+import {
+  createRadiusCanvasInstanceRegistry,
+  type RadiusCanvasInstanceRegistry
+} from "./canvas-instance-registry.js";
 import type { CanvasGraphResource, CanvasState } from "../shared.js";
 import {
   asGraphModelingFailure,
@@ -51,7 +55,10 @@ function isCurrentSourceRefToken(
 
 // Everything below this line is created by createRadiusCanvas so it can close
 // over `deps` instead of module-level imports of server.ts/gh.ts/workspace.ts.
-export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
+export function createRadiusCanvas(
+  deps: RadiusExtensionDependencies,
+  canvasInstances: RadiusCanvasInstanceRegistry = createRadiusCanvasInstanceRegistry()
+) {
   const closeGenerations = new Map<string, number>();
   const { workspaceState, fetchBicepForBranch } =
     createGraphContextHelpers(deps);
@@ -165,13 +172,28 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
     inputSchema: buildRadiusCanvasInputSchema(DEFAULT_CANVAS_PAGE),
     actions,
     open: async (ctx: CanvasContext) => {
+      const activeInstanceId = canvasInstances.claim(ctx.instanceId);
+      if (activeInstanceId !== ctx.instanceId) {
+        throw new Error(
+          `Radius canvas instance ${activeInstanceId} is already open; reuse it instead of opening ${ctx.instanceId}.`
+        );
+      }
       closeGenerations.set(
         ctx.instanceId,
         (closeGenerations.get(ctx.instanceId) || 0) + 1
       );
       const input = record(ctx.input);
       const page = optionalString(input.page) || DEFAULT_CANVAS_PAGE;
-      const entry = await deps.getOrCreateServer(ctx.instanceId, page);
+      let entry;
+      try {
+        entry = await deps.getOrCreateServer(ctx.instanceId, page);
+      } catch (error) {
+        if (!deps.servers.has(ctx.instanceId)) {
+          canvasInstances.release(ctx.instanceId);
+        }
+        throw error;
+      }
+      entry.state.canvasInstanceId = ctx.instanceId;
       entry.state.activeGraphView =
         page === "graph-diff" ? "diff"
         : page === "planned" ? "planned"
@@ -379,6 +401,7 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
             deps.operations.markEnvironmentInstanceShuttingDown(ctx.instanceId);
             deps.servers.delete(ctx.instanceId);
             closeGenerations.delete(ctx.instanceId);
+            canvasInstances.release(ctx.instanceId);
             entry.server.close();
           };
           const stopListening = deps.operations.onEnvironmentTasksSettled(
@@ -397,6 +420,7 @@ export function createRadiusCanvas(deps: RadiusExtensionDependencies) {
         deps.operations.markEnvironmentInstanceShuttingDown(ctx.instanceId);
         deps.servers.delete(ctx.instanceId);
         closeGenerations.delete(ctx.instanceId);
+        canvasInstances.release(ctx.instanceId);
         await new Promise<void>((resolve) =>
           entry.server.close(() => resolve())
         );

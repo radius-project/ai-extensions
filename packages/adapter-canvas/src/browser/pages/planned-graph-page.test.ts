@@ -892,8 +892,11 @@ describe("initializePlannedGraphPage", () => {
     const { browser, branch } = fixture();
     const first = createDeferred<HttpResponse>();
     let calls = 0;
-    browser.net.handle("/api/plan-graph", () => {
+    const requestedBranches: string[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
       calls++;
+      const body = JSON.parse(String(init?.body)) as { branch?: string };
+      requestedBranches.push(body.branch || "");
       return calls === 1 ? first.promise : jsonResponse({ reload: true });
     });
     initializePlannedGraphPage(browser.context, globals());
@@ -906,13 +909,11 @@ describe("initializePlannedGraphPage", () => {
     browser.clock.tick(PLAN_DEBOUNCE_MS);
     await flushPromises();
 
-    // Requests are serialized, so the replacement is still queued: it is only
-    // released once the superseded request settles.
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
+    expect(browser.net.aborted).toBe(1);
+    expect(requestedBranches).toEqual(["feature", "another"]);
 
     first.reject(new Error("stale plan failure"));
-    await flushPromises();
-    browser.clock.tick(PLAN_DEBOUNCE_MS);
     await flushPromises();
 
     expect(calls).toBe(2);

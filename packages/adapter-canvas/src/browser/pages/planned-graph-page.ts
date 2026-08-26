@@ -311,7 +311,7 @@ export function initializePlannedGraphPage(
         );
       })
       .then(() => {
-        stopProgress();
+        if (current()) stopProgress();
         if (requestAbort === abort) requestAbort = null;
       });
   };
@@ -338,6 +338,9 @@ export function initializePlannedGraphPage(
   // deploy does not exist yet, and the request may still fail.
   const queue = (immediate = false): void => {
     stopAppBicepRetry();
+    requestAbort?.abort();
+    requestAbort = null;
+    stopProgress();
     plan.requestFailed = false;
     plan.planPending = true;
     applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);

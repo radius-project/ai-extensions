@@ -284,6 +284,7 @@ export interface CanvasState {
   graphDefinitionHash?: string;
   graphBuildGeneration?: number;
   progressMessages?: string[];
+  canvasInstanceId?: string;
   // Delivered model handoffs by repo+branch target. A same-instance reopen can
   // change targets while the old iframe still polls, so one latest key cannot
   // deduplicate both targets.

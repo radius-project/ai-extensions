@@ -144,14 +144,14 @@ describe("RU-19: onPreToolUse hook", () => {
     expect(result).toBeUndefined();
   });
 
-  it("requires every Radius open to reuse the canonical canvas instance", async () => {
+  it("uses the canonical instance initially, then reuses the live Radius instance", async () => {
     const { ext } = setup();
 
     const missing = await ext.hooks.onPreToolUse({
       toolName: "open_canvas",
       toolArgs: { canvasId: "radius", input: { page: "graph" } }
     });
-    const different = await ext.hooks.onPreToolUse({
+    const differentAfterDefault = await ext.hooks.onPreToolUse({
       toolName: "open_canvas",
       toolArgs: {
         canvasId: "radius",
@@ -159,7 +159,7 @@ describe("RU-19: onPreToolUse hook", () => {
         input: { page: "graph" }
       }
     });
-    const canonical = await ext.hooks.onPreToolUse({
+    const canonicalAgain = await ext.hooks.onPreToolUse({
       toolName: "open_canvas",
       toolArgs: {
         canvasId: "radius",
@@ -168,14 +168,66 @@ describe("RU-19: onPreToolUse hook", () => {
       }
     });
 
-    expect(missing).toEqual(
+    expect(missing).toBeUndefined();
+    expect(differentAfterDefault).toEqual(
       expect.objectContaining({ permissionDecision: "deny" })
     );
-    expect(different).toEqual(
+    expect(differentAfterDefault?.additionalContext).toContain("radius-panel");
+    expect(canonicalAgain).toBeUndefined();
+  });
+
+  it("reuses an arbitrary existing Radius instance instead of opening the canonical default", async () => {
+    const { ext } = setup();
+    await ext.canvases[0].open({
+      extensionId: "radius-project.radius",
+      canvasId: "radius",
+      instanceId: "app-graph",
+      input: { page: "graph" }
+    });
+
+    const canonical = await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "radius-panel",
+        input: { page: "planned" }
+      }
+    });
+    const existing = await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "app-graph",
+        input: { page: "planned" }
+      }
+    });
+
+    expect(canonical).toEqual(
       expect.objectContaining({ permissionDecision: "deny" })
     );
-    expect(different?.additionalContext).toContain("radius-panel");
-    expect(canonical).toBeUndefined();
+    expect(canonical?.additionalContext).toContain("`app-graph`");
+    expect(existing).toBeUndefined();
+  });
+
+  it("releases an unfulfilled Radius reservation after open_canvas fails", async () => {
+    const { ext } = setup();
+    await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: { canvasId: "radius" }
+    });
+
+    await ext.hooks.onPostToolUseFailure({
+      toolName: "open_canvas",
+      toolArgs: { canvasId: "radius" },
+      error: "host unavailable"
+    });
+
+    await expect(
+      ext.hooks.onPreToolUse({
+        toolName: "open_canvas",
+        toolArgs: { canvasId: "radius", instanceId: "replacement-panel" }
+      })
+    ).resolves.toBeUndefined();
   });
 
   it("allows opening a graph page with no application model, leaving the decision to the graph routes", async () => {
@@ -335,18 +387,26 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     const { ext, deps, capturedHostCallbacks } = setup();
     const session = createFakeSession();
     ext.attachSession(session);
+    await ext.canvases[0].open({
+      extensionId: "radius-project.radius",
+      canvasId: "radius",
+      instanceId: "app-graph",
+      input: { page: "graph" }
+    });
+    const state = deps.servers.get("app-graph")?.state;
     expect(capturedHostCallbacks.appBicepHandoff).toBeTypeOf("function");
     await capturedHostCallbacks.appBicepHandoff!({
       repo: "acme/widgets",
       branches: ["main"],
-      page: "graph"
+      page: "graph",
+      state
     });
     expect(session.send).toHaveBeenCalledOnce();
     const sent = (session.send as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as { prompt: string; displayPrompt: string };
     // The agent half must carry the full instructions...
     expect(sent.prompt).toBe(
-      appBicepHandoffPrompt("acme/widgets", "graph", ["main"])
+      appBicepHandoffPrompt("acme/widgets", "graph", ["main"], "app-graph")
     );
     // ...and the timeline half must be the short stand-in, not the reverse.
     expect(sent.displayPrompt).toBe(

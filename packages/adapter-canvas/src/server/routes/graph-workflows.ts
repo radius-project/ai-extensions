@@ -495,9 +495,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     entry: TEntry,
     repo: string,
     branch: string,
-    reportRefusal: (detail: string) => void
+    reportRefusal: (detail: string) => void,
+    isCurrent?: () => boolean
   ): Promise<GraphWorkflowOutcome> {
     const refusal = await branchRefusalReason(entry, repo, branch);
+    if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
     if (refusal) {
       reportRefusal(refusal);
       return json(200, {
@@ -816,6 +818,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         data.restartWait === true
       );
       activeProgressHandle = progressHandle;
+      const isCurrentPlan = (): boolean =>
+        dependencies.isCurrentPlannedGraphRequest(state, planGeneration);
 
       const addEvent = (
         stage: GraphBuildStage,
@@ -824,7 +828,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       ): void => {
         if (
           !isCurrentGraphProgress(state, progressHandle) ||
-          !dependencies.isCurrentPlannedGraphRequest(state, planGeneration)
+          !isCurrentPlan()
         ) {
           return;
         }
@@ -840,6 +844,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         `Checking ${repo} for .radius/app.bicep.`
       );
       const selection = await pipeline.selectAppBicep(entry, repo, branch);
+      if (!isCurrentPlan()) return json(409, STALE_PAYLOAD);
       const content = selection.content;
       if (!content) {
         addEvent(
@@ -852,8 +857,12 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "running",
           "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
         );
-        return await appBicepHandoffOutcome(entry, repo, branch, (detail) =>
-          addEvent("creating_model", "failed", detail)
+        return await appBicepHandoffOutcome(
+          entry,
+          repo,
+          branch,
+          (detail) => addEvent("creating_model", "failed", detail),
+          isCurrentPlan
         );
       }
       if (modelCreationIsRunning(progressHandle.record)) {
@@ -877,6 +886,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         log: addBuildDetail
       });
       const definitionHash = pipeline.definitionHashFor(selection, staged);
+      if (!isCurrentPlan()) {
+        try {
+          pipeline.discardStagedArtifacts(staged);
+        } catch {
+          /* best-effort */
+        }
+        return json(409, STALE_PAYLOAD);
+      }
       const canReusePlannedGraph =
         data.refresh === true &&
         Array.isArray(previousPlannedResources) &&
@@ -959,7 +976,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
 
       if (sourceRefContext) {
         // Equivalent mutant, as in load-graph: retained verbatim, unreachable.
-        if (!dependencies.isCurrentPlannedGraphRequest(state, planGeneration)) {
+        if (!isCurrentPlan()) {
           return json(409, STALE_PAYLOAD);
         }
         if (

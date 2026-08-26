@@ -168,7 +168,9 @@ export function createAppModelHandoff(
       }
       if (!ownsReservation()) return;
       try {
-        await deps.send(appBicepHandoffMessage(repo, page, targets));
+        await deps.send(
+          appBicepHandoffMessage(repo, page, targets, state?.canvasInstanceId)
+        );
       } catch (sendError) {
         releaseReservation();
         throw sendError;

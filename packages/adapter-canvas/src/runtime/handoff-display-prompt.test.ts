@@ -68,8 +68,8 @@ describe("issue #209: automated turns never render as user-authored messages", (
   });
 
   it("routes every handoff through a builder that pairs prompt with displayPrompt", () => {
-    expect(sources["app-model-handoff.ts"]).toContain(
-      "send(appBicepHandoffMessage("
+    expect(sources["app-model-handoff.ts"]).toMatch(
+      /send\(\s*appBicepHandoffMessage\(/
     );
     expect(sources["app-model-handoff.ts"]).toContain(
       "send(appModelUnverifiedMessage("

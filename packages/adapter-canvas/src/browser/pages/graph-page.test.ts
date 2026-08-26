@@ -716,6 +716,28 @@ describe("initializeGraphPage", () => {
     expect(browser.nav.reloads).toBe(1);
   });
 
+  it("aborts an in-flight graph and requests the newly selected branch", async () => {
+    const { browser, branch } = fixture({ loaded: false });
+    const first = createDeferred<HttpResponse>();
+    const requestedBranches: string[] = [];
+    browser.net.handle("/api/load-graph", (init) => {
+      const body = JSON.parse(String(init?.body)) as { branch?: string };
+      requestedBranches.push(body.branch || "");
+      return requestedBranches.length === 1 ?
+          first.promise
+        : jsonResponse({ resources: [] });
+    });
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    await flushPromises();
+
+    expect(browser.net.aborted).toBe(1);
+    expect(requestedBranches).toEqual(["feature", "another"]);
+  });
+
   it("updates a loaded graph for a new branch using response provenance", async () => {
     const { browser, branch } = fixture({
       loaded: true,

@@ -247,7 +247,8 @@ test.describe("Radius Canvas in Chromium", () => {
       .toBe(true);
     expect(bodyFor(canvas, "/api/load-graph")).toEqual({
       repo: REPOSITORY,
-      branch: WORKTREE_BRANCH
+      branch: WORKTREE_BRANCH,
+      restartWait: true
     });
     await expect
       .poll(async () =>
@@ -531,6 +532,40 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).not.toContainText(
       "Application graph ready"
     );
+  });
+
+  test("cancels an in-flight graph when the branch selection changes @safety", async ({
+    page,
+    canvas
+  }) => {
+    let releaseFirst: (() => void) | undefined;
+    const branches: string[] = [];
+    await page.route("**/api/load-graph", async (route) => {
+      const body = route.request().postDataJSON() as { branch?: string };
+      branches.push(body.branch || "");
+      if (branches.length === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        await route.abort().catch(() => undefined);
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ resources: [] })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    await expect.poll(() => branches).toEqual([WORKTREE_BRANCH]);
+    await page.getByLabel("Branch").selectOption("release");
+
+    await expect.poll(() => branches).toEqual([WORKTREE_BRANCH, "release"]);
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready");
+    releaseFirst?.();
   });
 
   test("keeps the modeling status stable while the graph automatically polls", async ({

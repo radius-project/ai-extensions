@@ -674,12 +674,23 @@ describe("RU-17: canvas instance reuse", () => {
     expect(second!.page).toBe("planned");
   });
 
-  it("creates distinct entries for distinct instanceIds", async () => {
+  it("rejects a second Radius instance while the existing panel is live", async () => {
     const { canvas, deps } = setup();
     await canvas.open(ctx("panel-a", { page: "graph" }));
-    await canvas.open(ctx("panel-b", { page: "graph" }));
-    expect(deps.servers.get("panel-a")).not.toBe(deps.servers.get("panel-b"));
-    expect(deps.servers.size).toBe(2);
+    await expect(
+      canvas.open(ctx("panel-b", { page: "graph" }))
+    ).rejects.toThrow(/panel-a is already open/);
+    expect(deps.servers.has("panel-a")).toBe(true);
+    expect(deps.servers.has("panel-b")).toBe(false);
+  });
+
+  it("allows a new instance after the authoritative panel closes", async () => {
+    const { canvas, deps } = setup();
+    await canvas.open(ctx("panel-a", { page: "graph" }));
+    await canvas.onClose(ctx("panel-a"));
+
+    await canvas.open(ctx("panel-b", { page: "planned" }));
+    expect(deps.servers.has("panel-b")).toBe(true);
   });
 });
 
@@ -700,13 +711,11 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("closing one instance does not affect another", async () => {
+  it("ignores a close notification for a different instance", async () => {
     const { canvas, deps } = setup();
     await canvas.open(ctx("panel-a", { page: "graph" }));
-    await canvas.open(ctx("panel-b", { page: "graph" }));
-    await canvas.onClose(ctx("panel-a"));
-    expect(deps.servers.has("panel-a")).toBe(false);
-    expect(deps.servers.has("panel-b")).toBe(true);
+    await canvas.onClose(ctx("panel-b"));
+    expect(deps.servers.has("panel-a")).toBe(true);
   });
 
   it("defers close until the last server-owned environment task settles", async () => {
@@ -761,13 +770,12 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     expect(deps.servers.get("radius-panel")).toBe(entry);
   });
 
-  it("does not defer one instance for another instance's active work", async () => {
+  it("does not defer the live instance for stale work attributed to another id", async () => {
     const { canvas, deps } = setup();
     vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockImplementation(
       (instanceId) => instanceId === "panel-b"
     );
     await canvas.open(ctx("panel-a", { page: "environment" }));
-    await canvas.open(ctx("panel-b", { page: "environment" }));
     const panelA = deps.servers.get("panel-a")!;
     const closeSpy = panelA.server.close as unknown as ReturnType<typeof vi.fn>;
 
@@ -775,7 +783,6 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
 
     expect(closeSpy).toHaveBeenCalledTimes(1);
     expect(deps.operations.onEnvironmentTasksSettled).not.toHaveBeenCalled();
-    expect(deps.servers.has("panel-b")).toBe(true);
   });
 
   it("force-closes a deferred server after the supported operation lifetime", async () => {

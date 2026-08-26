@@ -90,6 +90,7 @@ interface PipelineScript {
   // Every path on a branch, keyed by branch. Empty models a tree that could not
   // be read, which is what the default leaves in place.
   branchPaths?: Record<string, string[]>;
+  afterListBranchPaths?: () => void;
   compileThrows?: Record<string, Error>;
   stageLogs?: Record<string, string>;
   compileLogs?: Record<string, string>;
@@ -98,6 +99,7 @@ interface PipelineScript {
   modelingActivityAtMs?: number;
   observeModelingRun?: () => Promise<number | null>;
   // Runs after the named stage, so a test can move the world on mid-request.
+  afterSelect?: () => void;
   afterStage?: () => void;
   afterCompile?: () => void;
 }
@@ -193,9 +195,13 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       order.push(`select:${branch}`);
       const failure = harnessScript.selectThrows?.[branch];
       if (failure) return Promise.reject(failure);
-      return Promise.resolve(
-        requireScripted(harnessScript.selections, branch, "selectAppBicep")
+      const selection = requireScripted(
+        harnessScript.selections,
+        branch,
+        "selectAppBicep"
       );
+      harnessScript.afterSelect?.();
+      return Promise.resolve(selection);
     },
     bicepPathOf: (selection) => selection.bicepPath || ".radius/app.bicep",
     stageArtifacts: ({ branch, log }: StageArtifactsInput) => {
@@ -246,8 +252,11 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       repairExhausted: false
     }),
     clearGraphRepairAttempt: () => {},
-    listBranchPaths: (_entry, _repo, branch) =>
-      Promise.resolve(harnessScript.branchPaths?.[branch] ?? []),
+    listBranchPaths: (_entry, _repo, branch) => {
+      const paths = harnessScript.branchPaths?.[branch] ?? [];
+      harnessScript.afterListBranchPaths?.();
+      return Promise.resolve(paths);
+    },
     observeModelingRun: (_state, repo, branches) => {
       modelingObservations.count++;
       modelingObservations.lastRepo = repo;
@@ -1145,6 +1154,39 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs[0]?.page).toBe("graph");
     });
 
+    it("does not hand off a missing model after a newer plan supersedes it", async () => {
+      let harness!: Harness;
+      harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        afterSelect: () => {
+          beginPlannedGraphRequest(harness.state);
+        }
+      });
+
+      const outcome = await harness.run("planGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.status).toBe(409);
+      expect(outcome.payload).toEqual({ stale: true });
+      expect(harness.handoffs).toEqual([]);
+    });
+
+    it("does not hand off when superseded while inspecting a missing model's branch", async () => {
+      let harness!: Harness;
+      harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchPaths: { main: ["Dockerfile"] },
+        afterListBranchPaths: () => {
+          beginPlannedGraphRequest(harness.state);
+        }
+      });
+
+      const outcome = await harness.run("planGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.status).toBe(409);
+      expect(outcome.payload).toEqual({ stale: true });
+      expect(harness.handoffs).toEqual([]);
+    });
+
     it("reports a rendered plan's model so drift is still noticed after it exists", async () => {
       const harness = start({ selections: { main: selectionOf() } });
 
@@ -1269,6 +1311,40 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs).toHaveLength(1);
       expect(harness.order).toEqual(["select:main", "stage:main", "discard:"]);
       expect(harness.recipePackCalls).toEqual([]);
+    });
+
+    it("does not restore cached planned resources after a newer plan supersedes staging", async () => {
+      let harness!: Harness;
+      harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: true } },
+        discardThrows: new Error("EBUSY"),
+        afterStage: () => {
+          beginPlannedGraphRequest(harness.state);
+        }
+      });
+      Object.assign(harness.state, {
+        plannedResources: [{ id: "cached" }],
+        plannedRepo: "octo/app",
+        plannedBranch: "main",
+        plannedProvider: "azure",
+        plannedEnvironment: "",
+        plannedDefinitionHash: "hash-a"
+      });
+
+      const outcome = await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","refresh":true}'
+      );
+
+      expect(outcome.status).toBe(409);
+      expect(outcome.payload).toEqual({ stale: true });
+      expect(harness.state.plannedResources).toBeNull();
+      expect(harness.order).toEqual([
+        "select:main",
+        "stage:main",
+        "discard:/tmp/staged"
+      ]);
     });
 
     it("preserves the persisted environment when freshness reconciliation has no loaded selector", async () => {

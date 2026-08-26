@@ -155,10 +155,10 @@ describe("P0-A Radius runtime registration contract", () => {
     await enabled.extension.shutdown("test");
   });
 
-  it("rejects noncanonical Radius canvas instances at the SDK hook boundary", async () => {
+  it("keeps the first Radius canvas instance authoritative at the SDK hook boundary", async () => {
     const harness = await createRuntimeSdkHarness();
 
-    const rejected = await harness.extension.hooks.onPreToolUse({
+    const first = await harness.extension.hooks.onPreToolUse({
       toolName: "open_canvas",
       toolArgs: {
         canvasId: "radius",
@@ -166,7 +166,7 @@ describe("P0-A Radius runtime registration contract", () => {
         input: { page: "graph", repo: "acme/widgets" }
       }
     });
-    const accepted = await harness.extension.hooks.onPreToolUse({
+    const rejected = await harness.extension.hooks.onPreToolUse({
       toolName: "open_canvas",
       toolArgs: {
         canvasId: "radius",
@@ -175,11 +175,11 @@ describe("P0-A Radius runtime registration contract", () => {
       }
     });
 
+    expect(first).toBeUndefined();
     expect(rejected).toEqual(
       expect.objectContaining({ permissionDecision: "deny" })
     );
-    expect(rejected?.additionalContext).toContain("radius-panel");
-    expect(accepted).toBeUndefined();
+    expect(rejected?.additionalContext).toContain("app-graph-studious");
 
     await harness.extension.shutdown("test");
   });
@@ -247,6 +247,7 @@ describe("P0-A Radius runtime registration contract", () => {
         body: `${markdown}\nImplementation details`
       }
     };
+    await harness.host.open("app-graph", { page: "graph" });
     await expect(
       harness.extension.hooks.onPreToolUse(allowed)
     ).resolves.toBeUndefined();
@@ -255,7 +256,7 @@ describe("P0-A Radius runtime registration contract", () => {
     ).resolves.toBeUndefined();
     expect(harness.routedOpens.at(-1)).toMatchObject({
       canvasId: "radius",
-      instanceId: "radius-panel",
+      instanceId: "app-graph",
       input: {
         page: "graph-diff",
         repo: "acme/widgets",
@@ -562,7 +563,7 @@ describe("P0-A Radius runtime registration contract", () => {
 });
 
 describe("P0-A Radius SDK routing and lifecycle", () => {
-  it("routes open, same-instance reopen, rehydrate, and close through one provider instance", async () => {
+  it("rehydrates and reuses an arbitrary existing instance until it closes", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {
         workspacePath: "/worktrees/widgets",
@@ -571,32 +572,39 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       }
     });
 
-    await harness.host.open("radius-panel", {
+    await harness.host.open("app-graph", {
       page: "graph",
       repo: "acme/widgets",
       branch: "main"
     });
-    const firstEntry = harness.servers.get("radius-panel");
+    const firstEntry = harness.servers.get("app-graph");
     expect(firstEntry?.state).toMatchObject({
       contextRepo: "acme/widgets",
       contextBranch: "feature/runtime-tests"
     });
 
-    await harness.host.open("radius-panel", {
+    await harness.host.open("app-graph", {
       page: "planned",
       repo: "acme/widgets"
     });
-    expect(harness.servers.get("radius-panel")).toBe(firstEntry);
+    expect(harness.servers.get("app-graph")).toBe(firstEntry);
     expect(harness.servers.size).toBe(1);
     expect(firstEntry?.page).toBe("planned");
 
-    await harness.host.rehydrate("radius-panel");
-    expect(harness.servers.get("radius-panel")).toBe(firstEntry);
+    await harness.host.rehydrate("app-graph");
+    expect(harness.servers.get("app-graph")).toBe(firstEntry);
     expect(harness.routedOpens).toHaveLength(3);
 
-    await harness.host.close("radius-panel");
-    expect(harness.servers.has("radius-panel")).toBe(false);
+    await expect(
+      harness.host.open("radius-panel", { page: "graph" })
+    ).rejects.toThrow(/app-graph is already open/);
+
+    await harness.host.close("app-graph");
+    expect(harness.servers.has("app-graph")).toBe(false);
     expect(firstEntry?.server.close).toHaveBeenCalledOnce();
+
+    await harness.host.open("radius-panel", { page: "graph" });
+    expect(harness.servers.has("radius-panel")).toBe(true);
   });
 
   it("surfaces provider failures instead of returning a success-shaped fallback", async () => {
@@ -609,6 +617,9 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       harness.host.open("broken-panel", { page: "credentials" })
     ).rejects.toThrow("provider unavailable");
     expect(harness.servers.has("broken-panel")).toBe(false);
+    await expect(
+      harness.host.open("replacement-panel", { page: "credentials" })
+    ).resolves.toMatchObject({ title: "Radius" });
   });
 
   it("uses the worktree branch for the session repository and explicit base/head for graph diff", async () => {

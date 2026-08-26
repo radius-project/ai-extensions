@@ -77,6 +77,18 @@ describe("appBicepHandoffPrompt", () => {
     expect(msg).toContain("instanceId `radius-panel`");
   });
 
+  it("reopens the actual existing Radius instance after modeling", () => {
+    const msg = appBicepHandoffPrompt(
+      "acme/widgets",
+      "graph",
+      ["feat"],
+      "app-graph"
+    );
+
+    expect(msg).toContain("instanceId `app-graph`");
+    expect(msg).toContain("refreshes its server and client connections");
+  });
+
   it("names multiple branches when given several", () => {
     const msg = appBicepHandoffPrompt("acme/widgets", "graph-diff", [
       "main",

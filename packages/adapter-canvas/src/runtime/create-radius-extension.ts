@@ -25,6 +25,7 @@ import {
   deployFailureNoticeMessage
 } from "./hooks.js";
 import { createPullRequestGraphDiffGuard } from "./pr-graph-diff-guard.js";
+import { createRadiusCanvasInstanceRegistry } from "./canvas-instance-registry.js";
 import { errorMessage } from "./util.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { SessionPort } from "./session.js";
@@ -89,6 +90,13 @@ export function createRadiusExtension(
 ): RadiusExtension {
   const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
+  const canvasInstances = createRadiusCanvasInstanceRegistry();
+
+  const selectedCanvasInstanceId = (): string =>
+    canvasInstances.current() ?? RADIUS_CANVAS_INSTANCE_ID;
+
+  const reserveCanvasInstance = (): string =>
+    canvasInstances.claim(selectedCanvasInstanceId());
 
   // Staleness signals already handed to the agent, so a refresh that does not
   // clear the drift cannot re-prompt on every later render. Scoped to this
@@ -125,12 +133,19 @@ export function createRadiusExtension(
       };
     },
     getDefaultBranch: (repo) => deps.github.getDefaultBranch(repo),
-    openGraphDiff: ({ repo, baseBranch, headBranch }) =>
-      deps.session.get().rpc.canvas.open({
-        canvasId: "radius",
-        instanceId: RADIUS_CANVAS_INSTANCE_ID,
-        input: { page: "graph-diff", repo, baseBranch, headBranch }
-      })
+    openGraphDiff: async ({ repo, baseBranch, headBranch }) => {
+      const instanceId = reserveCanvasInstance();
+      try {
+        return await deps.session.get().rpc.canvas.open({
+          canvasId: "radius",
+          instanceId,
+          input: { page: "graph-diff", repo, baseBranch, headBranch }
+        });
+      } catch (error) {
+        if (!deps.servers.has(instanceId)) canvasInstances.release(instanceId);
+        throw error;
+      }
+    }
   });
   let pendingStartupDiagnostic = "";
 
@@ -439,7 +454,7 @@ export function createRadiusExtension(
   }
 
   return {
-    canvases: [createRadiusCanvas(deps)],
+    canvases: [createRadiusCanvas(deps, canvasInstances)],
     tools: createRadiusTools(deps),
     hooks: {
       // Nothing here inspects the application model any more. Opening a graph
@@ -457,23 +472,51 @@ export function createRadiusExtension(
             input.toolArgs !== null && typeof input.toolArgs === "object" ?
               Reflect.get(input.toolArgs, "instanceId")
             : undefined;
-          if (
-            canvasId === "radius" &&
-            instanceId !== RADIUS_CANVAS_INSTANCE_ID
-          ) {
+          if (canvasId === "radius") {
+            const guarded = await pullRequestGraphDiffGuard.onPreToolUse(input);
+            if (guarded) return guarded;
+            const requestedInstanceId =
+              typeof instanceId === "string" && instanceId ?
+                instanceId
+              : RADIUS_CANVAS_INSTANCE_ID;
+            const selectedInstanceId =
+              canvasInstances.claim(requestedInstanceId);
+            if (requestedInstanceId === selectedInstanceId) {
+              return undefined;
+            }
             return {
               permissionDecision: "deny",
               permissionDecisionReason:
-                "Radius uses one canonical canvas instance.",
-              additionalContext: `Retry open_canvas with instanceId \`${RADIUS_CANVAS_INSTANCE_ID}\`. Reuse that instance for every Radius page so polling or agent-driven reopens cannot create duplicate panels.`
+                "A Radius canvas is already open in this session.",
+              additionalContext: `Retry open_canvas with the existing instanceId \`${selectedInstanceId}\`. Reopening that exact instance refreshes its server and client connections; do not create another Radius panel.`
             };
           }
         }
         return await pullRequestGraphDiffGuard.onPreToolUse(input);
       },
       onPostToolUse: (input) => pullRequestGraphDiffGuard.onPostToolUse(input),
-      onPostToolUseFailure: (input) =>
-        pullRequestGraphDiffGuard.onPostToolUseFailure(input),
+      onPostToolUseFailure: async (input) => {
+        const canvasId =
+          input.toolArgs !== null && typeof input.toolArgs === "object" ?
+            Reflect.get(input.toolArgs, "canvasId")
+          : undefined;
+        const instanceId =
+          input.toolArgs !== null && typeof input.toolArgs === "object" ?
+            Reflect.get(input.toolArgs, "instanceId")
+          : undefined;
+        const failedInstanceId =
+          typeof instanceId === "string" && instanceId ?
+            instanceId
+          : RADIUS_CANVAS_INSTANCE_ID;
+        if (
+          input.toolName === "open_canvas" &&
+          canvasId === "radius" &&
+          !deps.servers.has(failedInstanceId)
+        ) {
+          canvasInstances.release(failedInstanceId);
+        }
+        return await pullRequestGraphDiffGuard.onPostToolUseFailure(input);
+      },
       onSessionStart: async (input) => {
         let active = false;
         try {
