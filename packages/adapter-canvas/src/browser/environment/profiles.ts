@@ -9,12 +9,20 @@
 // injects — never through a shared browser global.
 
 import { isDomElement } from "../context.js";
+import { createCommandAction } from "../command-action.js";
+import type { CommandActionHandle } from "../command-action.js";
+import {
+  isRemediationId,
+  remediationView
+} from "@radius-project/core/remediations";
+import type { RemediationView } from "@radius-project/core/remediations";
 import { setChildren } from "../dom.js";
 import type { ElementSpec } from "../dom.js";
 import { beginEntry } from "../lifecycle.js";
 import { isRecord, readArray, readBoolean, readString } from "../json.js";
 import type {
   BrowserContext,
+  DomElement,
   DomEventListener,
   DomEventTarget
 } from "../ports.js";
@@ -47,8 +55,7 @@ export const GITHUB_IDENTITY_IDS = {
   note: "env-gh-identity-note",
   recheck: "env-gh-recheck",
   details: "env-gh-technical-details",
-  repair: "env-gh-repair",
-  fix: "env-gh-fix-access"
+  repair: "env-gh-repair"
 } as const;
 
 export type CredentialProvider = "azure" | "aws";
@@ -95,6 +102,7 @@ export interface GithubReadiness {
   readonly credentialSource: string;
   readonly summary: string;
   readonly repair: string;
+  readonly repairRemediation: RemediationView | null;
   readonly selectionHandle: string;
   readonly checks: Readonly<Record<string, GithubReadinessCheck>>;
 }
@@ -200,6 +208,22 @@ export function parseGithubReadiness(payload: unknown): GithubReadiness {
     credentialSource: readString(readiness, "credentialSource"),
     summary: readString(readiness, "summary"),
     repair: readString(readiness, "repair"),
+    // The server names the remediation; core builds the command. The page is
+    // never trusted with the command text itself.
+    repairRemediation: (() => {
+      const raw = readiness.repairRemediation;
+      if (!isRecord(raw)) return null;
+      const id = readString(raw, "id");
+      if (!isRemediationId(id)) return null;
+      const params: Record<string, string> = {};
+      if (isRecord(raw.params)) {
+        for (const [key, value] of Object.entries(raw.params)) {
+          if (typeof value === "string") params[key] = value;
+        }
+      }
+      const view = remediationView(id, params);
+      return view.runnable ? view : null;
+    })(),
     selectionHandle: readString(payload, "selectionHandle"),
     checks
   };
@@ -313,26 +337,28 @@ export function githubIdentityNote(
       return { specs: textNote(message), tone: "warning", showRecheck: true };
     }
     const missNames: string[] = [];
-    const refreshScopes: string[] = [];
     if (!identity.actingHasWorkflow) {
       missNames.push("workflow");
-      refreshScopes.push("workflow");
     }
     if (packagesMissing) {
       missNames.push("write:packages");
-      refreshScopes.push("read:packages");
-      refreshScopes.push("write:packages");
     }
-    const refreshScopeFlags = refreshScopes
-      .map((scope) => ` -s ${scope}`)
-      .join("");
-    const refreshCmd =
-      `gh auth switch -h github.com -u ${identity.actingLogin} && ` +
-      `gh auth refresh -h github.com${refreshScopeFlags}`;
+    // Built from the registry rather than hand-written here, so this note shows
+    // the same command the callout would run, quoted the same way, and stays
+    // paste-able in Windows PowerShell (which cannot parse `&&`).
+    const view = remediationView("github-account-scopes", {
+      login: identity.actingLogin,
+      ...(identity.actingHasWorkflow ? {} : { workflow: "true" }),
+      ...(identity.actingHasPackages ? {} : { packages: "true" })
+    });
+    const runLine =
+      view.runnable ?
+        ` Run:\n${view.command}\n`
+      : " Grant the missing scopes with GitHub CLI, ";
     return {
       specs: textNote(
         `The stored GitHub CLI credential for @${identity.actingLogin} is missing the ${missNames.join(" and ")} ` +
-          `scope${missNames.length > 1 ? "s" : ""} environment setup needs. Run "${refreshCmd}" or switch accounts. ` +
+          `scope${missNames.length > 1 ? "s" : ""} environment setup needs.${runLine}or switch accounts. ` +
           "Note: gh auth switch changes your active GitHub account machine-wide for every tool in this terminal until you switch back."
       ),
       tone: "warning",
@@ -522,9 +548,25 @@ export function initializeCredentialProfilesPanel(
   const noteEl = context.dom.byId(GITHUB_IDENTITY_IDS.note);
   const recheckBtn = context.dom.inputById(GITHUB_IDENTITY_IDS.recheck);
   const detailsEl = context.dom.byId(GITHUB_IDENTITY_IDS.details);
-  const detailsPanel = context.dom.byId("env-gh-details-panel");
   const repairEl = context.dom.byId(GITHUB_IDENTITY_IDS.repair);
-  const fixAccessBtn = context.dom.byId(GITHUB_IDENTITY_IDS.fix);
+
+  let repairAction: CommandActionHandle | null = null;
+  const mountRepairAction = (
+    host: DomElement,
+    remediation: RemediationView | null
+  ): void => {
+    repairAction?.dispose();
+    repairAction = null;
+    host.replaceChildren();
+    if (!remediation) return;
+    repairAction = createCommandAction(context, {
+      host,
+      remediation,
+      mutationNonce: deps.mutationNonce || "",
+      idPrefix: "env-gh-repair",
+      showWarning: false
+    });
+  };
 
   let profiles: CredentialProfile[] = [];
   let selectedProfile: CredentialProfile | null = null;
@@ -699,6 +741,7 @@ export function initializeCredentialProfilesPanel(
       ghEmptyEl.style.display = identity.accounts.length > 0 ? "none" : "";
 
     if (noteEl && githubReadiness) {
+      const remediation = githubReadiness.repairRemediation;
       setChildren(context.dom, noteEl, [
         {
           tag: "strong",
@@ -707,7 +750,10 @@ export function initializeCredentialProfilesPanel(
             (githubReadiness.ready ?
               "Ready to configure deployments"
             : "Additional GitHub access is required")
-        }
+        },
+        ...(remediation?.warning ?
+          [{ tag: "div", text: remediation.warning }]
+        : [])
       ]);
       noteEl.style.color =
         githubReadiness.ready ?
@@ -724,12 +770,19 @@ export function initializeCredentialProfilesPanel(
       recheckBtn.disabled = checking;
       recheckBtn.textContent = checking ? "Checking…" : "Re-check";
     }
-    if (fixAccessBtn) {
-      fixAccessBtn.style.display = githubReadiness?.repair ? "" : "none";
-    }
     if (repairEl) {
-      repairEl.textContent = githubReadiness?.repair || "";
-      repairEl.style.display = githubReadiness?.repair ? "" : "none";
+      const remediation = githubReadiness?.repairRemediation ?? null;
+      // A runnable scope gap becomes a callout with Copy and Run. Everything
+      // else — a repository grant, a failed restoration — stays prose, because
+      // there is no command that would fix it.
+      if (remediation) {
+        repairEl.style.display = "";
+        mountRepairAction(repairEl, remediation);
+      } else {
+        mountRepairAction(repairEl, null);
+        repairEl.textContent = githubReadiness?.repair || "";
+        repairEl.style.display = githubReadiness?.repair ? "" : "none";
+      }
     }
     if (detailsEl && githubReadiness) {
       const detailSpecs: ElementSpec[] = [];
@@ -903,11 +956,6 @@ export function initializeCredentialProfilesPanel(
   if (recheckBtn) {
     scope.on(recheckBtn, "click", () => {
       if (selectedGithubLogin) void checkGitHubAccount(selectedGithubLogin);
-    });
-  }
-  if (fixAccessBtn) {
-    scope.on(fixAccessBtn, "click", () => {
-      if (detailsPanel) Reflect.set(detailsPanel, "open", true);
     });
   }
   scope.on(context.dom.document, "visibilitychange", () => {

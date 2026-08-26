@@ -181,6 +181,8 @@ describe("GitHub account readiness", () => {
         }
       }
     });
+    // A failed restoration is not a scope gap, so there is no command to run.
+    expect(result.repairRemediation).toBeNull();
   });
 
   it("reports missing workflow and package access without using another account", async () => {
@@ -211,9 +213,33 @@ describe("GitHub account readiness", () => {
       }
     });
     expect(result.repair).toBe(
-      "The account @octocat needs the workflow and write:packages permissions to proceed. In the terminal, run: gh auth switch --hostname github.com --user octocat. Then run: gh auth refresh --hostname github.com --scopes workflow,read:packages,write:packages. This will make @octocat the active GitHub CLI account if it is not already active."
+      "The account @octocat needs the workflow and write:packages permissions to proceed. In the terminal, run:\ngh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s workflow -s read:packages -s write:packages\nThis will make @octocat the active GitHub CLI account if it is not already active."
     );
     expect(probePackageAccess).not.toHaveBeenCalled();
+    expect(result.repairRemediation).toEqual({
+      id: "github-account-scopes",
+      params: { login: "octocat", workflow: "true", packages: "true" }
+    });
+  });
+
+  it("falls back to prose when the login is one the registry will not run", async () => {
+    const service = readinessService(
+      coordinator(
+        selectedExecutor({ login: "octo cat; rm -rf /", scopes: ["workflow"] })
+      )
+    );
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login: "octo cat; rm -rf /"
+    });
+
+    // A login the registry refuses must never be spliced into a command.
+    expect(result.repair).not.toContain("gh auth switch");
+    expect(result.repair).toContain("Grant the missing scopes with GitHub CLI");
+    expect(result.repairRemediation).toBeNull();
   });
 
   it("names only the selected account when package permission is missing", async () => {
@@ -229,9 +255,13 @@ describe("GitHub account readiness", () => {
     });
 
     expect(result.repair).toBe(
-      "The account @octocat needs the write:packages permission to proceed. In the terminal, run: gh auth switch --hostname github.com --user octocat. Then run: gh auth refresh --hostname github.com --scopes read:packages,write:packages. This will make @octocat the active GitHub CLI account if it is not already active."
+      "The account @octocat needs the write:packages permission to proceed. In the terminal, run:\ngh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s read:packages -s write:packages\nThis will make @octocat the active GitHub CLI account if it is not already active."
     );
     expect(result.repair).not.toContain("original");
+    expect(result.repairRemediation).toEqual({
+      id: "github-account-scopes",
+      params: { login: "octocat", packages: "true" }
+    });
   });
 
   it("skips package probing until repository administration is ready", async () => {
@@ -293,7 +323,7 @@ describe("GitHub account readiness", () => {
       detail:
         "GitHub Packages access was not checked because workflow access is not ready."
     });
-    expect(result.repair).toContain("--scopes workflow");
+    expect(result.repair).toContain("-s workflow");
     expect(result.repair).not.toContain("write:packages");
     expect(result.repair).not.toContain("original");
     expect(probePackageAccess).not.toHaveBeenCalled();
@@ -323,6 +353,9 @@ describe("GitHub account readiness", () => {
     expect(result.checks.repository.state).toBe("missing");
     expect(result.checks.environment.state).toBe("missing");
     expect(result.repair).toContain("repository administrator access");
+    // A repository grant is not something a command can fix, so the wizard
+    // must keep showing prose rather than an actionable callout.
+    expect(result.repairRemediation).toBeNull();
   });
 
   it.each([

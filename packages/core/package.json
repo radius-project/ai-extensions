@@ -12,7 +12,8 @@
     ".": "./src/index.ts",
     "./graph": "./src/graph/index.ts",
     "./modeling": "./src/modeling/index.ts",
-    "./platforms": "./src/platforms/index.ts"
+    "./platforms": "./src/platforms/index.ts",
+    "./remediations": "./src/remediations.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",

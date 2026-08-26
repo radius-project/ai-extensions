@@ -17,6 +17,7 @@ import {
   isWorkspacePath,
   modelingRunLastActivityAtMs,
   workspaceHeadCommit,
+  uncommittedGeneratedPaths,
   workspaceSourceChangedSince,
   workspaceModelRecoverable
 } from "./workspace.js";
@@ -628,6 +629,122 @@ describe("workspaceSourceChangedSince", () => {
       expect(await workspaceSourceChangedSince(dir, "")).toBeUndefined();
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// A branch push publishes commits, not the working tree, so this decides whether
+// the canvas offers a bare push or a commit-then-push. Reporting a clean
+// worktree when the model is uncommitted produces exactly the reported bug: a
+// pushed branch the deploy workflow cannot read the model from.
+describe("uncommittedGeneratedPaths", () => {
+  async function checkout(): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-pending-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir });
+    git("init", "--quiet", "--initial-branch", "main");
+    git("config", "user.email", "radius@example.invalid");
+    git("config", "user.name", "Radius Test");
+    await fs.mkdir(path.join(dir, "src"), { recursive: true });
+    await fs.writeFile(path.join(dir, "src", "app.js"), "console.log(1)\n");
+    git("add", ".");
+    git("commit", "--quiet", "-m", "source");
+    return dir;
+  }
+
+  async function withCheckout(
+    run: (dir: string) => Promise<void>
+  ): Promise<void> {
+    const dir = await checkout();
+    try {
+      await run(dir);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("is empty when no generated files exist", async () => {
+    await withCheckout(async (dir) => {
+      expect(await uncommittedGeneratedPaths(dir)).toEqual([]);
+    });
+  });
+
+  it("reports an untracked model directory", async () => {
+    await withCheckout(async (dir) => {
+      await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+      await fs.writeFile(
+        path.join(dir, ".radius", "app.bicep"),
+        "resource {}\n"
+      );
+
+      expect(await uncommittedGeneratedPaths(dir)).toEqual([".radius"]);
+    });
+  });
+
+  it("reports every pending generated root in allowlist order", async () => {
+    await withCheckout(async (dir) => {
+      await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+      await fs.writeFile(path.join(dir, ".radius", "app.bicep"), "a\n");
+      await fs.writeFile(path.join(dir, "app.origin.json"), "{}\n");
+      await fs.writeFile(path.join(dir, "app.bicep"), "b\n");
+
+      expect(await uncommittedGeneratedPaths(dir)).toEqual([
+        ".radius",
+        "app.bicep",
+        "app.origin.json"
+      ]);
+    });
+  });
+
+  it("reports a staged generated file", async () => {
+    await withCheckout(async (dir) => {
+      await fs.writeFile(path.join(dir, "app.bicep"), "a\n");
+      execFileSync("git", ["add", "app.bicep"], { cwd: dir });
+
+      expect(await uncommittedGeneratedPaths(dir)).toEqual(["app.bicep"]);
+    });
+  });
+
+  it("reports an unstaged edit to a committed generated file", async () => {
+    await withCheckout(async (dir) => {
+      await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+      await fs.writeFile(path.join(dir, ".radius", "app.bicep"), "a\n");
+      execFileSync("git", ["add", "."], { cwd: dir });
+      execFileSync("git", ["commit", "--quiet", "-m", "model"], { cwd: dir });
+      expect(await uncommittedGeneratedPaths(dir)).toEqual([]);
+
+      await fs.writeFile(path.join(dir, ".radius", "app.bicep"), "b\n");
+      expect(await uncommittedGeneratedPaths(dir)).toEqual([".radius"]);
+    });
+  });
+
+  it("ignores uncommitted application source", async () => {
+    await withCheckout(async (dir) => {
+      await fs.writeFile(path.join(dir, "src", "app.js"), "console.log(2)\n");
+      await fs.writeFile(path.join(dir, "src", "new.js"), "export {};\n");
+
+      expect(await uncommittedGeneratedPaths(dir)).toEqual([]);
+    });
+  });
+
+  it("does not match a path that merely shares a prefix", async () => {
+    await withCheckout(async (dir) => {
+      await fs.writeFile(path.join(dir, "app.biceps"), "not the model\n");
+      await fs.mkdir(path.join(dir, ".radiusx"), { recursive: true });
+      await fs.writeFile(path.join(dir, ".radiusx", "x"), "x\n");
+
+      expect(await uncommittedGeneratedPaths(dir)).toEqual([]);
+    });
+  });
+
+  it("is empty when there is no workspace or no git", async () => {
+    const bare = await fs.mkdtemp(path.join(os.tmpdir(), "rad-nogit-"));
+    try {
+      expect(await uncommittedGeneratedPaths("")).toEqual([]);
+      expect(await uncommittedGeneratedPaths(null)).toEqual([]);
+      expect(await uncommittedGeneratedPaths(undefined)).toEqual([]);
+      expect(await uncommittedGeneratedPaths(bare)).toEqual([]);
+    } finally {
+      await fs.rm(bare, { recursive: true, force: true });
     }
   });
 });

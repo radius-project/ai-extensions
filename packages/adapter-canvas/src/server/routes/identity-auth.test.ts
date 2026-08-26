@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
+import { remediationView } from "@radius-project/core";
 import { createRequestContext } from "../request-context.js";
 import {
   createIdentityAuthRoutes,
@@ -182,7 +183,8 @@ function fakes(
       return {
         error: `login-required(${tenantId}|${activeTenantId ?? ""})`,
         code: "az-login-required",
-        tenantId
+        tenantId,
+        remediation: remediationView("azure-cli-login", { tenantId })
       };
     },
     isCliCommandMissing: (detail) => {
@@ -364,7 +366,8 @@ describe("identity-auth routes (SU-08)", () => {
     expect(JSON.parse(recording.body)).toEqual({
       error: "Azure CLI is not installed.",
       code: "az-cli-missing",
-      tenantId: TENANT_A
+      tenantId: TENANT_A,
+      remediation: remediationView("azure-cli-install", { tenantId: TENANT_A })
     });
     // The missing-CLI probe reads the raw error message, not the injected
     // formatter, so no `formatted:` prefix reaches it.
@@ -386,7 +389,8 @@ describe("identity-auth routes (SU-08)", () => {
     expect(JSON.parse(recording.body)).toEqual({
       error: `login-required(${TENANT_A}|)`,
       code: "az-login-required",
-      tenantId: TENANT_A
+      tenantId: TENANT_A,
+      remediation: remediationView("azure-cli-login", { tenantId: TENANT_A })
     });
   });
 
@@ -403,7 +407,8 @@ describe("identity-auth routes (SU-08)", () => {
     expect(JSON.parse(recording.body)).toEqual({
       error: `login-required(${TENANT_B}|${TENANT_A})`,
       code: "az-login-required",
-      tenantId: TENANT_B
+      tenantId: TENANT_B,
+      remediation: remediationView("azure-cli-login", { tenantId: TENANT_B })
     });
   });
 
@@ -654,9 +659,11 @@ describe("identity-auth routes (SU-08)", () => {
     );
     // The underlying CLI error is deliberately swallowed here.
     expect(recording.status).toBe(200);
-    expect(recording.body).toBe(
-      '{"error":"No active AWS CLI session. Run \\"aws configure\\" (or \\"aws sso login\\") in your terminal, then click Verify again."}'
-    );
+    expect(JSON.parse(recording.body)).toEqual({
+      error:
+        'No active AWS CLI session. Run "aws configure" (or "aws sso login") in your terminal, then click Verify again.',
+      remediation: remediationView("aws-cli-login", {})
+    });
     expect(recording.body).not.toContain("ENOENT");
   });
 

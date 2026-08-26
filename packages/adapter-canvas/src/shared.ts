@@ -306,6 +306,11 @@ export interface CanvasState {
   deployRunUrl?: string | null;
   deployErrorKind?: DeployErrorKind | null;
   deployErrorBranch?: string | null;
+  // Generator-owned paths that were uncommitted when a branch-not-pushed failure
+  // was reported, as a comma-joined allowlist token list. Drives the push
+  // action's commit steps, so a push can never be offered that would publish the
+  // branch without the model it needs.
+  deployErrorPaths?: string | null;
   deployRepairing?: boolean;
   deployHandoffState?: string;
   deployHandoffAttempts?: number;
