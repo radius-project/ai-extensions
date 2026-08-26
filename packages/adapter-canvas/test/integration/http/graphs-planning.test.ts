@@ -207,7 +207,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     });
   });
 
-  it("refreshes scoped modeling liveness before expiring progress", async () => {
+  it("observes a scoped modeling run before expiring progress", async () => {
     const harness = start();
     const staleActivityAtMs = 1_000;
     harness.advanceClock(staleActivityAtMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS);
@@ -226,8 +226,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
         graphProgressBranches: ["main"],
         graphProgressOwner: 1,
         graphProgressAwaitingModel: true,
-        graphProgressWaitStartedAtMs: 1,
-        graphProgressLastActivityAtMs: staleActivityAtMs
+        graphProgressWaitStartedAtMs: 1
       }
     };
     const entry = await container!.getOrCreate("panel-a");

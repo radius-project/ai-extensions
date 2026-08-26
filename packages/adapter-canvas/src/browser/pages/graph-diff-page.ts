@@ -80,6 +80,7 @@ export function initializeGraphDiffPage(
   let progressView: GraphProgressView | null = null;
   let appBicepRetry: ScopeTimer | null = null;
   let initialRefresh = state.resources.length > 0;
+  let restartWait = true;
 
   const stopAppBicepRetry = (): void => {
     if (appBicepRetry !== null) entry.cancel(appBicepRetry);
@@ -142,6 +143,8 @@ export function initializeGraphDiffPage(
     const base = baseSelect?.value ?? "";
     const head = headElement.value;
     const repo = repoInput?.value ?? state.repo;
+    const restartExpiredWait = restartWait;
+    restartWait = false;
     if (!repo || !base || !head) return;
     if (modelingFailureVisible) {
       const graphContainer = context.dom.byId("graph-container");
@@ -175,7 +178,13 @@ export function initializeGraphDiffPage(
       .fetch("/api/diff-branches", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ base, head, repo, refresh }),
+        body: JSON.stringify({
+          base,
+          head,
+          repo,
+          refresh,
+          restartWait: restartExpiredWait
+        }),
         signal: requestAbort?.signal
       })
       .then((response) => response.json())
@@ -216,6 +225,8 @@ export function initializeGraphDiffPage(
             }
           } else if (readBoolean(payload, "reload")) {
             context.nav.reload();
+          } else if (readBoolean(payload, "refreshed")) {
+            showStatus(context, "The graph comparison is current.", "info");
           } else {
             const message = readString(payload, "message");
             if (message) showStatus(context, message, "info");
@@ -244,6 +255,7 @@ export function initializeGraphDiffPage(
     stopAppBicepRetry();
     stopProgress();
     if (pending !== null) entry.cancel(pending);
+    restartWait = true;
     const refresh = initialRefresh;
     initialRefresh = false;
     pending = entry.after(DIFF_DEBOUNCE_MS, () =>

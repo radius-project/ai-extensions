@@ -94,6 +94,7 @@ export function initializePlannedGraphPage(
   let selectionQueuedWhileLoading = false;
   let appBicepRetry: ScopeTimer | null = null;
   let nextRequestRefresh = page.resources.length > 0;
+  let restartWait = true;
   // Re-issues the current selection. Assigned once the scheduler exists, since
   // the retry must go through the same serialization as a user-driven request
   // rather than starting a second overlapping compile.
@@ -144,6 +145,8 @@ export function initializePlannedGraphPage(
       : page.provider;
     const refresh = nextRequestRefresh;
     nextRequestRefresh = false;
+    const restartExpiredWait = restartWait;
+    restartWait = false;
     const current = (): boolean => entry.active && isCurrent();
 
     if (plan.envsStale && !refresh) {
@@ -235,8 +238,9 @@ export function initializePlannedGraphPage(
           repo: page.repo,
           branch: selectedBranch,
           provider: selectedProvider,
-          environment: selectedEnvironment,
-          refresh
+          ...(selectedEnvironment ? { environment: selectedEnvironment } : {}),
+          refresh,
+          restartWait: restartExpiredWait
         }),
         signal: abort?.signal
       })
@@ -348,6 +352,7 @@ export function initializePlannedGraphPage(
     if (!selector) continue;
     entry.on(selector, "change", () => {
       nextRequestRefresh = false;
+      restartWait = true;
       queue();
     });
   }

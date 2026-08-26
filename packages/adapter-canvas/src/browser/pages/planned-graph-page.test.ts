@@ -239,6 +239,7 @@ describe("initializePlannedGraphPage", () => {
 
     expect(planCalls).toBe(1);
     expect(requestBody).toContain('"refresh":true');
+    expect(requestBody).toContain('"restartWait":true');
     expect(render).toHaveBeenCalledOnce();
     expect(status.textContent).toBe("The planned deployment is current.");
   });
@@ -282,7 +283,30 @@ describe("initializePlannedGraphPage", () => {
 
     expect(bodies).toHaveLength(2);
     expect(bodies[0]).toContain('"refresh":true');
+    expect(bodies[0]).toContain('"restartWait":true');
     expect(bodies[1]).toContain('"refresh":false');
+    expect(bodies[1]).toContain('"restartWait":true');
+  });
+
+  it("omits an empty environment while reconciling cached resources", async () => {
+    const { browser } = fixture({
+      resources: [{ id: "app/web" }],
+      environment: "",
+      envListing: "error"
+    });
+    let requestBody = "";
+    browser.net.handle("/api/plan-graph", (init) => {
+      requestBody = String(init?.body ?? "");
+      return jsonResponse({ refreshed: true });
+    });
+
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(requestBody).toContain('"refresh":true');
+    expect(requestBody).not.toContain('"environment"');
   });
 
   it("coalesces changes and ignores an outdated plan response", async () => {
@@ -770,8 +794,10 @@ describe("initializePlannedGraphPage", () => {
     const renderGraph = vi.fn();
     const { browser, status } = fixture();
     let calls = 0;
-    browser.net.handle("/api/plan-graph", () => {
+    const bodies: string[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
       calls++;
+      bodies.push(String(init?.body ?? ""));
       return calls < 3 ?
           jsonResponse({ needsAppBicep: true })
         : jsonResponse({ reload: true });
@@ -792,6 +818,9 @@ describe("initializePlannedGraphPage", () => {
     }
 
     expect(calls).toBe(3);
+    expect(bodies[0]).toContain('"restartWait":true');
+    expect(bodies[1]).toContain('"restartWait":false');
+    expect(bodies[2]).toContain('"restartWait":false');
     expect(browser.nav.reloads).toBe(1);
     expect(status.textContent).toContain("Copilot is generating");
   });

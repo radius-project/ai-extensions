@@ -145,6 +145,7 @@ describe("graph build record", () => {
     };
 
     expireGraphProgressWait(record, "The modeling wait expired.");
+    expireGraphProgressWait(record, "The modeling wait expired.");
 
     expect(record).toMatchObject({
       graphProgressActive: false,
@@ -158,6 +159,7 @@ describe("graph build record", () => {
       state: "failed",
       detail: "The modeling wait expired."
     });
+    expect(record.graphBuildEvents).toHaveLength(1);
   });
 
   it("starts a record on the first event and numbers events in order", () => {

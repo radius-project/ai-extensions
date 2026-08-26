@@ -20,7 +20,6 @@ import {
   GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
   GRAPH_APP_BICEP_MAX_WAIT_MESSAGE,
   GRAPH_APP_BICEP_MAX_WAIT_MS,
-  GRAPH_APP_BICEP_STALLED_MESSAGE,
   GRAPH_APP_BICEP_TIMEOUT_MESSAGE
 } from "../../graph-progress-contract.js";
 import type {
@@ -730,7 +729,7 @@ describe("graphs-planning read routes (SU-09)", () => {
     ).toMatchObject({ state: "running" });
   });
 
-  it("reports a stalled modeling run differently from one that never started", async () => {
+  it("keeps an observed run open when staging has not changed", async () => {
     const calls: Calls = { log: [] };
     const scriptedState = graphProgressState("graph", {
       graphProgressActive: true,
@@ -745,18 +744,16 @@ describe("graphs-planning read routes (SU-09)", () => {
       state: scriptedState
     });
 
-    await run("/api/progress", handleProgress, deps);
+    const payload = JSON.parse(
+      (await run("/api/progress", handleProgress, deps)).body
+    ) as Record<string, unknown>;
 
-    expect(
-      state?.graphProgressRecords?.graph?.graphBuildEvents.at(-1)
-    ).toMatchObject({
-      stage: "creating_model",
-      state: "failed",
-      detail: GRAPH_APP_BICEP_STALLED_MESSAGE
+    expect(payload.active).toBe(true);
+    expect(state?.graphProgressRecords?.graph).toMatchObject({
+      graphProgressActive: true,
+      graphProgressAwaitingModel: true,
+      graphProgressLastActivityAtMs: 5_000
     });
-    expect(
-      state?.graphProgressRecords?.graph?.graphProgressLastActivityAtMs
-    ).toBeUndefined();
   });
 
   // A run that keeps producing filesystem activity would renew the idle budget
@@ -797,7 +794,6 @@ describe("graphs-planning read routes (SU-09)", () => {
       graphProgressActive: true,
       graphProgressAwaitingModel: true,
       graphProgressWaitStartedAtMs: 1_000,
-      graphProgressLastActivityAtMs: staleActivityMs,
       graphProgressStartedAtMs: 1_000,
       graphBuildEvents: []
     });
@@ -829,7 +825,6 @@ describe("graphs-planning read routes (SU-09)", () => {
       graphProgressActive: true,
       graphProgressAwaitingModel: true,
       graphProgressWaitStartedAtMs: 1_000,
-      graphProgressLastActivityAtMs: staleActivityMs,
       graphProgressStartedAtMs: 1_000,
       graphBuildEvents: []
     });
@@ -854,7 +849,6 @@ describe("graphs-planning read routes (SU-09)", () => {
       graphProgressActive: true,
       graphProgressAwaitingModel: true,
       graphProgressWaitStartedAtMs: 1_000,
-      graphProgressLastActivityAtMs: staleActivityMs,
       graphProgressStartedAtMs: 1_000,
       graphBuildEvents: []
     });
@@ -889,7 +883,6 @@ describe("graphs-planning read routes (SU-09)", () => {
       graphProgressActive: true,
       graphProgressAwaitingModel: true,
       graphProgressWaitStartedAtMs: 1_000,
-      graphProgressLastActivityAtMs: staleActivityMs,
       graphProgressStartedAtMs: 1_000,
       graphBuildEvents: []
     });

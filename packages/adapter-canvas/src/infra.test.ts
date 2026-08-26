@@ -28,10 +28,14 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
 }>(() => {
   const BASE_UPSTREAM: Record<string, string> = {
     // Minimal stand-ins for radius-project/radius/.github/extension templates.
+    // Carries the `on: workflow_dispatch: inputs:` block the real upstream
+    // template has. Production always dispatches with `-f environment=`, so a
+    // template without it would 422, and the operation marker is inserted into
+    // that same inputs block.
     "verify-azure.yml":
-      "name: verify\njobs:\n  v:\n    default: '{{ENV}}'\n    uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
+      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "verify-aws.yml":
-      "name: verify\njobs:\n  v:\n    default: '{{ENV}}'\n    uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
+      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "run-rad-commands.yml":
       "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n",
     "run-rad-commands-azure.yml":
@@ -87,10 +91,57 @@ const {
   generateVerifyWorkflow,
   generateDeployWorkflow,
   generateDeleteWorkflow,
-  configureVerifyGhcrProbe
+  configureVerifyGhcrProbe,
+  configureVerifyOperationMarker
 } = await import("./infra.js");
+const { hasVerificationOperationMarker } =
+  await import("./verification-run-identity.js");
 
 const VERIFY_PATH = ".github/workflows/radius-verify-credentials.yml";
+
+describe("verification operation marker", () => {
+  it("adds the dispatch input and run title exposed by GitHub run metadata", () => {
+    const workflow = configureVerifyOperationMarker(`
+name: verify
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+`);
+
+    expect(workflow).toContain(
+      "run-name: Radius verify ${{ inputs.environment }} [${{ inputs.radius_operation }}]"
+    );
+    expect(workflow).toContain("      radius_operation:");
+    expect(workflow).toContain("        required: false");
+  });
+
+  it("binds generated verify workflows to the marker the planner looks for", async () => {
+    // `verification-plan` decides whether to send `-f radius_operation` by
+    // asking `hasVerificationOperationMarker` about the installed file. If a
+    // generated workflow stopped satisfying that predicate, the dispatch would
+    // send an input GitHub rejects with 422 — a refusal the journal reads as
+    // conclusive — failing every environment creation with a message about the
+    // dispatch rather than about this template.
+    for (const provider of ["azure", "aws"]) {
+      expect(
+        hasVerificationOperationMarker(
+          await generateVerifyWorkflow("dev", provider)
+        )
+      ).toBe(true);
+    }
+  });
+
+  it("refuses a template that no longer exposes a dispatch inputs block", () => {
+    expect(() =>
+      configureVerifyOperationMarker("name: verify\njobs:\n  v:\n    run: x\n")
+    ).toThrow(/no longer exposes/u);
+  });
+});
 
 // Build the full expected committed-file map the extension would produce for one
 // environment, so tests can seed an "in sync" branch.

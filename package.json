@@ -25,6 +25,8 @@
     "test:visual": "playwright test --config packages/adapter-canvas/playwright.visual.config.ts",
     "test:visual:stability": "playwright test --config packages/adapter-canvas/playwright.visual.config.ts --repeat-each=2 --retries=0",
     "test:visual:update": "playwright test --config packages/adapter-canvas/playwright.visual.config.ts --update-snapshots --retries=0",
+    "test:visual:canonical": "node scripts/canvas-visual.mjs check",
+    "test:visual:canonical:update": "node scripts/canvas-visual.mjs update",
     "test:reliability": "pnpm --filter @radius-project/adapter-canvas run test:reliability",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",

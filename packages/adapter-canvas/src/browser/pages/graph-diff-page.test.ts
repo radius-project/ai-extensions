@@ -148,7 +148,8 @@ describe("initializeGraphDiffPage", () => {
       diffCalls++;
       requestBody = String(init?.body ?? "");
       return jsonResponse({
-        message: "The preloaded diff is current."
+        refreshed: true,
+        message: "Comparing main → feature"
       });
     });
     const render = vi.fn();
@@ -161,8 +162,9 @@ describe("initializeGraphDiffPage", () => {
 
     expect(diffCalls).toBe(1);
     expect(requestBody).toContain('"refresh":true');
+    expect(requestBody).toContain('"restartWait":true');
     expect(render).toHaveBeenCalledOnce();
-    expect(status.textContent).toBe("The preloaded diff is current.");
+    expect(status.textContent).toBe("The graph comparison is current.");
   });
 
   it("reloads when preloaded diff resources are stale and the workflow says so", async () => {
@@ -417,8 +419,10 @@ describe("initializeGraphDiffPage", () => {
     const renderGraph = vi.fn();
     const { browser, head, status } = fixture();
     let calls = 0;
-    browser.net.handle("/api/diff-branches", () => {
+    const bodies: string[] = [];
+    browser.net.handle("/api/diff-branches", (init) => {
       calls++;
+      bodies.push(String(init?.body ?? ""));
       return calls < 3 ?
           jsonResponse({ needsAppBicep: true })
         : jsonResponse({ message: "Graphs are identical." });
@@ -440,6 +444,9 @@ describe("initializeGraphDiffPage", () => {
     }
 
     expect(calls).toBe(3);
+    expect(bodies[0]).toContain('"restartWait":true');
+    expect(bodies[1]).toContain('"restartWait":false');
+    expect(bodies[2]).toContain('"restartWait":false');
     expect(status.textContent).toBe("Graphs are identical.");
   });
 

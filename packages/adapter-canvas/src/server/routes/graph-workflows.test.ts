@@ -28,7 +28,6 @@ import {
   GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
   GRAPH_APP_BICEP_MAX_WAIT_MESSAGE,
   GRAPH_APP_BICEP_MAX_WAIT_MS,
-  GRAPH_APP_BICEP_STALLED_MESSAGE,
   GRAPH_APP_BICEP_TIMEOUT_MESSAGE
 } from "../../graph-progress-contract.js";
 import {
@@ -493,7 +492,7 @@ describe("graph planning workflows", () => {
         ).toBe(false);
       });
 
-      it("reports a run that started and then stopped as stalled", async () => {
+      it("does not cut off an observed run when staging remains unchanged", async () => {
         const harness = start({
           selections: { main: selectionOf({ content: null }) },
           modelingActivityAtMs: 1_000
@@ -503,24 +502,22 @@ describe("graph planning workflows", () => {
         harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS);
         const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
 
-        expect(outcome.payload).toMatchObject({
-          error: GRAPH_APP_BICEP_STALLED_MESSAGE,
-          appBicepWaitExpired: true
-        });
+        expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+        expect(outcome.payload.appBicepWaitExpired).toBeUndefined();
       });
 
-      it("does not let an abandoned prior run keep renewing the wait", async () => {
+      it("keeps an observed run until the hard ceiling", async () => {
         const harness = start({
           selections: { main: selectionOf({ content: null }) },
           modelingActivityAtMs: 999
         });
 
         await harness.run("loadGraph", '{"repo":"octo/app"}');
-        harness.advanceClock(GRAPH_APP_BICEP_IDLE_TIMEOUT_MS);
+        harness.advanceClock(GRAPH_APP_BICEP_MAX_WAIT_MS);
         const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
 
         expect(outcome.payload).toMatchObject({
-          error: GRAPH_APP_BICEP_STALLED_MESSAGE,
+          error: GRAPH_APP_BICEP_MAX_WAIT_MESSAGE,
           appBicepWaitExpired: true
         });
       });
@@ -566,6 +563,32 @@ describe("graph planning workflows", () => {
           graphProgressActive: false,
           graphProgressWaitExpiredMessage: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
         });
+      });
+
+      it("starts a new wait when a fresh page explicitly retries an expired key", async () => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) }
+        });
+        await harness.run("loadGraph", '{"repo":"octo/app"}');
+        const record = harness.state.graphProgressRecords?.graph;
+        if (!record) throw new Error("expected graph progress record");
+        const generation = record.graphProgressGeneration;
+        expireGraphProgressWait(record, GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
+
+        const outcome = await harness.run(
+          "loadGraph",
+          '{"repo":"octo/app","restartWait":true}'
+        );
+
+        expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+        expect(harness.state.graphProgressRecords?.graph).toMatchObject({
+          graphProgressGeneration: generation + 1,
+          graphProgressActive: true
+        });
+        expect(
+          harness.state.graphProgressRecords?.graph
+            ?.graphProgressWaitExpiredMessage
+        ).toBeUndefined();
       });
 
       it("honors an expiry recorded while the activity probe is in flight", async () => {
@@ -1232,6 +1255,7 @@ describe("graph planning workflows", () => {
       harness.state.plannedBranch = "main";
       harness.state.plannedProvider = "azure";
       harness.state.plannedEnvironment = "";
+      harness.state.plannedDefinitionHash = "hash-a";
 
       const outcome = await harness.run(
         "planGraph",
@@ -1243,6 +1267,87 @@ describe("graph planning workflows", () => {
         refreshed: true
       });
       expect(harness.handoffs).toHaveLength(1);
+      expect(harness.order).toEqual(["select:main", "stage:main", "discard:"]);
+      expect(harness.recipePackCalls).toEqual([]);
+    });
+
+    it("preserves the persisted environment when freshness reconciliation has no loaded selector", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "", remote: false } }
+      });
+      harness.state.plannedResources = [{ id: "res-a" }];
+      harness.state.plannedRepo = "octo/app";
+      harness.state.plannedBranch = "main";
+      harness.state.plannedProvider = "azure";
+      harness.state.plannedEnvironment = "prod";
+      harness.state.plannedDefinitionHash = "hash-a";
+
+      const outcome = await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","refresh":true}'
+      );
+
+      expect(outcome.payload).toEqual({ reload: false, refreshed: true });
+      expect(harness.state.plannedEnvironment).toBe("prod");
+      expect(harness.state.plannedResources).toEqual([{ id: "res-a" }]);
+    });
+
+    it("rebuilds cached planned resources when the model definition changes", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "", remote: false } },
+        compiled: { main: [{ id: "res-a" } as CanvasGraphResource] },
+        definitionHash: "hash-new"
+      });
+      harness.plannedOutputs.push({ id: "res-a" });
+      Object.assign(harness.state, {
+        plannedResources: [{ id: "res-a" }],
+        plannedRepo: "octo/app",
+        plannedBranch: "main",
+        plannedProvider: "azure",
+        plannedEnvironment: "prod",
+        plannedDefinitionHash: "hash-old"
+      });
+
+      const outcome = await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","environment":"prod","refresh":true}'
+      );
+
+      expect(outcome.payload).toEqual({ reload: false, refreshed: true });
+      expect(harness.order).toContain("compile:main");
+      expect(harness.recipePackCalls).toEqual(["azure"]);
+      expect(harness.state.plannedDefinitionHash).toBe("hash-new");
+    });
+
+    it("surfaces cleanup failures from the cached planned fast path", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "/tmp/staged", remote: true } },
+        discardThrows: new Error("EBUSY")
+      });
+      Object.assign(harness.state, {
+        plannedResources: [{ id: "res-a" }],
+        plannedRepo: "octo/app",
+        plannedBranch: "main",
+        plannedProvider: "azure",
+        plannedEnvironment: "prod",
+        plannedDefinitionHash: "hash-a"
+      });
+
+      const outcome = await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","environment":"prod","refresh":true}'
+      );
+
+      expect(outcome.status).toBe(400);
+      expect(outcome.payload).toEqual({ error: "EBUSY" });
+      expect(harness.order).toEqual([
+        "select:main",
+        "stage:main",
+        "discard:/tmp/staged"
+      ]);
     });
 
     it("reloads unchanged resources when the planned selection changes", async () => {

@@ -13,6 +13,7 @@ export interface AzureAutoSetupCompositionSeams extends Pick<
   | "ensureServicePrincipal"
   | "finalizeSetupFailure"
   | "persistMutationCheckpoint"
+  | "honorStopBoundary"
   | "sleep"
   | "stageAuthorizeIdentity"
 > {

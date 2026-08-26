@@ -606,8 +606,10 @@ describe("initializeGraphPage", () => {
   it("schedules a slow retry while Copilot drafts app.bicep and cancels it on a branch change", async () => {
     const { browser, branch, status } = fixture({ loaded: false });
     let calls = 0;
-    browser.net.handle("/api/load-graph", () => {
+    const bodies: string[] = [];
+    browser.net.handle("/api/load-graph", (init) => {
       calls++;
+      bodies.push(String(init?.body ?? ""));
       return jsonResponse({ needsAppBicep: true });
     });
     initializeGraphPage(browser.context, globals());
@@ -628,6 +630,9 @@ describe("initializeGraphPage", () => {
     browser.clock.tick(GRAPH_RETRY_MS);
     await flushPromises();
     expect(calls).toBe(3);
+    expect(bodies[0]).toContain('"restartWait":true');
+    expect(bodies[1]).toContain('"restartWait":true');
+    expect(bodies[2]).toContain('"restartWait":false');
   });
 
   it("retries quickly after a stale response", async () => {

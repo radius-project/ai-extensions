@@ -1,11 +1,16 @@
 import type { SelectedGhExecutor } from "../../gh.js";
+import { unresolvedProviderMutations } from "../../operations.js";
 import {
   ensureGitHubEnvironment,
+  GitHubEnvironmentEnsureCancelled,
   GitHubEnvironmentEnsureError,
-  type EnsuredGitHubEnvironment
+  readEnsuredGitHubEnvironment
 } from "./github-environment.js";
+import {
+  ProviderMutationRecoveryError,
+  recordProviderReconciliationFailure
+} from "./provider-mutation-recovery.js";
 import type { GitHubEnvironmentReadResult } from "./github-environment.js";
-import { proveGitHubEnvironmentCreated } from "./github-environment-provenance.js";
 
 export interface EnvironmentOperationRecord {
   operationId: string;
@@ -24,6 +29,7 @@ export interface EnvironmentOperationRecord {
       origin?: string;
       repo: string | null;
       name: string | null;
+      providerId: string | null;
     };
   };
 }
@@ -39,6 +45,10 @@ export interface EnvironmentOperationWorkflowDependencies {
     repo: string,
     executor: SelectedGhExecutor
   ): Promise<string>;
+  guardStopBoundary(
+    operation: EnvironmentOperationRecord,
+    boundary: string
+  ): Promise<boolean>;
   preflightGhcrPackageWriteAccess(executor: SelectedGhExecutor): Promise<
     | { ok: true; credentials?: unknown }
     | {
@@ -58,7 +68,13 @@ export interface EnvironmentOperationWorkflowDependencies {
   ): void;
   recordGitHubEnvironment(
     operation: EnvironmentOperationRecord,
-    patch: { state: string; origin: string; repo: string; name: string }
+    patch: {
+      state: string;
+      origin: string;
+      repo: string;
+      name: string;
+      providerId?: string | null;
+    }
   ): void;
   promoteCreatedGitHubEnvironment(
     operation: EnvironmentOperationRecord,
@@ -68,6 +84,7 @@ export interface EnvironmentOperationWorkflowDependencies {
   persistEnvironmentResolution(
     operation: EnvironmentOperationRecord
   ): Promise<boolean>;
+  persistProviderMutation(): Promise<void>;
   finalizeEnvironmentResolutionFailure(
     operation: EnvironmentOperationRecord,
     input: { status: number; error: string; code: string },
@@ -104,6 +121,15 @@ async function failResolution(
   dependencies: EnvironmentOperationWorkflowDependencies,
   error: unknown
 ): Promise<{ shouldMonitor: false }> {
+  const unresolvedMutation = unresolvedProviderMutations(operation)[0];
+  if (unresolvedMutation) {
+    return recordProviderReconciliationFailure(
+      operation,
+      unresolvedMutation,
+      dependencies.persistProviderMutation,
+      error
+    );
+  }
   const ensureError =
     error instanceof GitHubEnvironmentEnsureError ? error : null;
   const failure = record(error);
@@ -141,39 +167,115 @@ export async function runEnvironmentOperationWorkflow(
   executor: SelectedGhExecutor,
   dependencies: EnvironmentOperationWorkflowDependencies
 ): Promise<{ shouldMonitor: boolean }> {
-  const accessMessage = await dependencies.preflightRepoAdmin(
-    operation.repo,
-    executor
-  );
-  if (accessMessage) {
-    return failResolution(operation, executor, dependencies, {
-      status: 403,
-      message: accessMessage,
-      code: "repo-admin-required"
-    });
-  }
-  const packageAccess =
-    await dependencies.preflightGhcrPackageWriteAccess(executor);
-  if (!packageAccess.ok) {
-    return failResolution(operation, executor, dependencies, {
-      status: packageAccess.status,
-      message: packageAccess.error,
-      code: packageAccess.code
-    });
+  const outstandingProviderMutation =
+    unresolvedProviderMutations(operation)[0] ?? null;
+  const reconcilingProviderMutation = outstandingProviderMutation !== null;
+  if (!reconcilingProviderMutation) {
+    if (
+      !(await dependencies.guardStopBoundary(
+        operation,
+        "before-github-environment"
+      ))
+    ) {
+      return { shouldMonitor: false };
+    }
+    const accessMessage = await dependencies.preflightRepoAdmin(
+      operation.repo,
+      executor
+    );
+    if (accessMessage) {
+      if (
+        !(await dependencies.guardStopBoundary(
+          operation,
+          "before-setup-failure-cleanup"
+        ))
+      ) {
+        return { shouldMonitor: false };
+      }
+      return failResolution(operation, executor, dependencies, {
+        status: 403,
+        message: accessMessage,
+        code: "repo-admin-required"
+      });
+    }
+    const packageAccess =
+      await dependencies.preflightGhcrPackageWriteAccess(executor);
+    if (!packageAccess.ok) {
+      if (
+        !(await dependencies.guardStopBoundary(
+          operation,
+          "before-setup-failure-cleanup"
+        ))
+      ) {
+        return { shouldMonitor: false };
+      }
+      return failResolution(operation, executor, dependencies, {
+        status: packageAccess.status,
+        message: packageAccess.error,
+        code: packageAccess.code
+      });
+    }
   }
 
-  let ensured: EnsuredGitHubEnvironment;
-  try {
-    ensured = await ensureGitHubEnvironment({
-      repo: operation.repo,
-      requestedName: operation.environment,
-      readGitHubJson: (apiPath) =>
-        dependencies.readGitHubJson(apiPath, executor),
-      runGh: (args) => executor.run(args),
-      now: dependencies.now
-    });
-  } catch (error) {
-    return failResolution(operation, executor, dependencies, error);
+  const recordedCanonicalEnvironment =
+    typeof operation.context?.canonicalEnvironment === "string" ?
+      operation.context.canonicalEnvironment
+    : operation.environment;
+  let ensured =
+    reconcilingProviderMutation ?
+      readEnsuredGitHubEnvironment(
+        operation,
+        operation.repo,
+        recordedCanonicalEnvironment
+      )
+    : null;
+  if (!ensured) {
+    try {
+      ensured = await ensureGitHubEnvironment({
+        repo: operation.repo,
+        requestedName: operation.environment,
+        readGitHubJson: (apiPath) =>
+          dependencies.readGitHubJson(apiPath, executor),
+        runGh: (args) => executor.run(args),
+        now: dependencies.now,
+        mutationRecovery: {
+          operation,
+          persist: dependencies.persistProviderMutation
+        },
+        beforeCreate: () =>
+          dependencies.guardStopBoundary(
+            operation,
+            "before-github-environment-create"
+          )
+      });
+    } catch (error) {
+      if (error instanceof GitHubEnvironmentEnsureCancelled) {
+        return { shouldMonitor: false };
+      }
+      if (error instanceof ProviderMutationRecoveryError) {
+        throw error;
+      }
+      if (
+        error instanceof GitHubEnvironmentEnsureError &&
+        error.createdCandidate
+      ) {
+        dependencies.recordGitHubEnvironment(operation, {
+          state: "created_candidate",
+          origin: "unknown",
+          repo: error.createdCandidate.repo,
+          name: error.createdCandidate.name
+        });
+      }
+      if (
+        !(await dependencies.guardStopBoundary(
+          operation,
+          "after-github-environment-attempt"
+        ))
+      ) {
+        return { shouldMonitor: false };
+      }
+      return failResolution(operation, executor, dependencies, error);
+    }
   }
 
   const requestedName = operation.environment;
@@ -182,31 +284,35 @@ export async function runEnvironmentOperationWorkflow(
     state: ensured.state,
     origin: ensured.state === "reused" ? "pre_existing" : "unknown",
     repo: operation.repo,
-    name: ensured.name
+    name: ensured.name,
+    // GitHub's own id for the environment, so a rollback can tell what this
+    // request wrote from a replacement the customer created under the same
+    // name. Without it the cleanup gate has nothing to match and refuses.
+    providerId: ensured.providerId
   });
-  if (ensured.state === "created_candidate" && ensured.creationEvidence) {
-    const proof = proveGitHubEnvironmentCreated({
-      preflight: ensured.state,
-      putResponseBody: ensured.creationEvidence.putResponseBody,
-      putStartedAtMs: ensured.creationEvidence.putStartedAtMs
-    });
-    if (
-      proof.proven &&
-      dependencies.promoteCreatedGitHubEnvironment(operation, {
-        repo: operation.repo,
-        name: ensured.name
-      })
-    ) {
-      dependencies.addLegacyStep(
-        operation,
-        `✅ GitHub environment "${ensured.name}" created by this setup — Radius owns it and can remove it.`
-      );
-    } else if (!proof.proven) {
-      dependencies.addLegacyStep(
-        operation,
-        `ℹ️ Radius left GitHub environment "${ensured.name}" outside its cleanup scope. ${proof.detail}`
-      );
-    }
+  // The proof is settled inside `ensureGitHubEnvironment` rather than derived
+  // here, because a reconciled mutation proves ownership from the re-read body
+  // against the journalled start time and this call site has neither.
+  if (
+    ensured.creationProof?.proven &&
+    dependencies.promoteCreatedGitHubEnvironment(operation, {
+      repo: operation.repo,
+      name: ensured.name
+    })
+  ) {
+    dependencies.addLegacyStep(
+      operation,
+      `✅ GitHub environment "${ensured.name}" created by this setup — Radius owns it and can remove it.`
+    );
+  } else if (
+    ensured.state === "created_candidate" &&
+    ensured.creationProof &&
+    !ensured.creationProof.proven
+  ) {
+    dependencies.addLegacyStep(
+      operation,
+      `ℹ️ Radius left GitHub environment "${ensured.name}" outside its cleanup scope. ${ensured.creationProof.detail}`
+    );
   }
   if (requestedName === ensured.name) {
     dependencies.addLegacyStep(
@@ -222,17 +328,64 @@ export async function runEnvironmentOperationWorkflow(
   if (!(await dependencies.persistEnvironmentResolution(operation))) {
     return { shouldMonitor: false };
   }
+  if (
+    !(await dependencies.guardStopBoundary(
+      operation,
+      "after-github-environment"
+    ))
+  ) {
+    return { shouldMonitor: false };
+  }
 
   const request = requestFrom(operation);
+  const postInternal = async (
+    pathname: string,
+    data: Record<string, unknown>
+  ): Promise<Record<string, unknown> | null> => {
+    try {
+      return await dependencies.postInternal(pathname, data);
+    } catch (error) {
+      if (outstandingProviderMutation) {
+        const live = unresolvedProviderMutations(operation).find(
+          (mutation) =>
+            mutation.mutationId === outstandingProviderMutation.mutationId
+        );
+        if (live) {
+          return recordProviderReconciliationFailure(
+            operation,
+            live,
+            dependencies.persistProviderMutation,
+            error
+          );
+        }
+      }
+      throw error;
+    }
+  };
   let setupResult: Record<string, unknown> | null = null;
-  if (operation.provider === "azure" && request.needsAzureCredentials) {
-    setupResult = await dependencies.postInternal("/api/azure-auto-setup", {
+  const reconcilingAzureMutation =
+    outstandingProviderMutation?.kind.startsWith("azure_") === true;
+  if (
+    operation.provider === "azure" &&
+    request.needsAzureCredentials &&
+    (!reconcilingProviderMutation || reconcilingAzureMutation)
+  ) {
+    setupResult = await postInternal("/api/azure-auto-setup", {
       ...record(request.azure),
       repo: operation.repo,
       environment: ensured.name,
       operationEnvironment: operation.environment,
       operationId: operation.operationId
     });
+    if (setupResult?.reconciling) {
+      throw new ProviderMutationRecoveryError(
+        String(
+          setupResult.message ||
+            "Azure setup is reconciling an uncertain provider mutation."
+        ),
+        "provider-mutation-outcome-unknown"
+      );
+    }
     if (setupResult?.inputRequired || operation.state === "input_required") {
       return { shouldMonitor: false };
     }
@@ -242,7 +395,7 @@ export async function runEnvironmentOperationWorkflow(
     return { shouldMonitor: false };
   }
   const environmentRequest = record(request.environment);
-  await dependencies.postInternal("/api/create-environment", {
+  const environmentResult = await postInternal("/api/create-environment", {
     ...environmentRequest,
     repo: operation.repo,
     environment: ensured.name,
@@ -251,9 +404,20 @@ export async function runEnvironmentOperationWorkflow(
     operationId: operation.operationId,
     clientId:
       (typeof setupResult?.clientId === "string" && setupResult.clientId) ||
+      (typeof operation.context?.clientId === "string" &&
+        operation.context.clientId) ||
       (typeof environmentRequest.clientId === "string" &&
         environmentRequest.clientId) ||
       ""
   });
+  if (environmentResult?.reconciling) {
+    throw new ProviderMutationRecoveryError(
+      String(
+        environmentResult.message ||
+          "Environment setup is reconciling an uncertain provider mutation."
+      ),
+      "provider-mutation-outcome-unknown"
+    );
+  }
   return { shouldMonitor: true };
 }

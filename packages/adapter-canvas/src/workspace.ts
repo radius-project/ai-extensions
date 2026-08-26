@@ -376,9 +376,9 @@ function isLegacyRadiusAppModel(content: string): boolean {
 // The newest filesystem activity from a modeling run in the workspace checkout.
 //
 // A run creates `.radius/.staging-<runId>/` before it writes anything and
-// removes it when it finishes. A cancelled or crashed run can leave that
-// directory behind, so presence alone is not liveness: use the newest mtime from
-// the directory or one of its direct staged artifacts.
+// removes it when it finishes. The newest mtime proves that the run existed and
+// may provide a newer observation, but callers must not treat an unchanged mtime
+// as proof that source analysis or recipe publishing stopped.
 //
 // Any read failure answers null. This decides whether to keep waiting, so an
 // unreadable `.radius/` must let the wait end rather than renew it forever.

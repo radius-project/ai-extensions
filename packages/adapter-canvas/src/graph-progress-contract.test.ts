@@ -4,7 +4,6 @@ import {
   GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
   GRAPH_APP_BICEP_MAX_WAIT_MESSAGE,
   GRAPH_APP_BICEP_MAX_WAIT_MS,
-  GRAPH_APP_BICEP_STALLED_MESSAGE,
   GRAPH_APP_BICEP_TIMEOUT_MESSAGE
 } from "./graph-progress-contract.js";
 
@@ -21,7 +20,7 @@ describe("evaluateAppBicepWait", () => {
     ).toEqual({ status: "waiting" });
   });
 
-  it("gives up on a wait that never saw a modeling run", () => {
+  it("gives up when no modeling activity can be observed", () => {
     expect(
       evaluateAppBicepWait({
         nowMs: START + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
@@ -30,7 +29,7 @@ describe("evaluateAppBicepWait", () => {
       })
     ).toEqual({
       status: "expired",
-      reason: "never-started",
+      reason: "not-observed",
       message: GRAPH_APP_BICEP_TIMEOUT_MESSAGE
     });
   });
@@ -49,30 +48,15 @@ describe("evaluateAppBicepWait", () => {
     ).toEqual({ status: "waiting" });
   });
 
-  it("renews the idle budget from the last observed activity", () => {
+  it("does not infer abandonment from an old staging mtime", () => {
     const lastActivityAtMs = START + 10_000;
     expect(
       evaluateAppBicepWait({
-        nowMs: lastActivityAtMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - 1,
+        nowMs: lastActivityAtMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS * 2,
         waitStartedAtMs: START,
         lastActivityAtMs
       })
     ).toEqual({ status: "waiting" });
-  });
-
-  it("reports a run that started and then stopped as stalled", () => {
-    const lastActivityAtMs = START + 10_000;
-    expect(
-      evaluateAppBicepWait({
-        nowMs: lastActivityAtMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
-        waitStartedAtMs: START,
-        lastActivityAtMs
-      })
-    ).toEqual({
-      status: "expired",
-      reason: "stalled",
-      message: GRAPH_APP_BICEP_STALLED_MESSAGE
-    });
   });
 
   // A run that keeps producing filesystem activity can still exceed the total
@@ -113,13 +97,12 @@ describe("evaluateAppBicepWait", () => {
     ).toEqual({ status: "waiting" });
   });
 
-  it("distinguishes the three failures by message", () => {
+  it("distinguishes an unobserved run from the hard ceiling", () => {
     const messages = new Set([
       GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
-      GRAPH_APP_BICEP_STALLED_MESSAGE,
       GRAPH_APP_BICEP_MAX_WAIT_MESSAGE
     ]);
-    expect(messages.size).toBe(3);
+    expect(messages.size).toBe(2);
     expect(GRAPH_APP_BICEP_TIMEOUT_MESSAGE).toContain("5 minutes");
     expect(GRAPH_APP_BICEP_MAX_WAIT_MESSAGE).toContain("30 minutes");
   });

@@ -204,11 +204,13 @@ export function expireGraphProgressWait(
   record: GraphProgressRecord,
   message: string
 ): void {
-  recordGraphBuildEvent(record, {
-    stage: "creating_model",
-    state: "failed",
-    detail: message
-  });
+  if (record.graphProgressWaitExpiredMessage !== message) {
+    recordGraphBuildEvent(record, {
+      stage: "creating_model",
+      state: "failed",
+      detail: message
+    });
+  }
   record.graphProgressActive = false;
   record.graphProgressAwaitingModel = false;
   record.graphProgressWaitExpiredMessage = message;
@@ -233,6 +235,7 @@ export interface CanvasState {
   plannedResources?: CanvasGraphResource[] | null;
   plannedBranch?: string;
   plannedEnvironment?: string;
+  plannedDefinitionHash?: string;
   plannedRequestGeneration?: number;
   plannedFromWorkspace?: boolean;
   deployProvider?: string;

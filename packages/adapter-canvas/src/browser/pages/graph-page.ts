@@ -320,7 +320,11 @@ export function initializeGraphPage(
       .fetch("/api/load-graph", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: page.repo, branch }),
+        body: JSON.stringify({
+          repo: page.repo,
+          branch,
+          restartWait: options.continuing !== true
+        }),
         signal: requestAbort?.signal
       })
       .then((response) => response.json())
@@ -431,7 +435,8 @@ export function initializeGraphPage(
         body: JSON.stringify({
           repo: page.repo,
           branch: page.branch,
-          refresh: true
+          refresh: true,
+          restartWait: true
         }),
         signal: requestAbort?.signal
       })

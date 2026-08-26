@@ -237,9 +237,46 @@ function rolledBackOperation() {
   recordGitHubEnvironment(operation, {
     state: "created",
     repo: REPO,
-    name: "dev"
+    name: "dev",
+    // GitHub's own id for the environment. The deleting pass requires the
+    // name to still answer for it, so a replacement created under the same
+    // name is never what gets removed.
+    providerId: "7"
   });
   return operation;
+}
+
+const ENV_PRESENT = {
+  code: 0,
+  stdout: JSON.stringify({ id: 7, name: "dev" }),
+  stderr: ""
+};
+const ENV_GONE = { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+
+/**
+ * The reads one delete makes: the identity check before it, the environments
+ * listing when absence has to be proven, and the confirming reread after.
+ */
+function environmentReader(stillThere: boolean) {
+  let sawIdentity = false;
+  return async (args: string[]) => {
+    const path = args[1] ?? "";
+    if (path.includes("/environments?")) {
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          total_count: stillThere ? 1 : 0,
+          environments: stillThere ? [{ name: "dev" }] : []
+        }),
+        stderr: ""
+      };
+    }
+    if (!sawIdentity) {
+      sawIdentity = true;
+      return ENV_PRESENT;
+    }
+    return stillThere ? ENV_PRESENT : ENV_GONE;
+  };
 }
 
 describe("environment listing cache after a rollback", () => {
@@ -272,6 +309,7 @@ describe("environment listing cache after a rollback", () => {
       runDeleteEnvironment: async (args) => {
         deleted.push(args);
       },
+      readEnvironment: environmentReader(false),
       invalidateEnvironmentListing: (repo) => {
         harness.invalidate(repo);
       }
@@ -304,13 +342,22 @@ describe("environment listing cache after a rollback", () => {
       runDeleteEnvironment: async () => {
         throw new Error("GitHub API request failed.");
       },
+      readEnvironment: environmentReader(true),
       invalidateEnvironmentListing: (repo) => {
         harness.invalidate(repo);
       }
     });
     const after = await harness.list();
 
-    expect(cleanup.results).toMatchObject([{ outcome: "warning" }]);
+    // The failure said nothing conclusive, so the delete is unresolved rather
+    // than failed; the reread finds the environment exactly where it was and
+    // the pass refuses to issue the delete a second time.
+    expect(cleanup.results).toMatchObject([
+      {
+        outcome: "skipped",
+        detail: expect.stringContaining("still present at the exact identity")
+      }
+    ]);
     // The environment is still there, so the listing that still reports it is
     // correct and the cached payload stands.
     expect(names(after.body)).toEqual(["dev"]);
@@ -371,6 +418,7 @@ describe("a listing already in flight when the environment is removed", () => {
       {
         attempt: 1,
         runDeleteEnvironment: async () => {},
+        readEnvironment: environmentReader(false),
         invalidateEnvironmentListing: (repo) => {
           harness.invalidate(repo);
         }

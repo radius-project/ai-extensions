@@ -198,7 +198,8 @@ function beginGraphProgress(
   view: GraphProgressView,
   key: string,
   target: { repo: string; branches: string[] },
-  nowMs: number
+  nowMs: number,
+  restartExpired: boolean
 ): GraphProgressHandle {
   const existing = graphProgressRecord(state, view);
   // A build that is already in flight for this view is continued rather than
@@ -209,6 +210,10 @@ function beginGraphProgress(
   const sameKey = existing?.graphProgressKey === key;
   const continuing =
     sameKey &&
+    !(
+      restartExpired &&
+      typeof existing.graphProgressWaitExpiredMessage === "string"
+    ) &&
     ((existing.graphProgressActive === true &&
       existing.graphProgressAwaitingModel === true) ||
       typeof existing.graphProgressWaitExpiredMessage === "string");
@@ -555,7 +560,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "graph",
         JSON.stringify({ repo, branch }),
         { repo, branches: [branch] },
-        dependencies.now()
+        dependencies.now(),
+        data.restartWait === true
       );
       activeProgressHandle = progressHandle;
 
@@ -785,8 +791,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       activeGeneration = planGeneration;
       // Persist the selected environment so re-opening (or reloading) the
       // Planned tab re-selects it by default, matching the graph just shown.
-      state.plannedEnvironment =
-        typeof data.environment === "string" ? data.environment : "";
+      if (typeof data.environment === "string" && data.environment) {
+        state.plannedEnvironment = data.environment;
+      } else if (data.refresh !== true) {
+        state.plannedEnvironment = "";
+      }
       const sourceRefContext = dependencies.prepareSourceRefResources(
         entry,
         "planned",
@@ -803,7 +812,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           environment: state.plannedEnvironment
         }),
         { repo, branches: [branch] },
-        dependencies.now()
+        dependencies.now(),
+        data.restartWait === true
       );
       activeProgressHandle = progressHandle;
 
@@ -866,6 +876,20 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         branch,
         log: addBuildDetail
       });
+      const definitionHash = pipeline.definitionHashFor(selection, staged);
+      const canReusePlannedGraph =
+        data.refresh === true &&
+        Array.isArray(previousPlannedResources) &&
+        previousPlanSelection.repo === repo &&
+        previousPlanSelection.branch === branch &&
+        previousPlanSelection.provider === provider &&
+        previousPlanSelection.environment === state.plannedEnvironment &&
+        state.plannedDefinitionHash === definitionHash;
+      if (canReusePlannedGraph) {
+        pipeline.discardStagedArtifacts(staged);
+        state.plannedResources = previousPlannedResources;
+        return json(200, { reload: false, refreshed: true });
+      }
       addEvent(
         "building_graph",
         "running",
@@ -955,6 +979,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         // supplied the app.bicep content (file is on disk).
         state.plannedFromWorkspace = selection.fromWorkspace;
         state.plannedProvider = provider;
+        state.plannedDefinitionHash = definitionHash;
         state.resolvedRecipes = recipes;
         state.activeGraphView = "planned";
       }
@@ -1060,7 +1085,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "diff",
         JSON.stringify({ repo, base: data.base, head: data.head }),
         { repo, branches: [data.base, data.head] },
-        dependencies.now()
+        dependencies.now(),
+        data.restartWait === true
       );
       activeProgressHandle = progressHandle;
       const addEvent = (
