@@ -79,6 +79,8 @@ function start(): {
         return Promise.resolve(scripted);
       },
       isUuid,
+      createTemporaryKubeconfigPath: () => "/tmp/radius-kubeconfig-test",
+      removeTemporaryKubeconfig: () => {},
       parseServedReposFromSubjects: (subjects) =>
         parseServedReposFromSubjects(subjects as Iterable<unknown>)
     })
@@ -204,28 +206,47 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
     const { cli } = start();
     cli.set(
       CLI.aks,
-      JSON.stringify([{ id: "aks-1", name: "aks-1", resourceGroup: "rg-1" }])
+      JSON.stringify([
+        { id: "aks-first", name: "aks-first", resourceGroup: "rg-first" },
+        {
+          id: "aks-selected",
+          name: "aks-selected",
+          resourceGroup: "rg-selected"
+        }
+      ])
     );
-    cli.set(CLI.groups, JSON.stringify([{ id: "rg-1", name: "rg-1" }]));
     cli.set(
-      "az aks get-credentials --name aks-1 --resource-group rg-1 --overwrite-existing",
+      CLI.groups,
+      JSON.stringify([
+        { id: "rg-first", name: "rg-first" },
+        { id: "rg-selected", name: "rg-selected" }
+      ])
+    );
+    cli.set(
+      "az aks get-credentials --name aks-selected --resource-group rg-selected --file /tmp/radius-kubeconfig-test --overwrite-existing",
       ""
     );
     cli.set(
-      "kubectl get namespaces -o jsonpath={.items[*].metadata.name}",
+      "kubectl --kubeconfig /tmp/radius-kubeconfig-test get namespaces -o jsonpath={.items[*].metadata.name}",
       '"default" "radius-system"'
     );
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(`${entry.baseUrl}/api/discover`, {
       method: "POST",
-      body: JSON.stringify({ provider: "azure" })
+      body: JSON.stringify({
+        provider: "azure",
+        resourceGroup: "rg-selected",
+        cluster: "aks-selected"
+      })
     });
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(await response.text()).toBe(
-      '{"clusters":[{"id":"aks-1","name":"aks-1","resourceGroup":"rg-1"}],' +
-        '"resourceGroups":[{"id":"rg-1","name":"rg-1","resourceGroup":""}],' +
+      '{"clusters":[{"id":"aks-first","name":"aks-first","resourceGroup":"rg-first"},' +
+        '{"id":"aks-selected","name":"aks-selected","resourceGroup":"rg-selected"}],' +
+        '"resourceGroups":[{"id":"rg-first","name":"rg-first","resourceGroup":""},' +
+        '{"id":"rg-selected","name":"rg-selected","resourceGroup":""}],' +
         '"namespaces":["default","radius-system"],"vpcs":[],"subnets":[]}'
     );
 

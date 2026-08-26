@@ -12,7 +12,6 @@ import {
   formatServesReposLabel,
   isUuid
 } from "../../azure-oidc.js";
-import { isDomOptionElement } from "../context.js";
 import { beginEntry } from "../lifecycle.js";
 import { isRecord, readArray, readString, readStringArray } from "../json.js";
 import type { DiscoveryData } from "../../azure-oidc.js";
@@ -281,31 +280,6 @@ function renderAzureClusters(
   // Both callers pass a non-empty value only after confirming it is present in
   // the list being rendered, so no second membership branch is needed here.
   select.value = keepValue;
-}
-
-function backfillResourceGroupOption(
-  context: BrowserContext,
-  rgSelect: DomSelectElement,
-  resourceGroup: string
-): void {
-  const existing = Array.from(rgSelect.querySelectorAll("option")).filter(
-    isDomOptionElement
-  );
-  const hasRg = existing.some((option) => option.value === resourceGroup);
-  if (!hasRg) {
-    const customIndex = existing.findIndex(
-      (option) => option.value === "__custom__"
-    );
-    const newOption = context.dom.createOption({
-      value: resourceGroup,
-      label: resourceGroup
-    });
-    const rebuilt = [...existing];
-    if (customIndex >= 0) rebuilt.splice(customIndex, 0, newOption);
-    else rebuilt.push(newOption);
-    rgSelect.replaceChildren(...rebuilt);
-  }
-  rgSelect.value = resourceGroup;
 }
 
 function isAppRegistrationRecord(
@@ -586,6 +560,7 @@ export function initializeDiscoveryPanel(
   if (!scope) return null;
 
   let azureClusters: DiscoveryOption[] = [];
+  let renderedAzureClusters = new Map<string, DiscoveryOption>();
   let azureFilterWired = false;
   // Discovery is de-duplicated by request identity, not merely by provider.
   // Two requests are the same question only when they target the same provider
@@ -601,6 +576,14 @@ export function initializeDiscoveryPanel(
     azure: { identity: null, token: 0 },
     aws: { identity: null, token: 0 }
   };
+  const discoveryAccounts: Record<
+    "azure" | "aws",
+    { subscriptionId: string; tenantId: string }
+  > = {
+    azure: { subscriptionId: "", tenantId: "" },
+    aws: { subscriptionId: "", tenantId: "" }
+  };
+  const accountDiscovered = { azure: false, aws: false };
   // A pending selection belongs to the provider whose form asked for it.
   // Azure and AWS discovery can be outstanding at the same time, so the
   // provider is recorded alongside the config and only a matching response is
@@ -610,6 +593,18 @@ export function initializeDiscoveryPanel(
     provider: "azure" | "aws";
     config: EnvironmentInfrastructure;
   } | null = null;
+
+  const comboValue = (selectId: string, customId: string): string => {
+    const select = context.dom.selectById(selectId);
+    if (!select) return "";
+    if (select.value === "__custom__") {
+      return context.dom.inputById(customId)?.value ?? "";
+    }
+    if (selectId === "azure-cluster-select") {
+      return renderedAzureClusters.get(select.value)?.id ?? select.value;
+    }
+    return select.value;
+  };
 
   // Shared-identity pin helpers. The pin (az-selected-app-id) makes this repo
   // reuse another app's identity — deliberately wider blast radius, so it
@@ -731,9 +726,88 @@ export function initializeDiscoveryPanel(
     });
   }
 
+  const selectedAzureCluster = (): DiscoveryOption | undefined => {
+    const select = context.dom.selectById("azure-cluster-select");
+    if (!select) return undefined;
+    return renderedAzureClusters.get(select.value);
+  };
+
   const findAzureClusterResourceGroup = (clusterId: string): string => {
-    const cluster = azureClusters.find((item) => item.id === clusterId);
-    return cluster?.resourceGroup ?? "";
+    const selected = selectedAzureCluster();
+    if (selected?.id === clusterId) return selected.resourceGroup ?? "";
+    const matches = azureClusters.filter((item) => item.id === clusterId);
+    const resourceGroups = new Set(
+      matches
+        .map((item) => item.resourceGroup ?? "")
+        .filter((resourceGroup) => resourceGroup !== "")
+    );
+    return resourceGroups.size === 1 ? Array.from(resourceGroups)[0] : "";
+  };
+
+  const renderClusters = (
+    list: readonly DiscoveryOption[],
+    keepCluster: string,
+    keepResourceGroup: string
+  ): void => {
+    const repeatedIds = new Set(
+      list
+        .filter(
+          (item, index) =>
+            list.findIndex((other) => other.id === item.id) !== index
+        )
+        .map((item) => item.id)
+    );
+    const optionValue = (item: DiscoveryOption, index: number): string =>
+      repeatedIds.has(item.id) ?
+        `__aks__:${encodeURIComponent(item.resourceGroup ?? "")}:${encodeURIComponent(item.id)}:${index}`
+      : item.id;
+    renderedAzureClusters = new Map(
+      list.map((item, index) => [optionValue(item, index), item])
+    );
+    const keepMatches = [...renderedAzureClusters].filter(
+      ([, item]) =>
+        item.id === keepCluster &&
+        (keepResourceGroup === "" || item.resourceGroup === keepResourceGroup)
+    );
+    const keepValue = keepMatches.length === 1 ? keepMatches[0][0] : "";
+    renderAzureClusters(
+      context,
+      list.map((item, index) =>
+        repeatedIds.has(item.id) && item.resourceGroup ?
+          {
+            ...item,
+            id: optionValue(item, index),
+            name: `${item.name} (${item.resourceGroup})`
+          }
+        : { ...item, id: optionValue(item, index) }
+      ),
+      keepValue
+    );
+  };
+
+  const restoreAzureClusterValue = (
+    cluster: string,
+    resourceGroup: string
+  ): void => {
+    if (cluster === "") return;
+    const select = context.dom.selectById("azure-cluster-select");
+    if (!select) return;
+    const matches = [...renderedAzureClusters].filter(
+      ([, item]) =>
+        item.id === cluster &&
+        (resourceGroup === "" || item.resourceGroup === resourceGroup)
+    );
+    if (matches.length === 1) {
+      select.value = matches[0][0];
+      return;
+    }
+    if (matches.length === 0) {
+      restoreInfrastructureValue(
+        "azure-cluster-select",
+        "azure-cluster-custom",
+        cluster
+      );
+    }
   };
 
   const wireAzureInfraFilter = (): void => {
@@ -742,33 +816,26 @@ export function initializeDiscoveryPanel(
     const rgSelect = context.dom.selectById("azure-rg-select");
     if (!clusterSelect || !rgSelect) return;
     azureFilterWired = true;
-    // Selecting a resource group limits the cluster dropdown to the AKS
-    // clusters that live in that resource group. A custom-typed or empty RG
-    // shows them all.
     scope.on(rgSelect, "change", () => {
-      const rg = rgSelect.value;
-      if (rg === "" || rg === "__custom__") {
-        renderAzureClusters(context, azureClusters, clusterSelect.value);
-        return;
-      }
-      const filtered = azureClusters.filter(
-        (cluster) => (cluster.resourceGroup ?? "") === rg
-      );
-      const keep =
-        filtered.some((cluster) => cluster.id === clusterSelect.value) ?
-          clusterSelect.value
-        : "";
-      renderAzureClusters(context, filtered, keep);
+      void rediscoverAzureNamespaces();
     });
-    // Selecting a cluster back-fills its resource group so the two stay
-    // linked.
     scope.on(clusterSelect, "change", () => {
       const clusterId = clusterSelect.value;
       if (clusterId === "__custom__" || clusterId === "") return;
-      const cluster = azureClusters.find((item) => item.id === clusterId);
-      if (!cluster || !cluster.resourceGroup) return;
-      backfillResourceGroupOption(context, rgSelect, cluster.resourceGroup);
+      void rediscoverAzureNamespaces();
     });
+    const customResourceGroup = context.dom.inputById("azure-rg-custom");
+    const customCluster = context.dom.inputById("azure-cluster-custom");
+    if (customResourceGroup) {
+      scope.on(customResourceGroup, "change", () => {
+        void rediscoverAzureNamespaces();
+      });
+    }
+    if (customCluster) {
+      scope.on(customCluster, "change", () => {
+        void rediscoverAzureNamespaces();
+      });
+    }
   };
 
   const discoverResources = async (
@@ -780,7 +847,44 @@ export function initializeDiscoveryPanel(
       provider === "azure" ? "azure-refresh-btn" : "aws-refresh-btn"
     );
     const request = discoveryRequests[provider];
-    const identity = `${subscriptionId}\u0000${tenantId}`;
+    const previousAccount = discoveryAccounts[provider];
+    const accountChanged =
+      accountDiscovered[provider] &&
+      (previousAccount.subscriptionId !== subscriptionId ||
+        previousAccount.tenantId !== tenantId);
+    discoveryAccounts[provider] = { subscriptionId, tenantId };
+    accountDiscovered[provider] = true;
+    const pending =
+      pendingInfrastructure?.provider === provider ?
+        pendingInfrastructure.config
+      : null;
+    const deploymentResourceGroup =
+      provider === "azure" && (!accountChanged || pending !== null) ?
+        (pending?.resourceGroup ??
+        comboValue("azure-rg-select", "azure-rg-custom"))
+      : "";
+    const cluster =
+      provider === "azure" && (!accountChanged || pending !== null) ?
+        (pending?.cluster ??
+        comboValue("azure-cluster-select", "azure-cluster-custom"))
+      : "";
+    const clusterIsCustom =
+      context.dom.selectById("azure-cluster-select")?.value === "__custom__";
+    const clusterIsKnown = azureClusters.some((item) => item.id === cluster);
+    const discoveredClusterResourceGroup =
+      provider === "azure" ? findAzureClusterResourceGroup(cluster) : "";
+    const clusterResourceGroup =
+      discoveredClusterResourceGroup !== "" || clusterIsKnown ?
+        discoveredClusterResourceGroup
+      : clusterIsCustom || azureClusters.length > 0 ? deploymentResourceGroup
+      : "";
+    const identity = [
+      subscriptionId,
+      tenantId,
+      provider === "azure" ? deploymentResourceGroup : "",
+      clusterResourceGroup,
+      provider === "azure" ? cluster : ""
+    ].join("\u0000");
     if (request.identity === identity) {
       // The very same lookup is already running. Re-assert the disabled state
       // because callers enable Refresh optimistically when a profile is
@@ -801,6 +905,10 @@ export function initializeDiscoveryPanel(
     const payload: Record<string, string> = { provider };
     if (subscriptionId !== "") payload.subscriptionId = subscriptionId;
     if (tenantId !== "") payload.tenantId = tenantId;
+    if (clusterResourceGroup !== "") {
+      payload.resourceGroup = clusterResourceGroup;
+    }
+    if (cluster !== "") payload.cluster = cluster;
     try {
       const response = await context.net.fetch(DISCOVER_ENDPOINT, {
         method: "POST",
@@ -815,7 +923,7 @@ export function initializeDiscoveryPanel(
         azureClusters = sortDiscoveryOptions(
           parseDiscoveryOptions(readArray(raw, "clusters"))
         );
-        renderAzureClusters(context, azureClusters, "");
+        renderClusters(azureClusters, cluster, clusterResourceGroup);
         renderSelect(
           context,
           "azure-rg-select",
@@ -824,12 +932,20 @@ export function initializeDiscoveryPanel(
           ),
           "Select resource group…"
         );
+        restoreInfrastructureValue(
+          "azure-rg-select",
+          "azure-rg-custom",
+          deploymentResourceGroup
+        );
+        restoreAzureClusterValue(cluster, clusterResourceGroup);
         renderSelect(
           context,
           "azure-namespace-select",
           sortDiscoveryOptions(
             parseDiscoveryOptions(
-              readArrayOrDefault(raw, "namespaces", DEFAULT_NAMESPACES)
+              data.errors?.namespaces ?
+                []
+              : readArrayOrDefault(raw, "namespaces", DEFAULT_NAMESPACES)
             )
           ),
           "Select namespace…"
@@ -875,6 +991,14 @@ export function initializeDiscoveryPanel(
         );
       }
       applyPendingInfrastructure(provider);
+      if (
+        provider === "azure" &&
+        pending !== null &&
+        cluster !== "" &&
+        clusterResourceGroup === ""
+      ) {
+        void rediscoverAzureNamespaces();
+      }
     } catch (error) {
       if (isStale()) return;
       if (statusEl)
@@ -890,14 +1014,18 @@ export function initializeDiscoveryPanel(
     }
   };
 
+  const rediscoverAzureNamespaces = async (): Promise<void> => {
+    const account = discoveryAccounts.azure;
+    const resourceGroup = comboValue("azure-rg-select", "azure-rg-custom");
+    const cluster = comboValue("azure-cluster-select", "azure-cluster-custom");
+    const clusterResourceGroup =
+      findAzureClusterResourceGroup(cluster) || resourceGroup;
+    if (clusterResourceGroup === "" || cluster === "") return;
+    await discoverResources("azure", account.subscriptionId, account.tenantId);
+  };
+
   const getComboValue = (selectId: string, customId: string): string => {
-    const select = context.dom.selectById(selectId);
-    if (!select) return "";
-    if (select.value === "__custom__") {
-      const custom = context.dom.inputById(customId);
-      return custom ? custom.value : "";
-    }
-    return select.value;
+    return comboValue(selectId, customId);
   };
 
   const restoreInfrastructureValue = (
@@ -923,11 +1051,7 @@ export function initializeDiscoveryPanel(
         "azure-rg-custom",
         config.resourceGroup ?? ""
       );
-      restoreInfrastructureValue(
-        "azure-cluster-select",
-        "azure-cluster-custom",
-        config.cluster ?? ""
-      );
+      restoreAzureClusterValue(config.cluster ?? "", "");
       restoreInfrastructureValue(
         "azure-namespace-select",
         "azure-namespace-custom",

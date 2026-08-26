@@ -16,6 +16,8 @@ export interface DiscoveryResult {
 export interface DiscoveryRequest {
   subscriptionId?: string;
   provider?: string;
+  resourceGroup?: string;
+  cluster?: string;
 }
 
 export interface DiscoveryDependencies {
@@ -25,6 +27,8 @@ export interface DiscoveryDependencies {
     options: { timeout: number }
   ): Promise<string>;
   isUuid(value: unknown): boolean;
+  createTemporaryKubeconfigPath(): string;
+  removeTemporaryKubeconfig(path: string): void;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -142,43 +146,47 @@ export async function discoverResources(
       result.errors = result.errors || {};
       result.errors.resourceGroups = errorMessage(e).slice(0, 800);
     }
-    // If we got a cluster, try to get namespaces from it
-    if (result.clusters.length > 0) {
+    const resourceGroup = optionalString(data.resourceGroup).trim();
+    const cluster = optionalString(data.cluster).trim();
+    if (resourceGroup && cluster) {
+      const kubeconfigPath = dependencies.createTemporaryKubeconfigPath();
       try {
-        const rg =
-          result.resourceGroups.length > 0 ? result.resourceGroups[0].id : "";
-        const clusterName = result.clusters[0].id;
-        if (rg && clusterName) {
-          await dependencies.runCli(
-            "az",
-            [
-              "aks",
-              "get-credentials",
-              "--name",
-              clusterName,
-              "--resource-group",
-              rg,
-              "--overwrite-existing"
-            ],
-            { timeout: 20000 }
-          );
-          const nsJson = await dependencies.runCli(
-            "kubectl",
-            ["get", "namespaces", "-o", "jsonpath={.items[*].metadata.name}"],
-            { timeout: 10000 }
-          );
-          result.namespaces = nsJson
-            .replace(/"/g, "")
-            .split(" ")
-            .filter(Boolean);
-        } else {
-          result.namespaces = ["default", "kube-system", "radius-system"];
-        }
-      } catch {
-        result.namespaces = ["default", "kube-system", "radius-system"];
+        await dependencies.runCli(
+          "az",
+          [
+            "aks",
+            "get-credentials",
+            "--name",
+            cluster,
+            "--resource-group",
+            resourceGroup,
+            "--file",
+            kubeconfigPath,
+            "--overwrite-existing",
+            ...subArgs
+          ],
+          { timeout: 20000 }
+        );
+        const nsJson = await dependencies.runCli(
+          "kubectl",
+          [
+            "--kubeconfig",
+            kubeconfigPath,
+            "get",
+            "namespaces",
+            "-o",
+            "jsonpath={.items[*].metadata.name}"
+          ],
+          { timeout: 10000 }
+        );
+        result.namespaces = nsJson.replace(/"/g, "").split(" ").filter(Boolean);
+      } catch (e) {
+        result.namespaces = [];
+        result.errors = result.errors || {};
+        result.errors.namespaces = errorMessage(e).slice(0, 800);
+      } finally {
+        dependencies.removeTemporaryKubeconfig(kubeconfigPath);
       }
-    } else {
-      result.namespaces = ["default", "kube-system", "radius-system"];
     }
   } else {
     try {

@@ -1026,6 +1026,90 @@ describe("discoverResources", () => {
     await handle?.discoverResources("azure", "sub-1", "tenant-1");
   });
 
+  it("includes the current resource group and cluster when rediscovering", async () => {
+    const page = renderDiscoveryPage();
+    const bodies: unknown[] = [];
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      bodies.push(JSON.parse(init?.body ?? "{}"));
+      return discoverResponse(
+        azurePayload({
+          clusters: [
+            { id: "aks-1", name: "AKS One", resourceGroup: "rg-1" },
+            { id: "aks-2", name: "AKS Two", resourceGroup: "rg-2" }
+          ],
+          resourceGroups: [
+            { id: "rg-1", name: "rg-1" },
+            { id: "rg-2", name: "rg-2" }
+          ],
+          namespaces: ["selected-namespace"]
+        })
+      );
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    page.selects["azure-rg-select"].value = "rg-2";
+    page.selects["azure-cluster-select"].value = "aks-2";
+
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+
+    expect(bodies).toEqual([
+      { provider: "azure", subscriptionId: "sub-1", tenantId: "tenant-1" },
+      {
+        provider: "azure",
+        subscriptionId: "sub-1",
+        tenantId: "tenant-1",
+        resourceGroup: "rg-2",
+        cluster: "aks-2"
+      }
+    ]);
+    expect(page.selects["azure-rg-select"].value).toBe("rg-2");
+    expect(page.selects["azure-cluster-select"].value).toBe("aks-2");
+  });
+
+  it("shows namespace failures without static namespace choices", async () => {
+    const page = renderDiscoveryPage();
+    let requestCount = 0;
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      requestCount += 1;
+      const body = JSON.parse(init?.body ?? "{}");
+      if (requestCount === 1) {
+        expect(body).not.toHaveProperty("resourceGroup");
+        return discoverResponse(
+          azurePayload({
+            clusters: [{ id: "aks-2", name: "AKS Two", resourceGroup: "rg-2" }],
+            resourceGroups: [{ id: "rg-2", name: "rg-2" }]
+          })
+        );
+      }
+      expect(body).toMatchObject({ resourceGroup: "rg-2", cluster: "aks-2" });
+      return discoverResponse(
+        azurePayload({
+          clusters: [{ id: "aks-2", name: "AKS Two", resourceGroup: "rg-2" }],
+          resourceGroups: [{ id: "rg-2", name: "rg-2" }],
+          errors: { namespaces: "selected cluster unavailable" }
+        })
+      );
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(
+      { resourceGroup: "rg-2", cluster: "aks-2" },
+      "azure"
+    );
+
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    await flushPromises();
+
+    expect(page.azureStatus.textContent).toBe(
+      "Discovery failed: selected cluster unavailable"
+    );
+    expect(
+      Array.from(page.selects["azure-namespace-select"].options).map(
+        (option) => option.value
+      )
+    ).toEqual(["", "__custom__"]);
+    expect(page.selects["azure-namespace-select"].value).toBe("");
+  });
+
   it("renders azure clusters, resource groups, and default namespaces on success", async () => {
     const page = renderDiscoveryPage();
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
@@ -1067,6 +1151,50 @@ describe("discoverResources", () => {
     expect(page.selects["azure-rg-select"].value).toBe("rg-1");
     expect(page.selects["azure-cluster-select"].value).toBe("aks-1");
     expect(page.selects["azure-namespace-select"].value).toBe("default");
+  });
+
+  it("does not guess a resource group for a saved duplicate AKS name", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse({
+        clusters: [
+          { id: "shared-aks", name: "Shared AKS", resourceGroup: "rg-1" },
+          { id: "shared-aks", name: "Shared AKS", resourceGroup: "rg-2" }
+        ],
+        resourceGroups: [{ id: "app-rg", name: "app-rg" }]
+      })
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(
+      { resourceGroup: "app-rg", cluster: "shared-aks" },
+      "azure"
+    );
+
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    await flushPromises();
+
+    expect(page.selects["azure-cluster-select"].value).toBe("");
+    expect(page.customs["azure-cluster-custom"].value).toBe("");
+    expect(page.browser.net.calls).toHaveLength(1);
+  });
+
+  it("tolerates a missing cluster select while restoring saved discovery", async () => {
+    const browser = createFakeBrowser();
+    browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse({
+        clusters: [
+          { id: "aks-1", name: "AKS One", resourceGroup: "cluster-rg" }
+        ],
+        resourceGroups: []
+      })
+    );
+    const handle = initializeDiscoveryPanel(browser.context);
+    handle?.setPendingInfraSelection({ cluster: "aks-1" }, "azure");
+
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    await flushPromises();
+
+    expect(browser.net.calls).toHaveLength(1);
   });
 
   it("restores an azure value the discovered lists do not offer as a custom entry", async () => {
@@ -1514,6 +1642,39 @@ describe("discoverResources", () => {
     ).toEqual(["", "aks-2", "__custom__"]);
   });
 
+  it("does not restore a stale deployment resource group after namespace discovery", async () => {
+    const page = renderDiscoveryPage();
+    let resolveOld: (value: HttpResponse) => void = () => {};
+    const oldResponse = new Promise<HttpResponse>((resolve) => {
+      resolveOld = resolve;
+    });
+    let requestCount = 0;
+    const resources = azurePayload({
+      resourceGroups: [
+        { id: "rg-1", name: "rg-1" },
+        { id: "rg-2", name: "rg-2" }
+      ]
+    });
+    page.browser.net.handle(DISCOVER_ENDPOINT, () => {
+      requestCount += 1;
+      if (requestCount === 2) return oldResponse;
+      return discoverResponse(resources);
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    page.selects["azure-cluster-select"].value = "aks-1";
+    page.selects["azure-rg-select"].value = "rg-1";
+    const oldRequest = handle?.discoverResources("azure", "sub-1", "tenant-1");
+
+    page.selects["azure-rg-select"].value = "rg-2";
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    resolveOld(discoverResponse(resources));
+    await oldRequest;
+    await flushPromises();
+
+    expect(page.selects["azure-rg-select"].value).toBe("rg-2");
+  });
+
   it("leaves Refresh disabled when a superseded response settles first", async () => {
     const page = renderDiscoveryPage();
     const refreshBtn = createFakeInput("azure-refresh-btn");
@@ -1668,7 +1829,89 @@ describe("azure resource-group / cluster cross-filter", () => {
     await handle?.discoverResources("azure", "", "");
   }
 
-  it("filters the cluster list to the chosen resource group and reselects the only match", async () => {
+  it("re-queries namespaces when the selected cluster changes", async () => {
+    const page = renderDiscoveryPage();
+    const bodies: Array<Record<string, string>> = [];
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      bodies.push(JSON.parse(init?.body ?? "{}"));
+      return discoverResponse({
+        clusters: [
+          { id: "aks-1", name: "AKS One", resourceGroup: "rg-1" },
+          { id: "aks-2", name: "AKS Two", resourceGroup: "rg-2" }
+        ],
+        resourceGroups: [
+          { id: "rg-1", name: "rg-1" },
+          { id: "rg-2", name: "rg-2" }
+        ],
+        namespaces: bodies.length === 1 ? [] : ["team-two"]
+      });
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+
+    page.selects["azure-cluster-select"].value = "aks-2";
+    page.selects["azure-cluster-select"].dispatch("change");
+    await flushPromises();
+
+    expect(bodies.at(-1)).toEqual({
+      provider: "azure",
+      subscriptionId: "sub-1",
+      tenantId: "tenant-1",
+      resourceGroup: "rg-2",
+      cluster: "aks-2"
+    });
+    expect(page.selects["azure-rg-select"].value).toBe("");
+    expect(
+      Array.from(page.selects["azure-namespace-select"].options).map(
+        (option) => option.value
+      )
+    ).toEqual(["", "team-two", "__custom__"]);
+  });
+
+  it("re-queries namespaces after custom Azure targets are entered", async () => {
+    const page = renderDiscoveryPage();
+    const bodies: Array<Record<string, string>> = [];
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      bodies.push(JSON.parse(init?.body ?? "{}"));
+      return discoverResponse({
+        clusters: [],
+        resourceGroups: [],
+        namespaces: []
+      });
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    page.selects["azure-rg-select"].value = "__custom__";
+    page.selects["azure-rg-select"].dispatch("change");
+    page.customs["azure-rg-custom"].value = "rg-custom";
+    page.selects["azure-cluster-select"].value = "__custom__";
+    page.selects["azure-cluster-select"].dispatch("change");
+    page.customs["azure-cluster-custom"].value = "aks-custom";
+
+    page.customs["azure-rg-custom"].dispatch("change");
+    await flushPromises();
+    page.customs["azure-cluster-custom"].dispatch("change");
+    await flushPromises();
+
+    expect(bodies.slice(1)).toEqual([
+      {
+        provider: "azure",
+        subscriptionId: "sub-1",
+        tenantId: "tenant-1",
+        resourceGroup: "rg-custom",
+        cluster: "aks-custom"
+      },
+      {
+        provider: "azure",
+        subscriptionId: "sub-1",
+        tenantId: "tenant-1",
+        resourceGroup: "rg-custom",
+        cluster: "aks-custom"
+      }
+    ]);
+  });
+
+  it("keeps deployment resource-group selection independent from the AKS target", async () => {
     const page = renderDiscoveryPage();
     const handle = initializeDiscoveryPanel(page.browser.context);
     await loadTwoClusters(page, handle);
@@ -1676,140 +1919,61 @@ describe("azure resource-group / cluster cross-filter", () => {
     const clusterSelect = page.selects["azure-cluster-select"];
     const rgSelect = page.selects["azure-rg-select"];
     clusterSelect.value = "aks-2";
-    rgSelect.value = "rg-1";
+    rgSelect.value = "app-rg";
     rgSelect.dispatch("change");
+    await flushPromises();
 
-    expect(
-      Array.from(clusterSelect.options).map((option) => option.value)
-    ).toEqual(["", "aks-1", "__custom__"]);
-    // The previous selection is no longer in the filtered list, and a single
-    // remaining cluster is unambiguous, so it is selected outright.
-    expect(clusterSelect.value).toBe("aks-1");
-  });
-
-  it("excludes a cluster without a resource group when filtering by resource group", async () => {
-    const page = renderDiscoveryPage();
-    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      discoverResponse({
-        clusters: [
-          { id: "aks-1", name: "AKS One", resourceGroup: "rg-1" },
-          { id: "aks-unassigned", name: "AKS Unassigned" }
-        ],
-        resourceGroups: [{ id: "rg-1", name: "rg-1" }]
-      })
-    );
-    const handle = initializeDiscoveryPanel(page.browser.context);
-    await handle?.discoverResources("azure", "", "");
-
-    const clusterSelect = page.selects["azure-cluster-select"];
-    const rgSelect = page.selects["azure-rg-select"];
-    rgSelect.value = "rg-1";
-    rgSelect.dispatch("change");
-
-    expect(
-      Array.from(clusterSelect.options).map((option) => option.value)
-    ).toEqual(["", "aks-1", "__custom__"]);
-  });
-
-  it("keeps the cluster selection when it still matches the chosen resource group", async () => {
-    const page = renderDiscoveryPage();
-    const handle = initializeDiscoveryPanel(page.browser.context);
-    await loadTwoClusters(page, handle);
-
-    const clusterSelect = page.selects["azure-cluster-select"];
-    const rgSelect = page.selects["azure-rg-select"];
-    clusterSelect.value = "aks-1";
-    rgSelect.value = "rg-1";
-    rgSelect.dispatch("change");
-
-    expect(clusterSelect.value).toBe("aks-1");
-  });
-
-  it("shows every cluster again when the resource group is cleared or set to custom", async () => {
-    const page = renderDiscoveryPage();
-    const handle = initializeDiscoveryPanel(page.browser.context);
-    await loadTwoClusters(page, handle);
-
-    const clusterSelect = page.selects["azure-cluster-select"];
-    const rgSelect = page.selects["azure-rg-select"];
-    rgSelect.value = "";
-    rgSelect.dispatch("change");
     expect(
       Array.from(clusterSelect.options).map((option) => option.value)
     ).toEqual(["", "aks-1", "aks-2", "__custom__"]);
-
-    rgSelect.value = "__custom__";
-    rgSelect.dispatch("change");
-    expect(
-      Array.from(clusterSelect.options).map((option) => option.value)
-    ).toEqual(["", "aks-1", "aks-2", "__custom__"]);
+    expect(clusterSelect.value).toBe("aks-2");
+    expect(handle?.getComboValue("azure-rg-select", "azure-rg-custom")).toBe(
+      "app-rg"
+    );
+    expect(page.browser.net.calls.at(-1)?.init?.body).toContain(
+      '"resourceGroup":"rg-2"'
+    );
   });
 
-  it("back-fills the resource group when selecting a cluster that carries one", async () => {
-    const page = renderDiscoveryPage();
-    const handle = initializeDiscoveryPanel(page.browser.context);
-    await loadTwoClusters(page, handle);
-
-    const clusterSelect = page.selects["azure-cluster-select"];
-    const rgSelect = page.selects["azure-rg-select"];
-    clusterSelect.value = "aks-1";
-    clusterSelect.dispatch("change");
-
-    expect(rgSelect.value).toBe("rg-1");
-    expect(
-      Array.from(rgSelect.options).map((option) => option.value)
-    ).toContain("rg-1");
-  });
-
-  it("adds a missing resource-group option before the custom entry when back-filling", async () => {
+  it("uses the selected option's resource group when AKS names repeat", async () => {
     const page = renderDiscoveryPage();
     const handle = initializeDiscoveryPanel(page.browser.context);
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
       discoverResponse({
         clusters: [
-          { id: "aks-1", name: "AKS One", resourceGroup: "rg-unlisted" }
+          { id: "shared-aks", name: "Shared AKS", resourceGroup: "rg-1" },
+          { id: "shared-aks", name: "Shared AKS", resourceGroup: "rg-2" }
         ],
-        resourceGroups: []
+        resourceGroups: [
+          { id: "rg-1", name: "rg-1" },
+          { id: "rg-2", name: "rg-2" }
+        ],
+        namespaces: ["selected-team"]
       })
     );
-    await handle?.discoverResources("azure", "", "");
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
 
     const clusterSelect = page.selects["azure-cluster-select"];
     const rgSelect = page.selects["azure-rg-select"];
-    clusterSelect.value = "aks-1";
+    rgSelect.value = "app-rg";
+    clusterSelect.value = "__aks__:rg-2:shared-aks:1";
     clusterSelect.dispatch("change");
+    await flushPromises();
 
-    const values = Array.from(rgSelect.options).map((option) => option.value);
-    expect(values.indexOf("rg-unlisted")).toBeLessThan(
-      values.indexOf("__custom__")
+    expect(
+      Array.from(clusterSelect.options).map((option) => option.textContent)
+    ).toEqual([
+      "Select AKS cluster…",
+      "Shared AKS (rg-1)",
+      "Shared AKS (rg-2)",
+      "+ Enter custom..."
+    ]);
+    expect(handle?.getComboValue("azure-rg-select", "azure-rg-custom")).toBe(
+      "app-rg"
     );
-    expect(rgSelect.value).toBe("rg-unlisted");
-  });
-
-  it("appends the missing resource-group option at the end when no __custom__ entry exists", async () => {
-    const page = renderDiscoveryPage();
-    const handle = initializeDiscoveryPanel(page.browser.context);
-    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      discoverResponse({
-        clusters: [
-          { id: "aks-1", name: "AKS One", resourceGroup: "rg-unlisted" }
-        ],
-        resourceGroups: []
-      })
+    expect(page.browser.net.calls.at(-1)?.init?.body).toContain(
+      '"resourceGroup":"rg-2"'
     );
-    await handle?.discoverResources("azure", "", "");
-
-    const clusterSelect = page.selects["azure-cluster-select"];
-    const rgSelect = page.selects["azure-rg-select"];
-    // Simulate a resource-group select whose markup never got a trailing
-    // "__custom__" entry, exercising the append-at-end fallback path.
-    rgSelect.replaceChildren();
-    clusterSelect.value = "aks-1";
-    clusterSelect.dispatch("change");
-
-    const values = Array.from(rgSelect.options).map((option) => option.value);
-    expect(values.at(-1)).toBe("rg-unlisted");
-    expect(rgSelect.value).toBe("rg-unlisted");
   });
 
   it("does nothing when the cluster change selects __custom__, empty, an unknown cluster, or one without a resource group", async () => {
@@ -1927,5 +2091,71 @@ describe("findAzureClusterResourceGroup", () => {
     );
     await handle?.discoverResources("azure", "", "");
     expect(handle?.findAzureClusterResourceGroup("does-not-exist")).toBe("");
+    page.selects["azure-cluster-select"].selectedIndex = 1;
+    page.selects["azure-cluster-select"].value = "does-not-exist";
+    expect(handle?.findAzureClusterResourceGroup("does-not-exist")).toBe("");
+  });
+
+  it("falls back to unambiguous metadata when no cluster option is selected", async () => {
+    const page = renderDiscoveryPage();
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse({
+        clusters: [
+          { id: "aks-with-rg", name: "AKS With RG", resourceGroup: "rg-1" },
+          { id: "aks-no-rg", name: "AKS No RG" }
+        ],
+        resourceGroups: []
+      })
+    );
+    await handle?.discoverResources("azure", "", "");
+
+    expect(handle?.findAzureClusterResourceGroup("aks-with-rg")).toBe("rg-1");
+    expect(handle?.findAzureClusterResourceGroup("aks-no-rg")).toBe("");
+  });
+
+  it("resolves duplicate cluster names from the selected option", async () => {
+    const page = renderDiscoveryPage();
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse({
+        clusters: [
+          { id: "shared-aks", name: "Shared AKS", resourceGroup: "rg-1" },
+          { id: "shared-aks", name: "Shared AKS", resourceGroup: "rg-2" }
+        ],
+        resourceGroups: []
+      })
+    );
+    await handle?.discoverResources("azure", "", "");
+
+    expect(handle?.findAzureClusterResourceGroup("shared-aks")).toBe("");
+    page.selects["azure-cluster-select"].value = "__aks__:rg-2:shared-aks:1";
+    expect(handle?.findAzureClusterResourceGroup("shared-aks")).toBe("rg-2");
+  });
+
+  it("gives duplicate malformed cluster entries distinct option identities", async () => {
+    const page = renderDiscoveryPage();
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse({
+        clusters: [
+          { id: "shared-aks", name: "Shared AKS" },
+          { id: "shared-aks", name: "Shared AKS" }
+        ],
+        resourceGroups: []
+      })
+    );
+    await handle?.discoverResources("azure", "", "");
+
+    expect(
+      Array.from(page.selects["azure-cluster-select"].options).map(
+        (option) => option.value
+      )
+    ).toEqual([
+      "",
+      "__aks__::shared-aks:0",
+      "__aks__::shared-aks:1",
+      "__custom__"
+    ]);
   });
 });

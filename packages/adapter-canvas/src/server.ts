@@ -833,6 +833,9 @@ const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
   runAz: (command, args) => runCliCommand(command, args),
   runCli: (command, args, options) => runCommand(command, args, options),
   isUuid,
+  createTemporaryKubeconfigPath: () =>
+    join(tmpdir(), `radius-kubeconfig-${randomUUID()}`),
+  removeTemporaryKubeconfig: (path) => rmSync(path, { force: true }),
   parseServedReposFromSubjects: (subjects) =>
     parseServedReposFromSubjects(subjects as Iterable<unknown>)
 });
