@@ -296,6 +296,7 @@ resource myRoute 'Radius.Compute/routes@2025-08-01-preview' = {
   properties: {
     environment: environment
     application: app.id
+    kind: 'HTTP'
     rules: [
       {
         matches: [
@@ -315,9 +316,12 @@ resource myRoute 'Radius.Compute/routes@2025-08-01-preview' = {
 Rules:
 
 - Do NOT use `target`, `source`, `destination`, or `backend` — these do NOT exist
-- `rules` is the ONLY valid structure — array of objects with `matches` and `destinationContainer`
+- `rules` is a required array of objects with `matches` and `destinationContainer`
+- `kind` supports `HTTP`, `TCP`, `TLS`, and `UDP`; when omitted, it defaults to `HTTP`
+- `hostnames` is optional for HTTP Host or TLS SNI matching; it does not assign the exposed hostname, which the Recipe determines
+- Do not author the read-only `listener`; the Recipe assigns the route to a Gateway listener, and the Gateway may use a public or private load balancer
 - `destinationContainer` requires ALL THREE: `resourceId`, `containerName`, `containerPort`
-- Add a route only when an explicit request, deployment manifest, or other pinned-source evidence requires external ingress. An HTTP listener, `EXPOSE`, health check, or local-only port mapping alone is insufficient
+- Follow the route authoring rule in [app.bicep Structure](../SKILL.md#appbicep-structure-mandatory-order)
 
 ## Image resolution
 
