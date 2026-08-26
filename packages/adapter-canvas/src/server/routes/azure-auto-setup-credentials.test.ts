@@ -46,7 +46,8 @@ function result(
 function harness(options: {
   runAz: (args: string[]) => Promise<AzureAutoSetupCommandResult>;
   ensureServicePrincipal?: AzureAutoSetupCredentialInput["dependencies"]["ensureServicePrincipal"];
-  checkpoint?: () => Promise<boolean>;
+  stopBoundary?: AzureAutoSetupWorkflow["stopBoundary"];
+  checkpoint?: AzureAutoSetupWorkflow["checkpoint"];
   sleep?: (milliseconds: number) => Promise<void>;
   tempWrite?: (path: string, contents: string) => void;
   tempRemove?: (path: string) => void;
@@ -112,6 +113,12 @@ function harness(options: {
     fail: async (status, error, code, extra = {}) => {
       failures.push({ status, error, code, extra });
     },
+    stopBoundary:
+      options.stopBoundary ??
+      (async (boundary) => {
+        calls.push(`stop:${boundary}`);
+        return true;
+      }),
     checkpoint:
       options.checkpoint ??
       (async () => {
@@ -145,11 +152,34 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
         stderr: "Graph denied"
       })
     });
+
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
     expect(test.failures[0]).toMatchObject({
       code: "sp-failed",
       extra: { azError: "Graph denied" }
     });
+  });
+
+  it("stops after the Service Principal lookup and before its create", async () => {
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        boundary !== "before-service-principal-create",
+      ensureServicePrincipal: async (
+        _clientId,
+        _runAz,
+        _mutationRecovery,
+        beforeCreate
+      ) => {
+        if (!(await beforeCreate())) return { ok: false, stopped: true };
+        throw new Error("Service Principal create must not start");
+      },
+      runAz: async (args) => {
+        throw new Error(`unexpected az call: ${args.join(" ")}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures).toEqual([]);
   });
 
   it("stops immediately when the Service Principal checkpoint cancels", async () => {
@@ -322,11 +352,56 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
         throw new Error(`unexpected az call: ${line}`);
       }
     });
+
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
     expect(test.failures[0]).toMatchObject({
       code: "federated-credential-failed"
     });
     expect(test.calls).toContain("remove:C:\\temp\\fic.json");
+  });
+
+  it("honors Stop after a failed federated credential write before rollback", async () => {
+    const test = harness({
+      checkpoint: async (boundary) =>
+        !boundary.startsWith("after-federated-credential-create-attempt:"),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: "[]" });
+        }
+        if (line.includes("federated-credential create")) {
+          // A rejection Entra composed, so the journal settles the attempt
+          // without a reconciling read and the Stop lands on settled provenance.
+          return result({
+            code: 1,
+            stderr: "ERROR: (Authorization_RequestDenied) permission denied"
+          });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures).toEqual([]);
+  });
+
+  it("stops after credential discovery and before federated credential create", async () => {
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        !boundary.startsWith("before-federated-credential-create:"),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: "[]" });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(
+      test.calls.some((call) => call.includes("federated-credential create"))
+    ).toBe(false);
   });
 
   it("verifies an already-existing credential subject before continuing", async () => {
@@ -349,6 +424,54 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
     expect(test.calls.some((call) => call.startsWith("fic:"))).toBe(false);
     expect(test.calls).toContain("role:Contributor");
+  });
+
+  it("starts no role assignment after Stop is observed", async () => {
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        boundary !== "before-role-assignment:Contributor:attempt-1",
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: "[]" });
+        }
+        if (line.includes("federated-credential create")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures).toEqual([]);
+    expect(
+      test.calls.some((call) => call.startsWith("az:role assignment create "))
+    ).toBe(false);
+  });
+
+  it("stops before the AKS cluster role instead of warning about it", async () => {
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        !boundary.startsWith(
+          "before-role-assignment:Azure Kubernetes Service RBAC Cluster Admin"
+        ),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: "[]" });
+        }
+        if (line.includes("federated-credential create")) return result();
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures).toEqual([]);
+    expect(test.calls).toContain("role:Contributor");
+    expect(
+      test.workflow.steps.some((step) =>
+        step.includes("Could not assign the AKS RBAC Cluster Admin role")
+      )
+    ).toBe(false);
   });
 
   it("rejects an already-existing credential with a different subject", async () => {
@@ -666,6 +789,54 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     ).toHaveLength(1);
   });
 
+  it("honors Stop after a failed role write before automatic rollback", async () => {
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        !boundary.startsWith("after-role-assignment-attempt:Contributor:"),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({
+            stdout: JSON.stringify([{ name: "dev", subject: SUBJECT }])
+          });
+        }
+        if (line.startsWith("role assignment create ")) {
+          return result({ code: 1, stderr: "AuthorizationFailed" });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures).toEqual([]);
+  });
+
+  it("honors Stop during role replication backoff before another attempt", async () => {
+    let assignments = 0;
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        !boundary.startsWith("before-role-assignment-backoff:Contributor:"),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({
+            stdout: JSON.stringify([{ name: "dev", subject: SUBJECT }])
+          });
+        }
+        if (line.startsWith("role assignment create ")) {
+          assignments += 1;
+          return result({ code: 1, stderr: "PrincipalNotFound" });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(assignments).toBe(1);
+    expect(test.calls.some((call) => call.startsWith("sleep:"))).toBe(false);
+    expect(test.failures).toEqual([]);
+  });
+
   it("treats a malformed advisory credential list as empty and creates the credential", async () => {
     const test = harness({
       runAz: async (args) => {
@@ -826,7 +997,35 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     }
   );
 
-  it("accepts already-existing role assignments without recording new artifacts", async () => {
+  it.each([0, 1])(
+    "accepts code %i already-existing role assignments without recording new artifacts",
+    async (code) => {
+      const test = harness({
+        runAz: async (args) => {
+          const line = args.join(" ");
+          if (line.includes("federated-credential list")) {
+            return result({
+              stdout: JSON.stringify([{ name: "dev", subject: SUBJECT }])
+            });
+          }
+          if (line.startsWith("role assignment create ")) {
+            return result({ code, stderr: "already exists" });
+          }
+          throw new Error(`unexpected az call: ${line}`);
+        }
+      });
+
+      expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+      expect(test.calls.some((call) => call.startsWith("role:"))).toBe(false);
+    }
+  );
+
+  it("preserves non-ownership through a transient reconciliation failure", async () => {
+    const assignments = new Map<
+      string,
+      { objectId: string; role: string; scope: string }
+    >();
+    let failNextRead = false;
     const test = harness({
       runAz: async (args) => {
         const line = args.join(" ");
@@ -836,12 +1035,50 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
           });
         }
         if (line.startsWith("role assignment create ")) {
-          return result({ code: 1, stderr: "already exists" });
+          const assignmentId = args[args.indexOf("--name") + 1];
+          assignments.set(assignmentId, {
+            objectId: args[args.indexOf("--assignee-object-id") + 1],
+            role: args[args.indexOf("--role") + 1],
+            scope: args[args.indexOf("--scope") + 1]
+          });
+          return result({ code: 0, stderr: "already exists" });
+        }
+        if (line.startsWith("role assignment list ")) {
+          if (failNextRead) {
+            failNextRead = false;
+            return result({ code: 1, stderr: "temporarily unavailable" });
+          }
+          const assignmentId = /name=='([^']+)'/.exec(
+            args[args.indexOf("--query") + 1]
+          )?.[1];
+          const assignment =
+            assignmentId ? assignments.get(assignmentId) : undefined;
+          return result({
+            stdout: JSON.stringify(
+              assignment ?
+                [
+                  {
+                    id: `${assignment.scope}/providers/Microsoft.Authorization/roleAssignments/${assignmentId}`,
+                    principalId: assignment.objectId,
+                    roleDefinitionName: assignment.role,
+                    scope: assignment.scope
+                  }
+                ]
+              : []
+            )
+          });
         }
         throw new Error(`unexpected az call: ${line}`);
       }
     });
 
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    failNextRead = true;
+    await expect(
+      configureAzureAutoSetupCredentials(test.input)
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown"
+    });
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
     expect(test.calls.some((call) => call.startsWith("role:"))).toBe(false);
   });

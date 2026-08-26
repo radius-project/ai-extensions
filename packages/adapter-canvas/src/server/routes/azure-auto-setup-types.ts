@@ -161,10 +161,13 @@ export interface AzureAutoSetupDependencies {
   ensureServicePrincipal(
     clientId: string,
     runAz: (args: string[]) => Promise<Partial<AzureAutoSetupCommandResult>>,
-    mutationRecovery?: {
-      operation: object & { operationId: string };
-      persist(): Promise<void>;
-    }
+    mutationRecovery:
+      | {
+          operation: object & { operationId: string };
+          persist(): Promise<void>;
+        }
+      | undefined,
+    beforeCreate: () => Promise<boolean>
   ): Promise<
     | {
         ok: true;
@@ -172,7 +175,8 @@ export interface AzureAutoSetupDependencies {
         origin: "unknown" | "pre_existing" | "this_operation";
         objectId: string | null;
       }
-    | { ok: false; stderr: string }
+    | { ok: false; stopped: true }
+    | { ok: false; stopped?: false; stderr: string }
   >;
   finalizeSetupFailure(
     operation: AzureAutoSetupOperation | null,
@@ -183,6 +187,12 @@ export interface AzureAutoSetupDependencies {
     persist: () => Promise<void>;
     report: (diagnostic: { code: string; message: string }) => void;
     fail: (status: number, error: string, code: string) => Promise<void>;
+  }): Promise<boolean>;
+  honorStopBoundary(input: {
+    operation: AzureAutoSetupOperation | null;
+    boundary: string;
+    persist: () => Promise<void>;
+    report: (diagnostic: { code: string; message: string }) => void;
   }): Promise<boolean>;
   sleep(milliseconds: number): Promise<void>;
   stageAuthorizeIdentity: string;
@@ -200,7 +210,8 @@ export interface AzureAutoSetupWorkflow {
     code: string,
     extra?: Record<string, unknown>
   ): Promise<void>;
-  checkpoint(): Promise<boolean>;
+  stopBoundary(boundary: string): Promise<boolean>;
+  checkpoint(boundary: string): Promise<boolean>;
 }
 
 export interface AzureAutoSetupApplicationInput {

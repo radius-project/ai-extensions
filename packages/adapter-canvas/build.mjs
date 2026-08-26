@@ -139,15 +139,20 @@ function assembleDist() {
     if (!existsSync(from)) continue;
     cpSync(from, join(distDir, entry), { recursive: true });
   }
-  resolveCatalogSpecifiers(join(distDir, "package.json"));
+  const distPackage = join(distDir, "package.json");
+  resolveCatalogSpecifiers(distPackage);
   writeThirdPartyNotices(browserBundleInputs);
-  for (const manifest of ["package.json", "plugin.json"]) {
-    stampVersion(join(distDir, manifest));
-  }
+  stampVersion(distPackage, stampedVersion);
+  // The manifest the host reads must advertise the version the package ships,
+  // including when a rebuild runs without PLUGIN_VERSION.
+  stampVersion(
+    join(distDir, "plugin.json"),
+    JSON.parse(readFileSync(distPackage, "utf8")).version
+  );
 }
 
-function stampVersion(manifestPath) {
-  if (!stampedVersion) return;
+function stampVersion(manifestPath, version) {
+  if (!version) return;
   const raw = readFileSync(manifestPath, "utf8");
   // Non-global: only the top-level "version" key, never a dependency range.
   const versionKey = /("version":\s*")[^"]*(")/;
@@ -156,7 +161,7 @@ function stampVersion(manifestPath) {
   }
   // A no-op replace is fine: `changeset version` may already have written this
   // exact version into the source manifest.
-  const next = raw.replace(versionKey, `$1${stampedVersion}$2`);
+  const next = raw.replace(versionKey, `$1${version}$2`);
   if (next !== raw) writeFileSync(manifestPath, next);
 }
 
