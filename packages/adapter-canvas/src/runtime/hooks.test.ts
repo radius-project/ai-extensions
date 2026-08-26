@@ -111,6 +111,20 @@ describe("appBicepHandoffPrompt", () => {
     );
   });
 
+  it("keeps an open graph view alive while the generated model becomes available", () => {
+    const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    expect(msg).toContain("keep the current view open");
+    expect(msg).toContain("will render the model in place");
+    expect(msg).toContain("Do not reopen the Radius Canvas");
+    expect(msg).not.toContain("open the Radius graph view again");
+  });
+
+  it("still reopens views that do not support in-place model completion", () => {
+    expect(
+      appBicepHandoffPrompt("acme/widgets", "planned", ["feat"])
+    ).toContain("open the Radius planned view again");
+  });
+
   it("includes the repo suffix only when a repo is provided", () => {
     expect(appBicepHandoffPrompt("acme/widgets")).toContain(
       "view for acme/widgets"
@@ -638,10 +652,7 @@ describe("evaluateAppBicepHook", () => {
     ]);
   });
 
-  // The canvas ignores a caller-supplied branch for the workspace repository and
-  // renders the checked-out worktree. Deciding against the requested branch
-  // instead would judge a branch the user will never see.
-  it("judges the workspace repository on its checked-out branch, not the requested one", async () => {
+  it("honors an explicit branch for the workspace repository", async () => {
     const deps = makeDeps({
       state: {
         contextRepo: "a/b",
@@ -670,10 +681,40 @@ describe("evaluateAppBicepHook", () => {
 
     expect(deps.appModelStatus).toHaveBeenCalledWith(
       "a/b",
-      "feature",
+      "main",
       expect.anything()
     );
     expect(deps.appSource).toHaveBeenCalledWith(
+      "a/b",
+      "main",
+      expect.anything()
+    );
+  });
+
+  it("uses the checked-out branch when the workspace repository branch is omitted", async () => {
+    const deps = makeDeps({
+      state: {
+        contextRepo: "a/b",
+        workspaceRepo: "a/b",
+        workspaceBranch: "feature"
+      },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "missing" })
+      )
+    });
+
+    await evaluateAppBicepHook(
+      {
+        toolName: "open_canvas",
+        toolArgs: {
+          canvasId: "radius",
+          input: { page: "graph", repo: "a/b" }
+        }
+      },
+      deps
+    );
+
+    expect(deps.appModelStatus).toHaveBeenCalledWith(
       "a/b",
       "feature",
       expect.anything()

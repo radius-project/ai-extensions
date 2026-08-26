@@ -11,6 +11,11 @@
 import { addInboundConnections } from "./model.js";
 
 const DIFF_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const DEFINITION_KEY_SEPARATOR = "\u0000";
+
+function definitionKey(type: string, name: string): string {
+  return `${type}${DEFINITION_KEY_SEPARATOR}${name}`;
+}
 
 /**
  * applicationGraphToResources - convert a rad `app-graph.json` payload into the
@@ -87,7 +92,9 @@ export function applicationGraphToResources(
       definitionLine:
         typeof r.definitionLine === "number" && r.definitionLine > 0 ?
           r.definitionLine
-        : (definitionLines.get(r.name) ??
+        : (definitionLines.get(definitionKey(type, r.name || "")) ??
+          definitionLines.get(r.name) ??
+          definitionLines.get(definitionKey(type, id.split("/").pop() || "")) ??
           definitionLines.get(id.split("/").pop() || "") ??
           0),
       // Newer `rad app graph` emits the authored codeReference under the
@@ -123,13 +130,14 @@ export function findResourceDefinitionLines(
   if (!content) return result;
 
   const lines = content.split(/\r?\n/);
-  const declarations: Array<{ index: number; symbol: string }> = [];
+  const declarations: Array<{ index: number; symbol: string; type: string }> =
+    [];
   const declarationPattern =
-    /^\s*resource\s+([A-Za-z_][A-Za-z0-9_]*)\s+['"][^'"]+['"](?:\s+existing)?\s*=/;
+    /^\s*resource\s+([A-Za-z_][A-Za-z0-9_]*)\s+['"]([^@'"]+)(?:@[^'"]+)?['"](?:\s+existing)?\s*=/;
 
   for (let index = 0; index < lines.length; index++) {
     const match = lines[index].match(declarationPattern);
-    if (match) declarations.push({ index, symbol: match[1] });
+    if (match) declarations.push({ index, symbol: match[1], type: match[2] });
   }
 
   for (let i = 0; i < declarations.length; i++) {
@@ -158,6 +166,10 @@ export function findResourceDefinitionLines(
         : null;
       if (nameMatch && !result.has(nameMatch[1])) {
         result.set(nameMatch[1], lineNumber);
+      }
+      if (nameMatch) {
+        const typedKey = definitionKey(declaration.type, nameMatch[1]);
+        if (!result.has(typedKey)) result.set(typedKey, lineNumber);
       }
       if (foundBody && depth === 0) break;
     }

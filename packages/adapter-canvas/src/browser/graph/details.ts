@@ -7,7 +7,7 @@
 // listener per container so re-rendering a graph can never stack handlers.
 
 import { escapeBrowserHtml } from "../html.js";
-import { buildSourceUrl } from "./model.js";
+import { buildSourceUrl, githubSourceReferenceUrl } from "./model.js";
 import type { BrowserContext, DomElement } from "../ports.js";
 import type { GraphNodeData, GraphSettings } from "./build.js";
 
@@ -29,22 +29,29 @@ const SUBTITLE_STYLE =
 const LINK_STYLE =
   "color:var(--rad-link); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;";
 
-// A link row: monochrome glyph + blue label, with the target URL shown as a
-// muted subtitle beneath.
+// Every external row built here, including source, app-definition, portal, and
+// cloud-output links, carries delegated metadata so the Canvas host opens it.
+// The target URL is optionally shown as a muted subtitle beneath.
 export function linkRow(
   iconSvg: string,
   label: string,
   href: string,
   showUrl: boolean
 ): string {
-  const safeHref = safeExternalUrl(href) || "#";
+  const safeHref = safeExternalUrl(href);
+  if (!safeHref) {
+    return (
+      '<div style="padding:6px 4px;">' +
+      `<span aria-disabled="true" style="${LINK_STYLE}">${iconSvg}<span>${escapeBrowserHtml(label)}</span></span></div>`
+    );
+  }
   const sub =
     showUrl ?
       `<div style="${SUBTITLE_STYLE}">${escapeBrowserHtml(safeHref)}</div>`
     : "";
   return (
     '<div style="padding:6px 4px;">' +
-    `<a href="${escapeBrowserHtml(safeHref)}" target="_blank" rel="noopener noreferrer" style="${LINK_STYLE}">` +
+    `<a href="${escapeBrowserHtml(safeHref)}" data-external-url="${escapeBrowserHtml(safeHref)}" target="_blank" rel="noopener noreferrer" style="${LINK_STYLE}">` +
     iconSvg +
     `<span>${escapeBrowserHtml(label)}</span></a>${sub}</div>`
   );
@@ -156,6 +163,8 @@ export function buildDetailRows(
           data.sourceUrl
         )
       );
+    } else if (githubSourceReferenceUrl(data.codeRef) && data.sourceUrl) {
+      rows.push(linkRow(ICON_SRC, "View source code", data.sourceUrl, true));
     }
     if (data.defFile) {
       rows.push(
@@ -279,6 +288,9 @@ export interface DetailsPanel {
 }
 
 export interface DetailsPanelDeps {
+  // Opens a validated external URL through the Canvas host rather than relying
+  // on native navigation inside the webview.
+  openExternal(url: string): void;
   // Opens a repo-relative worktree file in the editor canvas, falling back to
   // the file's remote URL. Supplied by the renderer so the panel does not own a
   // network policy of its own.
@@ -331,9 +343,9 @@ export function createDetailsPanel(
     context.focus.focus(restore);
   }
 
-  // Delegate clicks from the node cards. The card body opens the panel; the
-  // in-card source anchor and the panel's own links are native anchors that
-  // handle their own clicks. Clicking the empty pane closes the panel.
+  // Delegate clicks from the node cards. Every validated external row is routed
+  // through the Canvas host; local source rows open the editor canvas. Clicking
+  // the empty pane closes the panel.
   const onClick = (event: {
     target?: unknown;
     preventDefault(): void;
@@ -354,6 +366,17 @@ export function createDetailsPanel(
         parseInt(element.getAttribute("data-local-line") ?? "", 10) || 0,
         element.getAttribute("data-fallback-url") ?? ""
       );
+      return;
+    }
+    const externalEl = find("[data-external-url]");
+    if (externalEl !== null && externalEl !== undefined) {
+      event.preventDefault();
+      // linkRow emits this attribute only for a validated URL. Validate again
+      // because a caller or browser extension can still mutate the DOM.
+      const url = safeExternalUrl(
+        (externalEl as DomElement).getAttribute("data-external-url") ?? ""
+      );
+      if (url) deps.openExternal(url);
       return;
     }
     if (find("#" + PANEL_ID)) return;
