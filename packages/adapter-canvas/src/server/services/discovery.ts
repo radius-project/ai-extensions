@@ -185,7 +185,11 @@ export async function discoverResources(
         result.errors = result.errors || {};
         result.errors.namespaces = errorMessage(e).slice(0, 800);
       } finally {
-        dependencies.removeTemporaryKubeconfig(kubeconfigPath);
+        try {
+          dependencies.removeTemporaryKubeconfig(kubeconfigPath);
+        } catch {
+          // Best-effort cleanup: do not fail discovery due to temp file deletion.
+        }
       }
     }
   } else {
