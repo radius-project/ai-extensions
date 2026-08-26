@@ -916,10 +916,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     await harness.extension.shutdown("test");
   });
 
-  // The canvas renders the workspace repository from its checked-out worktree
-  // regardless of the branch a caller names, so judging the named branch would
-  // deny on evidence from a branch the user will never see.
-  it("judges the workspace repository on its worktree, not a caller-named branch", async () => {
+  it("honors a caller-named branch of the workspace repository", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceTreeByRepoBranch: {
         "acme/widgets@main": ["src/index.ts", "Dockerfile"]
@@ -935,10 +932,13 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       }
     });
 
-    expect(decision?.additionalContext).not.toContain(
+    expect(decision?.additionalContext).toContain(
       UNSUPPORTED_NO_DOCKERFILE_MESSAGE
     );
-    expect(harness.deps.github.treePaths).not.toHaveBeenCalled();
+    expect(harness.deps.github.treePaths).toHaveBeenCalledWith(
+      "acme/widgets",
+      "legacy"
+    );
 
     await harness.extension.shutdown("test");
   });

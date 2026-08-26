@@ -652,10 +652,7 @@ describe("evaluateAppBicepHook", () => {
     ]);
   });
 
-  // The canvas ignores a caller-supplied branch for the workspace repository and
-  // renders the checked-out worktree. Deciding against the requested branch
-  // instead would judge a branch the user will never see.
-  it("judges the workspace repository on its checked-out branch, not the requested one", async () => {
+  it("honors an explicit branch for the workspace repository", async () => {
     const deps = makeDeps({
       state: {
         contextRepo: "a/b",
@@ -684,10 +681,40 @@ describe("evaluateAppBicepHook", () => {
 
     expect(deps.appModelStatus).toHaveBeenCalledWith(
       "a/b",
-      "feature",
+      "main",
       expect.anything()
     );
     expect(deps.appSource).toHaveBeenCalledWith(
+      "a/b",
+      "main",
+      expect.anything()
+    );
+  });
+
+  it("uses the checked-out branch when the workspace repository branch is omitted", async () => {
+    const deps = makeDeps({
+      state: {
+        contextRepo: "a/b",
+        workspaceRepo: "a/b",
+        workspaceBranch: "feature"
+      },
+      appModelStatus: vi.fn(async (repo: string, branch: string) =>
+        modelStatus(repo, branch, { status: "missing" })
+      )
+    });
+
+    await evaluateAppBicepHook(
+      {
+        toolName: "open_canvas",
+        toolArgs: {
+          canvasId: "radius",
+          input: { page: "graph", repo: "a/b" }
+        }
+      },
+      deps
+    );
+
+    expect(deps.appModelStatus).toHaveBeenCalledWith(
       "a/b",
       "feature",
       expect.anything()

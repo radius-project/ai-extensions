@@ -1413,20 +1413,25 @@ export async function runRadAppGraph(
         reject(new RadProcessError(err.message, stdout, stderr));
       });
 
-      // Some Windows rad builds leave a descendant or pipe open after writing a
-      // complete graph. The artifact is the command's contract, so once it is
-      // valid JSON, terminate the lingering process tree and continue.
-      artifactTimer = setInterval(() => {
-        if (settled || !fs.existsSync(outFile)) return;
-        try {
-          JSON.parse(fs.readFileSync(outFile, "utf8"));
-        } catch {
-          return;
-        }
-        complete();
-        killChildTree(child);
-        resolve();
-      }, 100);
+      // Some Windows rad builds exit successfully after writing the graph while
+      // a descendant keeps a stdio pipe open. Preserve rad's exit code as the
+      // authority: the artifact may shorten that post-exit wait, but it can
+      // never turn a still-running or failed command into success.
+      if (IS_WIN) {
+        artifactTimer = setInterval(() => {
+          if (settled || exited?.code !== 0 || !fs.existsSync(outFile)) {
+            return;
+          }
+          try {
+            JSON.parse(fs.readFileSync(outFile, "utf8"));
+          } catch {
+            return;
+          }
+          complete();
+          killChildTree(child);
+          resolve();
+        }, 100);
+      }
 
       // Prefer `close`: it fires once the process exited AND all stdio flushed,
       // so stdout/stderr are complete. As a safety net, a short grace window

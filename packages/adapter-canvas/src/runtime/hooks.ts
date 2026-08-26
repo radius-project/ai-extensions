@@ -44,10 +44,7 @@ interface GraphTriggerTarget {
   repo: string;
   branches: Array<string | undefined>;
   // True for a trigger that compares two explicitly named committed branches
-  // (graph-diff). Those branches mean exactly what they say. Every other graph
-  // view renders the workspace repository from its checked-out worktree, so a
-  // branch named alongside the workspace repo is not the branch that will be
-  // rendered — see resolveTargetBranches.
+  // (graph-diff). Those branches mean exactly what they say.
   comparesCommittedBranches: boolean;
 }
 
@@ -219,14 +216,10 @@ export function graphTriggerTargets(
 
 // The branches this trigger will actually be judged against.
 //
-// The canvas ignores a caller-supplied branch for the workspace repository and
-// renders the checked-out worktree instead (see createRadiusCanvas). This hook
-// has to resolve the target the same way, or it decides against a branch the
-// user will never see: asked for the workspace repo on `main` while a feature
-// branch is checked out, it would read `main` from GitHub and could deny — or
-// call the repository unsupported — on evidence from a branch the canvas was
-// never going to render. A graph diff is the exception, since its two branches
-// are explicitly named committed refs and mean exactly what they say.
+// Preserve an explicit ordinary-graph branch. The shared workspace-selection
+// predicate later decides whether that repo/branch pair resolves from the
+// worktree or from GitHub; only an omitted branch needs the workspace branch
+// supplied here. Graph diffs always use their explicit refs.
 function resolveTargetBranches(
   targets: GraphTriggerTarget,
   repo: string,
@@ -234,15 +227,14 @@ function resolveTargetBranches(
   defaultBranchForState: (state: CanvasState) => string
 ): string[] {
   const workspaceBranch = optionalString(state?.workspaceBranch);
-  if (
+  const omittedWorkspaceBranch =
     !targets.comparesCommittedBranches &&
     workspaceBranch &&
-    repo === optionalString(state?.workspaceRepo)
-  ) {
-    return [workspaceBranch];
-  }
+    repo === optionalString(state?.workspaceRepo);
   return targets.branches.map(
-    (candidate) => candidate || defaultBranchForState(state)
+    (candidate) =>
+      candidate ||
+      (omittedWorkspaceBranch ? workspaceBranch : defaultBranchForState(state))
   );
 }
 
