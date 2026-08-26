@@ -45,6 +45,7 @@ const identity = {
   commit,
   extension: "br:biceptypes.azurecr.io/radius:0.60"
 };
+const managedVersion = { version: identity.version, commit: identity.commit };
 const fixtureIndex = JSON.parse(
   fs.readFileSync(path.join(fixtureRoot, "index.json"), "utf8")
 );
@@ -83,7 +84,7 @@ function stagingDirectory(root = temporaryDirectory()): string {
 }
 
 function managedIdentityOptions({
-  radiusIdentity = identity,
+  radiusIdentity = managedVersion,
   execFileSyncImpl = () => JSON.stringify(radiusIdentity)
 } = {}) {
   return {
