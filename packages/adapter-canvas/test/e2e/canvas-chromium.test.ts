@@ -831,6 +831,144 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
   });
 
+  test("retries restored verification through the selected account and exact run identity @safety", async ({
+    page,
+    canvas
+  }) => {
+    const operationId = await canvas.seedRestartedVerificationFailure();
+    const exactCreatedAt = new Date().toISOString();
+    const decoyCreatedAt = new Date(Date.now() + 1000).toISOString();
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      {
+        tool: "gh",
+        args: [
+          "run",
+          "list",
+          "--workflow=radius-verify-credentials.yml",
+          "--limit",
+          "10",
+          "--json",
+          "databaseId",
+          "--repo",
+          REPOSITORY
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: '[{"databaseId":40}]'
+      },
+      {
+        tool: "gh",
+        args: [
+          "workflow",
+          "run",
+          "radius-verify-credentials.yml",
+          "-f",
+          "environment=fixture-environment",
+          "-f",
+          `radius_operation=${operationId}`,
+          "--repo",
+          REPOSITORY,
+          "--ref",
+          WORKTREE_BRANCH
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: ""
+      },
+      {
+        tool: "gh",
+        args: [
+          "run",
+          "list",
+          "--workflow=radius-verify-credentials.yml",
+          "--limit",
+          "10",
+          "--json",
+          "databaseId,createdAt,displayTitle,event,headBranch",
+          "--repo",
+          REPOSITORY
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: JSON.stringify([
+          {
+            databaseId: 42,
+            createdAt: decoyCreatedAt,
+            displayTitle:
+              "Radius verify fixture-environment [another-operation]",
+            event: "workflow_dispatch",
+            headBranch: WORKTREE_BRANCH
+          },
+          {
+            databaseId: 41,
+            createdAt: exactCreatedAt,
+            displayTitle: `Radius verify fixture-environment [${operationId}]`,
+            event: "workflow_dispatch",
+            headBranch: WORKTREE_BRANCH
+          }
+        ])
+      },
+      {
+        tool: "gh",
+        args: [
+          "run",
+          "view",
+          "41",
+          "--json",
+          "status,conclusion,jobs",
+          "--repo",
+          REPOSITORY
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: JSON.stringify({
+          status: "completed",
+          conclusion: "success",
+          jobs: []
+        })
+      }
+    );
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "environment");
+
+    const retry = page.locator("#env-progress-command-retry-verification");
+    await expect(retry).toBeVisible();
+    await expect(retry).toHaveText("Retry verification");
+    await retry.click();
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "gh" &&
+            call.args[0] === "workflow" &&
+            call.args.includes(`radius_operation=${operationId}`)
+        )
+      )
+      .toBe(true);
+    await expect
+      .poll(async () => (await canvas.operationRecord(operationId))["state"], {
+        timeout: 15_000
+      })
+      .toBe("succeeded");
+
+    const record = await canvas.operationRecord(operationId);
+    expect(record["verification"]).toMatchObject({
+      baselineRunId: 40,
+      runId: "41",
+      runUrl: `https://github.com/${REPOSITORY}/actions/runs/41`,
+      operationMarker: operationId
+    });
+    expect(record["providerRecovery"]).toMatchObject({
+      mutations: [
+        expect.objectContaining({
+          kind: "github_workflow.dispatch_retry",
+          status: "confirmed",
+          providerIdempotencyKey: operationId
+        })
+      ]
+    });
+    await expect(page.locator("body")).toContainText("Environment created");
+    await expectNoWcagViolations(page);
+  });
+
   test("sends the worktree branch the page selected when Deploy is activated @safety", async ({
     page,
     canvas
