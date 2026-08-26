@@ -725,6 +725,11 @@ test.describe("Radius Canvas in Chromium", () => {
     const namespace = page.locator("#azure-namespace-select");
     await expect(resourceGroup).toContainText("rg-selected");
     await resourceGroup.selectOption("rg-selected");
+    await expect(cluster.locator("option")).toHaveText([
+      "Select AKS cluster…",
+      "AKS Selected",
+      "+ Enter custom..."
+    ]);
     await cluster.selectOption("aks-selected");
     await expect(namespace).toBeDisabled();
     await expect(namespace).toContainText("selected-team");

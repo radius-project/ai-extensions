@@ -288,10 +288,7 @@ function renderAzureClusters(
   const select = context.dom.selectById("azure-cluster-select");
   if (!select) return;
   renderSelectOptions(context, select, list, "Select AKS cluster…");
-  if (keepValue === "") {
-    if (list.length === 1) select.value = list[0].id;
-    return;
-  }
+  if (keepValue === "") return;
   // Both callers pass a non-empty value only after confirming it is present in
   // the list being rendered, so no second membership branch is needed here.
   select.value = keepValue;
@@ -800,6 +797,19 @@ export function initializeDiscoveryPanel(
     );
   };
 
+  const renderClustersForResourceGroup = (
+    resourceGroup: string,
+    keepCluster: string
+  ): void => {
+    renderClusters(
+      resourceGroup === "" ?
+        []
+      : azureClusters.filter((item) => item.resourceGroup === resourceGroup),
+      keepCluster,
+      resourceGroup
+    );
+  };
+
   const restoreAzureClusterValue = (
     cluster: string,
     resourceGroup: string
@@ -816,13 +826,28 @@ export function initializeDiscoveryPanel(
       select.value = matches[0][0];
       return;
     }
-    if (matches.length === 0) {
+    if (
+      matches.length === 0 &&
+      !azureClusters.some((item) => item.id === cluster)
+    ) {
       restoreInfrastructureValue(
         "azure-cluster-select",
         "azure-cluster-custom",
         cluster
       );
     }
+  };
+
+  const applyAzureResourceGroupFilter = (resourceGroup: string): void => {
+    const request = discoveryRequests.azure;
+    request.token += 1;
+    request.identity = null;
+    renderClustersForResourceGroup(resourceGroup, "");
+    renderSelect(context, "azure-namespace-select", [], "Select namespace…");
+    const namespaceSelect = context.dom.selectById("azure-namespace-select");
+    if (namespaceSelect) namespaceSelect.disabled = false;
+    const refreshButton = context.dom.inputById("azure-refresh-btn");
+    if (refreshButton) refreshButton.disabled = false;
   };
 
   const wireAzureInfraFilter = (): void => {
@@ -832,7 +857,9 @@ export function initializeDiscoveryPanel(
     if (!clusterSelect || !rgSelect) return;
     azureFilterWired = true;
     scope.on(rgSelect, "change", () => {
-      void rediscoverAzureNamespaces();
+      applyAzureResourceGroupFilter(
+        comboValue("azure-rg-select", "azure-rg-custom")
+      );
     });
     scope.on(clusterSelect, "change", () => {
       const clusterId = clusterSelect.value;
@@ -843,7 +870,12 @@ export function initializeDiscoveryPanel(
     const customCluster = context.dom.inputById("azure-cluster-custom");
     if (customResourceGroup) {
       scope.on(customResourceGroup, "change", () => {
-        void rediscoverAzureNamespaces();
+        const customClusterSelected = clusterSelect.value === "__custom__";
+        applyAzureResourceGroupFilter(customResourceGroup.value);
+        if (customClusterSelected) {
+          clusterSelect.value = "__custom__";
+          void rediscoverAzureNamespaces();
+        }
       });
     }
     if (customCluster) {
@@ -952,7 +984,6 @@ export function initializeDiscoveryPanel(
         azureClusters = sortDiscoveryOptions(
           parseDiscoveryOptions(readArray(raw, "clusters"))
         );
-        renderClusters(azureClusters, cluster, clusterResourceGroup);
         renderSelect(
           context,
           "azure-rg-select",
@@ -965,6 +996,10 @@ export function initializeDiscoveryPanel(
           "azure-rg-select",
           "azure-rg-custom",
           deploymentResourceGroup
+        );
+        renderClustersForResourceGroup(
+          comboValue("azure-rg-select", "azure-rg-custom"),
+          cluster
         );
         restoreAzureClusterValue(cluster, clusterResourceGroup);
         renderSelect(
