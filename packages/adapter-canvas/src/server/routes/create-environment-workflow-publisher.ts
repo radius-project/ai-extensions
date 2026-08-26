@@ -5,6 +5,7 @@ import type {
   WorkflowCommitOutcome
 } from "./create-environment-types.js";
 import { cloudCredentialsComplete } from "../../deploy.js";
+import { ProviderMutationRecoveryError } from "../services/provider-mutation-recovery.js";
 
 // Seam 5 of the `POST /api/create-environment` slice: steps 2, 3, 4 and 4b —
 // writing the provider's configuration onto the GitHub environment, then
@@ -43,6 +44,43 @@ export interface ProviderConfigurationPorts {
 export interface ProviderCredentialStatus {
   credentialsComplete: boolean;
   missingCredNote: string;
+}
+
+export function providerCredentialStatus(
+  provider: string,
+  data: CreateEnvironmentRequestData,
+  ports: Pick<
+    ProviderConfigurationPorts,
+    "azureCredential" | "awsCredential" | "optionalString"
+  >
+): ProviderCredentialStatus {
+  if (provider === "azure") {
+    const azureCreds = ports.azureCredential();
+    const credentialsComplete = cloudCredentialsComplete("azure", {
+      clientId: data.clientId || ports.optionalString(azureCreds.clientId),
+      tenantId: data.tenantId || ports.optionalString(azureCreds.tenantId),
+      subscriptionId:
+        data.subscriptionId || ports.optionalString(azureCreds.subscriptionId)
+    });
+    return {
+      credentialsComplete,
+      missingCredNote:
+        credentialsComplete ? "" : (
+          "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
+        )
+    };
+  }
+
+  const credentialsComplete = cloudCredentialsComplete("aws", {
+    roleArn: data.roleArn || ""
+  });
+  return {
+    credentialsComplete,
+    missingCredNote:
+      credentialsComplete ? "" : (
+        "The AWS IAM role ARN is not configured for this environment. Enter it (or use auto-setup), then verify credentials from the Environments list."
+      )
+  };
 }
 
 // The RBAC scope at which to grant the environment identity a subscription-
@@ -85,6 +123,7 @@ export async function applyProviderConfiguration(
   ports.pushStep("Setting environment variables and secrets...");
   const azureCreds = ports.azureCredential();
   const awsCreds = ports.awsCredential();
+  const credentialStatus = providerCredentialStatus(provider, data, ports);
 
   if (provider === "azure") {
     const clientId = data.clientId || ports.optionalString(azureCreds.clientId);
@@ -112,21 +151,11 @@ export async function applyProviderConfiguration(
       data.namespace
     ].filter(Boolean).length;
     ports.pushStep(`Set ${setCount} environment value(s) for Azure.`);
-    if (
-      !cloudCredentialsComplete("azure", {
-        clientId,
-        tenantId,
-        subscriptionId
-      })
-    ) {
+    if (!credentialStatus.credentialsComplete) {
       ports.pushStep(
         "⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually."
       );
-      return {
-        credentialsComplete: false,
-        missingCredNote:
-          "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
-      };
+      return credentialStatus;
     }
     // Credentials are complete, but a manually-entered app registration may have
     // no role assignment that surfaces the subscription — verify then fails at
@@ -154,15 +183,11 @@ export async function applyProviderConfiguration(
   await ports.setEnvironmentVariable("RADIUS_VPC_ID", data.vpcId);
   await ports.setEnvironmentVariable("RADIUS_SUBNET_IDS", data.subnetIds);
   await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
-  if (!cloudCredentialsComplete("aws", { roleArn })) {
+  if (!credentialStatus.credentialsComplete) {
     ports.pushStep(
       "⚠️ Missing AWS role ARN. Enter it or use auto-setup before verifying credentials."
     );
-    return {
-      credentialsComplete: false,
-      missingCredNote:
-        "The AWS IAM role ARN is not configured for this environment. Enter it (or use auto-setup), then verify credentials from the Environments list."
-    };
+    return credentialStatus;
   }
   return { credentialsComplete: true, missingCredNote: "" };
 }
@@ -247,7 +272,7 @@ export interface WorkflowPublisherPorts {
       previousBlobKnown: boolean;
     }
   ): void;
-  deleteLegacyDeployWorkflow(repo: string): Promise<boolean>;
+  deleteLegacyDeployWorkflow(repo: string): Promise<boolean | "cancelled">;
   usingPullRequestBranch(): boolean;
   pullRequestBranch(): string | null;
   errorMessage(error: unknown): string;
@@ -299,9 +324,11 @@ export async function publishWorkflowFiles(
     verifyContent,
     "Add Radius verify-credentials workflow for environment " + envName
   );
+  if (verifyCommit.cancelled) return { outcome: "cancelled" };
 
   if (!verifyCommit.ok) {
     ports.pushStep("❌ Failed to commit verify-credentials workflow.");
+    if (!(await ports.gate())) return { outcome: "cancelled" };
     return {
       outcome: "refused",
       ...describeWorkflowCommitFailure(
@@ -338,9 +365,11 @@ export async function publishWorkflowFiles(
       deployContent,
       "Add Radius deploy workflow (" + fileName + ") for environment " + envName
     );
+    if (deployCommit.cancelled) return { outcome: "cancelled" };
 
     if (!deployCommit.ok) {
       ports.pushStep("❌ Failed to commit deploy workflow " + fileName + ".");
+      if (!(await ports.gate())) return { outcome: "cancelled" };
       return {
         outcome: "refused",
         ...describeWorkflowCommitFailure(
@@ -361,8 +390,16 @@ export async function publishWorkflowFiles(
   // Best-effort: remove the legacy monolithic deploy workflow so it does not
   // double-trigger alongside the new dispatcher. Skipped in PR-fallback mode
   // since we can't push to the default branch.
-  if (!ports.usingPullRequestBranch())
-    await ports.deleteLegacyDeployWorkflow(targetRepo);
+  if (!ports.usingPullRequestBranch()) {
+    try {
+      const legacyDelete = await ports.deleteLegacyDeployWorkflow(targetRepo);
+      if (legacyDelete === "cancelled") return { outcome: "cancelled" };
+    } catch (error) {
+      if (!(await ports.gate())) return { outcome: "cancelled" };
+      throw error;
+    }
+    if (!(await ports.gate())) return { outcome: "cancelled" };
+  }
   ports.pushStep("✅ Deploy workflows committed.");
 
   // Step 4b: Commit the application-delete workflows (dispatcher + Azure
@@ -384,6 +421,7 @@ export async function publishWorkflowFiles(
           ") for environment " +
           envName
       );
+      if (delCommit.cancelled) return { outcome: "cancelled" };
 
       if (!delCommit.ok) {
         ports.pushStep(
@@ -392,6 +430,7 @@ export async function publishWorkflowFiles(
             ": " +
             ((delCommit.stderr || "").trim() || "GitHub API request failed.")
         );
+        if (!(await ports.gate())) return { outcome: "cancelled" };
       }
       if (delCommit.ok) {
         ports.recordCommittedWorkflowFile(
@@ -403,6 +442,7 @@ export async function publishWorkflowFiles(
     }
     ports.pushStep("✅ Delete workflows committed.");
   } catch (delErr) {
+    if (delErr instanceof ProviderMutationRecoveryError) throw delErr;
     // Delete workflows are non-critical to environment creation, so surface the
     // failure but don't abort the whole flow.
     ports.pushStep(

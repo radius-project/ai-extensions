@@ -215,7 +215,11 @@ jobs:
 
       # Runs against the exact bundle uploaded below. This intentionally stays
       # after Build rather than relying on a pre-existing workspace artifact.
+      # It reruns the build itself, so it needs the same stamp to leave dist/
+      # byte-identical to what Build produced.
       - name: Run built-artifact smoke tests
+        env:
+          PLUGIN_VERSION: ${{ steps.version.outputs.version }}
         run: pnpm run test:integration:artifact
       - name: Verify Bicep checker is packaged
         run: test -f plugins/radius/dist/skills/radius-app-bicep/scripts/validate-bicep.mjs
