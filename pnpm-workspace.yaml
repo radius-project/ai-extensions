@@ -18,15 +18,15 @@ catalog:
   # Kept in sync with the pinned "@github/copilot-sdk" version in
   # plugins/radius/package.json by copilot-sdk-pin.test.ts. That manifest ships
   # to users without this file, so it must declare a literal version.
-  "@github/copilot-sdk": 1.0.9
+  "@github/copilot-sdk": 1.0.11
   # Must track the Node major in the "engines.node" range (>=24 <25) so
   # typechecking cannot reach APIs missing from the supported runtime.
   "@types/node": ^24.13.3
   # Must track the "vitest" version below; browser mode ships with the runner.
-  "@vitest/browser": ^4.1.10
-  "@vitest/coverage-v8": ^4.1.10
+  "@vitest/browser": ^4.1.11
+  "@vitest/coverage-v8": ^4.1.11
   typescript: ^7.0.2
-  vitest: ^4.1.10
+  vitest: ^4.1.11
   # YAML parser used only by @radius-project/core tests to assert generated
   # workflow files parse as valid YAML (dev-only; core ships no runtime deps).
   # Caret range compatible with the 2.9.0 already resolved in the lockfile.
