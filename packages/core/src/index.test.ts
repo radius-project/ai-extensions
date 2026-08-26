@@ -38,6 +38,10 @@ const EXPECTED_FUNCTIONS = [
   "buildOidcSubject",
   "buildEnvironmentSuffix",
   "buildFederatedCredentialName",
+  "buildRemediation",
+  "isRemediationId",
+  "remediationSessionMessage",
+  "remediationView",
   "generateVerifyWorkflow",
   "verifyTemplateFile",
   "generateDeployWorkflow",
@@ -71,7 +75,9 @@ const EXPECTED_VALUES = [
   "DELETE_ENV_AZURE_FILE",
   "DELETE_ENV_GUARD_STEP_NAME",
   "DELETE_AZURE_FILE",
-  "DELETE_AWS_FILE"
+  "DELETE_AWS_FILE",
+  "REMEDIATION_IDS",
+  "GENERATED_MODEL_PATHS"
 ] as const;
 
 // Helpers that live inside core and are deliberately not part of the package's

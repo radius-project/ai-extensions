@@ -1283,6 +1283,81 @@ describe("failure card rendering", () => {
     }
   );
 
+  // The whole point of the failure card change: a repair command must arrive as
+  // a callout with Copy / Run with Copilot, not as prose the customer retypes.
+  it("hosts a repair callout when the failure carries a remediation", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    controller?.renderProgress(
+      record({
+        terminalState: "failed",
+        failure: {
+          message: "Run the command below, then retry.",
+          remediation: {
+            id: "github-account-scopes",
+            params: { login: "pubuser", packages: "true" }
+          }
+        }
+      })
+    );
+
+    const host = browser.els[PROGRESS_IDS.failureCommand];
+    expect(host.style.display).toBe("");
+    expect(host.children.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ["an unknown id", { id: "not-a-remediation", params: {} }],
+    [
+      "params the registry refuses",
+      { id: "github-account-scopes", params: { login: "pub user; rm -rf /" } }
+    ],
+    ["a non-record remediation", "gh auth switch"],
+    ["params that are not strings", { id: "github-account-scopes", params: 7 }]
+  ])("leaves the callout empty for %s", (_name, remediation) => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    controller?.renderProgress(
+      record({
+        terminalState: "failed",
+        failure: { message: "boom", remediation }
+      })
+    );
+
+    // An unrunnable remediation must fall back to the prose, never to an empty
+    // callout with buttons that cannot do anything.
+    const host = browser.els[PROGRESS_IDS.failureCommand];
+    expect(host.style.display).toBe("none");
+    expect(host.children.length).toBe(0);
+  });
+
+  it("clears the callout when the panel moves off a failed operation", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    controller?.renderProgress(
+      record({
+        terminalState: "failed",
+        failure: {
+          message: "boom",
+          remediation: {
+            id: "github-account-scopes",
+            params: { login: "pubuser", packages: "true" }
+          }
+        }
+      })
+    );
+    expect(
+      browser.els[PROGRESS_IDS.failureCommand].children.length
+    ).toBeGreaterThan(0);
+
+    // A continuation reuses the panel, so a stale callout would offer a command
+    // for an attempt the customer already moved past.
+    controller?.renderProgress(record({ terminalState: "succeeded" }));
+
+    expect(browser.els[PROGRESS_IDS.failureCommand].children.length).toBe(0);
+    expect(browser.els[PROGRESS_IDS.failureCommand].style.display).toBe("none");
+  });
+
   it("renders the warning list and hides it when nothing was warned about", () => {
     const browser = setup();
     const controller = controllerFor(browser);
@@ -4391,6 +4466,7 @@ describe("graceful degradation when optional DOM elements are missing", () => {
     PROGRESS_IDS.bottomButtons,
     PROGRESS_IDS.failureCard,
     PROGRESS_IDS.failureMessage,
+    PROGRESS_IDS.failureCommand,
     PROGRESS_IDS.cleanupStatus,
     PROGRESS_IDS.retry
   ];

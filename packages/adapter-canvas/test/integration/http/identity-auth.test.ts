@@ -1,3 +1,4 @@
+import { remediationView } from "@radius-project/core";
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
@@ -57,7 +58,8 @@ function start(): Harness {
       azureLoginRequiredResponse: ({ tenantId, activeTenantId }) => ({
         error: `login-required(${tenantId}|${activeTenantId ?? ""})`,
         code: "az-login-required",
-        tenantId
+        tenantId,
+        remediation: remediationView("azure-cli-login", { tenantId })
       }),
       isCliCommandMissing: (detail) => String(detail).includes("ENOENT"),
       isUuid: (value) => uuids.has(String(value)),
@@ -144,7 +146,8 @@ describe("identity-auth real-loopback HIT (RF-02)", () => {
     expect(await mismatch.json()).toEqual({
       error: `login-required(${TENANT_B}|${TENANT_A})`,
       code: "az-login-required",
-      tenantId: TENANT_B
+      tenantId: TENANT_B,
+      remediation: remediationView("azure-cli-login", { tenantId: TENANT_B })
     });
 
     harness.commands["az account show -o json"] = new Error("spawn az ENOENT");
@@ -157,7 +160,8 @@ describe("identity-auth real-loopback HIT (RF-02)", () => {
     expect(await missing.json()).toEqual({
       error: "Azure CLI is not installed.",
       code: "az-cli-missing",
-      tenantId: TENANT_A
+      tenantId: TENANT_A,
+      remediation: remediationView("azure-cli-install", { tenantId: TENANT_A })
     });
 
     // A rejected GUID never reaches the CLI, and a malformed body is still 200.

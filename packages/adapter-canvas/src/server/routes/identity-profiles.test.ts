@@ -130,6 +130,7 @@ function dependencies(
           identity: { state: "ready", detail: "ready" }
         },
         repair: null,
+        repairRemediation: null,
         restoration: null
       },
       selectionHandle: "selection-handle",
@@ -505,6 +506,7 @@ describe("identity-profiles routes (SU-06, SU-07)", () => {
                 identity: { state: "ready", detail: "ready" }
               },
               repair: null,
+              repairRemediation: null,
               restoration: null
             },
             selectionHandle: "handle",

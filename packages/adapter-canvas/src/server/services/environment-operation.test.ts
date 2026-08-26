@@ -47,11 +47,21 @@ function dependencies(
 ): {
   dependencies: EnvironmentOperationWorkflowDependencies;
   events: string[];
-  failures: Array<{ status: number; error: string; code: string }>;
+  failures: Array<{
+    status: number;
+    error: string;
+    code: string;
+    remediation?: unknown;
+  }>;
   posts: Array<{ pathname: string; data: Record<string, unknown> }>;
 } {
   const events: string[] = [];
-  const failures: Array<{ status: number; error: string; code: string }> = [];
+  const failures: Array<{
+    status: number;
+    error: string;
+    code: string;
+    remediation?: unknown;
+  }> = [];
   const posts: Array<{ pathname: string; data: Record<string, unknown> }> = [];
   return {
     events,
@@ -635,7 +645,8 @@ describe("runEnvironmentOperationWorkflow", () => {
       {
         status: 400,
         error: 'Could not resolve GitHub environment "production". HTTP 503',
-        code: "github-environment-lookup-failed"
+        code: "github-environment-lookup-failed",
+        remediation: null
       }
     ]);
   });
@@ -791,7 +802,8 @@ describe("runEnvironmentOperationWorkflow", () => {
       failure: {
         status: 403,
         error: "Admin access is required.",
-        code: "repo-admin-required"
+        code: "repo-admin-required",
+        remediation: null
       }
     },
     {
@@ -807,7 +819,8 @@ describe("runEnvironmentOperationWorkflow", () => {
       failure: {
         status: 403,
         error: "Package scope is required.",
-        code: "ghcr-package-write-required"
+        code: "ghcr-package-write-required",
+        remediation: null
       }
     }
   ])(
@@ -830,6 +843,80 @@ describe("runEnvironmentOperationWorkflow", () => {
       expect(test.failures).toEqual([failure]);
     }
   );
+
+  // Only the id and params travel. If the whole view were forwarded, a command
+  // string would ride along in a persisted record and could be rendered without
+  // ever passing back through the registry.
+  it("forwards a preflight remediation as an id and params, not a command", async () => {
+    const op = operation();
+    const test = dependencies(op, {
+      preflightGhcrPackageWriteAccess: async () => ({
+        ok: false as const,
+        status: 403,
+        error: "Run the command below.",
+        code: "ghcr-scope-required",
+        remediation: {
+          id: "github-account-scopes",
+          params: { login: "pubuser", packages: "true" },
+          command: "gh auth switch -h github.com -u pubuser",
+          runnable: true
+        }
+      })
+    });
+
+    await runEnvironmentOperationWorkflow(
+      op,
+      successfulSelectedGhExecutor({ run: async () => command() }),
+      test.dependencies
+    );
+
+    expect(test.failures).toEqual([
+      {
+        status: 403,
+        error: "Run the command below.",
+        code: "ghcr-scope-required",
+        remediation: {
+          id: "github-account-scopes",
+          params: { login: "pubuser", packages: "true" }
+        }
+      }
+    ]);
+  });
+
+  it.each([
+    ["a remediation without an id", { params: { login: "pubuser" } }, null],
+    ["a remediation that is not a record", "gh auth switch", null],
+    ["an empty id", { id: "", params: {} }, null],
+    [
+      "params that are not strings",
+      { id: "github-account-scopes", params: 7 },
+      { id: "github-account-scopes", params: {} }
+    ],
+    [
+      "a non-string param value",
+      { id: "github-account-scopes", params: { login: 7, packages: "true" } },
+      { id: "github-account-scopes", params: { packages: "true" } }
+    ]
+  ])("normalizes %s", async (_name, remediation, expected) => {
+    const op = operation();
+    const test = dependencies(op, {
+      preflightGhcrPackageWriteAccess: async () => ({
+        ok: false as const,
+        status: 403,
+        error: "boom",
+        code: "ghcr-scope-required",
+        remediation
+      })
+    });
+
+    await runEnvironmentOperationWorkflow(
+      op,
+      successfulSelectedGhExecutor({ run: async () => command() }),
+      test.dependencies
+    );
+
+    expect(test.failures[0]?.remediation).toEqual(expected);
+  });
 
   it("does not continue when the canonical-name checkpoint cannot persist", async () => {
     const op = operation();
