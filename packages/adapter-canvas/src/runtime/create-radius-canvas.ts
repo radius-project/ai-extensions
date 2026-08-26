@@ -38,7 +38,8 @@ interface CanvasContext {
   extensionId: string;
   canvasId: string;
   instanceId: string;
-  input?: Record<string, unknown>;
+  // Host-supplied JSON of any shape; every consumer narrows it via record().
+  input?: unknown;
 }
 
 // Mirrors server.ts's isCurrentSourceRefToken: true only when `token` is
