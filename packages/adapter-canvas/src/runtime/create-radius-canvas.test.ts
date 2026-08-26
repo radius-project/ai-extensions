@@ -337,6 +337,42 @@ describe("RU-14: workspace repo/branch resolution on open()", () => {
     expect(state.contextBranch).toBe("feature/x");
   });
 
+  it("uses an explicit remote branch of the workspace repository", async () => {
+    const { canvas, deps } = setup({
+      workspaceContext: {
+        workspacePath: "/ws",
+        repo: "acme/widgets",
+        branch: "feature/x"
+      }
+    });
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: "release"
+      })
+    );
+    const state = deps.servers.get("radius-panel")!.state;
+    expect(state.contextRepo).toBe("acme/widgets");
+    expect(state.contextBranch).toBe("release");
+  });
+
+  it("uses an explicit branch with the workspace repository when repo is omitted", async () => {
+    const { canvas, deps } = setup({
+      workspaceContext: {
+        workspacePath: "/ws",
+        repo: "acme/widgets",
+        branch: "feature/x"
+      }
+    });
+    await canvas.open(
+      ctx("radius-panel", { page: "graph", branch: "release" })
+    );
+    const state = deps.servers.get("radius-panel")!.state;
+    expect(state.contextRepo).toBe("acme/widgets");
+    expect(state.contextBranch).toBe("release");
+  });
+
   it("falls back to the given branch (or main) for a different repo", async () => {
     const { canvas, deps } = setup({
       workspaceContext: {

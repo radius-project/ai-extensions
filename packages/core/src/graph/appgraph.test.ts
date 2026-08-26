@@ -271,6 +271,7 @@ describe("applicationGraphToResources", () => {
       new Map([
         ["frontend", 3],
         ["web", 3],
+        ["Radius.Compute/containers\u0000web", 3],
         ["database", 7]
       ])
     );
@@ -583,6 +584,71 @@ describe("applicationGraphToResources — input normalization", () => {
     );
 
     expect(resources[0].definitionLine).toBe(3);
+  });
+
+  it("matches definition lines by resource type when literal names collide", () => {
+    const content = [
+      "resource image 'Radius.Compute/containerImages@2025-01-01' = {",
+      "  name: 'store-admin'",
+      "}",
+      "resource container 'Radius.Compute/containers@2025-01-01' = {",
+      "  name: 'store-admin'",
+      "}",
+      "resource database 'Radius.Data/mongoDatabases@2025-01-01' = {",
+      "  name: 'orders'",
+      "}",
+      "resource queue 'Radius.Messaging/rabbitMQ@2025-01-01' = {",
+      "  name: 'orders'",
+      "}"
+    ].join("\n");
+
+    const resources = applicationGraphToResources(
+      [
+        {
+          ...base,
+          id: buildResourceID("Radius.Compute/containers", "store-admin"),
+          name: "store-admin",
+          type: "Radius.Compute/containers"
+        },
+        {
+          ...base,
+          id: buildResourceID("Radius.Messaging/rabbitMQ", "orders"),
+          name: "orders",
+          type: "Radius.Messaging/rabbitMQ"
+        }
+      ],
+      ".radius/app.bicep",
+      content
+    );
+
+    expect(resources.map((resource) => resource.definitionLine)).toEqual([
+      4, 10
+    ]);
+  });
+
+  it("keeps the first typed declaration when type and name both collide", () => {
+    const content = [
+      "resource first 'Radius.Compute/containers@2025-01-01' = {",
+      "  name: 'web'",
+      "}",
+      "resource second 'Radius.Compute/containers@2025-01-01' = {",
+      "  name: 'web'",
+      "}"
+    ].join("\n");
+
+    const resources = applicationGraphToResources(
+      [
+        {
+          ...base,
+          name: "web",
+          type: "Radius.Compute/containers"
+        }
+      ],
+      ".radius/app.bicep",
+      content
+    );
+
+    expect(resources[0].definitionLine).toBe(1);
   });
 });
 

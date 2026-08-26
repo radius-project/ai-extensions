@@ -534,7 +534,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     const firstEntry = harness.servers.get("radius-panel");
     expect(firstEntry?.state).toMatchObject({
       contextRepo: "acme/widgets",
-      contextBranch: "feature/runtime-tests"
+      contextBranch: "main"
     });
 
     await harness.host.open("radius-panel", {
@@ -566,7 +566,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     expect(harness.servers.has("broken-panel")).toBe(false);
   });
 
-  it("uses the worktree branch for the session repository and explicit base/head for graph diff", async () => {
+  it("uses the worktree branch when omitted and explicit base/head for graph diff", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {
         workspacePath: "/worktrees/widgets",
@@ -916,10 +916,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     await harness.extension.shutdown("test");
   });
 
-  // The canvas renders the workspace repository from its checked-out worktree
-  // regardless of the branch a caller names, so judging the named branch would
-  // deny on evidence from a branch the user will never see.
-  it("judges the workspace repository on its worktree, not a caller-named branch", async () => {
+  it("honors a caller-named branch when the workspace repository is implicit", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceTreeByRepoBranch: {
         "acme/widgets@main": ["src/index.ts", "Dockerfile"]
@@ -931,14 +928,26 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       toolName: "open_canvas",
       toolArgs: {
         canvasId: "radius",
-        input: { page: "graph", repo: "acme/widgets", branch: "legacy" }
+        input: { page: "graph", branch: "legacy" }
       }
     });
 
-    expect(decision?.additionalContext).not.toContain(
+    expect(decision?.additionalContext).toContain(
       UNSUPPORTED_NO_DOCKERFILE_MESSAGE
     );
-    expect(harness.deps.github.treePaths).not.toHaveBeenCalled();
+    expect(harness.deps.github.treePaths).toHaveBeenCalledWith(
+      "acme/widgets",
+      "legacy"
+    );
+
+    await harness.host.open("radius-panel", {
+      page: "graph",
+      branch: "legacy"
+    });
+    expect(harness.servers.get("radius-panel")?.state).toMatchObject({
+      contextRepo: "acme/widgets",
+      contextBranch: "legacy"
+    });
 
     await harness.extension.shutdown("test");
   });

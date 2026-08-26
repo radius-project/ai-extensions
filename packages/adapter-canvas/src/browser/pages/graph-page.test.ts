@@ -473,6 +473,33 @@ describe("initializeGraphPage", () => {
     await flushPromises();
   });
 
+  it("does not let a late branch listing replace the latest dropdown selection", async () => {
+    const { browser, branch } = fixture({ loaded: false });
+    const branches = createDeferred<HttpResponse>();
+    const graph = createDeferred<HttpResponse>();
+    browser.net.handle("/api/discover-branches", () => branches.promise);
+    browser.net.handle("/api/load-graph", () => graph.promise);
+
+    initializeGraphPage(browser.context, globals());
+    branch.value = "release";
+    branch.dispatch("change");
+    branch.value = "hotfix";
+    branch.dispatch("change");
+    branches.resolve(
+      jsonResponse({
+        branches: [
+          { name: "main", sha: "aaaaaaa" },
+          { name: "release", sha: "bbbbbbb" }
+        ]
+      })
+    );
+    await flushPromises();
+
+    expect(branch.value).toBe("hotfix");
+    graph.resolve(jsonResponse({ resources: [{ id: "app/current" }] }));
+    await flushPromises();
+  });
+
   it("skips the automatic load when no branch is selected", async () => {
     const { browser, button } = fixture({ loaded: false, branchValue: "" });
     browser.net.handle("/api/discover-branches", () =>
@@ -511,14 +538,21 @@ describe("initializeGraphPage", () => {
     );
   });
 
-  it("reloads the page once the graph finishes generating", async () => {
-    const { browser, status } = fixture({ loaded: false });
+  it("does not reload for a legacy reload-only graph response", async () => {
+    const setError = vi.fn();
+    const { browser } = fixture({ loaded: false });
     browser.net.handle("/api/load-graph", () => jsonResponse({ reload: true }));
-    initializeGraphPage(browser.context, globals());
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
     await flushPromises();
 
-    expect(browser.nav.reloads).toBe(1);
-    expect(status?.textContent).toBe("Application graph ready.");
+    expect(browser.nav.reloads).toBe(0);
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "The application graph response did not include any resources."
+    );
   });
 
   it("renders generated resources in place without reloading", async () => {
@@ -527,13 +561,16 @@ describe("initializeGraphPage", () => {
     let calls = 0;
     browser.net.handle("/api/load-graph", () => {
       calls++;
-      return calls === 1 ?
+      return (
+        calls === 1 ? jsonResponse({ needsAppBicep: true })
+        : calls === 2 ?
           jsonResponse({
             reload: true,
             resources: [{ id: "app/generated" }],
             fromWorkspace: false
           })
-        : jsonResponse({ needsAppBicep: true });
+        : jsonResponse({ needsAppBicep: true })
+      );
     });
     initializeGraphPage(
       browser.context,
@@ -542,11 +579,13 @@ describe("initializeGraphPage", () => {
       })
     );
     await flushPromises();
+    browser.clock.tick(GRAPH_RETRY_MS);
+    await flushPromises();
 
     expect(browser.nav.reloads).toBe(0);
     expect(
       browser.net.calls.filter((call) => call.url === "/api/load-graph")
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(render).toHaveBeenCalledWith(
       "graph-container",
       expect.arrayContaining([
@@ -572,7 +611,7 @@ describe("initializeGraphPage", () => {
       "Copilot is generating .radius/app.bicep"
     );
     expect(browser.clock.timeouts).toBe(1);
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);
   });
 
   it("presents an empty successful graph as loaded without a ready banner", async () => {
@@ -638,7 +677,7 @@ describe("initializeGraphPage", () => {
       calls++;
       return calls === 1 ?
           jsonResponse({ stale: true })
-        : jsonResponse({ reload: true });
+        : jsonResponse({ resources: [{ id: "app/current" }] });
     });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -649,7 +688,7 @@ describe("initializeGraphPage", () => {
     browser.clock.tick(GRAPH_STALE_RETRY_MS);
     await flushPromises();
     expect(calls).toBe(2);
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
   });
 
   it("surfaces a load error message returned by the server", async () => {
@@ -671,9 +710,11 @@ describe("initializeGraphPage", () => {
     expect(status?.textContent).toBe("");
   });
 
-  it("regenerates the graph for a newly selected branch and reloads", async () => {
+  it("regenerates the graph for a newly selected branch in place", async () => {
     const { browser, branch, status } = fixture({ loaded: true });
-    browser.net.handle("/api/load-graph", () => jsonResponse({ reload: true }));
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/current" }] })
+    );
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
@@ -684,7 +725,7 @@ describe("initializeGraphPage", () => {
     );
     await flushPromises();
 
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
   });
 
   it("updates a loaded graph for a new branch using response provenance", async () => {
@@ -786,7 +827,7 @@ describe("initializeGraphPage", () => {
       calls++;
       if (calls === 1) return jsonResponse({});
       if (calls === 2) return stale.promise;
-      return jsonResponse({ reload: true });
+      return jsonResponse({ resources: [{ id: "app/current" }] });
     });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -799,8 +840,7 @@ describe("initializeGraphPage", () => {
 
     stale.resolve(jsonResponse({ reload: true }));
     await flushPromises();
-    // Only the second (current) regenerate request's reload should count.
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
   });
 
   it("does nothing when reloading a branch without a repository", async () => {
@@ -963,6 +1003,143 @@ describe("initializeGraphPage", () => {
     expect(status?.textContent).toContain("rebuilding the application graph");
   });
 
+  it("retries a loaded graph until the rebuilt model is available", async () => {
+    const { browser, status } = fixture({ loaded: true });
+    const render = vi.fn();
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return calls === 1 ?
+          jsonResponse({ needsAppBicep: true })
+        : jsonResponse({ resources: [{ id: "app/rebuilt" }] });
+    });
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    browser.clock.tick(GRAPH_RETRY_MS);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+    expect(render).toHaveBeenLastCalledWith(
+      "graph-container",
+      [{ id: "app/rebuilt" }],
+      expect.objectContaining({ branch: "feature" })
+    );
+    expect(status?.textContent).toBe("Application graph ready.");
+    expect(browser.nav.reloads).toBe(0);
+  });
+
+  it("keeps a pending branch listing current across loaded-graph retries", async () => {
+    const { browser, branch } = fixture({ loaded: true });
+    const branches = createDeferred<HttpResponse>();
+    let calls = 0;
+    browser.net.handle("/api/discover-branches", () => branches.promise);
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return calls === 1 ?
+          jsonResponse({ needsAppBicep: true })
+        : jsonResponse({ resources: [{ id: "app/rebuilt" }] });
+    });
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    browser.clock.tick(GRAPH_RETRY_MS);
+    await flushPromises();
+    branches.resolve(
+      jsonResponse({
+        branches: [
+          { name: "feature", sha: "aaaaaaa" },
+          { name: "release", sha: "bbbbbbb" }
+        ]
+      })
+    );
+    await flushPromises();
+
+    expect(Array.from(branch.options).map((option) => option.value)).toContain(
+      "release"
+    );
+  });
+
+  it("preserves a loaded graph when model rebuilding times out", async () => {
+    const { browser, status } = fixture({ loaded: true });
+    const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
+    const setError = vi.fn();
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ needsAppBicep: true })
+    );
+    initializeGraphPage(
+      browser.context,
+      globals({
+        radiusRenderGraph: vi.fn(() => controller),
+        radiusSetGraphError: setError
+      })
+    );
+    await flushPromises();
+
+    const attempts = Math.ceil(GRAPH_APP_BICEP_TIMEOUT_MS / GRAPH_RETRY_MS);
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      browser.clock.tick(GRAPH_RETRY_MS);
+      await flushPromises();
+    }
+
+    expect(controller.destroy).not.toHaveBeenCalled();
+    expect(setError).not.toHaveBeenCalled();
+    expect(status?.textContent).toBe(
+      `Unable to refresh the application graph: ${GRAPH_APP_BICEP_TIMEOUT_MESSAGE}`
+    );
+  });
+
+  it("retries a stale loaded-graph refresh without replacing the current graph", async () => {
+    const { browser, status } = fixture({ loaded: true });
+    const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
+    const render = vi.fn(() => controller);
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return calls === 1 ?
+          jsonResponse({ stale: true })
+        : jsonResponse({ resources: [{ id: "app/refreshed" }] });
+    });
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    expect(status?.textContent).toContain("Retrying");
+    expect(controller.destroy).not.toHaveBeenCalled();
+    browser.clock.tick(GRAPH_STALE_RETRY_MS);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+    expect(controller.update).toHaveBeenCalledWith([{ id: "app/refreshed" }]);
+    expect(controller.destroy).not.toHaveBeenCalled();
+  });
+
+  it("preserves the current graph when a refresh response has no resources", async () => {
+    const { browser, status } = fixture({ loaded: true });
+    const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
+    const render = vi.fn(() => controller);
+    const setError = vi.fn();
+    browser.net.handle("/api/load-graph", () => jsonResponse({}));
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render, radiusSetGraphError: setError })
+    );
+    await flushPromises();
+
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(controller.destroy).not.toHaveBeenCalled();
+    expect(setError).not.toHaveBeenCalled();
+    expect(status?.textContent).toBe(
+      "Unable to refresh the application graph: the response did not include any resources."
+    );
+  });
+
   it("surfaces a refresh error message from the server", async () => {
     const { browser, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
@@ -1019,6 +1196,31 @@ describe("initializeGraphPage", () => {
 
     expect(status?.textContent).toBe("Unable to load branches.");
     expect(browser.logger.errors.length).toBeGreaterThan(0);
+  });
+
+  it("ignores a stale branch-list failure after the selected branch changes", async () => {
+    const { browser, branch, status } = fixture({ loaded: false });
+    const listing = createDeferred<HttpResponse>();
+    browser.net.handle("/api/discover-branches", () => listing.promise);
+    browser.net.handle(
+      "/api/load-graph",
+      () => new Promise<HttpResponse>(() => {})
+    );
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    branch.value = "other";
+    branch.dispatch("change");
+    await flushPromises();
+    listing.reject(new Error("stale branch failure"));
+    await flushPromises();
+
+    expect(status?.textContent).not.toBe("Unable to load branches.");
+    expect(
+      browser.logger.errors.some(
+        (entry) => entry.message === "Radius could not load graph branches."
+      )
+    ).toBe(false);
   });
 
   it("ignores a stale progress response superseded by a branch change", async () => {
@@ -1137,7 +1339,9 @@ describe("initializeGraphPage", () => {
     let calls = 0;
     browser.net.handle("/api/load-graph", () => {
       calls++;
-      return calls === 1 ? first.promise : jsonResponse({ reload: true });
+      return calls === 1 ?
+          first.promise
+        : jsonResponse({ resources: [{ id: "app/current" }] });
     });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -1149,7 +1353,7 @@ describe("initializeGraphPage", () => {
     first.reject(new Error("stale failure"));
     await flushPromises();
 
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
     expect(browser.logger.errors).toHaveLength(0);
   });
 
@@ -1161,7 +1365,7 @@ describe("initializeGraphPage", () => {
       calls++;
       if (calls === 1) return jsonResponse({});
       if (calls === 2) return stale.promise;
-      return jsonResponse({ reload: true });
+      return jsonResponse({ resources: [{ id: "app/current" }] });
     });
     initializeGraphPage(browser.context, globals());
     await flushPromises();
@@ -1175,7 +1379,7 @@ describe("initializeGraphPage", () => {
     stale.reject(new Error("stale regenerate failure"));
     await flushPromises();
 
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
     expect(browser.logger.errors).toHaveLength(0);
   });
 
@@ -1227,7 +1431,9 @@ describe("initializeGraphPage", () => {
     let calls = 0;
     browser.net.handle("/api/load-graph", () => {
       calls++;
-      return calls === 1 ? refresh.promise : jsonResponse({ reload: true });
+      return calls === 1 ?
+          refresh.promise
+        : jsonResponse({ resources: [{ id: "app/current" }] });
     });
     initializeGraphPage(browser.context, globals());
     branch.dispatch("change");
@@ -1237,7 +1443,7 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(browser.logger.errors).toHaveLength(0);
-    expect(browser.nav.reloads).toBe(1);
+    expect(browser.nav.reloads).toBe(0);
   });
 
   it("ignores a stale progress failure superseded by a branch change", async () => {
