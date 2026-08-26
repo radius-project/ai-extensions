@@ -1340,28 +1340,50 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
-    let pings = 0;
+    // The heartbeat drops a ping requested while another is still in flight, so
+    // the counter has to advance on response completion rather than on request
+    // interception. Counting at interception let the next dispatched focus be
+    // swallowed by that guard, leaving the overlay assertions to race the
+    // interval timer instead of the events this test drives.
+    let completedPings = 0;
+    let pingStatus = 200;
     let navigations = 0;
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) navigations += 1;
     });
-    await gotoCanvas(page, canvas, "planned");
-    await expectNoWcagViolations(page);
     await page.route("**/api/ping", async (route) => {
-      pings += 1;
+      const status = pingStatus;
       await route.fulfill({
-        status: pings <= 2 ? 503 : 200,
+        status,
         contentType: "application/json",
         body: "{}"
       });
+      completedPings += 1;
     });
+    await gotoCanvas(page, canvas, "planned");
+    await expectNoWcagViolations(page);
+    // The accessibility scan can run for an unpredictable share of the
+    // heartbeat interval, so the page is restarted to put the next interval
+    // ping well beyond the focus-driven sequence below. Serving 200 until the
+    // sequence starts keeps any earlier ping from recording a miss.
+    await gotoCanvas(page, canvas, "planned");
+
+    const overlay = page.locator("#radius-reconnect-overlay");
     const initialNavigations = navigations;
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
-    await expect.poll(() => pings).toBe(1);
-    await expect(page.locator("#radius-reconnect-overlay")).toBeHidden();
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
-    await expect.poll(() => pings).toBe(2);
-    await expect(page.locator("#radius-reconnect-overlay")).toBeVisible();
+    const focusForPing = async (): Promise<void> => {
+      const before = completedPings;
+      await page.evaluate("window.dispatchEvent(new Event('focus'))");
+      await expect.poll(() => completedPings).toBe(before + 1);
+    };
+
+    pingStatus = 503;
+    await focusForPing();
+    await expect(overlay).toBeHidden();
+    await focusForPing();
+    await expect(overlay).toBeVisible();
+    expect(navigations - initialNavigations).toBe(0);
+
+    pingStatus = 200;
     const recoveryNavigation = page.waitForNavigation({
       waitUntil: "domcontentloaded"
     });
@@ -1369,7 +1391,6 @@ test.describe("Radius Canvas in Chromium", () => {
       "setTimeout(() => window.dispatchEvent(new Event('focus')), 0)"
     );
     await recoveryNavigation;
-    await expect.poll(() => pings).toBe(3);
     await expect.poll(() => navigations - initialNavigations).toBe(1);
     await expect(page).toHaveURL(/page=planned/);
   });
