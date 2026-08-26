@@ -101,7 +101,7 @@
   "tools": [
     {
       "name": "radius_generate_app",
-      "description": "Starts Radius app.bicep authoring after checking whether the repository is modelable. Use the installed radius-app-bicep skill for the workflow. Returns only the repository path, packaged skill path, and generator version needed to follow that skill.",
+      "description": "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, instruction, optional generator version, and optional ambiguity brief. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -250,9 +250,25 @@
     }
   ],
   "bootstrap": {
-    "compact": true,
+    "fields": [
+      "skill",
+      "repoPath",
+      "skillBase",
+      "skillVersion",
+      "instruction"
+    ],
     "skill": "radius-app-bicep",
-    "hasSkillBase": true,
-    "hasSkillVersion": true
+    "repoPathMatchesWorkspace": true,
+    "skillBaseRelativeToArtifact": "skills/radius-app-bicep",
+    "skillVersionMatchesPackage": true,
+    "instruction": "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.",
+    "requiredFiles": [
+      "SKILL.md",
+      "scripts/promote-app-model.mjs",
+      "scripts/validate-bicep.mjs",
+      "scripts/write-app-origin.mjs",
+      "../radius-app-graph/references/source-code-references.md"
+    ],
+    "containsLegacyInlinedHeading": false
   }
 }

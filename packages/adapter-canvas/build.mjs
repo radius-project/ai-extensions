@@ -229,6 +229,22 @@ const installPath =
 
 function installToLocal() {
   try {
+    const skillFrom = join(distDir, "skills", "radius-app-bicep");
+    const sourceReferencesFrom = join(
+      distDir,
+      "skills",
+      "radius-app-graph",
+      "references",
+      "source-code-references.md"
+    );
+    for (const requiredAsset of [skillFrom, sourceReferencesFrom]) {
+      if (!existsSync(requiredAsset)) {
+        throw new Error(
+          `Missing required local-install asset: ${requiredAsset}`
+        );
+      }
+    }
+
     const installDir = dirname(installPath);
     mkdirSync(installDir, { recursive: true });
     // Write atomically: copy to a temp file in the same dir, then rename over the
@@ -285,6 +301,7 @@ function installToLocal() {
     console.log(`[canvas] installed → ${installPath}`);
   } catch (e) {
     console.error(`[canvas] install copy failed: ${e?.message || e}`);
+    throw e;
   }
 }
 
