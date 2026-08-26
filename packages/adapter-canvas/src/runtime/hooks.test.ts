@@ -54,6 +54,21 @@ describe("appBicepHandoffPrompt", () => {
     );
   });
 
+  it("keeps an open graph view alive while the generated model becomes available", () => {
+    const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    expect(msg).toContain("keep the current view open");
+    expect(msg).toContain("renders the model in place");
+    expect(msg).toContain("Do not open another Radius canvas");
+    expect(msg).toContain("detects it automatically");
+    expect(msg).not.toContain("open the Radius graph view again");
+  });
+
+  it("still reopens views that do not support in-place model completion", () => {
+    expect(
+      appBicepHandoffPrompt("acme/widgets", "planned", ["feat"])
+    ).toContain("open the Radius planned view again");
+  });
+
   it("includes the repo suffix only when a repo is provided", () => {
     expect(appBicepHandoffPrompt("acme/widgets")).toContain(
       "view for acme/widgets"
@@ -80,13 +95,26 @@ describe("appBicepHandoffPrompt", () => {
   it("reopens the actual existing Radius instance after modeling", () => {
     const msg = appBicepHandoffPrompt(
       "acme/widgets",
-      "graph",
+      "planned",
       ["feat"],
       "app-graph"
     );
 
     expect(msg).toContain("instanceId `app-graph`");
     expect(msg).toContain("refreshes its server and client connections");
+  });
+
+  it("names the existing instance without demanding a reopen for in-place views", () => {
+    const msg = appBicepHandoffPrompt(
+      "acme/widgets",
+      "graph",
+      ["feat"],
+      "app-graph"
+    );
+
+    expect(msg).toContain("instanceId `app-graph`");
+    expect(msg).toContain("never create another Radius canvas instance");
+    expect(msg).not.toContain("refreshes its server and client connections");
   });
 
   it("names multiple branches when given several", () => {

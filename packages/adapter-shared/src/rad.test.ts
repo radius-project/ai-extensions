@@ -15,6 +15,7 @@ import {
   MANAGED_BICEP_PATH,
   resolveExistingRadBinary,
   buildGraphViaRad,
+  runRadAppGraph,
   writeBicepCompileConfig,
   runRadBicepPublishExtension,
   spawnRad,
@@ -672,8 +673,9 @@ describe("buildGraphViaRad", () => {
 
 // A failing compile drives the real `rad` binary via RADIUS_RAD_BINARY, so the
 // fake `rad` is an executable node shebang script; that only works on POSIX.
-const describeBuild = process.platform === "win32" ? describe.skip : describe;
-describeBuild(
+const describePosixBuildFailure =
+  process.platform === "win32" ? describe.skip : describe;
+describePosixBuildFailure(
   "buildGraphViaRad failure surfaces the selected extension",
   () => {
     let ws: string;
@@ -730,6 +732,119 @@ describeBuild(
     }, 20000);
   }
 );
+
+describe("runRadAppGraph artifact completion", () => {
+  let binDir: string;
+  let bin: string;
+  let prevNodeOptions: string | undefined;
+  let prevScenario: string | undefined;
+  let bicepBackup: Buffer | null;
+  let bicepMode: number | null;
+  let prevBinary: string | undefined;
+
+  beforeEach(() => {
+    binDir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-bin-"));
+    bin = process.execPath;
+    const preload = path.join(binDir, "fake-rad.cjs");
+    fs.writeFileSync(
+      preload,
+      [
+        'const fs = require("node:fs");',
+        'const { spawn } = require("node:child_process");',
+        'fs.writeFileSync("app", "");',
+        'if (process.argv[1]?.endsWith("app")) {',
+        '  fs.writeFileSync("app-graph.json", "{");',
+        "  setTimeout(() => {",
+        '    fs.writeFileSync("app-graph.json", JSON.stringify({ resources: [] }));',
+        '    if (process.env.FAKE_RAD_SCENARIO === "failure") {',
+        '      process.stderr.write("late graph diagnostic");',
+        "      process.exit(3);",
+        "    }",
+        '    spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "inherit" });',
+        "    process.exit(0);",
+        "  }, 300);",
+        "}",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    prevNodeOptions = process.env.NODE_OPTIONS;
+    const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+    process.env.NODE_OPTIONS =
+      prevNodeOptions ? `${prevNodeOptions} ${preloadOption}` : preloadOption;
+    prevScenario = process.env.FAKE_RAD_SCENARIO;
+    delete process.env.FAKE_RAD_SCENARIO;
+    if (fs.existsSync(MANAGED_BICEP_PATH)) {
+      bicepBackup = fs.readFileSync(MANAGED_BICEP_PATH);
+      bicepMode = fs.statSync(MANAGED_BICEP_PATH).mode;
+    } else {
+      bicepBackup = null;
+      bicepMode = null;
+    }
+    fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
+    fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
+    if (process.platform !== "win32") {
+      fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
+    }
+    prevBinary = process.env.RADIUS_RAD_BINARY;
+    process.env.RADIUS_RAD_BINARY = bin;
+  });
+
+  afterEach(() => {
+    if (prevBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
+    else process.env.RADIUS_RAD_BINARY = prevBinary;
+    if (prevNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = prevNodeOptions;
+    if (prevScenario === undefined) delete process.env.FAKE_RAD_SCENARIO;
+    else process.env.FAKE_RAD_SCENARIO = prevScenario;
+    fs.rmSync(binDir, { recursive: true, force: true });
+    fs.rmSync(MANAGED_BICEP_PATH, { force: true });
+    if (bicepBackup) {
+      fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_BICEP_PATH, bicepBackup);
+      if (bicepMode !== null && process.platform !== "win32") {
+        fs.chmodSync(MANAGED_BICEP_PATH, bicepMode);
+      }
+    }
+  });
+
+  it("accepts a valid graph after a successful exit without waiting for a lingering pipe", async () => {
+    const bicepFile = path.join(binDir, "app.bicep");
+    fs.writeFileSync(
+      bicepFile,
+      "resource app 'Radius.Core/applications@2023-10-01-preview' = {}"
+    );
+    await expect(
+      runRadAppGraph(bicepFile, {
+        radPath: bin,
+        timeout: 4000,
+        processPlatform: "win32",
+        artifactPollIntervalMs: 10,
+        exitCloseGraceMs: 60_000
+      })
+    ).resolves.toEqual({
+      resources: []
+    });
+  }, 10000);
+
+  it("preserves a non-zero exit and diagnostics written after a valid artifact", async () => {
+    process.env.FAKE_RAD_SCENARIO = "failure";
+    const bicepFile = path.join(binDir, "app.bicep");
+    fs.writeFileSync(
+      bicepFile,
+      "resource app 'Radius.Core/applications@2023-10-01-preview' = {}"
+    );
+    await expect(
+      runRadAppGraph(bicepFile, { radPath: bin })
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("late graph diagnostic"),
+      cause: expect.objectContaining({
+        message: expect.stringContaining("rad exited with code 3"),
+        stderr: "late graph diagnostic"
+      })
+    });
+  }, 10000);
+});
 
 describe("writeBicepCompileConfig", () => {
   let dir: string;

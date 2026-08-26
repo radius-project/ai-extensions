@@ -70,7 +70,10 @@ function graphSourceNote(
   page: string,
   repo: string,
   branches: ReadonlyArray<string | undefined>,
-  canvasInstanceId: string
+  canvasInstanceId: string,
+  // False for a view that keeps polling while it waits, so telling the agent to
+  // reopen it would be wrong: the model appearing is enough.
+  reopenAfterModel = true
 ): string {
   const phrase = branchPhrase(branches);
   const where = repo ? ` for ${repo}` : "";
@@ -80,7 +83,9 @@ function graphSourceNote(
     "If the selected branch is your current workspace branch, writing it to the working tree is enough (the graph renders from the on-disk tree; modeling does not push).",
     "The selected branch name is immutable for this request. If the host renames the worktree branch before you edit files, publish the completed model to the originally selected branch before reopening the view.",
     "If the selected branch is a DIFFERENT branch, model it against that branch's code and commit + push .radius/app.bicep to that branch — prefer opening a pull request into it, and do not push generated files directly to a protected branch such as main without the user's confirmation.",
-    `Once the model is available on that branch, reopen the view with instanceId \`${canvasInstanceId}\`; never create another Radius canvas instance. Reopening that exact instance refreshes its server and client connections. Nodes then deep-link to https://github.com/<owner>/<repo>/blob/<branch>/<file>.`
+    reopenAfterModel ?
+      `Once the model is available on that branch, reopen the view with instanceId \`${canvasInstanceId}\`; never create another Radius canvas instance. Reopening that exact instance refreshes its server and client connections. Nodes then deep-link to https://github.com/<owner>/<repo>/blob/<branch>/<file>.`
+    : `Once the model is available on that branch, the view at instanceId \`${canvasInstanceId}\` detects it automatically; never create another Radius canvas instance. Nodes then deep-link to https://github.com/<owner>/<repo>/blob/<branch>/<file>.`
   ].join(" ");
 }
 
@@ -123,12 +128,17 @@ export function appBicepHandoffPrompt(
   const where = repo ? ` for ${repo}` : "";
   const phrase = branchPhrase(branches);
   const onPhrase = phrase ? ` (${phrase})` : "";
+  const rendersInPlace = page === "graph";
   return [
-    `The Radius ${page} view${where}${onPhrase} can't render yet because its application model hasn't been generated. Generate it now, then open the ${page} view again.`,
+    rendersInPlace ?
+      `The Radius ${page} view${where}${onPhrase} can't render yet because its application model hasn't been generated. Generate it now and keep the current view open.`
+    : `The Radius ${page} view${where}${onPhrase} can't render yet because its application model hasn't been generated. Generate it now, then open the ${page} view again.`,
     "",
     SKILL_HANDOFF,
-    graphSourceNote(page, repo, branches, canvasInstanceId),
-    `Once the model is available on the selected repo and branch, open the Radius ${page} view again so it loads.`,
+    graphSourceNote(page, repo, branches, canvasInstanceId, !rendersInPlace),
+    rendersInPlace ?
+      `Do not open another Radius canvas. The view at instanceId \`${canvasInstanceId}\` is already waiting and renders the model in place once it is available.`
+    : `Once the model is available on the selected repo and branch, open the Radius ${page} view again so it loads.`,
     "",
     RECIPE_PACK_NOTE
   ].join("\n");

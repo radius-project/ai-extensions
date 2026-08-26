@@ -580,7 +580,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     const firstEntry = harness.servers.get("app-graph");
     expect(firstEntry?.state).toMatchObject({
       contextRepo: "acme/widgets",
-      contextBranch: "feature/runtime-tests"
+      contextBranch: "main"
     });
 
     await harness.host.open("app-graph", {
@@ -622,7 +622,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     ).resolves.toMatchObject({ title: "Radius" });
   });
 
-  it("uses the worktree branch for the session repository and explicit base/head for graph diff", async () => {
+  it("uses the worktree branch when omitted and explicit base/head for graph diff", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {
         workspacePath: "/worktrees/widgets",
