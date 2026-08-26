@@ -872,10 +872,9 @@ export interface PlanScheduler {
   (immediate?: boolean): void;
 }
 
-// Coalesce rapid selector changes and serialize plan requests. A selection made
-// while a request is active invalidates that response and queues exactly one
-// request for the latest values, so an older plan can never overwrite a newer
-// selection in the browser or in the server's canvas state.
+// Coalesce rapid selector changes while allowing a new selection to supersede
+// an active request immediately. The server generation guard rejects the older
+// result, and `isCurrent` prevents it from changing the browser meanwhile.
 export function createPlanScheduler(
   context: BrowserContext,
   run: PlanRunner,
@@ -883,14 +882,10 @@ export function createPlanScheduler(
   debounceMs = 150
 ): PlanScheduler {
   let version = 0;
-  let active = false;
-  let queued = false;
   let timer: number | null = null;
 
   const drain = (): void => {
     timer = null;
-    queued = false;
-    active = true;
     const requestVersion = version;
     Promise.resolve()
       .then(() => run(() => requestVersion === version))
@@ -898,20 +893,13 @@ export function createPlanScheduler(
         context.logger.error("Planned graph request failed.", error);
       })
       .then(() => {
-        active = false;
-        if (queued) {
-          timer = context.clock.setTimeout(drain, debounceMs);
-        } else if (onIdle) {
-          onIdle();
-        }
+        if (requestVersion === version && timer === null) onIdle?.();
       });
   };
 
   return (immediate?: boolean) => {
     version++;
-    queued = true;
     if (timer !== null) context.clock.clearTimeout(timer);
-    if (active) return;
     timer = context.clock.setTimeout(
       drain,
       immediate === true ? 0 : debounceMs

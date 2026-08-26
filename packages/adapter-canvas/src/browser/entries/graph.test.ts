@@ -5,7 +5,8 @@ import {
 } from "../../../test/support/browser/fakes.js";
 import {
   childComponent,
-  createGraphVendor
+  createGraphVendor,
+  findByClass
 } from "../../../test/support/browser/graph-vendor.js";
 import { PAGE_REGISTRY_GLOBAL } from "../globals.js";
 import { resolvePageRegistry } from "../registry.js";
@@ -116,6 +117,47 @@ describe("graph browser entry", () => {
     resolvePageRegistry(browser.scope).teardownAll();
     expect(vendor.reactDom.roots.every((r) => r.unmounts > 0)).toBe(true);
   });
+
+  // The option allowlist here is the only thing standing between a page and a
+  // silently dropped setting: the renderer takes `unknown`, so a name missing
+  // from the list costs a behavior, not a type error.
+  it.each([
+    ["feature", undefined],
+    ["", "_blank"]
+  ])(
+    "threads a workspace branch of %j through to the card's source link",
+    (workspaceBranch, target) => {
+      const { browser, vendor } = fixture();
+      installGraphEntry(browser.scope, vendor);
+
+      callGlobal(
+        browser.scope,
+        "radiusRenderGraph",
+        "graph-container",
+        [{ id: "app/web", name: "web", codeReference: "web.bicep#L3" }],
+        {
+          diffMode: true,
+          localSource: false,
+          repoUrl: "https://github.com/octo/app",
+          branch: "feature",
+          baseBranch: "main",
+          workspaceBranch
+        }
+      );
+
+      const app = childComponent<{
+        initialNodes: ReadonlyArray<{ data: unknown }>;
+      }>(vendor.reactDom.roots[0].rendered[0]);
+      const tree = app.type(app.props) as { props: Record<string, unknown> };
+      const nodeTypes = tree.props.nodeTypes as {
+        rad: (props: { data: unknown }) => unknown;
+      };
+      const card = nodeTypes.rad({ data: app.props.initialNodes[0].data });
+      expect(
+        findByClass(card, "rad-node__source nodrag nopan nokey")?.props.target
+      ).toBe(target);
+    }
+  );
 
   it("treats a non-array resources argument as none and renders nothing", () => {
     const { browser, vendor } = fixture();

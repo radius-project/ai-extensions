@@ -382,6 +382,68 @@ function checkContainerImageBuildSources(
   return failed;
 }
 
+// A container's codeReference must lead to the code the workload runs. These
+// packaging files describe how it is built or deployed instead, so they render a
+// link that answers the wrong question. Kept in step with the "Always skip" list
+// in radius-app-graph/references/source-code-references.md.
+const packagingBasenamePatterns = [
+  /^dockerfile$/u,
+  /^dockerfile\..+$/u,
+  /^.+\.dockerfile$/u,
+  /^docker-compose.*\.ya?ml$/u,
+  /^compose.*\.ya?ml$/u,
+  /^chart\.ya?ml$/u,
+  /^values\.ya?ml$/u
+];
+
+// Decodes each path segment on its own so one malformed escape sequence degrades
+// to that segment's raw text instead of discarding the whole pathname.
+function decodePathname(pathname) {
+  return pathname
+    .split("/")
+    .map((segment) => {
+      try {
+        return decodeURIComponent(segment);
+      } catch {
+        return segment;
+      }
+    })
+    .join("/");
+}
+
+// Reduces either authored form -- a repo-relative worktree path or a GitHub blob
+// URL -- to the file's basename, so one list covers both.
+function sourceLocationBasename(codeReference) {
+  if (typeof codeReference !== "string") {
+    return "";
+  }
+  let location = codeReference.replace(/#L[1-9]\d*$/u, "");
+  if (/^https:\/\//iu.test(location)) {
+    try {
+      const { pathname } = new URL(location);
+      // `pathname` stays percent-encoded, and the host resolves the escapes, so
+      // "Docker%66ile" would otherwise slip past a literal basename comparison.
+      // A malformed escape falls back to the raw pathname rather than giving up,
+      // so a bad sequence elsewhere in the path cannot reopen the bypass.
+      location = decodePathname(pathname);
+    } catch {
+      return "";
+    }
+  }
+  const segments = location.split("/").filter((segment) => segment !== "");
+  return segments.length === 0 ?
+      ""
+    : segments[segments.length - 1].toLowerCase();
+}
+
+function isPackagingSourceLocation(codeReference) {
+  const basename = sourceLocationBasename(codeReference);
+  return (
+    basename !== "" &&
+    packagingBasenamePatterns.some((pattern) => pattern.test(basename))
+  );
+}
+
 function checkSourceCodeReferences(
   template,
   app,
@@ -487,6 +549,20 @@ function checkSourceCodeReferences(
       // with malformed literal values.
       report(
         `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: ${JSON.stringify(rawCodeReference)} must resolve to a repo-relative worktree path using forward slashes or an exact https://github.com/<owner>/<repo>/blob/<branch>/<file> URL, optionally followed by #L<line>.${customTypeHint}`
+      );
+      failed = true;
+      continue;
+    }
+
+    // containerImages is deliberately exempt: a Dockerfile is that resource's
+    // definition site, while for the workload that runs the image it is only
+    // packaging.
+    if (
+      resource.type.startsWith("Radius.Compute/containers@") &&
+      isPackagingSourceLocation(codeReference)
+    ) {
+      report(
+        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: ${JSON.stringify(rawCodeReference)} is a packaging file; point a container at the entrypoint of the process it runs, resolved from its command/args or through the image's Dockerfile.`
       );
       failed = true;
     }

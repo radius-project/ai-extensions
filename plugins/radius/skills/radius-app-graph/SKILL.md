@@ -70,7 +70,7 @@ invoke_canvas_action({
 If `ready` is `false`, the graph hasn't built yet — wait and retry. The response includes the exact graph context (`repo`, branch fields, `view`, and `contextToken`) plus resources (each with `name`, `type`, `id`). Keep the returned `contextToken`; it prevents references discovered for one repo, branch, or graph view from being applied to another.
 
 1. If the action returns any resources, run the `radius-app-bicep` skill as a repair of the existing model.
-2. Categorize each missing resource by its `type`, search the selected branch using the methodology in [source-code-references.md](references/source-code-references.md), and pinpoint the verified initialization line.
+2. Categorize each missing resource by its `type` and search the selected branch using the methodology in [source-code-references.md](references/source-code-references.md), which owns the per-category rules — including the entrypoint-resolution order for containers and the packaging files that are never a container's destination. Pinpoint the verified initialization line.
 3. Author each reference into that resource's `properties.codeReference` in staged `app.bicep`, validate the complete model, write a matching origin record, and publish through the skill's promote script.
 4. Rebuild the graph and call `get_graph_resources` again. Completion requires an empty missing-resource list from the rebuilt `app.bicep`.
 
